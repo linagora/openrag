@@ -84,6 +84,11 @@ def _human_readable_size(size_bytes: int) -> str:
         size_bytes /= 1024
     return f"{size_bytes:.2f} PB"
 
+@router.get("/supported/types")
+async def get_supported_types():
+    list_extensions = list(ACCEPTED_FILE_FORMATS)
+    return JSONResponse(content={"supported_types": list_extensions})
+
 
 @router.post("/partition/{partition}/file/{file_id}")
 async def add_file(
