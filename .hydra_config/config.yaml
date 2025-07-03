@@ -43,7 +43,6 @@ vectordb:
 reranker:
   enable: ${oc.decode:${oc.env:RERANKER_ENABLED, true}}
   model_name: ${oc.env:RERANKER_MODEL, Alibaba-NLP/gte-multilingual-reranker-base}
-  reranker_type: ${oc.decode:${oc.env:RERANKER_MODEL_TYPE, colbert}}
   top_k: ${oc.decode:${oc.env:RERANKER_TOP_K, 4}}
   base_url: ${oc.env:RERANKER_BASE_URL, http://reranker:${oc.env:RERANKER_PORT, 7997}}
 
@@ -96,6 +95,6 @@ loader:
   marker_num_gpus: ${oc.decode:${oc.env:MARKER_NUM_GPUS, 0.01}}
 
 ray:
-  num_gpus: ${oc.decode:${oc.env:RAY_NUM_GPUS, 0.1}}
+  num_gpus: ${oc.decode:${oc.env:RAY_NUM_GPUS, 0.01}}
   pool_size: ${oc.decode:${oc.env:RAY_POOL_SIZE, 1}}
   max_tasks_per_worker: ${oc.decode:${oc.env:RAY_MAX_TASKS_PER_WORKER, 5}}
