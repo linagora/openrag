@@ -86,8 +86,12 @@ app = FastAPI(dependencies=dependencies)
 
 # Add CORS middleware
 if INDEXERUI_URL and INDEXERUI_COMPOSE_FILE:
-    allow_origins = []
-    allow_origins.extend([INDEXERUI_URL, f"http://localhost:{INDEXERUI_PORT}"])
+    allow_origins = [
+        "http://localhost:3042",
+        "http://localhost:5173",
+        INDEXERUI_URL,
+        f"http://localhost:{INDEXERUI_PORT}",
+    ]
 else:
     allow_origins = ["*"]
 
