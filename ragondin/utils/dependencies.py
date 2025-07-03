@@ -1,23 +1,19 @@
 import ray
 import ray.actor
-from config import load_config
-
 from components import ABCVectorDB
 from components.indexer.indexer import Indexer, TaskStateManager
 from components.indexer.loaders.pdf_loaders.marker import MarkerPool
 from components.indexer.loaders.serializer import SerializerQueue
+from config import load_config
 
 
 def get_or_create_actor(name, cls, namespace="ragondin", **options):
-    from utils.logger import get_logger
-
-    logger = get_logger()
-    logger.info(f"Getting or creating actor: {name} in namespace: {namespace}")
     try:
         return ray.get_actor(name, namespace=namespace)
-    except Exception as e:
-        logger.info(f"Actor {name} not found, creating a new one: {e}")
+    except ValueError:
         return cls.options(name=name, namespace=namespace, **options).remote()
+    except:
+        raise
 
 
 class VDBProxy:
@@ -76,8 +72,10 @@ def get_indexer():
 
 
 def get_vectordb() -> ABCVectorDB:
-    indexer = get_indexer()
+    indexer = ray.get_actor("Indexer", namespace="ragondin")
     return VDBProxy(indexer_actor=indexer)
 
 
+indexer = get_indexer()
+marker_pool = get_marker_pool()
 vectordb = get_vectordb()
