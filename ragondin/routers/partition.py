@@ -10,39 +10,25 @@ router = APIRouter()
 
 
 @router.get("/")
-async def list_existant_partitions(request: Request, include_files: bool = False):
+async def list_existant_partitions(request: Request):
+    def pop_files(partition):
+        partition.pop("files")
+        return partition
+
     try:
-        partitions = []
-        for p in vectordb.list_partitions():
-            d = {
-                "partition": p.partition,
-                "created_at": int(p.created_at.timestamp()),
-            }
-            logger.info(f"Files {p.files}")
-            if include_files:
-                files = [
-                    str(
-                        request.url_for(
-                            "get_file", partition=p.partition, file_id=file.file_id
-                        )
-                    )
-                    for file in p.files
-                ]
-                d["files"] = files
-
-            partitions.append(d)
-
+        partitions = vectordb.list_partitions()
+        partitions = list(map(pop_files, partitions))
         logger.debug(
             "Returned list of existing partitions.", partition_count=len(partitions)
         )
         return JSONResponse(
             status_code=status.HTTP_200_OK, content={"partitions": partitions}
         )
-    except Exception:
-        logger.exception("Failed to list partitions.")
+    except Exception as e:
+        logger.exception(f"Failed to list partitions: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to list partitions.",
+            detail=f"Failed to list partitions: {str(e)}",
         )
 
 
@@ -84,8 +70,10 @@ async def list_files(
         )
 
     try:
-        results = vectordb.list_files(partition=partition)
-        log.debug("Listed files in partition", file_count=len(results))
+        partition_dict = vectordb.get_partition(partition=partition)
+        log.debug(
+            "Listed files in partition", file_count=len(partition_dict.get("files", []))
+        )
     except ValueError as e:
         log.warning(f"Invalid partition value: {str(e)}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -96,14 +84,19 @@ async def list_files(
             detail="Failed to list files",
         )
 
-    files = [
-        {
-            "link": str(request.url_for("get_file", partition=partition, file_id=file)),
+    def process_file(file_obj):
+        file_dict = file_obj.to_dict()
+        return {
+            "link": str(
+                request.url_for(
+                    "get_file", partition=partition, file_id=file_dict["file_id"]
+                )
+            ),
+            **file_dict,
         }
-        for file in results
-    ]
 
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"files": files})
+    partition_dict["files"] = list(map(process_file, partition_dict.get("files", [])))
+    return JSONResponse(status_code=status.HTTP_200_OK, content=partition_dict)
 
 
 @router.get("/check-file/{partition}/file/{file_id}")
@@ -229,3 +222,22 @@ async def list_all_chunks(
         for chunk in chunks
     ]
     return JSONResponse(status_code=status.HTTP_200_OK, content={"chunks": chunks})
+
+
+# def process_partition(partition):
+#     def add_file_url(file_obj):
+#         file_dict = file_obj.to_dict()
+#         file_metadata = file_dict.pop("file_metadata", {})
+#         return {
+#             **file_dict,
+#             **file_metadata,
+#             "file_url": str(
+#                 request.url_for(
+#                     "get_file",
+#                     partition=file_dict["partition"],
+#                     file_id=file_dict["file_id"],
+#                 )
+#             ),
+#         }
+#     partition["files"] = list(map(add_file_url, partition["files"]))
+#     return partition

@@ -63,6 +63,7 @@ AUTH_TOKEN: Optional[str] = os.getenv("AUTH_TOKEN")
 
 INDEXERUI_URL: Optional[str] = os.getenv("INDEXERUI_URL", None)
 INDEXERUI_COMPOSE_FILE = os.getenv("INDEXERUI_COMPOSE_FILE", None)
+INDEXERUI_PORT: Optional[str] = os.getenv("INDEXERUI_PORT", "3042")
 
 
 security = HTTPBearer()
@@ -85,10 +86,10 @@ app = FastAPI(dependencies=dependencies)
 
 # Add CORS middleware
 if INDEXERUI_URL and INDEXERUI_COMPOSE_FILE:
-    allow_origins = [INDEXERUI_URL]
+    allow_origins = []
+    allow_origins.extend([INDEXERUI_URL, f"http://localhost:{INDEXERUI_PORT}"])
 else:
     allow_origins = ["*"]
-
 
 app.add_middleware(
     CORSMiddleware,
