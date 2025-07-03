@@ -94,6 +94,7 @@ loader:
   marker_max_processes: ${oc.decode:${oc.env:MARKER_MAX_PROCESSES, 2}}
   marker_min_processes: ${oc.decode:${oc.env:MARKER_MIN_PROCESSES, 1}}
   marker_num_gpus: ${oc.decode:${oc.env:MARKER_NUM_GPUS, 0.01}}
+  marker_timeout: ${oc.decode:${oc.env:MARKER_TIMEOUT, 3600}}
 
 ray:
   num_gpus: ${oc.decode:${oc.env:RAY_NUM_GPUS, 0.1}}
