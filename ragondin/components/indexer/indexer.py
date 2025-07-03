@@ -1,17 +1,18 @@
 import asyncio
 import gc
 import inspect
+import os
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import ray
-import os
 import torch
 from config import load_config
 from langchain_core.documents.base import Document
 from langchain_openai import OpenAIEmbeddings
+
 from .chunker import BaseChunker, ChunkerFactory
 from .vectordb import ConnectorFactory
 
@@ -244,7 +245,7 @@ class TaskInfo:
     details: Dict[str, Any] = field(default_factory=dict)
 
 
-@ray.remote
+@ray.remote(max_restarts=-1)
 class TaskStateManager:
     def __init__(self):
         self.tasks: Dict[str, TaskInfo] = {}

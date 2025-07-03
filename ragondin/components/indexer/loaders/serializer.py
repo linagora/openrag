@@ -22,7 +22,7 @@ POOL_SIZE = config.ray.get("pool_size")
 MAX_TASKS_PER_WORKER = config.ray.get("max_tasks_per_worker")
 
 
-@ray.remote(num_gpus=NUM_GPUS)
+@ray.remote(max_restarts=-1, num_gpus=NUM_GPUS)
 class DocSerializer:
     def __init__(self, data_dir=None, **kwargs) -> None:
         from config import load_config
@@ -88,7 +88,7 @@ class DocSerializer:
             raise
 
 
-@ray.remote
+@ray.remote(max_restarts=-1)
 class SerializerQueue:
     def __init__(self):
         from utils.logger import get_logger

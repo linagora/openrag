@@ -142,7 +142,7 @@ class MarkerWorker:
         return len([p for p in self.pool._pool if p.is_alive()])
 
 
-@ray.remote
+@ray.remote(max_restarts=-1)
 class MarkerPool:
     def __init__(self):
         from config import load_config
