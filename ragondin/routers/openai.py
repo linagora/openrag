@@ -41,7 +41,20 @@ async def check_llm_model_availability(request: Request):
             )
 
 
-@router.get("/models")
+@router.get(
+    "/models",
+    summary="OpenAI-compatible model listing endpoint",
+    description="""
+    OpenAI-compatible endpoint to list all available models.
+    
+    Returns a list of models that can be used with RAGondin, including:
+    - All available partitions formatted as 'ragondin-{partition_name}'
+    - A special 'ragondin-all' model to query across all partitions
+    
+    The response format mimics the OpenAI models listing API for compatibility.
+    """,
+    response_description="A list of available models in OpenAI format",
+)
 async def list_models(
     app_state=Depends(get_app_state), _: None = Depends(check_llm_model_availability)
 ):
@@ -95,7 +108,21 @@ def __prepare_sources(request: Request, docs: list[Document]):
     return links
 
 
-@router.post("/chat/completions")
+@router.post(
+    "/chat/completions",
+    summary="OpenAI compatible chat completion endpoint using RAG",
+    description="""
+    OpenAI-compatible chat completion endpoint that leverages Retrieval-Augmented Generation (RAG).
+    
+    This endpoint accepts chat messages in OpenAI format and uses the specified model to generate
+    a completion. The model selection determines which document partition(s) will be queried:
+    - 'ragondin-{partition_name}': Queries only the specified partition
+    - 'ragondin-all': Queries across all available partitions
+    
+    Previous messages provide conversation context. The system enriches the prompt with relevant documents retrieved
+    from the vector database before sending to the LLM.
+    """,
+)
 async def openai_chat_completion(
     request2: Request,
     request: OpenAIChatCompletionRequest = Body(...),
@@ -171,7 +198,21 @@ async def openai_chat_completion(
             )
 
 
-@router.post("/completions")
+@router.post(
+    "/completions",
+    summary="OpenAI compatible completion endpoint using RAG",
+    description="""
+    OpenAI-compatible text completion endpoint that leverages Retrieval-Augmented Generation (RAG).
+    
+    This endpoint accepts a prompt in OpenAI format and uses the specified model to generate
+    a text completion. The model selection determines which document partition(s) will be queried:
+    - 'ragondin-{partition_name}': Queries only the specified partition
+    - 'ragondin-all': Queries across all available partitions
+    
+    The system enriches the prompt with relevant documents retrieved from the vector database
+    before sending to the LLM, allowing the completion to include information from your document store.
+    """,
+)
 async def openai_completion(
     request2: Request,
     request: OpenAICompletionRequest,
