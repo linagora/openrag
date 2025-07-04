@@ -345,6 +345,7 @@ class MilvusDB(ABCVectorDB):
                 )
 
         await self.vector_store.aadd_documents(chunks)
+        # asyncio.create_task(self.vector_store.aadd_documents(chunks)) # for prods
 
         for partition, file_id in partition_file_list:
             self.partition_file_manager.add_file_to_partition(
