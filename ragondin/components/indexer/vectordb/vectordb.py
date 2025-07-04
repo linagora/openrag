@@ -88,6 +88,14 @@ class ABCVectorDB(ABC):
     ) -> List[Document]:
         pass
 
+    @abstractmethod
+    def get_partition(self, partition: str):
+        pass
+
+    @abstractmethod
+    def list_partitions(self, **kwargs):
+        pass
+
 
 class MilvusDB(ABCVectorDB):
     """
@@ -330,12 +338,15 @@ class MilvusDB(ABCVectorDB):
     async def async_add_documents(self, chunks: list[Document]) -> None:
         """Asynchronously add documents to the vector store."""
 
-        partition_file_list = set(
-            (c.metadata["partition"], c.metadata["file_id"]) for c in chunks
-        )
+        try:
+            file_metadata = dict(chunks[0].metadata)
+            file_metadata.pop("page")
+            file_id, partition = (
+                file_metadata.get("file_id"),
+                file_metadata.get("partition"),
+            )
 
-        # check if this file_id exists
-        for partition, file_id in partition_file_list:
+            # check if this file_id exists
             res = self.partition_file_manager.file_exists_in_partition(
                 file_id=file_id, partition=partition
             )
@@ -344,13 +355,18 @@ class MilvusDB(ABCVectorDB):
                     f"No Insertion: This File ({file_id}) already exists in Partition ({partition})"
                 )
 
-        await self.vector_store.aadd_documents(chunks)
-        # asyncio.create_task(self.vector_store.aadd_documents(chunks)) # for prods
+            await self.vector_store.aadd_documents(chunks)
+            # asyncio.create_task(self.vector_store.aadd_documents(chunks)) # for prods
 
-        for partition, file_id in partition_file_list:
+            # insert file_id and partition into partition_file_manager
             self.partition_file_manager.add_file_to_partition(
-                file_id=file_id, partition=partition
+                file_id=file_id, partition=partition, file_metadata=file_metadata
             )
+        except Exception as e:
+            self.logger.exception(
+                "Error while adding documents to Milvus", error=str(e)
+            )
+            raise e
 
     def get_file_points(self, file_id: str, partition: str, limit: int = 100):
         """
@@ -517,30 +533,22 @@ class MilvusDB(ABCVectorDB):
             )
             return False
 
-    def list_files(self, partition: str):
-        """
-        Retrieve all unique file_id values from a given partition.
-        """
+    def get_partition(self, partition: str):
         try:
-            if not self.partition_file_manager.partition_exists(partition=partition):
-                return []
-            else:
-                results = self.partition_file_manager.list_files_in_partition(
-                    partition=partition
-                )
-                return results
+            partition_dict = self.partition_file_manager.get_partition(
+                partition=partition
+            )
+            return partition_dict
 
         except Exception:
-            self.logger.exception(
-                "Failed to list files in partition.", partition=partition
-            )
+            self.logger.exception("Failed get this partition.", partition=partition)
             raise
 
-    def list_partitions(self):
+    def list_partitions(self, **kwargs):
         try:
-            return self.partition_file_manager.list_partitions()
-        except Exception:
-            self.logger.exception("Failed to list partitions.")
+            return self.partition_file_manager.list_partitions(**kwargs)
+        except Exception as e:
+            self.logger.exception(f"Failed to list partitions: {e}")
             raise
 
     def collection_exists(self, collection_name: str):

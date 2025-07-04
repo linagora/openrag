@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 from sqlalchemy import (
@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    JSON,
     String,
     UniqueConstraint,
     create_engine,
@@ -24,9 +25,9 @@ Base = declarative_base()
 
 
 class FileModel(BaseModel):
-    id: int
     file_id: str
     partition: str
+    file_metadata: Dict = {}
 
 
 class BasePartitionModel(BaseModel):
@@ -46,6 +47,7 @@ class File(Base):
     file_id = Column(String, nullable=False)
     # Foreign key points directly to the partition string
     partition_name = Column(String, ForeignKey("partitions.partition"), nullable=False)
+    file_metadata = Column(JSON, nullable=True, default={})
 
     # relationship to the Partition object
     partition = relationship("Partition", back_populates="files")
@@ -55,8 +57,8 @@ class File(Base):
         UniqueConstraint("file_id", "partition_name", name="uix_file_id_partition"),
     )
 
-    def to_pydantic(self):
-        return FileModel(id=self.id, file_id=self.file_id, partition=self.partition)
+    def to_dict(self):
+        return self.file_metadata or {}
 
     def __repr__(self):
         return f"<File(id={self.id}, file_id='{self.file_id}', partition='{self.partition}')>"
@@ -73,17 +75,14 @@ class Partition(Base):
         "File", back_populates="partition", cascade="all, delete-orphan"
     )
 
-    def to_pydantic(self, exclude_files=True):
-        if exclude_files:
-            return BasePartitionModel(
-                partition=self.partition, created_at=self.created_at
-            )
-        else:
-            return PartitionModel(
-                partition=self.partition,
-                created_at=self.created_at,
-                files=[file.to_pydantic() for file in self.files],
-            )
+    def to_dict(self):
+        d = {
+            "partition": self.partition,
+            "created_at": self.created_at.isoformat(),
+            "files": self.files,
+            "file_count": len(self.files),  # Count of files in this partition
+        }
+        return d
 
     def __repr__(self):
         return f"<Partition(key='{self.partition}', created_at='{self.created_at}', file_count={len(self.files)})>"
@@ -101,12 +100,15 @@ class PartitionFileManager:
         log = self.logger.bind(partition=partition)
         with self.Session() as session:
             log.debug("Fetching partition")
-            partition = session.query(Partition).filter_by(partition=partition).first()
-            if partition:
-                log.info("Partition found")
+            partition_obj = (
+                session.query(Partition).filter_by(partition=partition).first()
+            )
+            if partition_obj:
+                log.info(f"Partition `{partition}` found")
+                return partition_obj.to_dict()
             else:
                 log.warning("No partition found")
-            return partition
+                return {}
 
     # def create_partition(self, partition: str):
     #     """Create a new partition if it doesn't exist"""
@@ -125,7 +127,9 @@ class PartitionFileManager:
     #             session.rollback()
     #             raise e
 
-    def add_file_to_partition(self, file_id: str, partition: str):
+    def add_file_to_partition(
+        self, file_id: str, partition: str, file_metadata: Optional[Dict] = None
+    ):
         """Add a file to a partition"""
         log = self.logger.bind(file_id=file_id, partition=partition)
         with self.Session() as session:
@@ -151,7 +155,11 @@ class PartitionFileManager:
                     log.info("Created new partition")
 
                 # Add file to partition
-                file = File(file_id=file_id, partition_name=partition_obj.partition)
+                file = File(
+                    file_id=file_id,
+                    partition_name=partition_obj.partition,
+                    file_metadata=file_metadata,
+                )
                 session.add(file)
                 session.commit()
                 log.info("Added file successfully")
@@ -208,21 +216,11 @@ class PartitionFileManager:
                 self.logger.info("Partition does not exist", partition=partition)
             return False
 
-    def list_partitions(self):
+    def list_partitions(self, **kwargs):
         """List all existing partitions"""
         with self.Session() as session:
             partitions = session.query(Partition).all()
-            return [
-                partition.to_pydantic(exclude_files=True) for partition in partitions
-            ]
-
-    def list_files_in_partition(self, partition: str):
-        """List all files in a partition"""
-        with self.Session() as session:
-            partition = session.query(Partition).filter_by(partition=partition).first()
-            if partition:
-                return [file.file_id for file in partition.files]
-            return []
+            return [partition.to_dict(**kwargs) for partition in partitions]
 
     def get_partition_file_count(self, partition: str):
         """Get the count of files in a partition"""

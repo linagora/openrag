@@ -25,7 +25,10 @@ async def search_multiple_partitions(
         results = await indexer.asearch.remote(
             query=text, top_k=top_k, partition=partitions
         )
-        log.info("Semantic search on multiple partitions completed.", result_count=len(results))
+        log.info(
+            "Semantic search on multiple partitions completed.",
+            result_count=len(results),
+        )
     except ValueError as e:
         log.warning(f"Invalid input: {str(e)}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -58,7 +61,9 @@ async def search_one_partition(
         results = await indexer.asearch.remote(
             query=text, top_k=top_k, partition=partition
         )
-        log.info("Semantic search on single partition completed.", result_count=len(results))
+        log.info(
+            "Semantic search on single partition completed.", result_count=len(results)
+        )
     except ValueError as e:
         log.warning(f"Invalid input: {str(e)}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -96,7 +101,9 @@ async def search_file(
         results = await indexer.asearch.remote(
             query=text, top_k=top_k, partition=partition, filter={"file_id": file_id}
         )
-        log.info("Semantic search on specific file completed.", result_count=len(results))
+        log.info(
+            "Semantic search on specific file completed.", result_count=len(results)
+        )
     except ValueError as e:
         log.warning(f"Invalid input: {str(e)}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
