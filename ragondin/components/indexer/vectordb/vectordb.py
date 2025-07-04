@@ -355,8 +355,8 @@ class MilvusDB(ABCVectorDB):
                     f"No Insertion: This File ({file_id}) already exists in Partition ({partition})"
                 )
 
-            # Insert Chunks
             await self.vector_store.aadd_documents(chunks)
+            # asyncio.create_task(self.vector_store.aadd_documents(chunks)) # for prods
 
             # insert file_id and partition into partition_file_manager
             self.partition_file_manager.add_file_to_partition(
