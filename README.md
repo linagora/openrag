@@ -1,11 +1,11 @@
-# 🦫 RAGondin — The Open RAG Experimentation Playground
+# 🦫 OpenRAG — The Open RAG Experimentation Playground
 
-RAGondin is a lightweight, modular and extensible Retrieval-Augmented Generation (RAG) framework designed to explore and test advanced RAG techniques — 100% open source and focused on experimentation, not lock-in.
+OPEnrag is a lightweight, modular and extensible Retrieval-Augmented Generation (RAG) framework designed to explore and test advanced RAG techniques — 100% open source and focused on experimentation, not lock-in.
 
-> Built by the OpenLLM France community, RAGondin offers a sovereign-by-design alternative to mainstream RAG stacks like LangChain or Haystack.
+> Built by the OpenLLM France community, OPEnrag offers a sovereign-by-design alternative to mainstream RAG stacks like LangChain or Haystack.
 
 ## Table of Contents
-- [🦫 RAGondin — The Open RAG Experimentation Playground](#-ragondin--the-open-rag-experimentation-playground)
+- [🦫 OPEnrag — The Open RAG Experimentation Playground](#-openrag--the-open-rag-experimentation-playground)
 - [Table of Contents](#table-of-contents)
 - [Goals](#goals)
 - [Current Features](#current-features)
@@ -111,17 +111,17 @@ Reranking models support multiple deployment formats:
 - **Docker** and **Docker Compose**
 - pFor GPU capable machines, ensure you have the NVIDIA Container Toolkit installed. Refer to the [NVIDIA documentation](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) for installation instructions.
 
-RAGondin is designed to run in a containerized environment under Linux on x86_64 architecture. ARM processors are not supported, this is subject to change in the future.
+OPEnrag is designed to run in a containerized environment under Linux on x86_64 architecture. ARM processors are not supported, this is subject to change in the future.
 
 ### Installation and Configuration
 
 #### 1. Clone the repository:
 ```bash
-git clone https://github.com/OpenLLM-France/RAGondin.git
+git clone https://github.com/OpenLLM-France/OPEnrag.git
 
-# git clone --recurse-submodules https://github.com/OpenLLM-France/RAGondin.git # to clone the repo with the associated submodules
+# git clone --recurse-submodules https://github.com/OpenLLM-France/OPEnrag.git # to clone the repo with the associated submodules
 
-cd RAGondin
+cd OPEnrag
 git checkout main # or a given release
 ```
 
@@ -139,7 +139,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```bash
 # Create a new environment with all dependencies
-cd RAGondin/
+cd OPEnrag/
 uv sync
 ```
 
@@ -263,8 +263,8 @@ curl http://localhost:8080/health_check # APP_PORT=8080
 ```bash
 # Chainlit UI authentication
 CHAINLIT_AUTH_SECRET=... # has to be generated with with this command: 'uv run chainlit create-secret' but a random value works too.
-CHAINLIT_USERNAME=Ragondin
-CHAINLIT_PASSWORD=Ragondin2025
+CHAINLIT_USERNAME=Openrag
+CHAINLIT_PASSWORD=Openrag2025
 ```
 
 >[!IMPORTANT]
@@ -276,9 +276,9 @@ CHAINLIT_PASSWORD=Ragondin2025
 
 #### 5. Distributed deployment in a Ray cluster
 
-To scale **RAGondin** in a distributed environment using **Ray**, follow the dedicated guide:
+To scale **OPEnrag** in a distributed environment using **Ray**, follow the dedicated guide:
 
-➡ [Deploy RAGondin in a Ray cluster](docs/deploy_ray_cluster.md)
+➡ [Deploy OPEnrag in a Ray cluster](docs/deploy_ray_cluster.md)
 
 #### 6. 🧠 API Overview
 
@@ -398,7 +398,7 @@ For the following OpenAI-compatible endpoints, when using an OpenAI client, prov
 This endpoint allows to list all existant **`models`**
 
 >[!NOTE]  
-> Model names follow the pattern **`ragondin-{partition_name}`**, where **`partition_name`** refers to a data partition containing specific files. These “models” aren’t standalone LLMs (like GPT-4 or Llama), but rather placeholders that tell your LLM endpoint to generate responses using only the data from the chosen partition. To query the entire vector database, use the special model name **`partition-all`**.
+> Model names follow the pattern **`openrag-{partition_name}`**, where **`partition_name`** refers to a data partition containing specific files. These “models” aren’t standalone LLMs (like GPT-4 or Llama), but rather placeholders that tell your LLM endpoint to generate responses using only the data from the chosen partition. To query the entire vector database, use the special model name **`partition-all`**.
 
 
 * **`POST /v1/chat/completions`**  
@@ -440,7 +440,7 @@ uv venv --python=3.12
 uv sync
 ```
 ### Error with models' weights downloading
-While executing RAGondin, if you encounter a problem that prevents you from downloading the models' weights locally, then you just need to create the needed folder and authorize it to be written and executed
+While executing OPEnrag, if you encounter a problem that prevents you from downloading the models' weights locally, then you just need to create the needed folder and authorize it to be written and executed
 
 ```bash
 sudo mkdir /app/model_weights
