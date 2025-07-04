@@ -60,15 +60,20 @@ async def list_models(
 ):
     partitions = app_state.vectordb.list_partitions()
     logger.debug("Listing models", partition_count=len(partitions))
-    models = [
-        {
-            "id": f"ragondin-{partition.partition}",
-            "object": "model",
-            "created": int(partition.created_at.timestamp()),
-            "owned_by": "RAGondin",
-        }
-        for partition in partitions
-    ]
+
+    models = []
+    for partition in partitions:
+
+        models.append(
+            {
+                "id": f"ragondin-{partition['partition']}",
+                "object": "model",
+                "created": partition['created_at'],
+                "owned_by": "RAGondin",
+            }
+        )
+
+
     models.append(
         {"id": "ragondin-all", "object": "model", "created": 0, "owned_by": "RAGondin"}
     )
@@ -95,6 +100,7 @@ def __prepare_sources(request: Request, docs: list[Document]):
     for doc in docs:
         doc_metadata = dict(doc.metadata)
         file_url = str(request.url_for("static", path=doc_metadata["filename"]))
+        file_url = file_url.replace("http://", "https://")  # Ensure HTTPS
         encoded_url = quote(file_url, safe=":/")
         links.append(
             {
