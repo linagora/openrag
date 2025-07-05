@@ -43,7 +43,7 @@ vectordb:
 reranker:
   enable: ${oc.decode:${oc.env:RERANKER_ENABLED, true}}
   model_name: ${oc.env:RERANKER_MODEL, Alibaba-NLP/gte-multilingual-reranker-base}
-  top_k: ${oc.decode:${oc.env:RERANKER_TOP_K, 4}}
+  top_k: ${oc.decode:${oc.env:RERANKER_TOP_K, 5}}
   base_url: ${oc.env:RERANKER_BASE_URL, http://reranker:${oc.env:RERANKER_PORT, 7997}}
 
 grader:
@@ -68,7 +68,7 @@ prompt:
 loader:
   image_captioning: true
   save_markdown: false
-  audio_model: ${oc.env:WHISPER_MODEL, base}
+  audio_model: ${oc.env:WHISPER_MODEL, base} # tiny, base, small, medium, large-v1, large-v2, large-v3
   file_loaders:
     txt: TextLoader
     pdf: ${oc.env:PDFLoader, DoclingLoader}  # DoclingLoader # MarkerLoader # PyMuPDFLoader # Custompymupdf4llm

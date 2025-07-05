@@ -19,8 +19,8 @@ AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
 
 # Chainlit authentication
 CHAINLIT_AUTH_SECRET = os.environ.get("CHAINLIT_AUTH_SECRET")
-CHAINLIT_USERNAME = os.environ.get("CHAINLIT_USERNAME", "Ragondin")
-CHAINLIT_PASSWORD = os.environ.get("CHAINLIT_PASSWORD", "Ragondin2025")
+CHAINLIT_USERNAME = os.environ.get("CHAINLIT_USERNAME", "OpenRAG")
+CHAINLIT_PASSWORD = os.environ.get("CHAINLIT_PASSWORD", "OpenRAG2025")
 
 headers = {
     "accept": "application/json",
@@ -77,7 +77,7 @@ async def chat_profile():
         models = output.data
         chat_profiles = []
         for i, m in enumerate(models, start=1):
-            partition = m.id.split("ragondin-")[1]
+            partition = m.id.split("openrag-")[1]
             description_template = "You are interacting with the **{name}** LLM.\n" + (
                 "The LLM's answers will be grounded on **all** partitions."
                 if "all" in m.id

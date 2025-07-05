@@ -44,8 +44,8 @@ After adding the submodule, add the following variables to your `.env` file:
 ```bash
 # Chainlit UI authentication (Necessary for data persistency). Don't add it if it's already included
 CHAINLIT_AUTH_SECRET=... # has to be generated with with this command: 'uv run chainlit create-secret' but a random value works too.
-CHAINLIT_USERNAME=Ragondin
-CHAINLIT_PASSWORD=Ragondin2025
+CHAINLIT_USERNAME=OpenRAG
+CHAINLIT_PASSWORD=OpenRAG2025
 
 ## Chainlit data persistency
 # Persistency services (localstack + AWS (Deployed Locally))

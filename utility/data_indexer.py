@@ -12,7 +12,7 @@ parser.add_argument(
     "--url",
     default="http://localhost:8080",
     type=str,
-    help="The base url of your RAGondin instance",
+    help="The base url of your OpenRAG instance",
 )
 parser.add_argument(
     "-a", "--auth", required=False, type=str, help="AUTH_KEY (see the .env.example"
