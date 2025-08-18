@@ -1,6 +1,6 @@
 defaults:
   - _self_  # TODO: Silences the hydra version migration warning (PLEASE REVIEW FOR BREAKING CHANGES)
-  - chunker: recursive_splitter # recursive_splitter, semantic_splitter
+  - chunker: recursive_splitter # markdown_splitter # semantic_splitter # 
   - retriever: single
   - rag: ChatBotRag
 
@@ -34,17 +34,22 @@ embedder:
   
 vectordb:
   host: ${oc.env:VDB_HOST, milvus}
-  port: ${oc.env:VDB_PORT, 19530}
+  port: ${oc.env:VDB_iPORT, 19530}
   connector_name: ${oc.env:VDB_CONNECTOR_NAME, milvus}
-  collection_name: vdb_test 
-  hybrid_mode: true
+  collection_name: ${oc.env:VDB_COLLECTION_NAME, vdb_test} 
+  hybrid_search: true
   enable: true
+
+rdb:
+  host: ${oc.env:POSTGRES_HOST, rdb}
+  port: ${oc.env:POSTGRES_PORT, 5432}
+  user: ${oc.env:POSTGRES_USER, root}
+  password: ${oc.env:POSTGRES_PASSWORD, root_password}
 
 reranker:
   enable: ${oc.decode:${oc.env:RERANKER_ENABLED, true}}
   model_name: ${oc.env:RERANKER_MODEL, Alibaba-NLP/gte-multilingual-reranker-base}
-  reranker_type: ${oc.decode:${oc.env:RERANKER_MODEL_TYPE, colbert}}
-  top_k: ${oc.decode:${oc.env:RERANKER_TOP_K, 4}}
+  top_k: ${oc.decode:${oc.env:RERANKER_TOP_K, 5}}
   base_url: ${oc.env:RERANKER_BASE_URL, http://reranker:${oc.env:RERANKER_PORT, 7997}}
 
 grader:
@@ -61,7 +66,7 @@ paths:
   log_dir: ${oc.env:LOG_DIR, /app/logs}
 
 prompt:
-  rag_sys_pmpt: rag_sys_prompt_template.txt # rag_sys_pmpt_tmpl_ifa.txt
+  rag_sys_pmpt: rag_sys_prompt_template.txt
   contextualizer_pmpt: contextualizer_pmpt.txt
   chunk_contextualizer_pmpt: chunk_contextualizer_tmpl.txt
   image_describer: image_captioning.txt
@@ -69,10 +74,22 @@ prompt:
 loader:
   image_captioning: true
   save_markdown: false
-  audio_model: ${oc.env:WHISPER_MODEL, base}
+  audio_model: ${oc.env:WHISPER_MODEL, base} # tiny, base, small, medium, large-v1, large-v2, large-v3
+  mimetypes:
+    text/plain: .txt
+    text/markdown: .md
+    application/pdf: .pdf
+    message/rfc822: .eml
+    application/vnd.openxmlformats-officedocument.wordprocessingml.document: .docx
+    application/vnd.openxmlformats-officedocument.presentationml.presentation: .pptx
+    application/msword: .doc
+    image/png: .png
+    image/jpeg: .jpeg
+    audio/vnd.wav: .wav
+    audio/mpeg: .mp3
   file_loaders:
     txt: TextLoader
-    pdf: ${oc.env:PDFLoader, DoclingLoader}  # DoclingLoader # MarkerLoader # PyMuPDFLoader # Custompymupdf4llm
+    pdf: ${oc.env:PDFLoader, MarkerLoader}  # DoclingLoader # MarkerLoader # PyMuPDFLoader # Custompymupdf4llm
     eml: EmlLoader
     docx: MarkItDownLoader
     pptx: PPTXLoader
@@ -91,11 +108,29 @@ loader:
     md: MarkdownLoader
   marker_max_tasks_per_child: ${oc.decode:${oc.env:MARKER_MAX_TASKS_PER_CHILD, 10}}
   marker_pool_size: ${oc.decode:${oc.env:MARKER_POOL_SIZE, 1}}
-  marker_max_processes: ${oc.decode:${oc.env:MARKER_MAX_PROCESSES, 5}}
+  marker_max_processes: ${oc.decode:${oc.env:MARKER_MAX_PROCESSES, 2}}
   marker_min_processes: ${oc.decode:${oc.env:MARKER_MIN_PROCESSES, 1}}
-  marker_num_gpus: ${oc.decode:${oc.env:MARKER_NUM_GPUS, 1}}
+  marker_num_gpus: ${oc.decode:${oc.env:MARKER_NUM_GPUS, 0.01}}
+  marker_timeout: ${oc.decode:${oc.env:MARKER_TIMEOUT, 3600}}
 
 ray:
-  num_gpus: ${oc.decode:${oc.env:RAY_NUM_GPUS, 0.1}}
+  num_gpus: ${oc.decode:${oc.env:RAY_NUM_GPUS, 0.01}}
   pool_size: ${oc.decode:${oc.env:RAY_POOL_SIZE, 1}}
   max_tasks_per_worker: ${oc.decode:${oc.env:RAY_MAX_TASKS_PER_WORKER, 5}}
+  indexer:
+    max_task_retries: ${oc.decode:${oc.env:RAY_MAX_TASK_RETRIES, 2}}
+    serialize_timeout: ${oc.decode:${oc.env:INDEXER_SERIALIZE_TIMEOUT, 36000}}
+    concurrency_groups:
+      default: ${oc.decode:${oc.env:INDEXER_DEFAULT_CONCURRENCY, 1000}}
+      update: ${oc.decode:${oc.env:INDEXER_UPDATE_CONCURRENCY, 100}}
+      search: ${oc.decode:${oc.env:INDEXER_SEARCH_CONCURRENCY, 100}}
+      delete: ${oc.decode:${oc.env:INDEXER_DELETE_CONCURRENCY, 100}}
+      chunk: ${oc.decode:${oc.env:INDEXER_CHUNK_CONCURRENCY, 1000}}
+      insert: ${oc.decode:${oc.env:INDEXER_INSERT_CONCURRENCY, 1}}
+  semaphore:
+    concurrency: ${oc.decode:${oc.env:RAY_SEMAPHORE_CONCURRENCY, 100000}}
+  serve:
+    enable: ${oc.decode:${oc.env:ENABLE_RAY_SERVE, false}}
+    num_replicas: ${oc.decode:${oc.env:RAY_SERVE_NUM_REPLICAS, 1}}
+    host: ${oc.env:RAY_SERVE_HOST, 0.0.0.0}
+    port: ${oc.env:RAY_SERVE_PORT, 8080}

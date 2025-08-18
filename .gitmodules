@@ -1,3 +1,6 @@
 [submodule "extern/chainlit-datalayer"]
 	path = extern/chainlit-datalayer
 	url = https://github.com/OpenLLM-France/chainlit-datalayer.git
+[submodule "extern/indexer-ui"]
+	path = extern/indexer-ui
+	url = https://github.com/ulysse-bouchet/indexer-ui

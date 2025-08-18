@@ -5,14 +5,13 @@ provider:
   worker_ips: [10.0.0.2] # Mandatory but does not automatically start the worker nodes for a local cluster
 
 docker:
-  image: ghcr.io/openllm-france/ragondin-ray
+  image: ghcr.io/linagora/openrag-ray
   pull_before_run: true
   container_name: ray_node
   run_options:
     - --gpus all
     - -v /ray_mount/model_weights:/app/model_weights
     - -v /ray_mount/data:/app/data
-    - -v /ray_mount/db:/app/db
     - -v /ray_mount/.hydra_config:/app/.hydra_config
     - -v /ray_mount/logs:/app/logs
     - --env-file /ray_mount/.env
@@ -20,5 +19,9 @@ auth:
   ssh_user: ubuntu
   ssh_private_key: <path/to/private/key>
 
-head_setup_commands:
-    - bash /app/ray-cluster/start_head.sh
+head_start_ray_commands:
+    - uv run ray stop
+    - uv run ray start --head --dashboard-host 0.0.0.0 --dashboard-port ${RAY_DASHBOARD_PORT:-8265} --node-ip-address ${HEAD_NODE_IP} --autoscaling-config=~/ray_bootstrap_config.yaml
+worker_start_ray_commands:
+    - uv run ray stop
+    - uv run ray start --address ${HEAD_NODE_IP:-10.0.0.1}:6379

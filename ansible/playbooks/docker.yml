@@ -1,0 +1,172 @@
+---
+# Docker Installation Playbook
+
+# Docker installation for all servers
+- name: Setup Docker
+  hosts: all
+  become: true
+  vars:
+    # Version configurations
+    docker_compose_version: "2.21.0"
+    docker_ce_version: "latest"
+
+    # Project configurations
+    project_user: "{{ ansible_user | default('ubuntu') }}"
+
+    # System packages required for Docker installation
+    common_packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - software-properties-common
+
+    # Docker packages
+    docker_packages:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+
+  tasks:
+    # ========== SYSTEM PREPARATION ==========
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install required system packages
+      apt:
+        name: "{{ common_packages }}"
+        state: present
+
+    # ========== DOCKER INSTALLATION ==========
+    - name: Check current Docker version
+      shell: |
+        if command -v docker >/dev/null 2>&1; then
+          docker --version | grep -oP 'Docker version \K[0-9]+\.[0-9]+\.[0-9]+'
+        else
+          echo "not_installed"
+        fi
+      register: current_docker_version
+      failed_when: false
+      changed_when: false
+
+    - name: Check if Docker installation is needed
+      set_fact:
+        docker_installation_needed: "{{ docker_ce_version == 'latest' or current_docker_version.stdout == 'not_installed' or current_docker_version.stdout != docker_ce_version }}"
+
+    - name: Clean Docker installation
+      block:
+        - name: Uninstall old Docker versions
+          apt:
+            name:
+              - docker.io
+              - docker-doc
+              - docker-compose
+              - docker-compose-v2
+              - podman-docker
+              - containerd
+              - runc
+              - docker-ce
+              - docker-ce-cli
+            state: absent
+            purge: true
+          ignore_errors: true
+
+        - name: Remove Docker repository and key files
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /etc/apt/sources.list.d/docker.list
+            - /etc/apt/sources.list.d/docker.list.save
+            - /etc/apt/sources.list.d/download_docker_com_linux_ubuntu.list
+            - /usr/share/keyrings/docker-archive-keyring.gpg
+            - /etc/apt/keyrings/docker.gpg
+            - /etc/apt/keyrings/docker.asc
+            - /etc/apt/trusted.gpg.d/docker.gpg
+          ignore_errors: true
+
+        - name: Clean Docker references and update cache
+          shell: |
+            sed -i '/download.docker.com/d' /etc/apt/sources.list
+            sed -i '/docker/d' /etc/apt/sources.list
+            apt-key del 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 2>/dev/null || true
+            apt-key del 0EBFCD88 2>/dev/null || true
+          ignore_errors: true
+
+        - name: Update apt cache after cleanup
+          apt:
+            update_cache: true
+            autoclean: true
+            autoremove: true
+      when: docker_installation_needed
+
+    - name: Install Docker
+      block:
+        - name: Create keyrings directory
+          file:
+            path: /etc/apt/keyrings
+            state: directory
+            mode: "0755"
+
+        - name: Add Docker GPG key and repository
+          shell: |
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+            chmod a+r /etc/apt/keyrings/docker.asc
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+        - name: Update apt cache and install Docker
+          apt:
+            update_cache: true
+            name: "{{ docker_packages }}"
+            state: present
+      when: docker_installation_needed
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add user to docker group
+      user:
+        name: "{{ project_user }}"
+        groups: docker
+        append: true
+
+    # Verification
+    - name: Verify Docker installation
+      block:
+        - name: Test Docker installation
+          shell: docker --version
+          register: docker_version_test
+
+        - name: Test Docker service
+          shell: docker info
+          register: docker_info_test
+          ignore_errors: true
+
+        - name: Test Docker Compose
+          shell: docker compose version
+          register: docker_compose_test
+          ignore_errors: true
+
+        - name: Display Docker installation summary
+          debug:
+            msg:
+              - "Docker Version: {{ docker_version_test.stdout }}"
+              - "Docker Service: {{ 'RUNNING' if docker_info_test.rc == 0 else 'NOT RUNNING' }}"
+              - "Docker Compose: {{ 'AVAILABLE' if docker_compose_test.rc == 0 else 'NOT AVAILABLE' }}"
+              - "User '{{ project_user }}' added to docker group (may require logout/login to take effect)"
+
+    - name: Show post-installation notes
+      debug:
+        msg:
+          - "Docker installation completed successfully!"
+          - "Note: User '{{ project_user }}' has been added to the docker group."
+          - "The user may need to log out and log back in for group membership to take effect."
+          - "Alternatively, you can run 'newgrp docker' to refresh group membership in the current session."

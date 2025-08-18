@@ -2,8 +2,10 @@ include:
   - vdb/milvus.yaml
   - ${CHAINLIT_DATALAYER_COMPOSE:-extern/dummy.yaml}
   - extern/infinity.yaml
+  - ${INDEXERUI_COMPOSE_FILE:-extern/dummy.yaml}
 
-x-ragondin: &ragondin_template
+x-openrag: &openrag_template
+  image: ghcr.io/linagora/openrag:latest
   build:
     context: .
     dockerfile: Dockerfile
@@ -11,8 +13,7 @@ x-ragondin: &ragondin_template
     - ${CONFIG_VOLUME:-./.hydra_config}:/app/.hydra_config
     - ${DATA_VOLUME:-./data}:/app/data
     - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
-    - ./ragondin:/app/ragondin # For dev mode
-    - ${DB_VOLUME:-./db}:/app/db
+    - ./openrag:/app/openrag # For dev mode
     - /$SHARED_ENV:/ray_mount/.env # Shared environment variables
     - /ray_mount/logs:/app/logs
   ports:
@@ -21,7 +22,7 @@ x-ragondin: &ragondin_template
   networks:
     default:
       aliases:
-        - ragondin
+        - openrag
   env_file:
     - ${SHARED_ENV:-.env}
   shm_size: 10.24gb
@@ -42,13 +43,13 @@ x-vllm: &vllm_template
   command: >
     --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
     --trust-remote-code
+    --gpu_memory_utilization 0.3
   ports:
     - ${VLLM_PORT:-8000}:8000
-
 services:
   # GPU - default 
-  ragondin:
-    <<: *ragondin_template
+  openrag:
+    <<: *openrag_template
     deploy:
       resources:
         reservations:
@@ -60,11 +61,19 @@ services:
       - ''
 
   # No GPU
-  ragondin-cpu:
-    <<: *ragondin_template
+  openrag-cpu:
+    <<: *openrag_template
     deploy: {}
     profiles:
       - 'cpu'
+
+  rdb:
+    image: postgres:15
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-root_password}
+      - POSTGRES_USER=${POSTGRES_USER:-root}
+    volumes:
+      - ${DB_VOLUME:-./db}:/var/lib/postgresql/data
 
   vllm-gpu:
     <<: *vllm_template
@@ -86,7 +95,8 @@ services:
       context: extern/vllm
       dockerfile: Dockerfile.cpu
       target: vllm-openai
-    image: ragondin-vllm-openai-cpu
+    image: openrag-vllm-openai-cpu
     deploy: {}
     profiles:
       - 'cpu'
+

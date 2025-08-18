@@ -38,3 +38,4 @@ services:
       --port ${RERANKER_PORT:-7997}
     profiles:
       - 'cpu'
+

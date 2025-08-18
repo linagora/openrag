@@ -1,0 +1,218 @@
+---
+# OpenRAG Application Deployment Playbook
+#
+# This playbook deploys the OpenRAG application on both GPU and CPU servers.
+# Prerequisites: Docker must be installed and running
+#
+# Usage: ansible-playbook openrag.yml
+
+# OpenRAG deployment for all servers (GPU and CPU)
+- name: Setup OpenRAG Environment
+  hosts: gpu_servers,cpu_servers
+  become: true
+  vars:
+    # Project configurations
+    project_user: "{{ ansible_user | default('ubuntu') }}"
+    project_path: "/home/{{ project_user }}/openrag"
+
+    # System packages required for OpenRAG
+    common_packages:
+      - git
+      - python3
+      - python3-pip
+      - unzip
+      - htop
+      - tree
+      - vim
+      - wget
+      - curl
+
+    # Project directories to create
+    project_directories:
+      - data
+      - db
+      - logs
+      - .hydra_config
+      - model_weights
+      - vdb/volumes
+
+    # Dynamic compose profile based on server type
+    compose_profile: "{{ 'cpu' if inventory_hostname in groups['cpu_servers'] else '' }}"
+
+  tasks:
+    # ========== SYSTEM PREPARATION ==========
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install required system packages
+      apt:
+        name: "{{ common_packages }}"
+        state: present
+
+    # ========== DOCKER VERIFICATION ==========
+    - name: Verify Docker is installed and running
+      block:
+        - name: Check if Docker is installed
+          shell: docker --version
+          register: docker_check
+          failed_when: docker_check.rc != 0
+
+        - name: Check if Docker service is running
+          shell: docker info
+          register: docker_service_check
+          failed_when: docker_service_check.rc != 0
+
+        - name: Display Docker status
+          debug:
+            msg: "Docker is installed and running: {{ docker_check.stdout }}"
+
+    # ========== PROJECT SETUP ==========
+    - name: Create project directory
+      file:
+        path: "{{ project_path }}"
+        state: directory
+        owner: "{{ project_user }}"
+        group: "{{ project_user }}"
+        mode: "0755"
+
+    - name: Clone or update OpenRAG repository
+      git:
+        repo: https://github.com/linagora/openrag.git
+        dest: "{{ project_path }}"
+        force: true
+      become_user: "{{ project_user }}"
+
+    - name: Setup environment file
+      block:
+        - name: Check if .env file exists
+          stat:
+            path: "{{ project_path }}/.env"
+          register: env_file
+
+        - name: Check if local .env file exists (in project root directory)
+          stat:
+            path: "{{ playbook_dir }}/../.env"
+          register: local_env_file
+          delegate_to: localhost
+          become: false
+
+        - name: Copy local .env file to project directory if it exists
+          copy:
+            src: "{{ playbook_dir }}/../.env"
+            dest: "{{ project_path }}/.env"
+            owner: "{{ project_user }}"
+            group: "{{ project_user }}"
+            mode: "0644"
+          when:
+            - not env_file.stat.exists
+            - local_env_file.stat.exists
+
+      become_user: "{{ project_user }}"
+
+    - name: Create required directories
+      file:
+        path: "{{ project_path }}/{{ item }}"
+        state: directory
+        owner: "{{ project_user }}"
+        group: "{{ project_user }}"
+        mode: "0755"
+      loop: "{{ project_directories }}"
+      become_user: "{{ project_user }}"
+
+    - name: Setup Python environment
+      block:
+        - name: Install uv (Python package manager)
+          shell: curl -LsSf https://astral.sh/uv/install.sh | sh
+          args:
+            creates: "/home/{{ project_user }}/.cargo/bin/uv"
+
+        - name: Add uv to PATH in .bashrc
+          lineinfile:
+            path: "/home/{{ project_user }}/.bashrc"
+            line: 'export PATH="$HOME/.cargo/bin:$PATH"'
+            create: true
+      become_user: "{{ project_user }}"
+
+    # ========== DEPLOYMENT ==========
+    - name: Deploy and start OpenRAG services
+      block:
+        - name: Start Docker Compose services with appropriate profile
+          shell: |
+            cd {{ project_path }}
+            docker compose --profile "{{ compose_profile }}" up -d --build
+
+        - name: Wait for Docker containers to be running and healthy
+          shell: |
+            cd {{ project_path }}
+            # Wait for containers to start and stabilize
+            sleep 30
+            # Check if containers are running
+            running_containers=$(docker compose ps --services --filter "status=running" | wc -l)
+            total_containers=$(docker compose ps --services | wc -l)
+            echo "Running containers: $running_containers/$total_containers"
+            if [ $running_containers -gt 0 ]; then
+              exit 0
+            else
+              exit 1
+            fi
+          register: container_health
+          retries: 10
+          delay: 30
+          until: container_health.rc == 0
+          ignore_errors: true
+      become_user: "{{ project_user }}"
+
+    # ========== VERIFICATION ==========
+    - name: Verify deployment
+      block:
+        - name: Check Docker containers status
+          shell: docker ps --format "table {{ '{{.Names}}' }}\t{{ '{{.Status}}' }}\t{{ '{{.Ports}}' }}"
+          register: docker_status
+
+        - name: Display running containers
+          debug:
+            var: docker_status.stdout_lines
+
+        - name: Test NVIDIA Docker integration (GPU servers only)
+          shell: docker run --rm --runtime=nvidia --gpus all ubuntu nvidia-smi
+          register: nvidia_test
+          ignore_errors: true
+          when: inventory_hostname in groups['gpu_servers']
+
+        - name: Test NVIDIA Docker integration with alternative runtime flag (GPU servers only)
+          shell: docker run --rm --gpus all ubuntu nvidia-smi
+          register: nvidia_test_fallback
+          ignore_errors: true
+          when:
+            - inventory_hostname in groups['gpu_servers']
+            - nvidia_test.rc != 0
+
+        - name: Display NVIDIA test result (GPU servers only)
+          debug:
+            var: "{{ nvidia_test.stdout_lines if nvidia_test.rc == 0 else nvidia_test_fallback.stdout_lines }}"
+          when:
+            - inventory_hostname in groups['gpu_servers']
+            - (nvidia_test.rc == 0 or nvidia_test_fallback.rc == 0)
+
+        - name: Display NVIDIA test failure if all attempts failed (GPU servers only)
+          debug:
+            msg:
+              - "NVIDIA Docker integration test failed with all attempts"
+              - "Runtime flag error: {{ nvidia_test.stderr }}"
+              - "GPUs flag error: {{ nvidia_test_fallback.stderr | default('Not attempted') }}"
+              - "This usually indicates NVIDIA Container Toolkit is not properly configured"
+          when:
+            - inventory_hostname in groups['gpu_servers']
+            - nvidia_test.rc != 0
+            - nvidia_test_fallback.rc != 0
+
+        - name: Show service URLs
+          debug:
+            msg:
+              - "Server Type: {{ 'GPU-enabled' if inventory_hostname in groups['gpu_servers'] else 'CPU-only' }}"
+              - "OpenRAG API: http://{{ ansible_default_ipv4.address }}:8080"
+              - "{{ 'Ray Dashboard: http://' + ansible_default_ipv4.address + ':8265' if inventory_hostname in groups['gpu_servers'] else 'Ray Dashboard: Not available (CPU-only mode)' }}"
+              - "Milvus: {{ ansible_default_ipv4.address }}:19530"
+      become_user: "{{ project_user }}"

@@ -1,0 +1,23 @@
+**Objective**: Succinctly write a contextualization text for the following chunk (from a document) by integrating the provided elements.
+
+**Writing Instructions**:
+1. Take into account:
+   - **Document Source**: Information about the origin and nature of the document (CV, videos, commercial proposals, etc.) to be explicitly mentioned to situate the chunk's provenance
+   - **First chunks of the original document**: Structure/Header of the original document
+   - **Previous chunk**: Adjacent content to ensure continuity
+
+2. Constraints:
+   - Language: Use the language of the current chunk
+   - Response format: Plain text only (no titles/markdown)
+   - Length: 1 to 3 sentence(s) according to relevance if necessary
+
+**Context**:
+- Document Source: {source} to be taken into account in the contextualization
+- First chunks of the original document:
+{first_chunks}
+
+- Previous chunk:
+{prev_chunk}
+
+**chunk to contextualize**:
+{chunk}

@@ -1,0 +1,2 @@
+Answer the user's question by writing a clear, concise and informative paragraph.
+Question: {question}

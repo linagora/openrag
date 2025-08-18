@@ -2,11 +2,9 @@
 
 import httpx
 import argparse
-
-from utils.logger import get_logger
 from pathlib import Path
+from loguru import logger
 
-logger = get_logger()
 
 parser = argparse.ArgumentParser(description="Index documents from local file system")
 parser.add_argument(
@@ -14,7 +12,7 @@ parser.add_argument(
     "--url",
     default="http://localhost:8080",
     type=str,
-    help="The base url of your RAGondin instance",
+    help="The base url of your OpenRAG instance",
 )
 parser.add_argument(
     "-a", "--auth", required=False, type=str, help="AUTH_KEY (see the .env.example"
@@ -40,7 +38,7 @@ dir_path = Path(args.dir).resolve()
 
 def __check_api(base_url):
     try:
-        response = httpx.get(f"{args.url}/health_check")
+        response = httpx.get(f"{base_url}/health_check", headers=headers)
         if response.status_code == 200:
             logger.info("API is up and running")
 
@@ -52,7 +50,7 @@ def __check_api(base_url):
 def __check_file_exists(base_url, partition, file_name, headers):
     try:
         url = f"{base_url}/partition/check-file/{partition}/file/{file_name}"
-        response = httpx.get(url, headers=headers)
+        response = httpx.get(url, headers=headers, timeout=60)
         if 200 == response.status_code:
             return True
     except Exception as e:

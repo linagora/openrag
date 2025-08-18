@@ -15,7 +15,7 @@ sudo apt install -y wireguard
 
 ---
 
-## 2️⃣ Configure the VPN Server (Main machine `162.19.92.65`)
+## 2️⃣ Configure the VPN Server (Main machine `X.X.X.X`)
 
 Create the configuration file:
 
@@ -46,7 +46,7 @@ AllowedIPs = 10.0.0.2/32
 
 ---
 
-## 3️⃣ Configure the VPN Client (Other machine `91.134.65.219`)
+## 3️⃣ Configure the VPN Client (Other machine `X.X.X.X`)
 
 Create the configuration file:
 
@@ -64,7 +64,7 @@ PrivateKey = <CLIENT_PRIVATE_KEY>
 [Peer]
 # VPN Server
 PublicKey = <SERVER_PUBLIC_KEY>
-Endpoint = 162.19.92.65:51820 # Replace with your VPN server IP
+Endpoint = X.X.X.X:51820 # Replace with your VPN server IP
 AllowedIPs = 10.0.0.0/24
 PersistentKeepalive = 25
 ```

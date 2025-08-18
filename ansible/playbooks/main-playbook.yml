@@ -1,0 +1,11 @@
+---
+# Main OpenRAG Installation Playbook
+
+- name: Step 1 - Docker Setup
+  import_playbook: ./docker.yml
+
+- name: Step 2 - NVIDIA Setup (GPU servers only)
+  import_playbook: ./nvidia-drivers-toolkit.yml
+
+- name: Step 3 - OpenRAG Application Deployment
+  import_playbook: ./openrag.yml

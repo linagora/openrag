@@ -1,0 +1,268 @@
+# OpenRAG Ansible Deployment
+
+> **📝 Note**: This repository now uses **modular playbooks** for better organization and flexibility. 
+> All playbooks have been moved to the `playbooks/` directory.
+> For detailed information about the modular approach, see [README-modular.md](README-modular.md).
+
+This directory contains Ansible playbooks and scripts to automatically set up the OpenRAG environment on one or more servers.
+
+These scripts are designed for installation on fresh production servers.
+
+## Features
+
+- **Automated Docker installation** 
+- **NVIDIA GPU support**
+- **Complete OpenRAG deployment**
+- **Multi-server support**
+
+## Quick Start
+
+### 1. Prerequisites
+
+- Ansible installed on your control machine (automatically installed by deploy.sh if missing)
+- SSH access to target servers (if deploying remotely)
+- Ubuntu 20.04+ or similar Linux distribution on target servers
+- For remote deployment: `inventory.ini.example` file from the OpenRAG repository
+
+### 2. Local Deployment (Easiest)
+
+```bash
+cd ansible/
+./deploy.sh
+# Choose option 1: "Deploy to local machine"
+# Select CPU-only or GPU-enabled deployment when prompted
+```
+
+The local deployment will:
+- Prompt you to choose between CPU-only or GPU-enabled deployment
+- Handle all necessary configurations and installs automatically
+- Start all services
+
+### 3. Remote Deployment
+
+1. **Create the inventory file (on the control machine):**
+   ```bash
+   # Rename the example inventory file
+   cp inventory.ini.example inventory.ini
+   
+   # Edit the inventory file
+   nano inventory.ini
+   ```
+
+2. **Configure your servers:**
+   ```ini
+   [gpu_servers]
+   gpu-server1 ansible_host=192.168.1.100 ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa
+   gpu-server2 ansible_host=192.168.1.101 ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa
+
+   [cpu_servers]
+   cpu-server1 ansible_host=192.168.1.102 ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa
+
+   [all:vars]
+   ansible_python_interpreter=/usr/bin/python3
+   ```
+
+3. **Run the deployment:**
+   ```bash
+   ./deploy.sh
+   # Choose option 2: "Deploy remotely"
+   ```
+
+## Files Overview
+
+### Playbooks
+
+- **`playbook.yml`** - Main deployment playbook with separate GPU-enabled and CPU-only server configurations
+
+### Inventory Files
+
+- **`inventory.ini.example`** - Example inventory template for remote deployment
+- **`inventory.ini`** - Generated automatically for local deployment or manually created for remote deployment
+
+### Configuration
+
+- **`ansible.cfg`** - Ansible configuration settings
+
+### Scripts
+
+- **`deploy.sh`** - Interactive deployment and management
+
+## Manual Deployment
+
+If you prefer to run Ansible commands directly:
+
+### Local/Remote Deployment
+```bash
+# Create inventory first
+ansible-playbook -i inventory.ini playbook.yml --ask-become-pass
+```
+
+### Check Status
+```bash
+ansible all -i inventory.ini -m shell -a "docker ps" --become
+```
+
+## Service Management
+
+The deployment script provides several management options:
+
+### Interactive Mode
+```bash
+./deploy.sh
+```
+
+### Command Line Mode
+```bash
+# Deploy locally
+./deploy.sh deploy-local
+
+# Deploy remotely  
+./deploy.sh deploy-remote
+
+# Check status
+./deploy.sh status
+
+# Stop services
+./deploy.sh stop
+
+# Start services
+./deploy.sh start
+
+# View logs
+./deploy.sh logs [service_name]
+
+# Update deployment
+./deploy.sh update
+
+# Complete removal
+./deploy.sh remove-all
+```
+
+## What Gets Installed
+
+### System Packages
+- Docker CE with Compose plugin
+- NVIDIA drivers (if GPU detected and GPU server group is used)
+- NVIDIA Container Toolkit (for GPU servers)
+- Python 3 with pip and uv package manager
+- Essential development tools
+
+### OpenRAG Components
+- Complete OpenRAG codebase from GitHub
+- All required Python dependencies installed via `uv`
+- Docker containers for OpenRAG services with appropriate profiles:
+  - GPU servers: Default profile (includes GPU-accelerated services)
+  - CPU servers: CPU profile (CPU-only services)
+
+### Directory Structure
+```
+/home/[user]/openrag/
+├── data/           # Document storage
+├── db/             # Database files
+├── logs/           # Application logs
+├── .hydra_config/  # Hydra configuration cache
+├── model_weights/  # Cached model files
+├── vdb/volumes/    # Vector database volumes
+├── .env            # Environment configuration
+└── ...             # OpenRAG source code
+```
+
+## Configuration
+
+### Environment Variables
+
+The deployment automatically creates a `.env` file from `.env.example` or copies a local `.env` file if present. Key variables to customize:
+
+```bash
+# LLM Configuration
+BASE_URL=http://your-llm-endpoint
+API_KEY=your-api-key
+MODEL=your-model-name
+
+# Application Settings
+APP_PORT=8080
+RETRIEVER_TOP_K=20
+
+# Embedder Settings
+EMBEDDER_MODEL_NAME=Qwen/Qwen3-Embedding-0.6B
+```
+
+### Version Configuration
+
+The playbook uses these default versions (configurable via inventory variables):
+
+```yaml
+# Docker and NVIDIA versions
+docker_compose_version: "2.21.0"
+nvidia_driver_version: "535"
+docker_ce_version: "latest"
+nvidia_container_toolkit_version: "1.17.8-1"
+```
+
+### Inventory Variables
+
+You can set variables in your inventory file:
+
+```ini
+[gpu_servers:vars]
+nvidia_driver_version=535
+project_user=ubuntu
+project_path=/home/ubuntu/openrag
+
+[cpu_servers:vars]
+project_user=ubuntu
+project_path=/home/ubuntu/openrag
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Docker permission denied**
+   ```bash
+   # Re-login to apply docker group membership
+   sudo su - $USER
+   ```
+
+2. **NVIDIA driver installation fails**
+   ```bash
+   # Check GPU compatibility
+   lspci | grep -i nvidia
+   ```
+
+3. **Services not starting**
+   ```bash
+   # Check logs
+   docker compose logs
+   ```
+
+### Manual Recovery
+
+If something goes wrong, you can manually clean up:
+
+```bash
+# Stop all containers
+docker compose down
+
+# Remove containers and images
+docker system prune -a
+
+# Re-run deployment
+./deploy.sh
+```
+
+### Complete System Reset
+
+For a complete removal of all components (Docker, NVIDIA drivers, OpenRAG):
+
+```bash
+# Use the deployment script's removal option
+./deploy.sh remove-all
+```
+
+**Warning**: This will remove Docker, NVIDIA drivers, and all related components. Use with caution!
+
+For OpenRAG application issues, refer to the main project documentation.

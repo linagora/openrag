@@ -1,0 +1,7 @@
+Generate {k_queries} different versions of the given question.
+These variants will help find relevant documents in a vector database.
+Write these alternative questions on a single line separated by '[SEP]' with nothing else.
+
+Example: Question 1?[SEP]Question 2?[SEP]Question 3?
+
+Original question: {query}

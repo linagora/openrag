@@ -1,0 +1,287 @@
+---
+# NVIDIA GPU setup for servers
+- name: Setup NVIDIA Drivers and Container Toolkit
+  hosts: gpu_servers
+  become: true
+  vars:
+    # GPU-specific configurations
+    nvidia_driver_version: "535"
+    nvidia_container_toolkit_version: "1.17.8-1"
+
+    # System packages required for NVIDIA installation
+    common_packages:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - software-properties-common
+      - wget
+
+  tasks:
+    # ========== SYSTEM PREPARATION ==========
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install required system packages
+      apt:
+        name: "{{ common_packages }}"
+        state: present
+
+    # ========== NVIDIA GPU VALIDATION ==========
+    - name: Check if NVIDIA GPU is present
+      shell: lspci | grep -i nvidia
+      register: nvidia_check
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if no NVIDIA GPU found on GPU server
+      fail:
+        msg: "No NVIDIA GPU found on this server, but it's configured as a GPU server"
+      when: nvidia_check.rc != 0
+
+    # ========== NVIDIA DRIVER MANAGEMENT ==========
+
+    - name: Check current NVIDIA driver version
+      shell: |
+        if command -v nvidia-smi >/dev/null 2>&1; then
+          nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits | head -1
+        else
+          echo "not_installed"
+        fi
+      register: current_nvidia_version
+      failed_when: false
+      changed_when: false
+
+    - name: Display current NVIDIA driver status
+      debug:
+        msg: "Current NVIDIA driver: {{ current_nvidia_version.stdout | default('not detected') }}, Required: {{ nvidia_driver_version }}"
+
+    - name: Check if NVIDIA driver version matches requirement
+      set_fact:
+        nvidia_version_matches: "{{ current_nvidia_version.stdout.split('.')[0] == nvidia_driver_version }}"
+      when: current_nvidia_version.stdout != "not_installed"
+
+    - name: Set nvidia_version_matches to false if not installed
+      set_fact:
+        nvidia_version_matches: false
+      when: current_nvidia_version.stdout == "not_installed"
+
+    - name: Check if NVIDIA driver installation is needed
+      set_fact:
+        nvidia_installation_needed: "{{ not nvidia_version_matches }}"
+
+    - name: Add NVIDIA package repository
+      block:
+        - name: Remove all NVIDIA and CUDA related packages
+          apt:
+            name:
+              - nvidia-*
+              - cuda-*
+              - nsight-*
+              - libnvidia-*
+            state: absent
+            purge: true
+          ignore_errors: true
+
+        - name: Remove held packages and fix broken dependencies
+          shell: |
+            apt-mark unhold $(apt-mark showhold)
+            apt-get remove --purge -y nsight-systems-2023.2.3 || true
+            apt-get autoremove -y
+            apt-get autoclean
+            dpkg --configure -a
+            apt-get -f install -y
+          ignore_errors: true
+
+        - name: Download NVIDIA repository key
+          get_url:
+            url: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb
+            dest: /tmp/cuda-keyring_1.0-1_all.deb
+
+        - name: Install NVIDIA repository key
+          apt:
+            deb: /tmp/cuda-keyring_1.0-1_all.deb
+
+        - name: Update apt cache after adding NVIDIA repo
+          apt:
+            update_cache: true
+      when: nvidia_installation_needed
+
+    - name: Install NVIDIA drivers (without CUDA toolkit)
+      block:
+        - name: Install basic NVIDIA drivers
+          apt:
+            name:
+              - nvidia-driver-{{ nvidia_driver_version }}
+            state: present
+            update_cache: true
+          register: nvidia_basic_install
+          ignore_errors: true
+
+        - name: Install NVIDIA DKMS if basic install succeeded
+          apt:
+            name:
+              - nvidia-dkms-{{ nvidia_driver_version }}
+            state: present
+          when: not nvidia_basic_install.failed
+          ignore_errors: true
+
+        - name: Try alternative NVIDIA driver installation
+          shell: |
+            apt-get install -y nvidia-driver-535-server nvidia-utils-535-server
+          when: nvidia_basic_install.failed
+          ignore_errors: true
+      when: nvidia_installation_needed
+
+    - name: Check NVIDIA driver status and handle reboot if needed
+      block:
+        - name: Initial NVIDIA driver check
+          shell: nvidia-smi
+          register: nvidia_initial_check
+          ignore_errors: true
+          changed_when: false
+
+        - name: Check if driver/library version mismatch exists
+          shell: nvidia-smi 2>&1 || true
+          register: nvidia_output
+          changed_when: false
+
+        - name: Reboot system if NVIDIA driver requires it (only if we changed drivers)
+          reboot:
+            msg: "Rebooting to complete NVIDIA driver installation"
+            reboot_timeout: 300
+            connect_timeout: 30
+          when:
+            - nvidia_installation_needed
+            - "'Driver/library version mismatch' in nvidia_output.stdout"
+
+        - name: Wait for system to come back online after reboot
+          wait_for_connection:
+            delay: 30
+            timeout: 300
+          when:
+            - nvidia_installation_needed
+            - "'Driver/library version mismatch' in nvidia_output.stdout"
+
+        - name: Final NVIDIA driver verification
+          shell: nvidia-smi
+          register: nvidia_final_check
+          ignore_errors: true
+          changed_when: false
+
+        - name: Display NVIDIA driver status
+          debug:
+            msg: "NVIDIA driver: {{ 'Version matches requirement (' + nvidia_driver_version + ') - No changes needed' if nvidia_version_matches else ('Installation: ' + ('SUCCESS' if nvidia_final_check.rc == 0 else 'FAILED - May require manual reboot')) }}"
+
+    # ========== NVIDIA CONTAINER TOOLKIT ==========
+    - name: Check current NVIDIA Container Toolkit version
+      shell: |
+        if command -v nvidia-ctk >/dev/null 2>&1; then
+          nvidia-ctk --version | grep -oP 'version \K[0-9]+\.[0-9]+\.[0-9]+'
+        else
+          echo "not_installed"
+        fi
+      register: current_nvidia_ctk_version
+      failed_when: false
+      changed_when: false
+
+    - name: Display current NVIDIA Container Toolkit status
+      debug:
+        msg: "Current NVIDIA Container Toolkit: {{ current_nvidia_ctk_version.stdout | default('not detected') }}, Required: {{ nvidia_container_toolkit_version }}"
+
+    - name: Check if NVIDIA Container Toolkit installation is needed
+      set_fact:
+        nvidia_ctk_installation_needed: "{{ current_nvidia_ctk_version.stdout == 'not_installed' or current_nvidia_ctk_version.stdout != nvidia_container_toolkit_version.split('-')[0] }}"
+
+    - name: Clean NVIDIA Container Toolkit installation (if needed)
+      block:
+        - name: Remove existing NVIDIA container repositories
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /etc/apt/sources.list.d/libnvidia-container.list
+            - /etc/apt/sources.list.d/nvidia-docker.list
+            - /etc/apt/sources.list.d/nvidia-container-runtime.list
+            - /etc/apt/sources.list.d/nvidia-container-toolkit.list
+            - /etc/apt/sources.list.d/nvidia-container-toolkit.list.save
+            - /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+            - /etc/apt/keyrings/nvidia-container-toolkit.gpg
+            - /etc/apt/trusted.gpg.d/nvidia-container-toolkit.gpg
+          ignore_errors: true
+
+        - name: Clean NVIDIA container references
+          shell: |
+            sed -i '/nvidia.github.io\/libnvidia-container/d' /etc/apt/sources.list
+            apt-key del $(apt-key list 2>/dev/null | grep -A1 "nvidia" | grep -oE "[A-F0-9]{8}" | head -1) 2>/dev/null || true
+          ignore_errors: true
+
+        - name: Update apt cache
+          apt:
+            update_cache: true
+            autoclean: true
+          ignore_errors: true
+      when: nvidia_ctk_installation_needed
+
+    - name: Configure NVIDIA Container Toolkit repository
+      shell: |
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+          sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+          tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+      when: nvidia_ctk_installation_needed
+
+    - name: Install NVIDIA Container Toolkit packages
+      apt:
+        update_cache: true
+        name:
+          - nvidia-container-toolkit={{ nvidia_container_toolkit_version }}
+          - nvidia-container-toolkit-base={{ nvidia_container_toolkit_version }}
+          - libnvidia-container-tools={{ nvidia_container_toolkit_version }}
+          - libnvidia-container1={{ nvidia_container_toolkit_version }}
+        state: present
+      when: nvidia_ctk_installation_needed
+
+    - name: Configure NVIDIA Container Runtime for Docker
+      block:
+        - name: Configure container runtime using nvidia-ctk
+          shell: nvidia-ctk runtime configure --runtime=docker
+
+        - name: Restart Docker service to apply NVIDIA runtime
+          systemd:
+            name: docker
+            state: restarted
+          ignore_errors: true # Docker might not be installed yet
+      when: nvidia_ctk_installation_needed or ansible_run_tags is defined and 'nvidia-config' in ansible_run_tags
+
+    # Verification
+    - name: Verify NVIDIA installation
+      block:
+        - name: Test NVIDIA driver
+          shell: nvidia-smi
+          register: nvidia_driver_test
+          ignore_errors: true
+
+        - name: Display NVIDIA driver test result
+          debug:
+            var: nvidia_driver_test.stdout_lines
+          when: nvidia_driver_test.rc == 0
+
+        - name: Test NVIDIA Container Toolkit (if Docker is available)
+          shell: docker run --rm --runtime=nvidia --gpus all ubuntu nvidia-smi
+          register: nvidia_container_test
+          ignore_errors: true
+
+        - name: Display NVIDIA Container Toolkit test result
+          debug:
+            var: nvidia_container_test.stdout_lines
+          when: nvidia_container_test.rc == 0
+
+        - name: Show NVIDIA installation summary
+          debug:
+            msg:
+              - "NVIDIA Driver: {{ 'INSTALLED and WORKING' if nvidia_driver_test.rc == 0 else 'FAILED or NOT INSTALLED' }}"
+              - "NVIDIA Container Toolkit: {{ 'INSTALLED and WORKING' if nvidia_container_test.rc == 0 else 'FAILED, NOT INSTALLED, or Docker not available' }}"

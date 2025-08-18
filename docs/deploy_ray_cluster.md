@@ -1,6 +1,6 @@
 # ⚡ Distributed Deployment in a Ray Cluster
 
-This guide explains how to deploy **RAGondin** across multiple machines using **Ray** for distributed indexing and processing.
+This guide explains how to deploy **OpenRAG** across multiple machines using **Ray** for distributed indexing and processing.
 
 ---
 
@@ -9,22 +9,33 @@ This guide explains how to deploy **RAGondin** across multiple machines using **
 Ensure your `.env` file includes the standard app variables **plus Ray-specific ones** listed below:
 
 ```env
-# Ray runtime
-RAY_DASHBOARD_PORT=8265
-RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
+# Ray
+# Resources for all files
+RAY_NUM_GPUS=0.1
+RAY_POOL_SIZE=1
+RAY_MAX_TASKS_PER_WORKER=5
 
-# Ray cluster-specific
+# PDF specific resources when using marker
+MARKER_MAX_TASKS_PER_CHILD=10
+MARKER_MAX_PROCESSES=5 # Number of subprocesses <-> Number of concurrent pdfs per worker
+MARKER_MIN_PROCESSES=3 # Minimum number of subprocesses available before triggering a process pool reset.
+MARKER_POOL_SIZE=1 # Number of workers (typically 1 worker per cluster node)
+MARKER_NUM_GPUS=0.6
+
 SHARED_ENV=/ray_mount/.env
-DATA_VOLUME = /ray_mount/data
-MODEL_WEIGHTS_VOLUME = /ray_mount/model_weights
-RAY_ADDRESS=ray://<HEAD_NODE_IP>:10001
+RAY_DASHBOARD_PORT=8265
+RAY_ADDRESS=ray://X.X.X.X:10001
+HEAD_NODE_IP=X.X.X.X
+RAY_HEAD_ADDRESS=X.X.X.X:6379
+# RAY_ENABLE_RECORD_ACTOR_TASK_LOGGING=1 # to enable logs at task level in ray dashboard
+RAY_task_retry_delay_ms=3000
 
-# Worker pool settings
-RAY_POOL_SIZE=8
-RAY_MAX_TASKS_PER_WORKER=5 # Worker restarts after 5 tasks to avoid memory leak
-
-# Resource requirements per indexation task
-RAY_NUM_GPUS=0.5
+# Ray volumes
+DATA_VOLUME=/ray_mount/data
+MODEL_WEIGHTS_VOLUME=/ray_mount/model_weights
+CONFIG_VOLUME=/ray_mount/.hydra_config
+UV_LINK_MODE=copy
+UV_CACHE_DIR=/tmp/uv-cache 
 ```
 
 ✅ Use host IPs instead of Docker service names :
@@ -47,14 +58,13 @@ RAY_NUM_GPUS=0.5
 ## 📁 2. Set Up Shared Storage
 
 All nodes need to access shared configuration and data folders.  
-We recommend using **NFS** for this.
+We recommend using **GlusterFS** for this.
 
-➡ Follow the [NFS Setup Guide](./setup_nfs.md) to configure:
+➡ Follow the [GlusterFS Setup Guide](./setup_glusterfs.md) to configure:
 
 - Shared access to:
   - `.env`
   - `.hydra_config`
-  - `/db` (SQLite)
   - `/data` (uploaded files)
   - `/model_weights` (embedding model cache)
 
@@ -72,14 +82,13 @@ provider:
   worker_ips: [10.0.0.2]  # Static IPs of other nodes (does not auto-start workers)
 
 docker:
-  image: ghcr.io/openllm-france/ragondin-ray
+  image: ghcr.io/linagora/openrag-ray
   pull_before_run: true
   container_name: ray_node
   run_options:
     - --gpus all
     - -v /ray_mount/model_weights:/app/model_weights
     - -v /ray_mount/data:/app/data
-    - -v /ray_mount/db:/app/db
     - -v /ray_mount/.hydra_config:/app/.hydra_config
     - -v /ray_mount/logs:/app/logs
     - --env-file /ray_mount/.env
@@ -88,41 +97,23 @@ auth:
   ssh_user: ubuntu
   ssh_private_key: path/to/private/key # Replace with your actual ssh key path
 
-head_setup_commands:
-  - bash /app/ray-cluster/start_head.sh
+head_start_ray_commands:
+    - uv run ray stop
+    - uv run ray start --head --dashboard-host 0.0.0.0 --dashboard-port ${RAY_DASHBOARD_PORT:-8265} --node-ip-address ${HEAD_NODE_IP} --autoscaling-config=~/ray_bootstrap_config.yaml
+worker_start_ray_commands:
+    - uv run ray stop
+    - uv run ray start --address ${HEAD_NODE_IP:-10.0.0.1}:6379
 ```
 
-> 🛠️ The base image (`ghcr.io/openllm-france/ragondin-ray`) must be built from `Dockerfile.ray` and pushed to a container registry before use.
+> 🛠️ The base image (`ghcr.io/linagora/openrag-ray`) must be built from `Dockerfile.ray` and pushed to a container registry before use.
 
 ### ⬆️ Launch the cluster
 
 ```bash
-uv run ray up cluster.yaml
+uv run ray up -y cluster.yaml
 ```
 
-### ➕ Join the cluster from worker nodes
-
-Run this on each worker node to start the Ray container:
-
-```bash
-docker run --rm -d \
-  --gpus all \
-  --network host \
-  --env-file /ray_mount/.env \
-  -v /ray_mount/model_weights:/app/model_weights \
-  -v /ray_mount/data:/app/data \
-  -v /ray_mount/db:/app/db \
-  -v /ray_mount/.hydra_config:/app/.hydra_config \
-  -v /ray_mount/logs:/app/logs \
-  --shm-size=10.24g
-  --name ray_node_worker \
-  ghcr.io/openllm-france/ragondin-ray \
-  bash /app/ray-cluster/start_worker.sh
-```
-
----
-
-## 🐳 4. Launch the RAGondin App
+## 🐳 4. Launch the OpenRAG App
 
 Use the Docker Compose setup:
 
@@ -130,7 +121,7 @@ Use the Docker Compose setup:
 docker compose up -d
 ```
 
-Once running, **RAGondin will auto-connect** to the Ray cluster using `RAY_ADDRESS` from `.env`.
+Once running, **OpenRAG will auto-connect** to the Ray cluster using `RAY_ADDRESS` from `.env`.
 
 ---
 
