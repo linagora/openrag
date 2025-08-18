@@ -1,0 +1,520 @@
+# Toyota
+
+Toyota Motor Corporation (Japanese: トヨタ自動車株式会社, Hepburn: Toyota Jidōsha kabushikigaisha, IPA:, English: /tɔɪˈjoʊtə/, commonly known as simply Toyota) is a Japanese multinational automotive manufacturer headquartered in Toyota City, Aichi, Japan. It was founded by Kiichiro Toyoda and incorporated on August 28, 1937. Toyota is the largest automobile manufacturer in the world, producing about 10 million vehicles per year.
+
+The company was originally founded as a spinoff of Toyota Industries, a machine maker started by Sakichi Toyoda, Kiichiro's father. Both companies are now part of the Toyota Group, one of the largest conglomerates in the world. While still a department of Toyota Industries, the company developed its first product, the Type A engine, in 1934 and its first passenger car in 1936, the Toyota AA.
+
+After World War II, Toyota benefited from Japan's alliance with the United States to learn from American automakers and other companies, which gave rise to The Toyota Way (a management philosophy) and the Toyota Production System (a lean manufacturing practice) that transformed the small company into a leader in the industry and was the subject of many academic studies.
+
+In the 1960s, Toyota took advantage of the rapidly growing Japanese economy to sell cars to a growing middle-class, leading to the development of the Toyota Corolla, which became the world's all-time best-selling automobile. The booming economy also funded an international expansion that allowed Toyota to grow into one of the largest automakers in the world, the largest company in Japan and the ninth-largest company in the world by revenue, as of December 2020. Toyota was the world's first automobile manufacturer to produce more than 10 million vehicles per year, a record set in 2012, when it also reported the production of its 200 millionth vehicle. By September 2023, total production reached 300 million vehicles.
+
+Toyota was praised for being a leader in the development and sales of more fuel-efficient hybrid electric vehicles, starting with the introduction of the XW10 Toyota Prius in 1997. The company now sells more than 40 hybrid vehicle models around the world. More recently, the company has also been criticized for being slow to adopt all-electric vehicles and focusing on the development of hydrogen fuel cell vehicles, like the Toyota Mirai, a technology that is costlier and has fallen far behind electric batteries.
+
+As of 2022, the Toyota Motor Corporation produces vehicles under four brands: Daihatsu, Hino, Lexus and the namesake Toyota. The company also holds a 20% stake in Subaru Corporation, a 5.1% stake in Mazda, a 4.9% stake in Suzuki, a 4.6% stake in Isuzu, a 3.8% stake in Yamaha Motor Corporation, and a 2.8% stake in Panasonic, as well as stakes in vehicle manufacturing joint-ventures in China (FAW Toyota and GAC Toyota), the Czech Republic (TPCA), India (Toyota Kirloskar) and the United States (MTMUS).
+
+Toyota is listed on the London Stock Exchange, Nagoya Stock Exchange, New York Stock Exchange and on the Tokyo Stock Exchange, where its stock is a component of the Nikkei 225 and TOPIX Core30 indices.
+
+## History
+
+### 1920s–1930s
+
+In 1924, Sakichi Toyoda invented the Toyoda Model G Automatic Loom. The principle of jidoka, which means the machine stops itself when a problem occurs, became later a part of the Toyota Production System. Looms were built on a small production line. In 1929, the patent for the automatic loom was sold to the British company Platt Brothers, generating the starting capital for automobile development.
+
+Under the direction of the founder's son, Kiichiro Toyoda, Toyoda Automatic Loom Works established an Automobile Division on September 1, 1933, and formally declared its intention to begin manufacturing automobiles on January 29, 1934. A prototype Toyota Type A engine was completed on September 25, 1934, with the company's first prototype sedan, the A1, completed the following May. As Kiichiro had limited experience with automobile production, he initially focused on truck production; the company's first truck, the G1, was completed on August 25, 1935, and debuted on November 21 in Tokyo, becoming the company's first production model. Modeled on a period Ford truck, the G1 sold for ¥2,900, ¥200 cheaper than the Ford truck. A total of 379 G1 trucks were ultimately produced.
+
+In April 1936, Toyoda's first passenger car, the Model AA, was completed. The sales price was ¥3,350, ¥400 cheaper than Ford or GM cars. The company's plant at Kariya was completed in May. In July, the company filled its first export order, with four G1 trucks exported to northeastern China. On September 19, 1936, the Japanese imperial government officially designated Toyota Automatic Loom Works as an automotive manufacturer.
+
+Vehicles were originally sold under the name "Toyoda" (トヨダ), from the family name of the company's founder, Kiichirō Toyoda. In September 1936, the company ran a public competition to design a new logo. Of 27,000 entries, the winning entry was the three Japanese katakana letters for "Toyoda" in a circle. However, Rizaburo Toyoda, who had married into the family and was not born with that name, preferred "Toyota" (トヨタ) because it took eight brush strokes (a lucky number) to write in Japanese, was visually simpler (leaving off the diacritic at the end), and with a voiceless consonant instead of a voiced one (voiced consonants are considered to have a "murky" or "muddy" sound compared to voiceless consonants, which are "clear").
+
+Since toyoda literally means "fertile rice paddies", changing the name also prevented the company from being associated with old-fashioned farming. The newly formed word was trademarked and the company began trading on August 28, 1937, as the Toyota Motor Company Ltd. Kiichiro's brother-in-law Rizaburo Toyoda was appointed the firm's first president, with Kiichiro as vice-president. Toyota Automatic Loom Works formally transferred automobile manufacturing to the new entity on September 29.
+
+The Japanese government supported the company by preventing foreign competitors Ford and General Motors from importing automobiles into Japan.
+
+At the onset of World War II, Toyota almost exclusively produced standard-sized trucks for the Japanese Army, which paid one-fifth of the price in advance and the remainder in cash upon delivery.
+
+### 1940s
+
+Japan was heavily damaged in World War II and Toyota's plants, which were used for the war effort, were not spared. On August 14, 1945, one day before the surrender of Japan, Toyota's Koromo Plant was bombed by the Allied forces. After the surrender, the U.S.-led occupying forces banned passenger car production in Japan. However, automakers like Toyota were allowed to begin building trucks for civilian use, in an effort to rebuild the nation's infrastructure. The U.S. military also contracted with Toyota to repair its vehicles.
+
+By 1947, there was an emerging global Cold War between the Soviet Union and the U.S., who had been allies in World War II. U.S. priorities shifted (the "Reverse Course") from punishing and reforming Japan to ensuring internal political stability, rebuilding the economy, and, to an extent, remilitarizing Japan. Under these new policies, in 1949, Japanese automakers were allowed to resume passenger car production, but at the same time, a new economic stabilization program to control inflation plunged the automotive industry into a serious shortage of funds, while many truck owners defaulted on their loans. Ultimately, the Bank of Japan, the central bank of the country, bailed out the company, with demands that the company institute reforms.
+
+### 1950s
+
+As the 1950s began, Toyota emerged from its financial crisis a smaller company, closing factories and laying off workers. Meanwhile, the Korean War broke out, and being located so close to the battlefront, the U.S. Army placed an order for 1,000 trucks from Toyota. The order helped to rapidly improve the struggling company's business performance. In 1950, company executives, including Kiichiro's cousin Eiji Toyoda, took a trip to the United States where they trained at the Ford Motor Company and observed the operations of dozens of U.S. manufacturers. The knowledge they gained during the trip, along with what the company learned making looms, gave rise to The Toyota Way (a management philosophy) and the Toyota Production System (a lean manufacturing practice) that transformed the company into a leader in the manufacturing industry.
+
+Toyota started developing its first full-fledged passenger car, the Toyopet Crown, in 1952. Prior to the Crown, Toyota had been outsourcing the design and manufacturing of auto bodies, which were then mounted on truck frames made by Toyota. The project was a major test for Toyota, who would need to build bodies and develop a new chassis that would be comfortable, but still stand up to the muddy, slow, unpaved roads common in Japan at the time. The project had been championed for many years by founder Kiichiro Toyoda, who died suddenly on March 27, 1952. The first prototypes were completed in June 1953 and began extensive testing, before the Crown went on sale in August 1955. The car was met with positive reviews from around the world.
+
+After the introduction of the Crown, Toyota began aggressively expanding into the export market; the company entered Saudi Arabia for the first time in 1955 with Land Cruisers, following an agreement reached with Abdul Latif Jameel (founder of his company of the same name); Toyota also brought Land Cruisers into neighboring Yemen in 1956. In 1958, Toyota established a production facility in Brazil, the company's first outside of Japan.
+
+Toyota entered the United States market in 1958, attempting to sell the Toyopet Crown. The company faced problems almost immediately, the Crown was a flop in the U.S. with buyers finding it overpriced and underpowered (because it was designed for the bad roads of Japan, not high-speed performance). In response, exports of the Crown to the United States were suspended in the early 1960s in favor of the Land Cruiser and the Tiara.
+
+After Kiichiro's death, his cousin Eiji Toyoda led the company for the two decades. Eiji helped establish the company's first plant independent from the Loom Works plant.
+
+### 1960s–1970s
+
+At the start of the 1960s, the Japanese economy was booming, a period that came to be known as the Japanese economic miracle. As the economy grew, so did the income of everyday people, who now could afford to purchase a vehicle. At the same time, the Japanese government heavily invested in improving road infrastructure. To take advantage of the moment, Toyota and other automakers started offering affordable economy cars like the Toyota Corolla, which became the world's all-time best-selling automobile.
+
+Toyota also found success in the United States in 1965 with the Toyota Corona compact car, which was redesigned specifically for the American market with a more powerful engine. The Corona helped increase U.S. sales of Toyota vehicles to more than 20,000 units in 1966 (a threefold increase) and helped the company become the third-best-selling import brand in the United States by 1967. Toyota's first manufacturing investment in the United States came in 1972 when the company struck a deal with Atlas Fabricators, to produce truck beds in Long Beach, in an effort to avoid the 25% "chicken tax" on imported light trucks. By importing the truck as an incomplete chassis cab (the truck without a bed), the vehicle only faced a 4% tariff. Once in the United States, Atlas would build the truck beds and attach them to the trucks. The partnership was successful and two years later, Toyota purchased Atlas.
+
+The energy crisis of the 1970s was a major turning point in the American auto industry. Before the crisis, large and heavy vehicles with powerful but inefficient engines were common. But in the years after, consumers started demanding high-quality and fuel-efficient small cars. Domestic automakers, in the midst of their malaise era, struggled to build these cars profitably, but foreign automakers like Toyota were well positioned. This, along with growing anti-Japanese sentiment, prompted the U.S. Congress to consider import restrictions to protect the domestic auto industry.
+
+The 1960s also saw the slight opening of the Japanese auto market to foreign companies. In an effort to strengthen Japan's auto industry ahead of the market opening, Toyota purchased stakes in other Japanese automakers. That included a stake in Hino Motors, a manufacturer of large commercial trucks, buses and diesel engines, along with a 16.8 percent stake in Daihatsu, a manufacturer of kei cars, the smallest highway-legal passenger vehicles sold in Japan. That began what became a long-standing partnership between Toyota and the two companies. As part of the partnership, Daihatsu would supply kei cars for Toyota to sell and to a lesser extent Toyota would supply full-sized cars for Daihatsu to sell (a process known as rebadging), allowing both companies to sell a full line-up of vehicles.
+
+### 1980s
+
+After the successes of the 1970s, and the threats of import restrictions, Toyota started making additional investments in the North American market in the 1980s. In 1981, Japan agreed to voluntary export restraints, which limited the number of vehicles the nation would send to the United States each year, leading Toyota to establish assembly plants in North America. The U.S. government also closed the loophole that allowed Toyota to pay lower taxes by building truck beds in America.
+
+Also in 1981, Eiji Toyoda stepped down as president and assumed the title of chairman. He was succeeded as president by Shoichiro Toyoda, the son of the company's founder. Within months, Shoichiro started to merge Toyota's sales and production organizations, and in 1982 the combined companies became the Toyota Motor Corporation. The two groups were described as "oil and water" and it took years of leadership from Shoichiro to successfully combine them into one organization.
+
+Efforts to open a Toyota assembly plant in the United States started in 1980, with the company proposing a joint-venture with the Ford Motor Company. Those talks broke down in July 1981. Eventually in 1984, the company struck a deal with General Motors (GM) to establish a joint-venture vehicle manufacturing plant called NUMMI (New United Motor Manufacturing, Inc.) in Fremont, California. GM saw the joint venture as a way to get access to a quality small car and an opportunity to learn about The Toyota Way and the Toyota Production System. For Toyota, the factory gave the company its first manufacturing base in North America allowing it to avoid any future tariffs on imported vehicles and saw GM as a partner who could show them how to navigate the American labor environment. The plant would be led by Tatsuro Toyoda, the younger brother of company president Shoichiro Toyoda. The first Toyota assembled in America, a white Corolla, rolled off the line at NUMMI on October 7, 1986.
+
+Toyota received its first Japanese Quality Control Award at the start of the 1980s and began participating in a wide variety of motorsports. Conservative Toyota held on to rear-wheel-drive designs for longer than most; while a clear first in overall production they were only third in production of front-wheel-drive cars in 1983, behind Nissan and Honda. In part due to this, Nissan's Sunny managed to squeeze by the Corolla in numbers built that year.
+
+Before the decade was out, Toyota introduced Lexus, a new division that was formed to market and service luxury vehicles in international markets. Prior to the debut of Lexus, Toyota's two existing flagship models, the Crown and Century, both catered exclusively for the Japanese market and had little global appeal that could compete with international luxury brands such as Mercedes-Benz, BMW and Jaguar. The company had been developing the brand and vehicles in secret since August 1983, at a cost of over US$1 billion. The LS 400 flagship full-size sedan debuted in 1989 to strong sales, and was largely responsible for the successful launch of the Lexus marque.
+
+### 1990s
+
+In the 1990s, Toyota began to branch out from producing mostly compact cars by adding many larger and more luxurious vehicles to its lineup, including a full-sized pickup, the T100 (and later the Tundra), several lines of SUVs, a sport version of the Camry, known as the Camry Solara. They would also launch newer iterations of their sports cars, namely the MR2, Celica, and Supra during this era.
+
+December 1997 saw the introduction of the first-generation Toyota Prius, the first mass-produced gasoline-electric hybrid car. The vehicle would be produced exclusively for the Japanese market for the first two years.
+
+With a major presence in Europe, due to the success of Toyota Team Europe in motorsport, the corporation decided to set up Toyota Motor Europe Marketing and Engineering, TMME, to help market vehicles in the continent. Two years later, Toyota set up a base in the United Kingdom, TMUK, as the company's cars had become very popular among British drivers. Bases in Indiana, Virginia, and Tianjin were also set up.
+
+Toyota also increased its ownership of Daihatsu during this period. In 1995, Toyota increased its shareholding in the company to 33.4 percent, giving Toyota the ability to veto shareholder resolutions at the annual meeting. In 1998, Toyota increased its holding in the company to 51.2 percent, becoming the majority shareholder.
+
+On September 29, 1999, the company decided to list itself on the New York and London Stock Exchanges.
+
+The later half of the 1990s would also see the Toyoda brothers step back from the company their father had founded. In 1992, Shoichiro Toyoda would shift to become chairman, allowing his brother Tatsuro to become president, a job he held until his retirement in 1995. Shoichiro would step down as chairman in 1999. Both would retain honorary advisory roles in the company. Hiroshi Okuda would lead the company as president from 1995 until 1999 when he became chairman and the President's office would be filled by Fujio Cho.
+
+### 2000s
+
+In August 2000, exports began of the Prius. In 2001, Toyota acquired its long time partner, truck and bus manufacturer Hino Motors. In 2002, Toyota entered Formula One competition and established a manufacturing joint venture in France with French automakers Citroën and Peugeot. A youth-oriented marque for North America, Scion, was introduced in 2003. Toyota ranked eighth on Forbes 2000 list of the world's leading companies for the year 2005. Also in 2005, Fujio Cho would shift to become chairman of Toyota and would be replaced as president by Katsuaki Watanabe.
+
+In 2007, Toyota released an update of its full-sized truck, the Tundra, produced in two American factories, one in Texas and one in Indiana. Motor Trend named the 2007 Toyota Camry "Car of the Year" for 2007. It also began the construction of two new factories, one in Woodstock, Ontario, Canada, and the other in Blue Springs, Mississippi, USA.
+
+The company was number one in global automobile sales for the first quarter of 2008.
+
+Toyota was hit by the global financial crisis of 2008 as it was forced in December 2008 to forecast its first annual loss in 70 years. In January 2009, it announced the closure of all of its Japanese plants for 11 days to reduce output and stocks of unsold vehicles.
+
+In October 2009, Toyota announced that they were establishing an office in South Korea and launched the Camry sedan, Camry hybrid, Prius and the RAV4 during the launching event at the Grand Hyatt Seoul.
+
+Between 2009 and 2011, Toyota conducted recalls of millions of vehicles after reports that several drivers experienced unintended acceleration. The recalls were to prevent a front driver's side floor mat from sliding into the foot pedal well, causing the pedals to become trapped and to correct the possible mechanical sticking of the accelerator pedal. At least 37 were killed in crashes allegedly related to unintended acceleration, approximately 9 million cars and trucks were recalled, Toyota was sued for personal injuries and wrongful deaths, paid US$1 billion to settle a class action lawsuit to compensate owners for lost resale value, and paid a US$1.2 billion criminal penalty to the United States government over accusations that it had intentionally hid information about safety defects and had made deceptive statements to protect its brand image.
+
+Amid the unintended acceleration scandal, Katsuaki Watanabe stepped down as company president. He was replaced by Akio Toyoda, grandson of company founder Kiichiro Toyoda, on June 23, 2009. Akio had been with Toyota since 1984, working jobs in production, marketing and product development, and took a seat on the board of directors in 2000. Akio's promotion by the board marked the return of a member of the Toyoda family to the top leadership role for the first time since 1999.
+
+### 2010s
+
+In 2011, Toyota, along with large parts of the Japanese automotive industry, suffered from a series of natural disasters. The 2011 Tōhoku earthquake and tsunami led to a severe disruption of the supplier base and a drop in production and exports. Severe flooding during the 2011 monsoon season in Thailand affected Japanese automakers that had chosen Thailand as a production base. Toyota is estimated to have lost production of 150,000 units to the tsunami and production of 240,000 units to the floods.
+
+On February 10, 2014, it was announced that Toyota would cease manufacturing vehicles and engines in Australia by the end of 2017. The decision was based on the unfavourable Australian dollar making exports not viable, the high cost of local manufacture, and the high amount of competition in a relatively small local market. The company planned to consolidate its corporate functions in Melbourne by the end of 2017, and retain its Altona plant for other functions. The workforce is expected to be reduced from 3,900 to 1,300. Both Ford Motor Company and General Motors (Holden) followed suit, ending Australian production in 2016 and 2017 respectively.
+
+The automaker narrowly topped global sales for the first half of 2014, selling 5.1 million vehicles in the six months ending June 30, 2014, an increase of 3.8% on the same period the previous year. Volkswagen AG, which recorded sales of 5.07 million vehicles, was close behind.
+
+In August 2014, Toyota announced it would be cutting its spare-parts prices in China by up to 35%. The company admitted the move was in response to a probe foreshadowed earlier in the month by China's National Development and Reform Commission of Toyota's Lexus spare-parts policies, as part of an industry-wide investigation into what the Chinese regulator considers exorbitantly high prices being charged by automakers for spare parts and after-sales servicing.
+
+In November 2015, the company announced that it would invest US$1 billion over the next 5 years into artificial intelligence and robotics research. In 2016, Toyota invested in Uber. In 2020, a corporate governance report showed that Toyota owns 10.25 million shares of Uber, which was valued at $292.46 million as of March 30, 2020. According to Reuters, this was roughly 0.6 per cent of Uber's outstanding shares.
+
+In March 2016, Toyota partnered with Yanmar to create a fiberglass pleasure boat using Yanmar outboard marine diesel engines or Toyota inboard engines.
+
+In August 2016, the company purchased all remaining assets of Daihatsu, making the manufacturer of small cars a wholly owned subsidiary of Toyota.
+
+On August 27, 2018, Toyota announced an investment of US$500 million in Uber's autonomous cars.
+
+In October 2019, Toyota backed the Trump Administration's proposal that federal authority should override California's ability to set its own emissions standards for automobiles. The proposal would reduce California's 2025 fuel efficiency standard from about 54.5 to 37 MPG. This shift by Toyota away from fuel efficiency damaged the company's reputation as a green brand.
+
+### 2020s
+
+By 2020, Toyota reclaimed its position as the largest automaker in the world, surpassing Volkswagen. It sold 9.528 million vehicles globally despite an 11.3% drop in sales due to the COVID-19 pandemic. This includes subsidiaries Daihatsu and Hino Motors.
+
+On April 2, 2020, BYD and Toyota announced a new joint venture between the two companies called BYD Toyota EV Technology Co., Ltd., with the aim of "developing BEVs (Battery Electric Vehicles) that appeal to customers."
+
+In March 2021, Toyota, its subsidiary Hino, and Isuzu announced the creation of a strategic partnership between the three companies. Toyota acquired a 4.6% stake in Isuzu while the latter plans to acquire Toyota shares for an equivalent value. The three companies said they would form a new joint venture by April called Commercial Japan Partnership Technologies Corporation with the aim of developing fuel cell and electric light trucks. Toyota would own an 80% stake in the venture while Hino and Isuzu would own 10% each.
+
+In April 2021, Toyota said that it will buy Lyft's self-driving technology unit for $550 million and merge it with its newly created Woven Planet Holdings automation division.
+
+In June 2021, the company defended its donations to the United States Republican lawmakers after they voted against certifying the results of the 2020 presidential election, saying it did not believe it was "appropriate to judge members of Congress" for that one vote. A report by Axios found that Toyota was the top donor to 2020 election objectors, by a substantial margin. The company then reversed course in July 2021 and ceased donations to election objectors, releasing a statement saying it understood that its PAC's donations to those objectors, which far outpaced those of any other company, "troubled some stakeholders." Toyota resumed donations after a six-month pause.
+
+In December 2021, Toyota announced that it would invest ¥8,000,000,000,000 ($70 billion at 2021 exchange rate) in electric vehicles by 2030, launch 30 EV models worldwide by that year, and set a sales target of 3.5 million electric vehicles in 2030.
+
+Toyota will increase its software engineer intake to around 40% to 50% of all technical hires from the second quarter of 2022, the move plans to address a transformation to so-called CASE — connected, autonomous, shared and electric — technologies in an environment of intensifying global competition.
+
+In 2021, Toyota told some of its suppliers to increase their semiconductor inventory levels from the conventional three months to five months in response to the COVID-19 chip shortage. The "just-in-time" supply chain in which parts are only delivered when necessary, had already been revised after the March 11, 2011, earthquake and tsunami in Japan, lifting inventories across the entire procurement network. The time it takes Toyota to turn over its inventory increased by around 40% during the past ten years, to 36.36 days as of March 2021.
+
+In June 2022, Toyota recalled 2,700 of its first mass-produced all-electric vehicles due to worries that their wheels could fall off during driving. It was discovered that the bolts on the bZ4X's wheels could loosen up to the point where the wheel simply detaches from the car, causing a loss of control over the vehicle and possible accident.
+
+In August 2022, Toyota pledged up to $5.6 billion towards production of electric vehicle battery production and announced an increase in investment in its plant near Greensboro, North Carolina. Also in 2022, Toyota managed to maintain its position as the world's best-selling automaker for the third year in a row.
+
+In January 2023, Toyota CEO and President Akio Toyoda announced that he was stepping down and passing the position on to Koji Sato. Akio is the great-grandson of company founder Rizaburo Toyoda. Sato had previously run Lexus, Toyota's luxury car brand. The change is set to take effect on April 1, 2023.
+
+## Board of directors
+
+* Chairman: Akio Toyoda (since April 2023)
+* Vice chairman: Shigeru Hayakawa
+* President & CEO: Koji Sato (since April 2023)
+* Members:
+   * Takeshi Uchiyamada
+   * James Kuffner
+   * Kenta Kon
+   * Masahiko Maeda
+   * Ikuro Sugawara
+   * Sir Philip Craven
+   * Teiko Kudo
+
+### List of former chairmen
+
+In 1950, Toyota was split into Toyota Motor Co. and Toyota Motor Sales Co. (sales arm of Toyota); the two companies merged in 1982 to create one unified company, with then-Toyota Motor Co. President Eiji Toyoda becoming chairman. Chairmen listed prior to 1982 below were for the pre-merger Toyota Motor Co. only.
+
+* Rizaburo Toyoda (1937–1948)
+* Taizo Ishida (1948–1952)
+* Shoichi Saito (1952–1959)
+* Masaya Hanai (1959–1982)
+* Eiji Toyoda (1982–1994)
+* Shoichiro Toyoda (1994–1999)
+* Hiroshi Okuda (1999–2006)
+* Fujio Cho (2006–2013)
+* Takeshi Uchiyamada (2013–2023)
+
+### List of former presidents
+
+Similar to the chairman position, in 1982 the then-Toyota Motor Sales Co. President Shoichiro Toyoda becoming President. President's listed prior to 1982 below were for the pre-merger Toyota Motor Co. only.
+
+* Rizaburo Toyoda (1937–1941)
+* Kiichiro Toyoda (1941–1950)
+* Taizo Ishida (1950–1961)
+* Fukio Nakagawa (1961–1967)
+* Eiji Toyoda (1967–1982)
+* Shoichiro Toyoda (1982–1992)
+* Tatsuro Toyoda (1992–1995)
+* Hiroshi Okuda (1995–1999)
+* Fujio Cho (1999–2005)
+* Katsuaki Watanabe (2005–2009)
+* Akio Toyoda (2009–2023)
+
+## Product line
+
+Best-selling Toyota and Lexus nameplates globally, FY2021 :
+
+| Rank in Toyota | Model | Sales (thousands of units) |
+| - | - | - |
+| 1 | Toyota Corolla | 1,312 |
+| 2 | Toyota RAV4 | 980 |
+| 3 | Toyota Yaris | 743 |
+| 4 | Toyota Camry | 685 |
+| 5 | Toyota Hilux | 605 |
+| 6 | Toyota Highlander | 466 |
+| 7 | Toyota Tacoma | 268 |
+| 8 | Toyota C-HR | 235 |
+| 9 | Toyota Levin | 221 |
+| 10 | Lexus RX | 199 |
+
+As of 2009, Toyota officially lists approximately 70 different models sold under its namesake brand, including sedans, coupes, vans, trucks, hybrids, and crossovers. Many of these models are produced as passenger sedans, which range from the subcompact Toyota Yaris, compact Corolla, to mid-size Camry and full-size Avalon. Minivans include the Innova, Alphard/Vellfire, Sienna, and others. Several small cars, such as the xB and tC, were sold under the Scion brand.
+
+### SUVs and crossovers
+
+Toyota SUV and crossover line-up grew quickly in the late 2010s to 2020s due to the market shift to SUVs. Toyota crossovers range from the subcompact Yaris Cross and C-HR, compact Corolla Cross and RAV4, to midsize Harrier/Venza and Kluger/Highlander. Other crossovers include the Raize, Urban Cruiser. Toyota SUVs range from the midsize Fortuner to full-size Land Cruiser. Other SUVs include the Rush, Prado, FJ Cruiser, 4Runner, and Sequoia.
+
+### Pickup trucks
+
+Toyota first entered the pickup truck market in 1947 with the SB that was only sold in Japan and limited Asian markets. It was followed in 1954 by the RK (renamed in 1959 as the Stout) and in 1968 by the compact Hilux. With continued refinement, the Hilux (simply known as the Pickup in some markets) became famous for being extremely durable and reliable. Extended cab and crew cab versions were eventually added, and Toyota continues to produce them today under various names depending on the market in various cab lengths, with gasoline or diesel engines, and 2WD and 4WD versions.
+
+In North America, the Hilux became a major model for the company, leading the company to launch the Tacoma in 1995. The Tacoma was based on the Hilux, but with a design intended to better suit the needs of North American consumers who often use pickup trucks as personal vehicles. The design was a success and the Tacoma became the best-selling compact pickup in North America.
+
+After the success of its compact Hilux pickups in North America, Toyota decided to enter the full-size pickup market, which was traditionally dominated by domestic automakers. The company introduced the T100 for the 1993 US model year. The T100 had a full-size 8-foot (2.4 m) long bed, but suspension and engine characteristics were similar to that of a compact pickup. Sales were disappointing and the T100 was criticized for having a small V6 engine (especially compared to the V8 engines common in American full-size trucks), lacking an extended-cab version, being too small, and too expensive (because of the 25% tariff on imported trucks). In 1995, Toyota added the more powerful V6 engine from the new Tacoma to the T100 and also added an extended cab version. In 1999, Toyota replaced the T100 with the larger Tundra, which would be built in the US with a V8 engine and styling that more closely matched other American full-size trucks.
+
+### Luxury vehicles
+
+In the Japanese home market, Toyota has two flagship models: the Crown premium sedan and the Century limousine.
+
+In the 1980s, Toyota wanted to expand its luxury car offerings but realized that existing Japanese-market flagship models had little global appeal and could not compete with established brands such as Mercedes-Benz, BMW and Jaguar or the Acura and Infiniti marquees being launched by Japanese competitors.
+
+Before the decade was out, Toyota introduced Lexus, a new division that was formed to market and service luxury vehicles in markets outside of Japan. The company developed the brand and its vehicles in secret since August 1983, at a cost of over US$1 billion. The Lexus LS flagship full-size sedan debuted in 1989 to strong sales, and was largely responsible for the successful launch of the Lexus marque. Subsequently, the division added sedan, coupé, convertible and SUV models.
+
+The Lexus brand was introduced to the Japanese market in 2005, previously all vehicles marketed internationally as Lexus from 1989 to 2005 were released in Japan under the Toyota marque.
+
+### Buses
+
+The Toyota Coaster is a minibus introduced in 1969 that seats 17 passengers. The Coaster is widely used in Japan, Singapore, Hong Kong, and Australia, but also in the developing world for minibus operators in Africa, the Middle East, South Asia, the Caribbean, and South America to operate as public transportation.
+
+## Technology
+
+### Hybrid electric vehicles
+
+Toyota is the world's leader in sales of hybrid electric vehicles, one of the largest companies to encourage the mass-market adoption of hybrid vehicles across the globe, and the first to commercially mass-produce and sell such vehicles, with the introduction of the XW10 Toyota Prius in 1997. The company's series hybrid technology is called Hybrid Synergy Drive, and it was later applied to many vehicles in Toyota's product lineup, starting first with the Camry and the technology was also brought to the luxury Lexus division.
+
+As of January 2020, Toyota Motor Corporation sells 44 Toyota and Lexus hybrid passenger car models in over 90 countries and regions around the world, and the carmaker has sold over 15 million hybrid vehicles since 1997. The Prius family is the world's top-selling hybrid gasoline-electric vehicle nameplate with almost 4 million units sold worldwide as of January 2017.
+
+### Hydrogen fuel-cell
+
+In 2002, Toyota began a development and demonstration program to test the Toyota FCHV, a hybrid hydrogen fuel cell vehicle based on the Toyota Highlander production SUV. Toyota also built a FCHV bus based on the Hino Blue Ribbon City low-floor bus. Toyota has built several prototypes/concepts of the FCHV since 1997, including the Toyota FCHV-1, FCHV-2, FCHV-3, FCHV-4, and Toyota FCHV-adv. The Toyota FCV-R fuel cell concept car was unveiled at the 2011 Tokyo Motor Show. The FCV-R sedan seats four and has a fuel cell stack including a 70 MPa high-pressure hydrogen tank, which can deliver a range of 435 mi (700 km) under the Japanese JC08 test cycle. Toyota said the car was planned for launch in about 2015.
+
+In August 2012, Toyota announced its plans to start retail sales of a hydrogen fuel-cell sedan in California in 2015. Toyota expects to become a leader in this technology. The prototype of its first hydrogen fuel cell vehicle will be exhibited at the November 2013 Tokyo Motor Show, and in the United States at the January 2014 Consumer Electronics Show.
+
+Toyota's first hydrogen fuel-cell vehicles to be sold commercially, the Toyota Mirai (Japanese for "future"), was unveiled at the November 2014 Los Angeles Auto Show. In January 2015, it was announced that production of the Mirai fuel cell vehicle would increase from 700 units in 2015 to approximately 2,000 in 2016 and 3,000 in 2017. Sales in Japan began on December 15, 2014, at a price of ¥6,700,000 (~US$57,400). The Japanese government plans to support the commercialization of fuel-cell vehicles with a subsidy of ¥2,000,000 (~US$19,600). Retail sales in the U.S. began in August 2015 at a price of US$57,500 before any government incentives. Initially, the Mirai will only be available in California. The market release in Europe is slated for September 2015, and initially will be available only in the UK, Germany, and Denmark, followed by other countries in 2017. Pricing in Germany starts at €60,000 (~US$75,140) plus VAT (€78,540).
+
+In 2015, Toyota released 5,600 patents for free use until 2020, hoping to promote global development of hydrogen fuel-cell technology.
+
+Since the mid-2010s, Toyota has increased its focus on building hydrogen powered trucks. It first showcased a heavy-duty semi-truck tractor in 2017 and in 2023 announced a kit to convert existing diesel-powered truck engines to use hydrogen. In late 2022, the company signed an £11.3 million government deal with the UK's Department for Business, Energy and Industrial Strategy to help it develop a hydrogen-powered Hilux pickup truck.
+
+### Plug-in hybrids
+
+The Prius Plug-In Hybrid Concept was exhibited in late 2009, and shortly after, a global demonstration program involving 600 pre-production test cars began. The vehicles were leased to fleet and government customers, and were equipped with data tracking devices to allow Toyota to monitor the car's performance. The vehicle was based on the third-generation Toyota Prius and outfitted with two additional lithium-ion batteries beyond the normal hybrid battery pack. The additional batteries were used to operate the car with minimal use of the internal combustion engine until they are depleted, at which point they are disengaged from the system. They are not used in tandem with the main hybrid battery pack.
+
+After the conclusion of the demonstration program, the production version of the Prius Plug-in Hybrid was unveiled in September 2011. The production Prius Plug-in had a maximum electric-only speed of 100 km/h (62 mph), and the United States Environmental Protection Agency (EPA) rated the vehicle as having an range of 18 kilometres (11 mi) in blended mode (mostly electric, but supplemented by the internal combustion engine). Toyota ultimately only did a small production run with 75,400 vehicles being produced between 2012 and 2016.
+
+The second-generation Prius Plug-in (renamed the Prius Prime in the US) was unveiled in early 2016. Unlike the prior generation, where the plug-in battery was limited by being added to the existing Prius, this model would be developed in tandem with the fourth-generation Prius, allowing Toyota to increase the range to 40 kilometres (25 mi), with a top speed of 135 km/h (84 mph), without needing the assistance of the internal combustion engine. The second-generation Prius Plug-in went on sale starting in late 2016, with Toyota expecting to sell up to 60,000 units globally per year.
+
+A second plug-in hybrid model, the Toyota RAV4 PHV (RAV4 Prime in the US) was unveiled in December 2019. The vehicle has an EPA-estimated 68 kilometres (42 mi) of all-electric range and generates a combined 225 kilowatts (302 hp), enabling it to be Toyota's second fastest car currently in production (behind the GR Supra 3.0 sports car). Sales started in mid-2020.
+
+### Battery electric vehicles
+
+Toyota has been criticized for being slow to add battery electric vehicles to its lineup. It has been publicly skeptical of battery-electric vehicles, instead focusing on hybrid and hydrogen fuel cell vehicles, and actively lobbying against government mandates to transition to zero-emissions vehicles.
+
+As of 2023, only a small only a small proportion of the vehicles the company sells are of battery electric, which has prompted criticism by some environmental and public interest groups. The company plans to increase its sales of electric vehicles to 3.5 million per year by 2030. However, the company has stated that it believes other technologies, including hybrid and hydrogen fuel cell vehicles, will continue to play a role in the future of the company.
+
+Toyota created the first generation Toyota RAV4 EV (Electric Vehicle) as a compliance car after the California Air Resources Board mandated in the late 1990s that every automaker offer a zero-emissions vehicle. A total of 1,484 were leased and/or sold in California from 1997 to 2003, when the state dropped its mandate under legal pressure from lawsuits filed by automakers.
+
+A second generation of the RAV4 EV was developed in 2010 as part of a deal with Tesla. The production version was unveiled in August 2012, using battery pack, electronics and powertrain components from Tesla. The RAV4 EV had a limited production run with just under 3,000 vehicles being produced, before it was discontinued in 2014. According to Bloomberg News, the partnership between Tesla and Toyota was "marred by clashes between engineers".
+
+Starting in 2009, Toyota introduced three generations of concept electric vehicles called the FT-EV built on a modified Toyota iQ platform. In late-2012, the company announced plans build a production version of the car called the Toyota iQ EV (Scion iQ EV in the US, Toyota eQ in Japan), but ultimately production was cut back to 100 cars for special fleet use in Japan and the U.S. only.
+
+In late 2012, Toyota announced that it would back away from fully electric vehicles, after producing less than 5,000. At the time, the company's vice chairman, Takeshi Uchiyamada, said: "The current capabilities of electric vehicles do not meet society's needs, whether it may be the distance the cars can run, or the costs, or how it takes a long time to charge."
+
+A shift in Toyota's formerly battery-agnostic posture could be seen as early as 2016, when Toyota's CFO Takahiko Ijichi “sent a strong signal that Toyota soon plans to jump on the battery bandwagon and make electric cars despite expressing skeptical views about their range and charging times,” as the Wall Street Journal wrote. Toyota said it would make and sell battery-electric vehicles if and where regulations and markets demand.
+
+A year later, Toyota outlined its electric-vehicle plans for between 2020 and 2030 to the press in Tokyo, saying it would introduce "more than 10" battery-electric vehicles worldwide by the early 2020s, beginning in China, and later in Japan, Europe, the US and India.
+
+In April 2019, Toyota introduced the C-HR EV, its first mass-produced pure electric model in China along with an identical twin called the IZOA EV. It went on sale in April 2020 and May 2020 respectively. Nikkei reported in October 2020 that Toyota had only sold less than 2,000 units in the first eight months of the year.
+
+Toyota introduced the C+pod in late 2020, a 2-seater kei car with an estimated range of 100 kilometres (62 mi) and a top speed of 60 kilometres per hour (37 mph).
+
+In December 2020, Toyota CEO Akio Toyoda stated that electric cars are excessively "hyped" and that, in Japan, they would not necessarily reduce carbon dioxide emissions since electricity is mostly generated by burning coal and natural gas in the country. He also said that the infrastructure needed for Japan to switch fully to EVs would cost between $135 billion and $358 billion and switching only to EVs would cost millions of jobs and make cars less affordable.
+
+In April 2021, Toyota revealed the bZ4X, an electric crossover SUV that will be the first vehicle built on a dedicated electric platform called e-TNGA when it goes on sale in mid-2022. It is the first model of the bZ ("beyond Zero") series of battery electric vehicles. The company has also stated that there will be seven "bZ" models to be launched globally out of 15 BEV models by 2025.
+
+In June 2021, Transport & Environment ranked Toyota as the least ready OEM to transition to battery electric vehicles by 2030, stating: "Toyota has not set a target for 2030 and it plans to produce just 10% BEVs in 2025. It is expected to rely on polluting hybrid technologies."
+
+In December 2021, Toyota announced in Tokyo plans for 30 battery-electric models by 2030, to sell 3.5 million BEVs per year by that date, and that its premium-brand Lexus will be 100% battery-operated by 2030 in North America, Europe, and China. The company announced investments of $70 billion into the company's electrification.
+
+In a session in parallel with the G-7 Meeting 2023 May, Akio Toyoda said that battery electric vehicles are not solely the future, instead offering a mix of battery electric, internal combustion engine-equipped and hydrogen cars.
+
+Toyota has been developing solid-state batteries in partnership with Panasonic, in which the company has more than a thousand patents covering solid-state batteries by late 2020. The technology has been implemented on the Toyota LQ concept. Toyota hopes the technology could increase efficiency of battery electric vehicles by 30 percent, which in turn would reduce battery costs by the same amount.
+
+### Autonomous vehicles
+
+Toyota is also regarded as lagging when it comes to developing smart car technology. Although the company unveiled its first self-driving test vehicle in 2017, and has been developing its own self-driving technology named "Chauffeur" (intended for full self-driving) and "Guardian" (a driver assist system), neither of these has been introduced into any production vehicles.
+
+The company had set up a large research and development operation by 2018, spending almost US$4 billion to start an autonomous vehicle research institute in California's Silicon Valley and another ¥300 billion on a similar research institute in Tokyo that would partner with fellow Toyota Group companies and automotive suppliers Aisin Seiki and Denso.
+
+Toyota has also been collaborating with autonomous vehicle technology developers and, in some cases, purchasing the companies. Toyota has acquired the autonomous vehicle division of ride-hailing service Lyft for $550 million, invested a total of US$1 billion in competing ride-hailing service Uber's self-driving vehicle division, invested $400 million in autonomous vehicle technology company Pony.ai, and announced a partnership with Chinese electronics e-commerce company Cogobuy to build a "Smart Car Ecosystem."
+
+In December 2020, Toyota showcased the 20-passenger "e-Palette" shared autonomous vehicle, which saw its first major use at the 2020 Summer Olympics in Tokyo. Toyota has announced it intends to have the vehicle available for commercial applications before 2025.
+
+Since February 2021, Toyota has been building the "Woven City" which it calls a "175-acre high tech, sensor-laden metropolis" at the foot of Mount Fuji. When completed in 2024, the Woven City will be used to run tests on autonomous vehicles for deliveries, transport and mobile shops, with the city's residents participating in the living laboratory experiment.
+
+## Motorsports
+
+Toyota has been involved in many global motorsports series, providing vehicles, engines and other auto parts under both the Toyota and Lexus brands.
+
+Toyota Gazoo Racing (GR) is Toyota's performance brand that is used in many of the world's major motorsports contests. Toyota Gazoo Racing Europe, based in Cologne, Germany, competes in the FIA World Endurance Championship, while the Finland-based Toyota Gazoo Racing WRT participates in the FIA World Rally Championship. Toyota Gazoo Racing South Africa competes in the Dakar Rally. Between 2002 and 2009, the Toyota Racing team competed in Formula One. Toyota won the highest class of the 24 Hours of Le Mans 5 consecutive times from 2018 to 2022, competing with the Toyota TS050 Hybrid and Toyota GR010 Hybrid.
+
+Toyota Racing Development USA (TRD USA) is responsible for participation in major motorsports contests in the United States including NASCAR, NHRA, Indy Racing League and Formula Drift.
+
+Toyota also makes engines and other auto parts for other Japanese motorsports including Super Formula, Super GT, Formula 3, and Toyota Racing Series.
+
+## Non-automotive activities
+
+### Aerospace
+
+Toyota is a minority shareholder in Mitsubishi Aircraft Corporation, having invested US$67.2 million in the new venture which will produce the Mitsubishi Regional Jet, slated for first deliveries in 2017. Toyota has also studied participation in the general aviation market and contracted with Scaled Composites to produce a proof of concept aircraft, the TAA-1, in 2002.
+
+### Pleasure boats
+
+In 1997, building on a previous partnership with Yamaha Marine, Toyota created "Toyota Marine", building private ownership motorboats, currently sold only in Japan. A small network in Japan sells the luxury craft at 54 locations, called the "Toyota Ponam" series, and in 2017, a boat was labeled under the Lexus brand name starting May 26, 2017.
+
+### Philanthropy
+
+Toyota works with nonprofits to improve their processes and operations such as the Food Bank For New York City.
+
+### Robotics
+
+In 2004, Toyota showcased its trumpet-playing robot. Toyota has been developing multitask robots destined for elderly care, manufacturing, and entertainment. A specific example of Toyota's involvement in robotics for the elderly is the Brain Machine Interface. Designed for use with wheelchairs, it "allows a person to control an electric wheelchair accurately, almost in real-time", with his or her mind. The thought controls allow the wheelchair to go left, right, and forward with a delay between thought and movement of just 125 milliseconds. Toyota also played a part in the development of Kirobo, a 'robotic astronaut'.
+
+In 2017, the company introduced T-HR3, a humanoid robot with the ability to be remotely controlled. The robot can copy the motions of a connected person. The 2017 version used wires for the connection but the 2018 version used 5G from a distance up to 10 km (6.2 mi).
+
+### Sewing machine brand
+
+Aisin, another member of the Toyota Group of companies, uses the same Toyota wordmark logo to market its home-use sewing machines. Aisin was founded by Kiichiro Toyoda after he founded the Toyota Motor Corporation. According to Aisin, he was so pleased with the first sewing machine, he decided to apply the same Toyota branding as his auto business, despite the companies being independent from each other.
+
+### Carbon removal
+
+Toyota Ventures, along with JetBlue Technology Ventures and Parley for the Oceans, is among the corporate investors that have invested $40 million in the Air Company, a carbon negative vodka distiller and perfume and hand sanitizer manufacturer that uses heterogeneous catalysis to convert captured carbon into ethanol.
+
+### Environmental initiatives
+
+Toyota states it is committed to achieving carbon neutrality by 2050, and it has set a goal to reduce its overall carbon emissions by 90% by 2050, compared to 2010 levels.
+
+The company has invested heavily in solar energy, with a goal to install solar panels on the rooftops of all its dealerships worldwide by 2050. In addition, Toyota has partnered with various renewable energy companies to promote the use of wind and solar power, including a recent partnership with ENEOS Corporation to develop hydrogen refueling stations in Japan.
+
+Toyota has launched a program called "Global Environmental Challenge" 2050 which is a comprehensive initiative aimed at reducing the environmental impact of Toyota's operations. The challenge includes six environmental goals that Toyota aims to achieve by 2050, including reducing carbon emissions, minimizing water usage, promoting the recycling and reuse of materials, and promoting the use of renewable energy. The company has also implemented a variety of initiatives to promote sustainability across its supply chain, including efforts to reduce waste, water usage, and promote sustainable agriculture. For example, Toyota has implemented a zero-waste initiative at its manufacturing plants, aiming to send zero waste to landfills.
+
+## Controversies
+
+### Corrosion lawsuit
+
+In November 2016, Toyota agreed to pay $3.4 billion to settle allegations that roughly one-and-a-half million of its Tacoma, Tundra, and Sequoia pickup trucks and SUVs had been outfitted with frames prone to corrosion and perforation. According to court papers, the corrosion could reach levels high enough to compromise the vehicle's structural integrity.
+
+### Death from overwork
+
+On February 9, 2002, Kenichi Uchino, aged 30 years, a quality control manager, collapsed then died at work. On January 2, 2006, an unnamed chief engineer of the Camry Hybrid, aged 45 years, died from heart failure in his bed.
+
+### Fines for environmental breaches
+
+In 2003, Toyota was fined $34 million for violating the United States Clean Air Act, as 2.2 million vehicles it sold had defective smog-control computers.
+
+In January 2021, Toyota was fined $180 million for delays in reporting emissions-related defects to the U.S. Environmental Protection Agency (EPA) between 2005 and 2015. The acting U.S. attorney said that the delays "likely led to delayed or avoided emissions-related recalls", although Toyota stated that despite the delays in reporting the issues to the EPA, it had notified customers and fixed the cars with the emissions defects. At the time, this was the biggest civil penalty ever levied for violating the EPA's emission reporting requirements.
+
+### 2009–2011 unintended acceleration recalls
+
+Between 2009 and 2011 Toyota, under pressure from the U.S. National Highway Traffic Safety Administration (NHTSA), conducted recalls of millions of vehicles after reports that several drivers experienced unintended acceleration. The first recall, in November 2009, was to prevent a front driver's side floor mat from sliding into the foot pedal well, causing the pedals to become trapped. The second recall, in January 2010, was begun after some crashes were shown not to have been caused by floor mats and may be caused by possible mechanical sticking of the accelerator pedal. Worldwide, approximately 9 million cars and trucks were impacted by the recalls.
+
+NHTSA received reports of a total of 37 deaths allegedly related to unintended acceleration, although an exact number was never verified. As a result of the problems, Toyota faced nearly 100 lawsuits from the families of those killed, drivers who were injured, vehicle owners who lost resale value, and investors who saw a drop in the value of their shares. While most of the personal injury and wrongful death lawsuits were settled confidentially, Toyota did spend more than US$1 billion to settle a class action lawsuit to compensate owners for lost resale value, and the company agreed to pay a US$1.2 billion criminal penalty to the United States government over accusations that it had intentionally hid information about safety defects from the public and had made deceptive statements to protect its brand image. The penalty was the largest ever levied against a car company.
+
+### Takata airbag recalls
+
+Toyota was impacted by a recall of faulty airbag inflators made by Takata. The inflators can explode, shooting metal fragments into the vehicle cabin. Millions of vehicles produced between 2000 and 2014 were impacted by the recall, with some needing multiple repairs.
+
+### June 2010 Chinese labour strike
+
+On June 21, 2010, a Chinese labor strike happened in Tianjin Toyoda Gosei Co, Tianjin. Workers demanded better wages and treatment.
+
+### Extremist usage
+
+In 2015, U.S. officials asked Toyota how the Islamic State was in possession of so many Toyota trucks. Toyota cars have also been documented to have been used by other extremist organizations such as the Taliban, Hamas, Al-shabab and Somali pirates. Toyota representatives have said the company has a strict policy of to not sell vehicles to potential purchasers who may use or modify them for paramilitary or terrorist activities and that it cannot track aftermarket sales and that it has worked with the U.S Treasury to brief them on Toyota's supply chain on the Middle East.
+
+### Misleading marketing
+
+In its marketing, Toyota has often referred to its non-plug-in hybrid vehicles as "self-charging hybrid" vehicles. The use of the term has caused some criticism that this is misleading, as some consumers were led to erroneously believe that these vehicles charge their batteries on their own when the vehicles are not used. Complaints about self-charging hybrid advertising were recorded in Ireland, although the complaints were rejected by the Advertising Standards Authority of Ireland. However, in 2020, the Norwegian Consumer Authority banned the adverts outright in Norway, stating: "It is misleading to give the impression that the power to the hybrid battery is free of charge, since the electricity produced by the car has consumption of gasoline as a necessary condition."
+
+Electric vehicle website IrishEVs criticised Toyota Ireland for paying University College Dublin to conduct a study of only seven examples of their hybrid cars over seven days to make a press release about the efficiency of the vehicles. The website also criticised Toyota Ireland for using opinion polls to substantiate a claim about their $CO_2$ emissions on Twitter.
+
+### Safety-related misconduct by Daihatsu
+
+In April 2023, it was revealed that Toyota subsidiary Daihatsu had cheated by rigging some models to perform better in crash tests than actual production cars. The vehicles in question had a notch in the interior panel of the front door which avoided the possibility of the collision creating a sharp edge that could have injured an occupant when the side airbag deployed. This notch was present on the tested vehicles but not on vehicles sold to the public.
+
+The issue affected four models, the Toyota Yaris Ativ (also known as the Vios), Perodua Axia, Toyota Agya, and an undisclosed upcoming product. No recall was conducted over the issue.
+
+In December 2023, Daihatsu halted shipments of 64 models, including two dozens branded as Toyota, after safety investigations uncovered misconduct far greater in scope than previously expected. In some models, the test speeds and results of headrest impact tests were falsified. In models such as the TownAce and Pixis Joy, the airbag control unit used in testing was different from the part installed on vehicles sold to the public. Affected markets included Japan as well as Bolivia, Cambodia, Chile, Ecuador, Indonesia, Malaysia, Mexico, Peru, Thailand, Uruguay, and Vietnam.
+
+On 29 January 2024, Koji Sato publicly apologized to customers, dealers and suppliers for the flawed testing.
+
+## Corporate affairs
+
+Toyota is headquartered in the city of Toyota, which was named Koromo until 1951, when it changed its name to match the automaker. Toyota City is located in the Aichi Prefecture of Japan. The main headquarters of Toyota is located in a four-story building that has been described as "modest". In 2013, company CEO Akio Toyoda reported that it had difficulties retaining foreign employees at the headquarters due to the lack of amenities in the city.
+
+Surrounding the headquarters are the 14-story Toyota Technical Center and the Honsha plant (which was established in 1938). Toyota and its Toyota Group affiliates operate a total of 17 manufacturing facilities in Aichi Prefecture and a total of 32 plants in Japan.
+
+Toyota also operates offices in Bunkyo, Tokyo, and Nakamura-ku, Nagoya.
+
+### Worldwide presence
+
+Top 10 Toyota and Lexus vehicle sales by country, 2022 :
+
+| Rank in Toyota | Location | Vehicle sales |
+| - | - | - |
+| 1 | United States | 2,108,460 |
+| 2 | China | 1,940,590 |
+| 3 | Japan | 1,289,132 |
+| 4 | GCC | 390,294 |
+| 5 | Indonesia | 330,498 |
+| 6 | Thailand | 288,810 |
+| 7 | Australia | 238,139 |
+| 8 | Canada | 200,205 |
+| 9 | Brazil | 191,653 |
+| 10 | Philippines | 174,106 |
+
+Outside of Japan, as one of the world's largest automotive manufacturer by production volume, Toyota has factories in most parts of the world. The company assembles vehicles in Argentina, Belgium, Brazil, Canada, Colombia, the Czech Republic, France, Indonesia, Mexico, the Philippines, Poland, Russia, South Africa, Thailand, Turkey, the United Kingdom, the United States, and Venezuela.
+
+Additionally, the company also has joint venture, licensed, or contract factories in China, France, India, Malaysia, Pakistan, Taiwan, the United States, and Vietnam.
+
+**North America**
+
+Toyota Motor North America is headquartered in Plano, Texas, and operates as a holding company for all operations of the Toyota Motor Corporation in Canada, Mexico, and the United States. Toyota's operations in North America began on October 31, 1957, and the current company was established in 2017 from the consolidation of three companies: Toyota Motor North America, Inc., which controlled Toyota's corporate functions; Toyota Motor Sales, U.S.A., Inc. which handled marketing, sales, and distribution in the United States; and Toyota Motor Engineering & Manufacturing North America which oversaw operations at all assembly plants in the region. While all three companies continue to exist in legal name, they operate as one company out of one headquarters campus.
+
+Toyota has a large presence in the United States with six major assembly plants in Huntsville, Alabama, Georgetown, Kentucky, Princeton, Indiana, San Antonio, Texas, Buffalo, West Virginia, and Blue Springs, Mississippi. In 2018, Toyota and Mazda announced a joint venture plant that will produce vehicles in Huntsville, Alabama, starting in 2021.
+
+It has started producing larger trucks, such as the new Tundra, to go after the full-size pickup market in the United States. Toyota is also pushing hybrid electric vehicle in the US such as the Prius, Camry Hybrid, Highlander Hybrid, and various Lexus products. Currently, Toyota has no plans to offer diesel motor options in its North American products, including pickup trucks.
+
+Toyota Canada Inc., which is part of Toyota Motor North America, handles marketing, sales, and distribution in Canada. Toyota Motor Manufacturing Canada operates three assembly plants: two in Cambridge, Ontario and one in Woodstock, Ontario. In 2006, Toyota's subsidiary Hino Motors opened a heavy duty truck plant, also in Woodstock, employing 45 people and producing 2,000 trucks annually.
+
+**Europe/Western Asia**
+
+Top 10 Toyota and Lexus vehicle production by country, 2022 :
+
+| Rank in Toyota | Location | Vehicle production |
+| - | - | - |
+| 1 | Japan | 2,656,009 |
+| 2 | China | 1,839,772 |
+| 3 | United States | 1,129,988 |
+| 4 | Thailand | 659,252 |
+| 5 | Canada | 433,077 |
+| 6 | Indonesia | 268,150 |
+| 7 | Mexico | 267,775 |
+| 8 | France | 255,936 |
+| 9 | Brazil | 224,272 |
+| 10 | Turkey | 215,798 |
+
+Toyota Motor Europe is headquartered in Brussels, Belgium, and oversees all operations of the Toyota Motor Corporation in Europe and western Asia. Toyota's operations in Europe began in 1963. Toyota has a significant presence in Europe with nine production facilities in Kolín, Czech Republic, Burnaston, England, Deeside, England, Onnaing, France, Jelcz-Laskowice, Poland, Wałbrzych, Poland, Ovar, Portugal, Saint Petersburg, Russia, and Arifiye, Turkey. Toyota also operates a joint venture plant with Citroën and Peugeot in Valenciennes, France.
+
+**Australia**
+
+In 1963, Australia was one of the first countries to assemble Toyotas outside Japan. However, in February 2014, Toyota was the last of Australia's major automakers to announce the end of production in Australia. The closure of Toyota's Australian plant was completed on October 3, 2017, and had produced a total 3,451,155 vehicles. At its peak in October 2007, Toyota manufactured 15,000 cars a month. Before Toyota, Ford and GM's Holden had announced similar moves, all citing an unfavorable currency and attendant high manufacturing costs.
+
+## Company strategy
+
+### The Toyota Way
+
+The Toyota Way is a set of principles and behaviors that underlie the company's approach to management and production (which is further defined as the Toyota Production System).
+
+The company has been developing its corporate philosophy since 1948 and passing it on as implicit knowledge to new employees, but as the company expanded globally, leaders officially identified and defined the Toyota Way in 2001. Toyota summarized it under two main pillars: continuous improvement and respect for people. Under the continuous improvement pillar are three principles: challenge (form a long-term vision), kaizen (a continual improvement process), and genchi genbutsu ("go and see" the process to make correct decisions). Under the respect for people pillar are two principles: respect and teamwork.
+
+In 2004, Dr. Jeffrey Liker, a University of Michigan professor of industrial engineering, published The Toyota Way. In his book, Liker calls the Toyota Way "a system designed to provide the tools for people to continually improve their work." According to Liker, there are 14 principles of The Toyota Way that can be organized into four themes: (1) long-term philosophy, (2) the right process will produce the right results, (3) add value to the organization by developing your people, and (4) continuously solving root problems drives organizational learning. The 14 principles are further defined in the Wikipedia article on The Toyota Way.
+
+### Toyota Production System
+
+The Toyota Way also helped shape the company's approach to production, where it was an early pioneer of what would become known as lean manufacturing. The company defines the Toyota Production System under two main pillars: just-in-time (make only what is needed, only when it is needed, and only in the amount that is needed) and Jidoka (automation with a human touch).
+
+The origin of the Toyota Production System is in dispute, with three stories of its origin: (1) that during a 1950 trip to train with the Ford Motor Company, company executives also studied the just-in-time distribution system of the grocery store company Piggly-Wiggly, (2) that they followed the writings of W. Edwards Deming, and (3) they learned the principles from a WWII US government training program (Training Within Industry).
+
+After developing the Toyota Production System in its own facilities, the company began teaching the system to its parts suppliers in the 1990s. Other companies were interested in the instruction, and Toyota later started offering training sessions. The company also has donated the training to non-profit groups to increase their efficiency and thus ability to serve people.
+
+### Logo and branding
+
+In 1936, Toyota entered the passenger car market with its Model AA and held a competition to establish a new logo emphasizing speed for its new product line. After receiving 27,000 entries, one was selected that additionally resulted in a change of its moniker to "Toyota" from the family name "Toyoda", which means rice paddy. The new name was believed to sound better, and its eight-stroke count in the Japanese language was associated with wealth and good fortune. The original logo was a heavily stylized version of the katakana characters for Toyota (トヨタ).
+
+As the company started to expand internationally in the late 1950s, the katakana character logo was supplemented by various wordmarks with the English form of the company name in all capital letters, "TOYOTA."
+
+Toyota introduced a worldwide logo in October 1989 to commemorate the 50th year of the company, and to differentiate it from the newly released luxury Lexus brand. The logo consists of three ovals that combine to form the letter "T", which stands for Toyota. Toyota says that the overlapping of the two perpendicular ovals inside the larger oval represents the mutually beneficial relationship and trust between the customer and the company while the larger oval surrounding both of these inner ovals represents the "global expansion of Toyota's technology and unlimited potential for the future". The new logo started appearing on all printed material, advertisements, dealer signage, and most vehicles in 1990.
+
+In countries or regions using traditional Chinese characters, e.g. Hong Kong and Taiwan, Toyota is known as "豐田". In countries using simplified Chinese characters (e.g. China and Singapore), Toyota is written as "丰田" (pronounced as Fēngtián in Mandarin Chinese and Hɔng Tshan in Minnanese). These are the same characters as the founding family's name "Toyoda" in Japanese.
+
+Toyota still uses the katakana character logo as its corporate emblem in Japan, including on the headquarters building, and some special edition models still use the "TOYOTA" wordmark on the grille as a nod to the company's heritage.
+
+On July 15, 2015, the company was delegated its own generic top-level domain, .toyota.
+
+### Sports sponsorships
+
+Toyota sponsors several teams and has purchased naming rights for several venues, and even competitions, including:
+
+* Toyota Alvark Tokyo, basketball team
+* Toyota Arena, Ontario, California
+* Toyota Cup
+* Toyota Center, Houston, Texas
+* Toyota Center, Kennewick, Washington
+* Toyota Field, San Antonio, Texas
+* Toyota Park, Bridgeview, Illinois
+* Toyota Sports Center, El Segundo, California
+* Toyota Stadium, Georgetown, Kentucky
+* Toyota Stadium, Frisco, Texas
+
+As of 2017, Toyota is an official sponsor of Cricket Australia, the England and Wales Cricket Board and the AFL. In March 2015, Toyota became a sponsor partner for the Olympic Games, in the form of supplying vehicles and communications between vehicles until 2024.
+

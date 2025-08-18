@@ -1,0 +1,759 @@
+# Sanskrit
+
+Part of a series on :
+
+Constitutionally recognised languages of India :
+
+Category :
+
+22 Official Languages of the Indian Republic :
+
+Assamese
+
+Bengali
+
+Boro (Bodo)
+
+Dogri
+
+Gujarati
+
+Hindi
+
+Kannada
+
+Kashmiri
+
+Konkani
+
+Maithili
+
+Malayalam
+
+Marathi
+
+Meitei (Manipuri)
+
+Nepali
+
+Odia
+
+Punjabi
+
+Sanskrit
+
+Santali
+
+Sindhi
+
+Tamil
+
+Telugu
+
+Urdu :
+
+Related :
+
+Eighth Schedule to the Constitution of India
+
+Official Languages Commission
+
+Classical Languages of India
+
+List of languages by number of native speakers in India :
+
+Asia portal
+
+ India portal
+
+ Language portal
+
+ Politics portal :
+
+Sanskrit (/ˈsænskrɪt/; attributively संस्कृत-, saṃskṛta-; nominally संस्कृतम्, saṃskṛtam, IPA:) is a classical language belonging to the Indo-Aryan branch of the Indo-European languages. It arose in South Asia after its predecessor languages had diffused there from the northwest in the late Bronze Age. Sanskrit is the sacred language of Hinduism, the language of classical Hindu philosophy, and of historical texts of Buddhism and Jainism. It was a link language in ancient and medieval South Asia, and upon transmission of Hindu and Buddhist culture to Southeast Asia, East Asia and Central Asia in the early medieval era, it became a language of religion and high culture, and of the political elites in some of these regions. As a result, Sanskrit had a lasting effect on the languages of South Asia, Southeast Asia and East Asia, especially in their formal and learned vocabularies.
+
+Sanskrit generally connotes several Old Indo-Aryan language varieties. The most archaic of these is the Vedic Sanskrit found in the Rigveda, a collection of 1,028 hymns composed between 1500 BCE and 1200 BCE by Indo-Aryan tribes migrating east from what is today Afghanistan across northern Pakistan and into northwestern India. Vedic Sanskrit interacted with the preexisting ancient languages of the subcontinent, absorbing names of newly encountered plants and animals; in addition, the ancient Dravidian languages influenced Sanskrit's phonology and syntax. Sanskrit can also more narrowly refer to Classical Sanskrit, a refined and standardized grammatical form that emerged in the mid-1st millennium BCE and was codified in the most comprehensive of ancient grammars, the Aṣṭādhyāyī ('Eight chapters') of Pāṇini. The greatest dramatist in Sanskrit, Kālidāsa, wrote in classical Sanskrit, and the foundations of modern arithmetic were first described in classical Sanskrit. The two major Sanskrit epics, the Mahābhārata and the Rāmāyaṇa, however, were composed in a range of oral storytelling registers called Epic Sanskrit which was used in northern India between 400 BCE and 300 CE, and roughly contemporary with classical Sanskrit. In the following centuries, Sanskrit became tradition-bound, stopped being learned as a first language, and ultimately stopped developing as a living language.
+
+The hymns of the Rigveda are notably similar to the most archaic poems of the Iranian and Greek language families, the Gathas of old Avestan and Iliad of Homer. As the Rigveda was orally transmitted by methods of memorisation of exceptional complexity, rigour and fidelity, as a single text without variant readings, its preserved archaic syntax and morphology are of vital importance in the reconstruction of the common ancestor language Proto-Indo-European. Sanskrit does not have an attested native script: from around the turn of the 1st-millennium CE, it has been written in various Brahmic scripts, and in the modern era most commonly in Devanagari.
+
+Sanskrit's status, function, and place in India's cultural heritage are recognized by its inclusion in the Constitution of India's Eighth Schedule languages. However, despite attempts at revival, there are few first-language speakers of Sanskrit in India. In each of India's recent decennial censuses, several thousand citizens have reported Sanskrit to be their mother tongue, but the numbers are thought to signify a wish to be aligned with the prestige of the language. Sanskrit has been taught in traditional gurukulas since ancient times; it is widely taught today at the secondary school level. The oldest Sanskrit college is the Benares Sanskrit College founded in 1791 during East India Company rule. Sanskrit continues to be widely used as a ceremonial and ritual language in Hindu and Buddhist hymns and chants.
+
+## Etymology and nomenclature
+
+In Sanskrit, the verbal adjective sáṃskṛta- is a compound word consisting of sáṃ ('together, good, well, perfected') and kṛta- ('made, formed, work'). It connotes a work that has been "well prepared, pure and perfect, polished, sacred". According to Biderman, the perfection contextually being referred to in the etymological origins of the word is its tonal—rather than semantic—qualities. Sound and oral transmission were highly valued qualities in ancient India, and its sages refined the alphabet, the structure of words and its exacting grammar into a "collection of sounds, a kind of sublime musical mold", states Biderman, as an integral language they called Sanskrit. From the late Vedic period onwards, state Annette Wilke and Oliver Moebus, resonating sound and its musical foundations attracted an "exceptionally large amount of linguistic, philosophical and religious literature" in India. Sound was visualized as "pervading all creation", another representation of the world itself; the "mysterious magnum" of Hindu thought. The search for perfection in thought and the goal of liberation were among the dimensions of sacred sound, and the common thread that wove all ideas and inspirations together became the quest for what the ancient Indians believed to be a perfect language, the "phonocentric episteme" of Sanskrit.
+
+Sanskrit as a language competed with numerous, less exact vernacular Indian languages called Prakritic languages (prākṛta-). The term prakrta literally means "original, natural, normal, artless", states Franklin Southworth. The relationship between Prakrit and Sanskrit is found in Indian texts dated to the 1st millennium CE. Patañjali acknowledged that Prakrit is the first language, one instinctively adopted by every child with all its imperfections and later leads to the problems of interpretation and misunderstanding. The purifying structure of the Sanskrit language removes these imperfections. The early Sanskrit grammarian Daṇḍin states, for example, that much in the Prakrit languages is etymologically rooted in Sanskrit, but involves "loss of sounds" and corruptions that result from a "disregard of the grammar". Daṇḍin acknowledged that there are words and confusing structures in Prakrit that thrive independent of Sanskrit. This view is found in the writing of Bharata Muni, the author of the ancient Natya Shastra text. The early Jain scholar Namisādhu acknowledged the difference, but disagreed that the Prakrit language was a corruption of Sanskrit. Namisādhu stated that the Prakrit language was the pūrvam ('came before, origin') and that it came naturally to children, while Sanskrit was a refinement of Prakrit through "purification by grammar".
+
+## History
+
+### Origin and development
+
+Sanskrit belongs to the Indo-European family of languages. It is one of the three earliest ancient documented languages that arose from a common root language now referred to as Proto-Indo-European:
+
+* Vedic Sanskrit (c. 1500–500 BCE).
+* Mycenaean Greek (c. 1450 BCE) and Ancient Greek (c. 750–400 BCE).
+* Hittite (c. 1750–1200 BCE).
+
+Other Indo-European languages distantly related to Sanskrit include archaic and Classical Latin (c. 600 BCE–100 CE, Italic languages), Gothic (archaic Germanic language, c. 350 CE), Old Norse (c. 200 CE and after), Old Avestan (c. late 2nd millennium BCE) and Younger Avestan (c. 900 BCE). The closest ancient relatives of Vedic Sanskrit in the Indo-European languages are the Nuristani languages found in the remote Hindu Kush region of northeastern Afghanistan and northwestern Himalayas, as well as the extinct Avestan and Old Persian – both are Iranian languages. Sanskrit belongs to the satem group of the Indo-European languages.
+
+Colonial era scholars familiar with Latin and Greek were struck by the resemblance of the Sanskrit language, both in its vocabulary and grammar, to the classical languages of Europe. In The Oxford Introduction to Proto-Indo-European and the Proto-Indo-European World, Mallory and Adams illustrate the resemblance with the following examples of cognate forms (with the addition of Old English for further comparison):
+
+| PIE | English | Old English | Latin | Greek | Sanskrit | Glossary |
+| - | - | - | - | - | - | - |
+| *méh₂tēr | mother | mōdor | māter | mētēr | mātár- | mother |
+| *ph₂tḗr | father | fæder | pater | patēr | pitár- | father |
+| *bʰréh₂tēr | brother | brōþor | frāter | phreter | bhrā́tar- | brother |
+| *swésōr | sister | sweoster | soror | eor | svásar- | sister |
+| *suHnús | son | sunu | - | hyiós | sūnú- | son |
+| *dʰugh₂tḗr | daughter | dohtor | - | thugátēr | duhitár- | daughter |
+| *gʷṓws | cow | cū | bōs | bous | gáu- | cow |
+| *demh₂- | tame, timber | tam, timber | domus | dom- | dām- | house, tame, build |
+
+The correspondences suggest some common root, and historical links between some of the distant major ancient languages of the world.
+
+The Indo-Aryan migrations theory explains the common features shared by Sanskrit and other Indo-European languages by proposing that the original speakers of what became Sanskrit arrived in South Asia from a region of common origin, somewhere north-west of the Indus region, during the early 2nd millennium BCE. Evidence for such a theory includes the close relationship between the Indo-Iranian tongues and the Baltic and Slavic languages, vocabulary exchange with the non-Indo-European Uralic languages, and the nature of the attested Indo-European words for flora and fauna.
+
+The pre-history of Indo-Aryan languages which preceded Vedic Sanskrit is unclear and various hypotheses place it over a fairly wide limit. According to Thomas Burrow, based on the relationship between various Indo-European languages, the origin of all these languages may possibly be in what is now Central or Eastern Europe, while the Indo-Iranian group possibly arose in Central Russia. The Iranian and Indo-Aryan branches separated quite early. It is the Indo-Aryan branch that moved into eastern Iran and then south into South Asia in the first half of the 2nd millennium BCE. Once in ancient India, the Indo-Aryan language underwent rapid linguistic change and morphed into the Vedic Sanskrit language.
+
+### Vedic Sanskrit
+
+The pre-Classical form of Sanskrit is known as Vedic Sanskrit. The earliest attested Sanskrit text is the Rigveda, a Hindu scripture from the mid- to late-second millennium BCE. No written records from such an early period survive, if any ever existed, but scholars are generally confident that the oral transmission of the texts is reliable: they are ceremonial literature, where the exact phonetic expression and its preservation were a part of the historic tradition.
+
+However some scholars have suggested that the original Ṛg-veda differed in some fundamental ways in phonology compared to the sole surviving version available to us. In particular that retroflex consonants did not exist as a natural part of the earliest Vedic language, and that these developed in the centuries after the composition had been completed, and as a gradual unconscious process during the oral transmission by generations of reciters.
+
+The primary source for this argument is internal evidence of the text which betrays an instability of the phenomenon of retroflexion, with the same phrases having sandhi-induced retroflexion in some parts but not other. This is taken along with evidence of controversy, for example, in passages of the Aitareya-Āraṇyaka (700 BCE), which features a discussion on whether retroflexion is valid in particular cases.
+
+The Ṛg-veda is a collection of books, created by multiple authors from distant parts of ancient India. These authors represented different generations, and the mandalas 2 to 7 are the oldest while the mandalas 1 and 10 are relatively the youngest. Yet, the Vedic Sanskrit in these books of the Ṛg-veda "hardly presents any dialectical diversity", states Louis Renou – an Indologist known for his scholarship of the Sanskrit literature and the Ṛg-veda in particular. According to Renou, this implies that the Vedic Sanskrit language had a "set linguistic pattern" by the second half of the 2nd millennium BCE. Beyond the Ṛg-veda, the ancient literature in Vedic Sanskrit that has survived into the modern age include the Samaveda, Yajurveda, Atharvaveda, along with the embedded and layered Vedic texts such as the Brahmanas, Aranyakas, and the early Upanishads. These Vedic documents reflect the dialects of Sanskrit found in the various parts of the northwestern, northern, and eastern Indian $subcontinent.^{:9}$
+
+Vedic Sanskrit was both a spoken and literary language of ancient India. According to Michael Witzel, Vedic Sanskrit was a spoken language of the semi-nomadic Aryans who temporarily settled in one place, maintained cattle herds, practiced limited agriculture, and after some time moved by wagon trains they called $grama.^{:16–17}$ The Vedic Sanskrit language or a closely related Indo-European variant was recognized beyond ancient India as evidenced by the "Mitanni Treaty" between the ancient Hittite and Mitanni people, carved into a rock, in a region that now includes parts of Syria and Turkey. Parts of this treaty, such as the names of the Mitanni princes and technical terms related to horse training, for reasons not understood, are in early forms of Vedic Sanskrit. The treaty also invokes the gods Varuna, Mitra, Indra, and Nasatya found in the earliest layers of the Vedic literature.
+
+   O Bṛhaspati, when in giving names they first set forth the beginning of Language, Their most excellent and spotless secret was laid bare through love, When the wise ones formed Language with their mind, purifying it like grain with a winnowing fan, Then friends knew friendships – an auspicious mark placed on their language.
+
+— Rigveda 10.71.1–4 Translated by Roger Woodard
+
+The Vedic Sanskrit found in the Ṛg-veda is distinctly more archaic than other Vedic texts, and in many respects, the Rigvedic language is notably more similar to those found in the archaic texts of Old Avestan Zoroastrian Gathas and Homer's Iliad and Odyssey. According to Stephanie W. Jamison and Joel P. Brereton – Indologists known for their translation of the Ṛg-veda – the Vedic Sanskrit literature "clearly inherited" from Indo-Iranian and Indo-European times the social structures such as the role of the poet and the priests, the patronage economy, the phrasal equations, and some of the poetic metres. While there are similarities, state Jamison and Brereton, there are also differences between Vedic Sanskrit, the Old Avestan, and the Mycenaean Greek literature. For example, unlike the Sanskrit similes in the Ṛg-veda, the Old Avestan Gathas lack simile entirely, and it is rare in the later version of the language. The Homerian Greek, like Ṛg-vedic Sanskrit, deploys simile extensively, but they are structurally very different.
+
+### Classical Sanskrit
+
+The early Vedic form of the Sanskrit language was far less homogenous compared to the Classical Sanskrit as defined by grammarians by about the mid-1st millennium BCE. According to Richard Gombrich—an Indologist and a scholar of Sanskrit, Pāli and Buddhist Studies—the archaic Vedic Sanskrit found in the Rigveda had already evolved in the Vedic period, as evidenced in the later Vedic literature. Gombrich posits that the language in the early Upanishads of Hinduism and the late Vedic literature approaches Classical Sanskrit, while the archaic Vedic Sanskrit had by the Buddha's time become unintelligible to all except ancient Indian sages.
+
+The formalization of the Sanskrit language is credited to Pāṇini, along with Patanjali's Mahābhāṣya and Katyayana's commentary that preceded Patañjali's work. Panini composed Aṣṭādhyāyī ('Eight-Chapter Grammar'). The century in which he lived is unclear and debated, but his work is generally accepted to be from sometime between the 6th and 4th centuries BCE.
+
+The Aṣṭādhyāyī was not the first description of Sanskrit grammar, but it is the earliest that has survived in full, and the culmination of a long grammatical tradition that Fortson says, is "one of the intellectual wonders of the ancient world". Pāṇini cites ten scholars on the phonological and grammatical aspects of the Sanskrit language before him, as well as the variants in the usage of Sanskrit in different regions of India. The ten Vedic scholars he quotes are Āpiśali, Kaśyapa, Gārgya, Gālava, Cakravarmaṇa, Bhāradvāja, Śākaṭāyana, Śākalya, Senaka and Sphoṭāyana. The Aṣṭādhyāyī of Panini became the foundation of Vyākaraṇa, a Vedānga.
+
+In the Aṣṭādhyāyī, language is observed in a manner that has no parallel among Greek or Latin grammarians. Pāṇini's grammar, according to Renou and Filliozat, is a classic that defines the linguistic expression and sets the standard for the Sanskrit language. Pāṇini made use of a technical metalanguage consisting of a syntax, morphology and lexicon. This metalanguage is organised according to a series of meta-rules, some of which are explicitly stated while others can be deduced. Despite differences in the analysis from that of modern linguistics, Pāṇini's work has been found valuable and the most advanced analysis of linguistics until the twentieth century.
+
+Pāṇini's comprehensive and scientific theory of grammar is conventionally taken to mark the start of Classical Sanskrit. His systematic treatise inspired and made Sanskrit the preeminent Indian language of learning and literature for two millennia. It is unclear whether Pāṇini himself wrote his treatise or he orally created the detailed and sophisticated treatise then transmitted it through his students. Modern scholarship generally accepts that he knew of a form of writing, based on references to words such as Lipi ('script') and lipikara ('scribe') in section 3.2 of the Aṣṭādhyāyī.
+
+The Classical Sanskrit language formalized by Pāṇini, states Renou, is "not an impoverished language", rather it is "a controlled and a restrained language from which archaisms and unnecessary formal alternatives were excluded". The Classical form of the language simplified the sandhi rules but retained various aspects of the Vedic language, while adding rigor and flexibilities, so that it had sufficient means to express thoughts as well as being "capable of responding to the future increasing demands of an infinitely diversified literature", according to Renou. Pāṇini included numerous "optional rules" beyond the Vedic Sanskrit's bahulam framework, to respect liberty and creativity so that individual writers separated by geography or time would have the choice to express facts and their views in their own way, where tradition followed competitive forms of the Sanskrit language.
+
+The phonetic differences between Vedic Sanskrit and Classical Sanskrit, as discerned from the current state of the surviving literature, are negligible when compared to the intense change that must have occurred in the pre-Vedic period between the Proto-Indo-Aryan language and Vedic Sanskrit. The noticeable differences between the Vedic and the Classical Sanskrit include the much-expanded grammar and grammatical categories as well as the differences in the accent, the semantics and the syntax. There are also some differences between how some of the nouns and verbs end, as well as the sandhi rules, both internal and external. Quite many words found in the early Vedic Sanskrit language are never found in late Vedic Sanskrit or Classical Sanskrit literature, while some words have different and new meanings in Classical Sanskrit when contextually compared to the early Vedic Sanskrit literature.
+
+Arthur Macdonell was among the early colonial era scholars who summarized some of the differences between the Vedic and Classical Sanskrit. Louis Renou published in 1956, in French, a more extensive discussion of the similarities, the differences and the evolution of the Vedic Sanskrit within the Vedic period and then to the Classical Sanskrit along with his views on the history. This work has been translated by Jagbans Balbir.
+
+### Sanskrit and Prakrit languages
+
+The earliest known use of the word Saṃskṛta (Sanskrit), in the context of a speech or language, is found in verses 5.28.17–19 of the Ramayana. Outside the learned sphere of written Classical Sanskrit, vernacular colloquial dialects (Prakrits) continued to evolve. Sanskrit co-existed with numerous other Prakrit languages of ancient India. The Prakrit languages of India also have ancient roots and some Sanskrit scholars have called these Apabhramsa, literally 'spoiled'. The Vedic literature includes words whose phonetic equivalent are not found in other Indo-European languages but which are found in the regional Prakrit languages, which makes it likely that the interaction, the sharing of words and ideas began early in the Indian history. As the Indian thought diversified and challenged earlier beliefs of Hinduism, particularly in the form of Buddhism and Jainism, the Prakrit languages such as Pali in Theravada Buddhism and Ardhamagadhi in Jainism competed with Sanskrit in the ancient times. However, states Paul Dundas, a scholar of Jainism, these ancient Prakrit languages had "roughly the same relationship to Sanskrit as medieval Italian does to Latin". The Indian tradition states that the Buddha and the Mahavira preferred the Prakrit language so that everyone could understand it. However, scholars such as Dundas have questioned this hypothesis. They state that there is no evidence for this and whatever evidence is available suggests that by the start of the common era, hardly anybody other than learned monks had the capacity to understand the old Prakrit languages such as Ardhamagadhi.
+
+Colonial era scholars questioned whether Sanskrit was ever a spoken language, or just a literary language. Scholars disagree in their answers. A section of Western scholars state that Sanskrit was never a spoken language, while others and particularly most Indian scholars state the opposite. Those who affirm Sanskrit to have been a vernacular language point to the necessity of Sanskrit being a spoken language for the oral tradition that preserved the vast number of Sanskrit manuscripts from ancient India. Secondly, they state that the textual evidence in the works of Yaksa, Panini and Patanajali affirms that the Classical Sanskrit in their era was a language that is spoken (bhasha) by the cultured and educated. Some sutras expound upon the variant forms of spoken Sanskrit versus written Sanskrit. The 7th-century Chinese Buddhist pilgrim Xuanzang mentioned in his memoir that official philosophical debates in India were held in Sanskrit, not in the vernacular language of that region.
+
+According to Sanskrit linguist professor Madhav Deshpande, Sanskrit was a spoken language in a colloquial form by the mid-1st millennium BCE which coexisted with a more formal, grammatically correct form of literary Sanskrit. This, states Deshpande, is true for modern languages where colloquial incorrect approximations and dialects of a language are spoken and understood, along with more "refined, sophisticated and grammatically accurate" forms of the same language being found in the literary works. The Indian tradition, states Winternitz (1996), has favored the learning and the usage of multiple languages from the ancient times. Sanskrit was a spoken language in the educated and the elite classes, but it was also a language that must have been understood in a wider circle of society because the widely popular folk epics and stories such as the Ramayana, the Mahabharata, the Bhagavata Purana, the Panchatantra and many other texts are all in the Sanskrit language. The Classical Sanskrit with its exacting grammar was thus the language of the Indian scholars and the educated classes, while others communicated with approximate or ungrammatical variants of it as well as other natural Indian languages. Sanskrit, as the learned language of Ancient India, thus existed alongside the vernacular Prakrits. Many Sanskrit dramas indicate that the language coexisted with the vernacular Prakrits. The cities of Varanasi, Paithan, Pune and Kanchipuram were centers of classical Sanskrit learning and public debates until the arrival of the colonial era.
+
+According to Lamotte (1976), an Indologist and Buddhism scholar, Sanskrit became the dominant literary and inscriptional language because of its precision in communication. It was, states Lamotte, an ideal instrument for presenting ideas, and as knowledge in Sanskrit multiplied, so did its spread and influence. Sanskrit was adopted voluntarily as a vehicle of high culture, arts, and profound ideas. Pollock disagrees with Lamotte, but concurs that Sanskrit's influence grew into what he terms a "Sanskrit Cosmopolis" over a region that included all of South Asia and much of southeast Asia. The Sanskrit language cosmopolis thrived beyond India between 300 and 1300 CE.
+
+Today, it is believed that Kashmiri is the closest language to Sanskrit.
+
+### Dravidian influence on Sanskrit
+
+Reinöhl mentions that not only have the Dravidian languages borrowed from Sanskrit vocabulary, but they have also affected Sanskrit on deeper levels of structure, "for instance in the domain of phonology where Indo-Aryan retroflexes have been attributed to Dravidian influence". Hock et al. quoting George Hart state that there was influence of Old Tamil on Sanskrit. Hart compared Old Tamil and Classical Sanskrit to arrive at a conclusion that there was a common language from which these features both derived – "that both Tamil and Sanskrit derived their shared conventions, metres, and techniques from a common source, for it is clear that neither borrowed directly from the other."
+
+Reinöhl further states that there is a symmetric relationship between Dravidian languages like Kannada or Tamil, with Indo-Aryan languages like Bengali or Hindi, whereas the same relationship is not found for non-Indo-Aryan languages, for example, Persian or English:
+
+   A sentence in a Dravidian language like Tamil or Kannada becomes ordinarily good Bengali or Hindi by substituting Bengali or Hindi equivalents for the Dravidian words and forms, without modifying the word order; but the same thing is not possible in rendering a Persian or English sentence into a non-Indo-Aryan language.
+
+Shulman mentions that "Dravidian nonfinite verbal forms (called vinaiyeccam in Tamil) shaped the usage of the Sanskrit nonfinite verbs (originally derived from inflected forms of action nouns in Vedic). This particularly salient case of the possible influence of Dravidian on Sanskrit is only one of many items of syntactic assimilation, not least among them the large repertoire of morphological modality and aspect that, once one knows to look for it, can be found everywhere in classical and postclassical Sanskrit".
+
+The main influence of Dravidian on Sanskrit is found to have been concentrated in the timespan between the late Vedic period and the crystallization of Classical Sanskrit. As in this period the Indo-Aryan tribes had not yet made contact with the inhabitants of the South of the subcontinent, this suggests a significant presence of Dravidian speakers in North India (the central Gangetic plain and the classical Madhyadeśa) who were instrumental in this substratal influence on Sanskrit.
+
+## Influence
+
+   Extant manuscripts in Sanskrit number over 30 million, one hundred times those in Greek and Latin combined, constituting the largest cultural heritage that any civilization has produced prior to the invention of the printing press.
+
+— Foreword of Sanskrit Computational Linguistics (2009), Gérard Huet, Amba Kulkarni and Peter Scharf
+
+Sanskrit has been the predominant language of Hindu texts encompassing a rich tradition of philosophical and religious texts, as well as poetry, music, drama, scientific, technical and others. It is the predominant language of one of the largest collection of historic manuscripts. The earliest known inscriptions in Sanskrit are from the 1st century BCE, such as the Ayodhya Inscription of Dhana and Ghosundi-Hathibada (Chittorgarh).
+
+Though developed and nurtured by scholars of orthodox schools of Hinduism, Sanskrit has been the language for some of the key literary works and theology of heterodox schools of Indian philosophies such as Buddhism and Jainism. The structure and capabilities of the Classical Sanskrit language launched ancient Indian speculations about "the nature and function of language", what is the relationship between words and their meanings in the context of a community of speakers, whether this relationship is objective or subjective, discovered or is created, how individuals learn and relate to the world around them through language, and about the limits of language? They speculated on the role of language, the ontological status of painting word-images through sound, and the need for rules so that it can serve as a means for a community of speakers, separated by geography or time, to share and understand profound ideas from each other. These speculations became particularly important to the Mīmāṃsā and the Nyaya schools of Hindu philosophy, and later to Vedanta and Mahayana Buddhism, states Frits Staal—a scholar of Linguistics with a focus on Indian philosophies and Sanskrit. Though written in a number of different scripts, the dominant language of Hindu texts has been Sanskrit. It or a hybrid form of Sanskrit became the preferred language of Mahayana Buddhism scholarship; for example, one of the early and influential Buddhist philosophers, Nagarjuna (~200 CE), used Classical Sanskrit as the language for his texts. According to Renou, Sanskrit had a limited role in the Theravada tradition (formerly known as the Hinayana) but the Prakrit works that have survived are of doubtful authenticity. Some of the canonical fragments of the early Buddhist traditions, discovered in the 20th century, suggest the early Buddhist traditions used an imperfect and reasonably good Sanskrit, sometimes with a Pali syntax, states Renou. The Mahāsāṃghika and Mahavastu, in their late Hinayana forms, used hybrid Sanskrit for their literature. Sanskrit was also the language of some of the oldest surviving, authoritative and much followed philosophical works of Jainism such as the Tattvartha Sutra by Umaswati.
+
+The Sanskrit language has been one of the major means for the transmission of knowledge and ideas in Asian history. Indian texts in Sanskrit were already in China by 402 CE, carried by the influential Buddhist pilgrim Faxian who translated them into Chinese by 418 CE. Xuanzang, another Chinese Buddhist pilgrim, learnt Sanskrit in India and carried 657 Sanskrit texts to China in the 7th century where he established a major center of learning and language translation under the patronage of Emperor Taizong. By the early 1st millennium CE, Sanskrit had spread Buddhist and Hindu ideas to Southeast Asia, parts of the East Asia and the Central Asia. It was accepted as a language of high culture and the preferred language by some of the local ruling elites in these regions. According to the Dalai Lama, the Sanskrit language is a parent language that is at the foundation of many modern languages of India and the one that promoted Indian thought to other distant countries. In Tibetan Buddhism, states the Dalai Lama, Sanskrit language has been a revered one and called legjar lhai-ka or "elegant language of the gods". It has been the means of transmitting the "profound wisdom of Buddhist philosophy" to Tibet.
+
+The Sanskrit language created a pan-Indo-Aryan accessibility to information and knowledge in the ancient and medieval times, in contrast to the Prakrit languages which were understood just regionally. It created a cultural bond across the subcontinent. As local languages and dialects evolved and diversified, Sanskrit served as the common language. It connected scholars from distant parts of South Asia such as Tamil Nadu and Kashmir, states Deshpande, as well as those from different fields of studies, though there must have been differences in its pronunciation given the first language of the respective speakers. The Sanskrit language brought Indo-Aryan speaking people together, particularly its elite scholars. Some of these scholars of Indian history regionally produced vernacularized Sanskrit to reach wider audiences, as evidenced by texts discovered in Rajasthan, Gujarat, and Maharashtra. Once the audience became familiar with the easier to understand vernacularized version of Sanskrit, those interested could graduate from colloquial Sanskrit to the more advanced Classical Sanskrit. Rituals and the rites-of-passage ceremonies have been and continue to be the other occasions where a wide spectrum of people hear Sanskrit, and occasionally join in to speak some Sanskrit words such as namah.
+
+Classical Sanskrit is the standard register as laid out in the grammar of Pāṇini, around the fourth century BCE. Its position in the cultures of Greater India is akin to that of Latin and Ancient Greek in Europe. Sanskrit has significantly influenced most modern languages of the Indian subcontinent, particularly the languages of the northern, western, central and eastern Indian subcontinent.
+
+### Decline
+
+Sanskrit declined starting about and after the 13th century. This coincides with the beginning of Islamic invasions of South Asia to create, and thereafter expand the Muslim rule in the form of Sultanates, and later the Mughal Empire. Sheldon Pollock characterises the decline of Sanskrit as a long-term "cultural, social, and political change". He dismisses the idea that Sanskrit declined due to "struggle with barbarous invaders", and emphasises factors such as the increasing attractiveness of vernacular language for literary expression.
+
+With the fall of Kashmir around the 13th century, a premier center of Sanskrit literary creativity, Sanskrit literature there disappeared, perhaps in the "fires that periodically engulfed the capital of Kashmir" or the "Mongol invasion of 1320" states $Pollock.^{:397–398}$ The Sanskrit literature which was once widely disseminated out of the northwest regions of the subcontinent, stopped after the 12th $century.^{:398}$ As Hindu kingdoms fell in the eastern and the South India, such as the great Vijayanagara Empire, so did Sanskrit. There were exceptions and short periods of imperial support for Sanskrit, mostly concentrated during the reign of the tolerant Mughal emperor Akbar. Muslim rulers patronized the Middle Eastern language and scripts found in Persia and Arabia, and the Indians linguistically adapted to this Persianization to gain employment with the Muslim rulers. Hindu rulers such as Shivaji of the Maratha Empire, reversed the process, by re-adopting Sanskrit and re-asserting their socio-linguistic identity. After Islamic rule disintegrated in South Asia and the colonial rule era began, Sanskrit re-emerged but in the form of a "ghostly existence" in regions such as Bengal. This decline was the result of "political institutions and civic ethos" that did not support the historic Sanskrit literary culture and the failure of new Sanskrit literature to assimilate into the changing cultural and political environment.
+
+Sheldon Pollock states that in some crucial way, "Sanskrit is $dead".^{:393}$ After the 12th century, the Sanskrit literary works were reduced to "reinscription and restatements" of ideas already explored, and any creativity was restricted to hymns and verses. This contrasted with the previous 1,500 years when "great experiments in moral and aesthetic imagination" marked the Indian scholarship using Classical Sanskrit, states $Pollock.^{:398}$
+
+Scholars maintain state that the Sanskrit language did not die, only declined. Jurgen Hanneder disagrees with Pollock, finding his arguments elegant but "often arbitrary". According to Hanneder, a decline or regional absence of creative and innovative literature constitutes a negative evidence to Pollock's hypothesis, but it is not positive evidence. A closer look at Sanskrit in the Indian history after the 12th century suggests that Sanskrit survived despite the odds. According to Hanneder,
+
+   On a more public level the statement that Sanskrit is a dead language is misleading, for Sanskrit is quite obviously not as dead as other dead languages and the fact that it is spoken, written and read will probably convince most people that it cannot be a dead language in the most common usage of the term. Pollock's notion of the "death of Sanskrit" remains in this unclear realm between academia and public opinion when he says that "most observers would agree that, in some crucial way, Sanskrit is dead."
+
+The Sanskrit language scholar Moriz Winternitz states, Sanskrit was never a dead language and it is still alive though its prevalence is lesser than ancient and medieval times. Sanskrit remains an integral part of Hindu journals, festivals, Ramlila plays, drama, rituals and the rites-of-passage. Similarly, Brian Hatcher states that the "metaphors of historical rupture" by Pollock are not valid, that there is ample proof that Sanskrit was very much alive in the narrow confines of surviving Hindu kingdoms between the 13th and 18th centuries, and its reverence and tradition continues.
+
+Hanneder states that modern works in Sanskrit are either ignored or their "modernity" contested.
+
+According to Robert P. Goldman and Sally Sutherland, Sanskrit is neither "dead" nor "living" in the conventional sense. It is a special, timeless language that lives in the numerous manuscripts, daily chants, and ceremonial recitations, a heritage language that Indians contextually prize, and which some practice.
+
+When the British introduced English to India in the 19th century, knowledge of Sanskrit and ancient literature continued to flourish as the study of Sanskrit changed from a more traditional style into a form of analytical and comparative scholarship mirroring that of Europe.
+
+### Modern Indo-Aryan languages
+
+The relationship of Sanskrit to the Prakrit languages, particularly the modern form of Indian languages, is complex and spans about 3,500 years, states Colin Masica—a linguist specializing in South Asian languages. A part of the difficulty is the lack of sufficient textual, archaeological and epigraphical evidence for the ancient Prakrit languages with rare exceptions such as Pali, leading to a tendency toward anachronistic errors. Sanskrit and Prakrit languages may be divided into Old Indo-Aryan (1500 BCE – 600 BCE), Middle Indo-Aryan (600 BCE – 1000 CE) and New Indo-Aryan (1000 CE – present), each can further be subdivided into early, middle or second, and late evolutionary substages.
+
+Vedic Sanskrit belongs to the early Old Indo-Aryan stage, while Classical Sanskrit to the later Old Indo-Aryan stage. The evidence for Prakrits such as Pali (Theravada Buddhism) and Ardhamagadhi (Jainism), along with Magadhi, Maharashtri, Sinhala, Sauraseni and Niya (Gandhari), emerge in the Middle Indo-Aryan stage in two versions—archaic and more formalized—that may be placed in early and middle substages of the 600 BCE – 1000 CE period. Two literary Indo-Aryan languages can be traced to the late Middle Indo-Aryan stage and these are Apabhramsa and Elu (a literary form of Sinhalese). Numerous North, Central, Eastern and Western Indian languages, such as Hindi, Gujarati, Sindhi, Punjabi, Kashmiri, Nepali, Braj, Awadhi, Bengali, Assamese, Oriya, Marathi, and others belong to the New Indo-Aryan stage.
+
+There is an extensive overlap in the vocabulary, phonetics and other aspects of these New Indo-Aryan languages with Sanskrit, but it is neither universal nor identical across the languages. They likely emerged from a synthesis of the ancient Sanskrit language traditions and an admixture of various regional dialects. Each language has some unique and regionally creative aspects, with unclear origins. Prakrit languages do have a grammatical structure, but like Vedic Sanskrit, it is far less rigorous than Classical Sanskrit. While the roots of all Prakrit languages may be in Vedic Sanskrit and ultimately the Proto-Indo-Aryan language, their structural details vary from Classical Sanskrit. It is generally accepted by scholars and widely believed in India that the modern Indo-Aryan languages – such as Bengali, Gujarati, Hindi, and Punjabi – are descendants of the Sanskrit language. Sanskrit, states Burjor Avari, can be described as "the mother language of almost all the languages of north India".
+
+## Geographic distribution
+
+The Sanskrit language's historic presence is attested across a wide geography beyond South Asia. Inscriptions and literary evidence suggests that Sanskrit language was already being adopted in Southeast Asia and Central Asia in the 1st millennium CE, through monks, religious pilgrims and merchants.
+
+South Asia has been the geographic range of the largest collection of the ancient and pre-18th-century Sanskrit manuscripts and inscriptions. Beyond ancient India, significant collections of Sanskrit manuscripts and inscriptions have been found in China (particularly the Tibetan monasteries), Myanmar, Indonesia, Cambodia, Laos, Vietnam, Thailand, and Malaysia. Sanskrit inscriptions, manuscripts or its remnants, including some of the oldest known Sanskrit written texts, have been discovered in dry high deserts and mountainous terrains such as in Nepal, Tibet, Afghanistan, Mongolia, Uzbekistan, Turkmenistan, Tajikistan, and Kazakhstan. Some Sanskrit texts and inscriptions have also been discovered in Korea and Japan.
+
+### Official status
+
+In India, Sanskrit is among the 22 official languages of India in the Eighth Schedule to the Constitution. In 2010, Uttarakhand became the first state in India to make Sanskrit its second official language. In 2019, Himachal Pradesh made Sanskrit its second official language, becoming the second state in India to do so.
+
+## Phonology
+
+Sanskrit shares many Proto-Indo-European phonological features, although it features a larger inventory of distinct phonemes. The consonantal system is the same, though it systematically enlarged the inventory of distinct sounds. For example, Sanskrit added a voiceless aspirated "tʰ", to the voiceless "t", voiced "d" and voiced aspirated "dʰ" found in PIE languages.
+
+The most significant and distinctive phonological development in Sanskrit is vowel merger. The short *e, *o and *a, all merge as a (अ) in Sanskrit, while long *ē, *ō and *ā, all merge as long ā (आ). Compare Sanskrit nāman to Latin nōmen. These mergers occurred very early and significantly affected Sanskrit's morphological system. Some phonological developments in it mirror those in other PIE languages. For example, the labiovelars merged with the plain velars as in other satem languages. The secondary palatalization of the resulting segments is more thorough and systematic within Sanskrit. A series of retroflex and dental stops were innovated in Sanskrit to more thoroughly articulate sounds for clarity. For example, unlike the loss of the morphological clarity from vowel contraction that is found in early Greek and related southeast European languages, Sanskrit deployed *y, *w, and *s intervocalically to provide morphological clarity.
+
+### Vowels
+
+The cardinal vowels (svaras) i (इ), u (उ), a (अ) distinguish length in Sanskrit. The short a (अ) in Sanskrit is a closer vowel than ā, equivalent to schwa. The mid vowels ē (ए) and ō (ओ) in Sanskrit are monophthongizations of the Indo-Iranian diphthongs *ai and *au. The Old Iranian language preserved *ai and *au. The Sanskrit vowels are inherently long, though often transcribed e and o without the diacritic. The vocalic liquid r̥ in Sanskrit is a merger of PIE *r̥ and *l̥. The long r̥ is an innovation and it is used in a few analogically generated morphological categories.
+
+Sanskrit vowels in the Devanagari script :
+
+| | Independent form | IAST/ ISO | IPA | Independent form | IAST/ ISO | IPA |
+| - | - | - | - | - | - | - |
+| kaṇṭhya (Guttural) | अ | a | /ɐ/ | आ | ā | /ɑː/ |
+| tālavya (Palatal) | इ | i | /i/ | ई | ī | /iː/ |
+| oṣṭhya (Labial) | उ | u | /u/ | ऊ | ū | /uː/ |
+| mūrdhanya (Retroflex) | ऋ | ṛ/r̥ | /r̩/ | ॠ | ṝ/r̥̄ | /r̩ː/ |
+| dantya (Dental) | ऌ | ḷ/l̥ | /l̩/ | (ॡ) | (ḹ/l̥̄) | /l̩ː/ |
+| kaṇṭhatālavya (Palatoguttural) | ए | e/ē | /eː/ | ऐ | ai | /ɑj/ |
+| kaṇṭhoṣṭhya (Labioguttural) | ओ | o/ō | /oː/ | औ | au | /ɑw/ |
+| (consonantal allophones) | ं | ṃ/ṁ | /◌̃/ | ः | ḥ | /h/ |
+
+According to Masica, Sanskrit has four traditional semivowels, with which were classed, "for morphophonemic reasons, the liquids: y, r, l, and v; that is, as y and v were the non-syllabics corresponding to i, u, so were r, l in relation to r̥ and l̥". The northwestern, the central and the eastern Sanskrit dialects have had a historic confusion between "r" and "l". The Paninian system that followed the central dialect preserved the distinction, likely out of reverence for the Vedic Sanskrit that distinguished the "r" and "l". However, the northwestern dialect only had "r", while the eastern dialect probably only had "l", states Masica. Thus literary works from different parts of ancient India appear inconsistent in their use of "r" and "l", resulting in doublets that are occasionally semantically differentiated.
+
+### Consonants
+
+Sanskrit possesses a symmetric consonantal phoneme structure based on how the sound is articulated, though the actual usage of these sounds conceals the lack of parallelism in the apparent symmetry possibly from historical changes within the language.
+
+Sanskrit consonants in the Devanagari script :
+
+| | sparśa (Plosive) | sparśa (Plosive) | sparśa (Plosive) | sparśa (Plosive) | sparśa (Plosive) | sparśa (Plosive) | sparśa (Plosive) | sparśa (Plosive) | anunāsika (Nasal) | anunāsika (Nasal) | antastha (Approximant) | antastha (Approximant) | ūṣman/saṃgharṣhī (Fricative) | ūṣman/saṃgharṣhī (Fricative) |
+| - | - | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| Voicing → | aghoṣa | aghoṣa | aghoṣa | aghoṣa | ghoṣa | ghoṣa | ghoṣa | ghoṣa | ghoṣa | ghoṣa | ghoṣa | ghoṣa | aghoṣa | aghoṣa |
+| Aspiration → | alpaprāṇa | alpaprāṇa | mahāprāṇa | mahāprāṇa | alpaprāṇa | alpaprāṇa | mahāprāṇa | mahāprāṇa | alpaprāṇa | alpaprāṇa | alpaprāṇa | alpaprāṇa | mahāprāṇa | mahāprāṇa |
+| kaṇṭhya (Guttural) | क | ka [k] | ख | kha [kʰ] | ग | ga [ɡ] | घ | gha [ɡʱ] | ङ | ṅa [ŋ] | ह | ha [ɦ] | | |
+| tālavya (Palatal) | च | ca [t͜ɕ] | छ | cha [t͜ɕʰ] | ज | ja [d͜ʑ] | झ | jha [d͜ʑʱ] | ञ | ña [ɲ] | य | ya [j] | श | śa [ɕ] |
+| mūrdhanya (Retroflex) | ट | ṭa [ʈ] | ठ | ṭha [ʈʰ] | ड | ḍa [ɖ] | ढ | ḍha [ɖʱ] | ण | ṇa [ɳ] | र | ra [ɾ] | ष | ṣa [ʂ] |
+| dantya (Dental) | त | ta [t] | थ | tha [tʰ] | द | da [d] | ध | dha [dʱ] | न | na [n] | ल | la [l] | स | sa [s] |
+| oṣṭhya (Labial) | प | pa [p] | फ | pha [pʰ] | ब | ba [b] | भ | bha [bʱ] | म | ma [m] | व | va [ʋ] | | |
+
+Sanskrit had a series of retroflex stops originating as conditioned alternants of dentals, albeit by Sanskrit they had become phonemic.
+
+Regarding the palatal plosives, the pronunciation is a matter of debate. In contemporary attestation, the palatal plosives are a regular series of palatal stops, supported by most Sanskrit sandhi rules. However, the reflexes in descendant languages, as well as a few of the sandhi rules regarding ch, could suggest an affricate pronunciation.
+
+jh was a marginal phoneme in Sanskrit, hence its phonology is more difficult to reconstruct; it was more commonly employed in the Middle Indo-Aryan languages as a result of phonological processes resulting in the phoneme.
+
+The palatal nasal is a conditioned variant of n occurring next to palatal obstruents. The anusvara that Sanskrit deploys is a conditioned alternant of postvocalic nasals, under certain sandhi conditions. Its visarga is a word-final or morpheme-final conditioned alternant of s and r under certain sandhi conditions.
+
+   The system of Sanskrit Sounds [The] order of Sanskrit sounds works along three principles: it goes from simple to complex; it goes from the back to the front of the mouth; and it groups similar sounds together. [...] Among themselves, both the vowels and consonants are ordered according to where in the mouth they are pronounced, going from back to front.
+
+— A. M. Ruppel, The Cambridge Introduction to Sanskrit
+
+The voiceless aspirated series is also an innovation in Sanskrit but is significantly rarer than the other three series.
+
+While the Sanskrit language organizes sounds for expression beyond those found in the PIE language, it retained many features found in the Iranian and Balto-Slavic languages. An example of a similar process in all three is the retroflex sibilant ʂ being the automatic product of dental s following i, u, r, and k.
+
+### Phonological alternations, sandhi rules
+
+Sanskrit deploys extensive phonological alternations on different linguistic levels through sandhi rules (literally, the rules of "putting together, union, connection, alliance"), similar to the English alteration of "going to" as gonna. The Sanskrit language accepts such alterations within it, but offers formal rules for the sandhi of any two words next to each other in the same sentence or linking two sentences. The external sandhi rules state that similar short vowels coalesce into a single long vowel, while dissimilar vowels form glides or undergo diphthongization. Among the consonants, most external sandhi rules recommend regressive assimilation for clarity when they are voiced. These rules ordinarily apply at compound seams and morpheme boundaries. In Vedic Sanskrit, the external sandhi rules are more variable than in Classical Sanskrit.
+
+The internal sandhi rules are more intricate and account for the root and the canonical structure of the Sanskrit word. These rules anticipate what are now known as the Bartholomae's law and Grassmann's law. For example, states Jamison, the "voiceless, voiced, and voiced aspirated obstruents of a positional series regularly alternate with each other (p ≈ b ≈ bh; t ≈ d ≈ dh, etc.; note, however, c ≈ j ≈ h), such that, for example, a morpheme with an underlying voiced aspirate final may show alternants with all three stops under differing internal sandhi conditions". The velar series (k, g, gʰ) alternate with the palatal series (c, j, h), while the structural position of the palatal series is modified into a retroflex cluster when followed by dental. This rule creates two morphophonemically distinct series from a single palatal series.
+
+Vocalic alternations in the Sanskrit morphological system is termed "strengthening", and called guṇa and vr̥ddhi in the preconsonantal versions. There is an equivalence to terms deployed in Indo-European descriptive grammars, wherein Sanskrit's unstrengthened state is same as the zero-grade, guṇa corresponds to normal-grade, while vr̥ddhi is same as the lengthened-state. The qualitative ablaut is not found in Sanskrit just like it is absent in Iranian, but Sanskrit retains quantitative ablaut through vowel strengthening. The transformations between unstrengthened to guṇa is prominent in the morphological system, states Jamison, while vr̥ddhi is a particularly significant rule when adjectives of origin and appurtenance are derived. The manner in which this is done slightly differs between the Vedic and the Classical Sanskrit.
+
+Sanskrit grants a very flexible syllable structure, where they may begin or end with vowels, be single consonants or clusters. Similarly, the syllable may have an internal vowel of any weight. Vedic Sanskrit shows traces of following the Sievers–Edgerton law, but Classical Sanskrit does not. Vedic Sanskrit has a pitch accent system (inherited from Proto-Indo-European) which was acknowledged by Pāṇini, states Jamison; but in his Classical Sanskrit the accents disappear. Most Vedic Sanskrit words have one accent. However, this accent is not phonologically predictable, states Jamison. It can fall anywhere in the word and its position often conveys morphological and syntactic information. The presence of an accent system in Vedic Sanskrit is evidenced from the markings in the Vedic texts. This is important because of Sanskrit's connection to the PIE languages and comparative Indo-European linguistics.
+
+Sanskrit, like most early Indo-European languages, lost the so-called "laryngeal consonants (cover-symbol *H) present in the Proto-Indo-European", states Jamison. This significantly affected the evolutionary path of the Sanskrit phonology and morphology, particularly in the variant forms of roots.
+
+### Pronunciation
+
+Because Sanskrit is not anyone's native language, it does not have a fixed pronunciation. People tend to pronounce it as they do their native language. The articles on Hindustani, Marathi, Nepali, Oriya and Bengali phonology will give some indication of the variation that is encountered. When Sanskrit was a spoken language, its pronunciation varied regionally and also over time. Nonetheless, Panini described the sound system of Sanskrit well enough that people have a fairly good idea of what he intended.
+
+Various renditions of Sanskrit pronunciation :
+
+| Transcription | | Goldman (2002) | Cardona (2003) |
+| - | - | - | - |
+| a | ɐ | ɐ | |
+| ā | aː | aː | |
+| i | ɪ | ɪ | |
+| ī | iː | iː | |
+| u | ʊ | ʊ | |
+| ū | uː | uː | |
+| r̥ | ɽɪ | ɽɪ | ᵊɾᵊ or ᵊɽᵊ |
+| r̥̄ | ɽiː | ɽiː? | ? |
+| l̥ | lɪ | ? | |
+| ē | eː | eː | eː |
+| ai | ai | ai | ɐi or ɛi |
+| ō | oː | oː | oː |
+| au | au | au | ɐu or ɔu |
+| aṃ | ɐ̃, ɐɴ | ɐ̃, ɐɴ | |
+| aḥ | ɐh | ɐhɐ | ɐh |
+| k | k | k | |
+| kh | kʰ | kʰ | |
+| g | ɡ | ɡ | |
+| gh | ɡʱ | ɡʱ | |
+| ṅ | ŋ | ŋ | |
+| h | ɦ | ɦ | ɦ |
+| c | t͡ɕ | t͡ɕ | |
+| ch | t͡ɕʰ | t͡ɕʰ | |
+| j | d͡ʑ | d͡ʑ | |
+| jh | d͡ʑʱ | d͡ʑʱ | |
+| ñ | n | n | |
+| y | j | j | j |
+| ś | ɕ | ɕ | ɕ |
+| ṭ | t̠ | t̠ | |
+| ṭh | t̠ʰ | t̠ʰ | |
+| ḍ | d̠ | d̠ | |
+| ḍh | d̠ʱ | d̠ʱ | |
+| ṇ | n̠ | n̠ | |
+| r | ɾ | ɾ | ɾ̪, ɾ or ɽ |
+| ṣ | s̠ | s̠ | ʂ |
+| t | t̪ | t̪ | |
+| th | t̪ʰ | t̪ʰ | |
+| d | d̪ | d̪ | |
+| dh | d̪ʱ | d̪ʱ | |
+| n | n̪ | n̪ | |
+| l | l | l | l̪ |
+| s | s | s | s̪ |
+| p | p | p | |
+| ph | pʰ | pʰ | |
+| b | b | b | |
+| bh | bʱ | bʱ | |
+| m | m | m | |
+| v | ʋ | ʋ | ʋ |
+| stress | | (ante)pen- ultimate | |
+
+## Morphology
+
+The basis of Sanskrit morphology is the root, states Jamison, "a morpheme bearing lexical meaning". The verbal and nominal stems of Sanskrit words are derived from this root through the phonological vowel-gradation processes, the addition of affixes, verbal and nominal stems. It then adds an ending to establish the grammatical and syntactic identity of the stem. According to Jamison, the "three major formal elements of the morphology are (i) root, (ii) affix, and (iii) ending; and they are roughly responsible for (i) lexical meaning, (ii) derivation, and (iii) inflection respectively".
+
+A Sanskrit word has the following canonical structure:
+
+The root structure has certain phonological constraints. Two of the most important constraints of a "root" is that it does not end in a short "a" (अ) and that it is monosyllabic. In contrast, the affixes and endings commonly do. The affixes in Sanskrit are almost always suffixes, with exceptions such as the augment "a-" added as prefix to past tense verb forms and the "-na/n-" infix in single verbal present class, states Jamison.
+
+Sanskrit verbs have the following canonical structure:
+
+According to Ruppel, verbs in Sanskrit express the same information as other Indo-European languages such as English. Sanskrit verbs describe an action or occurrence or state, its embedded morphology informs as to "who is doing it" (person or persons), "when it is done" (tense) and "how it is done" (mood, voice). The Indo-European languages differ in the detail. For example, the Sanskrit language attaches the affixes and ending to the verb root, while the English language adds small independent words before the verb. In Sanskrit, these elements co-exist within the word.
+
+Word morphology in Sanskrit, A. M. Ruppel :
+
+| | Sanskrit word equivalent | Sanskrit word equivalent |
+| - | - | - |
+| English expression | IAST/ISO | Devanagari |
+| you carry | bharasi | भरसि |
+| they carry | bharanti | भरन्ति |
+| you will carry | bhariṣyasi | भरिष्यसि |
+
+Both verbs and nouns in Sanskrit are either thematic or athematic, states Jamison. Guna (strengthened) forms in the active singular regularly alternate in athematic verbs. The finite verbs of Classical Sanskrit have the following grammatical categories: person, number, voice, tense-aspect, and mood. According to Jamison, a portmanteau morpheme generally expresses the person-number-voice in Sanskrit, and sometimes also the ending or only the ending. The mood of the word is embedded in the affix.
+
+These elements of word architecture are the typical building blocks in Classical Sanskrit, but in Vedic Sanskrit these elements fluctuate and are unclear. For example, in the Rigveda preverbs regularly occur in tmesis, states Jamison, which means they are "separated from the finite verb". This indecisiveness is likely linked to Vedic Sanskrit's attempt to incorporate accent. With nonfinite forms of the verb and with nominal derivatives thereof, states Jamison, "preverbs show much clearer univerbation in Vedic, both by position and by accent, and by Classical Sanskrit, tmesis is no longer possible even with finite forms".
+
+While roots are typical in Sanskrit, some words do not follow the canonical structure. A few forms lack both inflection and root. Many words are inflected (and can enter into derivation) but lack a recognizable root. Examples from the basic vocabulary include kinship terms such as mātar- (mother), nas- (nose), śvan- (dog). According to Jamison, pronouns and some words outside the semantic categories also lack roots, as do the numerals. Similarly, the Sanskrit language is flexible enough to not mandate inflection.
+
+The Sanskrit words can contain more than one affix that interact with each other. Affixes in Sanskrit can be athematic as well as thematic, according to Jamison. Athematic affixes can be alternating. Sanskrit deploys eight cases, namely nominative, accusative, instrumental, dative, ablative, genitive, locative, vocative.
+
+Stems, that is "root + affix", appear in two categories in Sanskrit: vowel stems and consonant stems. Unlike some Indo-European languages such as Latin or Greek, according to Jamison, "Sanskrit has no closed set of conventionally denoted noun declensions". Sanskrit includes a fairly large set of stem-types. The linguistic interaction of the roots, the phonological segments, lexical items and the grammar for the Classical Sanskrit consist of four Paninian components. These, states Paul Kiparsky, are the Astadhyaayi, a comprehensive system of 4,000 grammatical rules, of which a small set are frequently used; Sivasutras, an inventory of anubandhas (markers) that partition phonological segments for efficient abbreviations through the pratyharas technique; Dhatupatha, a list of 2,000 verbal roots classified by their morphology and syntactic properties using diacritic markers, a structure that guides its writing systems; and, the Ganapatha, an inventory of word groups, classes of lexical systems. There are peripheral adjuncts to these four, such as the Unadisutras, which focus on irregularly formed derivatives from the roots.
+
+Sanskrit morphology is generally studied in two broad fundamental categories: the nominal forms and the verbal forms. These differ in the types of endings and what these endings mark in the grammatical context. Pronouns and nouns share the same grammatical categories, though they may differ in inflection. Verb-based adjectives and participles are not formally distinct from nouns. Adverbs are typically frozen case forms of adjectives, states Jamison, and "nonfinite verbal forms such as infinitives and gerunds also clearly show frozen nominal case endings".
+
+### Tense and voice
+
+The Sanskrit language includes five tenses: present, future, past imperfect, past aorist and past perfect. It outlines three types of voices: active, passive and the middle. The middle is also referred to as the mediopassive, or more formally in Sanskrit as parasmaipada (word for another) and atmanepada (word for oneself).
+
+Voice in Sanskrit, Stephanie Jamison :
+
+| | Active | Active | Active | Middle (Mediopassive) | Middle (Mediopassive) | Middle (Mediopassive) |
+| - | - | - | - | - | - | - |
+| | Singular | Dual | Plural | Singular | Dual | Plural |
+| 1st person | -mi | -vas | -mas | -e | -vahe | -mahe |
+| 2nd person | -si | -thas | -tha | -se | -āthe | -dhve |
+| 3rd person | -ti | -tas | -anti | -te | -āte | -ante |
+
+The paradigm for the tense-aspect system in Sanskrit is the three-way contrast between the "present", the "aorist" and the "perfect" architecture. Vedic Sanskrit is more elaborate and had several additional tenses. For example, the Rigveda includes perfect and a marginal pluperfect. Classical Sanskrit simplifies the "present" system down to two tenses, the perfect and the imperfect, while the "aorist" stems retain the aorist tense and the "perfect" stems retain the perfect and marginal pluperfect. The classical version of the language has elaborate rules for both voice and the tense-aspect system to emphasize clarity, and this is more elaborate than in other Indo-European languages. The evolution of these systems can be seen from the earliest layers of the Vedic literature to the late Vedic literature.
+
+### Number, person
+
+Sanskrit recognizes three numbers—singular, dual, and plural. The dual is a fully functioning category, used beyond naturally paired objects such as hands or eyes, extending to any collection of two. The elliptical dual is notable in the Vedic Sanskrit, according to Jamison, where a noun in the dual signals a paired opposition. Illustrations include dyāvā (literally, "the two heavens" for heaven-and-earth), mātarā (literally, "the two mothers" for mother-and-father). A verb may be singular, dual or plural, while the person recognized in the language are forms of "I", "you", "he/she/it", "we" and "they".
+
+There are three persons in Sanskrit: first, second and third. Sanskrit uses the 3×3 grid formed by the three numbers and the three persons parameters as the paradigm and the basic building block of its verbal system.
+
+### Gender, mood
+
+The Sanskrit language incorporates three genders: feminine, masculine and neuter. All nouns have inherent gender. With some exceptions, personal pronouns have no gender. Exceptions include demonstrative and anaphoric pronouns. Derivation of a word is used to express the feminine. Two most common derivations come from feminine-forming suffixes, the -ā- (आ, Rādhā) and -ī- (ई, Rukmīnī). The masculine and neuter are much simpler, and the difference between them is primarily inflectional. Similar affixes for the feminine are found in many Indo-European languages, states Burrow, suggesting links of the Sanskrit to its PIE heritage.
+
+Pronouns in Sanskrit include the personal pronouns of the first and second persons, unmarked for gender, and a larger number of gender-distinguishing pronouns and adjectives. Examples of the former include ahám (first singular), vayám (first plural) and yūyám (second plural). The latter can be demonstrative, deictic or anaphoric. Both the Vedic and Classical Sanskrit share the sá/tám pronominal stem, and this is the closest element to a third person pronoun and an article in the Sanskrit language, states Jamison.
+
+Indicative, potential and imperative are the three mood forms in Sanskrit.
+
+### Prosody, metre
+
+The Sanskrit language formally incorporates poetic metres. By the late Vedic era, this developed into a field of study; it was central to the composition of the Hindu literature, including the later Vedic texts. This study of Sanskrit prosody is called chandas, and is considered one of the six Vedangas, or limbs of Vedic studies.
+
+Sanskrit prosody includes linear and non-linear systems. The system started off with seven major metres, according to Annette Wilke and Oliver Moebus, called the "seven birds" or "seven mouths of Brihaspati", and each had its own rhythm, movements and aesthetics wherein a non-linear structure (aperiodicity) was mapped into a four verse polymorphic linear sequence. A syllable in Sanskrit is classified as either laghu (light) or guru (heavy). This classification is based on a matra (literally, "count, measure, duration"), and typically a syllable that ends in a short vowel is a light syllable, while those that end in consonant, anusvara or visarga are heavy. The classical Sanskrit found in Hindu scriptures such as the Bhagavad Gita and many texts are so arranged that the light and heavy syllables in them follow a rhythm, though not necessarily a rhyme.
+
+Sanskrit metres include those based on a fixed number of syllables per verse, and those based on fixed number of morae per verse. The Vedic Sanskrit employs fifteen metres, of which seven are common, and the most frequent are three (8-, 11- and 12-syllable lines). The Classical Sanskrit deploys both linear and non-linear metres, many of which are based on syllables and others based on diligently crafted verses based on repeating numbers of morae (matra per foot).
+
+   There is no word without metre, nor is there any metre without words.
+
+— Natya Shastra
+
+Metre and rhythm is an important part of the Sanskrit language. It may have played a role in helping preserve the integrity of the message and Sanskrit texts. The verse perfection in the Vedic texts such as the verse Upanishads and post-Vedic Smṛti texts are rich in prosody. This feature of the Sanskrit language led some Indologists from the 19th century onwards to identify suspected portions of texts where a line or sections are off the expected metre.
+
+The metre-feature of the Sanskrit language embeds another layer of communication to the listener or reader. A change in metres has been a tool of literary architecture and an embedded code to inform the reciter and audience that it marks the end of a section or chapter. Each section or chapter of these texts uses identical metres, rhythmically presenting their ideas and making it easier to remember, recall and check for accuracy. Authors coded a hymn's end by frequently using a verse of a metre different from that used in the hymn's body. However, Hindu tradition does not use the Gayatri metre to end a hymn or composition, possibly because it has enjoyed a special level of reverence in Hinduism.
+
+## Writing system
+
+The early history of writing Sanskrit and other languages in ancient India is a problematic topic despite a century of scholarship, states Richard Salomon – an epigraphist and Indologist specializing in Sanskrit and Pali literature. The earliest possible script from South Asia is from the Indus Valley civilization (3rd/2nd millennium BCE), but this script – if it is a script – remains undeciphered. If any scripts existed in the Vedic period, they have not survived. Scholars generally accept that Sanskrit was spoken in an oral society, and that an oral tradition preserved the extensive Vedic and Classical Sanskrit literature. Other scholars such as Jack Goody argue that the Vedic Sanskrit texts are not the product of an oral society, basing this view by comparing inconsistencies in the transmitted versions of literature from various oral societies such as the Greek, Serbian, and other cultures. This minority of scholars argue that the Vedic literature is too consistent and vast to have been composed and transmitted orally across generations, without having been written down.
+
+Lipi is the term in Sanskrit which means "writing, letters, alphabet". It contextually refers to scripts, the art or any manner of writing or drawing. The term, in the sense of a writing system, appears in some of the earliest Buddhist, Hindu, and Jaina texts. Pāṇini's Astadhyayi, composed sometime around the 5th or 4th century BCE, for example, mentions lipi in the context of a writing script and education system in his times, but he does not name the script. Several early Buddhist and Jaina texts, such as the Lalitavistara Sūtra and Pannavana Sutta include lists of numerous writing scripts in ancient India. The Buddhist texts list the sixty four lipi that the Buddha knew as a child, with the Brahmi script topping the list. "The historical value of this list is however limited by several factors", states Salomon. The list may be a later interpolation. The Jain canonical texts such as the Pannavana Sutta – probably older than the Buddhist texts – list eighteen writing systems, with the Brahmi topping the list and Kharotthi (Kharoshthi) listed as fourth. The Jaina text elsewhere states that the "Brahmi is written in 18 different forms", but the details are lacking. However, the reliability of these lists has been questioned and the empirical evidence of writing systems in the form of Sanskrit or Prakrit inscriptions dated prior to the 3rd century BCE has not been found. If the ancient surface for writing Sanskrit was palm leaves, tree bark and cloth—the same as those in later times, these have not survived. According to Salomon, many find it difficult to explain the "evidently high level of political organization and cultural complexity" of ancient India without a writing system for Sanskrit and other languages.
+
+The oldest datable writing systems for Sanskrit are the Brāhmī script, the related Kharoṣṭhī script and the Brahmi derivatives. The Kharosthi was used in the northwestern part of South Asia and it became extinct, while the Brahmi was used all over the subcontinent along with regional scripts such as Old Tamil. Of these, the earliest records in the Sanskrit language are in Brahmi, a script that later evolved into numerous related Indic scripts for Sanskrit, along with Southeast Asian scripts (Burmese, Thai, Lao, Khmer, others) and many extinct Central Asian scripts such as those discovered along with the Kharosthi in the Tarim Basin of western China and in Uzbekistan. The most extensive inscriptions that have survived into the modern era are the rock edicts and pillar inscriptions of the 3rd century BCE Mauryan emperor Ashoka, but these are not in Sanskrit.
+
+### Scripts
+
+Over the centuries, and across countries, a number of scripts have been used to write Sanskrit.
+
+**Brahmi script**
+
+The Brahmi script for writing Sanskrit is a "modified consonant-syllabic" script. The graphic syllable is its basic unit, and this consists of a consonant with or without diacritic modifications. Since the vowel is an integral part of the consonants, and given the efficiently compacted, fused consonant cluster morphology for Sanskrit words and grammar, the Brahmi and its derivative writing systems deploy ligatures, diacritics and relative positioning of the vowel to inform the reader how the vowel is related to the consonant and how it is expected to be pronounced for clarity. This feature of Brahmi and its modern Indic script derivatives makes it difficult to classify it under the main script types used for the writing systems for most of the world's languages, namely logographic, syllabic and alphabetic.
+
+The Brahmi script evolved into "a vast number of forms and derivatives", states Richard Salomon, and in theory, Sanskrit "can be represented in virtually any of the main Brahmi-based scripts and in practice it often is". From the ancient times, it has been written in numerous regional scripts in South and Southeast Asia. Most of these are descendants of the Brahmi script. The earliest datable varnamala Brahmi alphabet system, found in later Sanskrit texts, is from the 2nd century BCE, in the form of a terracotta plaque found in Sughana, Haryana. It shows a "schoolboy's writing lessons", states Salomon.
+
+**Nagari script**
+
+Devanāgarī :
+
+Abugida
+
+Brahmic scripts
+
+Inherent vowel :
+
+Languages
+
+Hindi
+
+Marathi
+
+Nepali
+
+Konkani
+
+Maithili
+
+Sindhi
+
+Bodo
+
+Pali
+
+Prakrit
+
+Sanskrit and more :
+
+Transliteration
+
+IAST
+
+Hunterian
+
+NLK
+
+ISO 15919
+
+Harvard-Kyoto
+
+ITRANS
+
+Velthuis
+
+SLP1
+
+WX notation
+
+(ISCII) :
+
+Vowels and syllabic consonants अ a ॲ æ ऄ आ (का) ā इ (कि) i ई (की) ī उ (कु) u ऊ (कू) ū ॶ (कॖ) ॷ (कॗ) ऋ (कृ) r̥ ॠ (कॄ) r̥̄ ऌ (कॢ) l̥ ॡ (कॣ) l̥̄ ए (के) ē ऍ (कॅ) ê ऎ (कॆ) e ऐ (कै) ai (कॕ) (कॎ) ओ (को) ō ऑ (कॉ) ô ऒ (कॊ) o औ (कौ) au ॳ (कऺ) ॴ (कऻ) ॵ (कॏ)
+
+(Schwa deletion) :
+
+Consonants क k क़ q ख kh ख़ k̲h̲ ग g ग़ ġ ॻ gg घ gh ङ ṅ च c छ ch ज j ज़ z ॼ jj ॹ ž झ jh झ़ zh ञ ñ ट ṭ ठ ṭh ड ḍ ड़ ṛ ॾ ḍḍ ॸ ḍ ढ ḍh ढ़ ṛh ण ṇ त t थ th द d ध dh न n ऩ ṉ प p फ ph फ़ f ब b ॿ bb भ bh म m य y य़ ẏ ॺ र r ऱ ṟ ळ ḷ ऴ ḻ ल l व v श ś ष ṣ स s ह h ॽ
+
+(Conjuncts) :
+
+Diacritics, punctuation, symbols अं ṁ अः ḥ अँ m̐ अऀ ऽ ’ क़ क् ३ 3 ᳵ ẖ ᳶ ḫ अ॑ ` अ॒ _ अ॓ अ॔ ॐ aum̐ । ॥ ॰ ॱ ₹ INR
+
+and more (Devanagari (Unicode block)
+
+Devanagari Extended
+
+Devanagari Extended-A
+
+Vedic Extensions) :
+
+Numerals ० 0 १ 1 २ 2 ३ 3 ४ 4 ५ 5 ६ 6 ७ 7 ८ 8 ९ 9
+
+Āryabhaṭa
+
+Akṣarapallī
+
+Bhūtasaṃkhyā
+
+Kaṭapayādi :
+
+vte :
+
+Many modern era manuscripts are written and available in the Nagari script, whose form is attestable to the 1st millennium CE. The Nagari script is the ancestor of Devanagari (north India), Nandinagari (south India) and other variants. The Nāgarī script was in regular use by 7th century CE, and had fully evolved into Devanagari and Nandinagari scripts by about the end of the first millennium of the common era. The Devanagari script, states Banerji, became more popular for Sanskrit in India since about the 18th century. However, Sanskrit does have special historical connection to the Nagari script as attested by the epigraphical evidence.
+
+The Nagari script has been thought of as a northern Indic script for Sanskrit as well as the regional languages such as Hindi, Marathi, and Nepali. However, it has had a "supra-local" status as evidenced by 1st-millennium CE epigraphy and manuscripts discovered all over India and as far as Sri Lanka, Burma, Indonesia, and in its parent form, called the Siddhamatrka script, found in manuscripts of East Asia. The Sanskrit and Balinese languages Sanur inscription on Belanjong pillar of Bali (Indonesia), dated to about 914 CE, is in part in the Nagari script.
+
+The Nagari script used for Classical Sanskrit has the fullest repertoire of characters consisting of fourteen vowels and thirty three consonants. For Vedic Sanskrit, it has two more allophonic consonantal characters (the intervocalic ळ ḷa, and ळ्ह ḷha). To communicate phonetic accuracy, it also includes several modifiers such as the anusvara dot and the visarga double dot, punctuation symbols and others such as the halanta sign.
+
+**Other writing systems**
+
+Other scripts such as Gujarati, Bangla-Assamese, Odia and major south Indian scripts, states Salomon, "have been and often still are used in their proper territories for writing Sanskrit". These and many Indian scripts look different to the untrained eye, but the differences between Indic scripts is "mostly superficial and they share the same phonetic repertoire and systemic features", states Salomon. They all have essentially the same set of eleven to fourteen vowels and thirty-three consonants as established by the Sanskrit language and attestable in the Brahmi script. Further, a closer examination reveals that they all have the similar basic graphic principles, the same varnamala (literally, "garland of letters") alphabetic ordering following the same logical phonetic order, easing the work of historic skilled scribes writing or reproducing Sanskrit works across South Asia. The Sanskrit language written in some Indic scripts exaggerate angles or round shapes, but this serves only to mask the underlying similarities. Nagari script favours symmetry set with squared outlines and right angles. In contrast, Sanskrit written in the Bengali script emphasizes the acute angles while the neighbouring Odia script emphasizes rounded shapes and uses cosmetically appealing "umbrella-like curves" above the script symbols.
+
+In the south, where Dravidian languages predominate, scripts used for Sanskrit include the Kannada, Telugu, Malayalam and Grantha alphabets.
+
+### Transliteration schemes, Romanisation
+
+Since the late 18th century, Sanskrit has been transliterated using the Latin alphabet. The system most commonly used today is the IAST (International Alphabet of Sanskrit Transliteration), which has been the academic standard since 1888. ASCII-based transliteration schemes have also evolved because of difficulties representing Sanskrit characters in computer systems. These include Harvard-Kyoto and ITRANS, a transliteration scheme that is used widely on the Internet, especially in Usenet and in email, for considerations of speed of entry as well as rendering issues. With the wide availability of Unicode-aware web browsers, IAST has become common online. It is also possible to type using an alphanumeric keyboard and transliterate to Devanagari using software like Mac OS X's international support.
+
+European scholars in the 19th century generally preferred Devanagari for the transcription and reproduction of whole texts and lengthy excerpts. However, references to individual words and names in texts composed in European Languages were usually represented with Roman transliteration. From the 20th century onwards, because of production costs, textual editions edited by Western scholars have mostly been in Romanised transliteration.
+
+### Epigraphy
+
+The earliest known stone inscriptions in Sanskrit are in the Brahmi script from the first century BCE. These include the Ayodhyā (Uttar Pradesh) and Hāthībādā-Ghosuṇḍī (near Chittorgarh, Rajasthan) inscriptions. Both of these, states Salomon, are "essentially standard" and "correct Sanskrit", with a few exceptions reflecting an "informal Sanskrit usage". Other important Hindu inscriptions dated to the 1st century BCE, in relatively accurate classical Sanskrit and Brahmi script are the Yavanarajya inscription on a red sandstone slab and the long Naneghat inscription on the wall of a cave rest stop in the Western Ghats.
+
+Besides these few examples from the 1st century BCE, the earliest Sanskrit and hybrid dialect inscriptions are found in Mathura (Uttar Pradesh). These date to the 1st and 2nd century CE, states Salomon, from the time of the Indo-Scythian Northern Satraps and the subsequent Kushan Empire. These are also in the Brahmi script. The earliest of these, states Salomon, are attributed to Ksatrapa Sodasa from the early years of 1st century CE. Of the Mathura inscriptions, the most significant is the Mora Well Inscription. In a manner similar to the Hathibada inscription, the Mora well inscription is a dedicatory inscription and is linked to the cult of the Vrishni heroes: it mentions a stone shrine (temple), pratima (murti, images) and calls the five Vrishnis as bhagavatam. There are many other Mathura Sanskrit inscriptions in Brahmi script overlapping the era of Indo-Scythian Northern Satraps and early Kushanas. Other significant 1st-century inscriptions in reasonably good classical Sanskrit in the Brahmi script include the Vasu Doorjamb Inscription and the Mountain Temple inscription. The early ones are related to the Brahmanical, except for the inscription from Kankali Tila which may be Jaina, but none are Buddhist. A few of the later inscriptions from the 2nd century CE include Buddhist Sanskrit, while others are in "more or less" standard Sanskrit and related to the Brahmanical tradition.
+
+In Maharashtra and Gujarat, Brahmi script Sanskrit inscriptions from the early centuries of the common era exist at the Nasik Caves site, near the Girnar mountain of Junagadh and elsewhere such as at Kanakhera, Kanheri, and Gunda. The Nasik inscription dates to the mid-1st century CE, is a fair approximation of standard Sanskrit and has hybrid features. The Junagadh rock inscription of Western Satraps ruler Rudradaman I (c. 150 CE, Gujarat) is the first long poetic-style inscription in "more or less" standard Sanskrit that has survived into the modern era. It represents a turning point in the history of Sanskrit epigraphy, states Salomon. Though no similar inscriptions are found for about two hundred years after the Rudradaman reign, it is important because its style is the prototype of the eulogy-style Sanskrit inscriptions found in the Gupta Empire era. These inscriptions are also in the Brahmi script.
+
+The Nagarjunakonda inscriptions are the earliest known substantial South Indian Sanskrit inscriptions, probably from the late 3rd century or early 4th century CE, or both. These inscriptions are related to Buddhism and the Shaivism tradition of Hinduism. A few of these inscriptions from both traditions are verse-style in the classical Sanskrit language, while some such as the pillar inscription is written in prose and a hybridized Sanskrit language. An earlier hybrid Sanskrit inscription found on Amaravati slab is dated to the late 2nd century, while a few later ones include Sanskrit inscriptions along with Prakrit inscriptions related to Hinduism and Buddhism. After the 3rd century CE, Sanskrit inscriptions dominate and many have survived. Between the 4th and 7th centuries CE, south Indian inscriptions are exclusively in the Sanskrit language. In the eastern regions of South Asia, scholars report minor Sanskrit inscriptions from the 2nd century, these being fragments and scattered. The earliest substantial true Sanskrit language inscription of Susuniya (West Bengal) is dated to the 4th century. Elsewhere, such as Dehradun (Uttarakhand), inscriptions in more or less correct classical Sanskrit inscriptions are dated to the 3rd century.
+
+According to Salomon, the 4th-century reign of Samudragupta was the turning point when the classical Sanskrit language became established as the "epigraphic language par excellence" of the Indian world. These Sanskrit language inscriptions are either "donative" or "panegyric" records. Generally in accurate classical Sanskrit, they deploy a wide range of regional Indic writing systems extant at the time. They record the donation of a temple or stupa, images, land, monasteries, pilgrim's travel record, public infrastructure such as water reservoir and irrigation measures to prevent famine. Others praise the king or the donor in lofty poetic terms. The Sanskrit language of these inscriptions is written on stone, various metals, terracotta, wood, crystal, ivory, shell, and cloth.
+
+The evidence of the use of the Sanskrit language in Indic writing systems appears in southeast Asia in the first half of the 1st millennium CE. A few of these in Vietnam are bilingual where both the Sanskrit and the local language is written in the Indian alphabet. Early Sanskrit language inscriptions in Indic writing systems are dated to the 4th century in Malaysia, 5th to 6th centuries in Thailand near Si Thep and the Sak River, early 5th century in Kutai (known as the Mulavarman inscription discovered in eastern Borneo), and mid-5th century in west Java (Indonesia). Both major writing systems for Sanskrit, the North Indian and South Indian scripts, have been discovered in southeast Asia, but the Southern variety with its rounded shapes are far more common. The Indic scripts, particularly the Pallava script prototype, spread and ultimately evolved into Mon-Burmese, Khmer, Thai, Lao, Sumatran, Celebes, Javanese and Balinese scripts. From about the 5th century, Sanskrit inscriptions become common in many parts of South Asia and Southeast Asia, with significant discoveries in Nepal, Vietnam and Cambodia.
+
+## Literature
+
+Literature in Sanskrit can be broadly divided into texts composed in Vedic Sanskrit and the later Classical Sanskrit. Vedic Sanskrit is the language of the extensive liturgical works of the Vedic religion, which aside from the four Vedas, include the Brāhmaṇas and the Sūtras.
+
+The Vedic literature that survives is entirely of a religious form, whereas works in Classical Sanskrit exist in a wide variety of fields including epics, lyric, drama, romance, fairytale, fables, grammar, civil and religious law, the science of politics and practical life, the science of love and sex, philosophy, medicine, astronomy, astrology and mathematics, and is largely secular in subject-matter.
+
+While Vedic literature is essentially optimistic in spirit, portraying man as strong and powerful capable of finding fulfilment both here and in the afterworld, the later literature is pessimistic, portraying humans as controlled by the forces of fate with worldly pleasures deemed the cause of misery. These fundamental differences in psychology are attributed to the absence of the doctrines of Karma and reincarnation in the Vedic period, notions which are very prevalent in later times.
+
+### Works
+
+Sanskrit has been written in various scripts on a variety of media such as palm leaves, cloth, paper, rock and metal sheets, from ancient times.
+
+Sanskrit literature by tradition :
+
+| Tradition | Sanskrit texts, genre or collection | Example |
+| - | - | - |
+| Hinduism | Scriptures | Vedas, Upaniṣads, Āgamas, the Bhagavad·Gītā |
+| Hinduism | Language, Grammar | Aṣṭādhyāyī, Gaṇa·pāṭha, Pada·pāṭha, Vārttikas, Mahābhāṣya, Vākya·padīya, Phiṭ·sūtra |
+| Hinduism | Civil and Religious Law | Dharma·sūtras/Dharma·śāstras, Manu·smṛti |
+| Hinduism | Statecraft, political science | Artha·śāstra |
+| Hinduism | Timekeeping, Mathematics, Logic | Kalpa, Jyotiṣa, Gaṇita·śāstra, Śulba·sūtras, Siddhāntas, Āryabhaṭīya, Daśa·gītikā·sutra, Siddhānta·śiromaṇi, Gaṇita·sāra·saṅgraha, Bīja·gaṇita |
+| Hinduism | Life sciences, health | Āyurveda, Suśruta·saṃhitā, Caraka·saṃhitā |
+| Hinduism | Sex, emotions | Kāma·sūtra, Pañca·sāyaka, Rati·rahasya, Rati·mañjari, Anaṅga·ranga |
+| Hinduism | Epics | Rāmāyaṇa, Mahābhārata |
+| Hinduism | Court Epic (Kāvya) | Raghu·vaṃśa, Kumāra·sambhava |
+| Hinduism | Gnomic and didactic literature | Subhāṣitas, Nīti·śataka, Bodhicary'âvatāra, Śṛṅgāra·jñāna·nirṇaya, Kalā·vilāsa, Catur·varga·saṅgraha, Nīti·mañjari, Mugdh'ôpadeśa, Subhāṣita·ratna·sandoha, Yoga·śāstra, Śṛṅgāra·vairāgya·taraṅgiṇī |
+| Hinduism | Drama, dance and the performance arts | Nāṭya·śāstra |
+| Hinduism | Music | Sangīta·śāstra |
+| Hinduism | Poetics | Kāvya·śāstra |
+| Hinduism | Mythology | Purāṇas |
+| Hinduism | Mystical speculations, Philosophy | Darśana, Sāṅkhya, Yoga (philosophy), Nyāya, Vaiśeṣika, Mīmāṅsa, Vedānta, Vaishnavism, Shaivism, Shaktism, Smārta Tradition and others |
+| Hinduism | Agriculture and food | Kṛṣi·śāstra |
+| Hinduism | Design, architecture (Vastu, Śilpa) | Śilpa·śāstra |
+| Hinduism | Temples, Sculpture | Bṛhat·saṃhitā |
+| Hinduism | Saṃskāra (rites-of-passage) | Gṛhya·sūtras |
+| Buddhism | Sutras, Vinaya, Kāvya, Medicine, Buddhist philosophy | Tripiṭaka, Mahayana sutras and shastras, tantras, grammar texts, Buddhist poetry, drama, Buddhist medical texts |
+| Jainism | Theology, philosophy | Tattvārtha Sūtra, Mahāpurāṇa and others |
+
+## Lexicon
+
+As an Indo-European language, Sanskrit's core lexicon is inherited from Proto-Indo-European. Over time however, the language exhibits a tendency to shed many of these inherited words and borrow others in their place from other sources.
+
+In the oldest Vedic literature, there are few such non-Indo-European words, but these progressively grow in volume.
+
+The following are some of the old Indo-European words that eventually fade out of use in Sanskrit:
+
+    ápasworkc.f. Latin opus kravís raw flesh c.f. Latin crūdus dáma- house c.f. Latin domus dā́nu-moisture háras-heat
+
+### Dravidian lexical influence
+
+The sources of these new loanwords are many, and vary across the different regions of the Indian subcontinent. But of all influences on the lexicon of Sanskrit, the most important is Dravidian.
+
+The following is a list of Dravidian entrants into Sanskrit lexicon, although some may have been contested:
+
+    phálamripe fruitProto-Dravidian *paẓam múkham mouthProto-Dravidian *mukam kajjala- soot, lampblack  kaṭu-sharp, pungent kaṭhina-hard, firm kuṭi-hut, house kuṭṭ-to pound kuṇḍala- loop, ring, earring, coil of rope khala-a rogue mayū́ra-peacock mallikājasmine mīna-fish vallī-creeper heramba- buffalo
+
+### Nominal-form preference
+
+While Vedic and epic form of speech is largely cognate to that of other Indo-European languages such as Greek and Latin, later Sanskrit shows a tendency to move away from using verbal forms to nominal ones. Examples of nominal forms taking the place of conventional conjugation are:
+
+    past participle with the instrumental nareṇa gataḥ     "the man went", (lit. "by the man [it was] gone")   active past participle in -vant kṛta·vān    "he did"
+
+However the most notable development is the prolific use of word-compounding to express ideas normally conveyed by verbal forms and subclauses introduced by conjunctions.
+
+Classical Sanskrit's pre-eminent playwright Kālidāsa uses:
+
+    vīcikṣobhastanitavihagaśreṇikāñcīguṇā     whose girdle-string is a row of birds, loquacious through the agitation of the waves
+
+## Influence on other languages
+
+For nearly 2,000 years, Sanskrit was the language of a cultural order that exerted influence across South Asia, Inner Asia, Southeast Asia, and to a certain extent East Asia. A significant form of post-Vedic Sanskrit is found in the Sanskrit of Indian epic poetry—the Ramayana and Mahabharata. The deviations from Pāṇini in the epics are generally considered to be on account of interference from Prakrits, or innovations, and not because they are pre-Paninian. Traditional Sanskrit scholars call such deviations ārṣa (आर्ष), meaning 'of the ṛṣis', the traditional title for the ancient authors. In some contexts, there are also more "prakritisms" (borrowings from common speech) than in Classical Sanskrit proper. Buddhist Hybrid Sanskrit is a literary language heavily influenced by the Middle Indo-Aryan languages, based on early Buddhist Prakrit texts which subsequently assimilated to the Classical Sanskrit standard in varying degrees.
+
+### Indian subcontinent
+
+Sanskrit has greatly influenced the languages of India that grew from its vocabulary and grammatical base; for instance, Hindi is a "Sanskritised register" of Hindustani. All modern Indo-Aryan languages, as well as Munda and Dravidian languages have borrowed many words either directly from Sanskrit (tatsama words), or indirectly via middle Indo-Aryan languages (tadbhava words). Words originating in Sanskrit are estimated at roughly fifty percent of the vocabulary of modern Indo-Aryan languages, as well as the literary forms of Malayalam and Kannada. Literary texts in Telugu are lexically Sanskrit or Sanskritised to an enormous extent, perhaps seventy percent or more. Marathi is another prominent language in Western India, that derives most of its words and Marathi grammar from Sanskrit. Sanskrit words are often preferred in the literary texts in Marathi over corresponding colloquial Marathi word.
+
+There has been a profound influence of Sanskrit on the lexical and grammatical systems of Dravidian languages. As per Dalby, India has been a single cultural area for about two millennia which has helped Sanskrit influence on all the Indic languages. Emeneau and Burrow mention the tendency "for all four of the Dravidian literary languages in South to make literary use of total Sanskrit lexicon indiscriminately". There are a large number of loanwords found in the vocabulary of the three major Dravidian languages Malayalam, Kannada and Telugu. Tamil also has significant loanwords from Sanskrit. Krishnamurthi mentions that although it is not clear when the Sanskrit influence happened on the Dravidian languages, it might have been around the 5th century BCE at the time of separation of Tamil and Kannada from a common ancestral stage. ‌The borrowed words are classified into two types based on phonological integration – tadbhava – those words derived from Prakrit and tatsama – unassimilated loanwords from Sanskrit.
+
+Strazny mentions that "so massive has been the influence that it is hard to utter Sanskrit words have influenced Kannada from the early times". The first document in Kannada, the Halmidi inscription has a large number of Sanskrit words. As per Kachru, the influence has not only been on single lexical items in Kannada but also on "long nominal compounds and complicated syntactic expressions". New words have been created in Kannada using Sanskrit derivational prefixes and suffixes like vikēndrīkaraṇa, anilīkaraṇa, bahīskruṭa. Similar stratification is found in verb morphology. Sanskrit words readily undergo verbalization in Kannada, verbalizing suffixes as in: chāpisu, dauḍāyisu, ravānisu.
+
+George mentions that "No other Dravidian language has been so deeply influenced by Sanskrit as Malayalam". According to Lambert, Malayalam is so immensely Sanskritised that every Sanskrit word can be used in Malayalam by integrating "prosodic phonological" changes as per Grant. Loanwords have been integrated into Malayalam by "prosodic phonological" changes as per Grant. These phonological changes are either by replacement of a vowel as in sant-am coming from Sanskrit santa, sāgar-am from sāgara, or addition of prothetic vowel as in aracan from rājā-, uruvam from rūpa, codyam from sodhya.
+
+Hans Henrich et al. note that, the language of the pre-modern Telugu literature was also highly influenced by Sanskrit and was standardized between 11th and 14th centuries. Aiyar has shown that in a class of tadbhavas in Telugu the first and second letters are often replaced by the third and fourth letters and fourth again replaced often by h. Examples of the same are: Sanskrit artha becomes ardhama, vīthi becomes vidhi, putra becomes bidda, mukham becomes muhamu.
+
+Tamil also has been influenced by Sanskrit. Hans Henrich et al. mention that propagation of Jainism and Buddhism into south India had its influence. Shulman mentions that although contrary to the views held by Tamil purists, modern Tamil has been significantly influenced from Sanskrit, further states that "Indeed there may well be more Sanskrit in Tamil than in the Sanskrit derived north-Indian vernaculars". Sanskrit words have been Tamilized through the "Tamil phonematic grid".
+
+### Beyond the Indian subcontinent
+
+Sanskrit was a language for religious purposes and for the political elite in parts of medieval era Southeast Asia, Central Asia and East Asia, having been introduced in these regions mainly along with the spread of Buddhism. In some cases, it has competed with Pāli for prominence.
+
+**East Asia**
+
+Buddhist Sanskrit has had a considerable influence on Sino-Tibetan languages such as Chinese, state William Wang and Chaofen Sun. Many words have been adopted from Sanskrit into the Chinese, both in its historic religious discourse and everyday use. This process likely started about 200 CE and continued through about 1400 CE, with the efforts of monks such as Yuezhi, Anxi, Kangju, Tianzhu, Yan Fodiao, Faxian, Xuanzang and Yijing.
+
+Further, as the Chinese languages and culture influenced the rest of East Asia, the ideas in Sanskrit texts and some of its linguistic elements migrated further.
+
+Many terms were transliterated directly and added to the Chinese vocabulary. Chinese words like 剎那 chànà (Devanagari: क्षण kṣaṇa 'instantaneous period') were borrowed from Sanskrit. Many Sanskrit texts survive only in Tibetan collections of commentaries to the Buddhist teachings, the Tengyur.
+
+Sanskrit has also influenced the religious register of Japanese mostly through transliterations. These were borrowed from Chinese transliterations. In particular, the Shingon (lit. 'True Words') sect of esoteric Buddhism has been relying on Sanskrit and original Sanskrit mantras and writings, as a means of realizing Buddhahood.
+
+**Southeast Asia**
+
+A large number of inscriptions in Sanskrit across Southeast Asia testify the influence the language held in these regions.
+
+Languages such as Indonesian, Thai and Lao contain many loanwords from Sanskrit, as does Khmer. Many Sanskrit loanwords are also found in Austronesian languages, such as Javanese, particularly the older form in which nearly half the vocabulary is borrowed.
+
+Other Austronesian languages, such as Malay (descended into modern Malaysian and Indonesian standards) also derive much of their vocabulary from Sanskrit. Similarly, Philippine languages such as Tagalog have some Sanskrit loanwords, although more are derived from Spanish.
+
+A Sanskrit loanword encountered in many Southeast Asian languages is the word bhāṣā, or spoken language, which is used to refer to the names of many languages.
+
+To this day, Southeast Asian languages such as Thai are known to draw upon Sanskrit for technical vocabulary.
+
+**Southeast Asia**
+
+**Indonesia**
+
+The earliest Sanskrit text which was founded in the Indonesian archipelago was at Eastern Borneo dating back to 400 CE known as the Mulavarman inscription. This is one of the reason of strong influence of Indian culture that entered the Malay archipelago during the Indianization era, and since then, Indian culture has been absorbed towards Indonesian culture and language. Thus, the Sanskrit culture in Indonesia exists not as a religious aspect but more towards a cultural aspect that has been present for generations, resulting in a more cultural rather than Hinduistic value of the Indonesian people. As a result, it is common to find Muslim or Christian Indonesians with names that have Indian or Sanskrit nuances. Unlike names derived from Sanskrit in Thai and Khmer, the pronunciation of Sanskrit names in Indonesia is more similar to the original Indian pronunciation, except that "v" is changed to "w", for example, "Vishnu" in India will be spelled "Wisnu" in Indonesia.
+
+Sanskrit has influenced Indonesian to a great extent. Many words in Indonesian are taken from Sanskrit, for example from the word "language" (bhāṣa) itself comes from Sanskrit which means: "talking accent". In fact, names of cities such as Jayapura (the capital city of Papua province), including terms and mottoes of government, educational and military institutions use Sanskrit, such as the rank of general for example in the Indonesian Navy is "Laksamana" (taken from the Ramayana). The name of the environmental award given to cities throughout Indonesia by the central government is also taken from Sanskrit known as the "Adipura" award, namely from the words "Adi" (which means "role model") and "Pura" (which means "city") literally "A role model city" or "a city worthy of being an example". Sanskrit terms are also widely used in numerous government institutions such as the armed forces and national police, for example, the motto of the Indonesian National Police which reads Rashtra Sevakottama, the motto of the Indonesian Military Academy which reads Adhitakarya Mahatvavirya Nagarabhakti (अधिकाऱ्या विर्य नगरभक्ति) and the motto of the Indonesian Naval Academy which reads Hree Dharma Shanti are one of the small examples. Other Sanskrit terms such as Adhi Makayasa, Chandradimuka, Tri Dharma Eka Karma, Taruna, etc. are also used intensively in the Indonesian security and defence forces.
+
+**Rest of the world**
+
+In ancient and medieval times, several Sanskrit words in the field of food and spices made their way into European languages including Greek, Latin and later English. Some of these are pepper, ginger and sugar. English today has several words of Sanskrit origin, most of them borrowed during the British Raj or later. Some of these words have in turn been borrowed by other European or world languages.
+
+## Modern era
+
+### Liturgy, ceremonies and meditation
+
+Sanskrit is the sacred language of various Hindu, Buddhist, and Jain traditions. It is used during worship in Hindu temples. In Newar Buddhism, it is used in all monasteries, while Mahayana and Tibetan Buddhist religious texts and sutras are in Sanskrit as well as vernacular languages. Some of the revered texts of Jainism including the Tattvartha sutra, Ratnakaranda śrāvakācāra, the Bhaktamara Stotra and later versions of the Agamas are in Sanskrit. Further, states Paul Dundas, Sanskrit mantras and Sanskrit as a ritual language was commonplace among Jains throughout their medieval history.
+
+Many Hindu rituals and rites-of-passage such as the "giving away the bride" and mutual vows at weddings, a baby's naming or first solid food ceremony and the goodbye during a cremation invoke and chant Sanskrit hymns. Major festivals such as the Durga Puja ritually recite entire Sanskrit texts such as the Devi Mahatmya every year particularly amongst the numerous communities of eastern India. In the south, Sanskrit texts are recited at many major Hindu temples such as the Meenakshi Temple. According to Richard H. Davis, a scholar of Religion and South Asian studies, the breadth and variety of oral recitations of the Sanskrit text Bhagavad Gita is remarkable. In India and beyond, its recitations include "simple private household readings, to family and neighborhood recitation sessions, to holy men reciting in temples or at pilgrimage places for passersby, to public Gita discourses held almost nightly at halls and auditoriums in every Indian city".
+
+### Literature and arts
+
+More than 3,000 Sanskrit works have been composed since India's independence in 1947. Much of this work has been judged of high quality, in comparison to both classical Sanskrit literature and modern literature in other Indian languages.
+
+The Sahitya Akademi has given an award for the best creative work in Sanskrit every year since 1967. In 2009, Satya Vrat Shastri became the first Sanskrit author to win the Jnanpith Award, India's highest literary award.
+
+Sanskrit is used extensively in the Carnatic and Hindustani branches of classical music. Kirtanas, bhajans, stotras, and shlokas of Sanskrit are popular throughout India. The Samaveda uses musical notations in several of its recessions.
+
+In Mainland China, musicians such as Sa Dingding have written pop songs in Sanskrit.
+
+Numerous loan Sanskrit words are found in other major Asian languages. For example, Filipino, Cebuano, Lao, Khmer Thai and its alphabets, Malay (including Malaysian and Indonesian), Javanese (old Javanese-English dictionary by P.J. Zoetmulder contains over 25,500 entries), and even in English.
+
+### Media
+
+Since 1974, there has been a short daily news broadcast on state-run All India Radio. These broadcasts are also made available on the internet on AIR's website. Sanskrit news is broadcast on TV and on the internet through the DD National channel at 6:55 am IST.
+
+Over 90 weeklies, fortnightlies and quarterlies are published in Sanskrit. Sudharma, a daily printed newspaper in Sanskrit, has been published out of Mysore, India, since 1970. It was started by K.N. Varadaraja Iyengar, a Sanskrit scholar from Mysore. Sanskrit Vartman Patram and Vishwasya Vrittantam started in Gujarat during the last five years.
+
+### Schools and contemporary status
+
+Sanskrit has been taught in schools from time immemorial in India. In modern times, the first Sanskrit University was Sampurnanand Sanskrit University, established in 1791 in the Indian city of Varanasi. Sanskrit is taught in 5,000 traditional schools (Pathashalas), and 14,000 schools in India, where there are also 22 colleges and universities dedicated to the exclusive study of the language. Sanskrit is one of the 22 scheduled languages of India. Despite it being a studied school subject in contemporary India, Sanskrit has not been spoken as a native language in centuries.
+
+The Central Board of Secondary Education of India (CBSE), along with several other state education boards, has made Sanskrit an alternative option to the state's own official language as a second or third language choice in the schools it governs. In such schools, learning Sanskrit is an option for grades 5 to 8 (Classes V to VIII). This is true of most schools affiliated with the Indian Certificate of Secondary Education (ICSE) board, especially in states where the official language is Hindi. Sanskrit is also taught in traditional gurukulas throughout India.
+
+A number of colleges and universities in India have dedicated departments for Sanskrit studies. In March 2020, the Indian Parliament passed the Central Sanskrit Universities Act, 2020 which upgraded three universities, National Sanskrit University, Central Sanskrit University and Shri Lal Bahadur Shastri National Sanskrit University, from the deemed to be university status to a central university status.
+
+Dmitri Mendeleev used the Sanskrit numbers of one, two and three (eka-, dvi- or dwi-, and tri- respectively) to give provisional names to his predicted elements, like eka-boron being Gallium or eka-Francium being Ununennium.
+
+In the province of Bali in Indonesia, a number of educational and scholarly institutions have also been conducting Sanskrit lessons for Hindu locals.
+
+**In the West**
+
+St James Junior School and Avanti Schools Trust in London, England, offer Sanskrit as part of the curriculum. Since September 2009, US high school students have been able to receive credits as Independent Study or toward Foreign Language requirements by studying Sanskrit as part of the "SAFL: Samskritam as a Foreign Language" program coordinated by Samskrita Bharati. In Australia, the private boys' high school Sydney Grammar School offers Sanskrit from years 7 through to 12, including for the Higher School Certificate. Other schools that offer Sanskrit include the Ficino School in Auckland, New Zealand; St James Preparatory Schools in Cape Town, Durban and Johannesburg, South Africa; John Colet School, Sydney, Australia; Erasmus School, Melbourne, Australia.
+
+### European studies and discourse
+
+European scholarship in Sanskrit, begun by Heinrich Roth (1620–1668) and Johann Ernst Hanxleden (1681–1731), is considered responsible for the discovery of an Indo-European language family by Sir William Jones (1746–1794). This research played an important role in the development of Western philology, or historical linguistics.
+
+The 18th- and 19th-century speculations about the possible links of Sanskrit to ancient Egyptian language were later proven to be wrong, but it fed an orientalist discourse both in the form Indophobia and Indophilia, states Trautmann. Sanskrit writings, when first discovered, were imagined by Indophiles to potentially be "repositories of the primitive experiences and religion of the human race, and as such confirmatory of the truth of Christian scripture", as well as a key to "universal ethnological $narrative".^{:96–97}$ The Indophobes imagined the opposite, making the counterclaim that there is little of any value in Sanskrit, portraying it as "a language fabricated by artful [Brahmin] priests", with little original thought, possibly copied from the Greeks who came with Alexander or perhaps the $Persians.^{:124–126}$
+
+Scholars such as William Jones and his colleagues felt the need for systematic studies of Sanskrit language and literature. This launched the Asiatic Society, an idea that was soon transplanted to Europe starting with the efforts of Henry Thomas Colebrooke in Britain, then Alexander Hamilton who helped expand its studies to Paris and thereafter his student Friedrich Schlegel who introduced Sanskrit to the universities of Germany. Schlegel nurtured his own students into influential European Sanskrit scholars, particularly through Franz Bopp and Friedrich Max Müller. As these scholars translated the Sanskrit manuscripts, the enthusiasm for Sanskrit grew rapidly among European scholars, states Trautmann, and chairs for Sanskrit "were established in the universities of nearly every German statelet" creating a competition for Sanskrit $experts.^{:133–142}$
+
+### Symbolic usage
+
+In India, Indonesia, Nepal, Bangladesh, Sri Lanka, and Southeast Asia, Sanskrit phrases are widely used as mottoes for various national, educational and social organisations:
+
+* India: Satyameva Jayate (सत्यमेव जयते), meaning 'truth alone triumphs'.
+* Nepal: Janani Janmabhūmischa Swargādapi Garīyasī (जननी जन्मभूमिश्च स्वर्गादपि गरीयसी), meaning 'mother and motherland are superior to heaven'.
+* Indonesia: In Indonesia, Sanskrit is widely used as terms and mottoes of the armed forces and other national organizations (See: Indonesian Armed Forces mottoes). Rastra Sewakottama (राष्ट्र सेवकोत्तम, transl. 'people's main servants') is the official motto of the Indonesian National Police, Tri Dharma Eka Karma (त्रिधर्म एक कर्म) is the official motto of the Indonesian Military, Kartika Eka Paksi (कार्तिक एक पक्षी, transl. 'unmatchable bird with noble goals') is the official motto of the Indonesian Army, Adhitakarya Mahatvavirya Nagarabhakti (अधीतकार्य महत्ववीर्य नगरभक्ति, transl. 'hard-working knights serving bravery as nations hero') is the official motto of the Indonesian Military Academy, Upakriya Labdha Prayojana Balottama (उपक्रिया लब्ध प्रयोजन बालोत्तम, transl. 'purpose of the unit is to give the best service to the nation by finding the perfect soldier') is the official motto of the Army Psychological Corps, Karmanye Vadikaraste Mafalesu Kadatjana (कर्मण्येवाधिकारस्ते मा फलेषु कदाचन, transl. 'working without counting the profit and loss') is the official motto of the Air-Force Special Forces (Paskhas), Jalesu Bhumyamca Jayamahe (जलेषु भूम्यम्च जयमहे, transl. 'on the sea and land we are glorious') is the official motto of the Indonesian Marine Corps, and there are more units and organizations in Indonesia either Armed Forces or civil which use the Sanskrit language respectively as their mottoes and other purposes.
+* Many of India's and Nepal's scientific and administrative terms use Sanskrit. The Indian guided missile program that was commenced in 1983 by the Defence Research and Development Organisation has named the five missiles (ballistic and others) that it developed Prithvi, Agni, Akash, Nag and the Trishul missile system. India's first modern fighter aircraft is named HAL Tejas.
+
+In November 2020, Gaurav Sharma, a New Zealand politician of Indian origin swore into parliament using Sanskrit alongside Māori; the decision was made as a "homage to all Indian languages" compromising between his native Pahari and Punjabi.
+
+### In popular culture
+
+The song My Sweet Lord by George Harrison includes The Hare Krishna mantra, also referred to reverentially as the Maha Mantra, a 16-word Vaishnava mantra which is mentioned in the Kali-Santarana Upanishad. Satyagraha, an opera by Philip Glass, uses texts from the Bhagavad Gita, sung in Sanskrit. In 1996, English psychedelic rock band Kula Shaker released Govinda, a song entirely sung in Sanskrit. The closing credits of The Matrix Revolutions has a prayer from the Brihadaranyaka Upanishad. The song "Cyber-raga" from Madonna's album Music includes Sanskrit chants, and Shanti/Ashtangi from her 1998 album Ray of Light, which won a Grammy, is the ashtanga vinyasa yoga chant. The lyrics include the mantra Om shanti. Composer John Williams featured choirs singing in Sanskrit for Indiana Jones and the Temple of Doom and in Star Wars: Episode I – The Phantom Menace. The theme song of Battlestar Galactica 2004 is the Gayatri Mantra, taken from the Rigveda. The lyrics of "The Child in Us" by Enigma also contain Sanskrit verses. In 2006, Mexican singer Paulina Rubio was influenced in Sanskrit for her concept album Ananda.
+

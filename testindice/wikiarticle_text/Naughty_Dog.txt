@@ -1,0 +1,79 @@
+# Naughty Dog
+
+Naughty Dog, LLC (formerly JAM Software, Inc.) is an American first-party video game developer based in Santa Monica, California. Founded by Andy Gavin and Jason Rubin in 1984, the studio was acquired by Sony Computer Entertainment in 2001. Gavin and Rubin produced a sequence of progressively more successful games, including Rings of Power and Way of the Warrior in the early 1990s. The latter game prompted Universal Interactive Studios to sign the duo to a three-title contract and fund the expansion of the company.
+
+After designer and producer Mark Cerny convinced Naughty Dog to create a character-based platform game that would use the 3D capabilities of the new systems, Naughty Dog created Crash Bandicoot for the PlayStation in 1996. Naughty Dog developed three Crash Bandicoot games over the next several years. After developing Crash Team Racing, the company began working on Jak and Daxter: The Precursor Legacy for the PlayStation 2.
+
+In 2004, Rubin, who had become the company's president, left the company to work on a new project, Iron and the Maiden. In addition to their inhouse game team, Naughty Dog is also home to the ICE Team, one of PlayStation Studios's central technology groups. The company's first PlayStation 3 game, Uncharted: Drake's Fortune, was released in 2007, followed by several sequels and spin-off titles. This lasted until Naughty Dog announced a new intellectual property for the PlayStation 3, The Last of Us, which was in development by a secondary team at the studio and released to critical acclaim in 2013 which spawned a franchise. The Last of Us Part II was released for the PlayStation 4 in 2020 to similar acclaim.
+
+## History
+
+Jason Rubin and Andy Gavin met as pre-teens in 1982 at a weekend Hebrew school in Virginia. After they discovered a mutual interest in computers and video games, they began regularly discussing programming, game development, and game piracy during class. Having experimented with Lisp and C++, Rubin and Gavin teamed up with a friend, Mike Goyet, and founded JAM Software in 1984. The acronym "JAM" stood for "Jason, Andy and Mike"; however, when Goyet became uninterested in the work and did not contribute to JAM's operations, Rubin and Gavin bought back his share of the company (about US$100) within months and the acronym was redefined as "Jason and Andy's Magic". Rubin and Gavin chose to create software for the Apple II and decided to create a skiing game for their second title. During production of the game, Gavin accidentally copied bootleg games over the only copy of the skiing game they had. Rubin then created a new skiing game called Ski Crazed (originally titled Ski Stud) within the weekend. The game played slowly, but Gavin reprogrammed the game to play quicker. Later, the game was gathered and published by Baudville, who bought the game from Jam Software for $250. Ski Crazed sold more than 1,000 copies. Rubin and Gavin created an Apple IIGS graphic adventure game titled Dream Zone, which was released in 1988 and ported to the Atari ST, Amiga and PCs.
+
+In 1989, Rubin and Gavin released a game titled Keef the Thief, which was published by Electronic Arts for the Apple IIGS, Amiga and PCs. To make a fresh start and to dissolve their relationship with Baudville, Rubin and Gavin renamed Jam Software as Naughty Dog on September 9, 1989. Naughty Dog also created and developed Rings of Power, which was published by Electronic Arts for the Sega Genesis in 1991. Rubin and Gavin were joined on the title by programmer Vijay Pande, who would later become better known for orchestrating the distributed computing disease researching project known as Folding@home at Stanford University.
+
+In 1994, Rubin and Gavin produced the 3DO Interactive Multiplayer title Way of the Warrior and presented it to Mark Cerny of Universal Interactive Studios. Cerny was pleased with Way of the Warrior and signed Naughty Dog on to Universal Interactive Studios for three additional games. Rubin and Gavin devised a plan to create a three-dimensional action-platform game. Because the player would be forced to constantly look at the character's rear, the game was jokingly codenamed "Sonic's Ass Game".
+
+Production of the game began in 1994, during which Naughty Dog expanded its number of employees and invented a development tool called Game Oriented Object Lisp, to create the characters and gameplay. Cartoonists Charles Zembillas and Joe Pearson were recruited to create the characters of the game, which resulted in the titular character Crash Bandicoot. After 14 months of development, the game was shown to Sony Computer Entertainment, who then signed on to publish the game. Crash Bandicoot was shown to the public for the first time at E3 and went on to become one of the highest-selling titles for the PlayStation console, selling over 6.8 million copies.
+
+Naughty Dog continued to develop two more Crash Bandicoot games, with a spin-off Crash Team Racing kart racing game. By then the studio was looking to develop games for Sony and not be constrained by Universal Interactive. Since Universal held the rights to the Crash Bandicoot series, Naughty Dog could not develop future games in its own right. The studio would be bought out by Sony in 2001 to avoid a repeat while it focused on developing the first game of the Jak and Daxter series. The Jak and Daxter games met similar success as the Crash Bandicoot games. During the development of Jak 3 and Jak X: Combat Racing games, Rubin and Gavin slowly transitioned Evan Wells and Stephen White to become co-presidents of Naughty Dog by the time the founders left the studio. White was replaced by Christophe Balestra after a year.
+
+In 2007, Naughty Dog began work on the Uncharted series, and made their first approach to realistic worlds and characters, in contrast to their Crash Bandicoot and Jak and Daxter series, which featured fantastical worlds set in a fictional setting. The Uncharted franchise has been praised for its cinematic quality and technical proficiency, and has sold nearly 17 million copies worldwide as of April 2012.
+
+During the 2011 Spike TV Video Game Awards, Naughty Dog unveiled a new intellectual property, The Last of Us, described as a "post-apocalyptic third-person action-adventure game", following the plight of a teenage girl, Ellie, and her adult protector, Joel, in a post-apocalyptic United States overrun with humans infected with a disease reminiscent of the infection caused by Cordyceps unilateralis. The Last of Us received universal acclaim upon release. In 2012 and 2013, Naughty Dog teamed with Mass Media Inc. to release the Jak and Daxter Collection. It contains high-definition ports of the original PlayStation 2 trilogy and was released for PlayStation 3 and PlayStation Vita respectively. In May 2013, Naughty Dog confirmed it will keep its existing in-house engine used in Uncharted and The Last of Us for the PlayStation 4.
+
+On November 23, 2013, Corrinne Yu, principal engine architect at Microsoft's Halo 4 developer 343 Industries, announced that she had joined Naughty Dog. On December 7, 2013, during the first edition of Spike's VGX award show, Naughty Dog won the Studio of the Year award for its work on The Last of Us. On March 4, 2014, Uncharted lead writer Amy Hennig left the studio, with Uncharted 3 director Justin Richmond and The Last of Us lead artist Nate Wells leaving soon after. Later, it was revealed that The Last of Us would be released on the PlayStation 4 as a remastered version.
+
+In March 2017, Balestra announced that he would retire his role as co-president on April 3, 2017, after working at the company for fifteen years. Evan Wells remains in his role as president. In September 2017, game director Bruce Straley announced his departure from Naughty Dog, stating that he "found [his] energy focusing in other directions" following a sabbatical. Creative director Neil Druckmann was promoted to vice president in March 2018.
+
+In October 2017, former environment artist David Ballard claimed that he suffered a mental breakdown after experiencing sexual harassment by a senior team member while working at Naughty Dog in late 2015, stating that he informed PlayStation's HR department and the following day was terminated from his position and offered $20,000 to remain silent regarding the allegations, which he declined. Naughty Dog responded to the allegations with a statement declaring that it had "not found any evidence of having received allegations from Mr. Ballard that he was harassed in any way".
+
+Neil Druckmann was promoted to co-president alongside Evan Wells on December 4, 2020; Alison Mori, formerly the director of operations, and Christian Gyrling, the former co-director of programming, were promoted to co-vice presidents in his place. On October 4, 2021, director of communications Arne Meyer announced that he had been promoted to co-vice president. In July 2022, Josh Scherr announced his departure from Naughty Dog after 21 years with the company. In July 2023, Wells announced he would retire from the studio by the year's end. Simultaneously, Druckmann became head of creative, with Mori promoted to studio manager and head of operations, Meyer to head of culture and communications, and Gyrling to head of technology. The leadership team was expanded further, with Erick Pangilinan and Jeremy Yates becoming co-heads of the art departments, and Anthony Newman to head of production and design. Gyrling departed the company after 17 years in November 2023, replaced as head of technology by Travis McIntosh.
+
+## Games developed
+
+As a subsidiary of Sony Computer Entertainment, Naughty Dog is best known for developing games for the PlayStation consoles, including the Crash Bandicoot series for the original PlayStation, Jak and Daxter on PlayStation 2, and Uncharted and The Last of Us on PlayStation 3, PlayStation 4 and PlayStation 5. Before this, they also developed games including Dream Zone, Keef the Thief, Rings of Power and Way of the Warrior.
+
+List of games developed by Naughty Dog :
+
+| Year | Title | Platform(s) |
+| - | - | - |
+| 1986 | Math Jam | Apple II |
+| 1987 | Ski Crazed | Apple II |
+| 1988 | Dream Zone | Amiga, Apple IIGS, Atari ST, DOS |
+| 1989 | Keef the Thief | Amiga, Apple IIGS, DOS |
+| 1992 | Rings of Power | Sega Genesis |
+| 1994 | Way of the Warrior | 3DO Interactive Multiplayer |
+| 1996 | Crash Bandicoot | PlayStation, PlayStation 3, PlayStation Portable, PlayStation Vita |
+| 1997 | Crash Bandicoot 2: Cortex Strikes Back | PlayStation, PlayStation 3, PlayStation Portable, PlayStation Vita |
+| 1998 | Crash Bandicoot: Warped | PlayStation, PlayStation 3, PlayStation Portable, PlayStation Vita |
+| 1999 | Crash Team Racing | PlayStation, PlayStation 3, PlayStation Portable, PlayStation Vita |
+| 2001 | Jak and Daxter: The Precursor Legacy | PlayStation 2, PlayStation 3, PlayStation Vita |
+| 2003 | Jak II | PlayStation 2, PlayStation 3, PlayStation Vita |
+| 2004 | Jak 3 | PlayStation 2, PlayStation 3, PlayStation Vita |
+| 2005 | Jak X: Combat Racing | PlayStation 2 |
+| 2007 | Uncharted: Drake's Fortune | PlayStation 3, PlayStation 4 |
+| 2009 | Uncharted 2: Among Thieves | PlayStation 3, PlayStation 4 |
+| 2011 | Uncharted 3: Drake's Deception | PlayStation 3, PlayStation 4 |
+| 2013 | The Last of Us | PlayStation 3 |
+| 2014 | The Last of Us: Left Behind | PlayStation 3, PlayStation 4 |
+| 2014 | The Last of Us Remastered | PlayStation 4 |
+| 2016 | Uncharted 4: A Thief's End | PlayStation 4 |
+| 2017 | Uncharted: The Lost Legacy | PlayStation 4 |
+| 2020 | The Last of Us Part II | PlayStation 4 |
+| 2022 | Uncharted: Legacy of Thieves Collection | PlayStation 5, Windows |
+| 2022 | The Last of Us Part I | PlayStation 5, Windows |
+| 2024 | The Last of Us Part II Remastered | PlayStation 5 |
+
+## Development philosophy
+
+Naughty Dog is known for its unique way of handling game development, as the studio does not have a producer in either of their teams. The work culture at Naughty Dog is very different from many other studios; there is less middle-management; the studio's lead effects artist, Keith Guerrette, said: "It comes with a lot of pros and cons but I think it definitely is one of our biggest strengths. Looking around at the rest of the industry, and this is something that we do talk about quite a bit, the companies that are doing really innovative, cool things are all the ones that don't have the management, like the business side, directly injected into the company. Sony's put us in this fantastic situation where we don't have any producers; we don't have any interactions with Sony corporate at all on the development." Naughty Dog has complete freedom in basically every aspect of game design, and that also means that Sony Interactive Entertainment, the parent company, does not prevent the studio from any implementation of game elements.
+
+### ICE Team
+
+Naughty Dog is home to the ICE Team, one of Sony's World Wide Studios central technology groups. The term ICE originally stands for Initiative for a Common Engine which describes the original purpose of the studio. The ICE Team focuses on creating core graphics technologies for Sony's worldwide first party published titles, including low level game engine components, graphics processing pipelines, supporting tools, and graphics profiling and debugging tools. The ICE Team also supports third party developers with a suite of engine components, and a graphics analysis, profiling, and debugging tool for the RSX. Both enable developers to get better performance out of PlayStation hardware.
+
+## Awards
+
+Naughty Dog won the Studio of the Year award at the 2013 VGX, the 2013 Golden Joystick Awards, and the 2020 Golden Joystick Awards.
+

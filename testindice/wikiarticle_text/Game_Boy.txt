@@ -1,0 +1,84 @@
+# Game Boy
+
+The Game Boy is an 8-bit fourth generation handheld game console developed and manufactured by Nintendo. It was first released in Japan on April 21, 1989, in North America later the same year, and in Europe in late 1990. It was designed by the same team that developed the Game & Watch series of handheld electronic games and several Nintendo Entertainment System (NES) games: Satoru Okada, Gunpei Yokoi, and Nintendo Research & Development 1.
+
+It is Nintendo's second handheld game console and combines features from both the Game & Watch handheld and NES home system. The console features a dot-matrix screen with adjustable contrast dial, five game control buttons (a directional pad, two game buttons, and "START" and "SELECT"), a single speaker with adjustable volume dial and, like its rivals, uses cartridges as physical media for games. The color scheme is made from two tones of grey with accents of black, blue, and dark magenta. All the corners of the portrait-oriented rectangular unit are softly rounded, except for the bottom right, which is curved. At launch, it was sold either as a standalone unit, or bundled with one of several games, among them Super Mario Land and Tetris. Several accessories were also developed, including a carrying pouch, a camera, and a printer.
+
+The Game Boy received mixed reviews from critics and was deemed technologically inferior to its fourth-generation competitors (Sega's Game Gear, Atari's Lynx, and NEC's TurboExpress) due to its monochrome graphics, along with a design that was perceived as bulky by some. In spite of its perceived disadvantages, it quickly outsold the competition, selling one million units in the United States within a few weeks. An estimated 118.69 million units of the Game Boy and its successor, the Game Boy Color, have been sold worldwide, making it the fourth best-selling video game console of all time. It is one of the most recognizable devices from the 1990s, becoming a cultural icon in the years following its release. Several redesigns were released during the console's lifetime, including the Game Boy Pocket in 1996 and the Game Boy Light in 1998 (Japan only). Production of the Game Boy continued until 2003, well after the release of its second successor, the Game Boy Advance, in 2001.
+
+## Development
+
+The Game Boy was designed by Nintendo's chief engineer Gunpei Yokoi and its Nintendo R&D1 team. Following the popularity of the Nintendo Entertainment System, he held a meeting with Nintendo president Hiroshi Yamauchi, saying that he could do a handheld system with interchangeable games. The original internal code name for the Game Boy is Dot Matrix Game, referring to its dot-matrix display in contrast to the preceding Game & Watch series (which Yokoi had created in 1980) that has segmented LCDs pre-printed with an overlay, limiting each model to only play one game. The initials DMG came to be featured on the final product's model number: "DMG-01". Satoru Okada and Yokoi led the development of the console, which led to disagreements. Yokoi felt that the console could be small, light, durable and successful and have a recognizable library of games. Shigesato Itoi visited Nintendo and conceived the name "Game Boy" for the console Yokoi was designing. The internal reaction to the Game Boy at Nintendo was initially very poor, earning it the derogatory nickname "DameGame" from Nintendo employees, in which dame (だめ) means "hopeless" or "useless".
+
+Game Boy was unveiled as a prototype in 1987 and later exhibited at multiple industry trade shows. The device incorporated a key design element from its predecessor, the Game & Watch: the 8-way directional control pad, often referred to as the "D-pad". The concept was developed by Gunpei Yokoi and his team at R&D1. Yokoi recognized that traditional joysticks might hinder the portability of handheld devices. As a result, he designed the D-pad – a flat controller that would not extend beyond the handheld device's casing. Hiroshi Yamauchi estimated that the console would achieve sales exceeding 25 million units in its initial three years, a claim that was regarded as bold for that period.
+
+Nintendo's philosophy centered on the belief that the appeal of a gaming system was primarily determined by the quality of its games. With this in mind, Gunpei Yokoi and Satoru Okada developed Super Mario Land, a portable adaptation of the Super Mario Bros. game, intending it to be the flagship title for the Game Boy. However, Henk Rogers brought the Soviet Union-made game, Tetris, to the attention of Nintendo of America. Despite its simple graphics and lack of a well-known brand, Tetris's suitability for a handheld platform convinced Nintendo president Minoru Arakawa to port and bundle it with the Game Boy. As a result, Tetris was bundled with the Game Boy in every region except Japan on its release, which occurred in Japan in April 1989, followed by North America in July, and Europe in September of the following year.
+
+Nintendo had spent $10 million on marketing the Game Boy. All remaining units were sold by March 23, 2003.
+
+## Hardware
+
+The Game Boy has four operation buttons labeled "A", "B", "SELECT", and "START", and a directional pad (d-pad). There is a volume control dial on the right side of the device and a similar dial on the left side to adjust the contrast. At the top of the Game Boy, a sliding on-off switch and the slot for the Game Boy cartridges are located. The on-off switch includes a physical lockout to prevent users from either inserting or removing a cartridge while the unit is switched on. Nintendo recommends users leave a cartridge in the slot to prevent dust and dirt from entering the system.
+
+The Game Boy contains optional input or output connectors. On the left side of the system is an external 3.5 mm × 1.35 mm DC power supply jack that allows users to use an external rechargeable battery pack or AC adapter (sold separately) instead of four AA batteries. The Game Boy requires 6 V DC of at least 150 mA. A 3.5 mm stereo headphone jack is located on the bottom side of the unit which allows users to listen to the audio with the bundled headphones or external speakers.
+
+The right side of the device offers a port that allows a user to connect to another Game Boy system via a link cable, provided both users are playing games that support connecting to each other (usually only the same copies of the game; the Pokémon games however, are a notable exception, as they can connect to each other between different generations). The port can also be used to connect a Game Boy Printer. The link cable was originally designed for players to play head-to-head two-player games such as in Tetris. However, game developer Satoshi Tajiri later used the link cable technology as a method of communication and networking in the popular Pokémon video game series.
+
+### Play It Loud! edition
+
+On March 20, 1995, Nintendo released several special edition Game Boy models with colored cases, advertising them in the "Play It Loud!" campaign, known in Japan as Game Boy Bros. Play It Loud! units were manufactured in green, red, white, black, yellow, blue, and clear (transparent), also referred to as "x-ray". A rare, limited edition Manchester United Game Boy is red, with the logos of the team emblazoned on it. The Play It Loud's screens also have a darker border than the normal Game Boy.
+
+### Technical specifications
+
+| Size | Approximately 90 mm (3.5 in) x 148 mm (5.8 in) x 32 mm (1.3 in) (WxHxD) |
+| - | - |
+| Weight | Approximately 220 g (7.8 oz) |
+| Screen | 2.6 inch reflective super-twisted nematic (STN) liquid-crystal display (LCD) Vertical blank duration: Approximately 1.1 ms |
+| Display size | Original: 47 mm (1.9 in) by 43 mm (1.7 in) Pocket: 48 mm (1.9 in) by 44 mm (1.7 in) |
+| Framerate | 59.727500569606 Hz |
+| Power | 6 V, 0.7 W (4× AA batteries) |
+| Battery life | Approximately 15 hours of gameplay |
+| CPU | Custom 8-bit Sharp LR35902 (based on modified 8080 and Z80) at 4.19 MHz |
+| Memory | 64 KB address space including: 8 KB of built-in working RAM Up to sixteen 8 KB switchable working RAM pages (in the game cartridge) for a maximum of 128 KB of external RAM (which may be battery-backed to hold save games) 8 KB RAM for LCD display 32 KB external Game Pak ROM, of which 16 KB is switchable On-CPU-Die 256-byte bootstrap ROM; 32 Kbit, 64 Kbit, 128 Kbit, 256 Kbit, 512 Kbit, 1 Mbit, 2 Mbit, 4 Mbit and 8 Mbit cartridges |
+| Resolution | 160 (w) × 144 (h) pixels (10:9 aspect ratio) |
+| Color support | 2-bit (four shades of "gray": light to very dark olive green) Reference:Original color scheme: 0x0 0x1 0x2 0x3 Pocket/Light color scheme: 0x0 0x1 0x2 0x3 |
+| Sound | 2 pulse wave generators, 1 PCM 4-bit wave sample (64 4-bit samples played in 1×64 bank or 2×32 bank) channel, 1 noise generator, and one audio input from the cartridge. The unit has only one speaker, however the headphone port outputs stereo sound. |
+| Input | Eight-way control padFour action buttons (A, B, Start, Select)Volume potentiometerContrast potentiometerPower switchSerial I/O ("Link cable"): 512 kbit/s with up to 4 connections in serialCartridge I/O |
+
+### Revisions
+
+On July 21, 1996, Nintendo released the Game Boy Pocket for US$69.99 in Japan and September 3, 1996, in North America: a smaller, lighter unit that required fewer batteries. It has space for two AAA batteries, which provide approximately 10 hours of gameplay. The unit is also fitted with a 3 volt, 2.35 mm x 0.75 mm DC jack which can be used to power the system. The Pocket has a smaller link port, which requires an adapter to link with the older Game Boy. The port design is used on all subsequent Game Boy models, excluding the Game Boy Micro. The screen was changed to an FSTN LCD which included a compensation layer to produce a true black-and-white display, rather than the "pea soup" monochromatic display of the original Game Boy. Also, the Game Boy Pocket (GBP) has a larger screen than the Game Boy Color (GBC) that later superseded it. The GBP's screen has a 65 mm (2.56 in) diagonal, 48.5 mm (1.91 in) width, and 43.5 mm (1.71 in) height, compared to a 59 mm (2.32 in) diagonal for the GBC. Although like its predecessor, the Game Boy Pocket has no backlight to allow play in a darkened area, it did notably improve visibility and pixel response-time (mostly eliminating ghosting). The first version did not have a power LED. This was soon added due to public demand, along with new Game Boy Pocket units of different colors (released on April 28, 1997), some of them new to the Game Boy line. There were several limited-edition Game Boy Pockets, including a gold-metal model exclusive to Japan. Although several publishers took advantage of the surge in new Game Boy users that came with the release of the Game Boy Pocket by re-releasing older Game Boy games, the Game Boy Pocket was not a new software platform and played the same software as the original Game Boy model.
+
+A clear 'skeleton' Famitsu Model-F edition appeared in 1997, which had only 5,000 units released, and a clear yellow edition.
+
+The Game Boy Light was released on April 14, 1998, and only available in Japan. Like the Game Boy Pocket, the system was priced at ¥6,800. The GBL is slightly bigger than the GBP and features an electroluminescent backlight for low-light conditions. It uses two AA batteries, which give it approximately 12 gameplay hours with the light on and 20 with it off. It was available in two standard colors: gold and silver. It also received numerous special editions, including a clear 'skeleton' Famitsu 500 edition (Model-F02) with white buttons. This edition was also limited to 5000 units, like the first Model-F. Astro Boy edition with a clear case and a picture of Astro Boy on it, an Osamu Tezuka World edition with a clear red case and a picture of his characters, and a solid yellow Pokémon Center Tokyo version.
+
+## Games
+
+### Launch titles
+
+The Game Boy was released alongside six launch titles, which are listed in the table below:
+
+| Name | Notes |
+| - | - |
+| Alleyway | Breakout clone |
+| Baseball | Sports game |
+| Super Mario Land | Platform game in the Super Mario series |
+| Tennis | Sports game |
+| Tetris | Port of the 1984 puzzle game of the same name |
+| Yakuman | Mahjong game |
+
+### Re-releases
+
+Various Game Boy and Color games have been re-released on newer Nintendo consoles through its digital distribution services. On June 6, 2011, Nintendo launched the Virtual Console service on the Nintendo 3DS handheld system. All releases (aside from the Pokémon games) do not support multiplayer.
+
+On February 8, 2023, Nintendo announced the introduction of Game Boy/Color games to its Nintendo Switch Online service.
+
+## Reception
+
+Though it was less technically advanced than Sega's Game Gear, Atari's Lynx and other competitors, notably by not supporting color, the Game Boy's lower price along with longer battery life made it much more successful. In its first two weeks in Japan, from its release on April 21, 1989, the entire stock of 300,000 units was sold; a few months later on July 31, 1989, 40,000 units were sold on its first release day. More than 118.69 million units of the Game Boy and Game Boy Color combined have been sold worldwide, with 32.47 million units in Japan, 44.06 million in the Americas, and 42.16 million in other regions. By Japanese fiscal year 1997, before Game Boy Color's release in late 1998, 64.42 million units of the Game Boy had been sold worldwide. At a March 14, 1994, press conference in San Francisco, Nintendo vice president of marketing Peter Main answered queries about when Nintendo was coming out with a color handheld system by stating that sales of the Game Boy were strong enough that it had decided to hold off on developing a successor handheld for the near future.
+
+In 1995, Nintendo of America announced that 46% of Game Boy players were female, which was higher than the percentage of female players for both the Nintendo Entertainment System (29%) and Super Nintendo Entertainment System (14%). In 2009, the Game Boy was inducted into the National Toy Hall of Fame, 20 years after its introduction.
+
+The console received mixed reviews from critics. In a 1997 year-end review, a team of four Electronic Gaming Monthly editors gave the Game Boy scores of 7.5, 7.0, 8.0, and 2.0. Sushi-X (who contributed the 2.0) panned the system due to its black-and-white display and motion blur, while his three co-reviewers praised its long battery life and strong games library, as well as the sleek, conveniently pocket-sized design of the new Game Boy Pocket model.
+

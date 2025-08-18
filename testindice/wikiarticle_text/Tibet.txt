@@ -1,0 +1,278 @@
+# Tibet
+
+Tibet (/tɪˈbɛt/ ; Tibetan: བོད, Lhasa dialect: Böd; Chinese: 西藏; pinyin: Xīzàng) is a region in the central part of East Asia, covering much of the Tibetan Plateau and spanning about 2,500,000 $km^2$ (970,000 sq mi). It is the homeland of the Tibetan people. Also resident on the plateau are some other ethnic groups such as the Monpa, Tamang, Qiang, Sherpa and Lhoba peoples and, since the 20th century, considerable numbers of Han Chinese and Hui settlers. Since the annexation of Tibet by the People's Republic of China in 1951, the entire plateau has been under the administration of the People's Republic of China. Tibet is divided administratively into the Tibet Autonomous Region, and parts of the Qinghai and Sichuan provinces. Tibet is also constitutionally claimed by the Republic of China as the Tibet Area since 1912.
+
+Tibet is the highest region on Earth, with an average elevation of 4,380 m (14,000 ft). Located in the Himalayas, the highest elevation in Tibet is Mount Everest, Earth's highest mountain, rising 8,848.86 m (29,032 ft) above sea level.
+
+The Tibetan Empire emerged in the 7th century. At its height in the 9th century, the Tibetan Empire extended far beyond the Tibetan Plateau, from the Tarim Basin and Pamirs in the west, to Yunnan and Bengal in the southeast. It then divided into a variety of territories. The bulk of western and central Tibet (Ü-Tsang) was often at least nominally unified under a series of Tibetan governments in Lhasa, Shigatse, or nearby locations. The eastern regions of Kham and Amdo often maintained a more decentralized indigenous political structure, being divided among a number of small principalities and tribal groups, while also often falling under Chinese rule; most of this area was eventually annexed into the Chinese provinces of Sichuan and Qinghai. The current borders of Tibet were generally established in the 18th century.
+
+Following the Xinhai Revolution against the Qing dynasty in 1912, Qing soldiers were disarmed and escorted out of the Tibet Area (Ü-Tsang). The region subsequently declared its independence in 1913, although this was not recognised by the subsequent Chinese Republican government. Later, Lhasa took control of the western part of Xikang. The region maintained its autonomy until 1951 when, following the Battle of Chamdo, Tibet was occupied and annexed by the People's Republic of China. The Tibetan government was abolished after the failure of the 1959 Tibetan uprising. Today, China governs western and central Tibet as the Tibet Autonomous Region while the eastern areas are now mostly autonomous prefectures within Sichuan, Qinghai and other neighbouring provinces. The Tibetan independence movement is principally led by the Tibetan diaspora. Human rights groups have accused the Chinese government of abuses of human rights in Tibet, including torture.
+
+With the growth of tourism in recent years, the service sector has become the largest sector in Tibet, accounting for 50.1% of the local GDP in 2020. The dominant religion in Tibet is Tibetan Buddhism; other religions include Bön, an indigenous religion similar to Tibetan Buddhism, Islam, and Christianity. Tibetan Buddhism is a primary influence on the art, music, and festivals of the region. Tibetan architecture reflects Chinese and Indian influences. Staple foods in Tibet are roasted barley, yak meat, and butter tea.
+
+## Names
+
+The Tibetan name for their land, Bod (བོད་), means 'Tibet' or 'Tibetan Plateau', although it originally meant the central region around Lhasa, now known in Tibetan as Ü (དབུས). The Standard Tibetan pronunciation of Bod is transcribed as: Bhö in Tournadre Phonetic Transcription; Bö in the THL Simplified Phonetic Transcription; and Poi in Tibetan pinyin. Some scholars believe the first written reference to Bod ('Tibet') was the ancient Bautai people recorded in the Egyptian-Greek works Periplus of the Erythraean Sea (1st century CE) and Geographia (Ptolemy, 2nd century CE), itself from the Sanskrit form Bhauṭṭa of the Indian geographical tradition.
+
+The modern Standard Chinese exonym for the ethnic Tibetan region is Zangqu (Chinese: 藏区; pinyin: Zàngqū), which derives by metonymy from the Tsang region around Shigatse plus the addition of a Chinese suffix qū (区), which means 'area, district, region, ward'. Tibetan people, language, and culture, regardless of where they are from, are referred to as Zang (Chinese: 藏; pinyin: Zàng), although the geographical term Xīzàng is often limited to the Tibet Autonomous Region. The term Xīzàng was coined during the Qing dynasty in the reign of the Jiaqing Emperor (1796–1820) through the addition of the prefix xī (西, 'west') to Zang.
+
+The best-known medieval Chinese name for Tibet is Tubo (Chinese: 吐蕃; or Tǔbō, 土蕃 or Tǔfān, 土番). This name first appears in Chinese characters as 土番 in the 7th century (Li Tai) and as 吐蕃 in the 10th century (Old Book of Tang, describing 608–609 emissaries from Tibetan King Namri Songtsen to Emperor Yang of Sui). In the Middle Chinese language spoken during that period, as reconstructed by William H. Baxter, 土番 was pronounced thux-phjon, and 吐蕃 was pronounced thux-pjon (with the x representing a shang tone).
+
+Other pre-modern Chinese names for Tibet include:
+
+* Wusiguo (Chinese: 烏斯國; pinyin: Wūsīguó; cf. Tibetan: dbus, Ü,);
+* Wusizang (Chinese: 烏斯藏; pinyin: wūsīzàng, cf. Tibetan: dbus-gtsang, Ü-Tsang);
+* Tubote (Chinese: 圖伯特; pinyin: Túbótè); and
+* Tanggute (Chinese: 唐古忒; pinyin: Tánggǔtè, cf. Tangut).
+
+American Tibetologist Elliot Sperling has argued in favor of a recent tendency by some authors writing in Chinese to revive the term Tubote (simplified Chinese: 图伯特; traditional Chinese: 圖伯特; pinyin: Túbótè) for modern use in place of Xizang, on the grounds that Tubote more clearly includes the entire Tibetan plateau rather than simply the Tibet Autonomous Region.
+
+The English word Tibet or Thibet dates back to the 18th century. Historical linguists generally agree that "Tibet" names in European languages are loanwords from Semitic Ṭībat or Tūbātt (Arabic: طيبة، توبات; Hebrew: טובּה, טובּת), itself deriving from Turkic Töbäd (plural of töbän), literally 'The Heights'.
+
+## Language
+
+Linguists generally classify the Tibetan language as a Tibeto-Burman language of the Sino-Tibetan language family although the boundaries between 'Tibetan' and certain other Himalayan languages can be unclear. According to Matthew Kapstein:
+
+   From the perspective of historical linguistics, Tibetan most closely resembles Burmese among the major languages of Asia. Grouping these two together with other apparently related languages spoken in the Himalayan lands, as well as in the highlands of Southeast Asia and the Sino-Tibetan frontier regions, linguists have generally concluded that there exists a Tibeto-Burman family of languages. More controversial is the theory that the Tibeto-Burman family is itself part of a larger language family, called Sino-Tibetan, and that through it Tibetan and Burmese are distant cousins of Chinese.
+
+The language has numerous regional dialects which are generally not mutually intelligible. It is employed throughout the Tibetan plateau and Bhutan and is also spoken in parts of Nepal and northern India, such as Sikkim. In general, the dialects of central Tibet (including Lhasa), Kham, Amdo and some smaller nearby areas are considered Tibetan dialects. Other forms, particularly Dzongkha, Sikkimese, Sherpa, and Ladakhi, are considered by their speakers, largely for political reasons, to be separate languages. However, if the latter group of Tibetan-type languages are included in the calculation, then 'greater Tibetan' is spoken by approximately 6 million people across the Tibetan Plateau. Tibetan is also spoken by approximately 150,000 exile speakers who have fled from modern-day Tibet to India and other countries.
+
+Although spoken Tibetan varies according to the region, the written language, based on Classical Tibetan, is consistent throughout. This is probably due to the long-standing influence of the Tibetan empire, whose rule embraced (and extended at times far beyond) the present Tibetan linguistic area, which runs from Gilgit Baltistan in the west to Yunnan and Sichuan in the east, and from north of Qinghai Lake south as far as Bhutan. The Tibetan language has its own script which it shares with Ladakhi and Dzongkha, and which is derived from the ancient Indian Brāhmī script.
+
+Starting in 2001, the local deaf sign languages of Tibet were standardized, and Tibetan Sign Language is now being promoted across the country.
+
+The first Tibetan-English dictionary and grammar book was written by Alexander Csoma de Kőrös in 1834.
+
+## History
+
+### Early history
+
+Humans inhabited the Tibetan Plateau at least 21,000 years ago. This population was largely replaced around 3,000 BP by Neolithic immigrants from northern China, but there is a partial genetic continuity between the Paleolithic inhabitants and contemporary Tibetan populations.
+
+The earliest Tibetan historical texts identify the Zhang Zhung culture as a people who migrated from the Amdo region into what is now the region of Guge in western Tibet. Zhang Zhung is considered to be the original home of the Bön religion. By the 1st century BCE, a neighboring kingdom arose in the Yarlung valley, and the Yarlung king, Drigum Tsenpo, attempted to remove the influence of the Zhang Zhung by expelling the Zhang's Bön priests from Yarlung. He was assassinated and Zhang Zhung continued its dominance of the region until it was annexed by Songtsen Gampo in the 7th century. Prior to Songtsen Gampo, the kings of Tibet were more mythological than factual, and there is insufficient evidence of their existence.
+
+### Tibetan Empire
+
+The history of a unified Tibet begins with the rule of Songtsen Gampo (604–650 CE), who united parts of the Yarlung River Valley and founded the Tibetan Empire. He also brought in many reforms, and Tibetan power spread rapidly, creating a large and powerful empire. It is traditionally considered that his first wife was the Princess of Nepal, Bhrikuti, and that she played a great role in the establishment of Buddhism in Tibet. In 640, he married Princess Wencheng, the niece of the Chinese emperor Taizong of Tang China.
+
+Under the next few Tibetan kings, Buddhism became established as the state religion and Tibetan power increased even further over large areas of Central Asia, while major inroads were made into Chinese territory, even reaching the Tang's capital Chang'an (modern Xi'an) in late 763. However, the Tibetan occupation of Chang'an only lasted for fifteen days, after which they were defeated by Tang and its ally, the Turkic Uyghur Khaganate.
+
+The Kingdom of Nanzhao (in Yunnan and neighbouring regions) remained under Tibetan control from 750 to 794, when they turned on their Tibetan overlords and helped the Chinese inflict a serious defeat on the Tibetans.
+
+In 747, the hold of Tibet was loosened by the campaign of general Gao Xianzhi, who tried to re-open the direct communications between Central Asia and Kashmir. By 750, the Tibetans had lost almost all of their central Asian possessions to the Chinese. However, after Gao Xianzhi's defeat by the Arabs and Qarluqs at the Battle of Talas (751) and the subsequent civil war known as the An Lushan Rebellion (755), Chinese influence decreased rapidly and Tibetan influence resumed.
+
+At its height in the 780s to 790s, the Tibetan Empire reached its highest glory when it ruled and controlled a territory stretching from modern-day Afghanistan, Bangladesh, Bhutan, Burma, China, India, Nepal, Pakistan, Kazakhstan, Kyrgyzstan, Tajikistan.
+
+In 821/822 CE, Tibet and China signed a peace treaty. A bilingual account of this treaty, including details of the borders between the two countries, is inscribed on a stone pillar which stands outside the Jokhang temple in Lhasa. Tibet continued as a Central Asian empire until the mid-9th century, when a civil war over succession led to the collapse of imperial Tibet. The period that followed is known traditionally as the Era of Fragmentation, when political control over Tibet became divided between regional warlords and tribes with no dominant centralized authority. An Islamic invasion from Bengal took place in 1206.
+
+### Yuan dynasty
+
+The Mongol Yuan dynasty, through the Bureau of Buddhist and Tibetan Affairs, or Xuanzheng Yuan, ruled Tibet through a top-level administrative department. One of the department's purposes was to select a dpon-chen ("great administrator"), usually appointed by the lama and confirmed by the Mongol emperor in Beijing. The Sakya lama retained a degree of autonomy, acting as the political authority of the region, while the dpon-chen held administrative and military power. Mongol rule of Tibet remained separate from the main provinces of China, but the region existed under the administration of the Yuan dynasty. If the Sakya lama ever came into conflict with the dpon-chen, the dpon-chen had the authority to send Chinese troops into the region.
+
+Tibet retained nominal power over religious and regional political affairs, while the Mongols managed a structural and administrative rule over the region, reinforced by the rare military intervention. This existed as a "diarchic structure" under the Yuan emperor, with power primarily in favor of the Mongols. Mongolian prince Khuden gained temporal power in Tibet in the 1240s and sponsored Sakya Pandita, whose seat became the capital of Tibet. Drogön Chögyal Phagpa, Sakya Pandita's nephew became Imperial Preceptor of Kublai Khan, founder of the Yuan dynasty.
+
+Yuan control over the region ended with the Ming overthrow of the Yuan and Tai Situ Changchub Gyaltsen's revolt against the Mongols. Following the uprising, Tai Situ Changchub Gyaltsen founded the Phagmodrupa dynasty, and sought to reduce Yuan influences over Tibetan culture and politics.
+
+### Phagmodrupa, Rinpungpa and Tsangpa dynasties
+
+Between 1346 and 1354, Tai Situ Changchub Gyaltsen toppled the Sakya and founded the Phagmodrupa dynasty. The following 80 years saw the founding of the Gelug school (also known as Yellow Hats) by the disciples of Je Tsongkhapa, and the founding of the important Ganden, Drepung and Sera monasteries near Lhasa. However, internal strife within the dynasty and the strong localism of the various fiefs and political-religious factions led to a long series of internal conflicts. The minister family Rinpungpa, based in Tsang (West Central Tibet), dominated politics after 1435. In 1565 they were overthrown by the Tsangpa dynasty of Shigatse which expanded its power in different directions of Tibet in the following decades and favoured the Karma Kagyu sect.
+
+### Rise of Ganden Phodrang and Buddhist Gelug school
+
+In 1578, Altan Khan of the Tümed Mongols gave Sonam Gyatso, a high lama of the Gelugpa school, the name Dalai Lama, Dalai being the Mongolian translation of the Tibetan name Gyatso "Ocean".
+
+The 5th Dalai Lama (1617-1682) is known for unifying the Tibetan heartland under the control of the Gelug school of Tibetan Buddhism, after defeating the rival Kagyu and Jonang sects and the secular ruler, the Tsangpa prince, in a prolonged civil war. His efforts were successful in part because of aid from Güshi Khan, the Oirat leader of the Khoshut Khanate. With Güshi Khan as a largely uninvolved overlord, the 5th Dalai Lama and his intimates established a civil administration which is referred to by historians as the Lhasa state. This Tibetan regime or government is also referred to as the Ganden Phodrang.
+
+### Qing dynasty
+
+Qing dynasty rule in Tibet began with their 1720 expedition to the country when they expelled the invading Dzungars. Amdo came under Qing control in 1724, and eastern Kham was incorporated into neighbouring Chinese provinces in 1728. Meanwhile, the Qing government sent resident commissioners called Ambans to Lhasa. In 1750, the Ambans and the majority of the Han Chinese and Manchus living in Lhasa were killed in a riot, and Qing troops arrived quickly and suppressed the rebels in the next year. Like the preceding Yuan dynasty, the Manchus of the Qing dynasty exerted military and administrative control of the region, while granting it a degree of political autonomy. The Qing commander publicly executed a number of supporters of the rebels and, as in 1723 and 1728, made changes in the political structure and drew up a formal organization plan. The Qing now restored the Dalai Lama as ruler, leading the governing council called Kashag, but elevated the role of Ambans to include more direct involvement in Tibetan internal affairs. At the same time, the Qing took steps to counterbalance the power of the aristocracy by adding officials recruited from the clergy to key posts.
+
+For several decades, peace reigned in Tibet, but in 1792, the Qing Qianlong Emperor sent a large Chinese army into Tibet to push the invading Nepalese out. This prompted yet another Qing reorganization of the Tibetan government, this time through a written plan called the "Twenty-Nine Regulations for Better Government in Tibet". Qing military garrisons staffed with Qing troops were now also established near the Nepalese border. Tibet was dominated by the Manchus in various stages in the 18th century, and the years immediately following the 1792 regulations were the peak of the Qing imperial commissioners' authority; but there was no attempt to make Tibet a Chinese province.
+
+In 1834, the Sikh Empire invaded and annexed Ladakh, a culturally Tibetan region that was an independent kingdom at the time. Seven years later, a Sikh army led by General Zorawar Singh invaded western Tibet from Ladakh, starting the Sino-Sikh War. A Qing-Tibetan army repelled the invaders but was in turn defeated when it chased the Sikhs into Ladakh. The war ended with the signing of the Treaty of Chushul between the Chinese and Sikh empires.
+
+As the Qing dynasty weakened, its authority over Tibet also gradually declined, and by the mid-19th century, its influence was minuscule. Qing authority over Tibet had become more symbolic than real by the late 19th century, although in the 1860s, the Tibetans still chose for reasons of their own to emphasize the empire's symbolic authority and make it seem substantial.
+
+In 1774, a Scottish nobleman, George Bogle, travelled to Shigatse to investigate prospects of trade for the East India Company. His efforts, while largely unsuccessful, established permanent contact between Tibet and the Western world. However, in the 19th century, tensions between foreign powers and Tibet increased. The British Empire was expanding its territories in India into the Himalayas, while the Emirate of Afghanistan and the Russian Empire were both doing likewise in Central Asia.
+
+In 1904, a British expedition to Tibet, spurred in part by a fear that Russia was extending its power into Tibet as part of the Great Game, was launched. Although the expedition initially set out with the stated purpose of resolving border disputes between Tibet and Sikkim, it quickly turned into a military invasion. The British expeditionary force, consisting of mostly Indian troops, quickly invaded and captured Lhasa, with the Dalai Lama fleeing to the countryside. Afterwards, the leader of the expedition, Sir Francis Younghusband, negotiated the Convention Between Great Britain and Tibet with the Tibetans, which guaranteed the British great economic influence but ensured the region remained under Chinese control. The Qing imperial resident, known as the Amban, publicly repudiated the treaty, while the British government, eager for friendly relations with China, negotiated a new treaty two years later known as the Convention Between Great Britain and China Respecting Tibet. The British agreed not to annex or interfere in Tibet in return for an indemnity from the Chinese government, while China agreed not to permit any other foreign state to interfere with the territory or internal administration of Tibet.
+
+In 1910, the Qing government sent a military expedition of its own under Zhao Erfeng to establish direct Manchu-Chinese rule and, in an imperial edict, deposed the Dalai Lama, who fled to British India. Zhao Erfeng defeated the Tibetan military conclusively and expelled the Dalai Lama's forces from the province. His actions were unpopular, and there was much animosity against him for his mistreatment of civilians and disregard for local culture.
+
+### Post-Qing period
+
+After the Xinhai Revolution (1911–12) toppled the Qing dynasty and the last Qing troops were escorted out of Tibet, the new Republic of China apologized for the actions of the Qing and offered to restore the Dalai Lama's title. The Dalai Lama refused any Chinese title and declared himself ruler of an independent Tibet. In 1913, Tibet and Mongolia concluded a treaty of mutual recognition. For the next 36 years, the 13th Dalai Lama and the regents who succeeded him governed Tibet. During this time, Tibet fought Chinese warlords for control of the ethnically Tibetan areas in Xikang and Qinghai (parts of Kham and Amdo) along the upper reaches of the Yangtze River. In 1914, the Tibetan government signed the Simla Convention with Britain, which recognized Chinese suzerainty over Tibet in return for a border settlement. China refused to sign the convention and lost its suzerain rights.
+
+When in the 1930s and 1940s the regents displayed negligence in affairs, the Kuomintang Government of the Republic of China took advantage of this to expand its reach into the territory. On December 20, 1941, Kuomintang leader Chiang Kai-Shek noted in his diary that Tibet would be among the territories which he would demand as restitution for China following the conclusion of World War II.
+
+### From 1950 to present
+
+Emerging with control over most of mainland China after the Chinese Civil War, the People's Republic of China annexed Tibet in 1950 and negotiated the Seventeen Point Agreement with the newly enthroned 14th Dalai Lama's government, affirming the People's Republic of China's sovereignty but granting the area autonomy. Subsequently, on his journey into exile, the 14th Dalai Lama completely repudiated the agreement, which he has repeated on many occasions. According to the CIA, the Chinese used the Dalai Lama to gain control of the military's training and actions.
+
+The Dalai Lama had a strong following as many people from Tibet looked at him not just as their political leader, but as their spiritual leader. After the Dalai Lama's government fled to Dharamsala, India, during the 1959 Tibetan Rebellion, it established a rival government-in-exile. Afterwards, the Central People's Government in Beijing renounced the agreement and began implementation of the halted social and political reforms. During the Great Leap Forward, between 200,000 and 1,000,000 Tibetans may have died and approximately 6,000 monasteries were destroyed during the Cultural Revolution—destroying the vast majority of historic Tibetan architecture.
+
+In 1980, General Secretary and reformist Hu Yaobang visited Tibet and ushered in a period of social, political, and economic liberalization. At the end of the decade, however, before the Tiananmen Square protests of 1989, monks in the Drepung and Sera monasteries started protesting for independence. The government halted reforms and started an anti-separatist campaign. Human rights organisations have been critical of the Beijing and Lhasa governments' approach to human rights in the region when cracking down on separatist convulsions that have occurred around monasteries and cities, most recently in the 2008 Tibetan unrest.
+
+The central region of Tibet is now an autonomous region within China, the Tibet Autonomous Region. The Tibet Autonomous Region is a province-level entity of the People's Republic of China. It is governed by a People's Government, led by a chairman. In practice, however, the chairman is subordinate to the branch secretary of the Chinese Communist Party (CCP). In 2010 it was reported that, as a matter of convention, the chairman had almost always been an ethnic Tibetan, while the party secretary had always been ethnically non-Tibetan.
+
+## Geography
+
+All of modern China, including Tibet, is considered a part of East Asia. Historically, some European sources also considered parts of Tibet to lie in Central Asia. Tibet is west of the Central China plain. In China, Tibet is regarded as part of 西部 (Xībù), a term usually translated by Chinese media as "the Western section", meaning "Western China".
+
+### Mountains and rivers
+
+Tibet has some of the world's tallest mountains, with several of them making the top ten list. Mount Everest, located on the border with Nepal, is, at 8,848.86 metres (29,032 ft), the highest mountain on earth. Several major rivers have their source in the Tibetan Plateau (mostly in present-day Qinghai Province). These include the Yangtze, Yellow River, Indus River, Mekong, Ganges, Salween and the Yarlung Tsangpo River (Brahmaputra River). The Yarlung Tsangpo Grand Canyon, along the Yarlung Tsangpo River, is among the deepest and longest canyons in the world.
+
+Tibet has been called the "Water Tower" of Asia, and China is investing heavily in water projects in Tibet.
+
+The Indus and Brahmaputra rivers originate from the vicinities of Lake Mapam Yumco in Western Tibet, near Mount Kailash. The mountain is a holy pilgrimage site for both Hindus and Tibetans. The Hindus consider the mountain to be the abode of Lord Shiva. The Tibetan name for Mount Kailash is Khang Rinpoche. Tibet has numerous high-altitude lakes referred to in Tibetan as tso or co. These include Qinghai Lake, Lake Manasarovar, Namtso, Pangong Tso, Yamdrok Lake, Siling Co, Lhamo La-tso, Lumajangdong Co, Lake Puma Yumco, Lake Paiku, Como Chamling, Lake Rakshastal, Dagze Co and Dong Co. The Qinghai Lake (Koko Nor) is the largest lake in the People's Republic of China.
+
+### Climate
+
+The climate is severely dry nine months of the year, and average annual snowfall is only 46 cm (18 inches), due to the rain shadow effect. Western passes receive small amounts of fresh snow each year but remain traversible all year round. Low temperatures are prevalent throughout these western regions, where bleak desolation is unrelieved by any vegetation bigger than a low bush, and where the wind sweeps unchecked across vast expanses of arid plain. The Indian monsoon exerts some influence on eastern Tibet. Northern Tibet is subject to high temperatures in the summer and intense cold in the winter.
+
+Climate data for Lhasa (1986−2015 normals, extremes 1951−2022) :
+
+| Month | Jan | Feb | Mar | Apr | May | Jun | Jul | Aug | Sep | Oct | Nov | Dec | Year |
+| - | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| Record high °C (°F) | 20.5 (68.9) | 21.3 (70.3) | 25.1 (77.2) | 25.9 (78.6) | 29.4 (84.9) | 30.8 (87.4) | 30.4 (86.7) | 27.2 (81.0) | 26.5 (79.7) | 24.8 (76.6) | 22.8 (73.0) | 20.1 (68.2) | 30.8 (87.4) |
+| Mean daily maximum °C (°F) | 8.4 (47.1) | 10.1 (50.2) | 13.3 (55.9) | 16.3 (61.3) | 20.5 (68.9) | 24.0 (75.2) | 23.3 (73.9) | 22.0 (71.6) | 20.7 (69.3) | 17.5 (63.5) | 12.9 (55.2) | 9.3 (48.7) | 16.5 (61.7) |
+| Daily mean °C (°F) | −0.3 (31.5) | 2.3 (36.1) | 5.9 (42.6) | 9.0 (48.2) | 13.1 (55.6) | 16.7 (62.1) | 16.5 (61.7) | 15.4 (59.7) | 13.8 (56.8) | 9.4 (48.9) | 3.8 (38.8) | −0.1 (31.8) | 8.8 (47.8) |
+| Mean daily minimum °C (°F) | −7.4 (18.7) | −4.7 (23.5) | −0.8 (30.6) | 2.7 (36.9) | 6.8 (44.2) | 10.9 (51.6) | 11.4 (52.5) | 10.7 (51.3) | 8.9 (48.0) | 3.1 (37.6) | −3 (27) | −6.8 (19.8) | 2.7 (36.8) |
+| Record low °C (°F) | −16.5 (2.3) | −15.4 (4.3) | −13.6 (7.5) | −8.1 (17.4) | −2.7 (27.1) | 2.0 (35.6) | 4.5 (40.1) | 3.3 (37.9) | 0.3 (32.5) | −7.2 (19.0) | −11.2 (11.8) | −16.1 (3.0) | −16.5 (2.3) |
+| Average precipitation mm (inches) | 0.9 (0.04) | 1.8 (0.07) | 2.9 (0.11) | 8.6 (0.34) | 28.4 (1.12) | 75.9 (2.99) | 129.6 (5.10) | 133.5 (5.26) | 66.7 (2.63) | 8.8 (0.35) | 0.9 (0.04) | 0.3 (0.01) | 458.3 (18.06) |
+| Average precipitation days (≥ 0.1 mm) | 0.6 | 1.2 | 2.1 | 5.4 | 9.0 | 14.0 | 19.4 | 19.9 | 14.6 | 4.1 | 0.6 | 0.4 | 91.3 |
+| Average relative humidity (%) | 26 | 25 | 27 | 36 | 41 | 48 | 59 | 63 | 59 | 45 | 34 | 29 | 41 |
+| Mean monthly sunshine hours | 250.9 | 231.2 | 253.2 | 248.8 | 280.4 | 260.7 | 227.0 | 214.3 | 232.7 | 280.3 | 267.1 | 257.2 | 3,003.8 |
+| Percent possible sunshine | 78 | 72 | 66 | 65 | 66 | 61 | 53 | 54 | 62 | 80 | 84 | 82 | 67 |
+| Source 1: China Meteorological Administration, all-time extreme temperature ||||||||||||||
+| Source 2: China Meteorological Administration National Meteorological Information Center ||||||||||||||
+
+Climate data for Leh (1951–1980) :
+
+| Month | Jan | Feb | Mar | Apr | May | Jun | Jul | Aug | Sep | Oct | Nov | Dec | Year |
+| - | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| Record high °C (°F) | 8.3 (46.9) | 12.8 (55.0) | 19.4 (66.9) | 23.9 (75.0) | 28.9 (84.0) | 34.8 (94.6) | 34.0 (93.2) | 34.2 (93.6) | 30.6 (87.1) | 25.6 (78.1) | 20.0 (68.0) | 12.8 (55.0) | 34.8 (94.6) |
+| Mean daily maximum °C (°F) | −2.0 (28.4) | 1.5 (34.7) | 6.5 (43.7) | 12.3 (54.1) | 16.2 (61.2) | 21.8 (71.2) | 25.0 (77.0) | 25.3 (77.5) | 21.7 (71.1) | 14.6 (58.3) | 7.9 (46.2) | 2.3 (36.1) | 12.8 (55.0) |
+| Mean daily minimum °C (°F) | −14.4 (6.1) | −11.0 (12.2) | −5.9 (21.4) | −1.1 (30.0) | 3.2 (37.8) | 7.4 (45.3) | 10.5 (50.9) | 10.0 (50.0) | 5.8 (42.4) | −1.0 (30.2) | −6.7 (19.9) | −11.8 (10.8) | −1.3 (29.7) |
+| Record low °C (°F) | −28.3 (−18.9) | −26.4 (−15.5) | −19.4 (−2.9) | −12.8 (9.0) | −4.4 (24.1) | −1.1 (30.0) | 0.6 (33.1) | 1.5 (34.7) | −4.4 (24.1) | −8.5 (16.7) | −17.5 (0.5) | −25.6 (−14.1) | −28.3 (−18.9) |
+| Average rainfall mm (inches) | 9.5 (0.37) | 8.1 (0.32) | 11.0 (0.43) | 9.1 (0.36) | 9.0 (0.35) | 3.5 (0.14) | 15.2 (0.60) | 15.4 (0.61) | 9.0 (0.35) | 7.5 (0.30) | 3.6 (0.14) | 4.6 (0.18) | 105.5 (4.15) |
+| Average rainy days | 1.3 | 1.1 | 1.3 | 1.0 | 1.1 | 0.4 | 2.1 | 1.9 | 1.2 | 0.4 | 0.5 | 0.7 | 13.0 |
+| Average relative humidity (%) (at 17:30 IST) | 51 | 51 | 46 | 36 | 30 | 26 | 33 | 34 | 31 | 27 | 40 | 46 | 38 |
+| Source: India Meteorological Department ||||||||||||||
+
+### Wildlife
+
+Sus scrofa expanded from its origin in southeast Asia into the Plateau, acquiring and fixing adaptive alleles for the high-altitude environment. The forests of Tibet are home to black bears, red pandas, musk deer, barking deer, and squirrels. Monkeys such as rhesus macaques and langurs live in the warmer forest zones. Tibetan antelopes, gazelles, and kiangs gaze on the grasslands of the Tibetan plateau. There are more than 500 bird species in Tibet. Because of the high altitude and harsh climate, there are few insects in Tibet.
+
+Snow leopards are hunted for their fur and the eggs of black-necked cranes have been collected as a delicacy food.
+
+### Regions
+
+Cultural Tibet consists of several regions. These include Amdo (A mdo) in the northeast, which is administratively part of the provinces of Qinghai, Gansu, and Sichuan. Kham (Khams) in the southeast encompasses parts of western Sichuan, northern Yunnan, southern Qinghai, and the eastern part of the Tibet Autonomous Region. Ü-Tsang (dBus gTsang) (Ü in the center, Tsang in the center-west, and Ngari (mNga' ris) in the far west) covered the central and western portion of Tibet Autonomous Region.
+
+Tibetan cultural influences extend to the neighboring states of Bhutan, Nepal, regions of India such as Sikkim, Ladakh, Lahaul, and Spiti, Northern Pakistan Baltistan or Balti-yul in addition to designated Tibetan autonomous areas in adjacent Chinese provinces.
+
+### Cities, towns and villages
+
+There are over 800 settlements in Tibet. Lhasa is Tibet's traditional capital and the capital of Tibet Autonomous Region. It contains two world heritage sites – the Potala Palace and Norbulingka, which were the residences of the Dalai Lama. Lhasa contains a number of significant temples and monasteries, including Jokhang and Ramoche Temple.
+
+Shigatse is the second largest city in the Tibet AR, west of Lhasa. Gyantse and Qamdo are also amongst the largest.
+
+Other cities and towns in cultural Tibet include Shiquanhe (Gar), Nagchu, Bamda, Rutog, Nyingchi, Nedong, Coqên, Barkam, Sagya, Gertse, Pelbar, Lhatse, and Tingri; in Sichuan, Kangding (Dartsedo); in Qinghai, Jyekundo (Yushu), Machen, and Golmud; in India, Tawang, Leh, and Gangtok, and in Pakistan, Skardu, Kharmang, and Khaplu.
+
+## Economy
+
+The Tibetan economy is dominated by subsistence agriculture. Due to limited arable land, the primary occupation of the Tibetan Plateau is raising livestock, such as sheep, cattle, goats, camels, yaks, dzo, and horses.
+
+The main crops grown are barley, wheat, buckwheat, rye, potatoes, and assorted fruits and vegetables. Tibet is ranked the lowest among China's 31 provinces on the Human Development Index according to UN Development Programme data. In recent years, due to increased interest in Tibetan Buddhism, tourism has become an increasingly important sector, and is actively promoted by the authorities. Tourism brings in the most income from the sale of handicrafts. These include Tibetan hats, jewelry (silver and gold), wooden items, clothing, quilts, fabrics, Tibetan rugs and carpets. The Central People's Government exempts Tibet from all taxation and provides 90% of Tibet's government expenditures. However, most of this investment goes to pay migrant workers who do not settle in Tibet and send much of their income home to other provinces.
+
+Forty percent of the rural cash income in the Tibet Autonomous Region is derived from the harvesting of the fungus Ophiocordyceps sinensis (formerly Cordyceps sinensis); contributing at least 1.8 billion yuan, (US$225 million) to the region's GDP.
+
+The Qingzang railway linking the Tibet Autonomous Region to Qinghai Province was opened in 2006, but it was controversial.
+
+In January 2007, the Chinese government issued a report outlining the discovery of a large mineral deposit under the Tibetan Plateau. The deposit has an estimated value of $128 billion and may double Chinese reserves of zinc, copper, and lead. The Chinese government sees this as a way to alleviate the nation's dependence on foreign mineral imports for its growing economy. However, critics worry that mining these vast resources will harm Tibet's fragile ecosystem and undermine Tibetan culture.
+
+On January 15, 2009, China announced the construction of Tibet's first expressway, the Lhasa Airport Expressway, a 37.9 km (23.5 mi) stretch of controlled-access highway in southwestern Lhasa. The project will cost 1.55 billion yuan (US$227 million).
+
+From January 18–20, 2010, a national conference on Tibet and areas inhabited by Tibetans in Sichuan, Yunnan, Gansu and Qinghai was held in China and a plan to improve development of the areas was announced. The conference was attended by General secretary Hu Jintao, Wu Bangguo, Wen Jiabao, Jia Qinglin, Li Changchun, Xi Jinping, Li Keqiang, He Guoqiang and Zhou Yongkang, all members of Politburo Standing Committee of the Chinese Communist Party. The plan called for improvement of rural Tibetan income to national standards by 2020 and free education for all rural Tibetan children. China has invested 310 billion yuan (about 45.6 billion U.S. dollars) in Tibet since 2001.
+
+### Development zone
+
+The State Council approved Tibet Lhasa Economic and Technological Development Zone as a state-level development zone in 2001. It is located in the western suburbs of Lhasa, the capital of the Tibet Autonomous Region. It is 50 kilometres (31 miles) away from the Gonggar Airport, and 2 km (1.2 mi) away from Lhasa Railway Station and 2 km (1.2 mi) away from 318 national highway.
+
+The zone has a planned area of 5.46 $km^2$ (2.11 sq mi) and is divided into two zones. Zone A developed a land area of 2.51 $km^2$ (0.97 sq mi) for construction purposes. It is a flat zone, and has the natural conditions for good drainage.
+
+## Demographics
+
+Historically, the population of Tibet consisted of primarily ethnic Tibetans and some other ethnic groups. According to tradition the original ancestors of the Tibetan people, as represented by the six red bands in the Tibetan flag, are: the Se, Mu, Dong, Tong, Dru and Ra. Other traditional ethnic groups with significant population or with the majority of the ethnic group residing in Tibet (excluding a disputed area with India) include Bai people, Blang, Bonan, Dongxiang, Han, Hui people, Lhoba, Lisu people, Miao, Mongols, Monguor (Tu people), Menba (Monpa), Mosuo, Nakhi, Qiang, Nu people, Pumi, Salar, and Yi people.
+
+The proportion of the non-Tibetan population in Tibet is disputed. On the one hand, the Central Tibetan Administration of the Dalai Lama accuses China of actively swamping Tibet with migrants in order to alter Tibet's demographic makeup. On the other hand, according to the 2010 Chinese census ethnic Tibetans comprise 90% of a total population of 3 million in the Tibet Autonomous Region.
+
+## Culture
+
+### Religion
+
+**Buddhism**
+
+Religion is extremely important to the Tibetans and has a strong influence over all aspects of their lives. Bön is the indigenous religion of Tibet, but has been almost eclipsed by Tibetan Buddhism, a distinctive form of Mahayana and Vajrayana, which was introduced into Tibet from the Sanskrit Buddhist tradition of northern India. Tibetan Buddhism is practiced not only in Tibet but also in Mongolia, parts of northern India, the Buryat Republic, the Tuva Republic, and in the Republic of Kalmykia and some other parts of China. During China's Cultural Revolution, nearly all Tibet's monasteries were ransacked and destroyed by the Red Guards. A few monasteries have begun to rebuild since the 1980s (with limited support from the Chinese government) and greater religious freedom has been granted – although it is still limited. Monks returned to monasteries across Tibet and monastic education resumed even though the number of monks imposed is strictly limited. Before the 1950s, between 10 and 20% of males in Tibet were monks.
+
+Tibetan Buddhism has five main traditions (the suffix pa is comparable to "er" in English):
+
+* Gelug(pa), Way of Virtue, also known casually as Yellow Hat, whose spiritual head is the Ganden Tripa and whose temporal head is the Dalai Lama. Successive Dalai Lamas ruled Tibet from the mid-17th to mid-20th centuries. This order was founded in the 14th to 15th centuries by Je Tsongkhapa, based on the foundations of the Kadampa tradition. Tsongkhapa was renowned for both his scholasticism and his virtue. The Dalai Lama belongs to the Gelugpa school, and is regarded as the embodiment of the Bodhisattva of Compassion.
+* Kagyu(pa), Oral Lineage. This contains one major subsect and one minor subsect. The first, the Dagpo Kagyu, encompasses those Kagyu schools that trace back to Gampopa. In turn, the Dagpo Kagyu consists of four major sub-sects: the Karma Kagyu, headed by a Karmapa, the Tsalpa Kagyu, the Barom Kagyu, and Pagtru Kagyu. The once-obscure Shangpa Kagyu, which was famously represented by the 20th-century teacher Kalu Rinpoche, traces its history back to the Indian master Niguma, sister of Kagyu lineage holder Naropa. This is an oral tradition which is very much concerned with the experiential dimension of meditation. Its most famous exponent was Milarepa, an 11th-century mystic.
+* Nyingma(pa), The Ancient Ones. This is the oldest, the original order founded by Padmasambhava.
+* Sakya(pa), Grey Earth, headed by the Sakya Trizin, founded by Khon Konchog Gyalpo, a disciple of the great translator Drokmi Lotsawa. Sakya Pandita 1182–1251 CE was the great-grandson of Khon Konchog Gyalpo. This school emphasizes scholarship.
+* Jonang(pa) Its origins in Tibet can be traced to early 12th century master Yumo Mikyo Dorje, but became much wider known with the help of Dolpopa Sherab Gyaltsen, a monk originally trained in the Sakya school. The Jonang school was widely thought to have become extinct in the late 17th century at the hands of the 5th Dalai Lama, who forcibly annexed the Jonang monasteries to his Gelug school, declaring them heretical. Thus, Tibetologists were astonished when fieldwork turned up several active Jonangpa monasteries, including the main monastery, Tsangwa, located in Zamtang County, Sichuan. Almost 40 monasteries, comprising about 5000 monks, have subsequently been found, including some in the Amdo Tibetan and rGyalgrong areas of Qinghai, Sichuan and Tibet. One of the primary supporters of the Jonang lineage in exile has been the 14th Dalai Lama of the Gelugpa lineage. The Jonang tradition has recently officially registered with the Tibetan Government in exile to be recognized as the fifth living Buddhist tradition of Tibetan Buddhism. The 14th Dalai Lama assigned Jebtsundamba Khutuktu of Mongolia (who is considered to be an incarnation of Taranatha) as the leader of the Jonang tradition.
+
+The Chinese government continued to pursue a strategy of forced assimilation and suppression of Tibetan Buddhism, as demonstrated by the laws designed to control the next reincarnation of the Dalai Lama and those of other Tibetan eminent lamas. Monks and nuns who refused to denounce the Dalai Lama have been expelled from their monasteries, imprisoned, and tortured.
+
+It was reported in June 2021 that amidst the 2020–2022 China–India skirmishes, the People's Liberation Army had been forming a new unit for Tibetans who would be taken to Buddhist monks for religious blessings after completing their training.
+
+**Christianity**
+
+The first Christians documented to have reached Tibet were the Nestorians, of whom various remains and inscriptions have been found in Tibet. They were also present at the imperial camp of Möngke Khan at Shira Ordo, where they debated in 1256 with Karma Pakshi (1204/6-83), head of the Karma Kagyu order. Desideri, who reached Lhasa in 1716, encountered Armenian and Russian merchants.
+
+Roman Catholic Jesuits and Capuchins arrived from Europe in the 17th and 18th centuries. Portuguese missionaries Jesuit Father António de Andrade and Brother Manuel Marques first reached the kingdom of Gelu in western Tibet in 1624 and was welcomed by the royal family who allowed them to build a church later on. By 1627, there were about a hundred local converts in the Guge kingdom. Later on, Christianity was introduced to Rudok, Ladakh and Tsang and was welcomed by the ruler of the Tsang kingdom, where Andrade and his fellows established a Jesuit outpost at Shigatse in 1626.
+
+In 1661 another Jesuit, Johann Grueber, crossed Tibet from Sining to Lhasa (where he spent a month), before heading on to Nepal. He was followed by others who actually built a church in Lhasa. These included the Jesuit Father Ippolito Desideri, 1716–1721, who gained a deep knowledge of Tibetan culture, language and Buddhism, and various Capuchins in 1707–1711, 1716–1733 and 1741–1745, Christianity was used by some Tibetan monarchs and their courts and the Karmapa sect lamas to counterbalance the influence of the Gelugpa sect in the 17th century until in 1745 when all the missionaries were expelled at the lama's insistence.
+
+In 1877, the Protestant James Cameron from the China Inland Mission walked from Chongqing to Batang in Garzê Tibetan Autonomous Prefecture, Sichuan province, and "brought the Gospel to the Tibetan people." Beginning in the 20th century, in Dêqên Tibetan Autonomous Prefecture in Yunnan, a large number of Lisu people and some Yi and Nu people converted to Christianity. Famous earlier missionaries include James O. Fraser, Alfred James Broomhall and Isobel Kuhn of the China Inland Mission, among others who were active in this area.
+
+Proselytising has been illegal in China since 1949. But as of 2013, many Christian missionaries were reported to be active in Tibet with the tacit approval of Chinese authorities, who view the missionaries as a counterforce to Tibetan Buddhism or as a boon to the local economy.
+
+**Islam**
+
+Muslims have been living in Tibet since as early as the 8th or 9th century. In Tibetan cities, there are small communities of Muslims, known as Kachee (Kache), who trace their origin to immigrants from three main regions: Kashmir (Kachee Yul in ancient Tibetan), Ladakh and the Central Asian Turkic countries. Islamic influence in Tibet also came from Persia. A Muslim Sufi Syed Ali Hamdani preached to the people of Baltistan, then known as little Tibet. After 1959, a group of Tibetan Muslims made a case for Indian nationality based on their historic roots to Kashmir and the Indian government declared all Tibetan Muslims Indian citizens later on that year. Other Muslim ethnic groups who have long inhabited Tibet include Hui, Salar, Dongxiang and Bonan. There is also a well established Chinese Muslim community (gya kachee), which traces its ancestry back to the Hui ethnic group of China.
+
+### Tibetan art
+
+Tibetan representations of art are intrinsically bound with Tibetan Buddhism and commonly depict deities or variations of Buddha in various forms from bronze Buddhist statues and shrines, to highly colorful thangka paintings and mandalas. Thangkas are Tibet's traditional cloth paintings. Rendered on cotton cloth with a thin rod at the top, they portray Buddhist deities or themes in color and detail.
+
+* A thangka painting in Sikkim
+* A ritual box
+
+### Architecture
+
+Tibetan architecture contains Chinese and Indian influences, and reflects a deeply Buddhist approach. The Buddhist wheel, along with two dragons, can be seen on nearly every Gompa in Tibet. The design of the Tibetan Chörtens can vary, from roundish walls in Kham to squarish, four-sided walls in Ladakh.
+
+The most distinctive feature of Tibetan architecture is that many of the houses and monasteries are built on elevated, sunny sites facing the south, and are often made out of a mixture of rocks, wood, cement and earth. Little fuel is available for heat or lighting, so flat roofs are built to conserve heat, and multiple windows are constructed to let in sunlight. Walls are usually sloped inwards at 10 degrees as a precaution against the frequent earthquakes in this mountainous area.
+
+Standing at 117 metres (384 feet) in height and 360 metres (1,180 feet) in width, the Potala Palace is the most important example of Tibetan architecture. Formerly the residence of the Dalai Lama, it contains over one thousand rooms within thirteen stories, and houses portraits of the past Dalai Lamas and statues of the Buddha. It is divided between the outer White Palace, which serves as the administrative quarters, and the inner Red Quarters, which houses the assembly hall of the Lamas, chapels, 10,000 shrines, and a vast library of Buddhist scriptures. The Potala Palace is a World Heritage Site, as is Norbulingka, the former summer residence of the Dalai Lama.
+
+### Music
+
+The music of Tibet reflects the cultural heritage of the trans-Himalayan region, centered in Tibet but also known wherever ethnic Tibetan groups are found in India, Bhutan, Nepal and further abroad. First and foremost Tibetan music is religious music, reflecting the profound influence of Tibetan Buddhism on the culture.
+
+Tibetan music often involves chanting in Tibetan or Sanskrit, as an integral part of the religion. These chants are complex, often recitations of sacred texts or in celebration of various festivals. Yang chanting, performed without metrical timing, is accompanied by resonant drums and low, sustained syllables. Other styles include those unique to the various schools of Tibetan Buddhism, such as the classical music of the popular Gelugpa school, and the romantic music of the Nyingmapa, Sakyapa and Kagyupa schools.
+
+Nangma dance music is especially popular in the karaoke bars of the urban center of Tibet, Lhasa. Another form of popular music is the classical gar style, which is performed at rituals and ceremonies. Lu are a type of songs that feature glottal vibrations and high pitches. There are also epic bards who sing of Gesar, who is a hero to ethnic Tibetans.
+
+### Festivals
+
+Tibet has various festivals, many for worshipping the Buddha, that take place throughout the year. Losar is the Tibetan New Year Festival. Preparations for the festive event are manifested by special offerings to family shrine deities, painted doors with religious symbols, and other painstaking jobs done to prepare for the event. Tibetans eat Guthuk (barley noodle soup with filling) on New Year's Eve with their families. The Monlam Prayer Festival follows it in the first month of the Tibetan calendar, falling between the fourth and the eleventh days of the first Tibetan month. It involves dancing and participating in sports events, as well as sharing picnics. The event was established in 1049 by Tsong Khapa, the founder of the Dalai Lama and the Panchen Lama's order.
+
+### Cuisine
+
+The most important crop in Tibet is barley, and dough made from barley flour—called tsampa—is the staple food of Tibet. This is either rolled into noodles or made into steamed dumplings called momos. Meat dishes are likely to be yak, goat, or mutton, often dried, or cooked into a spicy stew with potatoes. Mustard seed is cultivated in Tibet, and therefore features heavily in its cuisine. Yak yogurt, butter and cheese are frequently eaten, and well-prepared yogurt is considered something of a prestige item. Butter tea is a very popular drink.
+

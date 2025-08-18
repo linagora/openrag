@@ -1,0 +1,516 @@
+# Samurai
+
+Samurai (侍、さむらい) were the hereditary military nobility and officer caste of medieval and early-modern Japan from the late 12th century until their abolition in the late 1870s during the Meiji era. They were the well-paid retainers of the daimyo, the great feudal landholders. They had high prestige and special privileges.
+
+Following the passing of a law in 1629, samurai on official duty were required to practice daishō (wear two swords). Samurai were granted kiri-sute gomen: the right to kill anyone of a lower class in certain situations. Some important samurai and other figures in Japanese history wanted others to believe all of them engaged combatants using bushido codes of martial virtues and followed various cultural ideals about what samurai should act like.
+
+Though they had predecessors in earlier military and administrative officers, the samurai truly emerged during the Kamakura shogunate, ruling from c.1185 to 1333. They became the ruling political class, with significant power but also significant responsibility. During the 13th century, the samurai proved themselves as adept warriors against the invading Mongols. During the peaceful Edo period, 1603 to 1868, they became the stewards and chamberlains of the daimyo estates, gaining managerial experience and education.
+
+In the 1870s, samurai families comprised 5% of the population. As modern militaries emerged in the 19th century, the samurai were rendered increasingly obsolete and very expensive to maintain compared to the average conscript soldier. The Meiji Restoration ended their feudal roles, and they moved into professional and entrepreneurial roles. Their memory and weaponry remain prominent in Japanese popular culture.
+
+## Terminology
+
+In Japanese, historical warriors are usually referred to as bushi (武士,), meaning 'warrior', or buke (武家), meaning 'military family'. According to translator William Scott Wilson: "In Chinese, the character 侍 was originally a verb meaning 'to wait upon', 'accompany persons' in the upper ranks of society, and this is also true of the original term in Japanese, saburau. In both countries the terms were nominalized to mean 'those who serve in close attendance to the nobility', the Japanese term saburai being the nominal form of the verb." According to Wilson, an early reference to the word saburai appears in the Kokin Wakashū, the first imperial anthology of poems, completed in the early 900s.
+
+In modern usage, bushi is often used as a synonym for samurai; however, historical sources make it clear that bushi and samurai were distinct concepts, with the former referring to soldiers or warriors and the latter referring instead to a kind of hereditary nobility. The word samurai is now closely associated with the middle and upper echelons of the warrior class. These warriors were usually associated with a clan and their lord, and were trained as officers in military tactics and grand strategy. While these samurai numbered less than 10% of then Japan's population, their teachings can still be found today in both everyday life and in modern Japanese martial arts.
+
+## History
+
+### Asuka and Nara periods
+
+Following the death of Prince Shōtoku and the victory against the Soga clan, Japan underwent widespread reform. One of the most important was that of the Taika Reform, issued by Emperor Kōtoku in 645. This edict allowed the Japanese aristocracy to adopt the Tang dynasty political structure, bureaucracy, culture, religion, and philosophy. As part of the Taihō Code of 702, and the later Yōrō Code, the population was required to report regularly for the census, a precursor for national conscription. With an understanding of how the population was distributed, Emperor Monmu introduced a law whereby 1 in 3–4 adult males were drafted into the national military. These soldiers were required to supply their own weapons, and in return were exempted from duties and taxes. This was one of the first attempts by the imperial government to form an organized army modeled after the Chinese system. It was called "Gundan-Sei" (ja:軍団制) by later historians and is believed to have been short-lived.
+
+The Taihō Code classified most of the Imperial bureaucrats into 12 ranks, each divided into two sub-ranks, 1st rank being the highest adviser to the emperor. Those of 6th rank and below were referred to as "samurai" and dealt with day-to-day affairs and were initially civilian public servants, in keeping with the original derivation of this word from saburau, a verb meaning 'to serve'. Military men, however, would not be referred to as "samurai" for many more centuries.
+
+### Heian period
+
+In the early Heian period, during the late 8th and early 9th centuries, Emperor Kanmu sought to consolidate and expand his rule in northern Honshū and made military campaigns against the Emishi, who resisted the governance of the Kyoto-based imperial court. Emperor Kanmu introduced the title of sei'i-taishōgun (征夷大将軍), or shōgun, and began to rely on the powerful regional clans to conquer the Emishi. Skilled in mounted combat and archery (kyūjutsu), these clan warriors became the emperor's preferred tool for putting down rebellions; the most well-known of which was Sakanoue no Tamuramaro. Though this is the first known use of the title shōgun, it was a temporary title and was not imbued with political power until the 13th century. At this time (the 7th to 9th centuries), officials considered them to be merely a military section under the control of the Imperial Court.
+
+Ultimately, Emperor Kanmu disbanded his army. From this time, the emperor's power gradually declined. While the emperor was still the ruler, powerful clans around Kyoto assumed positions as ministers, and their relatives bought positions as magistrates. To amass wealth and repay their debts, magistrates often imposed heavy taxes, resulting in many farmers becoming landless. Through protective agreements and political marriages, the aristocrats accumulated political power, eventually surpassing the traditional aristocracy.
+
+Some clans were originally formed by farmers who had taken up arms to protect themselves from the imperial magistrates sent to govern their lands and collect taxes. These clans formed alliances to protect themselves against more powerful clans.
+
+The Heian period saw the appearance of distinctive Japanese armor and weapons. Typical examples are the tachi (long sword) and naginata (halberd) used in close combat, and the ō-yoroi and dō-maru styles of armor. High-ranking samurai equipped with yumi (bows) and who fought on horseback wore ō-yoroi, while lower-ranking samurai equipped with naginata and who fought on foot wore dō-maru.
+
+* The Gosannen War in the 11th century
+* Samurai on horseback, wearing ō-yoroi armor, carrying a bow (yumi) and arrows in an yebira quiver
+* Heiji rebellion in 1159
+
+### Late Heian Period, Kamakura shogunate, and the rise of samurai
+
+The Kamakura period (1185–1333) saw the rise of the samurai under shogun rule as they were "entrusted with the security of the estates" and were symbols of the ideal warrior and citizen. Originally, the emperor and non-warrior nobility employed these warrior nobles. In time they amassed enough manpower, resources and political backing, in the form of alliances with one another, to establish the first samurai-dominated government. As the power of these regional clans grew, their chief was typically a distant relative of the emperor and a lesser member of either the Fujiwara, Minamoto, or Taira clan.
+
+From the Kamakura period onwards, emphasis was put on training samurai from childhood in using "the bow and sword".
+
+Though originally sent to provincial areas for fixed four-year terms as magistrates, the toryo declined to return to the capital when their terms ended, and their sons inherited their positions and continued to lead the clans in putting down rebellions throughout Japan during the middle- and later-Heian period. Because of their rising military and economic power, the warriors ultimately became a new force in the politics of the imperial court. Their involvement in the Hōgen Rebellion in the late Heian period consolidated their power, which later pitted the rivalry of Minamoto and Taira clans against each other in the Heiji Rebellion of 1160.
+
+The victor, Taira no Kiyomori, became an imperial advisor and was the first warrior to attain such a position. He eventually seized control of the central government, establishing the first samurai-dominated government and relegating the emperor to figurehead status. However, the Taira clan was still very conservative when compared to its eventual successor, the Minamoto, and instead of expanding or strengthening its military might, the clan had its women marry emperors and exercise control through the emperor.
+
+The Taira and the Minamoto clashed again in 1180, beginning the Genpei War, which ended in 1185. Samurai fought at the naval battle of Dan-no-ura, at the Shimonoseki Strait which separates Honshu and Kyūshū in 1185. The victorious Minamoto no Yoritomo established the superiority of the samurai over the aristocracy. In 1190 he visited Kyoto and in 1192 became Sei'i Taishōgun, establishing the Kamakura shogunate, or Kamakura bakufu. Instead of ruling from Kyoto, he set up the shogunate in Kamakura, near his base of power. "Bakufu" means "tent government", taken from the encampments the soldiers would live in, in accordance with the Bakufu's status as a military government.
+
+After the Genpei war, Yoritomo obtained the right to appoint shugo and jitō, and was allowed to organize soldiers and police, and to collect a certain amount of tax. Initially, their responsibility was restricted to arresting rebels and collecting needed army provisions and they were forbidden from interfering with Kokushi officials, but their responsibility gradually expanded. Thus, the samurai class became the political ruling power in Japan.
+
+In the late Kamakura period, even the most senior samurai began to wear dō-maru, as the heavy and elegant ō-yoroi were no longer respected. Until then, the body was the only part of the dō-maru that was protected, but for higher-ranking samurai, the dō-maru also came with a kabuto (helmet) and shoulder guards. For lower-ranked samurai, the haraate was introduced, the simplest style of armor that protected only the front of the torso and the sides of the abdomen. In the late Kamakura period, a new type of armor called haramaki appeared, in which the two ends of the haraate were extended to the back to provide greater protection.
+
+* Samurai of the Shōni clan gather to defend against Kublai Khan's Mongolian army during the first Mongol Invasion of Japan, 1274.
+* Battle of Yashima folding screens
+
+### Kamakura shogunate and the Mongol invasions
+
+Various samurai clans struggled for power during the Kamakura and Ashikaga shogunates. Zen Buddhism spread among the samurai in the 13th century and helped to shape their standards of conduct, particularly overcoming the fear of death and killing, but among the general populace Pure Land Buddhism was favored.
+
+In 1274, the Mongol-founded Yuan dynasty in China sent a force of some 40,000 men and 900 ships to invade Japan in northern Kyūshū. Japan mustered a mere 10,000 samurai to meet this threat. The invading army was harassed by major thunderstorms throughout the invasion, which aided the defenders by inflicting heavy casualties. The Yuan army was eventually recalled, and the invasion was called off. The Mongol invaders used small bombs, which was likely the first appearance of bombs and gunpowder in Japan.
+
+The Japanese defenders recognized the possibility of a renewed invasion and began construction of a great stone barrier around Hakata Bay in 1276. Completed in 1277, this wall stretched for 20 kilometers around the border of the bay. It would later serve as a strong defensive point against the Mongols. The Mongols attempted to settle matters in a diplomatic way from 1275 to 1279, but every envoy sent to Japan was executed.
+
+Leading up to the second Mongolian invasion, Kublai Khan continued to send emissaries to Japan, with five diplomats sent in September 1275 to Kyūshū. Hōjō Tokimune, the shikken of the Kamakura shogun, responded by having the Mongolian diplomats brought to Kamakura and then beheading them. The graves of the five executed Mongol emissaries exist to this day in Kamakura at Tatsunokuchi. On 29 July 1279, five more emissaries were sent by the Mongol empire, and again beheaded, this time in Hakata. This continued defiance of the Mongol emperor set the stage for one of the most famous engagements in Japanese history.
+
+In 1281, a Yuan army of 140,000 men with 5,000 ships was mustered for another invasion of Japan. Northern Kyūshū was defended by a Japanese army of 40,000 men. The Mongol army was still on its ships preparing for the landing operation when a typhoon hit north Kyūshū island. The casualties and damage inflicted by the typhoon, followed by the Japanese defense of the Hakata Bay barrier, resulted in the Mongols again being defeated.
+
+The thunderstorms of 1274 and the typhoon of 1281 helped the samurai defenders of Japan repel the Mongol invaders despite being vastly outnumbered. These winds became known as kami-no-Kaze, which literally translates as "wind of the gods". This is often given a simplified translation as "divine wind". The kami-no-Kaze lent credence to the Japanese belief that their lands were indeed divine and under supernatural protection.
+
+During this period, the tradition of Japanese swordsmithing developed using laminated or piled steel, a technique dating back over 2,000 years in the Mediterranean and Europe of combining layers of soft and hard steel to produce a blade with a very hard (but brittle) edge, capable of being highly sharpened, supported by a softer, tougher, more flexible spine. The Japanese swordsmiths refined this technique by using multiple layers of steel of varying composition, together with differential heat treatment, or tempering, of the finished blade, achieved by protecting part of it with a layer of clay while quenching (as explained in the article on Japanese swordsmithing). The craft was perfected in the 14th century by the great swordsmith Masamune. The Japanese sword (tachi and katana) became renowned around the world for its sharpness and resistance to breaking.
+
+### Nanboku-chō and Muromachi period
+
+In 1336, Ashikaga Takauji, who opposed Emperor Godaigo, established the Ashikaga Shogunate with Emperor Kōgon. As a result, the southern court, descended from Emperor Godaigo, and the northern court, descended from Emperor Kogon, were established side by side. This period of coexistence of the two dynasties is called the Nanboku-chō period, which corresponds to the beginning of the Muromachi period. The Northern Court, supported by the Ashikaga Shogunate, had six emperors, and in 1392 the Imperial Court was reunited by absorbing the Southern Court, although the modern Imperial Household Agency considers the Southern Court to be the legitimate emperor. The de facto rule of Japan by the Ashikaga Shogunate lasted until the Onin War, which broke out in 1467.
+
+The innovations of Sōshū swordsmiths in the late Kamakura period allowed them to produce Japanese swords with tougher blades than before, and during the Nanboku-chō period, ōdachi (large/great sword) were at their peak as weapons for the samurai.
+
+Until the Mongol invasion in the late Kamakura period, the main battle was fought by small groups of warriors using yumi (bows) from horseback, and close combat was a secondary battle. From the Nanboku-chō period to the Muromachi period, large groups of infantrymen became more active in battle, close combat became more important, and the naginata and tachi, which had been used since the Heian period, were used more. The yari (spear) was not yet a major weapon in this period.
+
+During the Nanboku-chō period, many lower-class foot soldiers called ashigaru began to participate in battles, and the popularity of haramaki increased. During the Nanboku-chō and Muromachi periods, dō-maru and haramaki became the norm, and senior samurai also began to wear haramaki by adding kabuto (helmet), men-yoroi (face armor), and gauntlet.
+
+Issues of inheritance caused family strife as primogeniture became common, in contrast to the division of succession designated by law before the 14th century. Invasions of neighboring samurai territories became common to avoid infighting, and bickering among samurai was a constant problem for the Kamakura and Ashikaga shogunates.
+
+### Sengoku period
+
+The outbreak of the Onin War, which began in 1467 and lasted about 10 years, devastated Kyoto and brought down the power of the Ashikaga Shogunate. This plunged the country into the Sengoku Period ("warring states period"), in which daimyo (feudal lords) from different regions fought each other. This period corresponds to the late Muromachi period. There are about nine theories about the end of the Sengoku Period, the earliest being the year 1568, when Oda Nobunaga marched on Kyoto, and the latest being the suppression of the Shimabara Rebellion in 1638. Thus, the Sengoku Period overlaps with the Muromachi, Azuchi–Momoyama, and Edo periods, depending on the theory. In any case, the Sengoku period was a time of large-scale civil wars throughout Japan.
+
+By the end of the Sengoku period, allegiances between warriors vassals, also known as military retainers, and lords were solidified. Vassals would serve lords in exchange for material and intangible advantages, in keeping with Confucian ideas brought from China between the seventh and ninth centuries. These independent vassals who held land were subordinate to their superiors, who may be local lords or, in the Edo period, the shogun. A vassal or samurai could expect monetary benefits, including land or money, from lords in exchange for their military services.
+
+From this time on, infantrymen called ashigaru, who were mobilized from the peasantry, were mobilized in even greater numbers than before, and the importance of the infantry, which had begun in the Nanboku-chō period, increased even more. When ｍatchlock were introduced from Portugal in 1543, Japanese swordsmiths immediately began to improve and mass produce them. The Japanese ｍatchlock was named tanegashima after the Tanegashima island, which is believed to be the place where it was first introduced to Japan. By the end of the Sengoku Period, there were hundreds of thousands of rifles in Japan and a large army of nearly 100,000 men clashing with each other.
+
+On the battlefield, ashigaru began to fight in close formation, using yari (spear) and tanegashima. As a result, yari, yumi (bow), and tanegashima became the primary weapons on the battlefield. The naginata, which was difficult to maneuver in close formation, and the long, heavy tachi fell into disuse and were replaced by the nagamaki, which could be held short, and the short, light katana, which appeared in the Nanboku-cho period and gradually became more common. The tachi was often cut off from the hilt and shortened to make a katana. The tachi, which had become inconvenient for use on the battlefield, was transformed into a symbol of authority carried by high-ranking samurai. Although the ōdachi had become even more obsolete, some daimyo dared to organize assault and kinsmen units composed entirely of large men equipped with ōdachi to demonstrate the bravery of their armies.
+
+These changes in the aspect of the battlefield during the Sengoku period led to the emergence of the tosei-gusoku style of armor, which improved the productivity and durability of armor. In the history of Japanese armor, this was the most significant change since the introduction of the ō-yoroi and dō-mal in the Heian period. In this style, the number of parts was reduced, and instead armor with eccentric designs became popular.
+
+The Sengoku Period was marked by the loosening of samurai culture, with people born into other social strata sometimes making a name for themselves as warriors and thus becoming de facto samurai.
+
+### Azuchi–Momoyama period
+
+There are several theories as to when the Azuchi–Momoyama period began: 1568, when Oda Nobunaga entered Kyoto in support of Ashikaga Yoshiaki; 1573, when Oda Nobunaga expelled Ashikaga Yoshiaki from Kyoto; and 1576, when the construction of Azuchi Castle began. In any case, the beginning of the Azuchii–Momoyama period marked the complete end of the rule of the Ashikaga shogunate, which had been disrupted by the Onin War; in other words, it marked the end of the Muromachi period.
+
+**Oda, Toyotomi, and Tokugawa**
+
+Oda Nobunaga was the well-known lord of the Nagoya area (once called Owari Province) and an exceptional example of a samurai of the Sengoku period. He came within a few years of, and laid down the path for his successors to follow, the reunification of Japan under a new bakufu (shogunate).
+
+Oda Nobunaga made innovations in the fields of organization and war tactics, made heavy use of arquebuses, developed commerce and industry, and treasured innovation. Consecutive victories enabled him to realize the termination of the Ashikaga Bakufu and the disarmament of the military powers of the Buddhist monks, which had inflamed futile struggles among the populace for centuries. Attacking from the "sanctuary" of Buddhist temples, they were constant headaches to any warlord and even the emperor who tried to control their actions. He died in 1582 when one of his generals, Akechi Mitsuhide, turned upon him with his army.
+
+Toyotomi Hideyoshi and Tokugawa Ieyasu, who founded the Tokugawa shogunate, were loyal followers of Nobunaga. Hideyoshi began as a peasant and became one of Nobunaga's top generals, and Ieyasu had shared his childhood with Nobunaga. Hideyoshi defeated Mitsuhide within a month and was regarded as the rightful successor of Nobunaga by avenging the treachery of Mitsuhide. These two were able to use Nobunaga's previous achievements on which build a unified Japan and there was a saying: "The reunification is a rice cake; Oda made it. Hashiba shaped it. In the end, only Ieyasu tastes it." (Hashiba is the family name that Toyotomi Hideyoshi used while he was a follower of Nobunaga.)
+
+Toyotomi Hideyoshi, who became a grand minister in 1586, created a law that non-samurai were not allowed to carry weapons, which the samurai caste codified as permanent and hereditary, thereby ending the social mobility of Japan, which lasted until the dissolution of the Edo shogunate by the Meiji revolutionaries.
+
+The distinction between samurai and non-samurai was so obscure that during the 16th century, most male adults in any social class (even small farmers) belonged to at least one military organization of their own and served in wars before and during Hideyoshi's rule. It can be said that an "all against all" situation continued for a century. The authorized samurai families after the 17th century were those that chose to follow Nobunaga, Hideyoshi and Ieyasu. Large battles occurred during the change between regimes, and a number of defeated samurai were destroyed, went rōnin or were absorbed into the general populace.
+
+**Invasions of Korea**
+
+In 1592 and again in 1597, Toyotomi Hideyoshi, aiming to invade China through Korea, mobilized an army of 160,000 peasants and samurai and deployed them to Korea in one of the largest military endeavors in Eastern Asia until the late 19th century. Taking advantage of arquebus mastery and extensive wartime experience from the Sengoku period, Japanese samurai armies made major gains in most of Korea. A few of the famous samurai generals of this war were Katō Kiyomasa, Konishi Yukinaga, and Shimazu Yoshihiro. Katō Kiyomasa advanced to Orangkai territory (present-day Manchuria) bordering Korea to the northeast and crossed the border into northern China.
+
+Kiyomasa withdrew back to Korea after retaliatory counterattacks from the Jurchens in the area, whose castles his forces had raided. Shimazu Yoshihiro led some 7,000 samurai into battle, and despite being heavily outnumbered, defeated a host of allied Ming and Korean forces at the Battle of Sacheon in 1598. Yoshihiro was feared as Oni-Shimazu ("Shimazu ogre") and his nickname spread across Korea and into China.
+
+In spite of the superiority of Japanese land forces, the two expeditions ultimately failed after Hideyoshi's death, though the invasions did devastate the Korean peninsula. The causes of the failure included Korean naval superiority (which, led by Admiral Yi Sun-sin, harassed Japanese supply lines continuously throughout the wars, resulting in supply shortages on land), the commitment of sizable Ming forces to Korea, Korean guerrilla actions, wavering Japanese commitment to the campaigns as the wars dragged on, and the underestimation of resistance by Japanese commanders.
+
+In the first campaign of 1592, Korean defenses on land were caught unprepared, under-trained, and under-armed. They were rapidly overrun, with only a limited number of successfully resistant engagements against the more experienced and battle-hardened Japanese forces. During the second campaign in 1597, Korean and Ming forces proved far more resilient and with the support of continued Korean naval superiority, managed to limit Japanese gains to parts of southeastern Korea. The final death blow to the Japanese campaigns in Korea came with Hideyoshi's death in late 1598 and the recall of all Japanese forces in Korea by the Council of Five Elders, established by Hideyoshi to oversee the transition from his regency to that of his son Hideyori.
+
+**Battle of Sekigahara**
+
+Many samurai forces that were active throughout this period were not deployed to Korea; most importantly, the daimyōs Tokugawa Ieyasu carefully kept forces under his command out of the Korean campaigns, and other samurai commanders who were opposed to Hideyoshi's domination of Japan either mulled Hideyoshi's call to invade Korea or contributed a small token force.
+
+Most commanders who opposed or otherwise resisted or resented Hideyoshi ended up as part of the so-called Eastern Army, while commanders loyal to Hideyoshi and his son (a notable exception to this trend was Katō Kiyomasa, who deployed with Tokugawa and the Eastern Army) were largely committed to the Western Army; the two opposing sides (so named for the relative geographical locations of their respective commanders' domains) later clashed, most notably at the Battle of Sekigahara which was won by Tokugawa Ieyasu and the Eastern Forces, paving the way for the establishment of the Tokugawa shogunate.
+
+Social mobility was high, as the ancient regime collapsed and emerging samurai needed to maintain a large military and administrative organizations in their areas of influence. Most of the samurai families that survived to the 19th century originated in this era, declaring themselves to be the blood of one of the four ancient noble clans: Minamoto, Taira, Fujiwara and Tachibana. In most cases, however, it is difficult to prove these claims.
+
+### Tokugawa shogunate
+
+After the Battle of Sekigahara, when the Tokugawa shogunate defeated the Toyotomi clan at summer campaign of the Siege of Osaka in 1615, the long war period ended. During the Tokugawa shogunate, samurai increasingly became courtiers, bureaucrats, and administrators rather than warriors. With no warfare since the early 17th century, samurai gradually lost their military function during the Tokugawa era (also called the Edo period).
+
+By the end of the Tokugawa era, samurai were aristocratic bureaucrats for the daimyōs, with their daishō, the paired long and short swords of the samurai (cf. katana and wakizashi) becoming more of a symbolic emblem of power rather than a weapon used in daily life. They still had the legal right to cut down any commoner who did not show proper respect kiri-sute gomen (斬り捨て御免), but to what extent this right was used is unknown. When the central government forced daimyōs to cut the size of their armies, unemployed rōnin became a social problem.
+
+Theoretical obligations between a samurai and his lord (usually a daimyō) increased from the Genpei era to the Edo era. They were strongly emphasized by the teachings of Confucius and Mencius, which were required reading for the educated samurai class. The leading figures who introduced Confucianism in Japan in the early Tokugawa period were Fujiwara Seika (1561–1619), Hayashi Razan (1583–1657), and Matsunaga Sekigo (1592–1657).
+
+The conduct of samurai served as role model behavior for the other social classes. With time on their hands, samurai spent more time in pursuit of other interests such as becoming scholars.After the Edo period, it came to cover all of society, and although the shogunate sometimes invited monks as advisors, the nobility was excluded from the government. As a result, samurai began to assume all civilian roles, and from the Edo period onwards, samurai shifted their activities from military to political administration. In addition, those who were newly promoted to the shogunate or domain in recognition of talents unrelated to martial arts, such as literature and scholarship, were also given the status of samurai. It can be said that the difference between a samurai and a military officer appears in such a place. In the Edo Shogunate, samurai equivalent to civil servants and administrative officers were called "officials" Samurai were given an honorific title and were called 'Obuke-sama'.
+
+### Modernization
+
+The relative peace of the Tokugawa era was shattered with the arrival of Commodore Matthew Perry's massive U.S. Navy steamships in 1853. Perry used his superior firepower to force Japan to open its borders to trade. Prior to that only a few harbor towns, under strict control from the shogunate, were allowed to participate in Western trade, and even then, it was based largely on the idea of playing the Franciscans and Dominicans against one another (in exchange for the crucial arquebus technology, which in turn was a major contributor to the downfall of the classical samurai).
+
+From 1854, the samurai army and the navy were modernized. A naval training school was established in Nagasaki in 1855. Naval students were sent to study in Western naval schools for several years, starting a tradition of foreign-educated future leaders, such as Admiral Enomoto. French naval engineers were hired to build naval arsenals, such as Yokosuka and Nagasaki. By the end of the Tokugawa shogunate in 1867, the Japanese navy of the shōgun already possessed eight western-style steam warships around the flagship Kaiyō Maru, which were used against pro-imperial forces during the Boshin War, under the command of Admiral Enomoto Takeaki. A French Military Mission to Japan (1867) was established to help modernize the armies of the Bakufu.
+
+The last showing of the original samurai was in 1867 when samurai from Chōshū and Satsuma provinces defeated the shogunate forces in favor of the rule of the emperor in the Boshin War. The two provinces were the lands of the daimyōs that submitted to Ieyasu after the Battle of Sekigahara in 1600.
+
+### Dissolution
+
+In the 1870s, samurai comprised five percent of the population, or 400,000 families with about 1.9 million members. They came under direct national jurisdiction in 1869, and of all the classes during the Meiji revolution they were the most affected. Although many lesser samurai had been active in the Meiji restoration, the older ones represented an obsolete feudal institution that had a practical monopoly of military force, and to a large extent of education as well. A priority of the Meiji government was to gradually abolish the entire class of samurai and integrate them into the Japanese professional, military and business classes.
+
+Their traditional guaranteed salaries were very expensive, and in 1873 the government started taxing the stipends and began to transform them into interest-bearing government bonds; the process was completed in 1879. The main goal was to provide enough financial liquidity to enable former samurai to invest in land and industry. A military force capable of contesting not just China but the imperial powers required a large conscript army that closely followed Western standards. The notion of very strict obedience to chain of command was incompatible with the individual authority of the samurai. Samurai now became Shizoku (士族; this status was abolished in 1947). The right to wear a katana in public was abolished, along with the right to execute commoners who paid them disrespect. In 1877, there was a localized samurai rebellion that was quickly crushed.
+
+Younger samurai often became exchange students because they were ambitious, literate and well-educated. On return, some started private schools for higher education, while many samurai became reporters and writers and set up newspaper companies. Others entered governmental service. In the 1880s, 23 percent of prominent Japanese businessmen were from the samurai class; by the 1920s the number had grown to 35 percent.
+
+## Philosophy
+
+### Religious influences
+
+The philosophies of Confucianism, Buddhism and Zen, and to a lesser extent Shinto, influenced the samurai culture. Zen meditation became an important teaching because it offered a process to calm one's mind. The Buddhist concept of reincarnation and rebirth led samurai to abandon torture and needless killing, while some samurai even gave up violence altogether and became Buddhist monks after coming to believe that their killings were fruitless. Some were killed as they came to terms with these conclusions in the battlefield. The most defining role that Confucianism played in samurai philosophy was to stress the importance of the lord-retainer relationship—the loyalty that a samurai was required to show his lord.
+
+Literature on the subject of bushido such as Hagakure ("Hidden in Leaves") by Yamamoto Tsunetomo and Gorin no Sho ("Book of the Five Rings") by Miyamoto Musashi, both written in the Edo period, contributed to the development of bushidō and Zen philosophy.
+
+According to Robert Sharf, "The notion that Zen is somehow related to Japanese culture in general, and bushidō in particular, is familiar to Western students of Zen through the writings of D. T. Suzuki, no doubt the single most important figure in the spread of Zen in the West." In a 16th century account of Japan sent to Father Ignatius Loyola at Rome, drawn from the statements of Anger (Han-Siro's western name), Xavier describes the importance of honor to the Japanese (Letter preserved at College of Coimbra):
+
+   In the first place, the nation with which we have had to do here surpasses in goodness any of the nations lately discovered. I really think that among barbarous nations there can be none that has more natural goodness than the Japanese. They are of a kindly disposition, not at all given to cheating, wonderfully desirous of honour and rank. Honour with them is placed above everything else. There are a great many poor among them, but poverty is not a disgrace to any one. There is one thing among them of which I hardly know whether it is practised anywhere among Christians. The nobles, however poor they may be, receive the same honour from the rest as if they were rich.
+
+### Doctrine
+
+In the 13th century, Hōjō Shigetoki wrote: "When one is serving officially or in the master's court, he should not think of a hundred or a thousand people, but should consider only the importance of the master." Carl Steenstrup notes that 13th- and 14th-century warrior writings (gunki) "portrayed the bushi in their natural element, war, eulogizing such virtues as reckless bravery, fierce family pride, and selfless, at times senseless devotion of master and man".
+
+Feudal lords such as Shiba Yoshimasa (1350–1410) stated that a warrior looked forward to a glorious death in the service of a military leader or the emperor:
+
+   It is a matter of regret to let the moment when one should die pass by ... First, a man whose profession is the use of arms should think and then act upon not only his own fame, but also that of his descendants. He should not scandalize his name forever by holding his one and only life too dear ... One's main purpose in throwing away his life is to do so either for the sake of the Emperor or in some great undertaking of a military general. It is that exactly that will be the great fame of one's descendants.
+
+In 1412, Imagawa Sadayo wrote a letter of admonishment to his brother stressing the importance of duty to one's master. Imagawa was admired for his balance of military and administrative skills during his lifetime, and his writings became widespread. The letters became central to Tokugawa-era laws and became required study material for traditional Japanese until World War II:
+
+   First of all, a samurai who dislikes battle and has not put his heart in the right place even though he has been born in the house of the warrior, should not be reckoned among one's retainers ... It is forbidden to forget the great debt of kindness one owes to his master and ancestors and thereby make light of the virtues of loyalty and filial piety ... It is forbidden that one should ... attach little importance to his duties to his master ... There is a primary need to distinguish loyalty from disloyalty and to establish rewards and punishments.
+
+Similarly, the feudal lord Takeda Nobushige (1525–1561) stated:
+
+   In matters both great and small, one should not turn his back on his master's commands ... One should not ask for gifts or enfiefments from the master ... No matter how unreasonably the master may treat a man, he should not feel disgruntled ... An underling does not pass judgments on a superior.
+
+Nobushige's brother Takeda Shingen (1521–1573) also made similar observations:
+
+   One who was born in the house of a warrior, regardless of his rank or class, first acquaints himself with a man of military feats and achievements in loyalty ... Everyone knows that if a man doesn't hold filial piety toward his own parents he would also neglect his duties toward his lord. Such a neglect means a disloyalty toward humanity. Therefore such a man doesn't deserve to be called 'samurai'.
+
+The feudal lord Asakura Yoshikage (1428–1481) wrote: "In the fief of the Asakura, one should not determine hereditary chief retainers. A man should be assigned according to his ability and loyalty." Asakura also observed that the successes of his father were obtained by the kind treatment of the warriors and common people living in domain. By his civility, "all were willing to sacrifice their lives for him and become his allies."
+
+Katō Kiyomasa was one of the most powerful and well-known lords of the Sengoku period. He commanded most of Japan's major clans during the invasion of Korea. In a handbook he addressed to "all samurai, regardless of rank", he told his followers that a warrior's only duty in life was to "grasp the long and the short swords and to die". He also ordered his followers to put forth great effort in studying the military classics, especially those related to loyalty and filial piety. He is best known for his quote: "If a man does not investigate into the matter of Bushido daily, it will be difficult for him to die a brave and manly death. Thus it is essential to engrave this business of the warrior into one's mind well."
+
+Nabeshima Naoshige (1538–1618 AD) was another Sengoku daimyō who fought alongside Kato Kiyomasa in Korea. He stated that it was shameful for any man to have not risked his life at least once in the line of duty, regardless of his rank. Nabeshima's sayings were passed down to his son and grandson and became the basis for Tsunetomo Yamamoto's Hagakure. He is best known for his saying, "The way of the samurai is in desperateness. Ten men or more cannot kill such a man."
+
+Torii Mototada (1539–1600) was a feudal lord in the service of Tokugawa Ieyasu. On the eve of the battle of Sekigahara, he volunteered to remain behind in the doomed Fushimi Castle while his lord advanced to the east. Torii and Tokugawa both agreed that the castle was indefensible. In an act of loyalty to his lord, Torii chose to remain behind, pledging that he and his men would fight to the finish. As was custom, Torii vowed that he would not be taken alive. In a dramatic last stand, the garrison of 2,000 men held out against overwhelming odds for ten days against the massive army of Ishida Mitsunari's 40,000 warriors. In a moving last statement to his son Tadamasa, he wrote:
+
+   It is not the Way of the Warrior [i.e., bushidō] to be shamed and avoid death even under circumstances that are not particularly important. It goes without saying that to sacrifice one's life for the sake of his master is an unchanging principle. That I should be able to go ahead of all the other warriors of this country and lay down my life for the sake of my master's benevolence is an honor to my family and has been my most fervent desire for many years.
+
+It is said that both men cried when they parted ways, because they knew they would never see each other again. Torii's father and grandfather had served the Tokugawa before him, and his own brother had already been killed in battle. Torii's actions changed the course of Japanese history. Ieyasu Tokugawa successfully raised an army and won at Sekigahara.
+
+The translator of Hagakure, William Scott Wilson, observed examples of warrior emphasis on death in clans other than Yamamoto's: "he (Takeda Shingen) was a strict disciplinarian as a warrior, and there is an exemplary story in the Hagakure relating his execution of two brawlers, not because they had fought, but because they had not fought to the death".
+
+The rival of Takeda Shingen (1521–1573) was Uesugi Kenshin (1530–1578), a legendary Sengoku warlord well versed in the Chinese military classics and who advocated the "way of the warrior as death". Japanese historian Daisetz Teitaro Suzuki describes Uesugi's beliefs as:
+
+   Those who are reluctant to give up their lives and embrace death are not true warriors ... Go to the battlefield firmly confident of victory, and you will come home with no wounds whatever. Engage in combat fully determined to die and you will be alive; wish to survive in the battle and you will surely meet death. When you leave the house determined not to see it again you will come home safely; when you have any thought of returning you will not return. You may not be in the wrong to think that the world is always subject to change, but the warrior must not entertain this way of thinking, for his fate is always determined.
+
+Families such as the Imagawa were influential in the development of warrior ethics and were widely quoted by other lords during their lifetime. The writings of Imagawa Sadayo were highly respected and sought out by Tokugawa Ieyasu as the source of Japanese feudal law.
+
+Historian H. Paul Varley notes the description of Japan given by Jesuit leader St. Francis Xavier: "There is no nation in the world which fears death less." Xavier further describes the honour and manners of the people: "I fancy that there are no people in the world more punctilious about their honour than the Japanese, for they will not put up with a single insult or even a word spoken in anger." Xavier spent 1549 to 1551 converting Japanese to Christianity. He also observed: "The Japanese are much braver and more warlike than the people of China, Korea, Ternate and all of the other nations around the Philippines."
+
+## Arts
+
+In December 1547, Francis was in Malacca (Malaysia) waiting to return to Goa (India) when he met a low-ranked samurai named Anjiro (possibly spelled "Yajiro"). Anjiro was not an intellectual, but he impressed Xavier because he took careful notes of everything he said in church. Xavier made the decision to go to Japan in part because this low-ranking samurai convinced him in Portuguese that the Japanese people were highly educated and eager to learn. They were hard workers and respectful of authority. In their laws and customs they were led by reason, and, should the Christian faith convince them of its truth, they would accept it en masse.
+
+By the 12th century, upper-class samurai were highly literate because of the general introduction of Confucianism from China during the 7th to 9th centuries and in response to their perceived need to deal with the imperial court, who had a monopoly on culture and literacy for most of the Heian period. As a result, they aspired to the more cultured abilities of the nobility.
+
+Examples such as Taira Tadanori (a samurai who appears in the Heike Monogatari) demonstrate that warriors idealized the arts and aspired to become skilled in them. Tadanori was famous for his skill with the pen and the sword or the "bun and the bu", the harmony of fighting and learning.
+
+Samurai were expected to be cultured and literate and admired the ancient saying "bunbu-ryōdō" (文武両道, literary arts, military arts, both ways) or "The pen and the sword in accord". By the time of the Edo period, Japan had a higher literacy comparable to that in central Europe.
+
+The number of men who actually achieved the ideal and lived their lives by it was high. An early term for warrior, "uruwashii", was written with a kanji that combined the characters for literary study ("bun" 文) and military arts ("bu" 武), and is mentioned in the Heike Monogatari (late 12th century). The Heike Monogatari makes reference to the educated poet-swordsman ideal in its mention of Taira no Tadanori's death:
+
+   Friends and foes alike wet their sleeves with tears and said, What a pity! Tadanori was a great general, pre-eminent in the arts of both sword and poetry.
+
+In his book "Ideals of the Samurai" translator William Scott Wilson states:
+
+   The warriors in the Heike Monogatari served as models for the educated warriors of later generations, and the ideals depicted by them were not assumed to be beyond reach. Rather, these ideals were vigorously pursued in the upper echelons of warrior society and recommended as the proper form of the Japanese man of arms. With the Heike Monogatari, the image of the Japanese warrior in literature came to its full maturity.
+
+Wilson then translates the writings of several warriors who mention the Heike Monogatari as an example for their men to follow.
+
+Plenty of warrior writings document this ideal from the 13th century onward. Most warriors aspired to or followed this ideal otherwise there would have been no cohesion in the samurai armies.
+
+## Culture
+
+As aristocrats for centuries, samurai developed their own cultures that influenced Japanese culture as a whole.
+
+Until the 17th century, samurai and other soldiers were widely hated, feared, or disdained by commoners and their village cultures, where pacifist movements flourished. Writers and artists who were either commoners or sympathized with them often cast the armies and the nobility structures of when they were writing in a bad light because of this. Samurai and other soldiers sometimes engaged in behavior similar to European free companies during peacetime, stirring up anti-elite tensions after village raids and thievery, as well as behavior viewed by commoners as cowardly or dishonorable, similar to common cultural views of ninjas.
+
+The culture associated with the samurai such as the tea ceremony, monochrome ink painting, rock gardens and poetry was adopted by warrior patrons throughout the centuries 1200–1600. These practices were adapted from the Chinese arts. Zen monks introduced them to Japan and they were allowed to flourish due to the interest of powerful warrior elites.
+
+Musō Soseki (1275–1351) was a Zen monk who was advisor to both Emperor Go-Daigo and General Ashikaga Takauji (1304–58). Musō, as well as other monks, served as a political and cultural diplomat between Japan and China. Musō was particularly well known for his garden design. Another Ashikaga patron of the arts was Yoshimasa. His cultural advisor, the Zen monk Zeami, introduced the tea ceremony to him. Previously, tea had been used primarily for Buddhist monks to stay awake during meditation.
+
+### Education
+
+In general, samurai, aristocrats, and priests had a very high literacy rate in kanji. Recent studies have shown that literacy in kanji among other groups in society was somewhat higher than previously understood. For example, court documents, birth and death records and marriage records from the Kamakura period, submitted by farmers, were prepared in Kanji. Both the kanji literacy rate and skills in math improved toward the end of Kamakura period.
+
+Some samurai had buke bunko, or "warrior library", a personal library that held texts on strategy, the science of warfare, and other documents that would have proved useful during the warring era of feudal Japan. One such library held 20,000 volumes. The upper class had Kuge bunko, or "family libraries", that held classics, Buddhist sacred texts, and family histories, as well as genealogical records.
+
+Literacy was generally high among the warriors and the common classes as well. The feudal lord Asakura Norikage (1474–1555 AD) noted the great loyalty given to his father, due to his polite letters, not just to fellow samurai, but also to the farmers and townspeople:
+
+   There were to Lord Eirin's character many high points difficult to measure, but according to the elders the foremost of these was the way he governed the province by his civility. It goes without saying that he acted this way toward those in the samurai class, but he was also polite in writing letters to the farmers and townspeople, and even in addressing these letters he was gracious beyond normal practice. In this way, all were willing to sacrifice their lives for him and become his allies.
+
+In a letter dated 29 January 1552, St Francis Xavier observed the ease of which the Japanese understood prayers due to the high level of literacy in Japan at that time:
+
+   There are two kinds of writing in Japan, one used by men and the other by women; and for the most part both men and women, especially of the nobility and the commercial class, have a literary education. The bonzes, or bonzesses, in their monasteries teach letters to the girls and boys, though rich and noble persons entrust the education of their children to private tutors. Most of them can read, and this is a great help to them for the easy understanding of our usual prayers and the chief points of our holy religion.
+
+In a letter to Father Ignatius Loyola at Rome, Xavier further noted the education of the upper classes:
+
+   The Nobles send their sons to monasteries to be educated as soon as they are 8 years old, and they remain there until they are 19 or 20, learning reading, writing and religion; as soon as they come out, they marry and apply themselves to politics.
+   They are discreet, magnanimous and lovers of virtue and letters, honouring learned men very much.
+
+In a letter dated 11 November 1549, Xavier described a multi-tiered educational system in Japan consisting of "universities", "colleges", "academies" and hundreds of monasteries that served as a principal center for learning by the populace:
+
+   But now we must give you an account of our stay at Cagoxima. We put into that port because the wind was adverse to our sailing to Meaco, which is the largest city in Japan, and most famous as the residence of the King and the Princes. It is said that after four months are passed the favourable season for a voyage to Meaco will return, and then with the good help of God we shall sail thither. The distance from Cagoxima is three hundred leagues. We hear wonderful stories about the size of Meaco: they say that it consists of more than ninety thousand dwellings. There is a very famous University there, as well as five chief colleges of students, and more than two hundred monasteries of bonzes, and of others who are like coenobites, called Legioxi, as well as of women of the same kind, who are called Hamacutis. Besides this of Meaco, there are in Japan five other principal academies, at Coya, at Negu, at Fisso, and at Homia. These are situated round Meaco, with short distances between them, and each is frequented by about three thousand five hundred scholars. Besides these there is the Academy at Bandou, much the largest and most famous in all Japan, and at a great distance from Meaco. Bandou is a large territory, ruled by six minor princes, one of whom is more powerful than the others and is obeyed by them, being himself subject to the King of Japan, who is called the Great King of Meaco. The things that are given out as to the greatness and celebrity of these universities and cities are so wonderful as to make us think of seeing them first with our own eyes and ascertaining the truth, and then when we have discovered and know how things really are, of writing an account of them to you. They say that there are several lesser academies besides those which we have mentioned.
+
+### Names
+
+A samurai was usually named by combining one kanji from his father or grandfather and one new kanji. Samurai normally used only a small part of their total name.
+
+For example, the full name of Oda Nobunaga was "Oda Kazusanosuke Saburo Nobunaga" (織田上総介三郎信長), in which "Oda" is a clan or family name, "Kazusanosuke" is a title of vice-governor of Kazusa province, "Saburo" is a formal nickname (yobina), and "Nobunaga" is an adult name (nanori) given at genpuku, the coming of age ceremony. A man was addressed by his family name and his title, or by his yobina if he did not have a title. However, the nanori was a private name that could be used by only a very few, including the emperor. Samurai could choose their own nanori and frequently changed their names to reflect their allegiances.
+
+Samurai were given the privilege of carrying two swords and using 'samurai surnames' to identify themselves from the common people.
+
+### Marriage
+
+Samurai had arranged marriages, which were arranged by a go-between of the same or higher rank. While for those samurai in the upper ranks this was a necessity (as most had few opportunities to meet women), this was a formality for lower-ranked samurai. Most samurai married women from a samurai family, but for lower-ranked samurai, marriages with commoners were permitted. In these marriages a dowry was brought by the woman and was used to set up the couple's new household.
+
+A samurai could take concubines, but their backgrounds were checked by higher-ranked samurai. In many cases, taking a concubine was akin to a marriage. Kidnapping a concubine, although common in fiction, would have been shameful, if not criminal. If the concubine was a commoner, a messenger was sent with betrothal money or a note for exemption of tax to ask for her parents' acceptance. Even though the woman would not be a legal wife, a situation normally considered a demotion, many wealthy merchants believed that being the concubine of a samurai was superior to being the legal wife of a commoner. When a merchant's daughter married a samurai, her family's money erased the samurai's debts, and the samurai's social status improved the standing of the merchant family. If a samurai's commoner concubine gave birth to a son, the son could inherit his father's social status.
+
+A samurai could divorce his wife for a variety of reasons with approval from a superior, but divorce was, while not entirely nonexistent, a rare event. A wife's failure to produce a son was cause for divorce, but adoption of a male heir was considered an acceptable alternative to divorce. A samurai could divorce for personal reasons, even if he simply did not like his wife, but this was generally avoided as it would embarrass the person who had arranged the marriage. A woman could also arrange a divorce, although it would generally take the form of the samurai divorcing her. After a divorce, samurai had to return the betrothal money, which often prevented divorces.
+
+### Culture of the Iga and Koga clans
+
+The leaders of the Iga and Koga clan shinobi were samurai, and cultivated ideas about secretive tactics for centuries to become leaders of mercenaries for nobles to pay and use.
+
+## Women
+
+Maintaining the household was the main duty of women of the samurai class. This was especially crucial during early feudal Japan, when warrior husbands were often traveling abroad or engaged in clan battles. The wife, or okugatasama (meaning: one who remains in the home), was left to manage all household affairs, care for the children, and perhaps even defend the home forcibly. For this reason, many women of the samurai class were trained in wielding a polearm called a naginata or a special knife called the kaiken in an art called tantojutsu (lit. the skill of the knife), which they could use to protect their household, family, and honor if the need arose. There were women who actively engaged in battles alongside male samurai in Japan, although most of these female warriors were not formal samurai.
+
+A samurai's daughter's greatest duty was political marriage. These women married members of enemy clans of their families to form a diplomatic relationship. These alliances were stages for many intrigues, wars and tragedies throughout Japanese history. A woman could divorce her husband if he did not treat her well and also if he was a traitor to his wife's family. A famous case was that of Oda Tokuhime (Daughter of Oda Nobunaga); irritated by the antics of her mother-in-law, Lady Tsukiyama (the wife of Tokugawa Ieyasu), she was able to get Lady Tsukiyama arrested on suspicion of communicating with the Takeda clan (then a great enemy of Nobunaga and the Oda clan). Ieyasu also arrested his own son, Matsudaira Nobuyasu, who was Tokuhime's husband, because Nobuyasu was close to his mother Lady Tsukiyama. To assuage his ally Nobunaga, Ieyasu had Lady Tsukiyama executed in 1579 and that same year ordered his son to commit seppuku to prevent him from seeking revenge for the death of his mother.
+
+Traits valued in women of the samurai class were humility, obedience, self-control, strength, and loyalty. Ideally, a samurai wife would be skilled at managing property, keeping records, dealing with financial matters, educating the children (and perhaps servants as well), and caring for elderly parents or in-laws that may be living under her roof. Confucian law, which helped define personal relationships and the code of ethics of the warrior class, required that a woman show subservience to her husband, filial piety to her parents, and care to the children. Too much love and affection was also said to indulge and spoil the youngsters. Thus, a woman was also to exercise discipline.
+
+Though women of wealthier samurai families enjoyed perks of their elevated position in society, such as avoiding the physical labor that those of lower classes often engaged in, they were still viewed as far beneath men. Women were prohibited from engaging in any political affairs and were usually not the heads of their household. This does not mean that women in the samurai class were always powerless. Powerful women both wisely and unwisely wielded power at various occasions. Throughout history, several women of the samurai class have acquired political power and influence, even though they have not received these privileges de jure.
+
+After Ashikaga Yoshimasa, 8th shōgun of the Muromachi shogunate, lost interest in politics, his wife Hino Tomiko largely ruled in his place. Nene, wife of Toyotomi Hideyoshi, was known to overrule her husband's decisions at times, and Yodo-dono, his concubine, became the de facto master of Osaka castle and the Toyotomi clan after Hideyoshi's death. Tachibana Ginchiyo was chosen to lead the Tachibana clan after her father's death. Yamauchi Chiyo, wife of Yamauchi Kazutoyo, has long been considered the ideal samurai wife. According to legend, she made her kimono out of a quilted patchwork of bits of old cloth and saved pennies to buy her husband a magnificent horse, on which he rode to many victories. The fact that Chiyo (though she is better known as "Wife of Yamauchi Kazutoyo") is held in such high esteem for her economic sense is illuminating in the light of the fact that she never produced an heir and the Yamauchi clan was succeeded by Kazutoyo's younger brother. The source of power for women may have been that samurai left their finances to their wives. Several women ascended the Chrysanthemum Throne as a female imperial ruler (女性 天皇, josei tennō)
+
+As the Tokugawa period progressed more value became placed on education, and the education of females beginning at a young age became important to families and society as a whole. Marriage criteria began to weigh intelligence and education as desirable attributes in a wife, right along with physical attractiveness. Though many of the texts written for women during the Tokugawa period only pertained to how a woman could become a successful wife and household manager, there were those that undertook the challenge of learning to read, and also tackled philosophical and literary classics. Nearly all women of the samurai class were literate by the end of the Tokugawa period.
+
+* Kasuga no Tsubone fighting robbers – Adachi Ginko (c. 1880)
+* Hangaku Gozen by Yoshitoshi, c. 1885
+* Japanese woman preparing for ritual suicide
+* Yuki no Kata defending Tsu Castle. 18th century
+* A samurai class woman
+
+## Foreign samurai
+
+Several people born in foreign countries were granted the title of samurai.
+
+After Bunroku and Keichō no eki, many people born in the Joseon dynasty were brought to Japan as prisoners or cooperators. Some of them served daimyōs as retainers. One of the most prominent figures among them was Kim Yeocheol, who was granted the Japanese name Wakita Naokata and promoted to Commissioner of Kanazawa city.
+
+The English sailor and adventurer William Adams (1564–1620) was among the first Westerners to receive the dignity of samurai. The shōgun Tokugawa Ieyasu presented him with two swords representing the authority of a samurai, and decreed that William Adams the sailor was dead and that Anjin Miura (三浦按針), a samurai, was born. Adams also received the title of hatamoto (bannerman), a high-prestige position as a direct retainer in the shōgun's court. He was provided with generous revenues: "For the services that I have done and do daily, being employed in the Emperor's service, the Emperor has given me a living". (Letters) He was granted a fief in Hemi (逸見) within the boundaries of present-day Yokosuka City, "with eighty or ninety husbandmen, that be my servants". (Letters) His estate was valued at 250 koku. He finally wrote "God hath provided for me after my great misery", (Letters) by which he meant the disaster-ridden voyage that initially brought him to Japan.
+
+Jan Joosten van Lodensteijn, a Dutch colleague of Adams on their ill-fated voyage to Japan in the ship De Liefde, was also given similar privileges by Tokugawa Ieyasu. Joosten likewise became a hatamoto samurai and was given a residence within Ieyasu's castle at Edo. Today, this area at the east exit of Tokyo Station is known as Yaesu (八重洲). Yaesu is a corruption of the Dutchman's Japanese name, Yayousu (耶楊子). Joosten was given a Red Seal Ship (朱印船) allowing him to trade between Japan and Indo-China. On a return journey from Batavia, Joosten drowned after his ship ran aground.
+
+Yasuke (弥助) was a retainer of Oda Nobunaga, and possible samurai, originally from Portuguese Mozambique, Africa. He was weapon bearer of Nobunaga. He served in the Honnō-ji incident.
+
+Italian Jesuit missionary Giuseppe Chiara entered Japan at a time when Christianity was strictly forbidden, in an attempt to locate fellow priest Cristóvão Ferreira, who had apostatized his Christian faith at the hands of torture by the Japanese authorities in 1633. Di Chiara was also tortured and eventually became an apostate as well. After the Shimabara Rebellion in 1638, he arrived on the island of Oshima and was immediately arrested in June 1643. He later married a Japanese woman, taking on the name and samurai status of her late husband, Okamoto San'emon (Japanese: 岡本三右衛門), and settled down, spending the rest of his life in Japan until his death in 1685 at the age of 83.
+
+## Weapons
+
+* Japanese swords are the weapons that have come to be synonymous with the samurai. Chokutō, swords from the Nara period, featured a straight blade. By 900, curved tachi appeared, and ultimately the katana. Smaller commonly known companion swords are the wakizashi and the tantō. Wearing a long sword (katana or tachi) together with a smaller sword became the symbol of the samurai, and this combination of swords is referred to as a daishō (literally "big and small"). During the Edo period only samurai were allowed to wear a daisho. A longer blade known as the nodachi was also used in the fourteenth century, though primarily used by samurai on the ground.
+* The yumi (longbow), reflected in the art of kyūjutsu (lit. the skill of the bow) was a major weapon of the Japanese military. Its usage declined with the introduction of the tanegashima (Japanese matchlock) during the Sengoku period, but the skill was still practiced at least for sport. The yumi, an asymmetric composite bow made from bamboo, wood, rattan and leather, had an effective range of 50 or 100 meters (160 or 330 feet) if accuracy was not an issue. On foot, it was usually used behind a tate (手盾), a large, mobile wooden shield, but the yumi could also be used from horseback because of its asymmetric shape. The practice of shooting from horseback became a Shinto ceremony known as yabusame (流鏑馬).
+* Pole weapons including the yari (spear) and naginata were commonly used by the samurai. The yari displaced the naginata from the battlefield as personal bravery became less of a factor and battles became more organized around massed, inexpensive foot troops (ashigaru). A charge, mounted or dismounted, was also more effective when using a spear rather than a sword, as it offered better than even odds against a samurai using a sword. In the Battle of Shizugatake where Shibata Katsuie was defeated by Toyotomi Hideyoshi, seven samurai who came to be known as the "Seven Spears of Shizugatake" (賤ヶ岳七本槍) played a crucial role in the victory.
+* Tanegashima were introduced to Japan in 1543 through Portuguese trade. Tanegashima were produced on a large scale by Japanese gunsmiths, enabling warlords to raise and train armies from masses of peasants. The new weapons were highly effective; their ease of use and deadly effectiveness led to the tanegashima becoming the weapon of choice over the yumi. By the end of the 16th century, there were more firearms in Japan than in many European nations. Tanegashima—employed en masse, largely by ashigaru peasant foot troops—were responsible for a change in military tactics that eventually led to establishment of the Tokugawa shogunate and an end to civil war. Production of tanegashima declined sharply as there was no need for massive amounts of firearms. During the Edo period, tanegashima were stored away and used mainly for hunting and target practice. Foreign intervention in the 19th century renewed interest in firearms, but the tanegashima was outdated by then, and various samurai factions purchased more modern firearms from European sources.
+* Cannon became a common part of the samurai's armory by the 1570s. They often were mounted in castles or on ships, being used more as anti-personnel weapons than against castle walls or the like, though in the siege of Nagashino castle (1575) a cannon was used to good effect against an enemy siege tower. The first popular cannon in Japan were swivel-breech loaders named kunikuzushi or "province destroyers". Kunikuzushi weighed 264 lb (120 kg) and used 40 lb (18 kg) chambers, firing a small shot of 10 oz (280 g). The Arima clan of Kyushu used cannon like this at the Battle of Okinawate against the Ryūzōji clan.
+* Staff weapons of many shapes and sizes made from oak and other hard woods were used by the samurai, commonly known ones include the bō, the jō, the hanbō, and the tanbō.
+* Clubs and truncheons made of iron or wood, of all shapes and sizes were used by the samurai. Some like the jutte were one-handed weapons, and others like the kanabō were large two-handed weapons.
+* Chain weapons, various weapons using chains were used during the samurai era, the kusarigama and kusari-fundo are examples.
+* Cross sections of Japanese sword lamination methods
+* Diagram of the katana sword
+* Samurai with various armor and weapons, c. 1802–1814
+* Antique Japanese tachi
+* Antique Japanese katana
+* Antique Japanese wakizashi
+* Reenactors with Tanegashima at Himeji Castle Festival
+* Japanese arrow stand with a pair of Yumi bows.
+* The bow of the Kamakura period
+* The arrow of the Kamakura period
+* A naginata blade from the Kamakura period
+* Three yari (Kagi yari, omi yari and su yari) mounted in koshirae
+
+## Armor
+
+As far back as the seventh century Japanese warriors wore a form of lamellar armor, which evolved into the armor worn by the samurai. The first types of Japanese armor identified as samurai armor were known as ō-yoroi and dō-maru. These early samurai armors were made from small individual scales known as kozane. The kozane were made from either iron or leather and were bound together into small strips, and the strips were coated with lacquer to protect the kozane from water. A series of strips of kozane were then laced together with silk or leather lace and formed into a complete chest armor (dou or dō). A complete set of the yoroi weighed 66 lbs.
+
+In the 16th century a new type of armor started to become popular after the advent of firearms, new fighting tactics by increasing the scale of battles and the need for additional protection and high productivity. The kozane dou, which was made of small individual scales, was replaced by itazane, which had larger iron plate or platy leather joined together. Itazane can also be said to replace a row of individual kozanes with a single steel plate or platy leather. This new armor, which used itazane, was referred to as tosei-gusoku (gusoku), or modern armor.
+
+The gusoku armour added features and pieces of armor for the face, thigh, and back. The back piece had multiple uses, such as for a flag bearing. The style of gusoku, like the plate armour, in which the front and back dou are made from a single iron plate with a raised center and a V-shaped bottom, was specifically called nanban dou gusoku (Western style gusoku). Various other components of armor protected the samurai's body. The helmet (kabuto) was an important part of the samurai's armor. It was paired with a shikoro and fukigaeshi for protection of the head and neck.
+
+The garment worn under all of the armor and clothing was called the fundoshi, also known as a loincloth. Samurai armor changed and developed as the methods of samurai warfare changed over the centuries. The last known use of samurai armor occurring in 1877 during the Satsuma Rebellion. As the last samurai rebellion was crushed, Japan modernized its defenses and turned to a national conscription army that used uniforms.
+
+* Samurai armour
+* Ō-yoroi, Kamakura period, 13th–14th century, Kasuga Grand Shrine, National Treasure
+* Dō-maru with Black and White Lacing. Muromachi period, 15th century, Tokyo National Museum, Important Cultural Property
+* Toyotomi Hidetsugu's gusoku armour, Azuchi-Momoyama period, 16th-17th century, Suntory Museum of Art
+* Karuta tatami dō gusoku, Edo period. A lightweight portable folding (tatami) armour made from small square or rectangle armor plates called karuta. The karuta are usually connected to each other by chainmail and sewn to a cloth backing.
+* A re-creation of an armored samurai riding a horse, showing horse armour (uma yoroi or bagai)
+* Shell-shaped casque (Oitaragainari kawari kabuto), iron and papier-mâché for the shell, beginning of the Edo Period
+* Face guard (Menpō). Edo period. Tokyo Fuji Art Museum.
+
+## Combat techniques
+
+During the existence of the samurai, two opposite types of organization reigned. The first type were recruits-based armies: at the beginning, during the Nara period, samurai armies relied on armies of Chinese-type recruits and towards the end in infantry units composed of ashigaru. The second type of organization was that of a samurai on horseback who fought individually or in small groups.
+
+At the beginning of the contest, a series of bulbous-headed arrows were shot, which buzzed in the air. The purpose of these shots was to call the kami to witness the displays of courage that were about to unfold. After a brief exchange of arrows between the two sides, a contest called ikkiuchi (一 騎 討 ち) was developed, where great rivals on both sides faced each other. After these individual combats, the major combats were given way, usually sending infantry troops led by samurai on horseback. At the beginning of the samurai battles, it was an honor to be the first to enter battle. This changed in the Sengoku period with the introduction of the arquebus.
+
+At the beginning of the use of firearms, the combat methodology was as follows: at the beginning an exchange of arquebus shots was made at a distance of approximately 100 meters; when the time was right, the ashigaru spearmen were ordered to advance and finally the samurai would attack, either on foot or on horseback. The army chief would sit in a scissor chair inside a semi-open tent called maku, which exhibited its respective mon and represented the bakufu, "government from the maku."
+
+In the middle of the contest, some samurai decided to get off the horse and seek to cut off the head of a worthy rival. This act was considered an honor. Through it they gained respect among the military class. After the battle, the high-ranking samurai normally celebrated with a tea ceremony, and the victorious general reviewed the heads of the most important members of the enemy which had been cut.
+
+Most of the battles were not resolved in the ideal manner mentioned above. Most wars were won through surprise attacks, such as night raids, fires, etc. The renowned samurai Minamoto no Tametomo said:
+
+   According to my experience, there is nothing more advantageous when it comes to crushing the enemy than a night attack [...]. If we set fire to three of the sides and close the passage through the room, those who flee from the flames will be shot down by arrows, and those who seek to escape from them will not be able to flee from the flames.
+
+### Head collection
+
+Cutting off the head of a worthy rival on the battlefield was a source of great pride and recognition. There was a whole ritual to beautify the severed heads: first they were washed and combed, and once this was done, the teeth were blackened by applying a dye called ohaguro. The reason for blackening the teeth was that white teeth was a sign of distinction, so applying a dye to darken them was a desecration. The heads were carefully arranged on a table for exposure.
+
+In 1600, Kani Saizō participated in the Battle of Sekigahara as the forerunner of Fukushima Masanori's army. In the outpost battle of Gifu Castle, he took the heads of 17 enemy soldiers, and was greatly praised by Tokugawa Ieyasu. He fought with a bamboo stalk on his back and would mark the heads of his defeated enemies by putting bamboo leaves in their cut necks or mouths, since he couldn't carry every head. Thus he gained the nickname Bamboo Saizo.
+
+During Toyotomi Hideyoshi's invasions of Korea, the number of severed heads of the enemies to be sent to Japan was such that for logistical reasons only the noses were sent. These were covered with salt and shipped in wooden barrels. These barrels were buried in a burial mound near the "Great Buddha" of Hideyoshi, where they remain today under the wrong name of mimizuka or "ear mound."
+
+### Military formations
+
+During the Azuchi-Momoyama period and thanks to the introduction of firearms, combat tactics changed dramatically. The military formations adopted had poetic names, among which are:
+
+| Name | Description |
+| - | - |
+| Ganko (birds in flight) | A very flexible formation that allowed the troops to adapt depending on the movements of the opponent. The commander was located at the rear, but near the center to avoid communication problems. |
+| Hoshi (arrowhead) | An aggressive formation in which the samurai took advantage of the casualties caused by the shooting of the ashigaru. The signaling elements were close to the major generals of the commander. |
+| Saku (lock) | Considered the best defense against the Hoshi, since two rows of arcabuceros and two archers were in position to receive the attack. |
+| Kakuyoku (crane wings) | Recurrent formation with the purpose of surrounding the enemy. The archers and arcabuceros diminished the enemy troops before the melee attack of the samurai while the second company surrounded them. |
+| Koyaku (yoke) | Owes its name to the yokes used for oxen. It was used to neutralize the "crane wings" and "arrowhead" attack and its purpose was for the vanguard to absorb the first attack and allow time for the enemy to reveal his next move to which the second company could react in time. |
+| Gyōrin (fish scales) | Frequently used to deal with much more numerous armies. Its purpose was to attack a single sector to break the enemy ranks. |
+| Engetsu (half moon) | Used when the army was not yet defeated but an orderly withdrawal to the castle was needed. While the rearguard receded, the vanguard could still be organized according to the circumstances. |
+
+## Martial arts
+
+Each child who grew up in a samurai family was expected to be a warrior when he grew up, so much of his childhood was spent practicing different martial arts. A complete samurai should be skilled at least in the use of the sword (kenjutsu), the bow and arrow (kyujutsu), the spear (sojutsu, yarijutsu), the halberd (naginatajutsu) and subsequently the use of firearms (houjutsu). Similarly, they were instructed in the use of these weapons while riding a horse. They were also expected to know how to swim and dive.
+
+Nihon Eiho (日本泳法, Japanese swimming style) originates from the Sengoku period in the 15th century. The samurai developed Suijutsu (水術, (combat) water skills) which was useful in case they were thrown overboard during naval conflicts. The samurai practiced Katchu gozen oyogi (甲冑御前游, full armor swimming), Tachi-oyogi (立ち泳ぎ, standing swimming) and Ina-tobi (鯔飛, flying mullet) to board enemy vessels. Activities included strokes with swords, bows and firearms. Hands were kept dry above the water to write messages with an ink brush on a paper scroll. This skill was useful for muskets which require dry gunpowder. Nihon Eiho is practiced by 28 schools and recognized by the Japan Swimming Federation.
+
+During the feudal era of Japan, various types of martial arts flourished, known in Japanese under the name of bujutsu (武術). The term jutsu can be translated as "method", "art" or "technique" and the name that each one has is indicative of the mode or weapon with which they are executed. The combat methods that were developed and perfected are very diverse, among which are:
+
+| With weapons | With weapons | With weapons | No weapons |
+| - | - | - | - |
+| Important | Secondary | Collateral | No weapons |
+| Archery | War fan art | Chain art and other tools | No weapons |
+| kyūjutsu | tessenjutsu | kusarijutsu | aiki jujutsu |
+| kyūdō | Cane art | kusariganayutsu | chikarakurabe |
+| shagei | bōjutsu | manrikikusari | chogusoku |
+| Spear and halberd | jōdō | chigirigijutsu | genkotsu |
+| sōjutsu | kanabo/tetsubo jutsu | gegikanjutsu | gusoku |
+| naginatajutsu | Jitte art | Hidden arts | hakushi |
+| sodegaramijutsu | juttejutsu | kyusho Jitsu (Touch of Death) | jūjutsu |
+| sasumatajutsu | | toiri-no-jutsu | kenpō o karate |
+| | | kiaijutsu | |
+| Fencing | | chikairi-no-jutsu | kogusoku |
+| tōjutsu | | | koshi-no-mawari |
+| kenjutsu | | yubijutsu | kumiuchi |
+| | koppō | roikomiuchi | |
+| iaijutsu | | fukihari | shikaku |
+| iaidō | | suihokojutsu | |
+| tantōjutsu | | | shubaku |
+| Horse riding | | | sumai |
+| bajutsu | | | sumo |
+| jobajutsu | | | taidō |
+| suibajutsu | | | taidōjutsu |
+| Swimming | | | torite |
+| suijutsu | | | wajutsu |
+| oyogijutsu | | | yawara |
+| katchu gozen oyogi | | | |
+| Tachi-oyogi | | | |
+| Ina-tobi | | | |
+
+Today martial arts are classified in koryū budō or classical martial arts, before the 19th century, and to the modernization of Japan. Modern traditional martial arts are called gendai budō.
+
+## Myth and reality
+
+Most samurai were bound by a code of honor and were expected to set an example for those below them. A notable part of their code is seppuku (切腹, seppuku) or hara kiri, which allowed a disgraced samurai to regain his honor by passing into death, where samurai were still beholden to social rules. While there are many romanticized characterizations of samurai behavior such as the writing of Bushido: The Soul of Japan in 1899, studies of kobudō and traditional budō indicate that the samurai were as practical on the battlefield as were any other warriors.
+
+Some writers take issue with the very mention of the term bushido when not used to describe an individual samurai's usage of the word because of how broad and changed the meaning of it has become over time.
+
+Despite the rampant romanticism of the 20th century, samurai could be disloyal and treacherous (e.g., Akechi Mitsuhide), cowardly, brave, or overly loyal (e.g., Kusunoki Masashige). Samurai were usually loyal to their immediate superiors, who in turn allied themselves with higher lords. These loyalties to the higher lords often shifted; for example, the high lords allied under Toyotomi Hideyoshi were served by loyal samurai, but the feudal lords under them could shift their support to Tokugawa, taking their samurai with them. There were, however, also notable instances where samurai would be disloyal to their lord (daimyō), when loyalty to the emperor was seen to have supremacy.
+
+## In popular culture
+
+Samurai figures have been the subject for legends, folk tales, dramatic stories (i.e. gunki monogatari), theatre productions in kabuki and noh, in literature, movies, animated and anime films, television shows, manga, video games, and in various musical pieces in genre that range from enka to J-Pop songs.
+
+Jidaigeki (literally historical drama) has always been a staple program on Japanese movies and television. The programs typically feature a samurai. Samurai films and westerns share a number of similarities, and the two have influenced each other over the years. One of Japan's most renowned directors, Akira Kurosawa, greatly influenced western film-making. George Lucas' Star Wars series incorporated many stylistic traits pioneered by Kurosawa, and Star Wars: A New Hope takes the core story of a rescued princess being transported to a secret base from Kurosawa's The Hidden Fortress. Kurosawa was inspired by the works of director John Ford, and in turn Kurosawa's works have been remade into westerns such as Seven Samurai into The Magnificent Seven and Yojimbo into A Fistful of Dollars. There is also a 26 episode anime adaptation (Samurai 7) of Seven Samurai. Along with film, literature containing samurai influences are seen as well. As well as influence from American Westerns, Kurosawa also adapted two of Shakespeare's plays as sources for samurai movies: Throne of Blood was based on Macbeth, and Ran was based on King Lear.
+
+Most common are historical works where the protagonist is either a samurai or former samurai (or another rank or position) who possesses considerable martial skill. Eiji Yoshikawa is one of the most famous Japanese historical novelists. His retellings of popular works, including Taiko, Musashi and The Tale of the Heike, are popular among readers for their epic narratives and rich realism in depicting samurai and warrior culture. The samurai have also appeared frequently in Japanese comics (manga) and animation (anime). Examples are Samurai Champloo, Shigurui, Requiem from the Darkness, Muramasa: The Demon Blade, and Afro Samurai. Samurai-like characters are not just restricted to historical settings, and a number of works set in the modern age, and even the future, include characters who live, train and fight like samurai. Some of these works have made their way to the west, where it has been increasing in popularity with America.
+
+In the 21st century, samurai have become more popular in America. Through various media, producers and writers have been capitalizing on the notion that Americans admire the samurai lifestyle. The animated series, Afro Samurai, became well-liked in American popular culture because of its blend of hack-and-slash animation and gritty urban music. Created by Takashi Okazaki, Afro Samurai was initially a dōjinshi, or manga series, which was then made into an animated series by Studio Gonzo. In 2007, the animated series debuted on American cable television on the Spike TV channel. The series was produced for American viewers which "embodies the trend... comparing hip-hop artists to samurai warriors, an image some rappers claim for themselves". The story line keeps in tone with the perception of a samurai finding vengeance against someone who has wronged him. Because of its popularity, Afro Samurai was adopted into a full feature animated film and also became titles on gaming consoles such as the PlayStation 3 and Xbox. Not only has the samurai culture been adopted into animation and video games, it can also be seen in comic books.
+
+The television series Power Rangers Samurai (adapted from Samurai Sentai Shinkenger) is inspired by the way of the samurai.
+
+In the real-time strategy video game Age of Empires II, Players can create samurai units (a Japanese civilization unique unit in-game).
+
+## Festivals
+
+There are a variety of festivals held in Japan. Some festivals are seasonal celebrations that were adopted from China and imbued with Japanese cultural values and stories. Other festivals in Japan are held where people celebrate historical heroes or commemorate historical events through parades with people dressed as samurai. Some examples of these festivals include the Hagi Jidai Festival, Matsue Warrior Procession, Kenshin Festival, Sendai Aoba Festival, Battle of Sekigahara Festival, and the Shingen-ko Festival.
+
+The Hagi Jidai Festival takes place in the fall in Hagi, Yamaguchi Prefecture. This festival started in the Edo period as a way for the people of Hagi to show their appreciation to the God of Kanaya Tenmangu Shrine. The festival has over 200 people dress up in traditional samurai armor and the clothes of various people of the daimyō's court as they walk down the streets of the town. The festival is separated into two main events: the Hagi Daimyō Procession and the Hagi Jidai Parade. The Hagi Daimyō Procession begins in the morning at the Hagi Castle town area with a procession of samurai, servants, and palanquin bearers marching and performing traditional dances. In the afternoon, the Hagi Jidai Parade occurs, starting in the Central Park and go around the town until they reach the Kanaya Tenmangu Shrine.
+
+The Matsue Warrior Procession is a festival in Matsue, Shimane Prefecture. This festival reenacts the entrance of Daimyō Horio Yoshiharu and his troops into a newly built Matsue during the Edo Period. The event is held on the first Saturday of April. The event is made up of performers marching in a warrior parade at the Shirakata Tenmangu Shrine dressed in samurai armor and various clothing of the Edo period. Visitors are also have the opportunity to rent costumes and march in the parade, or to take pictures with the performers in the parade. Other events also take place throughout the day to celebrate the founding of the city.
+
+The Kenshin Festival is a festival held in Jōetsu, Niigata Prefecture celebrating the life of Daimyō Uesugi Kenshin. The festival started during the Showa era in 1926 at Kasugayama Shrine. The festival holds various events such as the Signal Fire, the Butei Ceremony, and the Shutsujin Parade. Additionally, the battle of Kawanakajima is reenacted as a part of this festival. Throughout the festival people in samurai armor participate in each event. One unique event in particular is the reenactment of the battle of Kawanakajima where performers in the samurai armor portray the events with swords and spears.
+
+The Shingen-ko Festival (信玄公祭り, Shingen-ko Matsuri) celebrates the legacy of daimyō Takeda Shingen. The festival is 3 days long. It is held annually on the first or second weekend of April in Kōfu, Yamanashi Prefecture. There are more than 100,000 visitors per festival. Usually a famous Japanese celebrity plays the part of Takeda Shingen. Ordinary people can participate too after applying. It is one of the biggest historical reenactments in Japan. In 2012 Guinness World Records certified it as the "largest gathering of samurai" in the world with 1,061 participants.
+
+## Famous samurai
+
+These are some famous samurai with extraordinary achievements in history.
+
+* Akechi Mitsuhide
+* Amakusa Shirō
+* Date Masamune
+* Hasekura Tsunenaga
+* Hattori Hanzō
+* Hōjō Ujimasa
+* Honda Tadakatsu
+* Kusunoki Masashige
+* Minamoto no Yoshitsune
+* Minamoto no Yoshiie
+* Miyamoto Musashi
+* Nakano Takeko
+* Oda Nobunaga
+* Saigō Takamori
+* Saitō Hajime
+* Sakamoto Ryōma
+* Sanada Yukimura
+* Sasaki Kojirō
+* Shimazu Takahisa
+* Shimazu Yoshihiro
+* Takayama Ukon
+* Takeda Shingen
+* Tokugawa Ieyasu
+* William Adams
+* Toyotomi Hideyoshi
+* Uesugi Kenshin
+* Yagyū Jūbei Mitsuyoshi
+* Yagyū Munenori
+* Yamamoto Tsunetomo
+* Yamaoka Tesshū
+
+## Samurai museums
+
+* Matsumoto Castle – the second floor features a collection of feudal guns, armor, and other weapons.
+* Japanese Sword Museum – dedicated to the art of Japanese swordmaking.
+* Samurai Museum in Shinjuku, Tokyo – about the history of the samurai with armor, weapons etc.
+* Ōyamazumi Shrine in Ōmishima Island – large collection of ancient samurai weaponry, armor and shrine statuary.

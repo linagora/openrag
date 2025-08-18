@@ -1,0 +1,448 @@
+# Firefox
+
+Mozilla Firefox, or simply Firefox, is a free and open-source web browser developed by the Mozilla Foundation and its subsidiary, the Mozilla Corporation. It uses the Gecko rendering engine to display web pages, which implements current and anticipated web standards. In November 2017, Firefox began incorporating new technology under the code name "Quantum" to promote parallelism and a more intuitive user interface. Firefox is available for Windows 10 or later versions, macOS, and Linux. Its unofficial ports are available for various Unix and Unix-like operating systems, including FreeBSD, OpenBSD, NetBSD, illumos, and Solaris Unix. It is also available for Android and iOS. However, as with all other iOS web browsers, the iOS version uses the WebKit layout engine instead of Gecko due to platform requirements. An optimized version is also available on the Amazon Fire TV as one of the two main browsers available with Amazon's Silk Browser.
+
+Firefox was created in 2002 under the code name "Phoenix" by members of the Mozilla community who desired a standalone browser rather than the Mozilla Application Suite bundle. During its beta phase, it proved to be popular with its testers and was praised for its speed, security, and add-ons compared to Microsoft's then-dominant Internet Explorer 6. It was released on November 9, 2004, and challenged Internet Explorer's dominance with 60 million downloads within nine months. It is the spiritual successor of Netscape Navigator, as the Mozilla community was created by Netscape in 1998, before its acquisition by AOL.
+
+Firefox usage share grew to a peak of 32.21% in November 2009, with Firefox 3.5 overtaking Internet Explorer 7, although not all versions of Internet Explorer as a whole; its usage then declined in competition with Google Chrome. As of December 2023, according to StatCounter, it had a 6.7% usage share on traditional PCs (i.e. as a desktop browser), making it the fourth-most popular PC web browser after Google Chrome (62%), Safari (13%), and Microsoft Edge (11%).
+
+## History
+
+The project began as an experimental branch of the Mozilla project by Dave Hyatt, Joe Hewitt, and Blake Ross. They believed the commercial requirements of Netscape's sponsorship and developer-driven feature creep compromised the utility of the Mozilla browser. To combat what they saw as the Mozilla Suite's software bloat, they created a standalone browser, with which they intended to replace the Mozilla Suite. Version 0.1 was released on September 23, 2002. On April 3, 2003, the Mozilla Organization announced that it planned to change its focus from the Mozilla Suite to Firefox and Thunderbird.
+
+The Firefox project has undergone several name changes. The nascent browser was originally named Phoenix, after the mythical bird that rose triumphantly from the ashes of its dead predecessor (in this case, from the "ashes" of Netscape Navigator, after it was sidelined by Microsoft Internet Explorer in the "First Browser War"). Phoenix was renamed in 2003 due to a trademark claim from Phoenix Technologies. The replacement name, Firebird, provoked an intense response from the Firebird database software project. The Mozilla Foundation reassured them that the browser would always bear the name Mozilla Firebird to avoid confusion. After further pressure, Mozilla Firebird became Mozilla Firefox on February 9, 2004. The name Firefox was said to be derived from a nickname of the red panda, which became the mascot for the newly named project. For the abbreviation of Firefox, Mozilla prefers Fx or fx, although it is often abbreviated as FF.
+
+The Firefox project went through many versions before version 1.0 and had already gained a great deal of acclaim from numerous media outlets, such as Forbes and The Wall Street Journal. Among Firefox's popular features were the integrated pop-up blocker, tabbed browsing, and an extension mechanism for adding functionality. Although these features have already been available for some time in other browsers such as the Mozilla Suite and Opera, Firefox was the first of these browsers to have achieved large-scale adoption. Firefox attracted attention as an alternative to Internet Explorer, which had come under fire for its alleged poor program design and insecurity—detractors cite IE's lack of support for certain Web standards, use of the potentially dangerous ActiveX component, and vulnerability to spyware and malware installation. Microsoft responded by releasing Windows XP Service Pack 2, which added several important security features to Internet Explorer 6.
+
+Version 1.0 of Firefox was released on November 9, 2004. This was followed by version 1.5 in November 2005, version 2.0 in October 2006, version 3.0 in June 2008, version 3.5 in June 2009, version 3.6 in January 2010, and version 4.0 in March 2011. From version 5 onwards, the development and release model changed into a "rapid" one; by the end of 2011 the stable release was version 9, and by the end of 2012 it reached version 17.
+
+Major redesigns of its graphical user interface occurred on versions 4.0 (Strata) in March 2011, 29.0 (Australis) in April 2014, 57.0 (Photon) in November 2017, and 89.0 (Proton) in June 2021.
+
+In 2016, Mozilla announced a project known as Quantum, which sought to improve Firefox's Gecko engine and other components to improve the browser's performance, modernize its architecture, and transition the browser to a multi-process model. These improvements came in the wake of decreasing market share to Google Chrome, as well as concerns that its performance was lapsing in comparison. Despite its improvements, these changes required existing add-ons for Firefox to be made incompatible with newer versions, in favor of a new extension system that is designed to be similar to Chrome and other recent browsers. Firefox 57, which was released in November 2017, was the first version to contain enhancements from Quantum, and has thus been named Firefox Quantum. A Mozilla executive stated that Quantum was the "biggest update" to the browser since version 1.0. Unresponsive and crashing pages only affect other pages loaded within the same process. While Chrome uses separate processes for each loaded tab, Firefox distributes tabs over four processes by default (since Quantum), in order to balance memory consumption and performance. The process count can be adjusted, where more processes increase performance at the cost of memory, therefore suitable for computers with larger RAM capacity.
+
+On May 3, 2019, the expiration of an intermediate signing certificate on Mozilla servers caused Firefox to automatically disable and lock all browser extensions (add-ons). Mozilla began the roll-out of a fix shortly thereafter, using their Mozilla Studies component.
+
+Support for Adobe Flash was dropped on January 6, 2021, with the release of Firefox 85.
+
+On January 13, 2022, an issue with Firefox's HTTP/3 implementation resulted in a widespread outage for multiple hours.
+
+On January 23, 2024, along with the release of Firefox 122.0, Mozilla has introduced an official APT repository for Debian-based Linux distributions.
+
+## Features
+
+Features of the desktop edition include tabbed browsing, full-screen mode, spell checking, incremental search, smart bookmarks, bookmarking and downloading through drag and drop, a download manager, user profile management, private browsing, bookmark tags, bookmark exporting, offline mode, a screenshot tool, web development tools, a "page info" feature which shows a list of page metadata and multimedia items, a sophisticated configuration menu at about:config for power users, and more location-aware browsing (also known as "geolocation") based on a Google service. Firefox has an integrated search system which uses Google by default in most markets but an update for American users in 2021 made it start including paid promotions by default in its suggestions. DNS over HTTPS is another feature whose default behaviour is determined geographically.
+
+Firefox provides an environment for web developers in which they can use built-in tools, such as the Error Console or the DOM Inspector, and extensions, such as Firebug and more recently there has been an integration feature with Pocket. Firefox Hello was an implementation of WebRTC, added in October 2014, which allows users of Firefox and other compatible systems to have a video call, with the extra feature of screen and file sharing by sending a link to each other. Firefox Hello was scheduled to be removed in September 2016.
+
+Former features include a File Transfer Protocol (FTP) client for browsing file servers, the ability to block images from individual domains (until version 72), a 3D page inspector (versions 11 to 46), tab grouping (until version 44), and the ability to add customized extra toolbars (until version 28).
+
+### Browser extensions
+
+Functions can be added through add-ons created by third-party developers. Add-ons are primarily coded using an HTML, CSS, JavaScript, with API known as WebExtensions, which is designed to be compatible with Google Chrome and Microsoft Edge extension systems. Firefox previously supported add-ons using the XUL and XPCOM APIs, which allowed them to directly access and manipulate much of the browser's internal functionality. As compatibility was not included in the multi-process architecture, XUL add-ons have been deemed Legacy add-ons and are no longer supported on Firefox 57 "Quantum" and newer.
+
+Mozilla has occasionally installed extensions for users without their permission. This happened in 2017 when an extension designed to promote the show Mr. Robot was silently added in an update to Firefox.
+
+### Themes
+
+Firefox can have themes added to it, which users can create or download from third parties to change the appearance of the browser.
+
+### Guest session
+
+In 2013, Firefox for Android added a guest session mode, which wiped browsing data such as tabs, cookies, and history at the end of each guest session. Guest session data was kept even when restarting the browser or device, and deleted only upon a manual exit. The feature was removed in 2019, purportedly to "streamline the experience".
+
+### Standards
+
+Firefox implements many web standards, including HTML4 (almost full HTML5), XML, XHTML, MathML, SVG 1.1 (full), SVG 2 (partial), CSS (with extensions), ECMAScript (JavaScript), DOM, XSLT, XPath, and APNG (Animated PNG) images with alpha transparency. Firefox also implements standards proposals created by the WHATWG such as client-side storage, and the canvas element. These standards are implemented through the Gecko layout engine, and SpiderMonkey JavaScript engine. Firefox 4 was the first release to introduce significant HTML5 and CSS3 support.
+
+Firefox has passed the Acid2 standards-compliance test since version 3.0. Mozilla had originally stated that they did not intend for Firefox to pass the Acid3 test fully because they believed that the SVG fonts part of the test had become outdated and irrelevant, due to WOFF being agreed upon as a standard by all major browser makers. Because the SVG font tests were removed from the Acid3 test in September 2011, Firefox 4 and greater scored 100/100.
+
+Firefox also implements "Safe Browsing," a proprietary protocol from Google used to exchange data related with phishing and malware protection.
+
+Firefox supports the playback of video content protected by HTML5 Encrypted Media Extensions (EME), since version 38. For security and privacy reasons, EME is implemented within a wrapper of open-source code that allows execution of a proprietary DRM module by Adobe Systems—Adobe Primetime Content Decryption Module (CDM). CDM runs within a "sandbox" environment to limit its access to the system and provide it a randomized device ID to prevent services from uniquely identifying the device for tracking purposes. The DRM module, once it has been downloaded, is enabled, and disabled in the same manner as other plug-ins. Since version 47, "Google's Widevine CDM on Windows and Mac OS X so streaming services like Amazon Video can switch from Silverlight to encrypted HTML5 video" is also supported. Mozilla justified its partnership with Adobe and Google by stating:
+
+   Firefox downloads and enables the Adobe Primetime and Google Widevine CDMs by default to give users a smooth experience on sites that require DRM. Each CDM runs in a separate container called a sandbox and you will be notified when a CDM is in use. You can also disable each CDM and opt-out of future updates
+
+and that it is "an important step on Mozilla's roadmap to remove NPAPI plugin support." Upon the introduction of EME support, builds of Firefox on Windows were also introduced that exclude support for EME. The Free Software Foundation and Cory Doctorow condemned Mozilla's decision to support EME.
+
+## Security
+
+Firefox allowed for a sandbox security model to manage privileges accorded to JavaScript code, but that feature has since been deprecated. It limits scripts from accessing data from other websites based on the same-origin policy. It also provides support for smart cards to web applications, for authentication purposes. It uses TLS to protect communications with web servers using strong cryptography when using the HTTPS protocol. The freely available HTTPS Everywhere add-on enforces HTTPS, even if a regular HTTP URL is entered. Firefox now supports HTTP/2.
+
+The Mozilla Foundation offers a "bug bounty" (US$3,000 to US$7,500 cash reward) to researchers who discover severe security holes in Firefox. Official guidelines for handling security vulnerabilities discourage early disclosure of vulnerabilities so as not to give potential attackers an advantage in creating exploits.
+
+Because Firefox generally has fewer publicly known security vulnerabilities than Internet Explorer (see Comparison of web browsers), improved security is often cited as a reason to switch from Internet Explorer to Firefox. The Washington Post reported that exploit code for known critical security vulnerabilities in Internet Explorer was available for 284 days in 2006. In comparison, exploit code for known, critical security vulnerabilities in Firefox was available for nine days before Mozilla issued a patch to remedy the problem.
+
+A 2006 Symantec study showed that, although Firefox had surpassed other browsers in the number of vendor-confirmed vulnerabilities that year through September, these vulnerabilities were patched far more quickly than those found in other browsers, with Firefox's vulnerabilities being fixed on average one day after the exploit code was made available, as compared to nine days for Internet Explorer. Symantec later clarified their statement, saying that Firefox still had fewer security vulnerabilities than Internet Explorer, as counted by security researchers.
+
+In October 2009, Microsoft's security engineers acknowledged that Firefox was vulnerable to a security issue found in the 'Windows Presentation Foundation' browser plug-in since February of that year. A .NET Framework 3.5 SP1 Windows Update had silently installed the vulnerable plug-in into Firefox. This vulnerability has since been patched by Microsoft.
+
+In 2010, a study of the National Institute of Standards and Technology (NIST), based on data compiled from the National Vulnerability Database (NVD), Firefox was listed as the fifth-most vulnerable desktop software, with Internet Explorer as the eighth, and Google Chrome as the first.
+
+InfoWorld has cited security experts saying that, as Firefox becomes more popular, more vulnerabilities will be found, a claim that Mitchell Baker, president of the Mozilla Foundation, has denied. "There is this idea that market share alone will make you have more vulnerabilities. It is not relational at all," she said.
+
+As of February 11, 2011, Firefox 3.6 had no known unpatched security vulnerabilities according to Secunia. Internet Explorer 8 had five unpatched security vulnerabilities; the worst being rated "Less Critical" by Secunia. Mozilla claims that all patched vulnerabilities of Mozilla products are publicly listed.
+
+Firefox 11, released in January 2012, introduced a 3D page inspector that visualizes web pages' document object model three-dimensionally through WebGL. The feature was accessible from the developer tools.
+
+On January 28, 2013, Mozilla was recognized as the most trusted internet company for privacy in 2012. This study was performed by the Ponemon Institute and was a result of a survey from more than 100,000 consumers in the United States.
+
+In February 2013, plans were announced for Firefox 22 to disable third-party cookies by default. However, the introduction of the feature was then delayed so Mozilla developers could "collect and analyze data on the effect of blocking some third-party cookies." Mozilla also collaborated with Stanford University's "Cookie Clearinghouse" project to develop a blacklist and whitelist of sites that will be used in the filter.
+
+Version 23, released in August 2013, followed the lead of its competitors by blocking iframe, stylesheet, and script resources served from non-HTTPS servers embedded on HTTPS pages by default. Additionally, JavaScript could also no longer be disabled through Firefox's preferences, and JavaScript was automatically re-enabled for users who upgraded to 23 or higher with it disabled. The change was made due to its use across the majority of websites, the potential repercussions on inexperienced users who are unaware of its impact, along with the availability of extensions such as NoScript, which can disable JavaScript in a more controlled fashion. The following release added the ability to disable JavaScript through the developer tools for testing purposes.
+
+In January 2015, TorrentFreak reported that using Firefox when connected to the internet using a VPN can be a serious security issue due to the browser's support for WebRTC.
+
+Beginning with Firefox 48, all extensions must be signed by Mozilla to be used in release and beta versions of Firefox. Firefox 43 blocked unsigned extensions but allowed enforcement of extension signing to be disabled. All extensions must be submitted to Mozilla Add-ons and be subject to code analysis in order to be signed, although extensions do not have to be listed on the service to be signed. On May 2, 2019, Mozilla announced that it would be strengthening the signature enforcement with methods that included the retroactive disabling of old extensions now deemed to be insecure. A Firefox update on May 3 led to bug reports about all extensions being disabled. This was found to be the result of an overlooked certificate and not the policy change set to go into effect on June 10.
+
+In Firefox versions prior to 7.0, an information bar appears on the browser's first start asking users whether they would like to send performance statistics, or "telemetry", to Mozilla. It is enabled by default in development versions of Firefox, but not in release versions. According to Mozilla's privacy policy, these statistics are stored only in aggregate format, and the only personally identifiable information transmitted is the user's IP address.
+
+In November 2018, Firefox began using a sandbox to isolate web tabs from each other and from the rest of the system. Its lack of such a feature had previously earned it negative comparisons with Google Chrome and Microsoft Edge.
+
+Since version 60 Firefox includes the option to use DNS over HTTPS (DoH), which causes DNS lookup requests to be sent encrypted over the HTTPS protocol. To use this feature the user must set certain preferences beginning with "network.trr" (Trusted Recursive Resolver) in about:config: if network.trr.mode is 0, DoH is disabled; 1 activates DoH in addition to unencrypted DNS; 2 causes DoH to be used before unencrypted DNS; to use only DoH, the value must be 3. By setting network.trr.uri to the URL, special Cloudflare servers will be activated. Mozilla has a privacy agreement with this server host that restricts their collection of information about incoming DNS requests.
+
+On May 21, 2019, Firefox was updated to include the ability to block scripts that used a computer's CPU to mine cryptocurrency without a user's permission, in Firefox version 67.0. The update also allowed users to block known fingerprinting scripts that track their activity across the web, however it does not resist fingerprinting on its own.
+
+On July 2, 2019, Mozilla introduced a mechanism to allow Firefox to automatically trust OS-installed certificates to prevent TLS errors.
+
+In October 2019, ZDNet reported Firefox version 68 ESR passed all minimum requirements for mandatory security features during an exam by the Federal Office for Information Security of Germany.
+
+In Mozilla Foundation Security Advisory 2020–03, the company reported that the CVE-2019-17026 vulnerability (type confusion vulnerability in IonMonkey) had been detected in the wild and was being actively exploited.
+
+In March 2021, Firefox launched SmartBlock in version 87 to offer protection against cross-site tracking, without breaking the websites users visit. Also known as state partitioning or "total cookie protection", works via a feature in the browser that isolates data from each site visited by the user to ensure that cross-site scripting is very difficult if not impossible. The feature also isolates local storage, service workers and other common ways for sites to store data.
+
+## Localizations
+
+Firefox is a widely localized web browser. The first official release in November 2004 was available in 24 different languages and for 28 locales, including British English, American English, European Spanish, Argentine Spanish, Chinese in Traditional Chinese characters and Simplified Chinese characters and in Bangla. As of January 2024, currently supported versions 122.0 and 115.7.0esr are available in 97 locales (88 languages).
+
+## Platform availability
+
+The desktop version of Firefox is available and supports Microsoft Windows, macOS, and Linux, while Firefox for Android is available for Android (formerly Firefox for mobile, it also ran on Maemo, MeeGo and Firefox OS) and Firefox for iOS is available for iOS. Smartphones that support Linux but do not support Android or iOS apps can also run Firefox in its desktop version, for example using postmarketOS.
+
+* view
+* talk
+
+| Operating system | Operating system | Latest stable version | Support status |
+| - | - | - | - |
+| Windows | 10 v1709 or later | Current stable version: 122.0 (ARM64) | 2017– |
+| Windows | 10 v1709 or later | Older version, yet still maintained: 115.7.0esr (ARM64) | 2017– |
+| Windows | 10 or later, Server 2016 or later | Current stable version: 122.0 (x64) | 2015– |
+| Windows | 10 or later, Server 2016 or later | Older version, yet still maintained: 115.7.0esr (x64) | 2015– |
+| Windows | 10 or later, Server 2016 or later | Current stable version: 122.0 (IA-32) | 2015– |
+| Windows | 10 or later, Server 2016 or later | Older version, yet still maintained: 115.7.0esr (IA-32) | 2015– |
+| Windows | 7, Server 2008 R2, 8, Server 2012, 8.1 and Server 2012 R2 | Older version, yet still maintained: 115.7.0esr (x64) | 2015–2024 |
+| Windows | 7, Server 2008 R2, 8, Server 2012, 8.1 and Server 2012 R2 | Older version, yet still maintained: 115.7.0esr (IA-32) | 2009–2024 |
+| Windows | 7, Server 2008 R2, 8, Server 2012, 8.1 and Server 2012 R2 | Old version, no longer maintained: 115.0.2 (x64) | 2015–2023 |
+| Windows | 7, Server 2008 R2, 8, Server 2012, 8.1 and Server 2012 R2 | Old version, no longer maintained: 115.0.2 (IA-32) | 2009–2023 |
+| Windows | XP SP2+, Server 2003 SP1+ & R2, Vista and Server 2008 | Old version, no longer maintained: 52.9.0esr (IA-32) | 2004–2018 |
+| Windows | XP SP2+, Server 2003 SP1+ & R2, Vista and Server 2008 | Old version, no longer maintained: 52.0.2 (IA-32) | 2004–2017 |
+| Windows | 2000, XP RTM–SP1 and Server 2003 RTM | Old version, no longer maintained: 10.0.12esr | 2004–2013 |
+| Windows | 2000, XP RTM–SP1 and Server 2003 RTM | Old version, no longer maintained: 12.0 | 2004–2012 |
+| Windows | NT 4.0 (IA-32), 98 and ME | Old version, no longer maintained: 2.0.0.20 | 2004–2008 |
+| Windows | 95 | Old version, no longer maintained: 1.5.0.12 | 2004–2007 |
+| macOS | 11 (ARM64) or later | Current stable version: 122.0 | 2020– |
+| macOS | 11 (ARM64) or later | Older version, yet still maintained: 115.7.0esr | 2020– |
+| macOS | 10.15 (x64) or later | Current stable version: 122.0 | 2019– |
+| macOS | 10.15 (x64) or later | Older version, yet still maintained: 115.7.0esr | 2019– |
+| macOS | 10.12–10.14 | Older version, yet still maintained: 115.7.0esr | 2016–2024 |
+| macOS | 10.12–10.14 | Old version, no longer maintained: 115.0.2 | 2016–2023 |
+| macOS | 10.9–10.11 | Old version, no longer maintained: 78.15.0esr | 2013–2021 |
+| macOS | 10.9–10.11 | Old version, no longer maintained: 78.0.2 | 2013–2020 |
+| macOS | 10.6–10.8 | Old version, no longer maintained: 45.9.0esr | 2009–2017 |
+| macOS | 10.6–10.8 | Old version, no longer maintained: 48.0.2 | 2009–2016 |
+| macOS | 10.5 (IA-32 and x64) | Old version, no longer maintained: 10.0.12esr | 2007–2013 |
+| macOS | 10.5 (IA-32 and x64) | Old version, no longer maintained: 16.0.2 | 2007–2012 |
+| macOS | 10.4 (IA-32 and PPC)–10.5 (PPC) | Old version, no longer maintained: 3.6.28 | 2005–2012 |
+| macOS | 10.2–10.3 | Old version, no longer maintained: 2.0.0.20 | 2004–2008 |
+| macOS | 10.0–10.1 | Old version, no longer maintained: 1.0.8 | 2004–2006 |
+| Linux desktop | Linux desktop | Current stable version: 122.0 (x64) | 2011– |
+| Linux desktop | Linux desktop | Older version, yet still maintained: 115.7.0esr (x64) | 2011– |
+| Linux desktop | Linux desktop | Current stable version: 122.0 (IA-32) | 2004– |
+| Linux desktop | Linux desktop | Older version, yet still maintained: 115.7.0esr (IA-32) | 2004– |
+
+Notes
+
+* In March 2014, the Windows Store app version of Firefox was cancelled, although there is a beta release.
+* SSE2 instruction set support is required for 49.0 or later for Windows and 53.0 or later for Linux, IA-32 support only applies to superscalar processors.
+
+Firefox source code may be compiled for various operating systems; however, officially distributed binaries are provided for the following:
+
+Required hardware and software :
+
+| Requirement | Microsoft Windows | Linux desktop | macOS | Android | iOS |
+| - | - | - | - | - | - |
+| CPU | 1GHz or faster compatible processor (or ARM64 for Windows) ESR: Pentium 4 or newer with SSE2 (or ARM64 for Windows) | 1GHz or faster compatible processor (or ARM64 for Windows) ESR: Pentium 4 or newer with SSE2 (or ARM64 for Windows) | Any x86-64 and ARM64 CPU | ARMv7, ARM64, IA-32 and x64 | ARM64 |
+| Memory (RAM) | 1 GB for the 32-bit version and 2 GB for the 64-bit version ESR: 512 MB for the 32-bit version and 2 GB for the 64-bit version | 1 GB for the 32-bit version and 2 GB for the 64-bit version ESR: 512 MB for the 32-bit version and 2 GB for the 64-bit version | 1 GB for the 32-bit version and 2 GB for the 64-bit version ESR: 512 MB for the 32-bit version and 2 GB for the 64-bit version | 384 MB | ? |
+| Data storage device free space | 500 MB ESR: 200 MB | 500 MB ESR: 200 MB | 500 MB ESR: 200 MB | 80 MB | ~128 MB |
+| Operating system | Windows 10 or later Windows Server 2016 or later ESR: Windows 7, Server 2008 R2, 8, Server 2012, 8.1 and Server 2012 R2 | Minimum GTK 3.14 or newer libstdc++ 4.8.1 or newer X.Org 1.0 or newer glibc 2.17 or newer Recommended NetworkManager 0.7 or newer DBus 1.0 or newer GNOME 2.16 or newer PulseAudio X.Org 1.7 or newer libxtst 1.2.3 or newer | macOS 10.15 or newer ESR: 10.12–10.14 | 5.0 or newer | iOS 15 or later |
+
+### Microsoft Windows
+
+Firefox 1.0 was released for Windows 95, as well as Windows NT 4.0 or later. Some users reported the 1.x builds were operable (but not installable) on Windows NT 3.51.
+
+The version 42.0 release includes the first x64 build. It required Windows 7 or Server 2008 R2 (but those older operating system versions are no longer supported in latest Firefox versions). Starting from version 49.0, Firefox for Windows requires and uses the SSE2 instruction set.
+
+In September 2013, Mozilla released a Metro-style version of Firefox, optimized for touchscreen use, on the "Aurora" release channel. However, on March 14, 2014, Mozilla cancelled the project because of a lack of user adoption.
+
+Traditionally, installing the Windows version of Firefox entails visiting the Firefox website and downloading an installer package, depending on the desired localization and system architecture. In November 2021, Mozilla made Firefox available on Microsoft Store. The Store-distributed package does not interfere with the traditional installation.
+
+Most recently, Mozilla ended support for Windows 7 and 8 in Firefox 116, with those users being supported on the Firefox 115 ESR branch until late 2024.
+
+### macOS
+
+The first official release (Firefox version 1.0) supported macOS (then called Mac OS X) on the PowerPC architecture. Mac OS X builds for the IA-32 architecture became available via a universal binary which debuted with Firefox 1.5.0.2 in 2006.
+
+Starting with version 4.0, Firefox was released for the x64 architecture to which macOS had migrated. Version 4.0 also dropped support for PowerPC architecture, although other projects continued development of a PowerPC version of Firefox.
+
+Firefox was originally released for Mac OS X 10.0 and higher. The minimum OS then increased to Mac OS X 10.2 in Firefox 1.5 and 10.4 in Firefox 3. Firefox 4 dropped support for Mac OS X 10.4 and PowerPC Macs, and Firefox 17 dropped support for Mac OS X 10.5 entirely. The system requirements were left unchanged until 2016, when Firefox 49 dropped support for Mac OS X 10.6–10.8. Mozilla ended support for OS X 10.9–10.11 in Firefox 79, with those users being supported on the Firefox 78 ESR branch until November 2021. Most recently, Mozilla ended support for macOS 10.12–10.14 in Firefox 116, with those users being supported on the Firefox 115 ESR branch until late 2024.
+
+### Linux
+
+Since its inception, Firefox for Linux supported the 32-bit memory architecture of the IA-32 instruction set. 64-bit builds were introduced in the 4.0 release. The 46.0 release replaced GTK 2.18 with 3.4 as a system requirement on Linux and other systems running X.Org. Starting with 53.0, the 32-bit builds require the SSE2 instruction set. Firefox also can run on number of other architectures on Linux, including ARM, AArch64, POWER/PowerPC/Power ISA, SPARC, PA-RISC, MIPS, s390, and in the past Alpha, IA-64 (Intel Itanium) and m68k.
+
+### Firefox for Android
+
+Firefox for mobile, codenamed "Fennec", was first released for Maemo in January 2010 with version 1.0 and for Android in March 2011 with version 4.0. Support for Maemo was discontinued after version 7, released in September 2011. Fennec had a user interface optimized for phones and tablets. It included the Awesome Bar, tabbed browsing, add-on support, a password manager, location-aware browsing, and the ability to synchronize with the user's other devices with Mozilla Firefox using Firefox Sync. It was criticized for being slow, however, in part due to its poor port of Gecko. At the end of its existence, it had a market share of 0.5% on Android.
+
+In August 2020, Mozilla launched a new version of its Firefox for Android app, named Firefox Daylight to the public and codenamed Fenix, after a little over a year of testing. It boasted higher speeds with its new GeckoView engine, which is described as being "the only independent web engine browser available on Android". It also added Enhanced Tracking Protection 2.0, a feature that blocks many known trackers on the Internet. It also added the ability to place the address bar on the bottom, and a new Collections feature. However, it was criticized for only having nine Add-ons at launch, and missing certain features. In response, Mozilla stated that they will allow more Add-ons with time.
+
+* view
+* talk
+
+| Operating system | Operating system | Latest stable version | Support status |
+| - | - | - | - |
+| Android (including Android-x86) | 5.0 or later | Current stable version: 122.0 (x64) | 2018– |
+| Android (including Android-x86) | 5.0 or later | Current stable version: 122.0 (ARM64) | 2017– |
+| Android (including Android-x86) | 5.0 or later | Current stable version: 122.0 (IA-32 and ARMv7) | 2014– |
+| Android (including Android-x86) | 4.1–4.4 | Old version, no longer maintained: 68.11.0 (x64) | 2018–2020 |
+| Android (including Android-x86) | 4.1–4.4 | Old version, no longer maintained: 68.11.0 (IA-32) | 2013–2020 |
+| Android (including Android-x86) | 4.1–4.4 | Old version, no longer maintained: 68.11.0 (ARMv7) | 2012–2020 |
+| Android (including Android-x86) | 4.0 | Old version, no longer maintained: 55.0.2 (IA-32) | 2013–2017 |
+| Android (including Android-x86) | 4.0 | Old version, no longer maintained: 55.0.2 (ARMv7) | 2011–2017 |
+| Android (including Android-x86) | 3.0–3.2 | Old version, no longer maintained: 45.0.2 (ARMv7) | 2011–2016 |
+| Android (including Android-x86) | 2.3 | Old version, no longer maintained: 47.0 (ARMv7) | 2011–2016 |
+| Android (including Android-x86) | 2.2–4.3 | Old version, no longer maintained: 31.3.0esr (ARMv6) | 2012–2015 |
+| Android (including Android-x86) | 2.2 | Old version, no longer maintained: 31.0 (ARMv7) | 2011–2014 |
+| Android (including Android-x86) | 2.1 | Old version, no longer maintained: 19.0.2 (ARMv6) | 2012–2013 |
+| Android (including Android-x86) | 2.1 | Old version, no longer maintained: 19.0.2 (ARMv7) | 2011–2013 |
+| Android (including Android-x86) | 2.0 | Old version, no longer maintained: 6.0.2 (ARMv7) | 2011 |
+| Firefox OS | 2.2 | Old version, no longer maintained: 35/36/37 | 2015 |
+| Firefox OS | 2.1 | Old version, no longer maintained: 33/34 | 2014–2015 |
+| Firefox OS | 2.0 | Old version, no longer maintained: 31/32 | 2014–2015 |
+| Maemo | Maemo | Old version, no longer maintained: 7.0.1 | 2010–2011 |
+| Windows Mobile | 6.x | Old version, no longer maintained: 1.0a3 | 2009–2010 |
+
+**Notes**
+
+* Firefox for iOS is not listed in this table as its version numbers would be misleading. Prior to version 96 it used version numbers that do not correspond to any of the other Firefox versions. Those share a core component, the Gecko rendering engine, and track its version numbers, whereas the version for the iOS operating system uses the operating system's rendering engine (WebKit), rather than Mozilla's (Gecko).
+
+### Firefox for iOS
+
+Mozilla initially refused to port Firefox to iOS, due to the restrictions Apple imposed on third-party iOS browsers. Instead of releasing a full version of the Firefox browser, Mozilla released Firefox Home, a companion app for the iPhone and iPod Touch based on the Firefox Sync technology, which allowed users to access their Firefox browsing history, bookmarks, and recent tabs. It also included Firefox's "Awesomebar" location bar. Firefox Home was not a web browser, the application launched web pages in either an embedded viewer for that one page, or by opening the page in the Safari app. Mozilla pulled Firefox Home from the App Store in September 2012, stating it would focus its resources on other projects. The company subsequently released the source code of Firefox Home's underlying synchronization software.
+
+In April 2013, then-Mozilla CEO Gary Kovacs said that Firefox would not come to iOS if Apple required the use of the WebKit layout engine to do so. One reason given by Mozilla was that prior to iOS 8, Apple had supplied third-party browsers with an inferior version of their JavaScript engine which hobbled their performance, making it impossible to match Safari's JavaScript performance on the iOS platform. Apple later opened their "Nitro" JavaScript engine to third-party browsers. In 2015, Mozilla announced it was moving forward with Firefox for iOS, with a preview release made available in New Zealand in September of that year. It was fully released in November later that year. It is the first Firefox-branded browser not to use the Gecko layout engine as is used in Firefox for desktop and mobile. Apple's policies require all iOS apps that browse the web to use the built-in WebKit rendering framework and WebKit JavaScript, so using Gecko is not possible. Unlike Firefox on Android, Firefox for iOS does not support browser add-ons.
+
+In November 2016, Firefox released a new iOS app titled Firefox Focus, a private web browser.
+
+### Firefox Reality (AR/VR)
+
+Firefox Reality was released for Augmented Reality and Virtual Reality headsets in September 2018. It supports traditional web-browsing through 2D windows and immersive VR pages through Web VR. Firefox Reality is available on HTC Vive, Oculus, Google Daydream and Microsoft Hololens headsets. In February 2022 Mozilla announced that Igalia took over stewardship of this project under the new name of Wolvic.
+
+### Unofficial ports
+
+Firefox has also been ported to FreeBSD, NetBSD, OpenBSD, OpenIndiana, OS/2, ArcaOS, SkyOS, RISC OS and BeOS/Haiku, and an unofficial rebranded version called Timberwolf has been available for AmigaOS 4. An unofficial continuation of the Mac OS X PowerPC release was actively developed as TenFourFox until October 5, 2021.
+
+The Firefox port for OpenBSD is maintained by Landry Breuil since 2010. Firefox is regularly built for the current branch of the operating system, the latest versions are packaged for each release and remain frozen until the next release. In 2017, Landry began hosting packages of newer Firefox versions for OpenBSD releases from 6.0 onwards, making them available to installations without the ports system.
+
+The Solaris port of Firefox (including OpenSolaris) was maintained by the Oracle Solaris Desktop Beijing Team, until March 2017 when the team was disbanded. There was also an unofficial port of Firefox 3.6.x to IBM AIX and of v1.7.x to UnixWare.
+
+* view
+* talk
+
+| Operating system | Operating system | Operating system | Latest stable version | Support status |
+| - | - | - | - | - |
+| Solaris | 11 | 11 | Older version, yet still maintained: 115.6.0esr (x64,SPARC V9) | 2011– |
+| Solaris | 10 and OpenSolaris | 10 and OpenSolaris | Old version, no longer maintained: 52.9.0esr (IA-32,x64,SPARC V9) | 2005–2018 |
+| Solaris | 8–9 | 8–9 | Old version, no longer maintained: 2.0.0.20 (IA-32 and SPARC V9) | 2004–2008 |
+| HP-UX | 11i v2–v3 | 11i v2–v3 | Old version, no longer maintained: 3.5.9 (IA-64,PA-RISC) | N/A |
+| OpenBSD | -current | -current | Current stable version: 121.0 (x64,ARM64) | 2019– |
+| OpenBSD | -current | -current | Older version, yet still maintained: 115.6.0esr (x64,ARM64) | 2019– |
+| OpenBSD | -current | -current | Old version, no longer maintained: 88.0.1 (IA-32) | 2019–2021 |
+| OpenBSD | -current | -current | Old version, no longer maintained: 78.14.0esr (IA-32) | 2019–2021 |
+| OpenBSD | -stable | 7.4 | Current stable version: 121.0 (x64,ARM64) | 2023– |
+| OpenBSD | -stable | 7.4 | Older version, yet still maintained: 115.6.0esr (x64,ARM64) | 2023– |
+| OpenBSD | -stable | 6.9 | Old version, no longer maintained: 88.0.1 (IA-32) | 2021 |
+| OpenBSD | -stable | 6.9 | Old version, no longer maintained: 78.14.0esr (IA-32) | 2021 |
+| OpenBSD | -stable | 5.8 | Old version, no longer maintained: 38.7.1esr (PPC) | 2015–2016 |
+| OpenBSD | -stable | 5.7 | Old version, no longer maintained: 31.6.0esr (SPARC V9) | 2015 |
+| OpenBSD | -release | 5.8 | 39.0.3 (PPC) | |
+| OpenBSD | -release | 5.4 | 3.6.28 (Alpha) | |
+| OpenBSD | -release | 4.7 | 3.0.18 (ARMv7) | |
+
+## Channels and release schedule
+
+In March 2011, Mozilla presented plans to switch to a faster 16-week development cycle, similar to Google Chrome. Ars Technica noted that this new cycle entailed "significant technical and operational challenges" for Mozilla (notably preserving third-party add-on compatibility), but that it would help accelerate Firefox's adoption of new web standards, feature, and performance improvements. This plan was implemented in April 2011. The release process was split into four "channels", with major releases trickling down to the next channel every six to eight weeks. For example, the nightly channel would feature a preliminary unstable version of Firefox 6, which would move to the experimental "Aurora" channel after preliminary testing, then to the more stable "beta" channel, before finally reaching the public release channel, with each stage taking around six weeks. For corporations, Mozilla introduced an Extended Support Release channel, with new versions released every 30 weeks (and supported for 12 more weeks after a new ESR version is released), though Mozilla warned that it would be less secure than the release channel, since security patches would only be backported for high-impact vulnerabilities.
+
+In 2017, Mozilla abandoned the Aurora channel, which saw low uptake, and rebased Firefox Developer Edition onto the beta channel. Mozilla uses A/B testing and a staged rollout mechanism for the release channel, where updates are first presented to a small fraction of users, with Mozilla monitoring its telemetry for increased crashes or other issues before the update is made available to all users. In 2020, Firefox moved to a four-week release cycle, to catch up with Chrome in support for new web features. Chrome switched to a four-week cycle a year later.
+
+## Licensing
+
+Firefox source code is free software, with most of it being released under the Mozilla Public License (MPL) version 2.0. This license permits anyone to view, modify, or redistribute the source code. As a result, several publicly released applications have been built from it, such as Netscape, Flock, Miro, GNU IceCat, Iceweasel, Songbird, Pale Moon, Waterfox, and Comodo IceDragon.
+
+In the past, Firefox was licensed solely under the MPL, then version 1.1, which the Free Software Foundation criticized for being weak copyleft, as the license permitted, in limited ways, proprietary derivative works. Additionally, code only licensed under MPL 1.1 could not legally be linked with code under the GPL. To address these concerns, Mozilla re-licensed most of Firefox under the tri-license scheme of MPL 1.1, GPL 2.0, or LGPL 2.1. Since the re-licensing, developers were free to choose the license under which they received most of the code, to suit their intended use: GPL or LGPL linking and derivative works when one of those licenses is chosen, or MPL use (including the possibility of proprietary derivative works) if they chose the MPL. However, on January 3, 2012, Mozilla released the GPL-compatible MPL 2.0, and with the release of Firefox 13 on June 5, 2012, Mozilla used it to replace the tri-licensing scheme.
+
+The crash reporting service was initially closed-source but switched with version 3 from a program called Talkback to the open-source Breakpad (and Socorro server).
+
+## Trademark and logo
+
+The name "Mozilla Firefox" is a registered trademark of Mozilla; along with the official Firefox logo, it may only be used under certain terms and conditions. Anyone may redistribute the official binaries in unmodified form and use the Firefox name and branding for such distribution, but restrictions are placed on distributions which modify the underlying source code. The name "Firefox" derives from a nickname of the red panda.
+
+Mozilla has placed the Firefox logo files under open-source licenses, but its trademark guidelines do not allow displaying altered or similar logos in contexts where trademark law applies.
+
+There has been some controversy over the Mozilla Foundation's intentions in stopping certain open-source distributions from using the "Firefox" trademark. Open-source browsers "enable greater choice and innovation in the market rather than aiming for mass-market domination." Mozilla Foundation Chairperson Mitchell Baker explained in an interview in 2007 that distributions could freely use the Firefox trademark if they did not modify source code, and that the Mozilla Foundation's only concern was with users getting a consistent experience when they used "Firefox".
+
+To allow distributions of the code without using the official branding, the Firefox build system contains a "branding switch". This switch, often used for alphas ("Auroras") of future Firefox versions, allows the code to be compiled without the official logo and name and can allow a derivative work unencumbered by restrictions on the Firefox trademark to be produced. In the unbranded build, the trademarked logo and name are replaced with a freely distributable generic globe logo and the name of the release series from which the modified version was derived.
+
+Distributing modified versions of Firefox under the "Firefox" name required explicit approval from Mozilla for the changes made to the underlying code, and required the use of all of the official branding. For example, it was not permissible to use the name "Firefox" without also using the official logo. When the Debian project decided to stop using the official Firefox logo in 2006 (because Mozilla's copyright restrictions at the time were incompatible with Debian's guidelines), they were told by a representative of the Mozilla Foundation that this was not acceptable and was asked either to comply with the published trademark guidelines or cease using the "Firefox" name in their distribution. Debian switched to branding their modified version of Firefox "Iceweasel" (but in 2016 switched back to Firefox), along with other Mozilla software. GNU IceCat is another derived version of Firefox distributed by the GNU Project, which maintains its separate branding.
+
+### Branding and visual identity
+
+The Firefox icon is a trademark used to designate the official Mozilla build of the Firefox software and builds of official distribution partners. For this reason, software distributors who distribute modified versions of Firefox do not use the icon.
+
+Early Firebird and Phoenix releases of Firefox were considered to have reasonable visual designs but fell short when compared to many other professional software packages. In October 2003, professional interface designer Steven Garrity authored an article covering everything he considered to be wrong with Mozilla's visual identity.
+
+Shortly afterwards, the Mozilla Foundation invited Garrity to head up the new visual identity team. The release of Firefox 0.8 in February 2004 saw the introduction of the new branding efforts. Included were new icon designs by silverorange, a group of web developers with a long-standing relationship with Mozilla. The final renderings are by Jon Hicks, who had worked on Camino. The logo was later revised and updated, fixing several flaws found when it was enlarged. The animal shown in the logo is a stylized fox, although "firefox" is usually a common name for the red panda. The panda, according to Hicks, "didn't really conjure up the right imagery" and was not widely known.
+
+In June 2019, Mozilla unveiled a revised Firefox logo, which was officially implemented on version 70. The new logo is part of an effort to build a brand system around Firefox and its complementary apps and services, which are now being promoted as a suite under the Firefox brand.
+
+* Logo history
+* Logo of "Phoenix" and "Firebird" before being renamed as Firefox
+* Firefox 0.8–0.10, from February 9, 2004, to November 8, 2004
+* Firefox 1.0–3.0, from November 9, 2004, to June 29, 2009
+* Firefox 3.5–22, from June 30, 2009, to August 5, 2013
+* Firefox 23–56, from August 6, 2013, to November 13, 2017
+* Firefox 57–69, from November 14, 2017, to October 21, 2019
+* Firefox 70 or later, since October 22, 2019
+* Other logos, used for nightly versions
+* The 2011 Nightly logo, used to represent nightly builds of pre-alpha versions
+* The 2013 Nightly logo
+* The 2017 Nightly logo
+* The 2019 Nightly logo
+* Other logos, used for developer/aurora versions
+* The 2011 Aurora logo, used to represent an alpha release
+* The 2013 Aurora logo
+* The 2015 Developer Edition logo
+* The 2017 Developer Edition logo
+* The 2019 Developer Edition logo
+* Other logos
+* Blue globe artwork, distributed with the source code, and is explicitly not protected as a trademark
+* The logo for the Firefox brand of products and services, as of July 2019. It appears as if the fox was removed, but this is not the logo for the browser itself.
+
+## Promotion
+
+Firefox was adopted rapidly, with 100 million downloads in its first year of availability. This was followed by a series of aggressive marketing campaigns starting in 2004 with a series of events Blake Ross and Asa Dotzler called "marketing weeks".
+
+Firefox continued to heavily market itself by releasing a marketing portal dubbed "Spread Firefox" (SFX) on September 12, 2004, It debuted along with the Firefox Preview Release, creating a centralized space for the discussion of various marketing techniques. The release of their manifesto stated that "the Mozilla project is a global community of people who believe that openness, innovation and opportunity are key to the continued health of the Internet." A two-page ad in the edition of December 16 of The New York Times, placed by Mozilla Foundation in coordination with Spread Firefox, featured the names of the thousands of people worldwide who contributed to the Mozilla Foundation's fundraising campaign to support the launch of the Firefox 1.0 web browser. SFX portal enhanced the "Get Firefox" button program, giving users "referrer points" as an incentive. The site lists the top 250 referrers. From time to time, the SFX team or SFX members launch marketing events organized at the Spread Firefox website. As a part of the Spread Firefox campaign, there was an attempt to break the world download record with the release of Firefox 3. This resulted in an official certified Guinness world record, with over eight million downloads. In February 2011, Mozilla announced that it would be retiring Spread Firefox (SFX). Three months later, in May 2011, Mozilla officially closed Spread Firefox. Mozilla wrote that "there are currently plans to create a new iteration of this website [Spread Firefox] at a later date."
+
+In celebration of the third anniversary of the founding of the Mozilla Foundation, the "World Firefox Day" campaign was established on July 15, 2006, and ran until September 15, 2006. Participants registered themselves and a friend on the website for nomination to have their names displayed on the Firefox Friends Wall, a digital wall that was displayed at the headquarters of the Mozilla Foundation.
+
+The Firefox community has also engaged in the promotion of their web browser. In 2006, some of Firefox's contributors from Oregon State University made a crop circle of the Firefox logo in an oat field near Amity, Oregon, near the intersection of Lafayette Highway and Walnut Hill Road. After Firefox reached 500 million downloads on February 21, 2008, the Firefox community celebrated by visiting Freerice to earn 500 million grains of rice.
+
+Other initiatives included Live Chat – a service Mozilla launched in 2007 that allowed users to seek technical support from volunteers. The service was later retired.
+
+To promote the launch of Firefox Quantum in November 2017, Mozilla partnered with Reggie Watts to produce a series of TV ads and social media content.
+
+## Performance
+
+### 2000s
+
+In December 2005, Internet Week ran an article in which many readers reported high memory usage in Firefox 1.5. Mozilla developers said that the higher memory use of Firefox 1.5 was at least partially due to the new fast backwards-and-forwards (FastBack) feature. Other known causes of memory problems were malfunctioning extensions such as Google Toolbar and some older versions of AdBlock, or plug-ins, such as older versions of Adobe Acrobat Reader. When PC Magazine in 2006 compared memory usage of Firefox 2, Opera 9, and Internet Explorer 7, they found that Firefox used approximately as much memory as each of the other two browsers.
+
+In 2006, Softpedia noted that Firefox 1.5 took longer to start up than other browsers, which was confirmed by further speed tests.
+
+Internet Explorer 6 launched more swiftly than Firefox 1.5 on Windows XP since many of its components were built into the OS and loaded during system startup. As a workaround for the issue, a preloader application was created that loaded components of Firefox on startup, similar to Internet Explorer. A Windows Vista feature called SuperFetch performs a similar task of preloading Firefox if it is used often enough.
+
+Tests performed by PC World and Zimbra in 2006 indicated that Firefox 2 used less memory than Internet Explorer 7. Firefox 3 used less memory than Internet Explorer 7, Opera 9.50 Beta, Safari 3.1 Beta, and Firefox 2 in tests performed by Mozilla, CyberNet, and The Browser World. In mid-2009, BetaNews benchmarked Firefox 3.5 and declared that it performed "nearly ten times better on XP than Microsoft Internet Explorer 7".
+
+### 2010s
+
+In January 2010, Lifehacker compared the performance of Firefox 3.5, Firefox 3.6, Google Chrome 4 (stable and Dev versions), Safari 4, and Opera (10.1 stable and 10.5 pre-alpha versions). Lifehacker timed how long browsers took to start and reach a page (both right after boot-up and after running at least once already), timed how long browsers took to load nine tabs at once, tested JavaScript speeds using Mozilla's Dromaeo online suite (which implements Apple's SunSpider and Google's V8 tests) and measured memory usage using Windows 7's process manager. They concluded that Firefox 3.5 and 3.6 were the fifth- and sixth-fastest browsers, respectively, on startup, 3.5 was third- and 3.6 was sixth-fastest to load nine tabs at once, 3.5 was sixth- and 3.6 was fifth-fastest on the JavaScript tests. They also concluded that Firefox 3.6 was the most efficient with memory usage followed by Firefox 3.5.
+
+In February 2012, Tom's Hardware performance tested Chrome 17, Firefox 10, Internet Explorer 9, Opera 11.61, and Safari 5.1.2 on Windows 7. Tom's Hardware summarized their tests into four categories: Performance, Efficiency, Reliability, and Conformance. In the performance category they tested HTML5, Java, JavaScript, DOM, CSS 3, Flash, Silverlight, and WebGL (WebGL 2 is current as of version 51; and Java and Silverlight stop working as of version 52)—they also tested startup time and page load time. The performance tests showed that Firefox was either "acceptable" or "strong" in most categories, winning three categories (HTML5, HTML5 hardware acceleration, and Java) only finishing "weak" in CSS performance. In the efficiency tests, Tom's Hardware tested memory usage and management. In this category, it determined that Firefox was only "acceptable" at performing light memory usage, while it was "strong" at performing heavy memory usage. In the reliability category, Firefox performed a "strong" amount of proper page loads. In the final category, conformance, it was determined that Firefox had "strong" conformance for JavaScript and HTML5. In conclusion, Tom's Hardware determined that Firefox was the best browser for Windows 7 OS, but that it only narrowly beat Google Chrome.
+
+In June 2013, Tom's Hardware again performance tested Firefox 22, Chrome 27, Opera 12, and Internet Explorer 10. They found that Firefox slightly edged out the other browsers in their "performance" index, which examined wait times, JavaScript execution speed, HTML5/CSS3 rendering, and hardware acceleration performance. Firefox also scored the highest on the "non-performance" index, which measured memory efficiency, reliability, security, and standards conformance, finishing ahead of Chrome, the runner-up. Tom's Hardware concluded by declaring Firefox the "sound" winner of the performance benchmarks.
+
+In January 2014, a benchmark testing the memory usage of Firefox 29, Google Chrome 34, and Internet Explorer 11 indicated that Firefox used the least memory when a substantial number of tabs were open.
+
+In benchmark testing in early 2015 on a "high-end" Windows machine, comparing Microsoft Edge, Internet Explorer, Firefox, Chrome, and Opera, Firefox achieved the highest score on three of the seven tests. Four different JavaScript performance tests gave conflicting results. Firefox surpassed all other browsers on the Peacekeeper benchmark but was behind the Microsoft products when tested with SunSpider. Measured with Mozilla's Kraken, it came second place to Chrome, while on Google's Octane challenge it took third behind Chrome and Opera. Firefox took the lead with WebXPRT, which runs several typical HTML5 and JavaScript tasks. Firefox, Chrome, and Opera all achieved the highest possible score on the Oort Online test, measuring WebGL rendering speed (WebGL 2 is now current). In terms of HTML5 compatibility testing, Firefox was ranked in the middle of the group.
+
+A similar set of benchmark tests in 2016 showed Firefox's JavaScript performance on Kraken and the newer Jetstream tests trailing slightly behind all other tested browsers except Internet Explorer (IE), which performed relatively poorly. On Octane, Firefox came ahead of IE and Safari, but again slightly behind the rest, including Vivaldi and Microsoft Edge. Edge took overall first place on the Jetstream and Octane benchmarks.
+
+### Firefox Quantum
+
+As of the adoption of Firefox 57 and Mozilla's Quantum project entering production browsers in November 2017, Firefox was tested to be faster than Chrome in independent JavaScript tests, and demonstrated to use less memory with many browser tabs opened. TechRadar rated it as the fastest web browser in a May 2019 report.
+
+## Usage share
+
+Downloads have continued at an increasing rate since Firefox 1.0 was released on November 9, 2004, and as of 31 July 2009 Firefox had already been downloaded over one billion times. This number does not include downloads using software updates or those from third-party websites. They do not represent a user count, as one download may be installed on many machines, one person may download the software multiple times, or the software may be obtained from a third-party.
+
+In July 2010, IBM asked all employees (about 400,000) to use Firefox as their default browser.
+
+Firefox was the second-most used web browser until November 2011, when Google Chrome surpassed it. According to Mozilla, Firefox had more than 450 million users as of October 2012.
+
+In 2023, Firefox was the fourth-most widely used desktop browser, and it was the fourth-most popular with 3.23% of worldwide usage share of web browsers across all platforms.
+
+Desktop/laptop browser statistics
+
+Google Chrome
+
+66.22%
+
+Safari
+
+11.89%
+
+Microsoft Edge
+
+10.95%
+
+Mozilla Firefox
+
+5.59%
+
+Opera
+
+3.12%
+
+Other
+
+2.24%
+
+Desktop web browser market share according to StatCounter for April 2023 :
+
+According to the Firefox Public Data report by Mozilla, the active monthly count of Desktop clients has decreased from around 310 million in 2017 to 200 million in 2023. From Oct 2020, the desktop market share of Firefox started to decline in countries where it used to be the most popular. In Eritrea, it dropped from 50% in Oct 2020 to 9.32% in Sept 2021. In Cuba, it dropped from 54.36% in Sept 2020 to 38.42% in Sept 2021.
+
+The UK and US governments both follow the 2% rule. This states that only browsers with more than 2% market share among visitors of their websites will be supported. There are concerns that support for Firefox will be dropped because as of December 29th 2023, the browser market share among US government website visitors is 2.2%.
+
+## Third-party forks
+
+In addition to versions of Firefox made internally and the email client Mozilla Thunderbird, there are several third-party web browsers based on Firefox, including:
+
+* Abrowser
+* Basilisk
+* Classilla (for Mac OS 8.6–9)
+* Cliqz
+* Comodo IceDragon
+* Floorp
+* Ghostery Dawn
+* GNU IceCat
+* K-Meleon
+* LibreWolf, a fork focused on privacy and security
+* Light: formerly known as Firefox Light, is available for the Windows, OS X and Linux operating systems. It differs from Firefox by being built for performance, which it achieves by removing several of Firefox's built in components, including the crash reporter, safe browsing, spell checker, development tools, and support for various types of video and audio media. It was released in 2013, with a last stable version in 2016.
+* Mull Browser
+* Pale Moon
+* Parrotgeek Firefox Legacy (for Mac OS X 10.6–10.8)
+* Swiftweasel
+* TenFourFox
+* The Tor Browser
+* Waterfox
+* Wild Fox

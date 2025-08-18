@@ -1,0 +1,167 @@
+# Baccarat
+
+Baccarat or baccara (/ˈbækəræt, bɑːkəˈrɑː/; French:) is a card game played at casinos. It is a comparing card game played between two hands, the "player" and the "banker". Each baccarat coup (round of play) has three possible outcomes: "player" (player has the higher score), "banker", and "tie". There are three popular variants of the game: punto banco, baccarat chemin de fer, and baccarat banque (or à deux tableaux). In punto banco, each player's moves are forced by the cards the player is dealt. In baccarat chemin de fer and baccarat banque, by contrast, both players can make choices. The winning odds are in favour of the bank, with a house edge of at least 1 percent.
+
+## History
+
+The origins of the game are disputed, and some sources claim that it dates to the 19th century. Other sources claim that the game was introduced into France from Italy at the end of the 15th century by soldiers returning from the Italian Wars during the reign of Charles VIII.
+
+Baccarat has been popular among the French nobility since the 19th $century.^{:230}$ During the Napoleonic era and before the legalization of casino gambling in 1907, people in France commonly played baccarat in private gaming rooms. Dating to this time period, Baccarat Banque is the earliest form of baccarat; it is a three-person game and mentioned in Album des jeux by Charles Van-Tenac. Later, Chemin de Fer emerged as a two-person, zero-sum game from Baccarat Banque. Baccarat Punto Banco, in which the bettor bets on whether the Player or the Banker hand wins, was a significant change in the development of modern baccarat. It developed into a house-banked game in Havana in the 1940s, and is the most popular modern form.
+
+American casinos are generating an increasing amount of their revenue from baccarat play. For example, in May 2012, Nevada only generated 18.3% of its total table gaming win from baccarat. However, in May 2013, this percentage increased to 33.1% and in May 2014 it rose to 45.2%.
+
+Baccarat is the most important table game in Macau, with taxes from baccarat play constituting the largest single source of public funding in $Macau.^{:22}$
+
+## Valuation of hands
+
+In baccarat, cards have a point value: the 2 through 9 cards in each suit are worth face value (in points); the 10, jack, queen, and king have no point value (i.e. are worth zero); aces are worth 1 point; jokers are not used. Hands are valued modulo 10, i.e., according to the units digit of the sum of their constituent cards. For example, a hand consisting of 2 and 3 is worth 5, but a hand consisting of 6 and 7 is worth 3 (i.e., the 3 being the units digit in the combined points total of 13). The highest possible hand value in baccarat is therefore nine.
+
+## Versions
+
+### Punto banco
+
+Punto banco is the most played version of $baccarat.^{:231}$ In punto banco, the casino banks the game at all times, and commits to playing out both hands according to fixed drawing rules, known as the "tableau" (French: "board"), in contrast to more historic baccarat games where each hand is associated with an individual who makes drawing choices. The player (punto) and banker (banco) are simply designations for the two hands dealt out in each coup, two outcomes which the bettor can back; the player hand has no particular association with the gambler, nor the banker hand with the house.
+
+Punto banco is dealt from a shoe containing 6 or 8 decks of cards shuffled together; a cut-card is placed in front of the seventh from last card, and the drawing of the cut-card indicates the last coup of the shoe. The dealer burns the first card face up and then based on its respective numerical value, with aces worth 1 and face cards worth 10, the dealer burns that many cards face down. For each coup, two cards are dealt face up to each hand, starting from "player" and alternating between the hands. The croupier may call the total (e.g., "five player, three banker"). If either the player or banker or both achieve a total of 8 or 9 at this stage, the coup is finished and the result is announced: a player win, a banker win, or tie. If neither hand has eight or nine, the drawing rules are applied to determine whether the player should receive a third card. Then, based on the value of any card drawn to the player, the drawing rules are applied to determine whether the banker should receive a third card. The coup is then finished, the outcome is announced, and winning bets are paid out.
+
+Punto banco is a pure game of chance and therefore it is not possible for a gambler's bets to be rationally $motivated.^{:230}$
+
+**Tableau of drawing rules**
+
+If neither the player nor the banker is dealt a total of 8 or 9 in the first two cards (known as a "natural"), the tableau is consulted, first for the player's rules, then the banker's.
+
+**Tableau of drawing rules**
+
+**Player's rule**
+
+
+    If the player has an initial total of 5 or less, they draw a third card. If the player has an initial total of 6 or 7, they stand.
+
+**Tableau of drawing rules**
+
+**Banker's rule**
+
+
+    If the player stood pat (i.e. has only two cards), the banker regards only their own hand and acts according to the same rule as the player, i.e. the banker draws a third card with hands 5 or less and stands with 6 or 7.
+    If the player drew a third card, the banker acts according to the following more complex rules:
+* If the banker total is 2 or less, they draw a third card regardless of what the player's third card is.
+* If the banker total is 3, they draw a third card unless the player's third card is an 8.
+* If the banker total is 4, they draw a third card if the player's third card is 2, 3, 4, 5, 6, or 7.
+* If the banker total is 5, they draw a third card if the player's third card is 4, 5, 6, or 7.
+* If the banker total is 6, they draw a third card if the player's third card is a 6 or 7.
+* If the banker total is 7, they stand.
+
+| banker total | player's third card | player's third card | player's third card | player's third card | player's third card | player's third card | player's third card | player's third card | player's third card | player's third card |
+| - | - | - | - | - | - | - | - | - | - | - |
+| banker total | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+| <3 | H | H | H | H | H | H | H | H | H | H |
+| 3 | H | H | H | H | H | H | H | H | S | H |
+| 4 | S | S | H | H | H | H | H | H | S | S |
+| 5 | S | S | S | S | H | H | H | H | S | S |
+| 6 | S | S | S | S | S | S | H | H | S | S |
+| >6 | S | S | S | S | S | S | S | S | S | S |
+
+The croupier will deal the cards according to the tableau and the croupier will announce the winning hand, either the player or the banker. Losing bets will be collected and the winning bets will be paid according to the rules of the house. Usually, 1-to-1 even money will be paid on player bets and 19-to-20 on banker bets (even money with "5% commission to the house on the win").
+
+Should both the player and banker have the same value at the end of the deal the croupier shall announce "égalité — tie bets win." All tie bets will be paid at 8-to-1 odds and all bets on player or banker remain in place and active for the next game (the customer may or may not be able to retract these bets depending on casino rules).
+
+**Casino provision**
+
+In the US, the full-scale version of punto banco is usually played at large tables in roped off areas or private rooms separated from the main gaming floor. The game is frequented by high rollers, who may wager tens or hundreds of thousands of dollars on a single hand. Minimum bets are relatively high, often starting at $100 and going as high as $500. Posted maximum bets are often arranged to suit a player. The table is staffed by a croupier, who directs the play of the game, and two dealers who calculate tax and collect and pay bets. Six or eight decks of cards are used, normally shuffled only by the croupier and dealers. The shoe is held by one of the players, who deals the cards on the instructions of the croupier according to the tableau. On a player win, the shoe moves either to the highest winning bettor, or to the next person in clockwise order around the table, depending on the casino's conventions. The shoe may be refused or the croupier may be requested to deal.
+
+About 91% of total income from Macau casinos in 2014 came from punto banco.
+
+**Odds and strategy**
+
+Punto banco has both some of the lowest house edges among casino table games, and some of the highest. The player bet has, relative to most casino bets, a low house edge of 1.24%, and the banker bet (accounting for the 5% commission on the win) is even lower, at 1.06%.
+
+In contrast, the tie bet which pays 8-to-1 has a high house edge of 14.4%. Most casinos in the United Kingdom pay the tie at 9-to-1, resulting in a house edge of approximately 4.85%.
+
+While card counting, as employed in games such as blackjack, yields a relatively small advantage, if paired with a technique known as edge sorting baccarat players can obtain a significant edge versus the casino. This technique gained attention in 2012, when a UK casino refused to pay professional gambler Phil Ivey about $11 million, because he used edge sorting to gain an advantage. Also in 2012, Ivey and a female companion won $9.6 million at the Borgata casino in Atlantic City using edge sorting and another $500,000 playing craps using his gains as a stake in the game. The Borgata paid him after his win, but then sued Ivey in 2014 after surveillance video showed he manipulated the dealer into rotating certain cards in the deck to exploit the flaw on the back of the cards. The Borgata prevailed and won $10.1 million, which Ivey refused to pay. In February 2019 the Borgata received approval from the US District Court in New Jersey to go after Ivey's assets in the state of Nevada, since he had no assets in the state of New Jersey to pursue. Ivey and the Borgata reached a settlement in July 2020.
+
+House edge details (8 decks)
+
+| If Banco wins | 1.06% |
+| - | - |
+| If Punto wins | 1.24% |
+| If ties (8-to-1 payout) | 14.4% |
+| If ties (9-to-1 payout) | 4.85% |
+
+**Variations**
+
+Mini-baccarat is a version of banco punto played on a small table with smaller minimums/maximums. It is popular with more casual players, particularly those from Asia.
+
+A mini-baccarat variation where even money is paid on winning banker bets (rather than 95%), except when the banker wins with 6, which pay only 50% of the bet, goes under various names including Super 6 and Punto 2000. The house edge on a banker bet under Super 6 is 1.46% compared with regular commission baccarat at 1.058%. This is equivalent to increasing the commission by 17.45% to 5.87%. The banker wins with a 6 about five times every eight-deck shoe. As well as its increased house edge, the Super 6 variation is used by casinos for its speed, since it partially does away with the time-consuming process of calculating and collecting commission on winning banker bets except for winning with a 6.
+
+In a similar variation called EZ-baccarat, even money is paid on both winning banker or player bets, except when the banker wins with a total of 7 after the third card is drawn, which results in a push on banker bets. The game has two additional options, the Dragon 7, a specific bet of a winning three-card 7 on the banker side, which pays 40-to-1 instead of pushing, and Panda 8, a bet of a winning three-card 8 on the player side, which pays 25-to-1.
+
+### Chemin de fer
+
+Chemin de fer is a version which first appeared in the late 19th century. Its name, which is the French term for railway, comes from the version being quicker than the original game, the railway being at that time the fastest means of transport. It is still the most popular version in France.
+
+Six decks of cards are used, shuffled together. Players are seated in random order, typically around an oval table; discarded cards go to the center. Play begins to the right of the croupier and continues counterclockwise.
+
+Once play begins, one player is designated as the banker; this player also deals. The other players are "punters". The position of banker passes counterclockwise in the course of the game. In each round, the banker wagers the amount they are willing to risk. Each other player, in order, then declares whether they will "go bank", playing against the entire current bank with a matching wager. A maximum of one player may "go bank". If no one "goes bank", players make their wagers in order. If the total wagers from the players are less than the bank, observing bystanders may also wager up to the amount of the bank. If the total wagers from the players are greater than the bank, the banker may choose to increase the bank to match; otherwise, the excess wagers are removed in reverse play order.
+
+The banker deals four cards face-down: two to themselves and two held in common by the remaining players. The player with the highest individual wager (or first in play order if tied for highest wager) is selected to represent the group of non-banker players. The banker and player both look at their cards; if either has an eight or a nine, this is immediately announced and the hands are turned face-up and compared. If neither hand is an eight or nine, the player has a choice to accept or refuse a third card; if accepted, it is dealt face-up. Traditional practice – grounded in mathematics, similar to basic strategy in blackjack, but further enforced via social sanctions by the other individuals whose money is at stake – dictates that one always accept a card if one's hand totals between 0 and 4, inclusive, and always refuse a card if it totals 6 or 7. After the player finishes, the banker, in turn, decides either to accept or to refuse another card. Once both the banker and the representative player have made their decision, the hands are turned face-up and compared.
+
+If the player's hand exceeds the banker's hand when they are compared, each wagering player receives back their wager and a matching amount from the bank, and the position of banker passes to the next player in order. If the banker's hand exceeds the player's hand, all wagers are forfeit and placed into the bank, and the banker position does not change. If there is a tie, wagers remain as they are for the next hand.
+
+If the banker wishes to withdraw, the new banker is the first player in order willing to stake an amount equal to the current bank total. If no one is willing to stake this amount, the new banker is instead the next player in order, and the bank resets to whatever they wish to stake. Many games have a set minimum bank or wager amount.
+
+Unlike punto banco, which is purely a game of chance, chemin de fer includes an element of player $skill.^{:231}$
+
+### Baccarat banque
+
+In Baccarat banque the position of banker is more permanent compared to Chemin de fer. The shoe contains three inter-shuffled decks. The banker, unless they retire because they wish to or ran out of money to stake, keeps their role until all these cards have been dealt.
+
+The banker is initially determined via auctioning, i.e. is given to the player who will undertake to risk the largest amount. In some circles, the person who has first set down their name on the list of players has the right to hold the first bank, risking such amount as they may think proper.
+
+When a banker is determined, they sit opposite the croupier with the discard area between. On both sides of the banker are the punters (traditionally, ten such constituting a full table). Other players cannot sit directly and may only bet when active players' bets don't cover the banker's stakes.
+
+The croupier shuffles the cards then prompts one punter from their right, one from their left then the banker to reshuffle and finally selects a random player to cut. After every player has bet, the banker deals one card to one of the right punters, the second to one of the left punters, and the third to themselves. This is done twice, resulting in 6 cards on the table. Each side wins or loses depending on the cards dealt to that side only. The rules as to turning up with eight or nine, offering and accepting cards, and so on, are the same as Chemin de fer.
+
+Each punter continues to hold the cards for their side so long as they win or tie. If they lose, the next hand is dealt to the player next following them in rotation.
+
+In each side, any player may "go bank", like in Chemin de fer. If two players on opposite sides desire to "go bank", each player bets half the bank.
+
+A player going bank may either do so for as many times as they like until they lose, or as a cheval, i.e. on two hands separately, one-half of the stake being played upon each hand. A player going bank and losing may go bank again, until they lose for the third time.
+
+A banker must play out one hand, but may retire at any time afterwards. On retiring, they must state the amount they retire with. It is then open to any other player (in order of rotation) to continue the bank, starting with the same stake and dealing from undealt cards. The outgoing banker takes the place previously occupied by their successor.
+
+Should the bank empty, the banker may freely put more money at stake without losing their right to bank.
+
+If all punters' bets exceed the bank stake, the banker does not need to put more money. In the event of their losing, the croupier pays the punters in order of rotation until the bank runs out of money. The remainders are returned. The banker may, however, choose to accept the bets and increase their own stakes anyway. If they do so, the bank becomes unlimited and the banker must either cover all bets posted by all players or give up the bank.
+
+### Macao
+
+David Parlett considers Macao as the immediate precursor to baccarat. Its name and rules suggest it may have been brought over by sailors returning from Asia where similar card games have been played since the early 17th century such as San zhang, Oicho-Kabu, and Gabo japgi. Macao appeared in Europe at the end of the 18th century and was popular for all classes. Its notoriety led to King Victor-Amadeus III banning it in all his realms in 1788. It was the most popular game in Watier's, an exclusive gentlemen's club in London, where it led to the ruin of Beau Brummell. The match in Arthur Schnitzler's 1926 novella Night Games (Spiel im Morgengrauen) contains instructions for Macao under the name of baccarat. Its popularity in the United States waned after the early 20th century. The game still has a following in Continental Europe, especially in Russia.
+
+Macao uses two decks of cards shuffled together. Punters place their bets (within the agreed limits) against the banker. Initially, one card is dealt clockwise and face down to every player by the banker. The punters' objective is to beat the banker's card value or risk losing their bet. In case of a tie, whoever has the same value with fewer cards wins. The banker wins if there is a tie in both value and number of cards (in an early version, all bets are off). Any punter who receives a natural 9 receives triple the amount of the bet as long as the banker does not have a natural 9 too. Winning with a natural 8 awards double while winning with a 7 or under is only equal to the bet. Players can request additional cards which are dealt face up; if it is a ten or a face card, they can reject it and ask for another. In an early version of this game, going over 9 with extra cards amounts to a "bust" as in blackjack, later versions use modulo 10 arithmetic as in the other games. Beating the banker with a pair only awards an equal amount to the bet. When the deck is exhausted, the player to the banker's left becomes the new banker.
+
+Victoria is a variation of macao where players are initially dealt two cards. Like macao and baccarat, it was banned in Russia during the 19th century though their rules continued to be printed in game books.
+
+## In popular culture
+
+### Royal baccarat scandal
+
+The Tranby Croft affair in 1891 and disgraced socialite William Gordon Cumming's subsequent lawsuit were known together as the royal baccarat scandal, due to the involvement of the future King Edward VII. Since the Prince of Wales was involved in the incident, it inspired a huge amount of media interest in the game, bringing baccarat to the attention of the public at large. Accounts of the scandal in newspapers also included the rules for the game. The scandal became the subject of music hall songs and a stage play.
+
+### A Hard Day's Night
+
+In the 1964 Richard Lester comedy A Hard Day's Night, Paul McCartney's "grandfather" John (played by Wilfrid Brambell) steals an invite to a posh casino intended for the band, and has a run of luck at a baccarat table despite appearing not to know how to play the game; at one point, upon winning a bet, he yells "Bingo," to which the croupier corrects him, thinking he meant to proclaim "Banco."
+
+### James Bond
+
+Baccarat chemin-de-fer is the favoured game of James Bond, the fictional secret agent created by Ian Fleming. Bond plays the game in numerous $novels,^{:231}$ most notably his 1953 debut, Casino Royale, in which much of the plot revolves around a game between Bond and SMERSH trade union operative Le Chiffre; the unabridged version of the novel includes a primer to the game for readers who are unfamiliar with it. It is also featured in several filmed versions of the $character,^{:231}$ including the 1954 television adaptation of Casino Royale, where Bond bankrupts Le Chiffre in order to have him eliminated by his Soviet superiors; Dr. No, where Bond is first introduced while playing the game in film; Thunderball; the 1967 version of Casino Royale, which is the most detailed treatment of a baccarat game in any Bond film; On Her Majesty's Secret Service; For Your Eyes Only; and GoldenEye.
+
+In the 2006 movie adaptation of Casino Royale, baccarat is replaced by Texas hold 'em poker, largely due to the poker boom at the time of filming.
+
+### Rush Hour 3
+
+In 2007's Rush Hour 3, main characters James Carter and Geneviève first meet playing baccarat in a casino in Paris. Initially, Carter can not afford to play, but Geneviève covers for him. Unsure of the rules of the game, Carter first asks for an extra card as if it was blackjack, and then thinks that he has a good hand (3 kings), not knowing that he instead has zero points. The dealer explains the situation, and Geneviève wins.
+
+### Bob le flambeur
+
+The 1956 French heist film Bob le flambeur features a climactic sequence in which the protagonist begins gambling as a heist is taking place. He encounters extraordinary luck playing chemin de fer, which leads him to lose track of time.
+

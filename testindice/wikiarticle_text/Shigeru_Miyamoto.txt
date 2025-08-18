@@ -1,0 +1,231 @@
+# Shigeru Miyamoto
+
+Shigeru Miyamoto (Japanese: 宮本 茂, Hepburn: Miyamoto Shigeru, born November 16, 1952) is a Japanese video game designer, producer and game director at Nintendo, where he serves as one of its representative directors as an executive since 2002. Widely regarded as one of the most accomplished and influential designers in video games, he is the creator of some of the most acclaimed and best-selling game franchises of all time, including Mario, The Legend of Zelda, Donkey Kong, Star Fox and Pikmin. More than 1 billion copies of games featuring franchises created by Miyamoto have been sold.
+
+Born in Sonobe, Kyoto, Miyamoto graduated from Kanazawa Municipal College of Industrial Arts. He originally sought a career as a manga artist, until developing an interest in video games. With the help of his father, he joined Nintendo in 1977 after impressing the president, Hiroshi Yamauchi, with his toys. He helped create art for the arcade game Sheriff, and was later tasked with designing a new arcade game, leading to the 1981 game Donkey Kong.
+
+Miyamoto's games Super Mario Bros. (1985) and The Legend of Zelda (1986) helped the Nintendo Entertainment System dominate the console game market. His games have been flagships of every Nintendo video game console, from the arcade machines of the late 1970s to the present day. He managed Nintendo's Entertainment Analysis & Development software division, which developed many Nintendo games, and he played an important role in the creation of other influential games such as Pokémon Red and Blue (1996) and Metroid Prime (2002). Following the death of Nintendo president Satoru Iwata in July 2015, Miyamoto became acting president alongside Genyo Takeda until he was formally appointed "Creative Fellow" a few months later.
+
+## Early life
+
+Miyamoto was born on November 16, 1952, in the Japanese town of Sonobe, Kyoto Prefecture. His parents were of "modest means", and his father taught English.
+
+From an early age, Miyamoto explored the natural areas around his home. He discovered a cave, and, after days of hesitation, went inside. His expeditions into the Kyoto countryside inspired his later work, particularly The Legend of Zelda, a seminal video game.
+
+In the early 1970's, Miyamoto graduated from Kanazawa Municipal College of Industrial Arts with a degree in industrial design. He had a love for manga and initially hoped to become a professional manga artist before considering a career in video games. He was influenced by manga's classic kishōtenketsu narrative structure, as well as Western genre television shows. He was inspired to enter the video game industry by the 1978 arcade hit Space Invaders.
+
+## Career
+
+### 1977–1984: Arcade beginnings and Donkey Kong
+
+   I feel that I have been very lucky to be a game designer since the dawn of the industry. I am not an engineer, but I have had the opportunities to learn the principles of game [design] from scratch, over a long period of time. And because I am so pioneering and trying to keep at the forefront, I have grown accustomed to first creating the very tools necessary for game creation.
+
+In the 1970s, Nintendo was a relatively small Japanese company that sold playing cards and other novelties, although it had started to branch out into toys and games in the 1960s. Through a mutual friend, Miyamoto's father arranged an interview with Nintendo president Hiroshi Yamauchi. After showing some of his toy creations, he was hired in 1977 as an apprentice in the planning department.
+
+Miyamoto helped create the art for the coin-operated arcade game, Sheriff. He first helped the company develop a game after the 1980 release Radar Scope. The game achieved moderate success in Japan, but by 1981, Nintendo's efforts to break it into the North American video game market had failed, leaving them with a large number of unsold units and on the verge of financial collapse. Nintendo president Hiroshi Yamauchi decided to convert unsold Radar Scope units into a new arcade game. He tasked Miyamoto with the $conversion,^{:157}$ about which Miyamoto has said self-deprecatingly that "no one else was available" to do the work. Nintendo's head engineer, Gunpei Yokoi, supervised the $project.^{:158}$
+
+Miyamoto imagined many characters and plot concepts, but eventually settled on a love triangle between a gorilla, a carpenter, and a woman. He meant to mirror the rivalry between comic characters Bluto and Popeye for the woman Olive Oyl, although Nintendo's original intentions to gain rights to Popeye failed. Bluto evolved into an ape, a form Miyamoto claimed was "nothing too evil or $repulsive".^{:47}$ This ape would be the pet of the main character, "a funny, hang-loose kind of $guy".^{:47}$ Miyamoto also named "Beauty and the Beast" and the 1933 film King Kong as $influences.^{:36}$ Miyamoto had high hopes for his new project, but lacked the technical skills to program it himself; instead, he conceived the game's concepts, then consulted technicians on whether they were possible. He wanted to make the characters different sizes, move in different manners, and react in various ways. However, Yokoi viewed Miyamoto's original design as too $complex.^{:47–48}$ Yokoi suggested using see-saws to catapult the hero across the screen but this proved too difficult to program. Miyamoto next thought of using sloped platforms and ladders for travel, with barrels for obstacles. When he asked that the game have multiple stages, the four-man programming team complained that he was essentially asking them to make the game repeat, but the team eventually successfully programmed the $game.^{:38–39}$ When the game was sent to Nintendo of America for testing, the sales manager disapproved of its vast differentiation from the maze and shooter games common at the $time.^{:49}$ When American staffers began naming the characters, they settled on "Pauline" for the woman, after Polly James, wife of Nintendo's Redmond, Washington, warehouse manager, Don James. The playable character, initially "Jumpman", was eventually named for Mario Segale, the warehouse $landlord.^{:109}$ These character names were printed on the American cabinet art and used in promotional materials. The staff also pushed for an English name, and thus it received the title Donkey $Kong.^{:212}$
+
+Donkey Kong was a success, leading Miyamoto to work on sequels Donkey Kong Jr. in 1982 and Donkey Kong 3 in 1983. In January 1983, the 1982 Arcade Awards gave Donkey Kong the Best Single-player video game award and the Certificate of Merit as runner-up for Coin-Op Game of the Year. In his next game, he gave Mario a brother: Luigi. He named the new game Mario Bros. Yokoi convinced Miyamoto to give Mario some superhuman abilities, namely the ability to fall from any height unharmed. Mario's appearance in Donkey Kong—overalls, a hat, and a thick mustache—led Miyamoto to change aspects of the game to make Mario look like a plumber rather than a carpenter. Miyamoto felt that New York City provided the best setting for the game, with its "labyrinthine subterranean network of sewage pipes". To date, games in the Mario Bros. franchise have been released for more than a dozen platforms. Shortly after, Miyamoto also worked the character sprites and game design for the Baseball, Tennis, and Golf games on the NES.
+
+### 1985–1989: NES/Famicom, Super Mario Bros., and The Legend of Zelda
+
+As Nintendo released its first home video game console, the Family Computer (rereleased in North America as the Nintendo Entertainment System), Miyamoto made two of the most popular titles for the console and in the history of video games as a whole: Super Mario Bros. (a sequel to Mario Bros.) and The Legend of Zelda (an entirely original title).
+
+In both games, Miyamoto decided to focus more on gameplay than on high scores, unlike many games of the time. Super Mario Bros. largely took a linear approach, with the player traversing the stage by running, jumping, and dodging or defeating enemies. It was a culmination of Miyamoto's gameplay concepts and technical knowledge drawn from his experiences of designing Donkey Kong, Mario Bros, Devil World (1984), the side-scrolling racing game Excitebike (1984), and the 1985 NES port of side-scrolling beat 'em up Kung-Fu Master (1984). This culminated in his concept of a platformer set in an expansive world that would have the player "strategize while scrolling sideways" over long distances, have aboveground and underground levels, and have colorful backgrounds rather than black backgrounds.
+
+By contrast, Miyamoto employed nonlinear gameplay in The Legend of Zelda, forcing the player to think their way through riddles and puzzles. The world was expansive and seemingly endless, offering "an array of choice and depth never seen before in a video game." With The Legend of Zelda, Miyamoto sought to make an in-game world that players would identify with, a "miniature garden that they can put inside their drawer." He drew his inspiration from his experiences as a boy around Kyoto, where he explored nearby fields, woods, and caves; each Zelda game embodies this sense of exploration. "When I was a child," Miyamoto said, "I went hiking and found a lake. It was quite a surprise for me to stumble upon it. When I traveled around the country without a map, trying to find my way, stumbling on amazing things as I went, I realized how it felt to go on an adventure like $this."^{:51}$ He recreated his memories of becoming lost amid the maze of sliding doors in his family home in Zelda's labyrinthine $dungeons.^{:52}$ In February 1986, Nintendo released it as the launch game for the Nintendo Entertainment System's new Disk System peripheral.
+
+Miyamoto worked on various other different games for the Nintendo Entertainment System, including Ice Climber and Kid Icarus. He also worked on sequels to both Super Mario Bros and The Legend of Zelda. Super Mario Bros. 2, released only in Japan at the time, reuses gameplay elements from Super Mario Bros., though the game is much more difficult than its predecessor. Nintendo of America disliked Super Mario Bros. 2, which they found to be frustratingly difficult and otherwise little more than a modification of Super Mario Bros. Rather than risk the franchise's popularity, they canceled its stateside release and looked for an alternative. They realized they already had one option in Yume Kojo: Doki Doki Panic (Dream Factory: Heart-Pounding Panic), also designed by Miyamoto. This game was reworked and released as Super Mario Bros. 2 (not to be confused with the Japanese game of the same name) in North America and Europe. The Japanese version of Super Mario Bros. 2 was eventually released in North America as Super Mario Bros.: The Lost Levels.
+
+The successor to The Legend of Zelda, Zelda II: The Adventure of Link, bears little resemblance to the first game in the series. The Adventure of Link features side-scrolling areas within a larger world map rather than the bird's eye view of the previous title. The game incorporates a strategic combat system and more RPG elements, including an experience points (EXP) system, magic spells, and more interaction with non-player characters (NPCs). Link has extra lives; no other game in the series includes this feature. The Adventure of Link plays out in a two-mode dynamic. The overworld, the area where the majority of the action occurs in other The Legend of Zelda games, is still from a top-down perspective, but it now serves as a hub to the other areas. Whenever Link enters a new area such as a town, the game switches to a side-scrolling view. These separate methods of traveling and entering combat are one of many aspects adapted from the role-playing genre. The game was highly successful at the time, and introduced elements such as Link's "magic meter" and the Dark Link character that would become commonplace in future Zelda games, although the role-playing elements such as experience points and the platform-style side-scrolling and multiple lives were never used again in the official series. The game is also looked upon as one of the most difficult games in the Zelda series and 8-bit gaming as a whole. Additionally, The Adventure of Link was one of the first games to combine role-playing video game and platforming elements to a considerable degree.
+
+Soon after, Super Mario Bros. 3 was developed by Nintendo Entertainment Analysis & Development; the game took more than two years to complete. The game offers numerous modifications on the original Super Mario Bros., ranging from costumes with different abilities to new enemies. Bowser's children were designed to be unique in appearance and personality; Miyamoto based the characters on seven of his programmers as a tribute to their work on the game. The Koopalings' names were later altered to mimic names of well-known, Western musicians in the English localization. In a first for the Mario series, the player navigates via two game screens: an overworld map and a level playfield. The overworld map displays an overhead representation of the current world and has several paths leading from the world's entrance to a castle. Moving the on-screen character to a certain tile will allow access to that level's playfield, a linear stage populated with obstacles and enemies. The majority of the game takes place in these levels.
+
+### 1990–2000: SNES, Nintendo 64, Super Mario 64, and Ocarina of Time
+
+A merger between Nintendo's various internal research and development teams led to the creation of Nintendo Entertainment Analysis & Development (Nintendo EAD), which Miyamoto eventually headed. Nintendo EAD had approximately fifteen months to develop F-Zero, a launch game for the Super Nintendo Entertainment System. Miyamoto worked through various games on the Super Nintendo Entertainment System, one of them Star Fox. For the game, programmer Jez San convinced Nintendo to develop an upgrade for the Super Nintendo, allowing it to handle three-dimensional graphics better: the Super FX chip. Using this new hardware, Miyamoto and Katsuya Eguchi designed the Star Fox game with an early implementation of three-dimensional graphics.
+
+Miyamoto produced two major Mario games for the system. The first, Super Mario World, was a launch game. It features an overworld as in Super Mario Bros. 3 and introduces a new character, Yoshi, who appears in many other Nintendo games. The second Mario game for the system, Super Mario RPG, went in a somewhat different direction. Miyamoto led a team consisting of a partnership between Nintendo and Square; it took nearly a year to develop the graphics. The story takes place in a newly rendered Mushroom Kingdom based on the Super Mario Bros. series.
+
+Miyamoto also created The Legend of Zelda: A Link to the Past for the Super Nintendo Entertainment System, the third entry in the series. Dropping the side-scrolling elements of its predecessor, A Link to the Past introduced to the series elements that are still commonplace today, such as the concept of an alternate or parallel world, the Master Sword, and other new weapons and items.
+
+Shigeru Miyamoto mentored Satoshi Tajiri, guiding him during the creation process of Pocket Monsters: Red and Green (released in English as Pokémon Red and Blue), the initial video games in the Pokémon series. He also acted as the producer for these games and worked on social gameplay concepts such as trading. Pokémon would go on to be one of the most popular entertainment franchises in the world, spanning video games, anime, and various other merchandise.
+
+Miyamoto made several games for the Nintendo 64, mostly from his previous franchises. His first game on the new system, and one of its launch games, is Super Mario 64, for which he was the principal director. In developing the game, he began with character design and the camera system. Miyamoto and the other designers were initially unsure of which direction the game should take, and spent months to select an appropriate camera view and layout. The original concept involved a fixed path much like an isometric-type game, before the choice was made to settle on a free-roaming 3D design. He guided the design of the Nintendo 64 controller in tandem with that of Super Mario 64.
+
+Using what he had learned about the Nintendo 64 from developing Super Mario 64 and Star Fox 64, Miyamoto produced his next game, The Legend of Zelda: Ocarina of Time, leading a team of several directors. Its engine was based on that of Super Mario 64 but was so heavily modified as to be a somewhat different engine. Individual parts of Ocarina of Time were handled by multiple directors—a new strategy for Nintendo EAD. However, when things progressed slower than expected, Miyamoto returned to the development team with a more central role assisted in public by interpreter Bill Trinen. The team was new to 3D games, but assistant director Makoto Miyanaga recalls a sense of "passion for creating something new and unprecedented". Miyamoto went on to produce a sequel to Ocarina of Time, known as The Legend of Zelda: Majora's Mask. By reusing the game engine and graphics from Ocarina of Time, a smaller team required only 18 months to finish Majora's Mask.
+
+Miyamoto worked on a variety of Mario series spin-offs for the Nintendo 64, including Mario Kart 64 and Mario Party.
+
+### 2000–2011: GameCube, Wii, and DS
+
+Miyamoto produced various games for the GameCube, including the launch game Luigi's Mansion. The game was first revealed at Nintendo Space World 2000 as a technical demo designed to show off the graphical capabilities of the GameCube. Miyamoto made an original short demo of the game concepts, and Nintendo decided to turn it into a full game. Luigi's Mansion was later shown at E3 2001 with the GameCube console. Miyamoto continued to make additional Mario spinoffs in these years. He also produced the 3D game series Metroid Prime, after the original designer Yokoi, a friend and mentor of Miyamoto's, died. In this time he developed Pikmin and its sequel Pikmin 2, based on his experiences gardening. He also worked on new games for the Star Fox, Donkey Kong, F-Zero, and The Legend of Zelda series on both the GameCube and the Game Boy Advance systems. With the help of Hideo Kojima, he guided the developers of Metal Gear Solid: The Twin Snakes. He helped with many games on the Nintendo DS, including the remake of Super Mario 64, titled Super Mario 64 DS, and the new game Nintendogs, a new franchise based on his own experiences with dogs. At E3 2005, Miyamoto showed off Nintendogs with Tina Wood, where he promised to show her "a few more tricks" backstage.
+
+Miyamoto played a major role in the development of the Wii, a console that popularized motion control gaming, and its launch game Wii Sports, which helped show the capability of the new control scheme. Miyamoto went on to produce other titles in the Wii series, including Wii Fit. His inspiration for Wii Fit was to encourage conversation and family bonding.
+
+At E3 2004, Miyamoto unveiled The Legend of Zelda: Twilight Princess, appearing dressed as the protagonist Link with a sword and shield. Also released for the GameCube, the game was among the Wii's launch games and the first in the Zelda series to implement motion controls. He also helped with The Legend of Zelda: Skyward Sword, which featured more accurate motion controls. He also produced two Zelda titles for the Nintendo DS, The Legend of Zelda: Phantom Hourglass and The Legend of Zelda: Spirit Tracks. These were the first titles in the series to implement touch screen controls.
+
+Miyamoto produced three major Mario titles for Wii from 2007 to 2010: Super Mario Galaxy, New Super Mario Bros. Wii, and Super Mario Galaxy 2.
+
+### 2011–present: Wii U, 3DS, Switch and other projects
+
+Unlike in the 2000s in which he was involved on many projects as producer, Miyamoto's activities in development were less pronounced in that decade with Miyamoto only producing Luigi's Mansion: Dark Moon and Star Fox Zero. Otherwise, Miyamoto was credited as General Producer, Executive Producer and Supervisor for most projects, which are positions with much less involvement in comparison to a producer.
+
+Following the death of Nintendo president Satoru Iwata in July 2015, Miyamoto was appointed as an acting Representative Director, alongside Genyo Takeda. He was relieved of this position in September 2015 when Tatsumi Kimishima assumed the role of the company's president. He was also appointed the position of "Creative Fellow" at the same time, providing expert advice to Kimishima as a "support network" alongside Takeda. In his capacity as Creative Fellow, he provides feedback and guidance to game directors during development.
+
+In 2018, it was announced that Miyamoto would be working as a producer on The Super Mario Bros. Movie based on the Mario franchise by Illumination.
+
+Miyamoto was heavily involved with the design and construction of Super Nintendo World, a themed area featured at Universal Studios Japan and Universal Studios Hollywood and under construction at Universal Studios Singapore and Universal Epic Universe. Miyamoto oversaw the design and construction of the land and its attractions and acted as Nintendo's public representative on the land, hosting several promotional materials including a December 2020 Nintendo Direct in which he gave a tour of parts of the land.
+
+## Development philosophy
+
+   People have paid me a lot of lip service, calling me a genius story teller or a talented animator, and have gone so far as to suggest that I try my hand at movies, since my style of game design is, in their words, quite similar to making movies. But I feel that I am not a movie maker, but rather that my strength lies in my pioneering spirit to make use of technology to create the best, interactive commodities possible, and use that interactivity to give users a game they can enjoy and play comfortably.
+
+Miyamoto, and Nintendo as a whole, do not use focus groups. Instead, Miyamoto figures out if a game is fun for himself. He says that if he enjoys it, others will too. He elaborates, citing the conception of the Pokémon series as an example, "And that's the point – Not to make something sell, something very popular, but to love something, and make something that we creators can love. It's the very core feeling we should have in making games." Miyamoto wants players to experience kyokan; he wants "the players to feel about the game what the developers felt themselves."
+
+He then tests it with friends and family. He encourages younger developers to consider people who are new to gaming, for example by having them switch their dominant hand with their other hand to feel the experience of an unfamiliar game.
+
+Miyamoto's philosophy does not focus on hyper-realistic graphics, although he realizes they have their place. He is more focused on the game mechanics, such as the choices and challenges in the game. Similar to how manga artists subverted their genre, Miyamoto hopes to subvert some of the basic principles he had popularized in his early games, retaining some elements but eliminating others.
+
+His game design philosophy typically prioritizes gameplay over storytelling. In a 1992 interview, he said "the important thing is that it feels good when you're playing it" and "that quality is not determined by the story, but by the controls, the sound, and the rhythm and pacing". However, he requires a "compatibility [between] the story and gameplay [because] a good story can smooth over that discrepancy and make it all feel natural".
+
+His use of real-time rendered cinematics (not prerendered video) serves both his own rapidly interactive development process with no rendering delays, and the player's interaction with the game's continuity. He prefers to change his games right until they are finalized, and to make "something unique and unprecedented". He prefers the game to be interactively fun rather than have elaborate film sequences, stating in 1999, "I will never make movie-like games"; therefore, the more than 90 total minutes of short cutscenes interspersed throughout Ocarina of Time deliver more interactive cinematic qualities. His vision mandates a rapid and malleable development process with small teams, as when he directed substantial changes to the overall game scenario in the final months of the development of Ocarina of Time. He said, "The reason behind using such a simple process, as I am sure you have all experienced in the workshop, is that there is a total limit on team energy. There is a limit to the work a team can do, and there is a limit to my own energy. We opted not to use that limited time and energy on pre-rendered images for use in cinema scenes, but rather on tests on other inter-active elements and polishing up the game".
+
+For these reasons, he opposes prerendered cutscenes. Of Ocarina of Time, he says "we were able to make use of truly cinematic methods with our camera work without relying on [prerendered video]."
+
+Miyamoto has occasionally been critical of the role-playing game (RPG) genre. In a 1992 interview, when asked whether Zelda is an RPG series, he declined but classified it as "a real-time adventure"; he said he was "not interested in [games] decided by stats and numbers [but in preserving] as much of that 'live' feeling as possible", which he said "action games are better suited in conveying". In 2003, he described his "fundamental dislike" of the RPG genre: "I think that with an RPG you are completely bound hand and foot, and can't move. But gradually you become able to move your hands and legs... you become slightly untied. And in the end, you feel powerful. So what you get out of an RPG is a feeling of happiness. But I don't think they're something that's fundamentally fun to play. With a game like that, anyone can become really good at it. With Mario though, if you're not good at it, you may never get good." While critical of the RPG gameplay system, he has occasionally praised certain aspects of RPGs, such as Yuji Horii's writing in the Dragon Quest series, the "interactive cinematic approach" of the Final Fantasy series, and Shigesato Itoi's dialogue in the Mother series.
+
+## Impact
+
+Time called Miyamoto "the Spielberg of video games" and "the father of modern video games," while The Daily Telegraph says he is "regarded by many as possibly the most important game designer of all time." GameTrailers called him "the most influential game creator in history." Miyamoto has significantly influenced various aspects of the medium. The Daily Telegraph credited him with creating "some of the most innovative, ground breaking and successful work in his field." Many of Miyamoto's works have pioneered new video game concepts or refined existing ones. Miyamoto's games have received outstanding critical praise, some being considered the greatest games of all time.
+
+Miyamoto's games have also sold very well, becoming some of the bestselling games on Nintendo consoles and of all time. As of 1999, his games had sold 250 million units and grossed billions of dollars.
+
+Calling him one of the few "video-game auteurs," The New Yorker credited Miyamoto's role in creating the franchises that drove console sales, as well as designing the consoles themselves. They described Miyamoto as Nintendo's "guiding spirit, its meal ticket, and its playful public face," noting that Nintendo might not exist without him. The Daily Telegraph similarly attributed Nintendo's success to Miyamoto more than any other person. Next Generation listed him in their "75 Most Important People in the Games Industry of 1995", elaborating that, "He's the most successful game developer in history. He has a unique and brilliant mind as well as an unparalleled grasp of what gamers want to play."
+
+### Industry
+
+Miyamoto's first major arcade hit Donkey Kong was highly influential. It spawned a number of other games with a mix of running, jumping, and vertical traversal. Particularly novel, the vertical genre was initially referred to as "Donkey Kong-type" or "Kong-style", before finalizing as "platform". Earlier games either use storytelling or cutscenes, but Donkey Kong combines both to introduce the use of cutscenes to visually advance a complete story. It has multiple, distinct levels that progress the storyline. Computer and Video Games called Donkey Kong "the most momentous" release of 1981.
+
+Miyamoto's best known and most influential game, Super Mario Bros., "depending on your point of view, created an industry or resuscitated a comatose one". The Daily Telegraph said it "set the standard for all future videogames". G4 noted its revolutionary gameplay and its role in "almost single-handedly" rescuing the video game industry after the North American video game crash of 1983. The game also popularized the side-scrolling video game genre. The New Yorker described Mario as the first folk hero of video games, with as much influence as Mickey Mouse.
+
+GameSpot featured The Legend of Zelda as one of the 15 most influential games of all time, for being an early example of open world, nonlinear gameplay, and for its introduction of battery backup saving, laying the foundations for later action-adventure games like Metroid and role-playing video games like Final Fantasy, while influencing most modern games in general. In 2009, Game Informer called The Legend of Zelda "no less than the greatest game of all time" on their list of "The Top 200 Games of All Time", saying that it was "ahead of its time by years if not decades".
+
+At the time of the release of Star Fox, the use of filled, three-dimensional polygons in a console game was very unusual, apart from a handful of earlier titles. Due to its success, Star Fox has become a Nintendo franchise, with five more games and numerous appearances by its characters in other Nintendo games such as the Super Smash Bros. series.
+
+His game Super Mario 64 defined the field of 3D game design, particularly with its use of a dynamic camera system and the implementation of its analog control. The Legend of Zelda: Ocarina of Time's gameplay system introduced features such as a target lock system and context-sensitive buttons that have since become common elements in 3D adventure games.
+
+The Wii, which Miyamoto played a major role in designing, is the first wireless motion-controlled video game console.
+
+### Critical reception
+
+Miyamoto's games have received outstanding critical praise, and are widely considered among the greatest of all time.
+
+Games in Miyamoto's The Legend of Zelda series have received outstanding critical acclaim. A Link to the Past is a landmark game for Nintendo and is widely considered today to be one of the greatest video games of all time. Ocarina of Time is widely considered by critics and gamers alike to be one of the greatest video games ever made. Ocarina of Time was listed by Guinness World Records as the highest-rated video game in history, citing its Metacritic score of 99 out of 100. Twilight Princess was released to universal critical acclaim, and is the third highest-rated game for the Wii. It received perfect scores from major publications such as CVG, Electronic Gaming Monthly, Game Informer, GamesRadar, and GameSpy.
+
+Critical analysis of Super Mario Bros. has been extremely positive, with many touting it as one of the best video games of all time. In 2009, Game Informer put Super Mario Bros. in second place on its list of "The Top 200 Games of All Time", behind The Legend of Zelda, saying that it "remains a monument to brilliant design and fun gameplay".
+
+Super Mario 64 is acclaimed by many critics and fans as one of the greatest and most revolutionary video games of all time.
+
+According to Metacritic, Super Mario Galaxy and Super Mario Galaxy 2 are the highest- and second-highest-rated games, respectively, for the Wii.
+
+A 1995 article in Maximum stated that "in gaming circles Miyamoto's name carries far more weight than Steven Spielberg's could ever sustain."
+
+### Commercial reception
+
+More than 1 billion copies of games featuring franchises created by Miyamoto have been sold.
+
+Miyamoto's Mario series is, by far, the best-selling video game franchise of all time, selling over 500 million units. Super Mario Bros. is the sixth best-selling video game of all time. The game was the all-time bestselling video game for over 20 years until its lifetime sales were surpassed by Wii Sports. Super Mario Bros., Super Mario Bros. 3, and Super Mario Bros. 2 were, respectively, the three bestselling games for the Nintendo Entertainment System. Levi Buchanan of IGN considered Super Mario Bros. 3's appearance in the film The Wizard as a show-stealing element, and referred to the movie as a "90-minute commercial" for the game. Super Mario World was the bestselling game for the Super Nintendo Entertainment System. Super Mario 64 was the bestselling Nintendo 64 game, and as of May 21, 2003, the game had sold eleven million copies. At the end of 2007, Guinness World Records reported sales of 11.8 million copies. As of September 25, 2007, it was the seventh best-selling video game in the United States with six million copies sold. By June 2007, Super Mario 64 had become the second most popular game on Wii's Virtual Console, behind Super Mario Bros. Super Mario Sunshine is the third best-selling GameCube game.
+
+The original game in The Legend of Zelda series is the fifth-bestselling game for the Nintendo Entertainment System. The Wind Waker is the fourth bestselling GameCube game. Twilight Princess was commercially successful. In the PAL region, which covers most of Asia, Africa, South America, Australia, New Zealand, and most of Western Europe, Twilight Princess is the bestselling Zelda game ever. During its first week, the game was sold with three out of every four Wii purchases. The game had sold 4.52 million copies on the Wii as of March 1, 2008, and 1.32 million on the GameCube as of March 31, 2007.
+
+The Mario Kart series is currently the most successful racing game franchise of all time. Mario Kart titles tend to be among the bestselling games for their respective consoles; Super Mario Kart is the third bestselling video game for the Super Nintendo Entertainment System, Mario Kart 64 is the second bestselling Nintendo 64 game, Mario Kart: Double Dash is the second bestselling game for the GameCube, and Mario Kart Wii is the second bestselling game for the Wii.
+
+Miyamoto produced Wii Sports, another of the bestselling games of all time and part of the Wii series. Wii Fit designed by Miyamoto, was the third best selling console game not packaged with a console, with 22.67 million copies sold.
+
+Outside of video games, Miyamoto produced The Super Mario Bros. Movie, which ended up becoming the third-highest-grossing animated movie of all time, grossing $1.347 billion worldwide during its theatrical run as of July 14, 2023. It is also the highest-grossing film based on a video game (or video game series) by a huge margin, making it a huge statistical outlier; for context, the second-highest-grossing film based on a video game is Warcraft (2016), which grossed $900 million less, for a total of about $439 million.
+
+### Awards and recognition
+
+   [Miyamoto] approaches the games playfully, which seems kind of obvious, but most people don't. And he approaches things from the players' point of view, which is part of his magic.
+
+The name of the main character of the PC game Daikatana, Hiro Miyamoto, is a homage to Miyamoto. The character Gary Oak from the Pokémon anime series is named Shigeru in Japan and is the rival of Ash Ketchum (called Satoshi in Japan). Pokémon creator Satoshi Tajiri was mentored by Miyamoto.
+
+In 1998, Miyamoto was honored as the first person inducted into the Academy of Interactive Arts and Sciences' Hall of Fame. In 2006, Miyamoto was made a Chevalier (knight) of the French Ordre des Arts et des Lettres by the French Minister of Culture Renaud Donnedieu de Vabres.
+
+On November 28, 2006, Miyamoto was featured in TIME Asia's "60 Years of Asian Heroes". He was later chosen as one of Time Magazine's 100 Most Influential People of the Year in both 2007 and also in 2008, in which he topped the list with a total vote of 1,766,424. At the Game Developers Choice Awards, on March 7, 2007, Miyamoto received the Lifetime Achievement Award "for a career that spans the creation of Super Mario Bros. and The Legend of Zelda, and Donkey Kong to the company's recent revolutionary systems, Nintendo DS and Wii." GameTrailers and IGN placed Miyamoto first on their lists for the "Top Ten Game Creators" and the "Top 100 Game Creators of All Time" respectively.
+
+In a survey of game developers by industry publication Develop, 30% of the developers, by far the largest portion, chose Miyamoto as their "Ultimate Development Hero". Miyamoto has been interviewed by companies and organizations such as CNN's Talk Asia. He was made a Fellow of BAFTA at the British Academy Video Games Awards on March 19, 2010. In 2012, Miyamoto was also the first interactive creator to be awarded the highest recognition in Spain, the Prince of Asturias Award, in the category of Communications and Humanities.
+
+Miyamoto was awarded Japan's Person of Cultural Merit in 2019 in recognition for his contributions towards Japan's video game industry. He was the first person in the video game industry to receive the honor.
+
+## Personal life
+
+Miyamoto is married to Yasuko, and they have two children. In 2010, his son was 25 and working at an advertising agency, while his daughter was 23 and studying zoology at the time. His children played video games in their youth, but he also made them go outside. Although he can speak some English, he is not fluent and prefers to speak in Japanese for interviews.
+
+Miyamoto does not generally sign autographs, out of concern that he would be inundated. He also does not appear on Japanese television, so as to minimize his chance of being recognized. More foreign tourists than Japanese people approach him.
+
+Miyamoto spends little time playing video games in his personal time, preferring to play the guitar, mandolin, and banjo. He avidly enjoys bluegrass music. Miyamoto said in a 2016 interview that when he had his own family he took up gardening with his wife, which influenced other games that he was making at the time. He has a Shetland Sheepdog named Pikku that provided the inspiration for Nintendogs. He is also a semi-professional dog breeder. He has been quoted as stating, "Video games are bad for you? That's what they said about rock and roll."
+
+Miyamoto enjoys rearranging furniture in his house, even late at night. He also stated that he has a hobby of guessing the dimensions of objects, then checking to see if he was correct, and reportedly carries a measuring tape with him everywhere. In December 2016, Miyamoto showcased his hobby on The Tonight Show Starring Jimmy Fallon, while also performing the Super Mario Bros. theme on guitar with The Roots during the same show.
+
+## Notable works
+
+| Year | Game title | Role |
+| - | - | - |
+| 1979 | Sheriff | Artist |
+| 1980 | Space Firebird | Artist |
+| 1981 | Donkey Kong | Director, designer |
+| 1981 | Sky Skipper | Designer |
+| 1982 | Donkey Kong Jr. | Director, designer |
+| 1982 | Popeye | Director, designer |
+| 1983 | Mario Bros. | Director, designer |
+| 1983 | Donkey Kong 3 | Director, designer |
+| 1983 | Baseball | Designer |
+| 1984 | Tennis | Designer |
+| 1984 | Golf | Designer |
+| 1984 | Devil World | Director, designer, producer |
+| 1984 | Excitebike | Director, designer, producer |
+| 1984 | Hogan's Alley | Director, designer |
+| 1984 | Wild Gunman | Director, designer |
+| 1984 | Duck Hunt | Director, designer |
+| 1985 | Kung Fu | Director, designer |
+| 1985 | Super Mario Bros. | Director, designer, producer |
+| 1986 | The Legend of Zelda | Director, designer, producer |
+| 1986 | Super Mario Bros.: The Lost Levels | Director, producer |
+| 1987 | Zelda II: The Adventure of Link | Producer |
+| 1987 | Yume Kōjō: Doki Doki Panic (Super Mario Bros. 2) | Designer, producer |
+| 1988 | Super Mario Bros. 3 | Director, designer, producer |
+| 1990 | Super Mario World | Producer |
+| 1990 | F-Zero | Designer, producer |
+| 1991 | The Legend of Zelda: A Link to the Past | Producer |
+| 1993 | Star Fox | Designer, producer |
+| 1995 | BS Zelda no Densetsu | Designer |
+| 1996 | Pokémon Red and Blue | Producer |
+| 1996 | Super Mario 64 | Director, producer |
+| 1996 | Wave Race 64 | Producer |
+| 1997 | Star Fox 64 | Designer, producer |
+| 1998 | The Legend of Zelda: Ocarina of Time | Designer, producer, supervisor |
+| 1999 | Pokémon Snap | Producer |
+| 2000 | Paper Mario | Producer |
+| 2000 | The Legend of Zelda: Majora's Mask | Producer, supervisor |
+| 2001 | Luigi's Mansion | Producer, original concept |
+| 2001 | Pikmin | Producer, original concept |
+| 2002 | Metroid Prime | Producer |
+| 2005 | Nintendogs | Producer, original concept |
+| 2006 | The Legend of Zelda: Twilight Princess | Producer |
+| 2006 | Wii Sports | General producer |
+| 2007 | Super Mario Galaxy | Producer, game design concept |
+| 2007 | Wii Fit | Designer, general producer |
+| 2011 | Steel Diver | Designer, general producer |
+| 2015 | Super Mario Maker | General producer, original concept |
+| 2016 | Star Fox Zero | Supervising director, producer |
+| 2016 | Super Mario Run | Director, producer |
+| 2017 | The Legend of Zelda: Breath of the Wild | General producer |
+| 2017 | Super Mario Odyssey | Executive producer |
+| 2021 | Super Nintendo World | Creative director |
+| 2023 | The Super Mario Bros. Movie | Producer |
+| 2023 | The Legend of Zelda: Tears of the Kingdom | General producer |
+| 2023 | Pikmin 4 | General producer |
+| TBA | Untitled The Legend of Zelda film | Producer |

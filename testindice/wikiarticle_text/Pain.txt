@@ -1,0 +1,232 @@
+# Pain
+
+Pain is a distressing feeling often caused by intense or damaging stimuli. The International Association for the Study of Pain defines pain as "an unpleasant sensory and emotional experience associated with, or resembling that associated with, actual or potential tissue damage."
+
+Pain motivates organisms to withdraw from damaging situations, to protect a damaged body part while it heals, and to avoid similar experiences in the future. Most pain resolves once the noxious stimulus is removed and the body has healed, but it may persist despite removal of the stimulus and apparent healing of the body. Sometimes pain arises in the absence of any detectable stimulus, damage or disease.
+
+Pain is the most common reason for physician consultation in most developed countries. It is a major symptom in many medical conditions, and can interfere with a person's quality of life and general functioning. People in pain experience impaired concentration, working memory, mental flexibility, problem solving and information processing speed, and are more likely to experience irritability, depression and anxiety.
+
+Simple pain medications are useful in 20% to 70% of cases. Psychological factors such as social support, cognitive behavioral therapy, excitement, or distraction can affect pain's intensity or unpleasantness.
+
+## Etymology
+
+First attested in English in 1297, the word peyn comes from the Old French peine, in turn from Latin poena meaning "punishment, penalty" (also meaning "torment, hardship, suffering" in Late Latin) and that from Greek ποινή (poine), generally meaning "price paid, penalty, punishment".
+
+## Classification
+
+The International Association for the Study of Pain recommends using specific features to describe a patient's pain:
+
+* region of the body involved (e.g. abdomen, lower limbs),
+* system whose dysfunction may be causing the pain (e.g., nervous, gastrointestinal),
+* duration and pattern of occurrence,
+* intensity, and
+* cause
+
+### Chronic versus acute
+
+Pain is usually transitory, lasting only until the noxious stimulus is removed or the underlying damage or pathology has healed, but some painful conditions, such as rheumatoid arthritis, peripheral neuropathy, cancer and idiopathic pain, may persist for years. Pain that lasts a long time is called "chronic" or "persistent", and pain that resolves quickly is called "acute". Traditionally, the distinction between acute and chronic pain has relied upon an arbitrary interval of time between onset and resolution; the two most commonly used markers being 3 months and 6 months since the onset of pain, though some theorists and researchers have placed the transition from acute to chronic pain at 12 $months.^{:93}$ Others apply "acute" to pain that lasts less than 30 days, "chronic" to pain of more than six months' duration, and "subacute" to pain that lasts from one to six months. A popular alternative definition of "chronic pain", involving no arbitrarily fixed duration, is "pain that extends beyond the expected period of healing". Chronic pain may be classified as "cancer-related" or "benign."
+
+### Allodynia
+
+Allodynia is pain experienced in response to a normally painless stimulus. It has no biological function and is classified by stimuli into dynamic mechanical, punctate and static.
+
+### Phantom
+
+Phantom pain is pain felt in a part of the body that has been amputated, or from which the brain no longer receives signals. It is a type of neuropathic pain.
+
+The prevalence of phantom pain in upper limb amputees is nearly 82%, and in lower limb amputees is 54%. One study found that eight days after amputation, 72% of patients had phantom limb pain, and six months later, 67% reported it. Some amputees experience continuous pain that varies in intensity or quality; others experience several bouts of pain per day, or it may reoccur less often. It is often described as shooting, crushing, burning or cramping. If the pain is continuous for a long period, parts of the intact body may become sensitized, so that touching them evokes pain in the phantom limb. Phantom limb pain may accompany urination or $defecation.^{:61–69}$
+
+Local anesthetic injections into the nerves or sensitive areas of the stump may relieve pain for days, weeks, or sometimes permanently, despite the drug wearing off in a matter of hours; and small injections of hypertonic saline into the soft tissue between vertebrae produces local pain that radiates into the phantom limb for ten minutes or so and may be followed by hours, weeks or even longer of partial or total relief from phantom pain. Vigorous vibration or electrical stimulation of the stump, or current from electrodes surgically implanted onto the spinal cord, all produce relief in some $patients.^{:61–69}$
+
+Mirror box therapy produces the illusion of movement and touch in a phantom limb which in turn may cause a reduction in pain.
+
+Paraplegia, the loss of sensation and voluntary motor control after serious spinal cord damage, may be accompanied by girdle pain at the level of the spinal cord damage, visceral pain evoked by a filling bladder or bowel, or, in five to ten per cent of paraplegics, phantom body pain in areas of complete sensory loss. This phantom body pain is initially described as burning or tingling but may evolve into severe crushing or pinching pain, or the sensation of fire running down the legs or of a knife twisting in the flesh. Onset may be immediate or may not occur until years after the disabling injury. Surgical treatment rarely provides lasting $relief.^{:61–69}$
+
+### Breakthrough
+
+Breakthrough pain is transitory pain that comes on suddenly and is not alleviated by the patient's regular pain management. It is common in cancer patients who often have background pain that is generally well-controlled by medications, but who also sometimes experience bouts of severe pain that from time to time "breaks through" the medication. The characteristics of breakthrough cancer pain vary from person to person and according to the cause. Management of breakthrough pain can entail intensive use of opioids, including fentanyl.
+
+### Asymbolia and insensitivity
+
+The ability to experience pain is essential for protection from injury, and recognition of the presence of injury. Episodic analgesia may occur under special circumstances, such as in the excitement of sport or war: a soldier on the battlefield may feel no pain for many hours from a traumatic amputation or other severe injury.
+
+Although unpleasantness is an essential part of the IASP definition of pain, it is possible in some patients to induce a state known as pain asymbolia, described as intense pain devoid of unpleasantness, with morphine injection or psychosurgery. Such patients report that they have pain but are not bothered by it; they recognize the sensation of pain but suffer little, or not at all. Indifference to pain can also rarely be present from birth; these people have normal nerves on medical investigations, and find pain unpleasant, but do not avoid repetition of the pain stimulus.
+
+Insensitivity to pain may also result from abnormalities in the nervous system. This is usually the result of acquired damage to the nerves, such as spinal cord injury, diabetes mellitus (diabetic neuropathy), or leprosy in countries where that disease is prevalent. These individuals are at risk of tissue damage and infection due to undiscovered injuries. People with diabetes-related nerve damage, for instance, sustain poorly-healing foot ulcers as a result of decreased sensation.
+
+A much smaller number of people are insensitive to pain due to an inborn abnormality of the nervous system, known as "congenital insensitivity to pain". Children with this condition incur carelessly-repeated damage to their tongues, eyes, joints, skin, and muscles. Some die before adulthood, and others have a reduced life expectancy. Most people with congenital insensitivity to pain have one of five hereditary sensory and autonomic neuropathies (which includes familial dysautonomia and congenital insensitivity to pain with anhidrosis). These conditions feature decreased sensitivity to pain together with other neurological abnormalities, particularly of the autonomic nervous system. A very rare syndrome with isolated congenital insensitivity to pain has been linked with mutations in the SCN9A gene, which codes for a sodium channel $(Na_v1.7)$ necessary in conducting pain nerve stimuli.
+
+## Functional effects
+
+Experimental subjects challenged by acute pain and patients in chronic pain experience impairments in attention control, working memory capacity, mental flexibility, problem solving, and information processing speed. Pain is also associated with increased depression, anxiety, fear, and anger.
+
+   If I have matters right, the consequences of pain will include direct physical distress, unemployment, financial difficulties, marital disharmony, and difficulties in concentration and attention…
+
+### On subsequent negative emotion
+
+Although pain is considered to be aversive and unpleasant and is therefore usually avoided, a meta-analysis which summarized and evaluated numerous studies from various psychological disciplines, found a reduction in negative affect. Across studies, participants that were subjected to acute physical pain in the laboratory subsequently reported feeling better than those in non-painful control conditions, a finding which was also reflected in physiological parameters. A potential mechanism to explain this effect is provided by the opponent-process theory.
+
+## Theory
+
+### Historical
+
+Before the relatively recent discovery of neurons and their role in pain, various different body functions were proposed to account for pain. There were several competing early theories of pain among the ancient Greeks: Hippocrates believed that it was due to an imbalance in vital fluids. In the 11th century, Avicenna theorized that there were a number of feeling senses including touch, pain and titillation.
+
+In 1644, René Descartes theorized that pain was a disturbance that passed along nerve fibers until the disturbance reached the brain. Descartes' work, along with Avicenna's, prefigured the 19th-century development of specificity theory. Specificity theory saw pain as "a specific sensation, with its own sensory apparatus independent of touch and other senses". Another theory that came to prominence in the 18th and 19th centuries was intensive theory, which conceived of pain not as a unique sensory modality, but an emotional state produced by stronger than normal stimuli such as intense light, pressure or temperature. By the mid-1890s, specificity was backed mostly by physiologists and physicians, and the intensive theory was mostly backed by psychologists. However, after a series of clinical observations by Henry Head and experiments by Max von Frey, the psychologists migrated to specificity almost en masse, and by century's end, most textbooks on physiology and psychology were presenting pain specificity as fact.
+
+### Modern
+
+Some sensory fibers do not differentiate between noxious and non-noxious stimuli, while others, nociceptors, respond only to noxious, high intensity stimuli. At the peripheral end of the nociceptor, noxious stimuli generate currents that, above a given threshold, send signals along the nerve fiber to the spinal cord. The "specificity" (whether it responds to thermal, chemical or mechanical features of its environment) of a nociceptor is determined by which ion channels it expresses at its peripheral end. Dozens of different types of nociceptor ion channels have so far been identified, and their exact functions are still being determined.
+
+The pain signal travels from the periphery to the spinal cord along A-delta and C fibers. Because the A-delta fiber is thicker than the C fiber, and is thinly sheathed in an electrically insulating material (myelin), it carries its signal faster (5–30 m/s) than the unmyelinated C fiber (0.5–2 m/s). Pain evoked by the A-delta fibers is described as sharp and is felt first. This is followed by a duller pain, often described as burning, carried by the C fibers. These A-delta and C fibers enter the spinal cord via Lissauer's tract and connect with spinal cord nerve fibers in the central gelatinous substance of the spinal cord. These spinal cord fibers then cross the cord via the anterior white commissure and ascend in the spinothalamic tract. Before reaching the brain, the spinothalamic tract splits into the lateral, neospinothalamic tract and the medial, paleospinothalamic tract. The neospinothalamic tract carries the fast, sharp A-delta signal to the ventral posterolateral nucleus of the thalamus. The paleospinothalamic tract carries the slow, dull, C-fiber pain signal. Some of the paleospinothalamic fibers peel off in the brain stem, connecting with the reticular formation or midbrain periaqueductal gray, and the remainder terminate in the intralaminar nuclei of the thalamus.
+
+Pain-related activity in the thalamus spreads to the insular cortex (thought to embody, among other things, the feeling that distinguishes pain from other homeostatic emotions such as itch and nausea) and anterior cingulate cortex (thought to embody, among other things, the affective/motivational element, the unpleasantness of pain), and pain that is distinctly located also activates primary and secondary somatosensory cortex.
+
+Spinal cord fibers dedicated to carrying A-delta fiber pain signals, and others that carry both A-delta and C fiber pain signals to the thalamus have been identified. Other spinal cord fibers, known as wide dynamic range neurons, respond to A-delta and C fibers, but also to the much larger, more heavily myelinated A-beta fibers that carry touch, pressure and vibration signals.
+
+Ronald Melzack and Patrick Wall introduced their gate control theory in the 1965 Science article "Pain Mechanisms: A New Theory". The authors proposed that the thin C and A-delta (pain) and large diameter A-beta (touch, pressure, vibration) nerve fibers carry information from the site of injury to two destinations in the dorsal horn of the spinal cord, and that A-beta fiber signals acting on inhibitory cells in the dorsal horn can reduce the intensity of pain signals sent to the brain.
+
+**Three dimensions of pain**
+
+In 1968 Ronald Melzack and Kenneth Casey described chronic pain in terms of its three dimensions:
+
+* "sensory-discriminative" (sense of the intensity, location, quality and duration of the pain),
+* "affective-motivational" (unpleasantness and urge to escape the unpleasantness), and
+* "cognitive-evaluative" (cognitions such as appraisal, cultural values, distraction and hypnotic suggestion).
+
+They theorized that pain intensity (the sensory discriminative dimension) and unpleasantness (the affective-motivational dimension) are not simply determined by the magnitude of the painful stimulus, but "higher" cognitive activities can influence perceived intensity and unpleasantness. Cognitive activities may affect both sensory and affective experience or they may modify primarily the affective-motivational dimension. Thus, excitement in games or war appears to block both the sensory-discriminative and affective-motivational dimensions of pain, while suggestion and placebos may modulate only the affective-motivational dimension and leave the sensory-discriminative dimension relatively undisturbed. (p. 432)
+
+The paper ends with a call to action: "Pain can be treated not only by trying to cut down the sensory input by anesthetic block, surgical intervention and the like, but also by influencing the motivational-affective and cognitive factors as well." (p. 435)
+
+## Evolutionary and behavioral role
+
+Pain is part of the body's defense system, producing a reflexive retraction from the painful stimulus, and tendencies to protect the affected body part while it heals, and avoid that harmful situation in the future. It is an important part of animal life, vital to healthy survival. People with congenital insensitivity to pain have reduced life expectancy.
+
+In The Greatest Show on Earth: The Evidence for Evolution, biologist Richard Dawkins addresses the question of why pain should have the quality of being painful. He describes the alternative as a mental raising of a "red flag". To argue why that red flag might be insufficient, Dawkins argues that drives must compete with one other within living beings. The most "fit" creature would be the one whose pains are well balanced. Those pains which mean certain death when ignored will become the most powerfully felt. The relative intensities of pain, then, may resemble the relative importance of that risk to our ancestors. This resemblance will not be perfect, however, because natural selection can be a poor designer. This may have maladaptive results such as supernormal stimuli.
+
+Pain, however, does not only wave a "red flag" within living beings but may also act as a warning sign and a call for help to other living beings. Especially in humans who readily helped each other in case of sickness or injury throughout their evolutionary history, pain might be shaped by natural selection to be a credible and convincing signal of need for relief, help, and care.
+
+Idiopathic pain (pain that persists after the trauma or pathology has healed, or that arises without any apparent cause) may be an exception to the idea that pain is helpful to survival, although some psychodynamic psychologists argue that such pain is psychogenic, enlisted as a protective distraction to keep dangerous emotions unconscious.
+
+## Thresholds
+
+In pain science, thresholds are measured by gradually increasing the intensity of a stimulus in a procedure called quantitative sensory testing which involves such stimuli as electric current, thermal (heat or cold), mechanical (pressure, touch, vibration), ischemic, or chemical stimuli applied to the subject to evoke a response. The "pain perception threshold" is the point at which the subject begins to feel pain, and the "pain threshold intensity" is the stimulus intensity at which the stimulus begins to hurt. The "pain tolerance threshold" is reached when the subject acts to stop the pain.
+
+## Assessment
+
+A person's self-report is the most reliable measure of pain. Some health care professionals may underestimate pain severity. A definition of pain widely employed in nursing, emphasizing its subjective nature and the importance of believing patient reports, was introduced by Margo McCaffery in 1968: "Pain is whatever the experiencing person says it is, existing whenever he says it does". To assess intensity, the patient may be asked to locate their pain on a scale of 0 to 10, with 0 being no pain at all, and 10 the worst pain they have ever felt. Quality can be established by having the patient complete the McGill Pain Questionnaire indicating which words best describe their pain.
+
+### Visual analogue scale
+
+The visual analogue scale is a common, reproducible tool in the assessment of pain and pain relief. The scale is a continuous line anchored by verbal descriptors, one for each extreme of pain where a higher score indicates greater pain intensity. It is usually 10 cm in length with no intermediate descriptors as to avoid marking of scores around a preferred numeric value. When applied as a pain descriptor, these anchors are often 'no pain' and 'worst imaginable pain". Cut-offs for pain classification have been recommended as no pain (0–4mm), mild pain (5–44mm), moderate pain (45–74mm) and severe pain (75–100mm).
+
+### Multidimensional pain inventory
+
+The Multidimensional Pain Inventory (MPI) is a questionnaire designed to assess the psychosocial state of a person with chronic pain. Combining the MPI characterization of the person with their IASP five-category pain profile is recommended for deriving the most useful case description.
+
+### Assessment in non-verbal people
+
+Non-verbal people cannot use words to tell others that they are experiencing pain. However, they may be able to communicate through other means, such as blinking, pointing, or nodding.
+
+With a non-communicative person, observation becomes critical, and specific behaviors can be monitored as pain indicators. Behaviors such as facial grimacing and guarding (trying to protect part of the body from being bumped or touched) indicate pain, as well as an increase or decrease in vocalizations, changes in routine behavior patterns and mental status changes. Patients experiencing pain may exhibit withdrawn social behavior and possibly experience a decreased appetite and decreased nutritional intake. A change in condition that deviates from baseline, such as moaning with movement or when manipulating a body part, and limited range of motion are also potential pain indicators. In patients who possess language but are incapable of expressing themselves effectively, such as those with dementia, an increase in confusion or display of aggressive behaviors or agitation may signal that discomfort exists, and further assessment is necessary. Changes in behavior may be noticed by caregivers who are familiar with the person's normal behavior.
+
+Infants do feel pain, but lack the language needed to report it, and so communicate distress by crying. A non-verbal pain assessment should be conducted involving the parents, who will notice changes in the infant which may not be obvious to the health care provider. Pre-term babies are more sensitive to painful stimuli than those carried to full term.
+
+Another approach, when pain is suspected, is to give the person treatment for pain, and then watch to see whether the suspected indicators of pain subside.
+
+### Other reporting barriers
+
+The way in which one experiences and responds to pain is related to sociocultural characteristics, such as gender, ethnicity, and age. An aging adult may not respond to pain in the same way that a younger person might. Their ability to recognize pain may be blunted by illness or the use of medication. Depression may also keep older adult from reporting they are in pain. Decline in self-care may also indicate the older adult is experiencing pain. They may be reluctant to report pain because they do not want to be perceived as weak, or may feel it is impolite or shameful to complain, or they may feel the pain is a form of deserved punishment.
+
+Cultural barriers may also affect the likelihood of reporting pain. Patients may feel that certain treatments go against their religious beliefs. They may not report pain because they feel it is a sign that death is near. Many people fear the stigma of addiction, and avoid pain treatment so as not to be prescribed potentially addicting drugs. Many Asians do not want to lose respect in society by admitting they are in pain and need help, believing the pain should be borne in silence, while other cultures feel they should report pain immediately to receive immediate relief.
+
+Gender can also be a perceived factor in reporting pain. Gender differences can be the result of social and cultural expectations, with women expected to be more emotional and show pain, and men more stoic. As a result, female pain is often stigmatized, leading to less urgent treatment of women based on social expectations of their ability to accurately report it. This leads to extended emergency room wait times for women and frequent dismissal of their ability to accurately report pain.
+
+### Diagnostic aid
+
+Pain is a symptom of many medical conditions. Knowing the time of onset, location, intensity, pattern of occurrence (continuous, intermittent, etc.), exacerbating and relieving factors, and quality (burning, sharp, etc.) of the pain will help the examining physician to accurately diagnose the problem. For example, chest pain described as extreme heaviness may indicate myocardial infarction, while chest pain described as tearing may indicate aortic dissection.
+
+### Physiological measurement
+
+Functional magnetic resonance imaging brain scanning has been used to measure pain, and correlates well with self-reported pain.
+
+## Mechanisms
+
+### Nociceptive
+
+Nociceptive pain is caused by stimulation of sensory nerve fibers that respond to stimuli approaching or exceeding harmful intensity (nociceptors), and may be classified according to the mode of noxious stimulation. The most common categories are "thermal" (e.g. heat or cold), "mechanical" (e.g. crushing, tearing, shearing, etc.) and "chemical" (e.g. iodine in a cut or chemicals released during inflammation). Some nociceptors respond to more than one of these modalities and are consequently designated polymodal.
+
+Nociceptive pain may also be classed according to the site of origin and divided into "visceral", "deep somatic" and "superficial somatic" pain. Visceral structures (e.g., the heart, liver and intestines) are highly sensitive to stretch, ischemia and inflammation, but relatively insensitive to other stimuli that normally evoke pain in other structures, such as burning and cutting. Visceral pain is diffuse, difficult to locate and often referred to a distant, usually superficial, structure. It may be accompanied by nausea and vomiting and may be described as sickening, deep, squeezing, and dull. Deep somatic pain is initiated by stimulation of nociceptors in ligaments, tendons, bones, blood vessels, fasciae and muscles, and is dull, aching, poorly-localized pain. Examples include sprains and broken bones. Superficial somatic pain is initiated by activation of nociceptors in the skin or other superficial tissue, and is sharp, well-defined and clearly located. Examples of injuries that produce superficial somatic pain include minor wounds and minor (first degree) burns.
+
+### Neuropathic
+
+Neuropathic pain is caused by damage or disease affecting any part of the nervous system involved in bodily feelings (the somatosensory system). Neuropathic pain may be divided into peripheral, central, or mixed (peripheral and central) neuropathic pain. Peripheral neuropathic pain is often described as "burning", "tingling", "electrical", "stabbing", or "pins and needles". Bumping the "funny bone" elicits acute peripheral neuropathic pain.
+
+Some manifestations of neuropathic pain include: traumatic neuropathy, tic douloureux, painful diabetic neuropathy, and postherpetic neuralgia.
+
+### Nociplastic
+
+Nociplastic pain is pain characterized by a changed nociception (but without evidence of real or threatened tissue damage, or without disease or damage in the somatosensory system).
+
+### Psychogenic
+
+Psychogenic pain, also called psychalgia or somatoform pain, is pain caused, increased or prolonged by mental, emotional or behavioral factors. Headache, back pain and stomach pain are sometimes diagnosed as psychogenic. Those affected are often stigmatized, because both medical professionals and the general public tend to think that pain from a psychological source is not "real". However, specialists consider that it is no less actual or hurtful than pain from any other source.
+
+People with long-term pain frequently display psychological disturbance, with elevated scores on the Minnesota Multiphasic Personality Inventory scales of hysteria, depression and hypochondriasis (the "neurotic triad"). Some investigators have argued that it is this neuroticism that causes acute pain to turn chronic, but clinical evidence points the other direction, to chronic pain causing neuroticism. When long-term pain is relieved by therapeutic intervention, scores on the neurotic triad and anxiety fall, often to normal levels. Self-esteem, often low in chronic pain patients, also shows improvement once pain has $resolved.^{:31–32}$
+
+## Management
+
+Pain can be treated through a variety of methods. The most appropriate method depends upon the situation. Management of chronic pain can be difficult and may require the coordinated efforts of a pain management team, which typically includes medical practitioners, clinical pharmacists, clinical psychologists, physiotherapists, occupational therapists, physician assistants, and nurse practitioners.
+
+Inadequate treatment of pain is widespread throughout surgical wards, intensive care units, and accident and emergency departments, in general practice, in the management of all forms of chronic pain including cancer pain, and in end of life care. This neglect extends to all ages, from newborns to medically frail elderly. In the US, African and Hispanic Americans are more likely than others to suffer unnecessarily while in the care of a physician; and women's pain is more likely to be undertreated than men's.
+
+The International Association for the Study of Pain advocates that the relief of pain should be recognized as a human right, that chronic pain should be considered a disease in its own right, and that pain medicine should have the full status of a medical specialty. It is a specialty only in China and Australia at this time. Elsewhere, pain medicine is a subspecialty under disciplines such as anesthesiology, physiatry, neurology, palliative medicine and psychiatry. In 2011, Human Rights Watch alerted that tens of millions of people worldwide are still denied access to inexpensive medications for severe pain.
+
+### Medication
+
+Acute pain is usually managed with medications such as analgesics and anesthetics. Caffeine when added to pain medications such as ibuprofen, may provide some additional benefit. Ketamine can be used instead of opioids for short-term pain. Pain medications can cause paradoxical side effects, such as opioid-induced hyperalgesia (severe generalized pain caused by long-term opioid use).
+
+Sugar (sucrose) when taken by mouth reduces pain in newborn babies undergoing some medical procedures (a lancing of the heel, venipuncture, and intramuscular injections). Sugar does not remove pain from circumcision, and it is unknown if sugar reduces pain for other procedures. Sugar did not affect pain-related electrical activity in the brains of newborns one second after the heel lance procedure. Sweet liquid by mouth moderately reduces the rate and duration of crying caused by immunization injection in children between one and twelve months of age.
+
+### Psychological
+
+Individuals with more social support experience less cancer pain, take less pain medication, report less labor pain and are less likely to use epidural anesthesia during childbirth, or suffer from chest pain after coronary artery bypass surgery.
+
+Suggestion can significantly affect pain intensity. About 35% of people report marked relief after receiving a saline injection they believed to be morphine. This placebo effect is more pronounced in people who are prone to anxiety, and so anxiety reduction may account for some of the effect, but it does not account for all of it. Placebos are more effective for intense pain than mild pain; and they produce progressively weaker effects with repeated $administration.^{:26–28}$ It is possible for many with chronic pain to become so absorbed in an activity or entertainment that the pain is no longer felt, or is greatly $diminished.^{:22–23}$
+
+A number of meta-analyses have found clinical hypnosis to be effective in controlling pain associated with diagnostic and surgical procedures in both adults and children, as well as pain associated with cancer and childbirth. A 2007 review of 13 studies found evidence for the efficacy of hypnosis in the reduction of chronic pain under some conditions, though the number of patients enrolled in the studies was low, raising issues related to the statistical power to detect group differences, and most lacked credible controls for placebo or expectation. The authors concluded that "although the findings provide support for the general applicability of hypnosis in the treatment of chronic pain, considerably more research will be needed to fully determine the effects of hypnosis for different chronic-pain conditions."
+
+### Alternative medicine
+
+An analysis of the 13 highest quality studies of pain treatment with acupuncture, published in January 2009, concluded there was little difference in the effect of real, faked and no acupuncture. However, more recent reviews have found some benefit. Additionally, there is tentative evidence for a few herbal medicines. There has been some interest in the relationship between vitamin D and pain, but the evidence so far from controlled trials for such a relationship, other than in osteomalacia, is inconclusive.
+
+For chronic (long-term) lower back pain, spinal manipulation produces tiny, clinically insignificant, short-term improvements in pain and function, compared with sham therapy and other interventions. Spinal manipulation produces the same outcome as other treatments, such as general practitioner care, pain-relief drugs, physical therapy, and exercise, for acute (short-term) lower back pain.
+
+## Epidemiology
+
+Pain is the main reason for visiting an emergency department in more than 50% of cases, and is present in 30% of family practice visits. Several epidemiological studies have reported widely varying prevalence rates for chronic pain, ranging from 12 to 80% of the population. It becomes more common as people approach death. A study of 4,703 patients found that 26% had pain in the last two years of life, increasing to 46% in the last month.
+
+A survey of 6,636 children (0–18 years of age) found that, of the 5,424 respondents, 54% had experienced pain in the preceding three months. A quarter reported having experienced recurrent or continuous pain for three months or more, and a third of these reported frequent and intense pain. The intensity of chronic pain was higher for girls, and girls' reports of chronic pain increased markedly between ages 12 and 14.
+
+## Society and culture
+
+Physical pain is a universal experience, and a strong motivator of human and animal behavior. As such, physical pain is used politically in relation to various issues such as pain management  policy, drug control,  animal rights or  animal welfare,  torture, and  pain compliance. The deliberate infliction of pain and the medical management of pain are both important aspects of biopower, a concept that encompasses the "set of mechanisms through which the basic biological features of the human species became the object of a political strategy".
+
+In various contexts, the deliberate infliction of pain in the form of corporal punishment is used as retribution for an offence, for the purpose of disciplining or reforming a wrongdoer, or to deter attitudes or behaviour deemed unacceptable. In Western societies, the intentional infliction of severe pain (torture) was principally used to extract confession prior to its abolition in the latter part of the 19th century. Torture as a means to punish the citizen has been reserved for offences posing severe threat to the social fabric (for example, treason).
+
+The administration of torture on bodies othered by the cultural narrative, those observed as not 'full members of $society'^{:101–121[AD1]}$ met a resurgence in the 20th century, possibly due to the heightened $warfare.^{:101–121[AD2]}$
+
+Many cultures use painful ritual practices as a catalyst for psychological transformation. The use of pain to transition to a 'cleansed and purified' state is seen in religious self-flagellation practices (particularly those of Christianity and Islam), or personal catharsis in neo-primitive body suspension experiences.
+
+Beliefs about pain play an important role in sporting cultures. Pain may be viewed positively, exemplified by the 'no pain, no gain' attitude, with pain seen as an essential part of training. Sporting culture tends to normalise experiences of pain and injury and celebrate athletes who 'play hurt'.
+
+Pain has psychological, social, and physical dimensions, and is greatly influenced by cultural factors.
+
+## Non-humans
+
+René Descartes argued that animals lack consciousness and therefore do not experience pain and suffering in the way that humans do. Bernard Rollin of Colorado State University, the principal author of two U.S. federal laws regulating pain relief for animals, wrote that researchers remained unsure into the 1980s as to whether animals experience pain, and that veterinarians trained in the U.S. before 1989 were simply taught to ignore animal pain. The ability of invertebrate species of animals, such as insects, to feel pain and suffering is unclear.
+
+Specialists believe that all vertebrates can feel pain, and that certain invertebrates, like the octopus, may also. The presence of pain in animals is unknown, but can be inferred through physical and behavioral reactions, such as paw withdrawal from various noxious mechanical stimuli in rodents.
+
+While plants, as living beings, can perceive and communicate physical stimuli and damage, they do not feel pain simply because of the lack of any pain receptors, nerves, or a brain, and, by extension, lack of consciousness. Many plants are known to perceive and respond to mechanical stimuli at a cellular level, and some plants such as the venus flytrap or touch-me-not, are known for their "obvious sensory abilities". Nevertheless, the plant kingdom as a whole do not feel pain notwithstanding their abilities to respond to sunlight, gravity, wind, and any external stimuli such as insect bites, since they lack any nervous system. The primary reason for this is that, unlike the members of the animal kingdom whose evolutionary successes and failures are shaped by suffering, the evolution of plants are simply shaped by life and death.
+

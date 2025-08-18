@@ -1,0 +1,640 @@
+# Bobby Fischer
+
+Robert James Fischer (March 9, 1943 – January 17, 2008) was an American chess grandmaster and the eleventh World Chess Champion. A chess prodigy, he won his first of a record eight US Championships at the age of 14. In 1964, he won with an 11–0 score, the only perfect score in the history of the tournament. Qualifying for the 1972 World Championship, Fischer swept matches with Mark Taimanov and Bent Larsen by 6–0 scores. After winning another qualifying match against Tigran Petrosian, Fischer won the title match against Boris Spassky of the USSR, in Reykjavík, Iceland. Publicized as a Cold War confrontation between the US and USSR, the match attracted more worldwide interest than any chess championship before or since.
+
+In 1975, Fischer refused to defend his title when an agreement could not be reached with FIDE, chess's international governing body, over the match conditions. Consequently, the Soviet challenger Anatoly Karpov was named World Champion by default. Fischer subsequently disappeared from the public eye, though occasional reports of erratic behavior emerged. In 1992, he reemerged to win an unofficial rematch against Spassky. It was held in Yugoslavia, which was under a United Nations embargo at the time. His participation led to a conflict with the US government, which warned Fischer that his participation in the match would violate an executive order imposing US sanctions on Yugoslavia. The US government ultimately issued a warrant for his arrest; subsequently, Fischer lived as an émigré. In 2004, he was arrested in Japan and held for several months for using a passport that the US government had revoked. Eventually, he was granted Icelandic citizenship by a special act of the Icelandic parliament, allowing him to live there until his death in 2008.
+
+Fischer made numerous lasting contributions to chess. His book My 60 Memorable Games, published in 1969, is regarded as essential reading in chess literature. In the 1990s, he patented a modified chess timing system that added a time increment after each move, now a standard practice in top tournament and match play. He also invented Fischer random chess, also known as Chess960, a chess variant in which the initial position of the pieces is randomized to one of 960 possible positions.
+
+Fischer made numerous antisemitic statements, including Holocaust denial. His antisemitism was a major theme in his public and private remarks, and there has been widespread comment and speculation concerning his psychological condition based on his extreme views and eccentric behavior.
+
+## Early years
+
+Bobby Fischer was born at Michael Reese Hospital in Chicago, Illinois, on March 9, 1943. His mother, Regina Wender Fischer, was a US citizen, born in Switzerland; her parents were Polish Jews. Raised in St. Louis, Missouri, Regina became a teacher, a registered nurse, and later a physician.
+
+After graduating from college in her teens, Regina traveled to Germany to visit her brother. It was there she met geneticist and future Nobel Prize winner Hermann Joseph Muller, who persuaded her to move to Moscow to study medicine. She enrolled at I.M. Sechenov First Moscow State Medical University, where she met Hans-Gerhardt Fischer, also known as Gerardo Liebscher, a German biophysicist, whom she married in November 1933. In 1938, Hans-Gerhardt and Regina had a daughter, Joan Fischer. The reemergence of antisemitism under Stalin prompted Regina to go with Joan to Paris, where Regina became an English teacher. The threat of a German invasion led her and Joan to go to the United States in 1939. Regina and Hans-Gerhardt had already separated in Moscow, although they did not officially divorce until 1945.
+
+At the time of her son's birth, Regina was homeless and shuttled to different jobs and schools around the country to support her family. She engaged in political activism and raised both Bobby and Joan as a single parent.
+
+In 1949, Regina moved the family to Manhattan and the following year to Brooklyn, New York City, where she studied for her master's degree in nursing and subsequently began working in that field.
+
+### Paul Neményi as Fischer's father
+
+In 2002, Peter Nicholas and Clea Benson of The Philadelphia Inquirer published an investigative report which stated that Bobby Fischer's biological father was actually Paul Neményi.
+
+Neményi, a Hungarian mathematician and physicist of Jewish heritage, specialized in continuum mechanics. His work applied geometrical solutions to fluid dynamics. Like Bobby, he was a child prodigy and won the Hungarian national mathematics competition at the age of 17.
+
+Benson and Nicholas continued their work and gathered additional evidence in court records, personal interviews, and a summary of an FBI investigation written by J. Edgar Hoover, which confirmed their earlier conclusions.
+
+Throughout the 1950s, the FBI investigated Regina and her circle due to her supposed communist views and due to her time living in Moscow. FBI files note that Hans-Gerhardt Fischer never entered the United States, while recording that Neményi took a keen interest in Fischer's upbringing. Not only were Regina and Neményi reported to have had an affair in 1942, but Neményi made monthly child support payments to Regina and paid for Bobby's schooling until Paul Neményi's death in 1952.
+
+### Chess beginnings
+
+In March 1949, six-year-old Bobby and his sister Joan learned how to play chess using the instructions from a set bought at a candy store. When Joan lost interest in chess and Regina did not have time to play, Fischer was left to play many of his first games against himself. When the family vacationed at Patchogue, Long Island, New York, that summer, Bobby found a book of old chess games and studied it intensely.
+
+In 1950, the family moved to Brooklyn, first to an apartment at the corner of Union Street and Franklin Avenue and later to a two-bedroom apartment at 560 Lincoln Place. It was there that "Fischer soon became so engrossed in the game that Regina feared he was spending too much time alone." As a result, on November 14, 1950, Regina sent a postcard to the Brooklyn Eagle newspaper, seeking to place an ad inquiring whether other children of Bobby's age might be interested in playing chess with him. The paper rejected her ad, because no one could figure out how to classify it, but forwarded her inquiry to Hermann Helms, the "Dean of American Chess", who told her that Master Max Pavey, former Scottish champion, would be giving a simultaneous exhibition on January 17, 1951. Fischer played in the exhibition. Although he held on for 15 minutes, drawing a crowd of onlookers, he eventually lost to the chess master.
+
+One of the spectators was Brooklyn Chess Club President Carmine Nigro, an American chess expert of near master strength and an instructor. Nigro was so impressed with Fischer's play that he introduced him to the club and began teaching him. Fischer noted of his time with Nigro: "Mr. Nigro was possibly not the best player in the world, but he was a very good teacher. Meeting him was probably a decisive factor in my going ahead with chess."
+
+Nigro hosted Fischer's first chess tournament at his home in 1952. In the summer of 1955, Fischer, then 12 years old, joined the Manhattan Chess Club. Fischer's relationship with Nigro lasted until 1956, when Nigro moved away.
+
+### The Hawthorne Chess Club
+
+In June 1956, Fischer began attending the Hawthorne Chess Club, based in master John "Jack" W. Collins's home. Collins taught chess to children, and has been described as Fischer's teacher, but Collins himself suggested that he did not actually teach Fischer, and the relationship might be more accurately described as one of mentorship.
+
+Fischer played thousands of blitz and offhand games with Collins and other strong players, studied the books in Collins' large chess library, and ate almost as many dinners at Collins' home as his own.
+
+## Young champion
+
+In March 1956, the Log Cabin Chess Club of West Orange, New Jersey (based in the home of the club's eccentric multi-millionaire founder and patron Elliott Forry Laucks), took Fischer on a tour to Cuba, where he gave a 12-board simultaneous exhibition at Havana's Capablanca Chess Club, winning ten games and drawing two. On this tour the club played a series of matches against other clubs. Fischer played second board, behind International Master Norman Whitaker. Whitaker and Fischer were the club's leading scorers, each scoring 5½ points out of 7 games.
+
+Fischer experienced a "meteoric rise" in his playing strength during 1956. Fischer's first real tournament success occurred in July 1956, when he won the US Junior Chess Championship in Philadelphia. He scored 8½/10 to become the youngest-ever Junior Champion at age 13, a record that still stands. At the 1956 US Open Chess Championship in Oklahoma City, he scored 8½/12 to tie for 4th–8th places, with Arthur Bisguier winning. In the first Canadian Open Chess Championship at Montreal 1956, he scored 7/10 to tie for 8th–12th places, with Larry Evans winning. In November, Fischer played in the 1956 Eastern States Open Championship in Washington, D.C., tying for second with William Lombardy, Nicholas Rossolimo, and Arthur Feuerstein, with Hans Berliner taking first by a half-point.
+
+Fischer accepted an invitation to play in the Third Lessing J. Rosenwald Trophy Tournament in New York City (1956), a premier tournament limited to the 12 players considered the best in the US. Playing against top opposition, the 13-year-old Fischer could only score 4½/11, tying for 8th–9th place. Yet he won the brilliancy prize for his game against International Master Donald Byrne, in which Fischer sacrificed his queen to unleash an unstoppable attack. Hans Kmoch called it "The Game of the Century", writing: "The following game, a stunning masterpiece of combination play performed by a boy of 13 against a formidable opponent, matches the finest on record in the history of chess prodigies." According to Frank Brady, "'The Game of the Century' has been talked about, analyzed, and admired for more than fifty years, and it will probably be a part of the canon of chess for many years to come." "In reflecting on his game a while after it occurred, Bobby was refreshingly modest: 'I just made the moves I thought were best. I was just lucky.'"
+
+In 1957, Fischer played a two-game match against former world champion Max Euwe at New York, losing ½–1½. When the US Chess Federation published its rating list in May, Fischer had the rank of Master, the youngest player to earn that title up to that point. In July, he successfully defended his US Junior title, scoring 8½/9 at San Francisco. In August, he scored 10/12 at the US Open Chess Championship in Cleveland, winning on tie-breaking points over Arthur Bisguier. This made Fischer the youngest ever US Open Champion. He won the New Jersey Open Championship, scoring 6½/7. He then defeated the young Filipino master Rodolfo Tan Cardoso 6–2 in a New York match sponsored by Pepsi-Cola.
+
+### Wins first US title
+
+Based on Fischer's rating and strong results, the USCF invited him to play in the 1957/58 US Championship. The tournament included six-time US champion Samuel Reshevsky, defending US champion Arthur Bisguier, and William Lombardy, who in August had won the World Junior Championship. Bisguier predicted that Fischer would "finish slightly over the center mark". Despite all the predictions to the contrary, Fischer scored eight wins and five draws to win the tournament by a one-point margin, with 10½/13. Still two months shy of his 15th birthday, Fischer became the youngest ever US Champion. Since the championship that year was also the US Zonal Championship, Fischer's victory earned him the title of International Master. Fischer's victory in the US Championship qualified him to participate in the 1958 Portorož Interzonal, the next step toward challenging the World Champion.
+
+## Grandmaster, candidate, and author
+
+In 1957, Fischer wanted to go to Moscow. At his pleading, "Regina wrote directly to the Soviet leader, Nikita Khrushchev, requesting an invitation for Fischer to participate in the 6th World Youth and Student Festival of 1957. The reply—affirmative—came too late for him to go." Regina did not have the money to pay the airfare, but in 1958, Fischer was invited onto the game show I've Got a Secret, where, thanks to Regina's efforts, the producers of the show arranged two round-trip tickets to the Soviet Union, for Bobby and his sister Joan.
+
+Once in Russia, Fischer was invited by the Soviet Union to Moscow, where International Master Lev Abramov would serve as a guide to Bobby and his sister, Joan. Upon arrival, Fischer immediately demanded that he be taken to the Moscow Central Chess Club, where he played speed chess with "two young Soviet masters", Evgeni Vasiukov and Alexander Nikitin, winning every game. Chess author V. I. Linder writes about the impression Fischer gave grandmaster (GM) Vladimir Alatortsev when he played blitz against the Soviet masters:
+
+   Back in 1958, in the Central Chess Club, Vladimir Alatortsev saw a tall, angular 15-year-old youth, who in blitz games, crushed almost everyone who crossed his path… Alatortsev was no exception, losing all three games. He was astonished by the young American Robert Fischer's play, his fantastic self-confidence, amazing chess erudition, and simply brilliant play! Vladimir said in admiration to his wife on arriving home: "This is the future world champion!"
+
+Fischer demanded to play against Mikhail Botvinnik, the reigning World Champion. When told that this was impossible, Fischer asked to play Paul Keres. "Finally, Tigran Petrosian was, on a semi-official basis, summoned to the club …" where he played speed games with Fischer, winning the majority. "When Bobby discovered that he wasn't going to play any formal games … he went into a not-so-silent rage", saying he was fed up "with these Russian pigs," which angered the Soviets who saw Fischer as their honored guest. It was then that the Yugoslavian chess officials offered to take in Fischer and Joan as early guests to the Interzonal. Fischer took them up on the offer, arriving in Yugoslavia to play two short training matches against masters Dragoljub Janošević and Milan Matulović. Fischer drew both games against Janošević and then defeated Matulović in Belgrade by 2½–1½.
+
+At Portorož, Fischer was accompanied by Lombardy. The top six finishers in the Interzonal would qualify for the Candidates Tournament. Most observers doubted that a 15-year-old with no international experience could finish among the six qualifiers at the Interzonal, but Fischer told journalist Miro Radoicic, "I can draw with the grandmasters, and there are half-a-dozen patzers in the tournament I reckon to beat." Despite some bumps in the road and a problematic start, Fischer succeeded in his plan: after a strong finish, he ended up with 12/20 (+6−2=12) to tie for 5th–6th. The Soviet GM Yuri Averbakh observed,
+
+   In the struggle at the board this youth, almost still a child, showed himself to be a full-fledged fighter, demonstrating amazing composure, precise calculation and devilish resourcefulness. I was especially struck not even by his extensive opening knowledge, but his striving everywhere to seek new paths. In Fischer's play an enormous talent was noticeable, and in addition one sensed an enormous amount of work on the study of chess.
+
+Soviet GM David Bronstein said of Fischer's time in Portorož: "It was interesting for me to observe Fischer, but for a long time I couldn't understand why this 15-year-old boy played chess so well." Fischer became the youngest person ever to qualify for the Candidates and the youngest-ever grandmaster at the time, aged 15 years, 6 months, 1 day. "By then everyone knew we had a genius on our hands."
+
+Before the Candidates' Tournament, Fischer won the 1958/59 US Championship (scoring 8½/11). He tied for third (with Borislav Ivkov) in Mar del Plata (scoring 10/14), a half-point behind Luděk Pachman and Miguel Najdorf. He tied for 4th–6th at Santiago (scoring 7½/12) behind Ivkov, Pachman, and Herman Pilnik. At the Zürich International Tournament, spring 1959, Fischer finished a point behind future world champion Mikhail Tal and a half-point behind Yugoslavian GM Svetozar Gligorić.
+
+Although Fischer had ended his formal education at age 16, dropping out of Erasmus Hall High School in Brooklyn, he subsequently taught himself several foreign languages, including Russian, so he could read foreign chess periodicals. According to Latvian chess master Alexander Koblencs, even he and Tal could not match the commitment that Fischer had made to chess. Recalling a conversation from the tournament:
+
+   "Tell me, Bobby," Tal continued, "what do you think of the playing style of Larissa Volpert?" "She's too cautious. But you have another girl, Dmitrieva. Her games do appeal to me!" Here we were left literally open-mouthed in astonishment. Misha and I have looked at thousands of games, but it never occurred to us to study our women players' games. How could we find the time for this?! Yet Bobby, it turns out, had found the time!
+
+Until late 1959, Fischer "had dressed atrociously for a champion, appearing at the most august and distinguished national and international events in sweaters and corduroys." Now, encouraged by Pal Benko to dress more smartly, Fischer "began buying suits from all over the world, hand-tailored and made to order." He told journalist Ralph Ginzburg that he had 17 hand-tailored suits and that all of his shirts and shoes were handmade.
+
+At the age of 16, Fischer finished equal fifth out of eight at the 1959 Candidates Tournament in Bled/Zagreb/Belgrade, Yugoslavia, scoring 12½/28. He was outclassed by tournament winner Tal, who won all four of their individual games. That year, Fischer released his first book of collected games: Bobby Fischer's Games of Chess, published by Simon & Schuster.
+
+### Drops out of school
+
+Fischer's interest in chess became more important than schoolwork, to the point that "by the time he reached the fourth grade, he'd been in and out of six schools." In 1952, Regina got Bobby a scholarship (based on his chess talent and "astronomically high IQ") to Brooklyn Community Woodward. Fischer later attended Erasmus Hall High School at the same time as Barbra Streisand and Neil Diamond. In 1959, its student council awarded him a gold medal for his chess achievements. The same year, Fischer dropped out of high school when he turned 16, the earliest he could legally do so. He later explained to Ralph Ginzburg, "You don't learn anything in school."
+
+When Fischer was 16, his mother moved out of their apartment to pursue medical training. Her friend Joan Rodker, who had met Regina when the two were "idealistic communists" living in Moscow in the 1930s, believes that Fischer resented his mother for being mostly absent, a communist activist, and an admirer of the Soviet Union, and that this led to his hatred for the Soviets. In letters to Rodker, Fischer's mother stated her desire to pursue her own "obsession" of training in medicine and wrote that her son would have to live in their Brooklyn apartment without her: "It sounds terrible to leave a 16-year-old to his own devices, but he is probably happier that way". The apartment was on the edge of Bedford-Stuyvesant, a neighborhood that had one of the highest homicide and general crime rates in New York City. Despite the alienation from her son, Regina, in 1960, protested the practices of the American Chess Foundation and staged a five-hour protest in front of the White House, urging President Dwight D. Eisenhower to send an American team to that year's chess Olympiad (set for Leipzig, East Germany, behind the Iron Curtain) and to help support the team financially.
+
+## US Championships
+
+Fischer played in eight US Championships, winning all of them by at least a one-point margin. His results were as follows:
+
+| US Champ. | Score | Place | Margin of victory | Percentage | Age |
+| - | - | - | - | - | - |
+| 1957/58 | 10½/13 (+8−0=5) | First | 1 point | 81% | 14 |
+| 1958/59 | 8½/11 (+6−0=5) | First | 1 point | 77% | 15 |
+| 1959/60 | 9/11 (+7−0=4) | First | 1 point | 82% | 16 |
+| 1960/61 | 9/11 (+7−0=4) | First | 2 points | 82% | 17 |
+| 1962/63 | 8/11 (+6−1=4) | First | 1 point | 73% | 19 |
+| 1963/64 | 11/11 (+11−0=0) | First | 3½ points | 100% | 20 |
+| 1965 | 8½/11 (+8−2=1) | First | 1 point | 77% | 22 |
+| 1966/67 | 9½/11 (+8−0=3) | First | 2 points | 86% | 23 |
+
+Fischer missed the 1961/62 Championship (he was preparing for the 1962 Interzonal), and there was no 1964/65 event. In his eight US Chess Championships, Fischer lost only three games; to Edmar Mednis in the 1962/63 event, and in consecutive rounds to Samuel Reshevsky, and Robert Byrne in the 1965 championship, culminating in a total score of 74/90 (61 wins, 26 draws, 3 losses).
+
+## Olympiads
+
+Fischer refused to play in the 1958 Munich Olympiad when his demand to play first board ahead of Samuel Reshevsky was rejected. Some sources claim that 15-year-old Fischer was unable to arrange leave from attending high school. Fischer later represented the United States on first board at four Men's Chess Olympiads, winning two individual Silver and one individual Bronze medals:
+
+| Olympiad | Individual result | Percentage | US team result | Percentage |
+| - | - | - | - | - |
+| Leipzig 1960 | 13/18 (Bronze) | 72.2% | Silver | 72.5% |
+| Varna 1962 | 11/17 (Eighth) | 64.7% | Fourth | 68.1% |
+| Havana 1966 | 15/17 (Silver) | 88.2% | Silver | 68.4% |
+| Siegen 1970 | 10/13 (Silver) | 76.9% | Fourth | 67.8% |
+
+Out of four Men's Chess Olympiads, Fischer scored +40−7=18, for 49/65: 75.4%. In 1966, Fischer narrowly missed the individual gold medal, scoring 88.23% to World Champion Tigran Petrosian's 88.46%. He played four games more than Petrosian, faced stiffer opposition, and would have won the gold if he had accepted Florin Gheorghiu's draw offer, rather than declining it and suffering his only loss.
+
+At the 1962 Varna Olympiad, Fischer predicted that he would defeat Argentinian GM Miguel Najdorf in 25 moves. Fischer actually did it in 24, becoming the only player to beat Najdorf in the tournament. Najdorf lost the game while employing the very opening variation named after him: the Sicilian Najdorf.
+
+Fischer had planned to play for the US at the 1968 Lugano Olympiad, but backed out when he saw the poor playing conditions. Both former world champion Tigran Petrosian and Belgian-American International Master George Koltanowski, the leader of the American team that year, felt that Fischer was justified in not participating in the Olympiad. According to Lombardy, Fischer's non-participation was due to Reshevsky's refusal to yield first board.
+
+In 1974, Fischer was willing to play the 21st Chess Olympiad in Nice, France, but FIDE rejected his demand to play in a separate room with only Fischer, his opponent, and spectators.
+
+## 1960–61
+
+In 1960, Fischer tied for first place with Soviet star Boris Spassky at the strong Mar del Plata Tournament in Argentina, winning by a two-point margin, scoring 13½/15 (+13−1=1), ahead of David Bronstein. Fischer lost only to Spassky; this was the start of their lifelong friendship and rivalry.
+
+Fischer experienced a rare failure in his competitive career at the Buenos Aires Tournament (1960), finishing with 8½/19 (+3−5=11), far behind winners Viktor Korchnoi and Samuel Reshevsky with 13/19. According to Larry Evans, Fischer's first sexual experience was with a girl to whom Evans introduced him during the tournament. Pal Benko said that Fischer did horribly in the tournament "because he got caught up in women and sex. Afterwards, Fischer said he'd never mix women and chess together, and kept the promise." Fischer concluded 1960 by winning a small tournament in Reykjavík with 4½/5, and defeating Klaus Darga in an exhibition game in West Berlin.
+
+In 1961, Fischer started a 16-game match with Reshevsky, split between New York and Los Angeles. Reshevsky, 32 years Fischer's senior, was considered the favorite since he had far more match experience and had never lost a set match. After 11 games and a tie score (two wins apiece with seven draws), the match ended prematurely due to a scheduling dispute between Fischer and match organizer and sponsor Jacqueline Piatigorsky. Fischer forfeited 2 games, and even though the score was now 7½ to 5½, with 8½ required to win, Reshevsky was declared the winner, by default, and received the winner's share of the prize fund.
+
+Fischer was second in a super-class field, behind only former world champion Tal, at Bled, 1961. Yet, Fischer defeated Tal head-to-head for the first time in their individual game, scored 3½/4 against the Soviet contingent, and finished as the only unbeaten player, with 13½/19 (+8−0=11).
+
+## 1962: success, setback, accusations of collusion
+
+Fischer won the 1962 Stockholm Interzonal by a 2½-point margin, going undefeated, with 17½/22 (+13−0=9). He was the first non-Soviet player to win an Interzonal since FIDE instituted the tournament in 1948. Russian GM Alexander Kotov said of Fischer:
+
+   I have discussed Fischer's play with Max Euwe and Gideon Stahlberg. All of us, experienced 'tournament old-timers', were surprised by Fischer's endgame expertise. When a young player is good at attacking or at combinations, this is understandable, but a faultless endgame technique at the age of 19 is something rare. I can recall only one other player who at that age was equally skillful at endgames – Vasily Smyslov.
+
+Fischer's victory made him a favorite for the Candidates Tournament in Curaçao. Yet, despite his result in the Interzonal, Fischer only finished fourth out of eight with 14/27 (+8−7=12), far behind Tigran Petrosian (17½/27), Efim Geller, and Paul Keres (both 17/27). Tal fell very ill during the tournament, and had to withdraw before completion. Fischer, a friend of Tal's, was the only contestant who visited him in the hospital.
+
+### Accuses Soviets of collusion
+
+Following his failure in the 1962 Candidates, Fischer asserted in a Sports Illustrated article, that three of the five Soviet players (Tigran Petrosian, Paul Keres, and Efim Geller) had a prearranged agreement to quickly draw their games against each other in order to conserve their energy for playing against Fischer. It is generally thought that this accusation is correct. Fischer stated that he would never again participate in a Candidates' tournament, since the format, combined with the alleged collusion, made it impossible for a non-Soviet player to win. Following Fischer's article, FIDE, in late 1962, voted to implement a radical reform of the playoff system, replacing the Candidates' tournament with a format of one-on-one knockout matches—the format that Fischer would dominate in 1971.
+
+Fischer defeated Bent Larsen in a summer 1962 exhibition game in Copenhagen for Danish TV. Later that year, Fischer beat Bogdan Śliwa in a team match against Poland in Warsaw.
+
+In the 1962/63 US Championship, Fischer lost to Edmar Mednis in round one. It was his first loss ever in a US Championship. Bisguier was in excellent form, and Fischer caught up to him only at the end. Tied at 7–3, the two met in the final round. Bisguier stood well in the middlegame, but blundered, handing Fischer his fifth consecutive US championship.
+
+## Semi-retirement in the mid-1960s
+
+Influenced by ill will over the aborted 1961 match against Reshevsky, Fischer declined an invitation to play in the 1963 Piatigorsky Cup tournament in Los Angeles, which had a world-class field. He instead played in the Western Open in Bay City, Michigan, which he won with 7½/8. In August–September 1963, Fischer won the New York State Championship at Poughkeepsie, with 7/7, his first perfect score, ahead of Arthur Bisguier and James Sherwin.
+
+In the 1963/64 US Championship, Fischer achieved his second perfect score, this time against the top-ranked chess players in the country. This result brought Fischer heightened fame, including a profile in Life magazine. Sports Illustrated diagrammed each of the 11 games in its article, "The Amazing Victory Streak of Bobby Fischer". Such extensive chess coverage was groundbreaking for the top American sports magazine. His 11–0 win in the 1963/64 Championship is the only perfect score in the history of the tournament, and one of about ten perfect scores in high-level chess tournaments ever. David Hooper and Kenneth Whyld called it "the most remarkable achievement of this kind". Fischer recalls: "Motivated by my lopsided result (11–0!), Dr. [Hans] Kmoch congratulated [Larry] Evans (the runner up) on 'winning' the tournament… and then he congratulated me on 'winning the exhibition'."
+
+Fischer's 21-move victory against Robert Byrne won the brilliancy prize for the tournament. Byrne wrote:
+
+   The culminating combination is of such depth that, even at the very moment at which I resigned, both grandmasters who were commenting on the play for the spectators in a separate room believed I had a won game!
+
+International Master Anthony Saidy recalled his last round encounter with the undefeated Fischer:
+
+   Going into the final game I certainly did not expect to upset Fischer. I hardly knew the opening but played simply, and he went along with the scenario, opting for a N-v-B [i.e., Knight vs. Bishop] endgame with a minimal edge. In the corridor, Evans said to me, "Good. Show him we're not all children."
+
+At adjournment, Saidy saw a way to force a draw, yet he had already "sealed a different, wrong move", and lost. "Chess publications around the world wrote of the unparalleled achievement. Only Bent Larsen, always a Fischer detractor, was unimpressed: 'Fischer was playing against children.'"
+
+Fischer, eligible as US Champion, decided against his participation in the 1964 Amsterdam Interzonal, taking himself out of the 1966 World Championship cycle, even after FIDE changed the format of the eight-player Candidates Tournament from a round-robin to a series of knockout matches, which eliminated the possibility of collusion. Instead, Fischer embarked on a tour of the United States and Canada from February through May, playing a simultaneous exhibition, and giving a lecture in each of more than 40 cities. He had a 94% winning percentage over more than 2,000 games. Fischer declined an invitation to play for the US in the 1964 Olympiad in Tel Aviv.
+
+## Successful return
+
+Fischer wanted to play in the Capablanca Memorial Tournament in Havana in August and September 1965. Since the State Department refused to endorse Fischer's passport as valid for visiting Cuba, he proposed, and the tournament officials and players accepted, a unique arrangement: Fischer played his moves from a room at the Marshall Chess Club, which were then transmitted by teleprinter to Cuba. Luděk Pachman observed that Fischer "was handicapped by the longer playing session resulting from the time wasted in transmitting the moves, and that is one reason why he lost to three of his chief rivals." The tournament was an "ordeal" for Fischer, who had to endure eight-hour and sometimes even twelve-hour playing sessions. Despite the handicap, Fischer tied for second through fourth places, with 15/21 (+12−3=6), behind former world champion Vasily Smyslov, whom Fischer defeated in their individual game. The tournament received extensive media coverage.
+
+In December, Fischer won his seventh US Championship (1965), with the score of 8½/11 (+8−2=1), despite losing to Robert Byrne and Reshevsky in the eighth and ninth rounds. Fischer also reconciled with Mrs. Piatigorsky, accepting an invitation to the very strong second Piatigorsky Cup (1966) tournament in Santa Monica. Fischer began disastrously and after eight rounds was tied for last with 3/8. He then staged a strong comeback, scoring 7/8 in the next eight rounds. In the end, World Chess Championship finalist Boris Spassky edged him out by a half point, scoring 11½/18 to Fischer's 11/18 (+7−3=8).
+
+Now aged 23, Fischer would win every match or tournament he completed for the rest of his life.
+
+Fischer won the US Championship (1966/67) for the eighth and final time, ceding only three draws (+8−0=3). In March–April and August–September, Fischer won strong tournaments at Monte Carlo, with 7/9 (+6−1=2), and Skopje, with 13½/17 (+12−2=3). In the Philippines, Fischer played nine exhibition games against master opponents, scoring 8½/9.
+
+### Withdrawal while leading Interzonal
+
+Fischer's win in the 1966/67 US Championship qualified him for the next World Championship cycle.
+
+At the 1967 Interzonal, held at Sousse, Tunisia, Fischer scored 8½ points in the first 10 games, to lead the field. His observance of the Worldwide Church of God's seventh-day Sabbath was honored by the organizers but deprived Fischer of several rest days, which led to a scheduling dispute, causing Fischer to forfeit two games in protest and later withdraw, eliminating himself from the 1969 World Championship cycle. Communications difficulties with the highly inexperienced local organizers were also a significant factor since Fischer knew little French and the organizers had very limited English. No one in Tunisian chess had previous experience running an event of this stature.
+
+Since Fischer had completed fewer than half of his scheduled games, all of his results were annulled, meaning players who had played Fischer had those games cancelled, and the scores nullified from the official tournament record.
+
+### Second semi-retirement
+
+In 1968, Fischer won tournaments at Netanya, with 11½/13 (+10−0=3), and Vinkovci, with 11/13 (+9−0=4), by large margins. Fischer then stopped playing for the next 18 months, except for a win against Anthony Saidy in a 1969 New York Metropolitan League team match. That year, Fischer (assisted by GM Larry Evans) released his second book of collected games: My 60 Memorable Games, published by Simon & Schuster. The book "was an immediate success".
+
+## 1969–1972: Road to World Champion
+
+In 1970, Fischer began a new effort to become World Champion. His dramatic march toward the title made him a household name and made chess front-page news for a time. He won the title in 1972, but forfeited it three years later.
+
+### Road to the World Championship
+
+The 1969 US Championship was also a zonal qualifier, with the top three finishers advancing to the Interzonal. Fischer, however, had sat out the US Championship because of disagreements about the tournament's format and prize fund. Benko, one of the three qualifiers, agreed to give up his spot in the Interzonal to give Fischer another shot at the World Championship; Lombardy, who would have been "next in line" after Benko, did the same.
+
+In 1970 and 1971, Fischer "dominated his contemporaries to an extent never seen before or since".
+
+Before the Interzonal, in March and April 1970, the world's best players competed in the USSR vs. Rest of the World match in Belgrade, Yugoslavia, often referred to as "the Match of the Century". There was much surprise when Fischer decided to participate.
+
+With Evans as his second, Fischer flew to Belgrade with the intention of playing first board for the rest of the world. Danish GM Bent Larsen, however, due to his recent tournament victories, demanded to play first board instead of Fischer, even though Fischer had the higher Elo rating. To the surprise of everyone, Fischer agreed. Although the USSR team eked out a 20½–19½ victory, "On the top four boards, the Soviets managed to win only one game out of a possible sixteen. Bobby Fischer was the high scorer for his team, with a 3–1 score against Petrosian (two wins and two draws)." "Fischer left no doubt in anyone's mind that he had put his temporary break from the tournament circuit to good use. Petrosian was almost unrecognizable in the first two games, and by the time he had collected himself, although pressing his opponent, he could do no more than draw the last two games of the four-game set".
+
+After the USSR versus the Rest of the World Match, the unofficial World Championship of Lightning Chess (5-minute games) was held at Herceg Novi. "[The Russians] figured on teaching Fischer a lesson and on bringing him down a peg or two". Petrosian and Tal were considered the favorites, but Fischer overwhelmed the super-class field with 19/22 (+17−1=4), far ahead of Tal (14½), Korchnoi (14), Petrosian (13½), and Bronstein (13). Fischer lost only one game (to Korchnoi, who was also the only player to achieve an even score against him in the double round robin tournament). Fischer "crushed such blitz kings as Tal, Petrosian and Vasily Smyslov by a clean score". Tal marveled that, "During the entire tournament he didn't leave a single pawn en prise!", while the other players "blundered knights and bishops galore". For Lombardy, who had played many blitz games with Fischer, Fischer's 4½-point margin of victory "came as a pleasant surprise".
+
+In April–May 1970, Fischer won at Rovinj/Zagreb with 13/17 (+10−1=6), by a two-point margin, ahead of Gligorić, Hort, Korchnoi, Smyslov, and Petrosian. In July–August, Fischer crushed the mostly grandmaster field at Buenos Aires, winning by a 3½-point margin, scoring 15/17 (+13−0=4). Fischer then played first board for the US Team in the 19th Chess Olympiad in Siegen, where he won an individual Silver medal, scoring 10/13 (+8−1=4), with his only loss being to World Champion Boris Spassky. Right after the Olympiad, Fischer defeated Ulf Andersson in an exhibition game for the Swedish newspaper Expressen. Fischer had taken his game to a new level.
+
+Fischer won the Interzonal (held in Palma de Mallorca in November and December 1970) with 18½/23 (+15−1=7), far ahead of Larsen, Efim Geller, and Robert Hübner, with 15/23. Fischer finished the tournament with seven consecutive wins. Setting aside the Sousse Interzonal (which Fischer withdrew from while leading), Fischer's victory gave him a string of eight consecutive first prizes in tournaments. Former world champion Mikhail Botvinnik was not, however, impressed by Fischer's results, stating: "Fischer has been declared a genius. I do not agree with this… In order to rightly be declared a genius in chess, you have to defeat equal opponents by a big margin. As yet he has not done this". Despite Botvinnik's remarks, "Fischer began a miraculous year in the history of chess".
+
+In the 1971 Candidates matches, Fischer was set to play against Soviet grandmaster and concert pianist Mark Taimanov in the quarter-finals. The match began in mid-May in Vancouver, British Columbia, Canada. Fischer was generally favored to win. Taimanov had reason to be confident. He was backed by the firm guidance of Botvinnik, who "had thoroughly analysed Fischer's record and put together a 'dossier' on him", from when he was in talks to play Fischer in a match "a couple of years earlier". After Fischer defeated Taimanov in the second game of the match, Taimanov asked Fischer how he managed to come up with the move 12. N1c3, to which Fischer replied "that the idea was not his—he had come across it in the monograph by the Soviet master Alexander Nikitin in a footnote". Taimanov said of this: "It is staggering that I, an expert on the Sicilian, should have missed this theoretically significant idea by my compatriot, while Fischer had uncovered it in a book in a foreign language!" With the score at 4–0, in Fischer's favor, the fifth game adjournment was a sight to behold. Schonberg explains the scene:
+
+   Taimanov came to Vancouver with two seconds, both grandmasters. Fischer was alone. He thought that the sight of Taimanov and his seconds was the funniest thing he had ever seen. There Taimanov and his seconds would sit, six hands flying, pocket sets waving in the air, while variations were being spouted all over the place. And there sat Taimanov with a confused look on his face. Just before resuming play [in the fifth game] the seconds were giving Taimanov some last-minute advice. When poor Taimanov entered the playing room and sat down to confront Fischer, his head was so full of conflicting continuations that he became rattled, left a Rook en prise and immediately resigned.
+
+Fischer beat Taimanov by the score of 6–0. There was little precedent for such a lopsided score in a match leading to the World Championship.
+
+Upon losing the final game of the match, Taimanov shrugged his shoulders, saying sadly to Fischer: "Well, I still have my music." As a result of his performance, Taimanov "was thrown out of the USSR team and forbidden to travel for two years. He was banned from writing articles, was deprived of his monthly stipend… [and] the authorities prohibited him from performing on the concert platform." "The crushing loss virtually ended Taimanov's chess career."
+
+Fischer was next scheduled to play against Danish GM Bent Larsen. "Spassky predicted a tight struggle. 'Larsen is a little stronger in spirit.'" Before the match, Botvinnik had told a Soviet television audience:
+
+   It is hard to say how their match will end, but it is clear that such an easy victory as in Vancouver [against Taimanov] will not be given to Fischer. I think Larsen has unpleasant surprises in store for [Fischer], all the more since having dealt with Taimanov thus, Fischer will want to do just the same to Larsen and this is impossible.
+
+Fischer beat Larsen by the identical score of 6–0. Robert Byrne writes: "To a certain extent I could grasp the Taimanov match as a kind of curiosity—almost a freak, a strange chess occurrence that would never occur again. But now I am at a loss for anything whatever to say… So, it is out of the question for me to explain how Bobby, how anyone, could win six games in a row from such a genius of the game as Bent Larsen". Just a year before, Larsen had played first board for the Rest of the World team ahead of Fischer, and had handed Fischer his only loss at the Interzonal. Garry Kasparov later wrote that no player had ever shown a superiority over his rivals comparable to Fischer's "incredible" 12–0 score in the two matches. Chess statistician Jeff Sonas concludes that the victory over Larsen gave Fischer the "highest single-match performance rating ever".
+
+On August 8, 1971, while preparing for his last Candidates match with former world champion Tigran Petrosian, Fischer won the Manhattan Chess Club Rapid Tournament, scoring 21½/22 against a strong field.
+
+Despite Fischer's results against Taimanov and Larsen, his upcoming match against Petrosian seemed a daunting task. Nevertheless, the Soviet government was concerned about Fischer. "Reporters asked Petrosian whether the match would last the full twelve games… 'It might be possible that I win it earlier,' Petrosian replied", and then stated: "Fischer's [nineteen consecutive] wins do not impress me. He is a great chess player but no genius." Petrosian played a strong theoretical novelty in the first game, gaining the advantage, but Fischer eventually won the game after Petrosian faltered. This gave Fischer a run of 20 consecutive wins against the world's top players (in the Interzonal and Candidates matches), a winning streak topped only by Steinitz's 25 straight wins in 1873–1882. Petrosian won the second game, finally snapping Fischer's streak. After three consecutive draws, Fischer swept the next four games to win the match 6½–2½ (+5−1=3). Sports Illustrated ran an article on the match, highlighting Fischer's domination of Petrosian as being due to Petrosian's outdated system of preparation:
+
+   Fischer's recent record raises the distinct possibility that he has made a breakthrough in modern chess theory. His response to Petrosian's elaborately plotted 11th move in the first game is an example: Russian experts had worked on the variation for weeks, yet when it was thrown at Fischer suddenly, he faced its consequences alone and won by applying simple, classic principles.
+
+Upon completion of the match, Petrosian remarked: "After the sixth game Fischer really did become a genius. I on the other hand, either had a breakdown or was tired, or something else happened, but the last three games were no longer chess." "Some experts kept insisting that Petrosian was off form, and that he should have had a plus score at the end of the sixth game …" to which Fischer replied, "People have been playing against me below strength for fifteen years." Fischer's match results befuddled Botvinnik: "It is hard to talk about Fischer's matches. Since the time that he has been playing them, miracles have begun." "When Petrosian played like Petrosian, Fischer played like a very strong grandmaster, but when Petrosian began making mistakes, Fischer was transformed into a genius."
+
+Fischer gained a far higher rating than any player in history up to that time. On the July 1972 FIDE rating list, his Elo rating of 2785 was 125 points above (World No. 2) Spassky's rating of 2660. His results put him on the cover of Life magazine, and allowed him to challenge World Champion Boris Spassky, whom he had never beaten (+0−3=2).
+
+### World Championship match
+
+Fischer's career-long stubbornness about match and tournament conditions was again seen in the run-up to his match with Spassky. Of the possible sites, Fischer's first choice was Belgrade, Yugoslavia, while Spassky's was Reykjavík, Iceland. For a time it appeared that the dispute would be resolved by splitting the match between the two locations, but that arrangement failed. After that issue was resolved, Fischer refused to appear in Iceland until the prize fund was increased. London financier Jim Slater donated an additional US$125,000, bringing the prize fund up to an unprecedented $250,000 ($1.75 million today) and Fischer finally agreed to play.
+
+Before and during the match, Fischer paid special attention to his physical training and fitness, which was a relatively novel approach for top chess players at that time. Leading up to this match he conducted interviews with 60 Minutes and Dick Cavett explaining the importance of physical fitness in his preparation. He had developed his tennis skills to a good level, and played frequently during off-days in Reykjavík. He had also arranged for exclusive use of his hotel's swimming pool during specified hours, and swam for extended periods, usually late at night. According to Soviet Grandmaster Nikolai Krogius, Fischer "was paying great attention to sport, and that he was swimming and even boxing …"
+
+The match took place in Reykjavík from July to September 1972. Fischer was accompanied by William Lombardy; besides assisting with analysis, Lombardy may have played an important role in getting Fischer to play in the match and to stay in it. The match was the first to receive an American broadcast in prime time. Fischer lost the first two games in strange fashion: the first when he played a risky pawn-grab in a drawn endgame, the second by forfeit when he refused to play the game in a dispute over playing conditions. Fischer would likely have forfeited the entire match, but Spassky, not wanting to win by default, yielded to Fischer's demands to move the next game to a back room, away from the cameras, whose presence had upset Fischer. After that game, the match was moved back to the stage and proceeded without further serious incident. Fischer won seven of the next 19 games, losing only one and drawing eleven, to win the match 12½–8½ and become the 11th World Chess Champion.
+
+The Cold War trappings made the match a media sensation. It was called "The Match of the Century", and received front-page media coverage in the United States and around the world. Fischer's win was an American victory in a field that Soviet players – closely identified with and subsidized by the state – had dominated for the previous quarter-century. Kasparov remarked, "Fischer fits ideologically into the context of the Cold War era: a lone American genius challenges the Soviet chess machine and defeats it". Dutch Grandmaster Jan Timman calls Fischer's victory "the story of a lonely hero who overcomes an entire empire". Fischer's sister observed, "Bobby did all this in a country almost totally without a chess culture. It was as if an Eskimo had cleared a tennis court in the snow and gone on to win the world championship".
+
+Upon Fischer's return to New York, a Bobby Fischer Day was held. He was offered numerous product endorsement offers worth "at least $5 million" ($35 million today), all of which he declined. He appeared on the cover of Sports Illustrated with American Olympic swimming champion Mark Spitz and also appeared on The Dick Cavett Show, as well as on a Bob Hope TV special. Membership in the US Chess Federation doubled in 1972, and peaked in 1974; in American chess, these years are commonly referred to as the "Fischer Boom". This match attracted more worldwide interest than any chess championship before or since.
+
+### Forfeiture of title
+
+Fischer was scheduled to defend his title in 1975 against Anatoly Karpov, who had emerged as his challenger. Fischer, who had played no competitive games since his World Championship match with Spassky, laid out a proposal for the match in September 1973, in consultation with FIDE official Fred Cramer. He made three principal (non-negotiable) demands:
+
+* The match continues until one player wins 10 games, draws not counting.
+* No limit to the total number of games played.
+* In case of a 9–9 score, the champion (Fischer) retains the title, and the prize fund is split equally.
+
+A FIDE Congress was held in 1974 during the Nice Olympiad. The delegates voted in favor of Fischer's 10-win proposal, but rejected his other two proposals, and limited the number of games in the match to 36. In response to FIDE's ruling, Fischer sent a cable to Euwe on June 27, 1974:
+
+   As I made clear in my telegram to the FIDE delegates, the match conditions I proposed were non-negotiable. Mr. Cramer informs me that the rules of the winner being the first player to win ten games, draws not counting, unlimited number of games and if nine wins to nine match is drawn with champion regaining title and prize fund split equally were rejected by the FIDE delegates. By so doing FIDE has decided against my participation in the 1975 World Chess Championship. Therefore, I resign my FIDE World Chess Championship title. Sincerely, Bobby Fischer.
+
+The delegates responded by reaffirming their prior decisions, but did not accept Fischer's resignation and requested that he reconsider. Many observers considered Fischer's requested 9–9 clause unfair because it would require the challenger to win by at least two games (10–8). Botvinnik called the 9–9 clause "unsporting". Korchnoi, David Bronstein, and Lev Alburt considered the 9–9 clause reasonable. Korchnoi in particular stated:
+
+   Was Fischer right in demanding that the world title be protected by a two point handicap – that the challenger would be considered the winner with a 10–8 score and that the champion would retain his title in the event of a 9–9 draw? Yes, this was quite natural: the champion deserves this, not to mention the fact that further play to the first win in the event of an even score would be nothing short of a lottery – the winner in that case could not claim to have won a convincing victory.
+
+Due to the continued efforts of US Chess Federation officials, a special FIDE Congress was held in March 1975 in Bergen, Netherlands, in which it was accepted that the match should be of unlimited duration, but the 9–9 clause was once again rejected, by a narrow margin of 35 votes to 32. FIDE set a deadline of April 1, 1975, for Fischer and Karpov to confirm their participation in the match. No reply was received from Fischer by April 3. Thus, by default, Karpov officially became World Champion. In his 1991 autobiography, Karpov professed regret that the match had not taken place, and claimed that the lost opportunity to challenge Fischer held back his own chess development. Karpov met with Fischer several times after 1975, in friendly but ultimately unsuccessful attempts to arrange a match, since Karpov would never agree to play to 10.
+
+Brian Carney opined in The Wall Street Journal that Fischer's victory over Spassky in 1972 left him nothing to prove, except that perhaps someone could someday beat him, and he was not interested in the risk of losing. He also opined that Fischer's refusal to recognize peers also allowed his paranoia to flower: "The world championship he won ... validated his view of himself as a chess player, but it also insulated him from the humanizing influences of the world around him. He descended into what can only be considered a kind of madness".
+
+Bronstein felt that Fischer "had the right to play the match with Karpov on his own conditions". Years later, in his 1992 match against Spassky, Fischer similarly said that it was Karpov who refused to play against him under Fischer's conditions.
+
+Whether Karpov could have beaten Fischer is a matter of speculation. Soviet GM Lev Alburt felt that the decision to not concede to Fischer's demands rested on Karpov's "sober view of what he was capable of". Spassky thought that Fischer would have won in 1975 but Karpov would have qualified again and beaten Fischer in 1978. According to Susan Polgar, commentators are divided, with a slight majority believing Fischer would have won, an opinion she shares. Former world champion Garry Kasparov argued that Karpov would have had good chances, because he had beaten Spassky convincingly and was a new breed of tough professional, and indeed had higher-quality games, while Fischer had been inactive for three years. Karpov himself said in 2020 that he thought he had chances, although he could not say he would be favored.
+
+## Sudden obscurity
+
+After the 1972 World Chess Championship, Fischer did not play a competitive game in public for nearly 20 years. In 1977 in Cambridge, Massachusetts, he played three games against the MIT Greenblatt computer program, winning them all.
+
+He moved to the Los Angeles area and associated with the Worldwide Church of God for a time. On May 26, 1981, while walking in Pasadena, Fischer was arrested by a police patrolman, because he resembled a man who had just committed a robbery in the area. Fischer, who alleged that he was slightly injured during the arrest, said that he was held for two days, subjected to assault and various types of mistreatment, and released on $1,000 bail. Fischer published a 14-page pamphlet detailing his allegations of police misconduct, saying that his arrest had been "a frame up and set up".
+
+In 1981, Fischer stayed at the home of grandmaster Peter Biyiasas in San Francisco, where, over a period of four months, he defeated Biyiasas seventeen times in a series of speed games. In an interview with Sports Illustrated reporter William Nack, Biyiasas assessed Fischer's play:
+
+   He was too good. There was no use in playing him. It wasn't interesting. I was getting beaten, and it wasn't clear to me why. It wasn't like I made this mistake or that mistake. It was like I was being gradually outplayed, from the start. He wasn't taking any time to think. The most depressing thing about it is that I wasn't even getting out of the middle game to an endgame. I don't ever remember an endgame. He honestly believes there is no one for him to play, no one worthy of him. I played him, and I can attest to that.
+
+In 1988–1990, Fischer had a relationship with German chess player Petra Stadler, who had been put in touch with Fischer by Spassky. When Stadler later published a book about the affair, Spassky apologized to Fischer.
+
+## 1992 Spassky rematch
+
+Fischer emerged after twenty years of isolation to play Spassky (then tied for 96th–102nd on the FIDE rating list) in a "Revenge Match of the 20th century" in 1992. This match took place in Sveti Stefan and Belgrade, Yugoslavia, in spite of a United Nations embargo that included sanctions on commercial activities. Fischer demanded that the organizers bill the match as "The World Chess Championship", although Garry Kasparov was the recognized FIDE World Champion. Fischer insisted he was still the true World Champion, and that for all the games in the FIDE-sanctioned World Championship matches, involving Karpov, Korchnoi, and Kasparov, the outcomes had been prearranged. The purse for the rematch was US$5 million, with $3.35 million of the purse going to the winner. This was and still is the largest purse for a match in chess history.
+
+According to grandmaster Andrew Soltis:
+
+   [The match games] were of a fairly high quality, particularly when compared with Kasparov's championship matches of 1993, 1995 and 2000, for example. Yet the games also reminded many fans of how out of place Fischer was in 1992. He was still playing the openings of a previous generation. He was, moreover, the only strong player in the world who didn't trust computers and wasn't surrounded by seconds and supplicants.
+
+Fischer won the match with 10 wins, 5 losses, and 15 draws. Kasparov stated, "Bobby is playing OK, nothing more. Maybe his strength is 2600 or 2650. It wouldn't be close between us". Yasser Seirawan believed that the match proved that Fischer's playing strength was "somewhere in the top ten in the world".
+
+Fischer and Spassky gave ten press conferences during the match. Seirawan attended the match and met with Fischer on several occasions; the two analyzed some match games and had personal discourse. Seirawan later wrote: "After September 23 [1992], I threw most of what I'd ever read about Bobby out of my head. Sheer garbage. Bobby is the most misunderstood, misquoted celebrity walking the face of the earth." He added that Fischer was not camera shy, smiled and laughed easily, was "a fine wit" and "wholly enjoyable conversationalist".
+
+The US Department of the Treasury warned Fischer before the start of the match that his participation was illegal, that it would violate President George H. W. Bush's Executive Order 12810 imposing United Nations Security Council Resolution 757 sanctions against engaging in economic activities in Yugoslavia. In response, during the first scheduled press conference on September 1, 1992, in front of the international press, Fischer spat on the US order, saying "this is my reply". His violation of the order led US Federal officials to initiate a warrant for his arrest upon completion of the match, citing, in pertinent part, "Title 50 USC §§1701, 1702, and 1705 and Executive Order 12810".
+
+Before the rematch against Spassky, Fischer had won a training match against Svetozar Gligorić in Sveti Stefan with six wins, one loss, and three draws.
+
+## Later life and death
+
+### Life as an émigré
+
+After the 1992 match with Spassky, Fischer, now a fugitive, slid back into relative obscurity, taking up residence in Budapest, Hungary, and allegedly having a relationship with young Hungarian chess master Zita Rajcsányi. Fischer stated that standard chess was stale and that he now played blitz games of chess variants, such as Chess960. He visited the Polgár family in Budapest and analyzed many games with Judit, Zsuzsa, and Zsófia Polgár. In 1998 and 1999, he also stayed at the house of young Hungarian grandmaster Peter Leko.
+
+From 2000 to 2002, Fischer lived in Baguio in the Philippines, residing in the same compound as the Filipino grandmaster Eugenio Torre, a close friend who had acted as his second during his 1992 match with Spassky. Torre introduced Fischer to a 22 year-old woman named Marilyn Young. On May 21, 2001, Marilyn Young gave birth to a daughter named Jinky Young, and claimed that Fischer was the child's father, a claim ultimately disproven by DNA after Fischer's death.
+
+### Comments on September 11 attacks
+
+Shortly after midnight on September 12, 2001, Philippines local time (approximately four hours after the September 11, 2001, terrorist attacks in the US), Fischer was interviewed live by Pablo Mercado on the Baguio station of the Bombo Radyo network. Fischer stated that he was happy that the attacks had happened, while expressing his view on United States and Israeli foreign policy, saying, "I applaud the act. Look, nobody gets ... that the US and Israel have been slaughtering the Palestinians ... for years." He also said, "The horrible behavior that the US is committing all over the world ... This just shows you, that what goes around, comes around, even for the United States." Fischer also referenced the movie Seven Days in May and said he hoped for a military coup d'état in the US: "[I hope] the country will be taken over by the military—they'll close down all the synagogues, arrest all the Jews, execute hundreds of thousands of Jewish ringleaders." In response to Fischer's statements about 9/11, the US Chess Federation passed a motion to cancel his right to membership in the organization. Fischer's right to become a member was reinstated in 2007.
+
+### Detention in Japan
+
+Fischer lived for a time in Japan. On July 13, 2004, acting in response to a letter from US officials, Japanese immigration authorities arrested him at Narita International Airport near Tokyo for allegedly using a revoked US passport while trying to board a Japan Airlines flight to Ninoy Aquino International Airport in Manila, Philippines. Fischer resisted arrest, and claimed to have sustained bruises, cuts and a broken tooth in the process. At the time, Fischer had a passport (originally issued in 1997 and updated in 2003 to add more pages) that, according to US officials, had been revoked in November 2003 due to his outstanding arrest-warrant for the Yugoslavia sanctions violation. Despite the outstanding arrest-warrant in the US, Fischer said that he believed the passport was still valid. The authorities held Fischer at a custody center for 16 days before transferring him to another facility. Fischer said that his cell was windowless and he had not seen the light of day during that period, and that the staff had ignored his complaints about constant tobacco smoke in his cell.
+
+Tokyo-based Canadian journalist and consultant John Bosnitch set up the "Committee to Free Bobby Fischer" after meeting Fischer at Narita Airport and offering to assist him. Boris Spassky wrote a letter to US President George W. Bush, asking "For mercy, charity," and, if that was not possible, "to put [him] in the same cell with Bobby Fischer" and "to give [them] a chess set". It was reported that Fischer and Miyoko Watai, the President of the Japanese Chess Association (with whom he had reportedly been living since 2000) wanted to become legally married. It was also reported that Fischer had been living in the Philippines with Marilyn Young during the same period. Fischer applied for German citizenship, on the grounds that his father was German. Fischer stated that he wanted to renounce his US citizenship, and appealed to US Secretary of State Colin Powell to help him do so, though to no effect. Japan's Justice Minister rejected Fischer's request for asylum and ordered his deportation.
+
+While in prison, Bobby Fischer legally married Miyoko Watai on September 6, 2004.
+
+### Citizenship and residency in Iceland
+
+Seeking ways to evade deportation to the United States, Fischer wrote a letter to the government of Iceland in early January 2005, requesting Icelandic citizenship. Sympathetic to Fischer's plight, but reluctant to grant him the full benefits of citizenship, Icelandic authorities granted him an alien's passport. When this proved insufficient for the Japanese authorities, the Althing (the Icelandic Parliament), at the behest of William Lombardy, agreed unanimously to grant Fischer full citizenship in late March for humanitarian reasons, as they felt he was being unjustly treated by the United States and Japanese governments and also in recognition of his 1972 match, which had "put Iceland on the map".
+
+After arriving in Reykjavík in late March, Fischer gave a press conference. He lived a reclusive life in Iceland, avoiding entrepreneurs and others who approached him with various proposals.
+
+Fischer moved into an apartment in the same building as his close friend and spokesman, Garðar Sverrisson. Garðar's wife, Kristín Þórarinsdóttir, was a nurse and later looked after Fischer as a terminally ill patient. Garðar's two children, especially his son, were very close to Fischer. Fischer also developed a friendship with Magnús Skúlason, a psychiatrist and chess player who later recalled long discussions with him on a wide variety of subjects.
+
+On December 10, 2006, Fischer telephoned an Icelandic television station that had just broadcast a chess game in which one player blundered such that his opponent was able to mate on the next move. Although he tried to change his mind upon seeing the mate, the touch-move rule forced him to play the blunder. Fischer pointed out a winning combination that could have been played instead of the blunder or the other attempted move, but had been missed by the player and commentators.
+
+In 2005, some of Fischer's belongings were auctioned on eBay. Fischer claimed, in 2006, that the belongings sold in the US without his permission were worth "hundreds of millions of [US] dollars; even billions of dollars." In the same interview, Fischer also said that UBS Bank had closed an account of his and liquidated his assets against his wishes, transferring the funds to a bank in Iceland.
+
+### Death, estate dispute, and exhumation
+
+On January 17, 2008, Fischer died at age 64 from degenerative kidney failure at the Landspítali Hospital (National University Hospital of Iceland) in Reykjavík. He originally had a urinary tract blockage but refused surgery or medication. Magnús Skúlason reported Fischer's response to leg massages: "Nothing soothes as much as the human touch."
+
+On January 21, Fischer was buried in the small Christian cemetery of Laugardælir church, outside the town of Selfoss, 60 kilometres (37 mi) southeast of Reykjavík, after a Catholic funeral presided over by Fr. Jakob Rolland of the diocese of Reykjavík. In accordance with Fischer's wishes, only Miyoko Watai, Garðar Sverrisson, and Garðar's family were present.
+
+Fischer's estate was estimated at 140 million ISK (about £1 million, or US$2 million). It quickly became the object of a legal battle involving claims from four parties, with Miyoko Watai ultimately inheriting what remained of Fischer's estate after government claims. The four parties were Fischer's Japanese wife, Miyoko Watai; his alleged Filipino daughter, Jinky Young, and her mother, Marilyn Young; his two American nephews, Alexander and Nicholas Targ, and their father, Russell Targ; and the US government (claiming unpaid taxes).
+
+Marilyn Young claimed that Jinky was Fischer's daughter, citing as evidence Jinky's birth and baptismal certificates, photographs, a transaction record dated December 4, 2007, of a bank remittance by Fischer to Jinky, and Jinky's DNA through her blood samples. However, Magnús Skúlason, a friend of Fischer's, said that he was certain that Fischer was not the girl's father. In addition, the validity of Miyoko Watai's marriage to Fischer was challenged.
+
+In June 2010, Iceland's supreme court ordered Fischer's remains exhumed so that a DNA sample could be obtained. In August it was announced that DNA testing had ruled out Fischer as the father of Jinky Young, and the following March an Icelandic court ruled that Miyoko Watai had married Fischer on September 6, 2004, and was therefore entitled to his estate. Fischer's nephews were ordered to pay Watai's legal costs, amounting to ISK 6.6 million (approximately $57,000).
+
+## Personal life
+
+### Religious affiliation
+
+Although Fischer's mother was Jewish, Fischer rejected attempts to label him as Jewish. In a 1962 interview with Harper's, asked if he was Jewish, he replied that he was "part-Jewish" through his mother. In the same interview he was quoted as saying: "I read a book lately by Nietzsche and he says religion is just to dull the senses of the people. I agree." In a 1984 letter to the editor of the Encyclopaedia Judaica, Fischer demanded that they remove his name from future editions.
+
+Fischer associated with the Worldwide Church of God in the mid-1960s. The church prescribed Saturday Sabbath, and forbade work (and competitive chess) on Sabbath. According to his friend and colleague Larry Evans, in 1968 Fischer felt philosophically that "the world was coming to an end" and he might as well make some money by publishing My 60 Memorable Games; Fischer thought that the Rapture was coming soon.
+
+During the mid-1970s, Fischer contributed significant money to the Worldwide Church of God. In 1972, one journalist stated that "Fischer is almost as serious about religion as he is about chess", and the champion credited his faith with greatly improving his chess. Yet prophecies by Herbert W. Armstrong went unfulfilled. Fischer eventually left the church in 1977, "accusing it of being 'Satanic', and vigorously attacking its methods and leadership".
+
+Towards the end of his life, Fischer became interested in Catholicism. He bought his friend Garðar Sverrisson a copy of "Basic Catechism: Creed, Sacraments, Morality, Prayer" so Sverrisson could explain the religion better to him. According to Sverrisson, Fischer talked to him about transformation of society through creation of harmony and that "the only hope for the world is through Catholicism." Fischer was also known to have read a synopsis of G. K. Chesterton's works in the years leading up to his death. He requested a Catholic funeral, and this final service was presided over by Catholic priest Jakob Rolland.
+
+### Antisemitism
+
+Fischer made numerous antisemitic statements and professed a general hatred for Jews from at least the early 1960s. Jan Hein Donner wrote that at the time of Bled 1961, "He idolized Hitler and read everything about him that he could lay his hands on. He also championed a brand of antisemitism that could only be thought up by a mind completely cut off from reality." Donner took Fischer to a war museum, which "left a great impression, since [Fischer] is not an evil person, and afterwards he was more restrained in his remarks—to me, at least."
+
+From the 1980s on, Fischer's comments about Jews were a major theme in his public and private remarks. He openly denied the Holocaust, and called the United States "a farce controlled by dirty, hook-nosed, circumcised Jew bastards". Between 1999 and 2006, Fischer's primary means of communicating with the public was radio interviews. He participated in at least 34 such broadcasts, mostly with radio stations in the Philippines, but also in Hungary, Iceland, Colombia, and Russia. In 1999, he gave a radio call-in interview to a station in Budapest, Hungary, during which he described himself as the "victim of an International Jewish conspiracy". In another radio interview, Fischer said that it became clear to him in 1977, after reading The Secret World Government by Count Cherep-Spiridovich, that Jewish agencies were targeting him. Fischer's sudden reemergence was apparently triggered when some of his belongings, which had been stored in a Pasadena, California, storage unit, were sold by the landlord, who claimed it was in response to nonpayment of rent. Fischer was also upset that UBS had liquidated his assets and closed his account without his permission. When asked who he thought was responsible for the actions UBS had taken, Fischer replied: "There's no question that the Jew-controlled United States is behind this—that's obvious." Fischer, at a press conference upon his return to Reykjavik, Iceland, lashed out at Jeremy Schaap, the son of the late Dick Schaap, a sportswriter who had been a father figure to Fischer when growing up, calling his father a "Jewish snake" for doubting Fischer's sanity in his later writings.
+
+Fischer's library contained antisemitic and racist literature such as Mein Kampf, The Protocols of the Elders of Zion, and The White Man's Bible and Nature's Eternal Religion by Ben Klassen, founder of the World Church of the Creator. A notebook written by Fischer contains sentiments such as "12/13/99 It's time to start randomly killing Jews". Despite his views, Fischer remained on good terms with Jewish chess players.
+
+### Speculation on psychological condition
+
+While as far as is known Fischer was never formally diagnosed with a mental disorder, there has been widespread comment and speculation concerning his psychological condition based on his extreme views and unusual behavior. Reuben Fine, psychologist and chess player, who met Fischer many times, said that "Some of Bobby's behavior is so strange, unpredictable, odd and bizarre that even his most ardent apologists have had a hard time explaining what makes him tick" and described him as "a troubled human being" with "obvious personal problems".
+
+Valery Krylov, advisor to Anatoly Karpov and a specialist in the "psycho-physiological rehabilitation of sportsmen", believed Fischer had schizophrenia. Psychologist Joseph G. Ponterotto, from secondhand sources, concludes that "Bobby did not meet all the necessary criteria to reach diagnoses of schizophrenia or Asperger syndrome. The evidence is stronger for paranoid personality disorder." Magnús Skúlason, a chess player, psychiatrist and head doctor of Sogn Institution for Mentally Ill Offenders near Selfoss, befriended Fischer towards the end of Fischer's life. From Endgame, Fischer's 2011 biography by Frank Brady:
+
+   Skulason was not "Bobby's psychiatrist", as has been implied in the general press, nor did he offer Bobby any analysis or psychotherapy. He was at Bobby's bedside as a friend, to try to do anything he could for him. Because of his training, however, he couldn't fail to take note of Bobby's mental condition. "He definitely was not schizophrenic", Skulason said. "He had problems, possibly certain childhood traumas that had affected him. He was misunderstood. Underneath I think he was a caring sensitive person."
+
+## Contributions to chess
+
+### Writings
+
+* Bobby Fischer's Games of Chess (Simon and Schuster, New York, 1959). ISBN 0-923891-46-3. An early collection of 34 lightly annotated games, including "The Game of the Century" against Donald Byrne.
+* "A Bust to the King's Gambit" (American Chess Quarterly, Vol. 1, No. 1 (Summer 1961), pp. 3–9).
+* "The Russians Have Fixed World Chess" (Sports Illustrated, Vol. 17, No. 8 (August 20, 1962), pp. 18–19, 64–65). This is the controversial article in which Fischer asserted that several of the Soviet players in the 1962 Curaçao Candidates' tournament had colluded with one another to prevent him [Fischer] from winning the tournament.
+* "The Ten Greatest Masters in History" (Chessworld, Vol. 1, No. 1 (January–February 1964), pp. 56–61). An article in which Fischer named Paul Morphy, Howard Staunton, Wilhelm Steinitz, Siegbert Tarrasch, Mikhail Chigorin, Alexander Alekhine, José Raúl Capablanca, Boris Spassky, Mikhail Tal, and Samuel Reshevsky as the greatest players of all time. Fischer's criterion for inclusion on his list was his own subjective appreciation of their games rather than their achievements.
+* Bobby Fischer Teaches Chess (1966), co-written with Donn Mosenfelder and Stuart Margulies. The extent of Fischer's contribution has been questioned.
+* "Checkmate" column from December 1966 to December 1969 in Boys' Life, later assumed by Larry Evans.
+* My 60 Memorable Games (Simon and Schuster, New York, 1969, and Faber and Faber, London, 1969; Batsford 2008 (algebraic notation)). Studied by Kasparov at a young age; "A classic of painstaking and objective analysis that modestly includes three of his losses."
+* I Was Tortured in the Pasadena Jailhouse! (1982). A self-published booklet on an incident in which Fischer was booked for vagrancy.
+
+### Opening theory
+
+Fischer's opening repertoire was narrow in some ways. As White, Fischer almost exclusively played 1.e4, calling it "best by test", throughout his career. He played 1.d4 only once in a serious game, during a blitz tournament. In spite of this narrowness, he was considered by some of his rivals to be unpredictable in his opening play, and a difficult opponent to prepare for.
+
+As Black, Fischer would usually play the Najdorf Sicilian against 1.e4, and the King's Indian Defense against 1.d4, only rarely venturing into the Nimzo-Indian, Benoni, Grünfeld or Neo-Grünfeld. Fischer acknowledged difficulty playing against the Winawer Variation of the French Defense (1.e4 e6 2.d4 d5 3.Nc3 Bb4), but maintained that the Winawer was unsound because it exposed Black's kingside, and that, in his view, "Black was trading off his good bishop with 3...Bb4 and ...Bxc3." Later on Fischer said: "I may yet be forced to admit that the Winawer is sound. But I doubt it! The defense is anti-positional and weakens the K-side."
+
+Fischer was renowned for his opening preparation and made numerous contributions to chess opening theory. He was one of the foremost experts on the Ruy Lopez. A line of the Exchange Variation (1.e4 e5 2.Nf3 Nc6 3.Bb5 a6 4.Bxc6 dxc6 5.0-0) is sometimes called the "Fischer Variation" after he successfully resurrected it at the 1966 Havana Olympiad. Fischer's lifetime score with the move 5.0-0 in tournament and match games was eight wins, three draws, and no losses (86.36%).
+
+Fischer was a recognized expert in the black side of the Najdorf Sicilian and the King's Indian Defense. He used the Grünfeld Defense and Neo-Grünfeld Defense to win his celebrated games against Donald and Robert Byrne, and played a theoretical novelty in the Grünfeld against reigning world champion Mikhail Botvinnik, refuting Botvinnik's prepared analysis over the board. In the Nimzo-Indian Defense, the line beginning with 1.d4 Nf6 2.c4 e6 3.Nc3 Bb4 4.e3 b6 5.Ne2 Ba6 was named after him.
+
+Fischer established the viability of the so-called Poisoned Pawn Variation of the Najdorf Sicilian (1.e4 c5 2.Nf3 d6 3.d4 cxd4 4.Nxd4 Nf6 5.Nc3 a6 6.Bg5 e6 7.f4 Qb6). This bold queen sortie, to snatch a pawn at the expense of development, had been considered dubious, but Fischer succeeded in proving its soundness. Out of ten tournament and match games as Black in the Poisoned Pawn, Fischer scored 70%, winning five, drawing four, and losing only one: the 11th game of his 1972 match against Spassky. Following Fischer's use, the Poisoned Pawn Variation became a respected line, utilized by many of the world's leading players. Fischer's 10.f5 in this line against Efim Geller quickly became the main line of the Poisoned Pawn.
+
+On the white side of the Sicilian, Fischer made advances to the theory of the line beginning 1.e4 c5 2.Nf3 d6 3.d4 cxd4 4.Nxd4 Nf6 5.Nc3 a6 (or e6) 6.Bc4, which has sometimes been named after him.
+
+In 1961, prompted by a loss the year before to Spassky, Fischer wrote an article titled "A Bust to the King's Gambit" for the first issue of the American Chess Quarterly, in which he stated, "In my opinion, the King's Gambit is busted. It loses by force." Fischer recommended 1.e4 e5 2.f4 exf4 3.Nf3 d6, which has since become known as the Fischer Defense, as a refutation to the King's Gambit. Fischer later played the King's Gambit as White in three tournament games, winning them all.
+
+### Endgame
+
+Fischer had excellent endgame technique. International Master Jeremy Silman listed him as one of the five best endgame players (along with Emanuel Lasker, Akiba Rubinstein, José Raúl Capablanca, and Vasily Smyslov), calling Fischer a "master of bishop endings". The endgame of a rook, bishop, and pawns against a rook, knight, and pawns has sometimes been called the "Fischer Endgame" because of several instructive wins by Fischer (with the bishop), including three against Mark Taimanov in 1970 and 1971.
+
+### Fischer clock
+
+In 1988, Fischer filed for U.S. Patent 4,884,255 for a new type of chess clock, which gave each player a fixed period at the start of the game and then added a small increment after each completed move.
+
+An example of Fischer's patented clock was made for, and used in, the 1992 rematch between Fischer and Spassky. Clocks based on the "Fischer clock" soon became standard in major chess tournaments. Fischer would later complain that he was cheated out of the royalties for this invention.
+
+### Fischer Random
+
+Following his re-emergence onto the chess scene with his 1992 match against Spassky, Fischer heavily disparaged chess as it was being played at the highest levels. As a result, on June 19, 1996, in Buenos Aires, Argentina, Fischer announced and advocated a variant of chess called Fischerandom (later also known as Chess960). The goal of Fischerandom was to ensure that a game between two players is a contest between their understandings of chess, rather than their abilities to prepare opening strategies or memorize opening lines.
+
+### Legacy
+
+Some grandmasters compared Fischer's play to that of a computer or a player without noticeable weaknesses.
+
+Biographers David Edmonds and John Eidinow wrote:
+
+   Faced with Fischer's extraordinary coolness, his opponents [sic] assurance would begin to disintegrate. A Fischer move, which at first glance looked weak, would be reassessed. It must have a deep master plan behind it, undetectable by mere mortals (more often than not they were right, it did). The US grandmaster Robert Byrne labeled the phenomenon "Fischer-fear". Grandmasters would wilt, their suits would crumple, sweat would glisten on their brows, panic would overwhelm their nervous systems. Errors would creep in. Calculations would go awry. There was talk among grandmasters that Fischer hypnotized his opponents, that he undermined their intellectual powers with a dark, mystic, insidious force.
+
+Kasparov wrote that Fischer "became the detonator of an avalanche of new chess ideas, a revolutionary whose revolution is still in progress". In January 2009, reigning world champion Viswanathan Anand described him as "the greatest chess player who ever lived". Serbian GM Ljubomir Ljubojević called Fischer, "A man without frontiers. He didn't divide the East and the West, he brought them together in their admiration of him."
+
+German GM Karsten Müller wrote:
+
+   Fischer, who had taken the highest crown almost singlehandedly from the mighty, almost invincible Soviet chess empire, shook the whole world, not only the chess world, to its core. He started a chess boom not only in the United States and in the Western hemisphere, but worldwide. Teaching chess or playing chess as a career had truly become a respectable profession. After Bobby, the game was simply not the same.
+
+### Head-to-head record versus selected grandmasters
+
+(Rapid, blitz, and blindfold games not included; listed as +wins −losses =draws.) Players who have been World Champions in boldface
+
+* Mikhail Tal +2−4=5
+* Mikhail Botvinnik +0−0=1
+* Vasily Smyslov +3−1=5
+* Boris Spassky +17−11=28
+* Max Euwe +1−1=1
+* Tigran Petrosian +8−4=15
+* Efim Geller +3−5=2
+* Svetozar Gligorić +7−4=8
+* Paul Keres +4−3=3
+* Victor Korchnoi +2−2=4
+* Bent Larsen +9−2=1
+* Miguel Najdorf +4−1=4
+* Lev Polugaevsky +0−0=1
+* David Bronstein +0−0=2
+* Samuel Reshevsky +9−4=13
+* Mark Taimanov +7−0=1
+* Borislav Ivkov +4−2=4
+* Pal Benko +8−3=7
+
+### Internet chess playing speculation
+
+In 2001, Nigel Short wrote in The Sunday Telegraph chess column that he believed he had been secretly playing Fischer on the Internet Chess Club (ICC) in speed chess matches. Subsequently others claimed to have played Fischer as well. Fischer denied ownership of the account.
+
+## In popular culture
+
+### In film
+
+* The 1993 film Searching for Bobby Fischer, adopted from its eponymous book, uses Fischer's name in the title although the film and book are both based on the life of fellow chess prodigy Joshua Waitzkin, whose father, Fred Waitzkin, wrote the book. Outside of the United States, it was released as Innocent Moves. The title refers to the search for Fischer's successor after his disappearance from competitive chess, since Waitzkin's father felt that his son could be that successor. Fischer claimed he had never seen the film and complained that it invaded his privacy by using his name without his permission. Fischer never received any compensation from the film, calling it "a monumental swindle".
+* In April 2009, the documentary Me and Bobby Fischer, about Fischer's last years as his old friend Saemundur Palsson gets him out of jail in Japan and helps him settle in Iceland, was premiered in Iceland. The film was produced by Friðrik Guðmundsson with music by Guðlaugur Kristinn Óttarsson, Björk and Einar Arnaldur Melax.
+* In October 2009, the biographical film Bobby Fischer Live was released, with Damien Chapa directing and starring as Fischer.
+* In 2011, documentary filmmaker Liz Garbus released Bobby Fischer Against the World, which explores the life of Fischer, with interviews from Garry Kasparov, Anthony Saidy, and others.
+* On September 16, 2015, the American biographical film Pawn Sacrifice was released, starring Tobey Maguire as Fischer, Liev Schreiber as Boris Spassky, Lily Rabe as Joan Fischer, and Peter Sarsgaard as William Lombardy.
+
+### Other media
+
+* The musical Chess, with lyrics by Tim Rice and music by Björn Ulvaeus and Benny Andersson, tells the story of two chess champions. The musical is loosely based on the 1972 World Championship match between Fischer and Spassky, and in later stage productions the American player is named "Freddie Trumper", a reference to Fischer.
+* During the 1972 Fischer–Spassky match, the Soviet bard Vladimir Vysotsky wrote an ironic two-song cycle "Honor of the Chess Crown". The first song is about a rank-and-file Soviet worker's preparation for the match with Fischer; the second is about the game. Many expressions from the songs have become catchphrases in Russian culture.
+* British sophisti-pop band Prefab Sprout reference Fischer in their 1984 song "Cue Fanfare" in the lyrics "When Bobby Fischer's plane touches the ground/He'll take those Russian boys and play them out of town".
+* In a season 21 episode of Saturday Night Live, in a sketch set at a chess tournament, the Spartan cheerleaders, played by Will Ferrell and Cheri Oteri, sang a cheer with references to Fischer and his reclusion, including the lyrics "Where is he?/I don't know/I don't know".
+* In episode 6 of season 3 of Drunk History, titled 'Games', comedian and author Rich Fulcher retold the story of the 1972 World Chess Championship match between Fischer and Spassky. In the episode, Taran Killam plays Fischer, and Jake Johnson plays Spassky.
+
+## Tournament, match, and team event summaries
+
+Fischer played 752 tournament games in his career, winning 417, drawing 251, and losing 84. These include, however, games when he was very young; if only the games after he turned 20 are considered, he played 311 tournament games and lost 23, a 7.4% loss percentage.
+
+### Tournaments
+
+The 1955 US Amateur Championship was the first tournament organized by the US Chess Federation in which Fischer entered. Before this tournament, he had played in the Brooklyn Chess Club Championships, in some tournaments organized by the Brooklyn YMCA Chess and Checker Club, and in a correspondence chess tournament organized by Chess Review.
+
+Tournament record :
+
+| Year | Tournament | Location | Wins | Draws | Losses | Points | Games | Ranking | Players | % |
+| - | - | - | - | - | - | - | - | - | - | - |
+| 1955 | US Amateur Championship | Mohegan Lake, New York | unknown (6 games) | unknown (6 games) | unknown (6 games) | ≤ 3 | 6 | below 32nd | 75 | ≤ 50% |
+| 1955 | US Junior Championship | Lincoln, Nebraska | 2 | 6 | 2 | 5 | 10 | 11th–21st (20th on tie-break) | 25 | 50% |
+| 1955 | Washington Square Park | New York | unknown (8 games) | unknown (8 games) | unknown (8 games) | 5 | 8 | 15th | 66 | 56% |
+| 1956 | Greater New York City Open | Manhattan | 5 | 0 | 2 | 5 | 7 | 5th–7th | 52 | 71% |
+| 1956 | Manhattan Chess Club Tournament 'A'-Reserves | New York | unknown (10 games) | unknown (10 games) | unknown (10 games) | 7½ | 10 | 1st–2nd | 6 | 75% |
+| 1956 | Metropolitan League (team event) | New York | 4 | 1 | 0 | 4½ | 5 | Manhattan 'A'-Reserves Team top scorer | Manhattan 'A'-Reserves Team top scorer | 90% |
+| 1956 | US Amateur Championship | Asbury Park, New Jersey | 3 | 2 | 1 | 4 | 6 | 21st | 88 | 67% |
+| 1956 | US Junior Championship | Philadelphia | 8 | 1 | 1 | 8½ | 10 | 1st | 28 | 85% |
+| 1956 | US Open | Oklahoma City | 5 | 7 | 0 | 8½ | 12 | 4th–8th | 102 | 71% |
+| 1956 | Canadian Open | Montreal | 6 | 2 | 2 | 7 | 10 | 8th–12th | 88 | 70% |
+| 1956 | Rosenwald Trophy | New York | 2 | 5 | 4 | 4½ | 11 | 8th–10th | 12 | 41% |
+| 1956 | Eastern States Open | Washington, D.C. | 4 | 3 | 0 | 5½ | 7 | 2nd–5th | 56 | 79% |
+| 1956 | Manhattan Chess Club Championship semifinals | New York | 2 | 1 | 2 | 2½ | 5 | 4th | 6 | 50% |
+| 1957 | Log Cabin Open | West Orange, New Jersey | 4 | 0 | 2 | 4 | 6 | 6th–14th | 61 | 67% |
+| 1957 | Log Cabin 50–50, fast chess | West Orange | 3 | 2 | 0 | 4 | 5 | unknown | unknown | 80% |
+| 1957 | Metropolitan League (team event) | New York | 5 | 0 | 0 | 5 | 5 | Manhattan team, Fischer played at board 7. | Manhattan team, Fischer played at board 7. | 100% |
+| 1957 | New Western Open | Milwaukee | 5 | 2 | 1 | 6 | 8 | 6th–12th | 122 | 75% |
+| 1957 | US Junior Championship | San Francisco | 8 | 1 | 0 | 8½ | 9 | 1st | 33 | 94% |
+| 1957 | US Open | Cleveland | 7/ 8 | 4 | 0 | 9/ 10 | 11/ 12 | 1st (on tie-break) | 176 | 82%/ 83% |
+| 1957 | New Jersey State Open | East Orange | 6 | 1 | 0 | 6½ | 7 | 1st | 81 | 93% |
+| 1957 | North Central Open | Milwaukee | 4 | 2 | 1 | 5 | 7 | 5th–11th | 93 | 71% |
+| 1957 | US Championship | New York | 8 | 5 | 0 | 10½ | 13 | 1st | 14 | 81% |
+| 1958 | Interzonal | Portorož | 6 | 12 | 2 | 12 | 20 | 5th–6th | 21 | 60% |
+| 1958 | US Championship | New York | 6 | 5 | 0 | 8½ | 11 | 1st | 12 | 77% |
+| 1959 | Mar del Plata International | Mar del Plata | 8 | 4 | 1 | 10 | 13 | 3rd–4th | 14 | 71% |
+| 1959 | International | Santiago | 7 | 1 | 4 | 7½ | 12 | 4th–7th | 13 | 63% |
+| 1959 | Zürich International | Zürich | 8 | 5 | 2 | 10½ | 15 | 3rd–4th | 16 | 70% |
+| 1959 | Candidates | Bled, Zagreb & Belgrade | 8 | 9 | 11 | 12½ | 28 | 5th–6th | 8 | 45% |
+| 1959 | US Championship | New York | 7 | 4 | 0 | 9 | 11 | 1st | 12 | 82% |
+| 1960 | Mar del Plata International | Mar del Plata | 13 | 1 | 1 | 13½ | 15 | 1st–2nd | 16 | 90% |
+| 1960 | Buenos Aires International | Buenos Aires | 3 | 11 | 5 | 8½ | 19 | 13th–16th | 20 | 45% |
+| 1960 | 3-player double round-robin | Reykjavík | 3 | 1 | 0 | 3½ | 4 | 1st | 3 | 88% |
+| 1960 | US Championship | New York | 7 | 4 | 0 | 9 | 11 | 1st | 12 | 82% |
+| 1961 | "Tournament of the century" | Bled | 8 | 11 | 0 | 15 | 19 | 2nd | 20 | 71% |
+| 1962 | Interzonal | Stockholm | 13 | 9 | 0 | 17½ | 22 | 1st | 23 | 80% |
+| 1962 | Candidates | Curaçao | 8 | 12 | 7 | 14 | 27 | 4th | 8 | 52% |
+| 1962 | US Championship | New York | 6 | 4 | 1 | 8 | 11 | 1st | 12 | 73% |
+| 1963 | Western Open | Bay City, Michigan | 7 | 1 | 0 | 7½ | 8 | 1st | 161 | 94% |
+| 1963 | New York State Open | Poughkeepsie | 7 | 0 | 0 | 7 | 7 | 1st | 57 | 100% |
+| 1963 | US Championship | New York | 11 | 0 | 0 | 11 | 11 | 1st | 12 | 100% |
+| 1965 | Capablanca Memorial | Havana | 12 | 6 | 3 | 15 | 21 | 2nd–4th | 22 | 71% |
+| 1965 | US Championship | New York | 8 | 1 | 2 | 8½ | 11 | 1st | 12 | 77% |
+| 1966 | Piatigorsky Cup | Santa Monica | 7 | 8 | 3 | 11 | 18 | 2nd | 10 | 61% |
+| 1966 | US Championship | New York | 8 | 3 | 0 | 9½ | 11 | 1st | 12 | 86% |
+| 1967 | Monaco International | Monte Carlo | 6 | 2 | 1 | 7 | 9 | 1st | 10 | 78% |
+| 1967 | International | Skopje | 12 | 3 | 2 | 13½ | 17 | 1st | 18 | 79% |
+| 1967 | Interzonal | Sousse | 7 | 3 | 0 | 8½ | 10 | withdrew | 22 | 85% |
+| 1968 | International | Netanya | 10 | 3 | 0 | 11½ | 13 | 1st | 14 | 88% |
+| 1968 | International | Vinkovci | 9 | 4 | 0 | 11 | 13 | 1st | 14 | 85% |
+| 1968 | Metropolitan League (team event) | New York | 1 | 0 | 0 | 1 | 1 | Manhattan team, Fischer played only one game. | Manhattan team, Fischer played only one game. | 100% |
+| 1970 | Blitz (5-minute games) | Herceg Novi | 17 | 4 | 1 | 19 | 22 | 1st | 12 | 86% |
+| 1970 | Tournament of Peace | Rovinj & Zagreb | 10 | 6 | 1 | 13 | 17 | 1st | 18 | 76% |
+| 1970 | Buenos Aires International | Buenos Aires | 13 | 4 | 0 | 15 | 17 | 1st | 18 | 88% |
+| 1970 | Interzonal | Palma de Mallorca | 15 | 7 | 1 | 18½ | 23 | 1st | 24 | 80% |
+| 1971 | Manhattan CC Blitz | New York | 21 | 1 | 0 | 21½ | 22 | 1st | 12 | 98% |
+
+### Matches
+
+Match record :
+
+| Year | Opponent | Location | Match | Wins | Draws | Losses | Result | Score | Percentage |
+| - | - | - | - | - | - | - | - | - | - |
+| 1957 | Max Euwe | New York | 2-game exhibition match | 0 | 1 | 1 | lost | ½–1½ | 25% |
+| 1957 | Dan Jacobo Beninson | New York | 5-game training match | 2 | 3 | 0 | won | 3½–1½ | 70% |
+| 1957 | Rodolfo Tan Cardoso | New York | | 5 | 2 | 1 | won | 6–2 | 75% |
+| 1958 | Dragoljub Janošević | Belgrade | 2-game training match | 0 | 2 | 0 | tied | 1–1 | 50% |
+| 1958 | Milan Matulović | Belgrade | | 2 | 1 | 1 | won | 2½–1½ | 63% |
+| 1961 | Samuel Reshevsky | New York & Los Angeles | 16-game match | 2 | 7 | 2 | unfinished | 5½–5½ | 50% |
+| 1970 | Tigran Petrosian | Belgrade | USSR vs. World Match | 2 | 2 | 0 | won | 3–1 | 75% |
+| 1971 | Mark Taimanov | Vancouver | Candidates quarterfinal | 6 | 0 | 0 | won | 6–0 | 100% |
+| 1971 | Bent Larsen | Denver | Candidates semifinal | 6 | 0 | 0 | won | 6–0 | 100% |
+| 1971 | Tigran Petrosian | Buenos Aires | Candidates final | 5 | 3 | 1 | won | 6½–2½ | 72% |
+| 1972 | Boris Spassky | Reykjavík | World Championship | 7 | 11 | 3 | won | 12½–8½ | 60% /63% |
+| 1992 | Svetozar Gligorić | Sveti Stefan | training match | 6 | 3 | 1 | won | 7½–2½ | 75% |
+| 1992 | Boris Spassky | Sveti Stefan & Belgrade | Unofficial rematch | 10 | 15 | 5 | won | 10–5 | 58% /67% |
+
+### International Team events
+
+International Team events record :
+
+| Year | Event | Location | Board | Opponents | Wins | Draws | Losses | Points | Games | Individual ranking | Team ranking | Individual percentage |
+| - | - | - | - | - | - | - | - | - | - | - | - | - |
+| 1960 | 14th Olympiad | Leipzig | 1 | various | 10 | 6 | 2 | 13 | 18 | Bronze | Silver | 72% |
+| 1960 | Berlin vs USA Match | Berlin | 1 | Klaus Darga | 1 | 0 | 0 | 1 | 1 | Game won | Team won | 100% (1 game) |
+| 1962 | Poland vs USA Match | Warsaw | 1 | Bogdan Sliwa | 1 | 0 | 0 | 1 | 1 | Game won | Team won | 100% (1 game) |
+| 1962 | 15th Olympiad | Varna | 1 | various | 8 | 6 | 3 | 11 | 17 | Eighth | Fourth | 65% |
+| 1966 | 17th Olympiad | Havana | 1 | various | 14 | 2 | 1 | 15 | 17 | Silver | Silver | 88% |
+| 1970 | USSR vs. World Match | Belgrade | 2 | Tigran Petrosian | 2 | 2 | 0 | 3 | 4 | best world team result | Team lost | 75% |
+| 1970 | 19th Olympiad | Siegen | 1 | various | 8 | 4 | 1 | 10 | 13 | Silver | Fourth | 77% |
+
+## Notable games
+
+* Donald Byrne vs. Fischer, New York 1956; Grünfeld Defense, 5.Bf4 (D92), 0–1. Played when Fischer was 13 years old, "this game appeared in chess magazines around the world, provoking the delight of the public and the amazement of the experts." It was dubbed "The Game of the Century" by Hans Kmoch in Chess Review.
+* Svetozar Gligorić vs. Fischer, Bled 1961; King's Indian Defense, Classical Variation, Mar del Plata Variation (E98), ½–½. "A genuine drawn masterpiece" according to Garry Kasparov. Andrew Soltis rated it as one of "The 100 Best Chess Games of the 20th Century".
+
+| | a | b | c | d | e | f | g | h | |
+| - | - | - | - | - | - | - | - | - | - |
+| 8 | | | | | | | | | 8 |
+| 7 | | | | | | | | | 7 |
+| 6 | | | | | | | | | 6 |
+| 5 | | | | | | | | | 5 |
+| 4 | | | | | | | | | 4 |
+| 3 | | | | | | | | | 3 |
+| 2 | | | | | | | | | 2 |
+| 1 | | | | | | | | | 1 |
+| | a | b | c | d | e | f | g | h | |
+
+* Robert Byrne vs. Fischer, 1963/64 US Championship; Neo-Grünfeld Defense, 0–1; annotated. From an almost symmetrical position, Fischer beats a strong international master in just 21 moves—"a game that was immediately recognized as an all-time classic".
+
+| | a | b | c | d | e | f | g | h | |
+| - | - | - | - | - | - | - | - | - | - |
+| 8 | | | | | | | | | 8 |
+| 7 | | | | | | | | | 7 |
+| 6 | | | | | | | | | 6 |
+| 5 | | | | | | | | | 5 |
+| 4 | | | | | | | | | 4 |
+| 3 | | | | | | | | | 3 |
+| 2 | | | | | | | | | 2 |
+| 1 | | | | | | | | | 1 |
+| | a | b | c | d | e | f | g | h | |
+
+* Fischer vs. Mark Taimanov, Vancouver Candidates Final 1971; 4th match game, Sicilian Defense, Taimanov Variation (B47), 1–0. Fischer's patient and accurate handling of bishop vs. knight, first in the rook and minor piece endgame, and then after rooks were exchanged, has become a staple of endgame instructional literature.
+
+| | a | b | c | d | e | f | g | h | |
+| - | - | - | - | - | - | - | - | - | - |
+| 8 | | | | | | | | | 8 |
+| 7 | | | | | | | | | 7 |
+| 6 | | | | | | | | | 6 |
+| 5 | | | | | | | | | 5 |
+| 4 | | | | | | | | | 4 |
+| 3 | | | | | | | | | 3 |
+| 2 | | | | | | | | | 2 |
+| 1 | | | | | | | | | 1 |
+| | a | b | c | d | e | f | g | h | |
+
+* Fischer vs. Tigran Petrosian, Buenos Aires Candidates Final 1971; 7th match game, Sicilian Defense, Taimanov Variation (B42), 1–0. Fischer's unconventional choice of 22.Nxd7+, exchanging a well-posted knight for an apparently passive bishop, has been widely praised. However, in 2020 engine-assisted analysis by Karsten Müller and ChessBase News readers came to the conclusion that 22.a4 wins, while 22.Nxd7+ only draws against correct defense.
+
+| | a | b | c | d | e | f | g | h | |
+| - | - | - | - | - | - | - | - | - | - |
+| 8 | | | | | | | | | 8 |
+| 7 | | | | | | | | | 7 |
+| 6 | | | | | | | | | 6 |
+| 5 | | | | | | | | | 5 |
+| 4 | | | | | | | | | 4 |
+| 3 | | | | | | | | | 3 |
+| 2 | | | | | | | | | 2 |
+| 1 | | | | | | | | | 1 |
+| | a | b | c | d | e | f | g | h | |
+
+* Fischer vs. Boris Spassky, World Chess Championship 1972; 6th match game, Queen's Gambit Declined, Tartakower Defense (D59), 1–0; annotated on the 1972 match page. Fischer called this game his best of the match. Efim Geller had told Spassky about the strong move 14...Qb7 during their preparation, but Spassky had forgotten the advice and played 14...a6. Geller won with 14...Qb7 against Jan Timman in the AVRO 1973 tournament.
+* Boris Spassky vs. Fischer, World Chess Championship 1972; 13th match game, Alekhine Defense, Modern Variation, Alburt Variation (B04), 0–1; annotated on the 1972 match page. Botvinnik called this game "the highest creative achievement of Fischer". He resolved a drawish opposite-colored bishops endgame by sacrificing his bishop and trapping his own rook. "Then five passed pawns struggled with the white rook. Nothing similar had been seen before in chess."
+* Fischer vs. Boris Spassky, 1992; 1st match game, Ruy Lopez, Breyer Variation (C95), 1–0; annotated on the 1992 match page. Fischer's "fine" victory in his first competitive game in 20 years "made a great impression on the chess world", although in Kasparov's view, Spassky's play was below the standard of the leading grandmasters of the time.

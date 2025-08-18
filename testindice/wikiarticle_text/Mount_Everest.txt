@@ -1,0 +1,620 @@
+# Mount Everest
+
+Mount Everest (Nepali: सगरमाथा, romanized: Sagarmāthā; Standard Tibetan: ཇོ་མོ་གླང་མ, romanized: Chomolungma; Chinese: 珠穆朗玛峰; pinyin: Zhūmùlǎngmǎ Fēng) is Earth's highest mountain above sea level, located in the Mahalangur Himal sub-range of the Himalayas. The China–Nepal border runs across its summit point. Its elevation (snow height) of 8,848.86 m (29,031 ft 8+1⁄2 in) was most recently established in 2020 by the Chinese and Nepali authorities.
+
+Mount Everest attracts many climbers, including highly experienced mountaineers. There are two main climbing routes, one approaching the summit from the southeast in Nepal (known as the "standard route") and the other from the north in Tibet. While not posing substantial technical climbing challenges on the standard route, Everest presents dangers such as altitude sickness, weather, and wind, as well as hazards from avalanches and the Khumbu Icefall. As of November 2022, 310 people have died on Everest. Over 200 bodies remain on the mountain and have not been removed due to the dangerous conditions.
+
+The first recorded efforts to reach Everest's summit were made by British mountaineers. As Nepal did not allow foreigners to enter the country at the time, the British made several attempts on the north ridge route from the Tibetan side. After the first reconnaissance expedition by the British in 1921 reached 7,000 m (22,970 ft) on the North Col, the 1922 expedition pushed the north ridge route up to 8,320 m (27,300 ft), marking the first time a human had climbed above 8,000 m (26,247 ft). The 1924 expedition resulted in one of the greatest mysteries on Everest to this day: George Mallory and Andrew Irvine made a final summit attempt on 8 June but never returned, sparking debate as to whether they were the first to reach the top. Tenzing Norgay and Edmund Hillary made the first documented ascent of Everest in 1953, using the southeast ridge route. Norgay had reached 8,595 m (28,199 ft) the previous year as a member of the 1952 Swiss expedition. The Chinese mountaineering team of Wang Fuzhou, Gonpo, and Qu Yinhua made the first reported ascent of the peak from the north ridge on 25 May 1960.
+
+## Name
+
+The Tibetan name for Everest is Qomolangma (ཇོ་མོ་གླང་མ, lit. "Holy Mother"). The name was first recorded with a Chinese transcription on the 1721 Kangxi Atlas during the reign of Emperor Kangxi of Qing China, and then appeared as Tchoumour Lancma on a 1733 map published in Paris by the French geographer D'Anville based on the former map. The Tibetan name is also popularly romanised as Chomolungma and (in Wylie) as Jo-mo-glang-ma.
+
+The official Chinese transcription is 珠穆朗玛峰 (t 珠穆朗瑪峰), whose pinyin form is Zhūmùlǎngmǎ Fēng. While other Chinese names were used, including Shèngmǔ Fēng (t 聖母峰, s 圣母峰, lit. "Holy Mother Peak"), these names were largely phased out when the Ministry of Internal Affairs of China issued a decree to adopt a sole name in May 1952.
+
+Other documented local names include "Deodungha" ("Holy Mountain"), but it is unclear whether it is commonly used.
+
+In 1849, the British survey wanted to preserve local names if possible (e.g., Kangchenjunga and Dhaulagiri), and Andrew Waugh, the British Surveyor General of India, argued that he could not find any commonly used local name, as his search for a local name was hampered by Nepal's and Tibet's exclusion of foreigners. Waugh argued that because there were many local names, it would be difficult to favour one name over all others; he decided that Peak XV should be named after British surveyor Sir George Everest, his predecessor as Surveyor General of India. Everest himself opposed the name suggested by Waugh and told the Royal Geographical Society in 1857 that "Everest" could not be written in Hindi nor pronounced by "the native of India". Waugh's proposed name prevailed despite the objections, and in 1865, the Royal Geographical Society officially adopted Mount Everest as the name. The modern pronunciation of Everest (/ˈɛvərɪst/) is different from Sir George's pronunciation of his surname (/ˈiːvrɪst/ EEV-rist). In the late 19th century, many European cartographers incorrectly believed that a native name for the mountain was Gaurishankar, a mountain between Kathmandu and Everest.
+
+In the early 1960s, the Nepali government coined the Nepali name Sagarmāthā (IAST transcription) or Sagar-Matha (सगर-माथा,, lit. "goddess of the sky"), which means "the Head in the Great Blue Sky", being derived from सगर (sagar), meaning "sky", and माथा (māthā), meaning "head".
+
+### Other names
+
+* Peak XV (British Empire's Survey)
+* Old Darjeeling name: "Deodungha"
+* "Gauri Shankar" or "Gaurisankar"; in modern times the name is used for a different peak about 30 miles (48 kilometres) away, but it was used occasionally until about 1900.
+
+## Surveys
+
+### 19th century
+
+In 1802, the British began the Great Trigonometrical Survey of India to fix the locations, heights, and names of the world's highest mountains. Starting in southern India, the survey teams moved northward using giant theodolites, each weighing 500 kg (1,100 lb) and requiring 12 men to carry, to measure heights as accurately as possible. They reached the Himalayan foothills by the 1830s, but Nepal was unwilling to allow the British to enter the country due to suspicions of their intentions. Several requests by the surveyors to enter Nepal were denied.
+
+The British were forced to continue their observations from Terai, a region south of Nepal which is parallel to the Himalayas. Conditions in Terai were difficult because of torrential rains and malaria. Three survey officers died from malaria while two others had to retire because of failing health.
+
+Nonetheless, in 1847, the British continued the survey and began detailed observations of the Himalayan peaks from observation stations up to 240 km (150 mi) distant. Weather restricted work to the last three months of the year. In November 1847, Andrew Scott Waugh, the British Surveyor General of India, made several observations from the Sawajpore station at the east end of the Himalayas. Kangchenjunga was then considered the highest peak in the world, and with interest, he noted a peak beyond it, about 230 km (140 mi) away. John Armstrong, one of Waugh's subordinates, also saw the peak from a site farther west and called it peak "b". Waugh would later write that the observations indicated that peak "b" was higher than Kangchenjunga, but closer observations were required for verification. The following year, Waugh sent a survey official back to Terai to make closer observations of peak "b", but clouds thwarted his attempts.
+
+In 1849, Waugh dispatched James Nicolson to the area, who made two observations from Jirol, 190 km (120 mi) away. Nicolson then took the largest theodolite and headed east, obtaining over 30 observations from five different locations, with the closest being 174 km (108 mi) from the peak.
+
+Nicolson retreated to Patna on the Ganges to perform the necessary calculations based on his observations. His raw data gave an average height of 9,200 m (30,200 ft) for peak "b", but this did not consider light refraction, which distorts heights. However, the number clearly indicated that peak "b" was higher than Kangchenjunga. Nicolson contracted malaria and was forced to return home without finishing his calculations. Michael Hennessy, one of Waugh's assistants, had begun designating peaks based on Roman numerals, with Kangchenjunga named Peak IX. Peak "b" now became known as Peak XV.
+
+In 1852, stationed at the survey headquarters in Dehradun, Radhanath Sikdar, an Indian mathematician and surveyor from Bengal was the first to identify Everest as the world's highest peak, using trigonometric calculations based on Nicolson's measurements. An official announcement that Peak XV was the highest was delayed for several years as the calculations were repeatedly verified. Waugh began work on Nicolson's data in 1854, and along with his staff spent almost two years working on the numbers, having to deal with the problems of light refraction, barometric pressure, and temperature over the vast distances of the observations. Finally, in March 1856 he announced his findings in a letter to his deputy in Calcutta. Kangchenjunga was declared to be 8,582 m (28,156 ft), while Peak XV was given the height of 8,840 m (29,002 ft). Waugh concluded that Peak XV was "most probably the highest in the world". Peak XV (measured in feet) was calculated to be exactly 29,000 ft (8,839.2 m) high, but was publicly declared to be 29,002 ft (8,839.8 m) in order to avoid the impression that an exact height of 29,000 feet (8,839.2 m) was nothing more than a rounded estimate. Waugh is sometimes playfully credited with being "the first person to put two feet on top of Mount Everest".
+
+### 20th century
+
+In 1856, Andrew Waugh announced Everest (then known as Peak XV) as 8,840 m (29,002 ft) high, after several years of calculations based on observations made by the Great Trigonometrical Survey. From 1952 to 1954, the Survey of India, using triangulation methods, determined that the height of Everest was 8,847.73 m (29,028 ft). In 1975 it was subsequently reaffirmed by a Chinese measurement of 8,848.13 m (29,029.30 ft). In both cases the snow cap, not the rock head, was measured. The 8,848 m (29,029 ft) height given was officially recognised by Nepal and China. Nepal planned a new survey in 2019 to determine if the April 2015 Nepal earthquake affected the height of the mountain.
+
+In May 1999, an American Everest expedition directed by Bradford Washburn anchored a GPS unit into the highest bedrock. A rock head elevation of 8,850 m (29,035 ft), and a snow/ice elevation 1 m (3 ft) higher, were obtained via this device. Although as of 2001, it has not been officially recognised by Nepal, this figure is widely quoted. Geoid uncertainty casts doubt upon the accuracy claimed by both the 1999 and 2005 (see § 21st-century surveys) surveys.
+
+In 1955, a detailed photogrammetric map (at a scale of 1:50,000) of the Khumbu region, including the south side of Mount Everest, was made by Erwin Schneider as part of the 1955 International Himalayan Expedition, which also attempted Lhotse.
+
+In the late 1980s, an even more detailed topographic map of the Everest area was made under the direction of Bradford Washburn, using extensive aerial photography.
+
+### 21st century
+
+On 9 October 2005, after several months of measurement and calculation, the Chinese Academy of Sciences and State Bureau of Surveying and Mapping announced the height of Everest as 8,844.43 m (29,017.16 ft) with accuracy of ±0.21 m (8.3 in), claiming it was the most accurate and precise measurement to date. This height is based on the highest point of rock and not the snow and ice covering it. The Chinese team measured a snow-ice depth of 3.5 m (11 ft), which is in agreement with a net elevation of 8,848 m (29,029 ft). An argument arose between China and Nepal as to whether the official height should be the rock height (8,844 m, China) or the snow height (8,848 m, Nepal). In 2010, both sides agreed that the height of Everest is 8,848 m, and Nepal recognises China's claim that the rock height of Everest is 8,844 m. On 8 December 2020, it was jointly announced by the two countries that the new official height is 8,848.86 metres (29,031.7 ft).
+
+It is thought that the plate tectonics of the area are adding to the height and moving the summit northeastwards. Two accounts suggest the rates of change are 4 mm (0.16 in) per year vertically and 3 to 6 mm (0.12 to 0.24 in) per year horizontally, but another account mentions more lateral movement (27 mm or 1.1 in), and even shrinkage has been suggested.
+
+### Comparisons
+
+The summit of Everest is the point at which Earth's surface reaches the greatest distance above sea level. Several other mountains are sometimes claimed to be the "tallest mountains on Earth". Mauna Kea in Hawaii is tallest when measured from its base; it rises over 10,200 m (33,464.6 ft) from its base on the mid-ocean floor, but only attains 4,205 m (13,796 ft) above sea level.
+
+By the same measure of base to summit, Denali, in Alaska, formerly known as Mount McKinley, is taller than Everest as well. Despite its height above sea level of only 6,190 m (20,308 ft), Denali sits atop a sloping plain with elevations from 300 to 900 m (980 to 2,950 ft), yielding a height above base in the range of 5,300 to 5,900 m (17,400 to 19,400 ft); a commonly quoted figure is 5,600 m (18,400 ft). By comparison, reasonable base elevations for Everest range from 4,200 m (13,800 ft) on the south side to 5,200 m (17,100 ft) on the Tibetan Plateau, yielding a height above base in the range of 3,650 to 4,650 m (11,980 to 15,260 ft).
+
+The summit of Chimborazo in Ecuador is 2,168 m (7,113 ft) farther from Earth's centre (6,384.4 km, 3,967.1 mi) than that of Everest (6,382.3 km, 3,965.8 mi), because the Earth bulges at the equator. This is despite Chimborazo having a peak 6,268 m (20,564.3 ft) above sea level versus Mount Everest's 8,848 m (29,028.9 ft).
+
+### Context and maps
+
+Nearby peaks include Lhotse, 8,516 m (27,940 ft); Nuptse, 7,855 m (25,771 ft), and Changtse, 7,580 m (24,870 ft) among others. Another nearby peak is Khumbutse, and many of the highest mountains in the world are near Mount Everest. On the southwest side, a major feature in the lower areas is the Khumbu icefall and glacier, an obstacle to climbers on those routes but also to the base camps.
+
+## Geology
+
+Geologists have subdivided the rocks comprising Mount Everest into three units called formations. Each formation is separated from the other by low-angle faults, called detachments, along which they have been thrust southward over each other. From the summit of Mount Everest to its base these rock units are the Qomolangma Formation, the North Col Formation, and the Rongbuk Formation.
+
+The Qomolangma Formation, also known as the Jolmo Lungama Formation, runs from the summit to the top of the Yellow Band, about 8,600 m (28,200 ft) above sea level. It consists of greyish to dark grey or white, parallel laminated and bedded, Ordovician limestone interlayered with subordinate beds of recrystallised dolomite with argillaceous laminae and siltstone. Gansser first reported finding microscopic fragments of crinoids in this limestone. Later petrographic analysis of samples of the limestone from near the summit revealed them to be composed of carbonate pellets and finely fragmented remains of trilobites, crinoids, and ostracods. Other samples were so badly sheared and recrystallised that their original constituents could not be determined. A thick, white-weathering thrombolite bed that is 60 m (200 ft) thick comprises the foot of the "Third Step", and base of the summit pyramid of Everest. This bed, which crops out starting about 70 m (230 ft) below the summit of Mount Everest, consists of sediments trapped, bound, and cemented by the biofilms of micro-organisms, especially cyanobacteria, in shallow marine waters. The Qomolangma Formation is broken up by several high-angle faults that terminate at the low angle normal fault, the Qomolangma Detachment. This detachment separates it from the underlying Yellow Band. The lower five metres of the Qomolangma Formation overlying this detachment are very highly deformed.
+
+The bulk of Mount Everest, between 7,000 and 8,600 m (23,000 and 28,200 ft), consists of the North Col Formation, of which the Yellow Band forms the upper part between 8,200 to 8,600 m (26,900 to 28,200 ft). The Yellow Band consists of intercalated beds of Middle Cambrian diopside-epidote-bearing marble, which weathers a distinctive yellowish brown, and muscovite-biotite phyllite and semischist. Petrographic analysis of marble collected from about 8,300 m (27,200 ft) found it to consist as much as five per cent of the ghosts of recrystallised crinoid ossicles. The upper five metres of the Yellow Band lying adjacent to the Qomolangma Detachment is badly deformed. A 5–40 cm (2.0–15.7 in) thick fault breccia separates it from the overlying Qomolangma Formation.
+
+The remainder of the North Col Formation, exposed between 7,000 to 8,200 m (23,000 to 26,900 ft) on Mount Everest, consists of interlayered and deformed schist, phyllite, and minor marble. Between 7,600 and 8,200 m (24,900 and 26,900 ft), the North Col Formation consists chiefly of biotite-quartz phyllite and chlorite-biotite phyllite intercalated with minor amounts of biotite-sericite-quartz schist. Between 7,000 and 7,600 m (23,000 and 24,900 ft), the lower part of the North Col Formation consists of biotite-quartz schist intercalated with epidote-quartz schist, biotite-calcite-quartz schist, and thin layers of quartzose marble. These metamorphic rocks appear to be the result of the metamorphism of Middle to Early Cambrian deep sea flysch composed of interbedded, mudstone, shale, clayey sandstone, calcareous sandstone, graywacke, and sandy limestone. The base of the North Col Formation is a regional low-angle normal fault called the "Lhotse detachment".
+
+Below 7,000 m (23,000 ft), the Rongbuk Formation underlies the North Col Formation and forms the base of Mount Everest. It consists of sillimanite-K-feldspar grade schist and gneiss intruded by numerous sills and dikes of leucogranite ranging in thickness from 1 cm to 1,500 m (0.4 in to 4,900 ft). These leucogranites are part of a belt of Late Oligocene–Miocene intrusive rocks known as the Higher Himalayan leucogranite. They formed as the result of partial melting of Paleoproterozoic to Ordovician high-grade metasedimentary rocks of the Higher Himalayan Sequence about 20 to 24 million years ago during the subduction of the Indian Plate.
+
+Mount Everest consists of sedimentary and metamorphic rocks that have been faulted southward over continental crust composed of Archean granulites of the Indian Plate during the Cenozoic collision of India with Asia. Current interpretations argue that the Qomolangma and North Col formations consist of marine sediments that accumulated within the continental shelf of the northern passive continental margin of India before it collided with Asia. The Cenozoic collision of India with Asia subsequently deformed and metamorphosed these strata as it thrust them southward and upward. The Rongbuk Formation consists of a sequence of high-grade metamorphic and granitic rocks that were derived from the alteration of high-grade metasedimentary rocks. During the collision of India with Asia, these rocks were thrust downward and to the north as they were overridden by other strata; heated, metamorphosed, and partially melted at depths of over 15 to 20 kilometres (9.3 to 12.4 mi) below sea level; and then forced upward to surface by thrusting towards the south between two major detachments. The Himalayas are rising by about 5 mm per year.
+
+### IUGS geological heritage site
+
+In respect of the recognition of the "highest rocks on the planet" as fossiliferous, marine limestone, the Ordovician Rocks of Mount Everest were included by the International Union of Geological Sciences (IUGS) in its assemblage of 100 geological heritage sites around the world in a listing published in October 2022. The organisation defines an IUGS Geological Heritage Site as "a key place with geological elements and/or processes of international scientific relevance, used as a reference, and/or with a substantial contribution to the development of geological sciences through history."
+
+## Flora and fauna
+
+There is very little native flora or fauna on Everest. A type of moss grows at 6,480 metres (21,260 ft) on Mount Everest and it may be the highest altitude plant species. An alpine cushion plant called Arenaria is known to grow below 5,500 metres (18,000 ft) in the region. According to the study based on satellite data from 1993 to 2018, vegetation is expanding in the Everest region. Researchers have found plants in areas that were previously deemed bare.
+
+A minute black jumping spider of the genus Euophrys has been found at elevations as high as 6,700 metres (22,000 ft), possibly making it the highest confirmed non-microscopic permanent resident on Earth. Another Euophrys species, E. everestensis, has been found at 5,030 metres (16,500 ft), and may feed on insects that have been blown there by the wind. There is a high likelihood of microscopic life at even higher altitudes.
+
+The bar-headed goose migrates over the Himalayas and have been seen flying at the higher altitudes of the mountain. In 1953, George Lowe (part of the expedition of Tenzing and Hillary) said that he saw bar-headed geese flying over Everest's summit. Another bird species, the chough, have been spotted as high as the South Col at 7,920 metres (25,980 ft) and yellow-billed choughs have been seen as high as 7,900 metres (26,000 ft).
+
+Yaks are often used to haul gear for Mount Everest climbs. They can haul around 100 kg (220 pounds), have thick fur and large lungs. Other animals in the region include the Himalayan tahr, which is sometimes the prey of the snow leopard. The Himalayan black bear can be found up to about 4,300 metres (14,000 ft) and the red panda is also present in the region. One expedition found a surprising range of species in the region including a pika and ten new species of ants.
+
+## Climate
+
+Mount Everest has an ice cap climate (Köppen EF) with all months averaging well below freezing.
+
+Climate data for Mount Everest :
+
+| Month | Jan | Feb | Mar | Apr | May | Jun | Jul | Aug | Sep | Oct | Nov | Dec | Year |
+| - | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| Mean minimum °C (°F) | −36 (−33) | −35 (−31) | −32 (−26) | −31 (−24) | −25 (−13) | −20 (−4) | −18 (0) | −18 (0) | −21 (−6) | −27 (−17) | −30 (−22) | −34 (−29) | −36 (−33) |
+| Source: ||||||||||||||
+
+### Climate change
+
+The base camp for Everest expeditions based out of Nepal is located by Khumbu Glacier, which is rapidly thinning and destabilizing due to climate change, making it unsafe for climbers. As recommended by the committee formed by Nepal's government to facilitate and monitor mountaineering in the Everest region, Taranath Adhikari—the director general of Nepal's tourism department—said they have plans to move the base camp to a lower altitude. This would mean a longer distance for climbers between the base camp and Camp 1. However, the present base camp is still useful and could still serve its purpose for three to four years. The move may happen by 2024, per officials.
+
+### Meteorology
+
+| Atmospheric pressure comparison | Pressure | Pressure | Reference |
+| - | - | - | - |
+| Atmospheric pressure comparison | kilopascal | psi | Reference |
+| Olympus Mons summit | 0.03 | 0.0044 | – |
+| Mars average | 0.6 | 0.087 | – |
+| Hellas Planitia bottom | 1.16 | 0.168 | – |
+| Armstrong limit | 6.25 | 0.906 | – |
+| Mount Everest summit | 33.7 | 4.89 | |
+| Earth sea level | 101.3 | 14.69 | – |
+| Dead Sea level | 106.7 | 15.48 | |
+| Surface of Venus | 9,200 | 1,330 | |
+
+In 2008, a new weather station at about 8,000 m (26,000 ft) elevation went online. The project was orchestrated by Stations at High Altitude for Research on the Environment (SHARE), which also placed the Mount Everest webcam in 2011. The solar-powered weather station is on the South Col.
+
+Mount Everest extends into the upper troposphere and penetrates the stratosphere. The air pressure at the summit is generally about one-third what it is at sea level. The altitude can expose the summit to the fast and freezing winds of the jet stream. Winds commonly attain 160 km/h (100 mph); in February 2004, a wind speed of 280 km/h (175 mph) was recorded at the summit.
+
+These winds can hamper or endanger climbers, by blowing them into chasms or (by Bernoulli's principle) by lowering the air pressure further, reducing available oxygen by up to 14 per cent. To avoid the harshest winds, climbers typically aim for a 7- to 10-day window in the spring and fall when the Asian monsoon season is starting up or ending.
+
+## Expeditions
+
+Because Mount Everest is the highest mountain in the world, it has attracted considerable attention and climbing attempts. Whether the mountain was climbed in ancient times is unknown. It may have been climbed in 1924, although this has never been confirmed, as neither of the men making the attempt returned. Several climbing routes have been established over several decades of climbing expeditions to the mountain.
+
+Everest's summit is first known to have been reached by a human in 1953, and interest from climbers increased thereafter. Despite the effort and attention poured into expeditions, only about 200 people had summited by 1987. Everest remained a difficult climb for decades, even for serious attempts by professional climbers and large national expeditions, which were the norm until the commercial era began in the 1990s. By March 2012, Everest had been climbed 5,656 times with 223 deaths. By 2013, The Himalayan Database recorded 6,871 summits by 4,042 different people.
+
+Although lower mountains have longer or steeper climbs, Everest is so high the jet stream can hit it. Climbers can be faced with winds beyond 320 km/h (200 mph) when the weather shifts. At certain times of the year the jet stream shifts north, providing periods of relative calm at the mountain. Other dangers include blizzards and avalanches.
+
+### Early attempts
+
+In 1885, Clinton Thomas Dent, president of the Alpine Club, suggested that climbing Mount Everest was possible in his book Above the Snow Line.
+
+The northern approach to the mountain was discovered by George Mallory and Guy Bullock on the initial 1921 British Reconnaissance Expedition. It was an exploratory expedition not equipped for a serious attempt to climb the mountain. With Mallory leading (and thus becoming the first European to set foot on Everest's flanks) they climbed the North Col to an altitude of 7,005 metres (22,982 ft). From there, Mallory espied a route to the top, but the party was unprepared to climb any further and descended.
+
+The British returned for a 1922 expedition. George Finch climbed using oxygen for the first time. He ascended at a remarkable speed—290 metres (951 ft) per hour—and reached an altitude of 8,320 m (27,300 ft), the first time a human reported to climb higher than 8,000 m. Mallory and Col. Felix Norton made a second unsuccessful attempt.
+
+The next expedition was in 1924. The initial attempt by Mallory and Geoffrey Bruce was aborted when weather conditions prevented the establishment of Camp VI. The next attempt was that of Norton and Somervell, who climbed without oxygen and in perfect weather, traversing the North Face into the Great Couloir. Norton managed to reach 8,550 m (28,050 ft), though he ascended only 30 m (98 ft) or so in the last hour. Mallory rustled up oxygen equipment for a last-ditch effort. He chose young Andrew Irvine as his partner.
+
+On 8 June 1924, George Mallory and Andrew Irvine made an attempt on the summit via the North Col-North Ridge-Northeast Ridge route from which they never returned. On 1 May 1999, the Mallory and Irvine Research Expedition found Mallory's body on the North Face in a snow basin below and to the west of the traditional site of Camp VI. Controversy has raged in the mountaineering community whether one or both of them reached the summit 29 years before the confirmed ascent and safe descent of Everest by Sir Edmund Hillary and Tenzing Norgay in 1953.
+
+In 1933, Lady Houston, a British millionairess, funded the Houston Everest Flight of 1933, which saw a formation of two aeroplanes led by the Marquess of Clydesdale fly over the Everest summit.
+
+Early expeditions—such as Charles Bruce's in the 1920s and Hugh Ruttledge's two unsuccessful attempts in 1933 and 1936—tried to ascend the mountain from Tibet, via the North Face. Access was closed from the north to Western expeditions in 1950 after China took control of Tibet. In 1950, Bill Tilman and a small party which included Charles Houston, Oscar Houston, and Betsy Cowles undertook an exploratory expedition to Everest through Nepal along the route which has now become the standard approach to Everest from the south.
+
+The 1952 Swiss Mount Everest Expedition, led by Edouard Wyss-Dunant, was granted permission to attempt a climb from Nepal. It established a route through the Khumbu icefall and ascended to the South Col at an elevation of 7,986 m (26,201 ft). Raymond Lambert and Sherpa Tenzing Norgay were able to reach an elevation of about 8,595 m (28,199 ft) on the southeast ridge, setting a new climbing altitude record. Tenzing's experience was useful when he was hired to be part of the British expedition in 1953. The Swiss decided to make another post-monsoon attempt in the autumn; they made it to the South Col but were driven back by winter winds and severe cold.
+
+### First successful ascent by Tenzing and Hillary, 1953
+
+In 1953, a ninth British expedition, led by John Hunt, returned to Nepal. Hunt selected two climbing pairs to attempt to reach the summit. The first pair, Tom Bourdillon and Charles Evans, came within 100 m (330 ft) of the summit on 26 May 1953, but turned back after running into oxygen problems. As planned, their work in route finding and breaking trail and their oxygen caches were of great aid to the following pair. Two days later, the expedition made its second assault on the summit with the second climbing pair: the New Zealander Edmund Hillary and Tenzing Norgay, a Nepali Sherpa climber. They reached the summit at 11:30 am local time on 29 May 1953 via the South Col route. At the time, both acknowledged it as a team effort by the whole expedition, but Tenzing revealed a few years later that Hillary had put his foot on the summit first. They paused at the summit to take photographs and buried a few sweets and a small cross in the snow before descending.
+
+### 1950s–1960s
+
+On 23 May 1956, Ernst Schmied and Juerg Marmet ascended. This was followed by Dölf Reist and Hans-Rudolf von Gunten on 24 May 1957. Wang Fuzhou, Gonpo and Qu Yinhua of China made the first reported ascent of the peak from the North Ridge on 25 May 1960. The first American to climb Everest, Jim Whittaker, joined by Nawang Gombu, reached the summit on 1 May 1963.
+
+### 1970s
+
+In 1970, Japanese mountaineers conducted a major expedition. The centrepiece was a large "siege"-style expedition led by Saburo Matsukata, working on finding a new route up the southwest face. Another element of the expedition was an attempt to ski Mount Everest. Despite a staff of over one hundred people and a decade of planning work, the expedition suffered eight deaths and failed to summit via the planned routes. However, Japanese expeditions did enjoy some successes. For example, Yuichiro Miura became the first man to ski down Everest from the South Col—he descended nearly 1,300 vertical metres (4,200 ft) from the South Col before falling with extreme injuries. Another success was an expedition that put four on the summit via the South Col route. Miura's exploits became the subject of film, and he went on to become the oldest person to summit Mount Everest in 2003 at age 70 and again in 2013 at the age of 80.
+
+In 1975, Junko Tabei became the first woman to summit Mount Everest.
+
+The 1975 British Mount Everest Southwest Face expedition led and organised by Chris Bonington made the first ascent of the south west face of Everest from the western cwm.
+
+The 1976 British and Nepalese Army Expedition to Everest led by Tony Streather put Bronco Lane and Brummy Stokes on the summit by the normal route.
+
+In 1978, Reinhold Messner and Peter Habeler made the first ascent of Everest without supplemental oxygen.
+
+### 1979/1980: Winter Himalaism
+
+The Polish climber Andrzej Zawada headed the first winter ascent of Mount Everest, the first winter ascent of an eight-thousander. The team of 20 Polish climbers and 4 Sherpas established a base camp on Khumbu Glacier in early January 1980. On 15 January, the team managed to set up Camp III at 7150 metres above sea level, but further action was stopped by hurricane-force winds. The weather improved after 11 February, when Leszek Cichy, Walenty Fiut and Krzysztof Wielicki set up camp IV on South Col (7906 m). Cichy and Wielicki started the final ascent at 6:50 am on 17 February. At 2:40 pm Andrzej Zawada at base camp heard the climbers' voices over the radio – "We are on the summit! The strong wind blows all the time. It is unimaginably cold." The successful winter ascent of Mount Everest started a new decade of Winter Himalaism, which became a Polish specialisation. After 1980 Poles did ten first winter ascents on 8000 metre peaks, which earned Polish climbers a reputation of "Ice Warriors".
+
+### Lho La tragedy, 1989
+
+In May 1989, Polish climbers under the leadership of Eugeniusz Chrobak organised an international expedition to Mount Everest on a difficult western ridge. Ten Poles and nine foreigners participated, but ultimately only the Poles remained in the attempt for the summit. On 24 May, Chrobak and Andrzej Marciniak, starting from camp V at 8,200 m, overcame the ridge and reached the summit. But on 27 May, during an avalanche from the side of Khumbutse near the Lho La pass, four Polish climbers were killed: Mirosław Dąsal, Mirosław Gardzielewski, Zygmunt Andrzej Heinrich and Wacław Otręba. The following day, due to his injuries, Chrobak also died. Marciniak, who was also injured, was saved by a rescue expedition in which Artur Hajzer and New Zealanders Gary Ball and Rob Hall took part. In the organisation of the rescue expedition they took part, inter alia Reinhold Messner, Elizabeth Hawley, Carlos Carsolio and the US consul.
+
+### 1996 disaster
+
+On 10 and 11 May 1996, eight climbers died after several guided expeditions were caught in a blizzard high up on the mountain during a summit attempt on 10 May. During the 1996 season, 15 people died while climbing on Mount Everest. These were the highest death tolls for a single weather event, and for a single season, until the sixteen deaths in the 2014 Mount Everest avalanche. The guiding disaster gained wide publicity and raised questions about the commercialisation of climbing and the safety of guiding clients on Mount Everest.
+
+Journalist Jon Krakauer, on assignment from Outside magazine, was in one of the affected guided parties, and afterward published the bestseller Into Thin Air, which related his experience. Krakauer was critical of guide Anatoli Boukreev in his recollection of the expedition. A year later, Boukreev co-authored The Climb, in part as a rebuttal of Krakauer's portrayal. The dispute sparked a debate within the climbing community. Boukreev was later awarded The American Alpine Club's David Sowles Award for his rescue efforts on the expedition.
+
+In May 2004, physicist Kent Moore and surgeon John L. Semple, both researchers from the University of Toronto, told New Scientist magazine that an analysis of weather conditions on 11 May suggested that weather caused oxygen levels to plunge about 14 per cent.
+
+One of the survivors was Beck Weathers, left for dead about 275 metres (900 feet) from Camp 4 at 7,950 metres (26,085 feet). After spending a night on the mountain, Weathers managed to make it back to Camp 4 with massive frostbite and vision impaired due to snow blindness. When he arrived at Camp 4, fellow climbers considered his condition terminal and left him in a tent to die overnight. Weathers was lowered to Camp 2 and eventually a helicopter rescue was organised thanks to the Nepali Army.
+
+The storm's impact on climbers on the North Ridge of Everest, where several climbers also died, was detailed in a first-hand account by British filmmaker and writer Matt Dickinson in his book The Other Side of Everest. Sixteen-year-old Mark Pfetzer was on the climb and wrote about it in his account, Within Reach: My Everest Story.
+
+The 2015 feature film Everest, directed by Baltasar Kormákur, is based on the events of this guiding disaster.
+
+### 2006 mountaineering season
+
+2006 fatalities :
+
+| Deaths | Nation |
+| - | - |
+| Tuk Bahadur Thapa Masa | Nepal |
+| Igor Plyushkin | Russia |
+| Vitor Negrete | Brazil |
+| David Sharp | United Kingdom |
+| Thomas Weber | Germany |
+| Tomas Olsson | Sweden |
+| Jacques-Hugues Letrange | France |
+| Ang Phinjo | Nepal |
+| *Pavel Kalny | Czech Republic |
+| Lhakpa Tseri | Nepal |
+| Dawa Temba | Nepal |
+| Sri Kishan | India |
+| *Lhotse face fatality ||
+
+In 2006, 12 people died. One death in particular (see below) triggered an international debate and years of discussion about climbing ethics. The season was also remembered for the rescue of Lincoln Hall who had been left by his climbing team and declared dead, but was later discovered alive and survived being helped off the mountain.
+
+**David Sharp ethics controversy, 2006**
+
+There was an international controversy about the death of a solo British climber David Sharp, who attempted to climb Mount Everest in 2006 but died in his attempt. The story broke out of the mountaineering community into popular media, with a series of interviews, allegations, and critiques. The question was whether climbers that season had left a man to die and whether he could have been saved. He was said to have attempted to summit Mount Everest by himself with no Sherpa or guide and fewer oxygen bottles than considered normal. He went with a low-budget Nepali guide firm that only provides support up to Base Camp, after which climbers go as a "loose group", offering a high degree of independence. The manager at Sharp's guide support said Sharp did not take enough oxygen for his summit attempt and did not have a Sherpa guide. It is less clear who knew Sharp was in trouble, and if they did know, whether they were qualified or capable of helping him.
+
+Double-amputee climber Mark Inglis said in an interview that his climbing party, and many others, had passed Sharp, on 15 May, sheltering under a rock overhang 450 metres (1,480 ft) below the summit, without attempting a rescue. Inglis said 40 people had passed by Sharp, but he might have been overlooked as climbers assumed Sharp was the corpse nicknamed "Green Boots", but Inglis was not aware that Turkish climbers had tried to help Sharp despite being in the process of helping an injured woman down (a Turkish woman, Burçak Poçan). There has also been some discussion about Himex in the commentary on Inglis and Sharp. In regards to Inglis's initial comments, he later revised certain details because he had been interviewed while he was "physically and mentally exhausted, and in a lot of pain. He had suffered severe frostbite – he later had five fingertips amputated." It was estimated on 14 May that Sharp summited Mount Everest and began his descent down, but 15 May he was in trouble but being passed by climbers on their way up and down. On 15 May 2006 it is believed he was suffering from hypoxia and was about 300 m (1,000 ft) from the summit on the North Side route.
+
+   Dawa from Arun Treks also gave oxygen to David and tried to help him move, repeatedly, for perhaps an hour. But he could not get David to stand alone or even stand to rest on his shoulders, and crying, Dawa had to leave him too. Even with two Sherpas, it was not going to be possible to get David down the tricky sections below.
+
+The Tribune of Chandigarh, India quoted someone who described what happened to Sharp as "the most shameful act in the history of mountaineering". In addition to Sharp's death, at least nine other climbers perished that year, including multiple Sherpas working for various guiding companies.
+
+Much of this controversy was captured by the Discovery Channel while filming the television program Everest: Beyond the Limit. A crucial decision affecting the fate of Sharp is shown in the program, where an early returning climber, Lebanese adventurer Maxim Chaya, is descending from the summit and radios to his base camp manager (Russell Brice) that he has found a frostbitten and unconscious climber in distress. Chaya is unable to identify Sharp, who had chosen to climb solo without any support and so did not identify himself to other climbers. The base camp manager assumes that Sharp is part of a group that has already calculated that they must abandon him, and informs his lone climber that there is no chance of him being able to help Sharp by himself. As Sharp's condition deteriorates through the day and other descending climbers pass him, his opportunities for rescue diminish: his legs and feet curl from frostbite, preventing him from walking; the later descending climbers are lower on oxygen and lack the strength to offer aid; time runs out for any Sherpas to return and rescue him.
+
+David Sharp's body remained just below the summit on the Chinese side next to "Green Boots"; they shared a space in a small rock cave that was an ad hoc tomb for them. Sharp's body was removed from the cave in 2007, according to the BBC, and since 2014, Green Boots has been missing, presumably removed or buried.
+
+**Lincoln Hall rescue, 2006**
+
+As the Sharp debate kicked off on 26 May 2006, Australian climber Lincoln Hall was found alive after being left for dead the day before. He was found by a party of four climbers (Dan Mazur, Andrew Brash, Myles Osborne and Jangbu Sherpa) who, giving up their own summit attempt, stayed with Hall and descended with him and a party of 11 Sherpas sent up to carry him down. Hall later fully recovered. His team assumed he had died from cerebral edema, and they were instructed to cover him with rocks. There were no rocks around to do this and he was abandoned. The erroneous information of his death was passed on to his family. The next day he was discovered alive by another party.
+
+### 2007
+
+On 21 May 2007, Canadian climber Meagan McGrath initiated the successful high-altitude rescue of Nepali Usha Bista. Major McGrath was selected as a 2011 recipient of the Sir Edmund Hillary Foundation of Canada Humanitarian Award, which recognises a Canadian who has personally or administratively contributed a significant service or act in the Himalayan Region of Nepal.
+
+### Ascent statistics up to 2010 season
+
+By the end of the 2010 climbing season, there had been 5,104 ascents to the summit by about 3,142 individuals, with 77 per cent of these ascents being accomplished since 2000. The summit was achieved in 7 of the 22 years from 1953 to 1974 and was not missed between 1975 and 2014. In 2007, the record number of 633 ascents was recorded, by 350 climbers and 253 sherpas.
+
+An illustration of the explosion of popularity of Everest is provided by the numbers of daily ascents. Analysis of the 1996 Mount Everest disaster shows that part of the blame was on the bottleneck caused by a large number of climbers (33 to 36) attempting to summit on the same day; this was considered unusually high at the time. By comparison, on 23 May 2010, the summit of Mount Everest was reached by 169 climbers – more summits in a single day than in the cumulative 31 years from the first successful summit in 1953 through 1983.
+
+There have been 219 fatalities recorded on Mount Everest from the 1922 British Mount Everest Expedition through the end of 2010, a rate of 4.3 fatalities for every 100 summits (this is a general rate, and includes fatalities amongst support climbers, those who turned back before the peak, those who died en route to the peak and those who died while descending from the peak). Of the 219 fatalities, 58 (26.5 per cent) were climbers who had summited but did not complete their descent. Though the rate of fatalities has decreased since the year 2000 (1.4 fatalities for every 100 summits, with 3938 summits since 2000), the significant increase in the total number of climbers still means 54 fatalities since 2000: 33 on the northeast ridge, 17 on the southeast ridge, 2 on the southwest face, and 2 on the north face.
+
+Nearly all attempts at the summit are done using one of the two main routes. The traffic seen by each route varies from year to year. In 2005–07, more than half of all climbers elected to use the more challenging, but cheaper northeast route. In 2008, the northeast route was closed by the Chinese government for the entire climbing season, and the only people able to reach the summit from the north that year were athletes responsible for carrying the Olympic torch for the 2008 Summer Olympics. The route was closed to foreigners once again in 2009 in the run-up to the 50th anniversary of the Dalai Lama's exile. These closures led to declining interest in the north route, and, in 2010, two-thirds of the climbers reached the summit from the south.
+
+### 2010s
+
+The 2010s were a time of new highs and lows for the mountain, with back-to-back disasters in 2013 and 2014 causing record deaths. In 2015 there were no summits for the first time in decades. However, other years set records for numbers of summits – 2013's record number of summiters, around 667, was surpassed in 2018 with around 800 summiting the peak, and a subsequent record was set in 2019 with over 890 summiters.
+
+Years in review summary :
+
+| Year | Summiters |
+| - | - |
+| 2010 | 543 |
+| 2011 | 538 |
+| 2012 | 547 |
+| 2013 | 658–670 |
+| 2014 | 106 |
+| 2015 | 0 |
+| 2016 | 641 |
+| 2017 | 648 |
+| 2018 | 807 |
+| 2019 | approx. 891 |
+
+### 2014 avalanche and season
+
+On 18 April 2014, an avalanche hit the area just below Base Camp 2. Sixteen people were killed (all Nepali guides) and nine more were injured. In response to the tragedy, numerous Sherpa climbing guides walked off the job and most climbing companies pulled out in respect for the Sherpa people mourning the loss.
+
+During the season, 13-year-old Malavath Purna reached the summit, becoming the youngest female climber to do so. One team used a helicopter to fly from South base camp to Camp 2 to avoid the Khumbu Icefall, then reached the Everest summit. This team had to use the south side because the Chinese had denied them a permit to climb. A team member (Jing Wang) donated US$30,000 to a local hospital. She was named the Nepali "International Mountaineer of the Year".
+
+Over 100 people summited Everest from China (Tibet region), and six from Nepal in the 2014 season. This included 72-year-old Bill Burke, the Indian teenage girl, and a Chinese woman Jing Wang. Another teen girl summiter was Ming Kipa Sherpa who summited with her elder sister Lhakpa Sherpa in 2003, and who had achieved the most times for woman to the summit of Mount Everest at that time. (see also Santosh Yadav)
+
+### 2015 avalanche, earthquake, season
+
+2015 was set to be a record-breaking season of climbs, with hundreds of permits issued in Nepal and many additional permits in Tibet (China). However, on 25 April 2015, an earthquake measuring 7.8 $M_w$ triggered an avalanche that hit Everest Base Camp, effectively shutting down the Everest climbing season. 18 bodies were recovered from Mount Everest by the Indian Army mountaineering team. The avalanche began on Pumori, moved through the Khumbu Icefall on the southwest side of Mount Everest, and slammed into the South Base Camp. 2015 was the first time since 1974 with no spring summits, as all climbing teams pulled out after the quakes and avalanche. One of the reasons for this was the high probability of aftershocks (over 50 per cent according to the United States Geological Survey). Just weeks after the first quake, the region was rattled again by a 7.3 magnitude quake and there were also many considerable aftershocks.
+
+The quakes trapped hundreds of climbers above the Khumbu icefall, and they had to be evacuated by helicopter as they ran low on supplies. The quake shifted the route through the ice fall, making it essentially impassable to climbers. Bad weather also made helicopter evacuation difficult. The Everest tragedy was small compared to the impact overall on Nepal, with almost nine thousand dead and about 22,000 injured. In Tibet, by 28 April at least 25 had died, and 117 were injured. By 29 April 2015, the Tibet Mountaineering Association (North/Chinese side) closed Everest and other peaks to climbing, stranding 25 teams and about 300 people on the north side of Everest. On the south side, helicopters evacuated 180 people trapped at Camps 1 and 2.
+
+On 24 August 2015, Nepal re-opened Everest to tourism including mountain climbers. The only climber permit for the autumn season was awarded to Japanese climber Nobukazu Kuriki, who had tried four times previously to summit Everest without success. He made his fifth attempt in October, but had to give up just 700 m (2,300 ft) from the summit due to "strong winds and deep snow".
+
+Some sections of the trail from Lukla to Everest Base Camp (Nepal) were damaged in the earthquakes earlier in the year and needed repairs to handle trekkers.
+
+### 2016 season
+
+Hawley's database records 641 made it to the summit in early 2016.
+
+### 2017 season
+
+2017 was the biggest season yet, permit-wise, yielding hundreds of summiters and a handful of deaths. On 27 May 2017, Kami Rita made his 21st climb to the summit with the Alpine Ascents Everest Expedition, one of three people in the World along with Apa Sherpa and Phurba Tashi Sherpa to make it to the summit of Mount Everest 21 times. The season had a tragic start with the death of Ueli Steck of Switzerland, who died from a fall during a warm-up climb. There was a continued discussion about the nature of possible changes to the Hillary Step. Total summiters for 2017 was tallied up to be 648. 449 summited via Nepal (from the South) and 120 from Chinese Tibet (North side).
+
+### 2018
+
+807 climbers summited Mount Everest in 2018, including 563 on the Nepal side and 240 from the Chinese Tibet side. This broke the previous record for total summits in year from which was 667 in 2013, and one factor that aided in this was an especially long and clear weather window of 11 days during the critical spring climbing season. Various records were broken, including a summit by double-amputee Xia Boyu, who undertook his climb after winning a court case in the Nepali Supreme Court. There were no major disasters, but seven climbers died in various situations including several sherpas as well as international climbers. Although record numbers of climbers reached the summit, old-time summiters that made expeditions in the 1980s lamented the crowding, feces, and cost.
+
+Figures for the number of permits issued by Nepal range from 347 to 375.
+
+### 2019
+
+2019 fatalities :
+
+| Fatalities | Nationality |
+| - | - |
+| Chris Daly | United States |
+| Donald Cash | United States |
+| Robin Fisher | United Kingdom |
+| Druba Bista | Nepal |
+| Kevin Hynes | Ireland |
+| Kalpana Dash | India |
+| Anjali S. Kulkarni | India |
+| Ernst Landgraf | Austria |
+| Nihal Bagwan | India |
+| Ravi Thakar | India |
+| Chris Kulish | United States |
+| Séamus Lawless* | Ireland |
+| *Declared dead after missing ||
+
+The spring or pre-monsoon window for 2019 witnessed the deaths of a number of climbers and worldwide publication of images of hundreds of mountaineers queuing to reach the summit and sensational media reports of climbers stepping over dead bodies dismayed people around the world.
+
+There were reports of various winter expeditions in the Himalayas, including K2, Nanga Parbat, and Meru with the buzz for the Everest 2019 beginning just 14 weeks to the weather window. Noted climber Cory Richards announced on Twitter that he was hoping to establish a new climbing route to the summit in 2019. Also announced was an expedition to re-measure the height of Everest, particularly in light of the 2015 earthquakes. China closed the base-camp to those without climbing permits in February 2019 on the northern side of Mount Everest. By early April, climbing teams from around the world were arriving for the 2019 spring climbing season. Among the teams was a scientific expedition with a planned study of pollution, and how things like snow and vegetation influence the availability of food and water in the region. In the 2019 spring mountaineering season, there were roughly 40 teams with almost 400 climbers and several hundred guides attempting to summit on the Nepali side. Nepal issued 381 climbing permits for 2019. For the northern routes in Chinese Tibet, several hundred more permits were issued for climbing by authorities there.
+
+In May 2019, Nepali mountaineering guide Kami Rita summited Mount Everest twice within a week, his 23rd and 24th ascents, making international news headlines. He first summited Everest in 1994, and has summited several other extremely high mountains, such as K2 and Lhotse.
+
+By 23 May 2019, about seven people had died, possibly due to crowding leading to delays high on the mountain, and shorter weather windows. One 19-year-old who summited previously noted that when the weather window opens, long lines form as everyone rushes to get the top and back down. In Chinese Tibet, one Austrian climber died from a fall, and by 26 May 2019 the overall number of deaths for the spring climbing season rose to 10. By 28 May, the death toll increased to 11 when a climber died at about 7,900 m (26,000 ft) during the descent, and a 12th climber missing and presumed dead. Despite the number of deaths, reports indicated that a record 891 climbers summited in the spring 2019 climbing season.
+
+Although China has had various permit restrictions, and Nepal requires a doctor to sign off on climbing permits, the natural dangers of climbing such as falls and avalanches combined with medical issues aggravated by Everest's extreme altitude led to 2019 being a year with a comparatively high death toll.
+
+### 2020s
+
+Both Nepal and China prohibited foreign climbing groups during the 2020 season, due to the COVID-19 pandemic. 2020 was the third year in this decade after 2014 and 2015 which saw no summits from the Nepal (South) Side.
+
+A team of Chinese surveyors climbed Mt. Everest from the North side during April–May 2020, becoming the only climbers to summit the world's highest peak during the pandemic, at least through May. The team was there to re-measure the height of Mount Everest.
+
+On 12 May 2022, the first all-Black team summited Mt. Everest. Seven men and two women climbers from the U.S. and Kenya, guided by eight sherpas, comprised the expedition.
+
+## Climbing
+
+Typical Nepal Camp Altitudes :
+
+| Location | Altitude (km) | Altitude (km) |
+| - | - | - |
+| Base camp 5400 m / 17700 ft. | 5.4 | 5.4 |
+| Camp 1 6100 m / 20000 ft. | 6.1 | 6.1 |
+| Camp 2 6400 m / 21000 ft. | 6.4 | 6.4 |
+| Camp 3 6800m / 22300 ft. | 6.8 | 6.8 |
+| Camp 4 8000 m / 26000 ft. | 8.0 | 8 |
+| Summit 8848 m / 29035 ft. | 8.8 | 8.8 |
+
+### Permits
+
+In 2014, Nepal issued 334 climbing permits, which were extended until 2019 due to the closure. In 2015, Nepal issued 357 permits, but the mountain was closed again because of the avalanche and earthquake, and these permits were given a two-year extension to 2017.
+
+In 2017, a person who tried to climb Everest without the $11,000 permit was caught after he made it past the Khumbu icefall. He faced, among other penalties, a $22,000 fine and a possible four years in jail. In the end, he was allowed to return home but banned from mountaineering in Nepal for 10 years.
+
+The number of permits issued each year by Nepal is:
+
+* 2008: 160
+* 2009: 220
+* 2010: 209
+* 2011: 225
+* 2012: 208
+* 2013: 316
+* 2014: 326 (extended for use through 2019)
+* 2015: 356 (extended for use through 2017)
+* 2016: 289
+* 2017: 366 to 373
+* 2018: 346
+* 2019: 381
+* 2020: 0 (no permits issued during the pandemic)
+* 2021: 408 (current record)
+
+The Chinese side in Tibet is also managed with permits for summiting Everest. They did not issue permits in 2008, due to the Olympic torch relay being taken to the summit of Mount Everest.
+
+In March 2020, the governments of China and Nepal cancelled all climbing permits for Mount Everest due to the COVID-19 pandemic. In April 2020, a group of Chinese mountaineers began an expedition from the Chinese side. The mountain remained closed on the Chinese side to all foreign climbers. On 10 May 2021, a separation line was announced by Chinese authorities to prevent the spread of coronavirus from climbers ascending Nepal's side.
+
+### Commercial climbing
+
+According to Jon Krakauer, the era of commercialisation of Everest started in 1985, when the summit was reached by a guided expedition led by David Breashears that included Richard Bass, a wealthy 55-year-old businessman and an amateur mountain climber with only four years of climbing experience. By the early-1990s, several companies were offering guided tours to the mountain. Rob Hall, one of the mountaineers who died in the 1996 disaster, had successfully guided 39 clients to the summit before that $incident.^{:24,42}$
+
+By 2016, most guiding services cost between US$35,000 and US$200,000. Going with a "celebrity guide", usually a well-known mountaineer typically with decades of climbing experience and perhaps several Everest summits, can cost over £100,000 as of 2015. However, the services offered vary widely and it is "buyer beware" when doing deals in Nepal, one of the poorest and least developed countries in the world. Tourism contributed 7.9 per cent of the gross domestic product (GDP) in 2019 in a country with high unemployment, but an Everest porter can make nearly double the nation's average wage in a region in which other sources of income are lacking.
+
+Costs beyond the guiding service can vary widely. It is technically possible to reach the summit with minimal additional expenses, and there are "budget" travel agencies that offer logistical support for such trips. A limited support service, offering only some meals at base camp and bureaucratic overhead like a permit, can cost as little as US$7,000 as of 2007. However, this is considered difficult and dangerous (as illustrated by the case of David Sharp).
+
+Climbing gear required to reach the summit may cost in excess of US$8,000, and most climbers also use bottled oxygen, which adds around US$3,000. The permit to enter the Everest area from the south via Nepal costs US$10,000 to US$30,000 per person, depending on the size of the team. The ascent typically starts at one of the two base camps near the mountain, both of which are approximately 100 kilometres (60 mi) from Kathmandu and 300 kilometres (190 mi) from Lhasa (the two nearest cities with major airports). Transferring one's equipment from the airport to the base camp may add as much as US$2,000.
+
+Many climbers hire "full service" guide companies, which provide a wide spectrum of services, including the acquisition of permits, transportation to/from base camp, food, tents, fixed ropes, medical assistance while on the mountain, an experienced mountaineer guide, and even personal porters to carry one's backpack and cook one's meals. The cost of such a guide service may range from US$40,000 to $80,000 per person. Since most equipment is moved by Sherpas, clients of full-service guide companies can often keep their backpack weights under 10 kilograms (22 lb), or hire a Sherpa to carry their backpack for them. By contrast, climbers attempting less commercialised peaks, like Denali, are often expected to carry backpacks over 30 kilograms (66 lb) and, occasionally, to tow a sled with 35 kilograms (77 lb) of gear and food.
+
+The degree of commercialisation of Mount Everest is a frequent subject of criticism. Jamling Tenzing Norgay, the son of Tenzing Norgay, said in a 2003 interview that his late father would have been shocked to discover that rich thrill-seekers with no climbing experience were now routinely reaching the summit, "You still have to climb this mountain yourself with your feet. But the spirit of adventure is not there any more. It is lost. There are people going up there who have no idea how to put on crampons. They are climbing because they have paid someone $65,000. It is very selfish. It endangers the lives of others."
+
+One example of this is Shriya Shah-Klorfine, who had to be taught how to put on crampons during her summit attempt in 2012. She paid at least US$40,000 to a new guiding company for the trip, and died when she ran out of oxygen during the descent after climbing for 27 hours straight.
+
+Reinhold Messner concurred in 2004:
+
+   You could die in each climb and that meant you were responsible for yourself. We were real mountaineers: careful, aware and even afraid. By climbing mountains we were not learning how big we were. We were finding out how breakable, how weak and how full of fear we are. You can only get this if you expose yourself to high danger. I have always said that a mountain without danger is not a mountain....High altitude alpinism has become tourism and show. These commercial trips to Everest, they are still dangerous. But the guides and organisers tell clients, 'Don't worry, it's all organised.' The route is prepared by hundreds of Sherpas. Extra oxygen is available in all camps, right up to the summit. People will cook for you and lay out your beds. Clients feel safe and don't care about the risks.
+
+By 2015, Nepal was considering requiring that climbers have some experience, hoping this would both make the mountain safer and increase revenue. One barrier to this is that low-budget firms make money not taking inexperienced climbers to the summit. Those turned away by Western firms can often find another firm willing to take them for a price—that they return home soon after arriving after base camp, or part way up the mountain.
+
+However, not all opinions on the subject among prominent mountaineers have been strictly negative. For example, Edmund Hillary stated in 2003 that while "Having people pay $65,000 and then be led up the mountain by a couple of experienced guides...isn't really mountaineering at all", he was pleased by the changes brought to Everest area by Westerners:
+
+   I don't have any regrets because I worked very hard indeed to improve the condition for the local people. When we first went in there they didn't have any schools, they didn't have any medical facilities, all over the years we have established 27 schools, we have two hospitals and a dozen medical clinics and then we've built bridges over wild mountain rivers and put in fresh water pipelines so in cooperation with the Sherpas we've done a lot to benefit them.
+
+One of the early guided summiters, Richard Bass (of Seven Summits fame) stated in 2003 that "Climbers should have high altitude experience before they attempt the really big mountains. People don't realise the difference between a 20,000-foot [6,100 m] mountain and 29,000-foot [8,800 m]. It's not just arithmetic. The reduction of oxygen in the air is proportionate to the altitude alright, but the effect on the human body is disproportionate—an exponential curve. People climb Denali [6,190 m or 20,320 ft] or Aconcagua [6,960 m or 22,834 ft] and think, 'Heck, I feel great up here, I'm going to try Everest.' But it's not like that."
+
+### Routes
+
+Mount Everest has two main climbing routes, the southeast ridge from Nepal and the north ridge from Tibet, as well as many other less frequently climbed routes. Of the two main routes, the southeast ridge is technically easier and more frequently used. It was the route used by Edmund Hillary and Tenzing Norgay in 1953 and the first recognised of 15 routes to the top by 1996. This was, however, a route decision dictated more by politics than by design, as the Chinese border was closed to the western world in the 1950s, after the People's Republic of China invaded Tibet.
+
+Most attempts are made during May, before the summer monsoon season. As the monsoon season approaches, the jet stream shifts northward, thereby reducing the average wind speeds high on the mountain. While attempts are sometimes made in September and October, after the monsoons, when the jet stream is again temporarily pushed northward, the additional snow deposited by the monsoons and the less stable weather patterns at the monsoons' tail end makes climbing extremely difficult.
+
+**Southeast ridge**
+
+The ascent via the southeast ridge begins with a trek to Base Camp at 5,380 m (17,700 ft) on the south side of Everest, in Nepal. Expeditions usually fly into Lukla (2,860 m) from Kathmandu and pass through Namche Bazaar. Climbers then hike to Base Camp, which usually takes six to eight days, allowing for proper altitude acclimatisation in order to prevent altitude sickness. Climbing equipment and supplies are carried by yaks, dzopkyos (yak-cow hybrids), and human porters to Base Camp on the Khumbu Glacier. When Hillary and Tenzing climbed Everest in 1953, the British expedition they were part of (comprising over 400 climbers, porters, and Sherpas at that point) started from the Kathmandu Valley, as there were no roads further east at that time.
+
+Climbers spend a couple of weeks in Base Camp, acclimatising to the altitude. During that time, Sherpas and some expedition climbers set up ropes and ladders in the treacherous Khumbu Icefall.
+
+Seracs, crevasses, and shifting blocks of ice make the icefall one of the most dangerous sections of the route. Many climbers and Sherpas have been killed in this section. To reduce the hazard, climbers usually begin their ascent well before dawn, when the freezing temperatures glue ice blocks in place.
+
+Above the icefall is Camp I at 6,065 metres (19,900 ft).
+
+From Camp I, climbers make their way up the Western Cwm to the base of the Lhotse face, where Camp II or Advanced Base Camp (ABC) is established at 6,500 m (21,300 ft). The Western Cwm is a flat, gently rising glacial valley, marked by huge lateral crevasses in the centre, which prevent direct access to the upper reaches of the Cwm. Climbers are forced to cross on the far right, near the base of Nuptse, to a small passageway known as the "Nuptse corner". The Western Cwm is also called the "Valley of Silence" as the topography of the area generally cuts off wind from the climbing route. The high altitude and a clear, windless day can make the Western Cwm unbearably hot for climbers.
+
+From Advanced Base Camp, climbers ascend the Lhotse face on fixed ropes, up to Camp III, located on a small ledge at 7,470 m (24,500 ft). From there, it is another 500 metres to Camp IV on the South Col at 7,920 m (26,000 ft).
+
+From Camp III to Camp IV, climbers are faced with two additional challenges: the Geneva Spur and the Yellow Band. The Geneva Spur is an anvil-shaped rib of black rock named by the 1952 Swiss expedition. Fixed ropes assist climbers in scrambling over this snow-covered rock band. The Yellow Band is a section of interlayered marble, phyllite, and semischist, which also requires about 100 metres of rope for traversing it.
+
+On the South Col, climbers enter the death zone. Climbers making summit bids typically can endure no more than two or three days at this altitude. If the weather is not clear with low winds during these short few days, climbers are forced to descend, many all the way back down to Base Camp.
+
+From Camp IV, climbers begin their summit push around midnight, with hopes of reaching the summit (still another 1,000 metres above) within 10 to 12 hours. Climbers first reach "The Balcony" at 8,400 m (27,600 ft), a small platform where they can rest and gaze at peaks to the south and east in the early light of dawn. Continuing up the ridge, climbers are then faced with a series of imposing rock steps which usually forces them to the east into the waist-deep snow, a serious avalanche hazard. At 8,750 m (28,700 ft), a small table-sized dome of ice and snow marks the South Summit.
+
+From the South Summit, climbers follow the knife-edge southeast ridge along what is known as the "Cornice traverse", where snow clings to intermittent rock. This is the most exposed section of the climb, and a misstep to the left would send one 2,400 m (7,900 ft) down the southwest face, while to the immediate right is the 3,050 m (10,010 ft) Kangshung Face. At the end of this traverse is an imposing 12 m (39 ft) rock wall, the Hillary Step, at 8,790 m (28,840 ft).
+
+Hillary and Tenzing were the first climbers to ascend this step, and they did so using primitive ice climbing equipment and ropes. Nowadays, climbers ascend this step using fixed ropes previously set up by Sherpas. Once above the step, it is a comparatively easy climb to the top on moderately angled snow slopes—though the exposure on the ridge is extreme, especially while traversing large cornices of snow. With increasing numbers of people climbing the mountain in recent years, the Step has frequently become a bottleneck, with climbers forced to wait significant amounts of time for their turn on the ropes, leading to problems in getting climbers efficiently up and down the mountain.
+
+After the Hillary Step, climbers also must traverse a loose and rocky section that has a large entanglement of fixed ropes that can be troublesome in bad weather. Climbers typically spend less than half an hour at the summit to allow time to descend to Camp IV before darkness sets in, to avoid serious problems with afternoon weather, or because supplemental oxygen tanks run out.
+
+**North ridge route**
+
+The north ridge route begins from the north side of Everest, in Tibet. Expeditions trek to the Rongbuk Glacier, setting up base camp at 5,180 m (16,990 ft) on a gravel plain just below the glacier. To reach Camp II, climbers ascend the medial moraine of the east Rongbuk Glacier up to the base of Changtse, at around 6,100 m (20,000 ft). Camp III (ABC – Advanced Base Camp) is situated below the North Col at 6,500 m (21,300 ft). To reach Camp IV on the North Col, climbers ascend the glacier to the foot of the col where fixed ropes are used to reach the North Col at 7,010 m (23,000 ft). From the North Col, climbers ascend the rocky north ridge to set up Camp V at around 7,775 m (25,500 ft). The route crosses the North Face in a diagonal climb to the base of the Yellow Band, reaching the site of Camp VI at 8,230 m (27,000 ft). From Camp VI, climbers make their final summit push.
+
+Climbers face a treacherous traverse from the base of the First Step: ascending from 8,501 to 8,534 m (27,890 to 28,000 ft), to the crux of the climb, the Second Step, ascending from 8,577 to 8,626 m (28,140 to 28,300 ft). (The Second Step includes a climbing aid called the "Chinese ladder", a metal ladder placed semi-permanently in 1975 by a party of Chinese climbers. It has been almost continuously in place since, and ladders have been used by virtually all climbers on the route.) Once above the Second Step the inconsequential Third Step is clambered over, ascending from 8,690 to 8,800 m (28,510 to 28,870 ft). Once above these steps, the summit pyramid is climbed by a snow slope of 50 degrees, to the final summit ridge along which the top is reached.
+
+### Summit
+
+The summit of Everest has been described as "the size of a dining room table". The summit is capped with snow over ice over rock, and the layer of snow varies from year to year. The rock summit is made of Ordovician limestone and is a low-grade metamorphic rock. (see the Surveys section for more on its height and about the Everest rock summit)
+
+Below the summit, there is an area known as "rainbow valley", filled with dead bodies still wearing brightly coloured winter gear. Down to about 8,000 m (26,000 ft) is an area commonly called the "death zone", due to the high danger and low oxygen because of the low pressure.
+
+Below the summit the mountain slopes downward to the three main sides, or faces, of Mount Everest: the North Face, the South-West Face, and the East/Kangshung Face.
+
+### Death zone
+
+At the higher regions of Mount Everest, climbers seeking the summit typically spend substantial time within the death zone (altitudes higher than 8,000 metres (26,000 ft)), and face significant challenges to survival. Temperatures can dip to very low levels, resulting in frostbite of any body part exposed to the air. Since temperatures are so low, snow is well-frozen in certain areas and death or injury by slipping and falling can occur. High winds at these altitudes on Everest are also a potential threat to climbers.
+
+Another significant threat to climbers is low atmospheric pressure. The atmospheric pressure at the top of Everest is about a third of sea level pressure or 0.333 standard atmospheres (337 mbar), resulting in the availability of only about a third as much oxygen to breathe.
+
+Debilitating effects of the death zone are so great that it takes most climbers up to 12 hours to walk the distance of 1.72 kilometres (1.07 mi) from South Col to the summit. Achieving even this level of performance requires prolonged altitude acclimatisation, which takes 40–60 days for a typical expedition. A sea-level dweller exposed to the atmospheric conditions at the altitude above 8,500 m (27,900 ft) without acclimatisation would likely lose consciousness within two to three minutes.
+
+In May 2007, the Caudwell Xtreme Everest undertook a medical study of oxygen levels in human blood at extreme altitude. Over 200 volunteers climbed to Everest Base Camp where various medical tests were performed to examine blood oxygen levels. A small team also performed tests on the way to the summit. Even at base camp, the low partial pressure of oxygen had direct effect on blood oxygen saturation levels. At sea level, blood oxygen saturation is generally 98 to 99 per cent. At base camp, blood saturation fell to between 85 and 87 per cent. Blood samples taken at the summit indicated very low oxygen levels in the blood. A side effect of low blood oxygen is a greatly increased breathing rate, often 80–90 breaths per minute as opposed to a more typical 20–30. Exhaustion can occur merely by attempting to breathe.
+
+Lack of oxygen, exhaustion, extreme cold, and climbing hazards all contribute to the death toll. An injured person who cannot walk is in serious trouble, since rescue by helicopter is generally impractical and carrying the person off the mountain is very risky. People who die during the climb are typically left behind. As of 2015, over 200 bodies remain on the mountain.
+
+   Debilitating symptoms consistent with high altitude cerebral oedema commonly present during descent from the summit of Mount Everest. Profound fatigue and late times in reaching the summit are early features associated with subsequent death.
+
+A 2008 study noted that the "death zone" is indeed where most Everest deaths occur, but also noted that most deaths occur during descent from the summit. A 2014 article in The Atlantic about deaths on Everest noted that while falling is one of the greatest dangers the death zone presents for all 8000ers, avalanches are a more common cause of death at lower altitudes.
+
+Despite this, Everest is safer for climbers than a number of peaks by some measurements, but it depends on the period. Some examples are Kangchenjunga, K2, Annapurna, Nanga Parbat, and the Eiger (especially the nordwand). Some factors that affect total mountain lethality include the level of popularity of the mountain, the skill of those climbing, and the difficulty of the climb.
+
+Another health hazard is retinal haemorrhages, which can damage eyesight and cause blindness. Up to a quarter of Everest climbers can experience retinal haemorrhages, and although they usually heal within weeks of returning to lower altitudes, in 2010 a climber went blind and died in the death zone.
+
+   At one o'clock in the afternoon, the British climber Peter Kinloch was on the roof of the world, in bright sunlight, taking photographs of the Himalayas below, "elated, cheery and bubbly". But Mount Everest is now his grave, because only minutes later, he suddenly went blind and had to be abandoned to die from the cold.
+
+The team made a huge effort for the next 12 hours to try to get him down the mountain, but to no avail, as they were unsuccessful in getting him through the difficult sections. Even for the able, the Everest North-East ridge is recognised as a challenge. It is hard to rescue someone who has become incapacitated and it can be beyond the ability of rescuers to save anyone in such a difficult spot. One way around this situation was pioneered by two Nepali men in 2011, who had intended to paraglide off the summit. They had no choice and were forced to go through with their plan anyway, because they had run out of bottled oxygen and supplies. They successfully launched off the summit and para-glided down to Namche Bazaar in just 42 minutes, without having to climb down the mountain.
+
+### Supplemental oxygen
+
+Most expeditions use oxygen masks and tanks above 8,000 m (26,000 ft). Everest can be climbed without supplementary oxygen, but only by the most accomplished mountaineers and at increased risk. Humans' ability to think clearly is hindered with low oxygen, and the combination of extreme weather, low temperatures, and steep slopes often requires quick, accurate decisions. While about 95 per cent of climbers who reach the summit use bottled oxygen in order to reach the top, about five per cent of climbers have summited Everest without supplemental oxygen. The death rate is double for those who attempt to reach the summit without supplemental oxygen. Travelling above 2,400 m (8,000 ft) altitude is a factor in cerebral hypoxia. One study found that Mount Everest may be the highest an acclimatised human could go, but also found that climbers may suffer permanent neurological damage despite returning to lower altitudes.
+
+The use of bottled oxygen to ascend Mount Everest has been controversial. It was first used on the 1922 British Mount Everest Expedition by George Finch and Geoffrey Bruce who climbed up to 7,800 m (25,600 ft) at a spectacular speed of 300 vertical metres (1,000 ft) per hour. Pinned down by a fierce storm, they escaped death by breathing oxygen from a jury-rigged set-up during the night. The next day they climbed to 8,100 m (26,600 ft) at 270 m/h (900 ft/h) – nearly three times as fast as non-oxygen users. Yet the use of oxygen was considered so unsportsmanlike that none of the rest of the Alpine world recognised this high ascent rate.
+
+George Mallory described the use of such oxygen as unsportsmanlike, but he later concluded that it would be impossible for him to summit without it and consequently used it on his final attempt in 1924. When Tenzing and Hillary made the first successful summit in 1953, they also used open-circuit bottled oxygen sets, with the expedition's physiologist Griffith Pugh referring to the oxygen debate as a "futile controversy", noting that oxygen "greatly increases subjective appreciation of the surroundings, which after all is one of the chief reasons for climbing." For the next twenty-five years, bottled oxygen was considered standard for any successful summit.
+
+   ...although an acclimatised lowlander can survive for a time on the summit of Everest without supplemental oxygen, one is so close to the limit that even a modicum of excess exertion may impair brain function.
+
+Reinhold Messner was the first climber to break the bottled oxygen tradition and in 1978, with Peter Habeler, made the first successful climb without it. In 1980, Messner summited the mountain solo, without supplemental oxygen or any porters or climbing partners, on the more difficult northwest route. Once the climbing community was satisfied that the mountain could be climbed without supplemental oxygen, many purists then took the next logical step of insisting that is how it should be $climbed.^{:154}$
+
+The aftermath of the 1996 disaster further intensified the debate. Jon Krakauer's Into Thin Air (1997) expressed the author's personal criticisms of the use of bottled oxygen. Krakauer wrote that the use of bottled oxygen allowed otherwise unqualified climbers to attempt to summit, leading to dangerous situations and more deaths. The disaster was partially caused by the sheer number of climbers (34 on that day) attempting to ascend, causing bottlenecks at the Hillary Step and delaying many climbers, most of whom summited after the usual 14:00 turnaround time. He proposed banning bottled oxygen except for emergency cases, arguing that this would both decrease the growing pollution on Everest—many bottles have accumulated on its slopes—and keep marginally qualified climbers off the mountain.
+
+The 1996 disaster also introduced the issue of the guide's role in using bottled oxygen.
+
+Guide Anatoli Boukreev's decision not to use bottled oxygen was sharply criticised by Jon Krakauer. Boukreev's supporters (who include G. Weston DeWalt, who co-wrote The Climb) state that using bottled oxygen gives a false sense of security. Krakauer and his supporters point out that, without bottled oxygen, Boukreev could not directly help his clients descend.
+
+The low oxygen can cause a mental fog-like impairment of cognitive abilities described as "delayed and lethargic thought process, clinically defined as bradypsychia" even after returning to lower altitudes. In severe cases, climbers can experience hallucinations. Some studies have found that high-altitude climbers, including Everest climbers, experience altered brain structure. The effects of high altitude on the brain, particularly if it can cause permanent brain damage, continue to be studied.
+
+### Autumn climbing
+
+Although generally less popular than spring, Mount Everest has also been climbed in the autumn (also called the "post-monsoon season"). For example, in 2010 Eric Larsen and five Nepali guides summited Everest in the autumn for the first time in ten years. The autumn season, when the monsoon ends, is regarded as more dangerous because there is typically a lot of new snow which can be unstable. However, this increased snow can make it more popular with certain winter sports like skiing and snowboarding. Two Japanese climbers also summited in October 1973.
+
+Chris Chandler and Bob Cormack summited Everest in October 1976 as part of the American Bicentennial Everest Expedition that year, the first Americans to make an autumn ascent of Mount Everest according to the Los Angeles Times. By the 21st century, summer and autumn can be more popular with skiing and snowboard attempts on Mount Everest. During the 1980s, climbing in autumn was actually more popular than in spring. U.S. astronaut Karl Gordon Henize died in October 1993 on an autumn expedition, conducting an experiment on radiation. The amount of background radiation increases with higher altitudes.
+
+The mountain has also been climbed in the winter, but that is not popular because of the combination of cold high winds and shorter days. By January the peak is typically battered by 170 mph (270 km/h) winds and the average temperature of the summit is around −33 °F (−36 °C).
+
+### Thefts and crime
+
+Some climbers have reported life-threatening thefts from supply caches. In May 2006, Vitor Negrete, the first Brazilian to climb Everest without oxygen and part of David Sharp's party, died during his descent, and theft of gear and food from his high-altitude camp may have contributed. In addition to theft, Michael Kodas describes in his book, High Crimes: The Fate of Everest in an Age of Greed (2008): unethical guides and Sherpas, prostitution and gambling at the Tibet Base Camp, fraud related to the sale of oxygen bottles, and climbers collecting donations under the pretense of removing trash from the mountain.
+
+The Chinese side of Everest in Tibet was described as "out of control" in 2007 after one Canadian had all his gear stolen and was abandoned by his Sherpa. Another Sherpa helped the victim get off the mountain safely and gave him some spare gear. Other climbers have also reported missing oxygen bottles, which can be worth hundreds of dollars each. Hundreds of climbers pass by people's tents, making it hard to safeguard against theft. In the late 2010s, the reports of theft of oxygen bottles from camps became more common.
+
+### Selected climbing records
+
+By the end of the 2010 climbing season, there had been 5,104 ascents to the summit by about 3,142 individuals. Some notable "firsts" by climbers include:
+
+* 1922: First climb to 8,000 metres (26,247 ft), by George Finch and Captain Geoffrey Bruce
+* 1952: First climb to South Col by 1952 Swiss Mount Everest expedition
+* 1953: First ascent, by Tenzing Norgay and Edmund Hillary on 1953 British Mount Everest expedition
+* 1960: First reported ascent from the North Ridge by Wang Fuzhou, Gonpo and Qu Yinhua of China.
+* 1975: First female ascent, by Junko Tabei (16 May).
+* 1975: First female ascent from the North Ridge, by Phanthog, deputy head of the second Chinese Everest expedition that sent nine climbers to the summit (27 May).
+* 1978: First ascent without supplemental oxygen by Reinhold Messner and Peter Habeler
+* 1978: First solo ascent, by Franz Oppurg
+* 1980: First winter ascent, by Polish National Expedition Winter 1979/1980 (Leszek Cichy and Krzysztof Wielicki)
+* 1980: Second solo ascent, and the first without supplemental oxygen, by Reinhold Messner
+* 1981: Third solo ascent, by Peter Hackett
+* 1988: First "cross-over" climb by Chinese, Japanese and Nepali teams which ascended the peak simultaneously from both the North and South sides of the mountain and descended down the other side. The cross-over climb was also the first to be recorded on live broadcast television.
+* 1988: First descent by paraglider, by Jean-Marc Boivin
+* 1988: First female ascent without supplemental oxygen by Lydia Bradey
+* 1998: Fastest to reach the summit via the southeast ridge (South Col), without supplemental oxygen, by Kazi Sherpa, in 20 hours and 24 minutes.
+* 2000: First descent by ski by Davo Karničar
+* 2001: First ascent by a blind climber, Erik Weihenmayer
+* 2001: Lhakpa Sherpa becomes first Nepali woman to summit Everest and survive.
+* 2004: Fastest to reach the summit via the southeast ridge (South Col), with supplemental oxygen, by Pemba Dorje, in 8 hours and 10 minutes.
+* 2006: Lhakpa Sherpa summits for the 6th time, breaking her own record for most successful female Everest climber.
+* 2007: Fastest to reach the summit via the northeast ridge, without supplemental oxygen, by Christian Stangl, in 16 hours, 42 minutes.
+* 2010: Youngest male to reach the summit, by Jordan Romero (13 years and 10 months old)
+* 2011: Most times to reach the summit, Apa Sherpa (21 times; 10 May 1990 – 11 May 2011)
+* 2013: Apa Sherpa tied for most times to reach the summit by Phurba Tashi (21 times; 1999–2013)
+* 2013: Melissa Arnot, American, summits for the fifth time, breaking her own record for most successful summits by any non-Sherpa woman.
+* 2014: Youngest female to reach the summit, by Malavath Purna (13 years and 11 months old)
+* 2017: Kami Rita Sherpa of Alpine Ascents reaches 21 ascents to the summit.
+* 2019: Kami Rita Sherpa reaches 24 ascents to the summit.
+* 2021: Kami Rita Sherpa reaches 25 ascents to the summit.
+* 2022: Kami Rita Sherpa reaches 26 ascents to the summit, and Pasang Dawa Sherpa reaches 25 ascents to the summit.
+* 2023: Kami Rita Sherpa reaches 28 ascents to the summit.
+
+### Summiting with disabilities
+
+Summiting Everest with disabilities such as amputations and diseases has become popular in the 21st century, with stories like that of Sudarshan Gautam, a man with no arms who made it to the top in 2013. A teenager with Down's syndrome made it to Base camp, which has become a substitute for more extreme record-breaking because it carries many of the same thrills including the trip to the Himalayas and rustic scenery. Danger lurks even at base camp though, which was the site where dozens were killed in the 2015 Mount Everest avalanches. Others that have climbed Everest with amputations include Mark Inglis (no legs), Hari Budha Magar (no legs), Paul Hockey (one arm only), and Arunima Sinha (one leg only).
+
+In 2001, Erik Weihenmayer became the first person to reach the summit of Mount Everest while blind.
+
+## Aviation
+
+### 1933: Flight over Everest
+
+Lucy, Lady Houston, a British millionaire former showgirl, funded the Houston Everest Flight of 1933. A formation of airplanes led by the Marquess of Clydesdale flew over the summit in an effort to photograph the unknown terrain.
+
+### 1988: First climb and glide
+
+On 26 September 1988, having climbed the mountain via the south-east ridge, Jean-Marc Boivin made the first paraglider descent of Everest, in the process creating the record for the fastest descent of the mountain and the highest paraglider flight. Boivin said: "I was tired when I reached the top because I had broken much of the trail, and to run at this altitude was quite hard." Boivin ran 18 m (60 ft) from below the summit on 40-degree slopes to launch his paraglider, reaching Camp II at 5,900 m (19,400 ft) in 12 minutes (some sources say 11 minutes). Boivin would not repeat this feat, as he was killed two years later in 1990, BASE-jumping off Venezuela's Angel Falls.
+
+### 1991: Hot air balloon flyover
+
+In 1991, four men in two balloons achieved the first hot-air balloon flight over Mount Everest. In one balloon was Andy Elson and Eric Jones (cameraman), and in the other balloon Chris Dewhirst and Leo Dickinson (cameraman). Dickinson went on to write a book about the adventure called Ballooning Over Everest. The hot-air balloons were modified to function at up to 12,000 m (40,000 ft) altitude. Reinhold Messner called one of Dickinson's panoramic views of Everest, captured on the now discontinued Kodak Kodachrome film, the "best snap on Earth", according to UK newspaper The Telegraph. Dewhirst has offered to take passengers on a repeat of this feat for US$2.6 million per passenger.
+
+### 2005: Pilot summits with helicopter
+
+In May 2005, pilot Didier Delsalle of France landed a Eurocopter AS350 B3 helicopter on the summit of Mount Everest. He needed to land for two minutes to set the Fédération Aéronautique Internationale (FAI) official record, but he stayed for about four minutes, twice. In this type of landing the rotors stay engaged, which avoids relying on the snow to fully support the aircraft. The flight set rotorcraft world records, for highest of both landing and take-off.
+
+Some press reports suggested that the report of the summit landing was a misunderstanding of a South Col landing, but he had also landed on South Col two days earlier, with this landing and the Everest records confirmed by the FAI. Delsalle also rescued two Japanese climbers at 4,880 m (16,000 ft) while he was there. One climber noted that the new record meant a better chance of rescue.
+
+### 2011: Paraglide off summit
+
+On 21 May 2011, Nepalis Lakpa Tsheri Sherpa and Sano Bapu Sunuwar paraglided from Everest's summit to Namche Bazaar in 42 minutes. After the flight they hiked, biked, and kayaked to the Indian Ocean, reaching the Bay of Bengal by 27 June 2011, thereby becoming the first persons to complete a continuous summit-to-sea descent from Everest. They accomplished the ground-breaking feat despite Bapu having never previously climbed, and Lakpa having never kayaked and not even knowing how to swim. The duo subsequently won National Geographic Adventurers of the Year for 2012 for their exploits. In 2013 footage of the flight was shown on the television news program Nightline.
+
+### 2014: Helicopter-assisted ascent
+
+In 2014, a team financed and led by mountaineer Wang Jing used a helicopter to fly from South base camp to Camp 2 to avoid the Khumbu Icefall, and thence climbed to the Everest summit. This climb immediately sparked outrage and controversy in much of the mountaineering world over the legitimacy and propriety of her climb. Nepal ended up investigating Wang, who initially denied the claim that she had flown to Camp 2, admitting only that some support crew were flown to that higher camp, over the Khumbu Icefall. In August 2014, however, she stated that she had flown to Camp 2 because the icefall was impassable. "If you don't fly to Camp II, you just go home", she said in an interview. In that same interview, she also insisted that she had never tried to hide this fact.
+
+Her team had had to use the south side because the Chinese had denied them a permit to climb. Ultimately, the Chinese refusal may have been beneficial to Nepal's interests, allowing the government to showcase improved local hospitals and providing the opportunity for a new hybrid aviation/mountaineering style, triggering discussions about helicopter use in the mountaineering world. National Geographic noted that a village festooned Wang with honours after she donated US$30,000 to the town's hospital. Wang won the International Mountaineer of the Year Award from the Nepal government in June 2014.
+
+### 2016: Helicopter business increases
+
+In 2016 the increased use of helicopters was noted for increased efficiency and for hauling material over the deadly Khumbu icefall. In particular it was noted that flights saved icefall porters 80 trips but still increased commercial activity at Everest. After many Nepalis died in the icefall in 2014, the government had wanted helicopters to handle more transportation to Camp 1 but this was not possible because of the 2015 earthquake closing the mountain, so this was then implemented in 2016 (helicopters did prove instrumental in rescuing many people in 2015 though). That summer Bell tested the 412EPI, which conducted a series of tests including hovering at 5,500 m (18,000 ft) and flying as high as 6,100 m (20,000 ft) altitude near Mount Everest.
+
+## Extreme sports
+
+Mount Everest has been host to other winter sports and adventuring besides mountaineering, including snowboarding, skiing, paragliding, and BASE jumping.
+
+Yuichiro Miura became the first man to ski down Everest in the 1970s. He descended nearly 1,300 vertical metres (4,200 ft) from the South Col before falling with extreme injuries. Stefan Gatt and Marco Siffredi snowboarded Mount Everest in 2001. Other Everest skiers include Davo Karničar of Slovenia, who completed a top to south base camp descent in 2000, Hans Kammerlander of Italy in 1996 on the north side, and Kit DesLauriers of the United States in 2006. In 2006 Swede Tomas Olsson and Norwegian Tormod Granheim skied together down the north face. Olsson's anchor broke while they were rappelling down a cliff in the Norton couloir at about 8,500 metres, resulting in his death from a two and a half-kilometre fall. Granheim skied down to camp III. Also, Marco Siffredi died in 2002 on his second snow-boarding expedition.
+
+Various types of gliding descents have slowly become more popular, and are noted for their rapid descents to lower camps. In 1986 Steve McKinney led an expedition to Mount Everest, during which he became the first person to fly a hang-glider off the mountain. Frenchman Jean-Marc Boivin made the first paraglider descent of Everest in September 1988, descending in minutes from the south-east ridge to a lower camp. In 2011, two Nepalis made a gliding descent from the Everest summit down 5,000 metres (16,400 ft) in 45 minutes. On 5 May 2013, the beverage company Red Bull sponsored Valery Rozov, who successfully BASE jumped off of the mountain while wearing a wingsuit, setting a record for world's highest BASE jump in the process.
+
+## Religious significance
+
+The southern part of Mount Everest is regarded as one of several "hidden valleys" of refuge designated by Padmasambhava, a ninth-century "lotus-born" Buddhist saint.
+
+Near the base of the north side of Everest lies Rongbuk Monastery, which has been called the "sacred threshold to Mount Everest, with the most dramatic views of the world." For Sherpas living on the slopes of Everest in the Khumbu region of Nepal, Rongbuk Monastery is an important pilgrimage site, accessed in a few days of travel across the Himalayas through Nangpa La.
+
+Miyolangsangma, a Tibetan Buddhist "Goddess of Inexhaustible Giving", is believed to have lived at the top of Mount Everest. According to Sherpa Buddhist monks, Mount Everest is Miyolangsangma's palace and playground, and all climbers are only partially welcome guests, having arrived without invitation.
+
+The Sherpa people also believe that Mount Everest and its flanks are blessed with spiritual energy, and one should show reverence when passing through this sacred landscape. Here, the karmic effects of one's actions are magnified, and impure thoughts are best avoided.
+
+## Waste management
+
+In 2015, the president of the Nepal Mountaineering Association warned that pollution, especially human waste, has reached critical levels. As much as 12,000 kg (26,500 lb) of human excrement each season is left behind on the mountain. Human waste is strewn across the verges of the route to the summit, making the four sleeping areas on the route up Everest's south side minefields of human excrement. Climbers above Base Camp—for the 62-year history of climbing on the mountain—have most commonly either buried their excrement in holes they dug by hand in the snow, or slung it into crevasses, or simply defecated wherever convenient, often within metres of their tents. The only place where climbers can defecate without worrying about contaminating the mountain is Base Camp. At approximately 5,500 m (18,000 ft), Base Camp sees the most activity of all camps on Everest because climbers acclimate and rest there. In the late-1990s, expeditions began using toilets that they fashioned from blue plastic 190-litre (50-US-gallon) barrels fitted with a toilet seat and enclosed.
+
+The problem of human waste is compounded by the presence of more anodyne waste: spent oxygen tanks, abandoned tents, empty cans and bottles. The Nepali government now requires each climber to pack out eight kilograms of waste when descending the mountain.
+
+In February 2019, due to the mounting waste problem, China closed the base camp on its side of Everest to visitors without climbing permits. Tourists are allowed to go as far as the Rongbuk Monastery.
+
+In April 2019, the Solukhumbu district's Khumbu Pasanglhamu Rural Municipality launched a campaign to collect nearly 10,000 kg of garbage from Everest.
+

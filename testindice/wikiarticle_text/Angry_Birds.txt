@@ -1,0 +1,382 @@
+# Angry Birds
+
+Angry Birds is a Finnish action, puzzle, and strategy based media franchise created by Rovio Entertainment, and owned by Sega. The game series focuses on the eponymous flock of colorful angry birds who try to save their eggs from green-colored pigs. Inspired by the game Crush the Castle, the game has been praised for its successful combination of fun gameplay, comical style, and low price. Its popularity led to many spin-offs; versions of Angry Birds created for PCs and video game consoles, a market for merchandise featuring its characters, Angry Birds Toons, a televised animated series, and two films; The Angry Birds Movie and its sequel The Angry Birds Movie 2. By January 2014, there had been over 2 billion downloads across all platforms, including both regular and special editions.
+
+By July 2015, the series' games had been downloaded more than 3 billion times collectively, making it the most downloaded freemium game series of all time. The original Angry Birds has been called "One of the most mainstream games out right now", "One of the great runaway hits of 2010", and "The largest mobile app success the world has seen so far". The first main-series video game sequel, Angry Birds 2, was released on 30 July 2015.
+
+The first game in the series was initially released on 11 December 2009 for iOS. At the time, the 2009 swine flu epidemic was in the news, so the staff decided to use pigs as the enemies of the Angry Birds. The company released ports of the game to other touchscreen smartphone operating systems, including Android. In early 2019, all remaining Angry Birds games released before October 2014 (with the exception of Friends) were discontinued and removed from app stores, though Bad Piggies was added back in early 2020. Rovio has declined to explain their reasoning behind the decision apart from a brief tweet and support response, both giving different answers. However, in June 2021, by popular demand of the fans, Rovio announced that the classic games will be available on the stores again sometime in the future. A recreated version of the original Angry Birds game known as Rovio Classics: Angry Birds came to mobile platforms on 31 March 2022.
+
+In August 2023, Sega acquired Rovio Entertainment. The deal was closed on 17 August 2023.
+
+## Video games
+
+Release timeline :
+
+| 2009 | Classic |
+| - | - |
+| 2010 | Seasons |
+| 2011 | Rio |
+| 2012 | Friends |
+| 2012 | Space |
+| 2012 | Trilogy |
+| 2012 | Bad Piggies |
+| 2012 | Star Wars |
+| 2013 | Star Wars II |
+| 2013 | Go! |
+| 2014 | Epic |
+| 2014 | Stella |
+| 2014 | Transformers |
+| 2015 | POP! |
+| 2015 | Fight! |
+| 2015 | 2 |
+| 2016 | Action! |
+| 2016 | Blast! |
+| 2017 | Evolution |
+| 2017 | Match |
+| 2018 | Champions |
+| 2018 | for Messenger |
+| 2019 | Dream Blast |
+| 2019 | Isle of Pigs |
+| 2019 | POP Blast |
+| 2019 | Explore |
+| 2019 | Under Pressure |
+| 2020 |
+| 2021 | Reloaded |
+| 2021 | Bird Island |
+| 2022 | Journey |
+| 2022 | Rovio Classics: Angry Birds |
+| Date | Game | Genre | Description |
+| December 2009 (as Angry Birds) March 2022 (as Rovio Classics: Angry Birds) February 2023 (as Red's First Flight, iOS only) | Angry Birds | Puzzle | The first game released of the series. It primarily involves shooting the angry birds into pigs' fortresses. This game was re-released under the title Rovio Classics: Angry Birds on 31 March 2022. |
+| October 2010 | Angry Birds Seasons | Puzzle | The second game in the series, featuring levels themed around holidays, such as the first day of school, Halloween, and Easter. It was originally released as Angry Birds Halloween. |
+| March 2011 | Angry Birds Rio | Puzzle | The third game in the series, tying in with the films Rio and Rio 2. |
+| February 2012 | Angry Birds Friends | Puzzle | The fourth game of the series. It was originally a Facebook exclusive, but it was later ported to mobile. |
+| March 2012 | Angry Birds Space | Puzzle | The fifth game in the series that features planets, different gravity, and the angry birds with improved abilities. |
+| September 2012 | Bad Piggies | Puzzle | The sixth game in the series where players must build vehicles to bring the pigs to their destinations. |
+| November 2012 | Angry Birds Star Wars | Puzzle | The seventh game that ties in with the original Star Wars trilogy: Star Wars (1977), The Empire Strikes Back (1980), and Return of the Jedi (1983). |
+| September 2013 | Angry Birds Star Wars II | Puzzle | The eighth game of the series that ties in with the Star Wars prequel trilogy: The Phantom Menace (1999), Attack of the Clones (2002), and Revenge of the Sith (2005). It also ties with the television show Star Wars Rebels. It is the first game compatible with Hasbro's Telepods, that allows the player to summon a specific character in the game. |
+| November 2013 | Angry Birds Go! | Racing | The ninth game of the series, taking the form of a racing game. |
+| June 2014 | Angry Birds Epic | Role-playing | The tenth game of the series that features turn-based RPG combat and an equipment system. |
+| September 2014 | Angry Birds Stella | Puzzle | The 11th game of the series, reuses the original physics-puzzle game play of Angry Birds, but with a cast of new birds. |
+| October 2014 | Angry Birds Transformers | Side-scrolling shooter | The 12th game of the series, which ties-in with the Transformers franchise and is a side-scrolling shoot 'em up game. |
+| March 2015 | Angry Birds POP! | Tile-matching | The 13th game of the series and the second game in the Stella series originally titled Angry Birds Stella POP!, where players must match bubbles to pop them and eventually must complete given objectives. In July 2015, the "Stella" name was removed from the title so it was renamed Angry Birds POP!. |
+| June 2015 | Angry Birds Fight! | Tile-matching, Role-playing | The 14th game of the series, which is a player versus player match-3 game. |
+| July 2015 | Angry Birds 2 | Puzzle | The direct sequel to Angry Birds and the 15th game of the series, involving multistage levels. |
+| April 2016 | Angry Birds Action! | Puzzle, Pinball | This is the 16th game of the series and the first to feature the birds in their movie designs. |
+| December 2016 | Angry Birds Blast | Tile-matching | This is the 17th game of the series that features match-3 gameplay that has the player popping balloons to free the Angry Birds. |
+| June 2017 | Angry Birds Evolution | Role-playing, Pinball | The 18th game of the series, which is a turn-based RPG battle game. |
+| August 2017 | Angry Birds Match | Tile-matching | The 19th game of the series, which is a match-3 game involving the Hatchlings and characters from Angry Birds Blues. |
+| February 2018 | Angry Birds Champions | Puzzle | The 20th game of the series, a competitive player versus player game where players take turns beating a traditional Angry Birds level, aiming to outscore opponents, with monetary prizes at stake. |
+| May 2018 | Angry Birds for Messenger | Puzzle | The 21st game of the series, online versus game on Facebook's Messenger service. Uses similar gameplay as seen in Angry Birds 2. |
+| January 2019 | Angry Birds Dream Blast | Tile-matching | The 22nd game of the series, itself a spin-off of Blast! Players clear groups of balls of the same color to complete objectives. |
+| February 2019 | Angry Birds VR/AR: Isle of Pigs | Puzzle | The 23rd game of the series and the virtual reality and augmented reality versions of the original game, using the visuals and art style of the Angry Birds Movie. |
+| May 2019 | Angry Birds POP Blast | Tile-matching | The 24th game of the series, sequel to the original, originally called Angry Birds POP 2, and takes place after the events of the second movie. |
+| June 2019 | Angry Birds Explore | N/A | The 25th game of the series, Spin-off of the discontinued Angry Birds Action!. It has minigames, as well as the BirdCodes feature from Angry Birds Action!, making it a movie exclusive software. |
+| August 2019 | The Angry Birds Movie 2 VR: Under Pressure | Puzzle | The 26th game of the series, the game takes place aboard the Piggy Gadget Lab that the main characters use to get to Eagle Island for the film's climactic confrontation. |
+| July 2021 | Angry Birds Reloaded | Puzzle | The 27th game of the series. Features the gameplay of the original game with new visuals, characters and worlds for the video game subscription service Apple Arcade. |
+| December 2021 | Angry Birds: Bird Island (also known as Angry Birds: Mayhem Simulator and Angry Birds: Destruction Simulator) | Simulator / Role-playing | The 28th game of the series, available exclusively on the MMOG platform Roblox. Features an open world map with tasks, a customizable bird, drivable cars, houses, and the ability to hatch and raise hatchlings. In the Angry Birds: Mayhem Simulator sub-game, it features a map with hatchlings that can open treasure chests with coins. In the Angry Birds: Destruction Simulator sub-game, it features structures which the player needs to destroy with their hatchlings. |
+| January 2022 | Angry Birds Journey | Puzzle | The 29th game of the series. Features similar mechanics and level structure of Angry Birds 2 but with chapters. The players will have 5 birds with different abilities to complete the level objective to advance to the next level. |
+
+### Upcoming/In developments
+
+| Release date | Game | Genre | Description |
+| - | - | - | - |
+| TBA | Angry Birds Double Crossed | Action | A movie-themed, multiplayer reality game show. |
+| TBA | Angry Birds Launch It! | Racing | A movie-themed, racing video game. |
+| TBA | Angry Birds Racing | Racing | A 2D Toons-themed racing game. |
+| TBA | Angry Birds Next | TBA | An upcoming game "with a twist". The game seems to be what the surveys for Double Crossed and Launch It! lead up to. |
+| TBA | Angry Birds Crazy Golf | TBA | An Angry Birds-themed miniature golf game. |
+| TBA | Angryverse Brawl | Fighting | An Angry Birds-themed fighting game. |
+| TBA | Bad Piggies 2 | Puzzle | A direct sequel to Bad Piggies. The game was soft launched in 2023. |
+
+### Compilations
+
+| Released | Game | Genre | Description |
+| - | - | - | - |
+| 2012 | Angry Birds Trilogy | Puzzle | A compilation of the first three Angry Birds games (the original, Seasons, and Rio) for video game consoles. |
+
+### Cancelled
+
+These games were soft-launched in select countries but were discontinued after a few months of its release. Some of them never made a release.
+
+| Released | Discontinued | Game | Genre | Developer | Description |
+| - | - | - | - | - | - |
+| Unreleased | April 2016 | Agri Birds | Simulation, Visual novel, Horror | N/A | While it was revealed as an April Fools' joke, it was indeed in development. This game would have featured Angry Birds with an appearance similar to their movie counterparts, as they engage in farming, horror survival, shooting, etc., with a full storyline. |
+| April 2016 | December 2016 | Angry Birds Football | Puzzle | New Star Games | Formerly known as Angry Birds Goal!, it involves birds and pigs as they appear in The Angry Birds Movie, as they face each other in football matches. |
+| May 2016 | October 2016 | Angry Birds Ace Fighter | Shoot 'em up | Siamgame Mobile | Formerly called Angry Birds Sky Fighters, birds fly and shoot pigs with their fighter jets while rescuing creatures that give them passive effects. |
+| May 2016 | December 2016 | Angry Birds Holiday | Simulation | Sproing | It involves most bird characters from The Angry Birds Movie, who run vacation resort services for incoming pigs to distract them from stealing the eggs. |
+| March – April 2017 | June 2017 | Angry Birds Islands | Role-playing, Simulation | NHN Studio629 | The pigs collect and create resources, while birds fight against monsters to rescue piglets or deliver resources in quests. |
+| February 2017 | October 2017 | Angry Birds Dice | Board game | Joycity Corporation | It involves birds and pigs as they appear in The Angry Birds Movie, in which players attempt to collect property and bankrupt their opponents by having them land on it. |
+| February 2018 | June 2019 | Angry Birds Island | Puzzle | Mybo | Also known as Angry Birds Blast 2 and Angry Birds Blast Island, it was a free-to-play 3D tap-to-match game similar to Angry Birds Blast!. |
+| Unreleased | May 2019 | Angry Birds Space Assault! | Puzzle | K Lab America | An unreleased game by K Lab America which was planned to be a spinoff to Angry Birds Space. It was described as a "3D action strategy collectable game". The project was first made public in May of 2019 when the designer Glen Dahlgren uploaded the contents to his portfolio. |
+| February 2020 | September 2020 | Angry Birds Tennis | Tennis | Rovio Entertainment | The game is played like tennis: the player needs to win a match of the game in the levels with characters from the Angry Birds movies and on various locations such as Cobalt Plateaus and Bird Island. There were various game modes and the player could play against another player. |
+| March 2020 | December 2020 | Angry Birds Legends | Role-playing | Rovio Entertainment | It was similar to Angry Birds Epic except it uses 3D graphics, cards and the birds and pigs team up with humans. |
+
+### Promotional
+
+From 2011 to 17, Angry Birds has collaborated with many other companies and released variations of the game in the respective companies' theme. Most of them were Flash-based. All of the games featured exclusive levels and elements that aid in promotion.
+
+* Angry Birds Chrome
+* Angry Birds Google+
+* Angry Birds Free with Magic (specific NFC-compatible Nokia phones only)
+* Angry Birds Volcano (Fazer's Tyrkisk Peber Volcano)
+* Angry Birds Breakfast (Nesquik cereal)
+* Angry Birds in The Hunt For The Golden Pistachio (Wonderful Pistachios)
+* Angry Birds Vuela Tazos (PepsiCo's Tazos)
+* Angry Birds Cheetos
+* Angry Birds Lotus F1 Team
+* Angry Birds McDonald's (China only)
+* Angry Birds Coca-Cola (Chinese Olympic team partnership, China only)
+* Angry Birds Heikki (Heikki Kovalainen partnership)
+* Angry Birds Telepizza
+* Angry Birds Fuji TV
+* Angry Birds in Ultrabook Adventure (Intel's Ultrabook)
+* Angry Birds Philadelphia Eagles
+* Angry Birds Starburst
+* Angry Birds Radox
+
+### Cameos
+
+This features the Angry Birds and Bad Piggies as playable characters or exclusive rewards featuring them, along with some miscellaneous references to the franchise.
+
+| Application | Genre | Description |
+| - | - | - |
+| LINE Rangers | Role-playing | Some characters appear as limited-time units. |
+| Puzzles & Dragons | Puzzle, Role-playing | Characters from Angry Birds, Angry Birds Friends and Angry Birds Epic appear as monsters in a collab dungeon. |
+| Sonic Dash | Endless runner, Platformer | Features three Angry Birds as playable characters, only collectible in the crossover event with Angry Birds Epic. |
+| Amazing Alex | Puzzle | The level background for "The Classroom" episode has a mini alphabet chart denoting the letters "Angry" and "Bird". The piggy bank item is also based on the pigs from Angry Birds. |
+| Sky Punks | Endless runner, Platformer | Features Angry Birds as outfits for characters. |
+| Tiny Thief | Point-and-click adventure | Level 5–1 features a puzzle element similar to Angry Birds. |
+| Retry | Adventure | The first Adbreak level featured in Retry is based on their most recent Angry Birds game at the time, Angry Birds Epic. |
+| Just Dance 2016 | Dance | Features a remix of the Angry Birds main theme known as "Balkan Blast Remix" as a dance level, which features Red, Chuck, Bomb, and a Minion Pig. |
+| Roblox | Mmorpg, Game creation | The Angry Birds Movie themed virtual accessories were obtainable during a collaboration event. Additionally, there is an official Angry Birds-themed experience on the platform titled Angry Birds: Bird Island, which allows players to explore the island and raise hatchlings. |
+| PUBG Mobile | Battle Royale | The Angry Birds Movie themed weapon and accessory skins were obtainable during a collaboration event. |
+| Duolingo | Education | Features ‘Red’ as a second cameo character (besides the Duolingo owl) on splash screens during the middle of a lesson. |
+| Minecraft | Sandbox | Skins and a game mode based on The Angry Birds Movie and Angry Birds: Summer Madness were made available as DLC. |
+
+## Characters
+
+### Birds
+
+**Main flock**
+
+* Red (formerly known as Red Bird, full name Red J. Bird) is a red bird and the leader of the Angry Birds flock. He was the first bird introduced in the original Angry Birds game. Red is in charge of looking after the birds' nest of eggs, and coming up with plans to attack the pigs. He is the most responsible and mature in the flock, but is also known for having severe anger issues. Despite this, he has a soft side that only shows when he is with his friends or comforting the eggs. Red is very overprotective, and would risk his life to make sure the eggs are safe and sound.
+* Chuck (formerly known as Yellow Bird) is a yellow triangular bird who was born with the ability to run at the speed of sound. Chuck is cocky and self-loving, but also very energetic. He spends a lot of his spare time playing games and hanging out with his closest friends. He is also very loyal and prioritizes the eggs' safety more than anything.
+* Bomb (formerly known as Black Bird or Bomb Bird) is a large black (or sometimes purple) bird diagnosed with a fictional disability called IED (Intermittent Explosive Disorder), which makes him explode upon having sudden emotional reactions such as anger and fear. This makes Bomb the most powerful in the flock, although he doesn't ever brag about it as he is often calm and reserved until something goes wrong or doesn't go his way. He is close friends with almost every bird in the flock, and is loyal to all of them.
+* Jay, Jake and Jim (nicknamed The Blues and formerly known as the Blue Birds) are cyan blue bird triplets who hatched from the same egg. They are some of the youngest and smallest in the flock, and share the same mischievous and cheeky thoughts and views. They often get into trouble due to this, but they enjoy putting their skills to good use against the pigs.
+* Matilda (formerly known as White Bird) is a female cream white bird and the mother figure of the flock. She's the least angry in the flock and the most peaceful. Matilda loves animals, nature, peace, and her favourite hobby is gardening. However, she has been prone to having bursts of anger herself in the past. Matilda has tried repeatedly to educate the birds in controlling their anger, but it has never worked out. Despite this, she is very lovable and kind-hearted.
+* Hal (formerly known as Green Bird or Boomerang Bird) is a green, long-beaked bird who is considered the black sheep of the flock. He doesn't get angry often and doesn't like to get involved with the fight against the pigs unless it really matters to him. Because of his long beak, Hal has the ability to act like a boomerang, which he often uses as an attack.
+* Terence (formerly known as Big Brother Bird) is a maroon bird the biggest in the flock. He is a silent-but-deadly brute that hardly expresses any sort of emotion or movement, as he only speaks in growls. Terence is easily the most destructive bird, making him the most threatening to the pigs and even some of the birds.
+* Bubbles (formerly known as Orange Bird) is an orange bird the youngest and smallest in the entire flock. He is obsessed with eating candy and sweets non-stop and loves Halloween. His special ability is inflating his body to grow to a gigantic size, flattening anything or anyone in his path.
+* Stella (formerly known as Pink Bird) is a female pink bird who is often very adventurous and energetic. She loves blowing bubbles and hanging out with her best friends. Her homeland is Golden Island, the location of her starring game Angry Birds Stella. She has a short temper similar to Red but is able to control it and use it to her advantage.
+* Silver is a female grey bird introduced in Angry Birds 2. When the pigs successfully stole an egg, it soon hatched into Silver. She was raised by the pigs before eventually joining the flock. Silver can perform somersaults to wipe out towers and tall structures built by the pigs.
+* Melody is a female beige-coloured bird introduced in a post-launch update to Angry Birds 2. She grew up surrounded by music, giving her a strong interest and love for it. She doesn't easily get angry, but expresses herself through song when she is. When Melody sings at the top of her lungs, she inhales everything in front of her, which she can shoot out like bullets as an attack.
+
+**Stella's flock**
+
+* Poppy is an energetic yellow female introduced in Angry Birds Stella. Her favourite hobby is to play drums, especially when playing music with her friends.
+* Willow is a blue female bird who appears in Angry Birds Stella, and wears an orange striped knit cap and loves to paint and create art. Willow also made a cameo appearance in The Angry Birds Movie, where she was voiced by Charli XCX.
+* Dahlia is a tan-coloured female who appears in Angry Birds Stella. She is a scientist, and is often in her laboratory performing experiments.
+* Luca is the only male member of Stella's flock. He is also the youngest, meaning he doesn't like to follow the rules often.
+* Gale is the main antagonist of Angry Birds Stella. Gale is a former friend of Stella, but betrayed her and the others when she discovered a crown and became the leader of a large army of pigs. In the Angry Birds Stella television series, her main goal was finding the Golden Egg with her Minion Pigs.
+
+**Eagles**
+
+* Mighty Eagle is a gigantic eagle who lives in a cave in the tallest mountain on Piggy Island (Bird Island in the movies). He is considered a mythical legend by the flock because he is the only bird who can fly. He likes to be isolated, which is why he refuses to join the flock.
+* Zeta is a female purple eagle who appears as a main antagonist in The Angry Birds Movie 2 and Angry Birds Reloaded. She is the leader of Eagle Island, and her motive is destroying Bird Island and Piggy Island so she and her team of eagles can turn them into her own personal paradise. Zeta has a high level of intelligence, being described by her ex-fiancée, Mighty Eagle, as "the smartest girl in school".
+
+**Other**
+
+* Tony (formerly known as Blue Terence) is Terence's sky blue cousin who lives in Finland. He is only playable in Angry Birds Seasons, and enjoys spending time with his cousin, fishing and watching the Northern Lights.
+* Ice Bird is an extraterrestrial being from outer space, who made a one-time appearance in Angry Birds Space before reappearing in Angry Birds Reloaded several years later. He met the flock when he came down to the Angry Birds' home planet looking for his Eggstroid which, alongside the flock's eggs, was stolen by the pigs. Ice Bird is very mysterious and reserved, but has the ability to turn anything within his radius into cold solid ice.
+* Jo is a non-binary turquoise and black bird who was introduced to celebrate LGBT Pride Month 2023. They enjoy dancing, and hopes to help make the world a better place to live in despite being shy. Jo has yet to make an appearance as a playable character, but they were featured in a limited-time event in Angry Birds 2, temporarily replacing the rubber ducks in the game's Golden Duck spell.
+
+### Pigs
+
+* King Pig (also known as King Smooth Cheeks) is the tyrannical, diabolical and greedy ruler of all of the pigs on Piggy Island. For years, he has been focused on his army of Minion Pigs capturing the birds' eggs for him to eat. His loyal subjects are forced to constantly humour and serve him, all while trying to steal the eggs. His big secret is that he has never eaten eggs before, and so has an unhealthy obsession with eating the birds' eggs, as the only pig who is allowed to do so.
+* The Minion Pigs are small pigs that are King Pig's subjects and the inhabitants of Pig City, the capital of Piggy Island. Stupid by nature, the Minion Pigs are in the lowest rank of the Piggy kingdom society, despite some having occupations as engineers or pilots. They love to have fun and to serve King Pig.
+* Big Bork (also known as Fat Pig) is a giant, fat pig who is an antagonist of Angry Birds Space, then reappearing in Angry Birds Reloaded. He was shown being frozen in the planet Cold Cuts, which he was stuck inside of it. Later on, he got out of the whole planet, and he possibly took a huge bite out of the another icy planet Fry Me to the Moon. He appears again in the food planet Utopia, where he was briefly "eating" the eggsteroid. When Big Bork was fighting Super Red and the flock, he was defeated. He turned back into a small minion pig, never bothered eating the eggsteroid and defeating the flock again.
+* Alien Pig is an alien pig who is an antagonist of Angry Birds Space. He only appears in Cosmic Crystals, where he got his own saucer to kidnapping the regular piggies to stuck them inside the ball crystals. Alien Pig was trying to defeat Super Red and his allies, by collecting the tiny crystals to make the ball crystals to make the flock go down. But he was defeated by the flock, and possibly got destroyed for good.
+* Ross (formerly known as Freckled Pig) is a Minion Pig who is a supporting antagonist of the Angry Birds series and the main playable protagonist of the game Bad Piggies. His occupation is to build vehicles, which he often pilots to help capture the eggs. Ross reappears in The Angry Birds Movie and Bad Piggies 2, the latter of which sees Ross as a middle-aged uncle who guides his nephew (the game's protagonist) on how to build and drive vehicles.
+* Chef Pig (also known as Scientist Pig) is the palace chef of Piggy Island, notable for his handlebar mustache and chef hat. As revealed in one episode in Angry Birds Toons, his desire in life is to usurp King Pig's role as the ruler of Piggy Island. While being a professional cook, he is also shown to be conducting scientific experiments, often utilizing them to trick the birds so that he could cook their eggs. However, these experiments often fail in the end.
+* Chronicler Pig is a pig wearing glasses and a judge wig, appearing exclusively in select episodes of Angry Birds Toons.
+* Corporal Pig (formerly known as Helmet Pig) is the bossy commander of the Minion Pigs. He is the one who comes up with plans to steal the eggs. He spends all day shouting at his minions, using fear to put them in order. Corporal Pig idolizes King Pig and will do absolutely anything to satisfy him.
+* Foreman Pig (also known as Mustache Pig) is an elder mustachioed pig and a secondary antagonist of the series. He is responsible and dedicated, although bossy at most times. He is very loyal to his superiors, as he has no doubt in helping King Pig with any problem he has no matter how ridiculous it is. Foreman Pig is known for being an expert at building vehicles and machines, which he can drive with ease.
+* Handsome Pig (also known as Hamsome Pig) is a blonde haired pig who only appears in Angry Birds Stella. He serves as Gale's right-hand man and consistently attempts to seduce Gale in the television series.
+* Professor Pig is an elderly bespectacled pig, possibly the smartest pig on Piggy Island. He seems to be a pacifist, as he hates it when the birds battle against the pigs, especially when Foreman Pig steals his blueprint of peaceful inventions as a design to build an egg-napping contraption.
+* Leonard is a bearded pig from the Angry Birds movies and an ancestor of King Pig. He is very confident, enthusiastic and scheming as, in The Angry Birds Movie, he tricked the birds into gaining their trust. Although, he was easily frustrated by Red's complaints and suspicions, mocking him underneath his breath, and has a mindset of not being worried about the consequences of his actions. He would later appear as a playable character in Angry Birds 2 and Angry Birds Reloaded.
+
+## Media
+
+Rovio is investigating ways to expand the Angry Birds brand, including merchandise, television shows and movies. Mikael Hed, CEO of Rovio Mobile, has envisioned a feature film in the stop-motion animation style of Aardman Animations, famous for the Wallace and Gromit franchise. To that end, Rovio has purchased a Helsinki-based animation studio to prepare Angry Birds short cartoons on the Nicktoons station's Nickelodeon Extra, the first of which was a Christmas special named "Wreck the Halls" that debuted in December 2011. Hed acknowledges that such a film would be years away, and that Rovio must keep the characters relevant until then, by producing sequels or new ports of the original game.
+
+### Television adaptations
+
+Angry Birds Toons, a TV series based on the game, made its debut on 16 March 2013. Angry Birds Toons is released through third-party video distribution platforms, including Comcast's Xfinity On-Demand in the US, Samsung Smart TVs, and Roku set-top boxes. It is also available in a number of countries on traditional television broadcasts. Angry Birds Toons is available on mobile devices by an additional Angry Birds Toons channel on all of the Angry Birds apps homescreens. DVD version for the TV series was released by Sony Pictures Home Entertainment. The series has a total of 3 seasons.
+
+On 11 April 2014, Rovio released Piggy Tales, a stop motion animated series. It tells the stories of the Minion Pigs' life.
+
+On 1 November 2014, Rovio released Angry Birds Stella, a 2D/3D animated series, telling the stories of Stella's life and that of her friends on their own island.
+
+On 3 July 2015, Rovio released the Rocket Science Show, an educational live-action-animated series, the NASA tell viewers facts about planets in the Solar System.
+
+On 12 July 2015, Real Angry Birds, inspired by the game Angry Birds, premiered on Nat Geo Wild.
+
+In 2016, Rovio released Fun Game Coding, another educational live-action-animated series, containing insightful instructions from tech-savvy Rovio employees.
+
+On 10 March 2017, Rovio released Angry Birds Blues, a computer-animated series based on The Angry Birds Movie. It shows the lives of the Blues having fun, while the Hatchlings were doing random stuff and ruining their plans.
+
+On 3 July 2017, Netflix and KidsClick picked up every Angry Birds Toons, Angry Birds Stella, and Piggy Tales episode in the form of 23 compilations.
+
+On 1 June 2018, U.S. television production company Big Fish Entertainment announced that they would be partnering with Rovio to create a game show based on Angry Birds currently called Angry Birds Challenge.
+
+On 9 June 2018, a series titled Angry Birds BirLd Cup was released on YouTube. It follows two teams (Team Red & Team Chuck) of rambunctious kids ready to put their soccer skills to the test. With Everton stars Wayne Rooney, Dominic Calvert-Lewin, Tom Davies, and Cenk Tosun on hand to lend their expertise and officiate the competition, the two teams will go head to head in a series of soccer-centric challenges to earn points. The team that scores the most points will claim the illustrious BirLd Cup, and BirLdwide acclaim.
+
+On 3 October 2018, a short, three-episode series titled Angry Birds Zero Gravity was released on YouTube.
+
+On 17 November 2018, a series titled Angry Birds on the Run was released on YouTube. The series focuses on the birds being sent to the real world from a girl's phone, causing mayhem while the pigs are looking for them.
+
+In late 2018, Rovio announced that a new, long-form Angry Birds television series titled Angry Birds: Summer Madness is in production and was originally set for release in 2021 on Netflix. It was pushed and was released in January 2022. It focuses on Red, Stella, Bomb, and Chuck as teenagers in summer camp causing mayhem with their teacher being the Mighty Eagle.
+
+On 1 June 2019, a series titled Angry Birds MakerSpace was released on YouTube. It features the birds and pigs working together in a shared workspace.
+
+On 18 January 2020, a series titled Angry Birds Slingshot Stories was released on YouTube. It features structures from the original Angry Birds game and shows the birds and pigs' life outside the levels.
+
+On 31 August 2020, a new series titled Angry Birds Bubble Trouble was released on Amazon Freetime Unlimited and YouTube. It shows Red, Chuck, Bomb, Silver, and Stella in their Dream Blast designs having fun and dreaming.
+
+On 6 June 2023, a new long-form television series titled Angry Birds Mystery Island which is in development and is set to be released on Amazon Prime Video and Amazon Kids+. The series focus on a new group of Hatchlings, trying to survive on an uncharted island.
+
+### Film adaptations
+
+A 3D computer-animated film adaptation, The Angry Birds Movie, was released on 20 May 2016 which fully anthropomorphizes the characters for the first time in franchise history, giving them limbs and voices. Developed, produced and financed by Rovio Entertainment, it is animated by Sony Pictures Imageworks and distributed worldwide by Sony Pictures Entertainment under their Columbia Pictures banner. It is directed by animation veterans Clay Kaytis and Fergal Reilly in their directorial debut. Jon Vitti wrote the film's screenplay, and John Cohen and Catherine Winder served as the producers. Rovio also hired David Maisel, former executive producer of Marvel Studios films such as Iron Man, to be the executive producer of its feature-length films.
+
+A sequel, The Angry Birds Movie 2 was released on 13 August 2019 which was co-produced by both Rovio Animation and Sony Pictures Animation. Directed by the creator of The Marvelous Misadventures of Flapjack, Thurop Van Orman, the sequel breaks from the series' source material by having the Birds and Pigs ending their rivalry to form an alliance to battle a larger threat, as well as becoming one of the most critically well-received video game film adaptations ever made, garnering an unprecedented score of 73% from Rotten Tomatoes.
+
+## Merchandise
+
+### Toys
+
+There have been several toys made from Angry Birds characters. The game's official website offers plush versions of the birds and pigs for sale, along with T-shirts featuring the game's logo and characters. In May 2011, Mattel released an Angry Birds board game, titled "Angry Birds: Knock on Wood". Over 10 million Angry Birds toys have been sold thus far. Rovio opened the first official Angry Birds retail store in Helsinki on 11 November 2011 at 11:11 a.m. local time. It expects to open its next retail store somewhere in China, considered the game's fastest-growing market. Merchandise has been successful, with 45% of Rovio's revenues in 2012 coming from branded merchandise.
+
+The most notable toys are the Telepods, created by Hasbro. These figures are created for Angry Birds Star Wars II, Angry Birds Go!, Angry Birds Stella, and Angry Birds Transformers. Telepods use a similar digital toy hybrid concept as Skylanders or Disney Infinity characters, but there is a different technology behind it. These are figures used to "teleport" a character of the corresponding figure into the game by scanning a tiny QR code via the device's camera. The Telepod platform technology was invented by ReToy, a bMuse company, in partnership with Hasbro. Telepods figures are not only for this use, but can also be used with the toy set that comes with the toy, like other Angry Birds board games.
+
+One of the 2012 New Models for Hot Wheels cars from Mattel is based on Red, the Blues, and Chuck. The package card bears both the Hot Wheels and Angry Birds logo.
+
+In 2016, Lego released six sets based on The Angry Birds Movie.
+
+### Print publications
+
+In 2011, Rovio published a cookbook titled Bad Piggies: Egg Recipes, along with doodle books based on some characters of the game. After a few weeks of the release of Angry Birds Space, they also released Angry Birds Space-themed books about numbers, alphabets, and stickers.
+
+On 20 March 2012, National Geographic published a paperback book titled Angry Birds Space: A Furious Flight Into The Final Frontier shortly before the release of Angry Birds Space which became available on 22 March 2012. National Geographic also has a book titled Angry Birds Feathered Fun for learning all about birds.
+
+In the same year, Rovio created a contest with the prize Angry Birds: Hatching a Universe, a book about the franchise and all the characters. It was released for sale by Titan Books on 24 May 2013; And again by Insight Editions on 4 June 2013. The book was written by Danny Gordon with a foreword by Mikael Hed.
+
+As of 10 March 2014, IDW Publishing announced that they will be publishing Angry Birds Comics starting in June 2014, with Paul Tobin being the writer.
+
+In the summer of 2017, GoComics announced that it will be running a comic strip series based on the world of The Angry Birds Movie, with each issue available to view on its website. The strip ran for over a year, from 3 August 2017 to 20 September 2018.
+
+### Food products
+
+In early 2012, Olvi started to manufacture Angry Birds soft drinks, after licensing with Rovio with two different tastes: Tropic (tropical fruits) and Paradise (pineapple-mandarin). In September 2012 Olvi released two new tastes to the soft drink collection: Lagoon (pear-apple) and Space Comet (orange-cola).
+
+## Parks and attractions
+
+### Angry Birds Land
+
+The game's characters have been used, officially or otherwise, in amusement park attractions. In September 2011, the Window of the World theme park in Changsha, China opened an unlicensed Angry Birds attraction. Visitors to the park use a large slingshot to launch stuffed versions of the bird characters at green balloons that represent the pigs.
+
+Upon learning of the attraction, Rovio Entertainment was reported to be considering working with the theme park to officially license it. In March 2012, Rovio announced plans for an official Angry Birds Land, that opened on 28 April 2012, at the Särkänniemi adventure park in Finland. Angry Birds Land opened in May 2014 at Johor Bahru City Centre in Malaysia.
+
+The first Angry Birds themed park in the UK was created in Sundown Adventureland, in the Nottinghamshire countryside.
+
+It was announced that UK theme park Thorpe Park would open their own Angry Birds Land themed area within the park, opening in May 2014, with a "4D Cinema" showing a 10-minute Angry Birds film with 4D effects, Angry Birds Dodgems, and a slight re-theme of existing drop tower ride Detonator. This Angry Birds Land operated until the end of the 2023 season, being rebranded for the 2024 season.
+
+### Angry Birds Activity Parks
+
+Rovio opened "Activity Parks" of the game. The first one opened in Lightwater Valley, England, with dance floors, playgrounds that include slides, and touchscreen devices for visitors to play Angry Birds. The attraction also opened in Vuokatti, Finland, with obstacle courses and races, and a separate "Angry Birds Town" with kids' cars.
+
+A park opened in Malaysia, but closed after six years on 5 April 2021 due to the COVID-19 pandemic.
+
+### Angry Birds Space Encounter
+
+In June 2013, Rovio and NASA opened the Angry Birds Space Encounter theme park at the Kennedy Space Center. It offers creating characters and shooting birds at pigs, as in the video game. It also opened in the Space Center Houston.
+
+### Angry Birds World
+
+Angry Birds World theme park at Doha Festival City opened in April 2019; the indoor part had opened in June 2018.
+
+### Angry Birds Not-So-Mini Golf
+
+Rovio opened a miniature Angry Birds golf course at American Dream Meadowlands in East Rutherford NJ USA on 1 October 2020.
+
+## Reception and legacy
+
+Aggregate review scores As of 5 September 2017. :
+
+| Game | Metacritic |
+| - | - |
+| Angry Birds | 80 |
+| Angry Birds Seasons | 78 |
+| Angry Birds Rio | 87 |
+| Angry Birds Friends | 65 |
+| Angry Birds Space | 83 |
+| Angry Birds Star Wars | 88 |
+| Angry Birds Star Wars II | 77 |
+| Angry Birds Go! | 60 |
+| Angry Birds Epic | 70 |
+| Angry Birds Transformers | 70 |
+| Angry Birds Fight! | 54 |
+| Angry Birds 2 | 66 |
+| Angry Birds Action! | 75 |
+| Angry Birds Blast! | 66 |
+| Angry Birds Evolution | TBC |
+| Angry Birds Match | TBC |
+| Angry Birds Island | TBC |
+| Angry Birds Dream Blast | TBC |
+| Angry Birds Reloaded | TBC |
+| Angry Birds Journey | TBC |
+
+The first game received critical acclaim for gameplay and style, and is considered one of the greatest video games ever made.
+
+According to Metacritic, only four games in the franchise received highly positive reviews with a score of 80% and above, while the two games received mixed reviews with a score of 60% and below.
+
+## Global impact
+
+### Television
+
+The Angry Birds characters have been referenced in television programs throughout the world. The Israeli comedy show Eretz Nehederet (in English: a Wonderful Country), one of the nation's most popular TV programs, satirized recent failed Israeli-Palestinian peace attempts by featuring the Angry Birds in peace negotiations with the pigs. Clips of the segment went viral, getting viewers from all around the world. The sketch received favorable coverage from a variety of independent blogs such as digitaltrends.com, hotair.com and intomobile.com, as well as from online news media agencies such as Haaretz, The Christian Science Monitor, The Guardian, and MSNBC. American television hosts Conan O'Brien, Jon Stewart and Daniel Tosh have referenced the game in comedy sketches on their respective series, Conan, The Daily Show, and Tosh.0. In the 30 Rock episode "Plan B", guest star Aaron Sorkin laments to Liz Lemon, "Our craft is dying while people are playing Angry Birds and poking each other on Facebook". He then provides a tip for Liz to improve her score in the game. In February 2011, American journalist Jake Tapper mockingly introduced U.S. Senator Chris Coons as the "Angry Birds champion of the Senate" during the National Press Club's annual dinner. Some of the game's more notable fans include ex-Prime Minister David Cameron of the United Kingdom, who plays the iPad version of the game, and author Salman Rushdie, who claims he is "something of a master at Angry Birds". Basketball star Kevin Durant is an avid fan of Angry Birds, and regularly plays other NBA stars in matches, although he is wary of cheating. In August 2011, the Milwaukee Brewers played the Angry Birds theme song during the pre-game introductions of the arch-rival St. Louis Cardinals players, in reference to former Cardinals' manager Tony LaRussa's propensity to bean opposing players. Angry Birds also appears briefly, for comic relief, during a scene in the 2013 film G.I. Joe: Retaliation, in which Zartan plays the game while waiting for the world leaders' response to his threats of annihilation. Angry Birds were featured in the 2013 Helsinki episode of Veep. Angry Birds was referenced in the film The Starving Games, a parody of The Hunger Games. A group in the Indian show Dance+ have done a dance based on Angry Birds. Angry Birds was referenced in the Family Guy episode "Turban Cowboy" where one failed skydiving attempt by Peter results in him landing in a level. The TV show Robot Chicken also parodied Angry Birds in one sketch.
+
+### Advertisements
+
+Angry Birds and its characters have been featured in advertisements for other products. In March 2011, the characters began appearing in a series of advertisements for Microsoft's Bing search engine. At the 2011 South by Southwest festival in Austin, Texas, Nokia used scrims on a downtown building to project an advertisement for its new N8 handset that included the game's characters. A June 2011 T-Mobile advertisement filmed in Barcelona, Spain included a real-life mock-up of the game in a city plaza, while Nokia used the game in Kuala Lumpur, Malaysia to promote an attempt to set a world record for the largest number of people playing a single mobile game. Finnair has also used Angry Birds in their advertising, including taping an Airbus A340 airliner with the Angry Birds figures and holding an Angry Birds tournament on board a flight to Singapore. Rovio has also prepared a number of web-based promotional variants of Angry Birds themed around creations of other companies, such as Finnish snack company Fazer, Spanish pizza delivery chain Telepizza, and Japanese television network Fuji TV, as well as promotions of American brands including Cheetos, Wonderful Pistachios and Coca-Cola. In November 2013, Indian brand Parle started a marketing campaign in which a trading card is included in each packet of Parle's Wafers and it included a related contest to win Angry Birds merchandise. In February 2016, Cadbury India had Angry Birds small figurines or tattoos in Cadbury Gems packs or Surprise balls. In June 2016, Kurkure India started an offer to win daily themed prizes and a trip to Angry Birds Activity Park in Malaysia.
+
+Finnish Formula One driver Heikki Kovalainen used an Angry Birds-themed helmet in the 2012 season, following a sponsorship deal with Rovio. Angry Birds also sponsored the Lotus F1 Team that year, with its logo on the top of each Lotus Renault F1 car's nosecone. As part of the deal, fellow Finn Kimi Räikkönen ran an Angry Birds 'Space' logo on his branded caps.
+
+Hockey Bird, an angry hockey playing bird, was the official mascot of the 2012 IIHF Ice Hockey World Championships. It was designed by Toni Kysenius and Rovio Entertainment.
+
+Premier League association football club Everton F.C. signed a deal with Rovio in 2017, whereby the Angry Birds logo appears on the club shirt's left sleeve beginning from the 2017–18 Premier League campaign.
+
+### Video games
+
+The game's popularity has spawned knock-off and parody games that utilize the same basic mechanics as Angry Birds. For example, Angry Turds features monkeys hurling feces and other objects at hunters who have stolen their babies. Another game, titled Chicks'n'Vixens and released in beta form on Windows Phone devices, replaces the birds and pigs with chickens and foxes, respectively. The developer of Chicks'n'Vixens intended the game as a challenge to Rovio Mobile, which stated at the time that a Windows Phone port of Angry Birds would not be ready until later in 2011. The Angry Birds theme song (Balkan Blast Remix) and its characters appear in Just Dance 2016.
+
+### Religion
+
+Angry Birds has inspired works of religious analogy. A five-part essay titled "Angry Birds Yoga — How to Eliminate the Green Pigs in Your Life" was written by Giridhari Dasa of the International Society for Krishna Consciousness of Brazil, utilizing the characters and gameplay mechanics to explain various concepts of yoga in Gaudiya Vaishnavism as understood and interpreted by the Hare Krishna. The piece attracted much media attention, in Brazil and abroad, for its unique method of philosophico-religious presentation. The piece was also recognized and appreciated by Rovio Mobile's Peter Vesterbacka, who was prompted to comment on Twitter, "Very cool! I can see Angry Birds Yoga becoming a worldwide craze;-)".
+
+### Education
+
+Rovio also launched the Angry Birds Playground in partnership with University of Helsinki. Based on the Finnish national curriculum the program covers maths, science, music, language, arts & crafts, physical education and social interaction. Focused on preschoolers of kindergarten age, the program introduced interactive learning material including books, posters, games and digital content. In 2015, a spin-off from the Rovio Angry Birds Playground was established as Fun Academy by co-founder and CEO Sanna Lukander, former Rovio's vice president of learning and book publishing, and co-founder Peter Vesterbacka, former Rovio's 'Mighty Eagle'. Fun Academy is currently present in 9 countries across the world.
+
+## Controversy
+
+During the 2023 Israel–Hamas war, graphic ads supporting Israel showed up in Angry Birds and other video games for children. The Israeli Foreign Ministry said it had instructed advertisers to block the ads for viewers under the age of 18. Rovio subsequently banned the ads manually.
+
+### Leaking user data
+
+In January 2014, it was revealed that Angry Birds was considered a "leaky app" and was used to collect data about its users including their sexual orientation and location by the National Security Agency (NSA) and GCHQ. In retaliation, anti-NSA hackers defaced Rovio's website. Claims were made by Edward Snowden that the app was leaky and that they were capable of siphoning data.
+
+According to The Register, the information was leaked through the in-game advertisement code like that embedded by Millennial Media: "Millennial's tracking software generates a personal record for each user that can store information from their political affiliation and sexual orientation to whether their marital state was single, married, divorced, engaged or 'swinger'. This information is used to target in-app ads more effectively, and can be collected by UK and US intelligence agencies for analysis." In a statement to the press, Rovio denied that they were providing any information to the intelligence agencies, but did not exclude the possibility that their advertisers might do so.
+
+Following this revelation, on 29 January, the Angry Birds site was defaced by hackers who replaced it with "Spying Birds" via a DNS hijacking attack. According to Rovio, "The defacement was caught in minutes and corrected immediately". The Syrian Electronic Army tweeted after the incident that the attack had been carried out by "a friend" of theirs.
+

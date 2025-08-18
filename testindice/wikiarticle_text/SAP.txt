@@ -1,0 +1,262 @@
+# SAP
+
+SAP SE (/ˌɛs.eɪˈpiː/; German pronunciation: ) is a German multinational software company based in Walldorf, Baden-Württemberg. It develops enterprise software to manage business operations and customer relations. The company is the world's leading enterprise resource planning (ERP) software vendor. Apart from ERP software, the company also sells database software and technology (particularly its own brands), cloud-engineered systems, and other ERP software products, such as human capital management (HCM) software, customer relationship management (CRM) software (also known as customer experience), enterprise performance management (EPM) software, product lifecycle management (PLM) software, supplier relationship management (SRM) software, supply chain management (SCM) software, business technology platform (BTP) software and programming environment SAP AppGyver for business.
+
+Founded in 1972 as a private partnership named Systemanalyse und Programmentwicklung (lit. 'System Analysis and Software Development'; SAP GbR), which in 1981 fully became Systeme, Anwendungen und Produkte in der Datenverarbeitung (SAP GmbH) after a five-year transition period beginning in $1976.^{:1972–1980}$ In 2005, it further restructured itself as SAP AG. Since 7 July 2014, its corporate structure is that of a pan-European societas Europaea (SE); as such, its former German corporate identity is now a subsidiary, SAP Deutschland SE & Co. KG.
+
+SAP is headquartered in Walldorf, Baden-Württemberg, Germany, with regional offices in 180 countries. The company has over 111,961 employees in over 180 countries and is a component of the DAX and Euro Stoxx 50 stock market indices. The company is the largest non-American software company by revenue and the world's third-largest publicly traded software company by revenue. As of December 2023, SAP is the largest German company by market capitalization.
+
+## History
+
+### Formation
+
+When Xerox exited the computer hardware manufacturing industry in 1971, it asked IBM to migrate its business systems to IBM technology. As part of IBM's compensation for the migration, IBM was given the rights to the Scientific Data Systems (SDS)/SAPE software, repo.
+
+Five IBM engineers from the AI department (Dietmar Hopp, Klaus Tschira, Hans-Werner Hector, Hasso Plattner, and Claus Wellenreuther, all from Mannheim, Baden-Württemberg) were working on an enterprise-wide system based on this software, only to be told that it would no longer be necessary. Rather than abandoning the project, they decided to leave IBM Tech and start another company.
+
+In June 1972, they founded the SAP Systemanalyse und Programmentwicklung ("System Analysis and Program Development" / "SAPD") company, as a private partnership under the German Civil Code.
+
+Their first client was the German branch of Imperial Chemical Industries in Östringen, where they developed mainframe programs for payroll and accounting. Instead of storing the data on punch cards mechanically, as IBM did, they stored it locally in the Electronic System while using a common Logical database for all activities of Organization. Therefore, they called their software a real-time system, since there was no need to process the punch cards overnight (for this reason their flagship product carried an R in its name until the late 1990s). This first version was also a standalone software that could be offered to other interested parties.
+
+## Acquisitions
+
+Acquisitions (1991–now):
+
+| Acquisition number | Acquired company | Acquisition date | Specialty | Country of origin | Acquisition costs |
+| - | - | - | - | - | - |
+| 75 | LeanIX | Sep 2023 | Enterprise architecture management | Germany | |
+| 74 | Taulia | (January 2022) | Working capital management | USA | |
+| 73 | AppGyver | (February 2021) | No-code development platform | Finland | |
+| 72 | Signavio | (January 2021) | Collaborative Business Process Design, Management and Analysis | Germany | $1b est. |
+| 71 | Emarsys | Oct 2020 | Omnichannel marketing | Austria | |
+| 70 | Qualtrics | Nov 2018 | Collect, Manage, act on Experience data | USA | $8.0b |
+| 69 | Contextor | Nov 2018 | Robotic Process Automation | France | |
+| 68 | Coresystems | Jun 2018 | Platform for field service management | Switzerland | |
+| 67 | CallidusCloud | Jan 2018 | Sales Performance Management Tool | USA | $2.4 b |
+| 66 | Recast.ai | Jan 2018 | Conversational User Experience Technology (chatbot) | France | |
+| 65 | Gigya | Sep 2017 | Customer Identity Management | Israel | $350m |
+| 64 | Abakus | Dec 2016 | Marketing attribution | USA | |
+| 63 | Plat.One | Oct 2016 | IoT | USA | |
+| 62 | Altiscale | Aug 2016 | big data and Hadoop Hosting | USA | $125m+ |
+| 61 | Fedem Technology | Jun 2016 | IoT | Norway | |
+| 60 | MeLLmo Inc. (Roambi) | Feb 2016 | Mobile Business Intelligence | USA | |
+| 59 | Concur Technologies | Sep 2014 | Travel and Expense Management | USA | $8.3b |
+| 58 | SeeWhy | May 2014 | Behavioural target marketing | USA | $1.1b |
+| 57 | Fieldglass | Mar 2014 | Contingent labour and services | USA | |
+| 56 | KXEN | Oct 2013 | Predictive analytics | France | |
+| 55 | hybris | May 2013 | E-Commerce Solutions | Switzerland | $1.5b |
+| 54 | Camilion | Mar 2013 | Insurance solutions | Canada | |
+| 53 | SmartOps | Feb 2013 | Inventory optimization | USA | |
+| 52 | Ticket-Web | Feb 2013 | Ticket systems and special CRM solutions for sports and entertainment | Germany | |
+| 51 | Ariba | Oct 2012 | Supplier network | USA | $4.3b |
+| 50 | Syclo | Jun 2012 | Mobile asset management | USA | |
+| 49 | datango | Jan 2012 | Electronic performance support technologies | Germany | |
+| 48 | SuccessFactors | Dec 2011 | Human Capital Management | USA | $3.4b |
+| 47 | Right Hemisphere | Sep 2011 | 3D visualization | USA | |
+| 46 | Crossgate | Sep 2011 | B2B eCommerce | Germany | |
+| 45 | Secude | Mar 2011 | Security software (Not the whole company, only some assets were acquired) | Germany | |
+| 44 | Cundus | Dec 2010 | Disclosure Management | Germany | |
+| 43 | Sybase | May 2010 | Database, middleware, mobile software | USA | $5.8b |
+| 42 | TechniData | May 2010 | Environmental, Health and Safety | Germany | |
+| 41 | SAF | Sep 2009 | Inventory Management | Switzerland | $91m |
+| 40 | Highdeal | May 2009 | High-volume billing | France | |
+| 39 | Visiprise | Jul 2008 | Manufacturing Execution | USA | |
+| 38 | Saicon INC | Oct 2014 | US Recruitment | India | |
+| 37 | BusinessObjects | Oct 2007 | Business Intelligence | France | $6.78b |
+| 36 | Yasu Technologies Pvt. Ltd. | Oct 2007 | Business Rules Management Software | India | |
+| 35 | Wicom Communications | May 2007 | Internet Communication software | Finland | |
+| 34 | MaXware | May 2007 | Identity software | Norway | |
+| 33 | Outlooksoft | May 2007 | Planning & consolidation | USA | |
+| 32 | Pilot Software | Feb 2007 | Strategy Management software | USA | ~$200m |
+| 31 | Factory Logic | Dec 2006 | Lean scheduling and supply synchronisation | USA | |
+| 30 | Praxis Software Solutions | Jul 2006 | Web-based CRM and eCommerce | USA | |
+| 29 | Frictionless Commerce | May 2006 | SRM software | USA | |
+| 28 | Virsa Systems | Apr 2006 | Compliance solutions | USA | |
+| 27 | SAP Systems Integration | Dec 2005 | Consulting services | Germany | |
+| 26 | Callixa | Nov 2005 | Enterprise Integration Information software | USA | |
+| 25 | Khimetrics | Nov 2005 | retail software | USA | |
+| 24 | Triversity | Sep 2005 | POS software | Canada | |
+| 23 | Lighthammer | Jun 2005 | Manufacturing Intelligence and Collaborative Manufacturing | USA | |
+| 22 | DCS Quantum | Feb 2005 | Automotive Dealer Management | United Kingdom | |
+| 21 | TomorrowNow | Jan 2005 | Grey market support | USA | |
+| 20 | ilytix | Jan 2005 | SAP BusinessOne Business Intelligence | Norway | |
+| 19 | A2i | Jul 2004 | Master Data Management | USA | |
+| 18 | SPM Technologies | Dec 2003 | IT architecture consulting | Germany | |
+| 17 | DCW Software | Jul 2003 | OS/400 Applications | Germany | |
+| 16 | Guimachine | Dec 2002 | NetWeaver Visual Composer toolkit | USA | |
+| 15 | IMHC | May 2001 | Integrated managed health care from IDS | USA | |
+| 14 | Expression | May 2002 | Real-time file sharing | ? | |
+| 13 | Topmanage | Feb 2002 | SAP BusinessOne Suite | Israel | |
+| 12 | Paynet International AG | Dec 2001 | Invoice Processing | Germany | |
+| 11 | COPA GmbH | Nov 2001 | Beverage industry consulting | Germany | |
+| 10 | Infinite Data Structures | May 2001 | Trade Management / CRM | USA | |
+| 9 | Toptier | Mar 2001 | Enterprise Information Portal and Integration Infrastructure | USA | ~$400m |
+| 8 | Prescient Consulting | Feb 2000 | Consulting services | USA | |
+| 7 | In-Q-My Technologies GmbH | 2000 | J2EE Server | Bulgaria | |
+| 6 | Campbell Software | 1999 | Workforce Management | USA | |
+| 5 | AMC Development | 1998 | Call Center telephony integration software | USA | |
+| 4 | OFEK-Tech | 1998 | Warehousing and distribution centre software | Israel | |
+| 3 | Kiefer & Veittinger | 1997 | Sales force Applications | Germany | |
+| 2 | Dacos | 1994 | Retail solution | Germany | |
+| 1 | Steeb | 1991 | Software and Consulting Services | Germany | |
+
+### Enterprise resource planning
+
+In 1973, the first commercial product was launched. SAP completed its first financial accounting system - RF. This system served as the cornerstone in the ongoing development of other software modules of the system that eventually bore the name SAP R/1.
+
+This offered a common system for multiple tasks. This permitted the use of a centralized data storage, improving the maintenance of data. From a technical point of view, therefore, a database was necessary.
+
+In 1976, SAP GmbH Systeme, Anwendungen und Produkte in der Datenverarbeitung ("Systems, Applications, and Products in Data Processing") was founded as a sales and support subsidiary. Five years later, the private partnership was dissolved and its rights were passed on to SAP GmbH.
+
+The headquarters moved the following year to Walldorf, Germany. Three years later, in 1979, SAP launched SAP R/2, expanding the capabilities of the system to other areas, such as material management and production planning. In 1981, SAP brought a re-designed product to market. However, SAP R/2 did not improve until the period between 1985 and 1990. SAP released the new SAP R/3 in 1992. SAP developed and released several versions of R/3 through 1995. By the mid-1990s, SAP followed the trend from mainframe computing to client–server architectures. The development of SAP's internet strategy with mySAP.com redesigned the concept of business processes (integration via Internet). As a result, R/3 was replaced with the introduction of SAP ERP Central Component (ECC) 5.0 in 2004. Architectural changes were also made to support an enterprise service architecture to transition customers to a service-oriented architecture. The latest version, SAP ERP 6.0, was released in 2006. SAP ERP 6.0 has since then been updated through SAP enhancement packs, the most recent: SAP enhancement package 8 for SAP ERP 6.0 in 2016.
+
+### Corporate restructuring
+
+In August 1988, SAP GmbH became SAP AG, and public trading started on 4 November 1988. Shares were listed on the Frankfurt and Stuttgart stock exchanges. In 1995, SAP was included in the German stock index DAX and, on 22 September 2003, SAP was included in the STOXX Europe 50.
+
+### SAP AG era
+
+The company's official name became SAP AG (a public limited company) after the 2005 annual general meeting.
+
+### SAP SE era
+
+On 21 May 2014, SAP AG announced during the Annual General Meeting of Shareholders that 99% of the shareholder votes approved the conversion of legal form to a European stock corporation (Societas Europaea, SE) and at the same time, elected the first supervisory board of SAP SE. The conversion of the company's legal form would take place upon entry in the commercial register, expected to be in July 2014.
+
+On 7 July 2014, SAP announced it had changed its legal form to a European Company (Societas Europaea, SE). As a result, its German subsidiary was renamed to SAP Deutschland SE & Co. KG. The conversion cost the company approximately €4 million.
+
+### Focus on cloud
+
+Since 2012, SAP has acquired several companies that sell cloud-based products, with several multi-billion-dollar acquisitions seen by analysts as an attempt to challenge competitor Oracle. In 2016 SAP bought Concur Technologies, a provider of cloud-based travel and expense management software, for $8.3 billion, SAP's most expensive purchase to that date. Analysts' reactions to the purchase were mixed, with Thomas Becker of Commerzbank questioning whether Concur was the right choice for SAP, while Credit Suisse called the acquisition an "aggressive" move.
+
+In 2014, IBM and SAP began a partnership to sell cloud-based services. Likewise, in 2015, SAP also partnered with HPE to provide secure hybrid cloud-based services running the SAP platform. Both HPE and IBM provide infrastructure services to SAP, and SAP runs its SAP HANA cloud solution on top. SAP has announced additional partnerships with Microsoft in order to give customers tools for data visualization, as well as improved mobile applications.
+
+SAP exceeded its revenue projections due to the expansion in its cloud business and the success of SAP HANA. The growth can also be partially attributed to the acquisitions of Concur and Fieldglass. Since 2017, SAP is a founding member of the EU Cloud Code of Conduct. Since May 2021 SAP has listed selected Cloud Service adherent to the EU Cloud Code of Conduct as one of the first Cloud Service Providers.
+
+The company announced plans in 2016 to invest heavily into technology relating to the Internet of things (IoT) as part of a strategy to capitalize on the growth in that market. For that purpose, €2 billion is planned for investment in relevant sectors by the end of 2020. SAP will also launch a new product line called SAP IoT, which "will combine large amounts of data from things connected to the Internet with machine learning and SAP's real-time database S/4 HANA."
+
+On 29 January 2019, SAP announced plans to cut approximately 4,000 positions at the company in a strategic plan to shift to more modern cloud-based technologies such as blockchain, quantum computing, machine learning, Internet of Things, and artificial intelligence.
+
+### SAP Fioneer and Dediq
+
+On 13 April 2021, SAP announced the formation of the joint venture SAP Fioneer, a dedicated Financial Services Industry (FSI) Unit between SAP and investment company Dediq GmbH. Dediq GmbH invested over €500 million in the newly formed unit and received an 80 per cent share in return. SAP brought its products, organizational units and the sales network into the business and holds 20 per cent of the shares.
+
+## Finances
+
+For the fiscal year 2017, SAP reported earnings of €4 billion, with an annual revenue of €23.5 billion, an increase of 6.3% over the previous fiscal cycle. SAP's shares traded at over US$154 per share, and its market capitalization was valued at US$180 billion in December 2023, making it the largest German company by market capitalization.
+
+The key trends for SAP are (as at the financial year ending March 31):
+
+| Year | Revenue (€ bn) | Net income (€ bn) | Total assets (€ bn) | Employees |
+| - | - | - | - | - |
+| 2013 | 16.8 | 3.3 | 27.0 | 66,572 |
+| 2014 | 17.5 | 3.2 | 38.5 | 74,406 |
+| 2015 | 20.7 | 3.0 | 41.3 | 76,986 |
+| 2016 | 22.0 | 3.6 | 44.2 | 84,183 |
+| 2017 | 23.4 | 4.0 | 42.4 | 88,543 |
+| 2018 | 24.7 | 4.0 | 51.5 | 96,498 |
+| 2019 | 27.5 | 3.3 | 60.2 | 100,330 |
+| 2020 | 27.3 | 5.1 | 58.4 | 103,876 |
+| 2021 | 27.8 | 5.2 | 71.1 | 107,415 |
+| 2022 | 30.8 | 2.2 | 72.1 | 111,961 |
+
+## Business and markets
+
+As of 2016, SAP is the world's fourth-largest software and programming company. The corporation operates in Europe, Asia, Africa, the Middle East, North America, and South America.
+
+SAP focuses on 25 industries and six industry sectors: process industries, discrete industries, consumer industries, service industries, financial services and public services. It offers integrated product sets for large enterprises, mid-sized companies and small businesses.
+
+## Partnerships
+
+SAP partners include Global Services Partners with cross-industry multinational consulting capabilities, SAP University Alliances, Global Software Partners providing integrated products that complement SAP Business Suite solutions, and Global Technology Partners providing user companies with a wide range of products to support SAP technology, including vendors of hardware, database, storage systems, networks, and mobile computing technology.
+
+Extensions partners are companies which provide functionality that complements SAP product capabilities. Their products are certified, sold, and supported by SAP. These partner companies include Adobe, CA Technologies, GK Software, Tricentis, Hewlett-Packard, IDS Scheer, Mendix, OpenText, Knoa Software, and BackOffice Associates.
+
+SAP has also partnered with Apple to work on the mobile experience for SAP enterprise customers. As part of the partnership, a new SAP HANA Cloud Platform SDK would be delivered exclusively for iOS. As a result, developers can build applications based on the SAP HANA Cloud Platform for the iPhone and iPad devices. The partnership was announced in May 2016.
+
+In 2019, SAP announced a three-year partnership "Embrace" with Microsoft that should allow its clients to move their business process into the cloud, although significant portions of that partnership were reduced to two years. SAP teams up on cloud sales with Microsoft
+
+In 2020 SAP announced that together with Wipro it will co-develop and market "solutions for the retail and fashion industry."
+
+## Organization
+
+SAP uses a two-tier structure of boards, with an executive board and a supervisory board. In October 2019, Jennifer Morgan and Christian Klein were appointed as co-CEOs of SAP. In April 2020, it was announced that Jennifer Morgan will leave SAP and Christian Klein will continue to operate as the sole CEO, citing that the current environment of the COVID-19 recession requires "companies to take swift, determined action which is best supported by a very clear leadership structure".
+
+The majority of the company's employees are in Germany and United States. About 20,000 employees are based in Germany and about 19,311 employees are based in the United States.
+
+In 2022, 45 employee representatives were elected to the SAP SE Works Council, including 15 candidates from the Ver.di and IG Metall trade union lists. They represent 17,000 employees of Germany.
+
+Headquarters is responsible for overall management as well as core engineering activities related to product development. Worldwide customer support is not provided by the field organizations but by a unified organization called Active Global Support (AGS).
+
+## SAP Labs
+
+Locations of SAP Labs :
+
+| Country | Main location(s) |
+| - | - |
+| Germany | Walldorf/Rot, Markdorf, Dresden, Berlin |
+| United States | Silicon Valley, Newtown Square |
+| India | Bangalore, Pune, Gurgaon |
+| China | Shanghai |
+| Brazil | São Leopoldo |
+| Bulgaria | Sofia |
+| Canada | Vancouver, Montreal, Waterloo |
+| South Korea | Seoul |
+| Vietnam | Ho Chi Minh City |
+| Israel | Ra'anana |
+| France | Paris, Sophia Antipolis |
+| Ireland | Dublin |
+| Hungary | Budapest |
+| Slovakia | Bratislava |
+| Czech Republic | Brno |
+| Poland | Gliwice |
+
+SAP Labs are research and development locations that develop and improve SAP core products. SAP Labs are strategically located in high-tech clusters around the globe.
+
+The four most prominent labs of SAP SE are located in Germany, Japan, Israel and the US. Labs Walldorf was founded in 1972 and became SAP's primary location. At the beginning, the focus of SAP's expansion was entering highly developed IT markets; in 1993, Palo Alto became a part of SAP Labs. Aiming to acquire talented employees, SAP opened another lab in Bangalore in 2003.
+
+SAP Labs in Czech Republic, Slovakia and Poland were established in 2016. The lab in India is SAP's largest outside Germany as of 2016.
+
+In order to manage SAP Labs, SAP Labs Network (SLN) was created. SLN is a global unit that manages regional Labs and shares best business practices. It coordinates and distributes development projects among individual SAP Labs locations, accelerates product delivery, gives SAP full access to talent, and drives SAP corporate strategy regarding innovation and business growth.
+
+## Philanthropic efforts
+
+SAP has donated several millions of dollars to a variety of global health causes including the Product Red campaign and the Global Fund. In addition, SAP has distributed free software in South Africa as part of an effort towards developing future markets there. The company also encourages employees to volunteer through social sabbaticals, sending teams of people to different countries to aid non-profits. SAP employees have volunteered in China, India, Brazil, and South Africa.
+
+## Controversies
+
+### Bribery charges
+
+In 2024, after investigations by the U.S. Justice Department and the Securities and Exchange Commission, SAP was ordered to pay $220 million to resolve violations of the Foreign Corrupt Practices Act in South Africa, Indonesia, Tanzania, Malawi, Ghana, Kenya, Zimbabwe and Azerbaijan. It paid bribes to officials in state-owned enterprises to gain government contracts. It entered into a three-year deferred prosecution agreement, paying a criminal penalty of $118.8 million and an administrative forfeiture of $103,396,765.
+
+In South Africa, SAP used third-party intermediaries to acquire tenders from various state-owned entities, including Transnet, the South African Revenue Service, the City of Johannesburg, Eskom and the Department of Water and $Sanitation.^{:4}$
+
+### US-Iran sanctions
+
+In 2021, SAP admitted in a United States court that it exported software to firms in Iran, contrary to US sanctions against Iran, which led to a fine of $8 million.
+
+### East African allegations
+
+In February 2019, SAP was accused of 'improper conduct' linked to state contracts in Kenya and Tanzania. An anonymous whistle-blower claims, through a firm of attorneys, that SAP used Twenty Third Century Systems (TTCS) to bribe officials at the Tanzania Ports Authority (TPA) to win a US$6.6 million enterprise resource planning software tender that involved the provision of software licenses and services.
+
+### South African allegations
+
+In July 2017, allegations were made that SAP had been involved in business transactions with the controversial and politically influential Gupta family in South Africa. SAP was accused of paying CAD House, a Gupta-controlled company, R100 million in order to secure a Transnet deal. SAP denied the allegations, claiming that the money was paid as "an extension of the sales force", despite CAD House having no prior SAP experience.
+
+The Guptas' dealings with SAP were revealed in a widely publicized e-mail leak.
+
+As a consequence of the allegations, SAP launched an investigation that led to four of its South African managers being placed on administrative leave along with the seizure of their mobile phones and computers. Claas Kuehnemann was named as acting managing director for Africa while the investigation continued.
+
+On 26 October 2017, SAP announced that it had voluntarily reported itself to the U.S. Securities and Exchange Commission (SEC) for a possible violation of US law, including the Foreign Corrupt Practices Act (FCPA), related to the South African bribery allegations. SAP's own investigation, conducted by law firm Baker McKenzie, revealed that SAP had paid $7.7 million in commissions to third-parties linked to the Gupta family while securing contracts worth $48 million with Transnet and Eskom.
+
+### Panamanian bribery
+
+Since May 2015, the company has dealt with a series of high-profile bribery investigations, including one that led to them paying $3.9 million to settle U.S. Securities and Exchange Commission civil charges over a former executive's scheme to bribe Panama government officials in order to win lucrative technology contracts.
+
+### Allegations of intellectual property theft and fraud
+
+In 2018, and in an ongoing court battle, Teradata accused SAP of IP theft and fraudulent behaviour. In 2021, in the German weekly news magazine Der Spiegel, additional claims were made of questionable behaviour with regards to SAP's funding of researchers at the University of Mannheim - who were in effect paid by SAP to investigate competitors technology. In a later article, Der Spiegel magazine maintained that SAP had been neglectful in maintaining strict governance for years. In June 2022 the German business magazine Manager Magazin published an article stating the management style of the leadership might be responsible for an increased compliance risk.
+
+### Bullying claims and misogyny
+
+In May 2022, multiple claims were made of bullying and sexual harassment within the company, with many cases of unwanted advances by senior male managers on female colleagues. When complaints were made or information made available, HR were found to be unhelpful or hostile. For example, in one case a female employee was groped by a male manager in Sydney while at a company event, but he was never brought to account. In another case, a female employee was sexually targeted by a manager and asked to keep her web camera on during the day. She then complained and was placed under "performance management" - a pre-cursor to being asked to leave the company. Several female executives, including the Co-CEO left the company, adding to concerns that women were negatively treated, despite SAP then hiring several other senior women from Microsoft.
+

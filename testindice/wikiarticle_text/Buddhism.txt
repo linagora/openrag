@@ -1,0 +1,481 @@
+# Buddhism
+
+Buddhism (/ˈbʊdɪzəm/ BUUD-ih-zəm, US also /ˈbuːd-/ BOOD-), also known as Buddha Dharma, and Dharmavinaya (transl. "doctrines and disciplines"), is an Indian religion or philosophical tradition based on teachings attributed to the Buddha. It originated in the eastern Gangetic plain as a śramaṇa–movement in the 5th century BCE, and gradually spread throughout much of Asia via the Silk Road. It is the world's fourth-largest religion, with over 520 million followers (Buddhists) who comprise seven percent of the global population.
+
+The Buddha's central teachings emphasize the aim of attaining liberation from dukkha (often translated as "suffering" or "unease"), the source of which is said to be attachment or clinging. He endorsed the Middle Way, a path of development that avoids both extreme asceticism and hedonism. A summary of this path is expressed in the Noble Eightfold Path, a cultivation of the mind which is said to lead to awakening and full liberation through observance of Buddhist ethics and meditation. Other widely observed practices include: monasticism; "taking refuge" in the Three Jewels: the Buddha, the dharma, and the saṅgha; and the cultivation of perfections (pāramitā).
+
+Buddhist schools vary in their interpretation of the paths to liberation (mārga) as well as the relative importance and "canonicity" assigned to various Buddhist texts, and their specific teachings and practices. Two major extant branches of Buddhism are generally recognized by scholars: Theravāda (lit. 'School of the Elders') and Mahāyāna (lit. 'Great Vehicle'). The Theravada tradition emphasizes the attainment of nirvāṇa (lit. 'extinguishing') as a means of transcending the individual self and ending the cycle of death and rebirth (saṃsāra), while the Mahayana tradition emphasizes the Bodhisattva-ideal, in which one works for the liberation of all beings. The Buddhist canon is vast, with many different textual collections in different languages (such as Sanskrit, Pali, Tibetan, and Chinese).
+
+The Theravāda branch has a widespread following in Sri Lanka as well as in Southeast Asia, namely Myanmar, Thailand, Laos, and Cambodia. The Mahāyāna branch—which includes the traditions of Zen, Pure Land, Nichiren, Tiantai, Tendai, and Shingon—is predominantly practised in Nepal, Bhutan, China, Malaysia, Vietnam, Taiwan, Korea, and Japan. Additionally, Vajrayāna (lit. 'Indestructible Vehicle'), a body of teachings attributed to Indian adepts, may be viewed as a separate branch or tradition within Mahāyāna. Tibetan Buddhism, which preserves the Vajrayāna teachings of eighth-century India, is practised in the Himalayan states as well as in Mongolia and Russian Kalmykia. Historically, until the early 2nd millennium, Buddhism was widely practiced in the Indian subcontinent; it also had a foothold to some extent elsewhere in Asia, namely Afghanistan, Turkmenistan, Uzbekistan, and Tajikistan.
+
+## Etymology
+
+Buddhism is an Indian religion or philosophy. The Buddha ("the Awakened One") was a Śramaṇa who lived in South Asia c. 6th or 5th century BCE.
+
+Followers of Buddhism, called Buddhists in English, referred to themselves as Sakyan-s or Sakyabhiksu in ancient India. Buddhist scholar Donald S. Lopez asserts they also used the term Bauddha, although scholar Richard Cohen asserts that that term was used only by outsiders to describe Buddhists.
+
+## The Buddha
+
+Details of the Buddha's life are mentioned in many Early Buddhist Texts but are inconsistent. His social background and life details are difficult to prove, and the precise dates are uncertain, although the 5th century BCE seems to be the best estimate.
+
+Early texts have the Buddha's family name as "Gautama" (Pali: Gotama), while some texts give Siddhartha as his surname. He was born in Lumbini, present-day Nepal and grew up in Kapilavastu, a town in the Ganges Plain, near the modern Nepal–India border, and he spent his life in what is now modern Bihar and Uttar Pradesh. Some hagiographic legends state that his father was a king named Suddhodana, his mother was Queen Maya. Scholars such as Richard Gombrich consider this a dubious claim because a combination of evidence suggests he was born in the Shakya community, which was governed by a small oligarchy or republic-like council where there were no ranks but where seniority mattered instead. Some of the stories about the Buddha, his life, his teachings, and claims about the society he grew up in may have been invented and interpolated at a later time into the Buddhist texts.
+
+According to early texts such as the Pali Ariyapariyesanā-sutta ("The discourse on the noble quest", MN 26) and its Chinese parallel at MĀ 204, Gautama was moved by the suffering (dukkha) of life and death, and its endless repetition due to rebirth. He thus set out on a quest to find liberation from suffering (also known as "nirvana"). Early texts and biographies state that Gautama first studied under two teachers of meditation, namely Āḷāra Kālāma (Sanskrit: Arada Kalama) and Uddaka Ramaputta (Sanskrit: Udraka Ramaputra), learning meditation and philosophy, particularly the meditative attainment of "the sphere of nothingness" from the former, and "the sphere of neither perception nor non-perception" from the latter.
+
+Finding these teachings to be insufficient to attain his goal, he turned to the practice of severe asceticism, which included a strict fasting regime and various forms of breath control. This too fell short of attaining his goal, and then he turned to the meditative practice of dhyana. He famously sat in meditation under a Ficus religiosa tree — now called the Bodhi Tree — in the town of Bodh Gaya and attained "Awakening" (Bodhi).
+
+According to various early texts like the Mahāsaccaka-sutta, and the Samaññaphala Sutta, on awakening, the Buddha gained insight into the workings of karma and his former lives, as well as achieving the ending of the mental defilements (asavas), the ending of suffering, and the end of rebirth in saṃsāra. This event also brought certainty about the Middle Way as the right path of spiritual practice to end suffering. As a fully enlightened Buddha, he attracted followers and founded a Sangha (monastic order). He spent the rest of his life teaching the Dharma he had discovered, and then died, achieving "final nirvana", at the age of 80 in Kushinagar, India.
+
+The Buddha's teachings were propagated by his followers, which in the last centuries of the 1st millennium BCE became various Buddhist schools of thought, each with its own basket of texts containing different interpretations and authentic teachings of the Buddha; these over time evolved into many traditions of which the more well known and widespread in the modern era are Theravada, Mahayana and Vajrayana Buddhism.
+
+## Worldview
+
+The term "Buddhism" is an occidental neologism, commonly (and "rather roughly" according to Donald S. Lopez Jr.) used as a translation for the Dharma of the Buddha, fójiào in Chinese, bukkyō in Japanese, nang pa sangs rgyas pa'i chos in Tibetan, buddhadharma in Sanskrit, buddhaśāsana in Pali.
+
+### Four Noble Truths – dukkha and its ending
+
+The Four Truths express the basic orientation of Buddhism: we crave and cling to impermanent states and things, which is dukkha, "incapable of satisfying" and painful. This keeps us caught in saṃsāra, the endless cycle of repeated rebirth, dukkha and dying again. But there is a way to liberation from this endless cycle to the state of nirvana, namely following the Noble Eightfold Path.
+
+The truth of dukkha is the basic insight that life in this mundane world, with its clinging and craving to impermanent states and things is dukkha, and unsatisfactory. Dukkha can be translated as "incapable of satisfying", "the unsatisfactory nature and the general insecurity of all conditioned phenomena"; or "painful". Dukkha is most commonly translated as "suffering", but this is inaccurate, since it refers not to episodic suffering, but to the intrinsically unsatisfactory nature of temporary states and things, including pleasant but temporary experiences. We expect happiness from states and things which are impermanent, and therefore cannot attain real happiness.
+
+In Buddhism, dukkha is one of the three marks of existence, along with impermanence and anattā (non-self). Buddhism, like other major Indian religions, asserts that everything is impermanent (anicca), but, unlike them, also asserts that there is no permanent self or soul in living beings (anattā). The ignorance or misperception (avijjā) that anything is permanent or that there is self in any being is considered a wrong understanding, and the primary source of clinging and dukkha.
+
+### The cycle of rebirth
+
+**Saṃsāra**
+
+Saṃsāra means "wandering" or "world", with the connotation of cyclic, circuitous change. It refers to the theory of rebirth and "cyclicality of all life, matter, existence", a fundamental assumption of Buddhism, as with all major Indian religions. Samsara in Buddhism is considered to be dukkha, unsatisfactory and painful, perpetuated by desire and avidya (ignorance), and the resulting karma. Liberation from this cycle of existence, nirvana, has been the foundation and the most important historical justification of Buddhism.
+
+Buddhist texts assert that rebirth can occur in six realms of existence, namely three good realms (heavenly, demi-god, human) and three evil realms (animal, hungry ghosts, hellish). Samsara ends if a person attains nirvana, the "blowing out" of the afflictions through insight into impermanence and "non-self".
+
+**Rebirth**
+
+Rebirth refers to a process whereby beings go through a succession of lifetimes as one of many possible forms of sentient life, each running from conception to death. In Buddhist thought, this rebirth does not involve a soul or any fixed substance. This is because the Buddhist doctrine of anattā (Sanskrit: anātman, no-self doctrine) rejects the concepts of a permanent self or an unchanging, eternal soul found in other religions.
+
+The Buddhist traditions have traditionally disagreed on what it is in a person that is reborn, as well as how quickly the rebirth occurs after death. Some Buddhist traditions assert that "no self" doctrine means that there is no enduring self, but there is avacya (inexpressible) personality (pudgala) which migrates from one life to another. The majority of Buddhist traditions, in contrast, assert that vijñāna (a person's consciousness) though evolving, exists as a continuum and is the mechanistic basis of what undergoes the rebirth process. The quality of one's rebirth depends on the merit or demerit gained by one's karma (i.e., actions), as well as that accrued on one's behalf by a family member. Buddhism also developed a complex cosmology to explain the various realms or planes of rebirth.
+
+**Karma**
+
+In Buddhism, karma (from Sanskrit: "action, work") drives saṃsāra – the endless cycle of suffering and rebirth for each being. Good, skilful deeds (Pāli: kusala) and bad, unskilful deeds (Pāli: akusala) produce "seeds" in the unconscious receptacle (ālaya) that mature later either in this life or in a subsequent rebirth. The existence of karma is a core belief in Buddhism, as with all major Indian religions, and it implies neither fatalism nor that everything that happens to a person is caused by karma.
+
+A central aspect of Buddhist theory of karma is that intent (cetanā) matters and is essential to bring about a consequence or phala "fruit" or vipāka "result". However, good or bad karma accumulates even if there is no physical action, and just having ill or good thoughts creates karmic seeds; thus, actions of body, speech or mind all lead to karmic seeds. In the Buddhist traditions, life aspects affected by the law of karma in past and current births of a being include the form of rebirth, realm of rebirth, social class, character and major circumstances of a lifetime. It operates like the laws of physics, without external intervention, on every being in all six realms of existence including human beings and gods.
+
+A notable aspect of the karma theory in Buddhism is merit transfer. A person accumulates merit not only through intentions and ethical living, but also is able to gain merit from others by exchanging goods and services, such as through dāna (charity to monks or nuns). Further, a person can transfer one's own good karma to living family members and ancestors.
+
+### Liberation
+
+The cessation of the kleshas and the attainment of nirvana (nibbāna), with which the cycle of rebirth ends, has been the primary and the soteriological goal of the Buddhist path for monastic life since the time of the Buddha. The term "path" is usually taken to mean the Noble Eightfold Path, but other versions of "the path" can also be found in the Nikayas. In some passages in the Pali Canon, a distinction is being made between right knowledge or insight (sammā-ñāṇa), and right liberation or release (sammā-vimutti), as the means to attain cessation and liberation.
+
+Nirvana literally means "blowing out, quenching, becoming extinguished". In early Buddhist texts, it is the state of restraint and self-control that leads to the "blowing out" and the ending of the cycles of sufferings associated with rebirths and redeaths. Many later Buddhist texts describe nirvana as identical with anatta with complete "emptiness, nothingness". In some texts, the state is described with greater detail, such as passing through the gate of emptiness (sunyata) – realising that there is no soul or self in any living being, then passing through the gate of signlessness (animitta) – realising that nirvana cannot be perceived, and finally passing through the gate of wishlessness (apranihita) – realising that nirvana is the state of not even wishing for nirvana.
+
+The nirvana state has been described in Buddhist texts partly in a manner similar to other Indian religions, as the state of complete liberation, enlightenment, highest happiness, bliss, fearlessness, freedom, permanence, non-dependent origination, unfathomable, and indescribable. It has also been described in part differently, as a state of spiritual release marked by "emptiness" and realisation of non-self.
+
+While Buddhism considers the liberation from saṃsāra as the ultimate spiritual goal, in traditional practice, the primary focus of a vast majority of lay Buddhists has been to seek and accumulate merit through good deeds, donations to monks and various Buddhist rituals in order to gain better rebirths rather than nirvana.
+
+### Dependent arising
+
+Pratityasamutpada, also called "dependent arising, or dependent origination", is the Buddhist theory to explain the nature and relations of being, becoming, existence and ultimate reality. Buddhism asserts that there is nothing independent, except the state of nirvana. All physical and mental states depend on and arise from other pre-existing states, and in turn from them arise other dependent states while they cease.
+
+The 'dependent arisings' have a causal conditioning, and thus Pratityasamutpada is the Buddhist belief that causality is the basis of ontology, not a creator God nor the ontological Vedic concept called universal Self (Brahman) nor any other 'transcendent creative principle'. However, Buddhist thought does not understand causality in terms of Newtonian mechanics; rather it understands it as conditioned arising. In Buddhism, dependent arising refers to conditions created by a plurality of causes that necessarily co-originate a phenomenon within and across lifetimes, such as karma in one life creating conditions that lead to rebirth in one of the realms of existence for another lifetime.
+
+Buddhism applies the theory of dependent arising to explain origination of endless cycles of dukkha and rebirth, through Twelve Nidānas or "twelve links". It states that because Avidyā (ignorance) exists, Saṃskāras (karmic formations) exist; because Saṃskāras exist therefore Vijñāna (consciousness) exists; and in a similar manner it links Nāmarūpa (the sentient body), Ṣaḍāyatana (our six senses), Sparśa (sensory stimulation), Vedanā (feeling), Taṇhā (craving), Upādāna (grasping), Bhava (becoming), Jāti (birth), and Jarāmaraṇa (old age, death, sorrow, and pain). By breaking the circuitous links of the Twelve Nidanas, Buddhism asserts that liberation from these endless cycles of rebirth and dukkha can be attained.
+
+### Not-Self and Emptiness
+
+The Five Aggregates (pañca khandha) according to the Pali Canon. :
+
+| | form (rūpa)   4 elements (mahābhūta)         ↓     contact (phassa)  ↓ ↑  consciousness (viññāna) | → ←   ← | mental factors (cetasika)    feeling (vedanā)     perception (sañña)     formation (saṅkhāra) |
+| - | - | - | - |
+| Form is derived from the Four Great Elements. Consciousness arises from other aggregates. Mental Factors arise from the Contact of Consciousness and other aggregates. |||||
+| Source: MN 109 (Thanissaro, 2001) | diagram details |||| |
+
+A related doctrine in Buddhism is that of anattā (Pali) or anātman (Sanskrit). It is the view that there is no unchanging, permanent self, soul or essence in phenomena. The Buddha and Buddhist philosophers who follow him such as Vasubandhu and Buddhaghosa, generally argue for this view by analyzing the person through the schema of the five aggregates, and then attempting to show that none of these five components of personality can be permanent or absolute. This can be seen in Buddhist discourses such as the Anattalakkhana Sutta.
+
+"Emptiness" or "voidness" (Skt: Śūnyatā, Pali: Suññatā), is a related concept with many different interpretations throughout the various Buddhisms. In early Buddhism, it was commonly stated that all five aggregates are void (rittaka), hollow (tucchaka), coreless (asāraka), for example as in the Pheṇapiṇḍūpama Sutta (SN 22:95). Similarly, in Theravada Buddhism, it often means that the five aggregates are empty of a Self.
+
+Emptiness is a central concept in Mahāyāna Buddhism, especially in Nagarjuna's Madhyamaka school, and in the Prajñāpāramitā sutras. In Madhyamaka philosophy, emptiness is the view which holds that all phenomena (dharmas) are without any svabhava (literally "own-nature" or "self-nature"), and are thus without any underlying essence, and so are "empty" of being independent. This doctrine sought to refute the heterodox theories of svabhava circulating at the time.
+
+### The Three Jewels
+
+All forms of Buddhism revere and take spiritual refuge in the "three jewels" (triratna): Buddha, Dharma and Sangha.
+
+**Buddha**
+
+While all varieties of Buddhism revere "Buddha" and "buddhahood", they have different views on what these are. Regardless of their interpretation, the concept of Buddha is central to all forms of Buddhism.
+
+In Theravada Buddhism, a Buddha is someone who has become awake through their own efforts and insight. They have put an end to their cycle of rebirths and have ended all unwholesome mental states which lead to bad action and thus are morally perfected. While subject to the limitations of the human body in certain ways (for example, in the early texts, the Buddha suffers from backaches), a Buddha is said to be "deep, immeasurable, hard-to-fathom as is the great ocean," and also has immense psychic powers (abhijñā). Theravada generally sees Gautama Buddha (the historical Buddha Sakyamuni) as the only Buddha of the current era.
+
+Mahāyāna Buddhism meanwhile, has a vastly expanded cosmology, with various Buddhas and other holy beings (aryas) residing in different realms. Mahāyāna texts not only revere numerous Buddhas besides Shakyamuni, such as Amitabha and Vairocana, but also see them as transcendental or supramundane (lokuttara) beings. Mahāyāna Buddhism holds that these other Buddhas in other realms can be contacted and are able to benefit beings in this world. In Mahāyāna, a Buddha is a kind of "spiritual king", a "protector of all creatures" with a lifetime that is countless of eons long, rather than just a human teacher who has transcended the world after death. Shakyamuni's life and death on earth is then usually understood as a "mere appearance" or "a manifestation skilfully projected into earthly life by a long-enlightened transcendent being, who is still available to teach the faithful through visionary experiences."
+
+**Dharma**
+
+The second of the three jewels is "Dharma" (Pali: Dhamma), which in Buddhism refers to the Buddha's teaching, which includes all of the main ideas outlined above. While this teaching reflects the true nature of reality, it is not a belief to be clung to, but a pragmatic teaching to be put into practice. It is likened to a raft which is "for crossing over" (to nirvana) not for holding on to. It also refers to the universal law and cosmic order which that teaching both reveals and relies upon. It is an everlasting principle which applies to all beings and worlds. In that sense it is also the ultimate truth and reality about the universe, it is thus "the way that things really are."
+
+**Sangha**
+
+The third "jewel" which Buddhists take refuge in is the "Sangha", which refers to the monastic community of monks and nuns who follow Gautama Buddha's monastic discipline which was "designed to shape the Sangha as an ideal community, with the optimum conditions for spiritual growth." The Sangha consists of those who have chosen to follow the Buddha's ideal way of life, which is one of celibate monastic renunciation with minimal material possessions (such as an alms bowl and robes).
+
+The Sangha is seen as important because they preserve and pass down Buddha Dharma. As Gethin states "the Sangha lives the teaching, preserves the teaching as Scriptures and teaches the wider community. Without the Sangha there is no Buddhism." The Sangha also acts as a "field of merit" for laypersons, allowing them to make spiritual merit or goodness by donating to the Sangha and supporting them. In return, they keep their duty to preserve and spread the Dharma everywhere for the good of the world.
+
+There is also a separate definition of Sangha, referring to those who have attained any stage of awakening, whether or not they are monastics. This sangha is called the āryasaṅgha "noble Sangha". All forms of Buddhism generally reveres these āryas (Pali: ariya, "noble ones" or "holy ones") who are spiritually attained beings. Aryas have attained the fruits of the Buddhist path. Becoming an arya is a goal in most forms of Buddhism. The āryasaṅgha includes holy beings such as bodhisattvas, arhats and stream-enterers.
+
+### Other key Mahāyāna views
+
+Mahāyāna Buddhism also differs from Theravada and the other schools of early Buddhism in promoting several unique doctrines which are contained in Mahāyāna sutras and philosophical treatises.
+
+One of these is the unique interpretation of emptiness and dependent origination found in the Madhyamaka school. Another very influential doctrine for Mahāyāna is the main philosophical view of the Yogācāra school variously, termed Vijñaptimātratā-vāda ("the doctrine that there are only ideas" or "mental impressions") or Vijñānavāda ("the doctrine of consciousness"). According to Mark Siderits, what classical Yogācāra thinkers like Vasubandhu had in mind is that we are only ever aware of mental images or impressions, which may appear as external objects, but "there is actually no such thing outside the mind." There are several interpretations of this main theory, many scholars see it as a type of Idealism, others as a kind of phenomenology.
+
+Another very influential concept unique to Mahāyāna is that of "Buddha-nature" (buddhadhātu) or "Tathagata-womb" (tathāgatagarbha). Buddha-nature is a concept found in some 1st-millennium CE Buddhist texts, such as the Tathāgatagarbha sūtras. According to Paul Williams these Sutras suggest that 'all sentient beings contain a Tathagata' as their 'essence, core inner nature, Self'. According to Karl Brunnholzl "the earliest mahayana sutras that are based on and discuss the notion of tathāgatagarbha as the buddha potential that is innate in all sentient beings began to appear in written form in the late second and early third century." For some, the doctrine seems to conflict with the Buddhist anatta doctrine (non-Self), leading scholars to posit that the Tathāgatagarbha Sutras were written to promote Buddhism to non-Buddhists. This can be seen in texts like the Laṅkāvatāra Sūtra, which state that Buddha-nature is taught to help those who have fear when they listen to the teaching of anatta. Buddhist texts like the Ratnagotravibhāga clarify that the "Self" implied in Tathagatagarbha doctrine is actually "not-self". Various interpretations of the concept have been advanced by Buddhist thinkers throughout the history of Buddhist thought and most attempt to avoid anything like the Hindu Atman doctrine.
+
+These Indian Buddhist ideas, in various synthetic ways, form the basis of subsequent Mahāyāna philosophy in Tibetan Buddhism and East Asian Buddhism.
+
+## Paths to liberation
+
+The Bodhipakkhiyādhammā are seven lists of qualities or factors that promote spiritual awakening (bodhi). Each list is a short summary of the Buddhist path, and the seven lists substantially overlap. The best-known list in the West is the Noble Eightfold Path, but a wide variety of paths and models of progress have been used and described in the different Buddhist traditions. However, they generally share basic practices such as sila (ethics), samadhi (meditation, dhyana) and prajña (wisdom), which are known as the three trainings. An important additional practice is a kind and compassionate attitude toward every living being and the world. Devotion is also important in some Buddhist traditions, and in the Tibetan traditions visualisations of deities and mandalas are important. The value of textual study is regarded differently in the various Buddhist traditions. It is central to Theravada and highly important to Tibetan Buddhism, while the Zen tradition takes an ambiguous stance.
+
+An important guiding principle of Buddhist practice is the Middle Way (madhyamapratipad). It was a part of Buddha's first sermon, where he presented the Noble Eightfold Path that was a 'middle way' between the extremes of asceticism and hedonistic sense pleasures. In Buddhism, states Harvey, the doctrine of "dependent arising" (conditioned arising, pratītyasamutpāda) to explain rebirth is viewed as the 'middle way' between the doctrines that a being has a "permanent soul" involved in rebirth (eternalism) and "death is final and there is no rebirth" (annihilationism).
+
+### Paths to liberation in the early texts
+
+A common presentation style of the path (mārga) to liberation in the Early Buddhist Texts is the "graduated talk", in which the Buddha lays out a step-by-step training.
+
+In the early texts, numerous different sequences of the gradual path can be found. One of the most important and widely used presentations among the various Buddhist schools is The Noble Eightfold Path, or "Eightfold Path of the Noble Ones" (Skt. 'āryāṣṭāṅgamārga'). This can be found in various discourses, most famously in the Dhammacakkappavattana Sutta (The discourse on the turning of the Dharma wheel).
+
+Other suttas such as the Tevijja Sutta, and the Cula-Hatthipadopama-sutta give a different outline of the path, though with many similar elements such as ethics and meditation.
+
+According to Rupert Gethin, the path to awakening is also frequently summarized by another a short formula: "abandoning the hindrances, practice of the four establishings of mindfulness, and development of the awakening factors."
+
+**Noble Eightfold Path**
+
+The Eightfold Path consists of a set of eight interconnected factors or conditions, that when developed together, lead to the cessation of dukkha. These eight factors are: Right View (or Right Understanding), Right Intention (or Right Thought), Right Speech, Right Action, Right Livelihood, Right Effort, Right Mindfulness, and Right Concentration.
+
+This Eightfold Path is the fourth of the Four Noble Truths and asserts the path to the cessation of dukkha (suffering, pain, unsatisfactoriness). The path teaches that the way of the enlightened ones stopped their craving, clinging and karmic accumulations, and thus ended their endless cycles of rebirth and suffering.
+
+The Noble Eightfold Path is grouped into three basic divisions, as follows:
+
+| Division | Eightfold factor | Sanskrit, Pali | Description |
+| - | - | - | - |
+| Wisdom (Sanskrit: prajñā, Pāli: paññā) | 1. Right view | samyag dṛṣṭi, sammā ditthi | The belief that there is an afterlife and not everything ends with death, that Buddha taught and followed a successful path to nirvana; according to Peter Harvey, the right view is held in Buddhism as a belief in the Buddhist principles of karma and rebirth, and the importance of the Four Noble Truths and the True Realities. |
+| Wisdom (Sanskrit: prajñā, Pāli: paññā) | 2. Right intention | samyag saṃkalpa, sammā saṅkappa | Giving up home and adopting the life of a religious mendicant in order to follow the path; this concept, states Harvey, aims at peaceful renunciation, into an environment of non-sensuality, non-ill-will (to lovingkindness), away from cruelty (to compassion). |
+| Moral virtues (Sanskrit: śīla, Pāli: sīla) | 3. Right speech | samyag vāc, sammā vāca | No lying, no rude speech, no telling one person what another says about him, speaking that which leads to salvation. |
+| Moral virtues (Sanskrit: śīla, Pāli: sīla) | 4. Right action | samyag karman, sammā kammanta | No killing or injuring, no taking what is not given; no sexual acts in monastic pursuit, for lay Buddhists no sensual misconduct such as sexual involvement with someone married, or with an unmarried woman protected by her parents or relatives. |
+| Moral virtues (Sanskrit: śīla, Pāli: sīla) | 5. Right livelihood | samyag ājīvana, sammā ājīva | For monks, beg to feed, only possessing what is essential to sustain life. For lay Buddhists, the canonical texts state right livelihood as abstaining from wrong livelihood, explained as not becoming a source or means of suffering to sentient beings by cheating them, or harming or killing them in any way. |
+| Meditation (Sanskrit and Pāli: samādhi) | 6. Right effort | samyag vyāyāma, sammā vāyāma | Guard against sensual thoughts; this concept, states Harvey, aims at preventing unwholesome states that disrupt meditation. |
+| Meditation (Sanskrit and Pāli: samādhi) | 7. Right mindfulness | samyag smṛti, sammā sati | Never be absent-minded, conscious of what one is doing; this, states Harvey, encourages mindfulness about impermanence of the body, feelings and mind, as well as to experience the five skandhas, the five hindrances, the four True Realities and seven factors of awakening. |
+| Meditation (Sanskrit and Pāli: samādhi) | 8. Right concentration | samyag samādhi, sammā samādhi | Correct meditation or concentration (dhyana), explained as the four jhānas. |
+
+## Common Buddhist practices
+
+### Hearing and learning the Dharma
+
+In various suttas which present the graduated path taught by the Buddha, such as the Samaññaphala Sutta and the Cula-Hatthipadopama Sutta, the first step on the path is hearing the Buddha teach the Dharma. This then said to lead to the acquiring of confidence or faith in the Buddha's teachings.
+
+Mahayana Buddhist teachers such as Yin Shun also state that hearing the Dharma and study of the Buddhist discourses is necessary "if one wants to learn and practice the Buddha Dharma." Likewise, in Indo-Tibetan Buddhism, the "Stages of the Path" (Lamrim) texts generally place the activity of listening to the Buddhist teachings as an important early practice.
+
+### Refuge
+
+Traditionally, the first step in most Buddhist schools requires taking of the "Three Refuges", also called the Three Jewels (Sanskrit: triratna, Pali: tiratana) as the foundation of one's religious practice. This practice may have been influenced by the Brahmanical motif of the triple refuge, found in the Rigveda 9.97.47, Rigveda 6.46.9 and Chandogya Upanishad 2.22.3–4. Tibetan Buddhism sometimes adds a fourth refuge, in the lama. The three refuges are believed by Buddhists to be protective and a form of reverence.
+
+The ancient formula which is repeated for taking refuge affirms that "I go to the Buddha as refuge, I go to the Dhamma as refuge, I go to the Sangha as refuge." Reciting the three refuges, according to Harvey, is considered not as a place to hide, rather a thought that "purifies, uplifts and strengthens the heart".
+
+### Śīla – Buddhist ethics
+
+Śīla (Sanskrit) or sīla (Pāli) is the concept of "moral virtues", that is the second group and an integral part of the Noble Eightfold Path. It generally consists of right speech, right action and right livelihood.
+
+One of the most basic forms of ethics in Buddhism is the taking of "precepts". This includes the Five Precepts for laypeople, Eight or Ten Precepts for monastic life, as well as rules of Dhamma (Vinaya or Patimokkha) adopted by a monastery.
+
+Other important elements of Buddhist ethics include giving or charity (dāna), Mettā (Good-Will), Heedfulness (Appamada), 'self-respect' (Hri) and 'regard for consequences' (Apatrapya).
+
+**Precepts**
+
+Buddhist scriptures explain the five precepts (Pali: pañcasīla; Sanskrit: pañcaśīla) as the minimal standard of Buddhist morality. It is the most important system of morality in Buddhism, together with the monastic rules.
+
+The five precepts are seen as a basic training applicable to all Buddhists. They are:
+
+* "I undertake the training-precept (sikkha-padam) to abstain from onslaught on breathing beings." This includes ordering or causing someone else to kill. The Pali suttas also say one should not "approve of others killing" and that one should be "scrupulous, compassionate, trembling for the welfare of all living beings."
+* "I undertake the training-precept to abstain from taking what is not given." According to Harvey, this also covers fraud, cheating, forgery as well as "falsely denying that one is in debt to someone."
+* "I undertake the training-precept to abstain from misconduct concerning sense-pleasures." This generally refers to adultery, as well as rape and incest. It also applies to sex with those who are legally under the protection of a guardian. It is also interpreted in different ways in the varying Buddhist cultures.
+* "I undertake the training-precept to abstain from false speech." According to Harvey this includes "any form of lying, deception or exaggeration...even non-verbal deception by gesture or other indication...or misleading statements." The precept is often also seen as including other forms of wrong speech such as "divisive speech, harsh, abusive, angry words, and even idle chatter."
+* "I undertake the training-precept to abstain from alcoholic drink or drugs that are an opportunity for heedlessness." According to Harvey, intoxication is seen as a way to mask rather than face the sufferings of life. It is seen as damaging to one's mental clarity, mindfulness and ability to keep the other four precepts.
+
+Undertaking and upholding the five precepts is based on the principle of non-harming (Pāli and Sanskrit: ahiṃsa). The Pali Canon recommends one to compare oneself with others, and on the basis of that, not to hurt others. Compassion and a belief in karmic retribution form the foundation of the precepts. Undertaking the five precepts is part of regular lay devotional practice, both at home and at the local temple. However, the extent to which people keep them differs per region and time. They are sometimes referred to as the śrāvakayāna precepts in the Mahāyāna tradition, contrasting them with the bodhisattva precepts.
+
+**Vinaya**
+
+Vinaya is the specific code of conduct for a sangha of monks or nuns. It includes the Patimokkha, a set of 227 offences including 75 rules of decorum for monks, along with penalties for transgression, in the Theravadin tradition. The precise content of the Vinaya Pitaka (scriptures on the Vinaya) differs in different schools and tradition, and different monasteries set their own standards on its implementation. The list of pattimokkha is recited every fortnight in a ritual gathering of all monks. Buddhist text with vinaya rules for monasteries have been traced in all Buddhist traditions, with the oldest surviving being the ancient Chinese translations.
+
+Monastic communities in the Buddhist tradition cut normal social ties to family and community and live as "islands unto themselves". Within a monastic fraternity, a sangha has its own rules. A monk abides by these institutionalised rules, and living life as the vinaya prescribes it is not merely a means, but very nearly the end in itself. Transgressions by a monk on Sangha vinaya rules invites enforcement, which can include temporary or permanent expulsion.
+
+### Restraint and renunciation
+
+Another important practice taught by the Buddha is the restraint of the senses (indriyasamvara). In the various graduated paths, this is usually presented as a practice which is taught prior to formal sitting meditation, and which supports meditation by weakening sense desires that are a hindrance to meditation. According to Anālayo, sense restraint is when one "guards the sense doors in order to prevent sense impressions from leading to desires and discontent." This is not an avoidance of sense impression, but a kind of mindful attention towards the sense impressions which does not dwell on their main features or signs (nimitta). This is said to prevent harmful influences from entering the mind. This practice is said to give rise to an inner peace and happiness which forms a basis for concentration and insight.
+
+A related Buddhist virtue and practice is renunciation, or the intent for desirelessness (nekkhamma). Generally, renunciation is the giving up of actions and desires that are seen as unwholesome on the path, such as lust for sensuality and worldly things. Renunciation can be cultivated in different ways. The practice of giving for example, is one form of cultivating renunciation. Another one is the giving up of lay life and becoming a monastic (bhiksu o bhiksuni). Practicing celibacy (whether for life as a monk, or temporarily) is also a form of renunciation. Many Jataka stories such as the focus on how the Buddha practiced renunciation in past lives.
+
+One way of cultivating renunciation taught by the Buddha is the contemplation (anupassana) of the "dangers" (or "negative consequences") of sensual pleasure (kāmānaṃ ādīnava). As part of the graduated discourse, this contemplation is taught after the practice of giving and morality.
+
+Another related practice to renunciation and sense restraint taught by the Buddha is "restraint in eating" or moderation with food, which for monks generally means not eating after noon. Devout laypersons also follow this rule during special days of religious observance (uposatha). Observing the Uposatha also includes other practices dealing with renunciation, mainly the eight precepts.
+
+For Buddhist monastics, renunciation can also be trained through several optional ascetic practices called dhutaṅga.
+
+In different Buddhist traditions, other related practices which focus on fasting are followed.
+
+### Mindfulness and clear comprehension
+
+The training of the faculty called "mindfulness" (Pali: sati, Sanskrit: smṛti, literally meaning "recollection, remembering") is central in Buddhism. According to Analayo, mindfulness is a full awareness of the present moment which enhances and strengthens memory. The Indian Buddhist philosopher Asanga defined mindfulness thus: "It is non-forgetting by the mind with regard to the object experienced. Its function is non-distraction." According to Rupert Gethin, sati is also "an awareness of things in relation to things, and hence an awareness of their relative value."
+
+There are different practices and exercises for training mindfulness in the early discourses, such as the four Satipaṭṭhānas (Sanskrit: smṛtyupasthāna, "establishments of mindfulness") and Ānāpānasati (Sanskrit: ānāpānasmṛti, "mindfulness of breathing").
+
+A closely related mental faculty, which is often mentioned side by side with mindfulness, is sampajañña ("clear comprehension"). This faculty is the ability to comprehend what one is doing and is happening in the mind, and whether it is being influenced by unwholesome states or wholesome ones.
+
+### Meditation – Sama-amādhi and dhyāna
+
+A wide range of meditation practices has developed in the Buddhist traditions, but "meditation" primarily refers to the attainment of samādhi and the practice of dhyāna (Pali: jhāna). Samādhi is a calm, undistracted, unified and concentrated state of awareness. It is defined by Asanga as "one-pointedness of mind on the object to be investigated. Its function consists of giving a basis to knowledge (jñāna)." Dhyāna is "state of perfect equanimity and awareness (upekkhā-sati-parisuddhi)," reached through focused mental training.
+
+The practice of dhyāna aids in maintaining a calm mind and avoiding disturbance of this calm mind by mindfulness of disturbing thoughts and feelings.
+
+**Origins**
+
+The earliest evidence of yogis and their meditative tradition, states Karel Werner, is found in the Keśin hymn 10.136 of the Rigveda. While evidence suggests meditation was practised in the centuries preceding the Buddha, the meditative methodologies described in the Buddhist texts are some of the earliest among texts that have survived into the modern era. These methodologies likely incorporate what existed before the Buddha as well as those first developed within Buddhism.
+
+There is no scholarly agreement on the origin and source of the practice of dhyāna. Some scholars, like Bronkhorst, see the four dhyānas as a Buddhist invention. Alexander Wynne argues that the Buddha learned dhyāna from Brahmanical teachers.
+
+Whatever the case, the Buddha taught meditation with a new focus and interpretation, particularly through the four dhyānas methodology, in which mindfulness is maintained. Further, the focus of meditation and the underlying theory of liberation guiding the meditation has been different in Buddhism. For example, states Bronkhorst, the verse 4.4.23 of the Brihadaranyaka Upanishad with its "become calm, subdued, quiet, patiently enduring, concentrated, one sees soul in oneself" is most probably a meditative state. The Buddhist discussion of meditation is without the concept of soul and the discussion criticises both the ascetic meditation of Jainism and the "real self, soul" meditation of Hinduism.
+
+**The formless attainments**
+
+Often grouped into the jhāna-scheme are four other meditative states, referred to in the early texts as arupa samāpattis (formless attainments). These are also referred to in commentarial literature as immaterial/formless jhānas (arūpajhānas). The first formless attainment is a place or realm of infinite space (ākāsānañcāyatana) without form or colour or shape. The second is termed the realm of infinite consciousness (viññāṇañcāyatana); the third is the realm of nothingness (ākiñcaññāyatana), while the fourth is the realm of "neither perception nor non-perception". The four rupa-jhānas in Buddhist practice leads to rebirth in successfully better rupa Brahma heavenly realms, while arupa-jhānas leads into arupa heavens.
+
+**Meditation and insight**
+
+In the Pali canon, the Buddha outlines two meditative qualities which are mutually supportive: samatha (Pāli; Sanskrit: śamatha; "calm") and vipassanā (Sanskrit: vipaśyanā, insight). The Buddha compares these mental qualities to a "swift pair of messengers" who together help deliver the message of nibbana (SN 35.245).
+
+The various Buddhist traditions generally see Buddhist meditation as being divided into those two main types. Samatha is also called "calming meditation", and focuses on stilling and concentrating the mind i.e. developing samadhi and the four dhyānas. According to Damien Keown, vipassanā meanwhile, focuses on "the generation of penetrating and critical insight (paññā)".
+
+There are numerous doctrinal positions and disagreements within the different Buddhist traditions regarding these qualities or forms of meditation. For example, in the Pali Four Ways to Arahantship Sutta (AN 4.170), it is said that one can develop calm and then insight, or insight and then calm, or both at the same time. Meanwhile, in Vasubandhu's Abhidharmakośakārikā, vipaśyanā is said to be practiced once one has reached samadhi by cultivating the four foundations of mindfulness (smṛtyupasthānas).
+
+Beginning with comments by La Vallee Poussin, a series of scholars have argued that these two meditation types reflect a tension between two different ancient Buddhist traditions regarding the use of dhyāna, one which focused on insight based practice and the other which focused purely on dhyāna. However, other scholars such as Analayo and Rupert Gethin have disagreed with this "two paths" thesis, instead seeing both of these practices as complementary.
+
+**The Brahma-vihara**
+
+The four immeasurables or four abodes, also called Brahma-viharas, are virtues or directions for meditation in Buddhist traditions, which helps a person be reborn in the heavenly (Brahma) realm. These are traditionally believed to be a characteristic of the deity Brahma and the heavenly abode he resides in.
+
+The four Brahma-vihara are:
+
+* Loving-kindness (Pāli: mettā, Sanskrit: maitrī) is active good will towards all;
+* Compassion (Pāli and Sanskrit: karuṇā) results from metta; it is identifying the suffering of others as one's own;
+* Empathetic joy (Pāli and Sanskrit: muditā): is the feeling of joy because others are happy, even if one did not contribute to it; it is a form of sympathetic joy;
+* Equanimity (Pāli: upekkhā, Sanskrit: upekṣā): is even-mindedness and serenity, treating everyone impartially.
+
+**Tantra, visualization and the subtle body**
+
+Some Buddhist traditions, especially those associated with Tantric Buddhism (also known as Vajrayana and Secret Mantra) use images and symbols of deities and Buddhas in meditation. This is generally done by mentally visualizing a Buddha image (or some other mental image, like a symbol, a mandala, a syllable, etc.), and using that image to cultivate calm and insight. One may also visualize and identify oneself with the imagined deity. While visualization practices have been particularly popular in Vajrayana, they may also found in Mahayana and Theravada traditions.
+
+In Tibetan Buddhism, unique tantric techniques which include visualization (but also mantra recitation, mandalas, and other elements) are considered to be much more effective than non-tantric meditations and they are one of the most popular meditation methods. The methods of Unsurpassable Yoga Tantra, (anuttarayogatantra) are in turn seen as the highest and most advanced. Anuttarayoga practice is divided into two stages, the Generation Stage and the Completion Stage. In the Generation Stage, one meditates on emptiness and visualizes oneself as a deity as well as visualizing its mandala. The focus is on developing clear appearance and divine pride (the understanding that oneself and the deity are one). This method is also known as deity yoga (devata yoga). There are numerous meditation deities (yidam) used, each with a mandala, a circular symbolic map used in meditation.
+
+### Insight and knowledge
+
+Prajñā (Sanskrit) or paññā (Pāli) is wisdom, or knowledge of the true nature of existence. Another term which is associated with prajñā and sometimes is equivalent to it is vipassanā (Pāli) or vipaśyanā (Sanskrit), which is often translated as "insight". In Buddhist texts, the faculty of insight is often said to be cultivated through the four establishments of mindfulness. In the early texts, Paññā is included as one of the "five faculties" (indriya) which are commonly listed as important spiritual elements to be cultivated (see for example: AN I 16). Paññā along with samadhi, is also listed as one of the "trainings in the higher states of mind" (adhicittasikkha).
+
+The Buddhist tradition regards ignorance (avidyā), a fundamental ignorance, misunderstanding or mis-perception of the nature of reality, as one of the basic causes of dukkha and samsara. Overcoming this ignorance is part of the path to awakening. This overcoming includes the contemplation of impermanence and the non-self nature of reality, and this develops dispassion for the objects of clinging, and liberates a being from dukkha and saṃsāra.
+
+Prajñā is important in all Buddhist traditions. It is variously described as wisdom regarding the impermanent and not-self nature of dharmas (phenomena), the functioning of karma and rebirth, and knowledge of dependent origination. Likewise, vipaśyanā is described in a similar way, such as in the Paṭisambhidāmagga, where it is said to be the contemplation of things as impermanent, unsatisfactory and not-self.
+
+### Devotion
+
+Most forms of Buddhism "consider saddhā (Skt śraddhā), 'trustful confidence' or 'faith', as a quality which must be balanced by wisdom, and as a preparation for, or accompaniment of, meditation." Because of this devotion (Skt. bhakti; Pali: bhatti) is an important part of the practice of most Buddhists. Devotional practices include ritual prayer, prostration, offerings, pilgrimage, and chanting. Buddhist devotion is usually focused on some object, image or location that is seen as holy or spiritually influential. Examples of objects of devotion include paintings or statues of Buddhas and bodhisattvas, stupas, and bodhi trees. Public group chanting for devotional and ceremonial is common to all Buddhist traditions and goes back to ancient India where chanting aided in the memorization of the orally transmitted teachings. Rosaries called malas are used in all Buddhist traditions to count repeated chanting of common formulas or mantras. Chanting is thus a type of devotional group meditation which leads to tranquility and communicates the Buddhist teachings.
+
+### Vegetarianism and animal ethics
+
+Based on the Indian principle of ahimsa (non-harming), the Buddha's ethics strongly condemn the harming of all sentient beings, including all animals. He thus condemned the animal sacrifice of the Brahmins as well hunting, and killing animals for food. However, early Buddhist texts depict the Buddha as allowing monastics to eat meat. This seems to be because monastics begged for their food and thus were supposed to accept whatever food was offered to them. This was tempered by the rule that meat had to be "three times clean": "they had not seen, had not heard, and had no reason to suspect that the animal had been killed so that the meat could be given to them". Also, while the Buddha did not explicitly promote vegetarianism in his discourses, he did state that gaining one's livelihood from the meat trade was unethical. In contrast to this, various Mahayana sutras and texts like the Mahaparinirvana sutra, Surangama sutra and the Lankavatara sutra state that the Buddha promoted vegetarianism out of compassion. Indian Mahayana thinkers like Shantideva promoted the avoidance of meat. Throughout history, the issue of whether Buddhists should be vegetarian has remained a much debated topic and there is a variety of opinions on this issue among modern Buddhists.
+
+## Buddhist texts
+
+Buddhism, like all Indian religions, was initially an oral tradition in ancient times. The Buddha's words, the early doctrines, concepts, and their traditional interpretations were orally transmitted from one generation to the next. The earliest oral texts were transmitted in Middle Indo-Aryan languages called Prakrits, such as Pali, through the use of communal recitation and other mnemonic techniques. The first Buddhist canonical texts were likely written down in Sri Lanka, about 400 years after the Buddha died. The texts were part of the Tripitakas, and many versions appeared thereafter claiming to be the words of the Buddha. Scholarly Buddhist commentary texts, with named authors, appeared in India, around the 2nd century CE. These texts were written in Pali or Sanskrit, sometimes regional languages, as palm-leaf manuscripts, birch bark, painted scrolls, carved into temple walls, and later on paper.
+
+Unlike what the Bible is to Christianity and the Quran is to Islam, but like all major ancient Indian religions, there is no consensus among the different Buddhist traditions as to what constitutes the scriptures or a common canon in Buddhism. The general belief among Buddhists is that the canonical corpus is vast. This corpus includes the ancient Sutras organised into Nikayas or Agamas, itself the part of three basket of texts called the Tripitakas. Each Buddhist tradition has its own collection of texts, much of which is translation of ancient Pali and Sanskrit Buddhist texts of India. The Chinese Buddhist canon, for example, includes 2184 texts in 55 volumes, while the Tibetan canon comprises 1108 texts – all claimed to have been spoken by the Buddha – and another 3461 texts composed by Indian scholars revered in the Tibetan tradition. The Buddhist textual history is vast; over 40,000 manuscripts – mostly Buddhist, some non-Buddhist – were discovered in 1900 in the Dunhuang Chinese cave alone.
+
+### Early Buddhist texts
+
+The Early Buddhist Texts refers to the literature which is considered by modern scholars to be the earliest Buddhist material. The first four Pali Nikayas, and the corresponding Chinese Āgamas are generally considered to be among the earliest material. Apart from these, there are also fragmentary collections of EBT materials in other languages such as Sanskrit, Khotanese, Tibetan and Gāndhārī. The modern study of early Buddhism often relies on comparative scholarship using these various early Buddhist sources to identify parallel texts and common doctrinal content. One feature of these early texts are literary structures which reflect oral transmission, such as widespread repetition.
+
+### The Tripitakas
+
+After the development of the different early Buddhist schools, these schools began to develop their own textual collections, which were termed Tripiṭakas (Triple Baskets).
+
+Many early Tripiṭakas, like the Pāli Tipitaka, were divided into three sections: Vinaya Pitaka (focuses on monastic rule), Sutta Pitaka (Buddhist discourses) and Abhidhamma Pitaka, which contain expositions and commentaries on the doctrine. The Pāli Tipitaka (also known as the Pali Canon) of the Theravada School constitutes the only complete collection of Buddhist texts in an Indic language which has survived until today. However, many Sutras, Vinayas and Abhidharma works from other schools survive in Chinese translation, as part of the Chinese Buddhist Canon. According to some sources, some early schools of Buddhism had five or seven pitakas.
+
+### Mahāyāna texts
+
+The Mahāyāna sūtras are a very broad genre of Buddhist scriptures that the Mahāyāna Buddhist tradition holds are original teachings of the Buddha. Modern historians generally hold that the first of these texts were composed probably around the 1st century BCE or 1st century CE. In Mahāyāna, these texts are generally given greater authority than the early Āgamas and Abhidharma literature, which are called "Śrāvakayāna" or "Hinayana" to distinguish them from Mahāyāna sūtras. Mahāyāna traditions mainly see these different classes of texts as being designed for different types of persons, with different levels of spiritual understanding. The Mahāyāna sūtras are mainly seen as being for those of "greater" capacity. Mahāyāna also has a very large literature of philosophical and exegetical texts. These are often called śāstra (treatises) or vrittis (commentaries). Some of this literature was also written in verse form (karikās), the most famous of which is the Mūlamadhyamika-karikā (Root Verses on the Middle Way) by Nagarjuna, the foundational text of the Madhyamika school.
+
+### Tantric texts
+
+During the Gupta Empire, a new class of Buddhist sacred literature began to develop, which are called the Tantras. By the 8th century, the tantric tradition was very influential in India and beyond. Besides drawing on a Mahāyāna Buddhist framework, these texts also borrowed deities and material from other Indian religious traditions, such as the Śaiva and Pancharatra traditions, local god/goddess cults, and local spirit worship (such as yaksha or nāga spirits).
+
+Some features of these texts include the widespread use of mantras, meditation on the subtle body, worship of fierce deities, and antinomian and transgressive practices such as ingesting alcohol and performing sexual rituals.
+
+## History
+
+### Historical roots
+
+Historically, the roots of Buddhism lie in the religious thought of Iron Age India around the middle of the first millennium BCE. This was a period of great intellectual ferment and socio-cultural change known as the "Second urbanisation", marked by the growth of towns and trade, the composition of the Upanishads and the historical emergence of the Śramaṇa traditions.
+
+New ideas developed both in the Vedic tradition in the form of the Upanishads, and outside of the Vedic tradition through the Śramaṇa movements. The term Śramaṇa refers to several Indian religious movements parallel to but separate from the historical Vedic religion, including Buddhism, Jainism and others such as Ājīvika.
+
+Several Śramaṇa movements are known to have existed in India before the 6th century BCE (pre-Buddha, pre-Mahavira), and these influenced both the āstika and nāstika traditions of Indian philosophy. According to Martin Wilshire, the Śramaṇa tradition evolved in India over two phases, namely Paccekabuddha and Savaka phases, the former being the tradition of individual ascetic and the latter of disciples, and that Buddhism and Jainism ultimately emerged from these. Brahmanical and non-Brahmanical ascetic groups shared and used several similar ideas, but the Śramaṇa traditions also drew upon already established Brahmanical concepts and philosophical roots, states Wiltshire, to formulate their own doctrines. Brahmanical motifs can be found in the oldest Buddhist texts, using them to introduce and explain Buddhist ideas. For example, prior to Buddhist developments, the Brahmanical tradition internalised and variously reinterpreted the three Vedic sacrificial fires as concepts such as Truth, Rite, Tranquility or Restraint. Buddhist texts also refer to the three Vedic sacrificial fires, reinterpreting and explaining them as ethical conduct.
+
+The Śramaṇa religions challenged and broke with the Brahmanic tradition on core assumptions such as Atman (soul, self), Brahman, the nature of afterlife, and they rejected the authority of the Vedas and Upanishads. Buddhism was one among several Indian religions that did so.
+
+Early Buddhist positions in the Theravada tradition had not established any deities, but were epistemologically cautious rather than directly atheist. Later Buddhist traditions were more influenced by the critique of deities within Hinduism and therefore more committed to a strongly atheist stance. These developments were historic and epistemological as documented in verses from Śāntideva's Bodhicaryāvatāra, and supplemented by reference to suttas and jātakas from the Pali canon.
+
+### Indian Buddhism
+
+The history of Indian Buddhism may be divided into five periods: Early Buddhism (occasionally called pre-sectarian Buddhism), Nikaya Buddhism or Sectarian Buddhism (the period of the early Buddhist schools), Early Mahayana Buddhism, Late Mahayana, and the era of Vajrayana or the "Tantric Age".
+
+**Pre-sectarian Buddhism**
+
+According to Lambert Schmithausen Pre-sectarian Buddhism is "the canonical period prior to the development of different schools with their different positions."
+
+The early Buddhist Texts include the four principal Pali Nikāyas (and their parallel Agamas found in the Chinese canon) together with the main body of monastic rules, which survive in the various versions of the patimokkha. However, these texts were revised over time, and it is unclear what constitutes the earliest layer of Buddhist teachings. One method to obtain information on the oldest core of Buddhism is to compare the oldest extant versions of the Theravadin Pāli Canon and other texts. The reliability of the early sources, and the possibility to draw out a core of oldest teachings, is a matter of dispute. According to Vetter, inconsistencies remain, and other methods must be applied to resolve those inconsistencies.
+
+According to Schmithausen, three positions held by scholars of Buddhism can be distinguished:
+
+* "Stress on the fundamental homogeneity and substantial authenticity of at least a considerable part of the Nikayic materials;"
+* "Scepticism with regard to the possibility of retrieving the doctrine of earliest Buddhism;"
+* "Cautious optimism in this respect."
+
+**Pre-sectarian Buddhism**
+
+**The Core teachings**
+
+According to Mitchell, certain basic teachings appear in many places throughout the early texts, which has led most scholars to conclude that Gautama Buddha must have taught something similar to the Four Noble Truths, the Noble Eightfold Path, Nirvana, the three marks of existence, the five aggregates, dependent origination, karma and rebirth.
+
+According to N. Ross Reat, all of these doctrines are shared by the Theravada Pali texts and the Mahasamghika school's Śālistamba Sūtra. A recent study by Bhikkhu Analayo concludes that the Theravada Majjhima Nikaya and Sarvastivada Madhyama Agama contain mostly the same major doctrines. Richard Salomon, in his study of the Gandharan texts (which are the earliest manuscripts containing early discourses), has confirmed that their teachings are "consistent with non-Mahayana Buddhism, which survives today in the Theravada school of Sri Lanka and Southeast Asia, but which in ancient times was represented by eighteen separate schools."
+
+However, some scholars argue that critical analysis reveals discrepancies among the various doctrines found in these early texts, which point to alternative possibilities for early Buddhism. The authenticity of certain teachings and doctrines have been questioned. For example, some scholars think that karma was not central to the teaching of the historical Buddha, while other disagree with this position. Likewise, there is scholarly disagreement on whether insight was seen as liberating in early Buddhism or whether it was a later addition to the practice of the four jhānas. Scholars such as Bronkhorst also think that the four noble truths may not have been formulated in earliest Buddhism, and did not serve in earliest Buddhism as a description of "liberating insight". According to Vetter, the description of the Buddhist path may initially have been as simple as the term "the middle way". In time, this short description was elaborated, resulting in the description of the eightfold path.
+
+**Ashokan Era and the early schools**
+
+According to numerous Buddhist scriptures, soon after the parinirvāṇa (from Sanskrit: "highest extinguishment") of Gautama Buddha, the first Buddhist council was held to collectively recite the teachings to ensure that no errors occurred in oral transmission. Many modern scholars question the historicity of this event. However, Richard Gombrich states that the monastic assembly recitations of the Buddha's teaching likely began during Buddha's lifetime, and they served a similar role of codifying the teachings.
+
+The so called Second Buddhist council resulted in the first schism in the Sangha. Modern scholars believe that this was probably caused when a group of reformists called Sthaviras ("elders") sought to modify the Vinaya (monastic rule), and this caused a split with the conservatives who rejected this change, they were called Mahāsāṃghikas. While most scholars accept that this happened at some point, there is no agreement on the dating, especially if it dates to before or after the reign of Ashoka.
+
+Buddhism may have spread only slowly throughout India until the time of the Mauryan emperor Ashoka (304–232 BCE), who was a public supporter of the religion. The support of Aśoka and his descendants led to the construction of more stūpas (such as at Sanchi and Bharhut), temples (such as the Mahabodhi Temple) and to its spread throughout the Maurya Empire and into neighbouring lands such as Central Asia and to the island of Sri Lanka.
+
+During and after the Mauryan period (322–180 BCE), the Sthavira community gave rise to several schools, one of which was the Theravada school which tended to congregate in the south and another which was the Sarvāstivāda school, which was mainly in north India. Likewise, the Mahāsāṃghika groups also eventually split into different Sanghas. Originally, these schisms were caused by disputes over monastic disciplinary codes of various fraternities, but eventually, by about 100 CE if not earlier, schisms were being caused by doctrinal disagreements too.
+
+Following (or leading up to) the schisms, each Saṅgha started to accumulate their own version of Tripiṭaka (triple basket of texts). In their Tripiṭaka, each school included the Suttas of the Buddha, a Vinaya basket (disciplinary code) and some schools also added an Abhidharma basket which were texts on detailed scholastic classification, summary and interpretation of the Suttas. The doctrine details in the Abhidharmas of various Buddhist schools differ significantly, and these were composed starting about the third century BCE and through the 1st millennium CE.
+
+### Post-Ashokan expansion
+
+According to the edicts of Aśoka, the Mauryan emperor sent emissaries to various countries west of India to spread "Dharma", particularly in eastern provinces of the neighbouring Seleucid Empire, and even farther to Hellenistic kingdoms of the Mediterranean. It is a matter of disagreement among scholars whether or not these emissaries were accompanied by Buddhist missionaries.
+
+In central and west Asia, Buddhist influence grew, through Greek-speaking Buddhist monarchs and ancient Asian trade routes, a phenomenon known as Greco-Buddhism. An example of this is evidenced in Chinese and Pali Buddhist records, such as Milindapanha and the Greco-Buddhist art of Gandhāra. The Milindapanha describes a conversation between a Buddhist monk and the 2nd-century BCE Greek king Menander, after which Menander abdicates and himself goes into monastic life in the pursuit of nirvana. Some scholars have questioned the Milindapanha version, expressing doubts whether Menander was Buddhist or just favourably disposed to Buddhist monks.
+
+The Kushan empire (30–375 CE) came to control the Silk Road trade through Central and South Asia, which brought them to interact with Gandharan Buddhism and the Buddhist institutions of these regions. The Kushans patronised Buddhism throughout their lands, and many Buddhist centres were built or renovated (the Sarvastivada school was particularly favored), especially by Emperor Kanishka (128–151 CE). Kushan support helped Buddhism to expand into a world religion through their trade routes. Buddhism spread to Khotan, the Tarim Basin, and China, eventually to other parts of the far east. Some of the earliest written documents of the Buddhist faith are the Gandharan Buddhist texts, dating from about the 1st century CE, and connected to the Dharmaguptaka school.
+
+The Islamic conquest of the Iranian Plateau in the 7th-century, followed by the Muslim conquests of Afghanistan and the later establishment of the Ghaznavid kingdom with Islam as the state religion in Central Asia between the 10th- and 12th-century led to the decline and disappearance of Buddhism from most of these regions.
+
+### Mahāyāna Buddhism
+
+The origins of Mahāyāna ("Great Vehicle") Buddhism are not well understood and there are various competing theories about how and where this movement arose. Theories include the idea that it began as various groups venerating certain texts or that it arose as a strict forest ascetic movement.
+
+The first Mahāyāna works were written sometime between the 1st century BCE and the 2nd century CE. Much of the early extant evidence for the origins of Mahāyāna comes from early Chinese translations of Mahāyāna texts, mainly those of Lokakṣema. (2nd century CE). Some scholars have traditionally considered the earliest Mahāyāna sūtras to include the first versions of the Prajnaparamita series, along with texts concerning Akṣobhya, which were probably composed in the 1st century BCE in the south of India.
+
+There is no evidence that Mahāyāna ever referred to a separate formal school or sect of Buddhism, with a separate monastic code (Vinaya), but rather that it existed as a certain set of ideals, and later doctrines, for bodhisattvas. Records written by Chinese monks visiting India indicate that both Mahāyāna and non-Mahāyāna monks could be found in the same monasteries, with the difference that Mahāyāna monks worshipped figures of Bodhisattvas, while non-Mahayana monks did not.
+
+Mahāyāna initially seems to have remained a small minority movement that was in tension with other Buddhist groups, struggling for wider acceptance. However, during the fifth and sixth centuries CE, there seems to have been a rapid growth of Mahāyāna Buddhism, which is shown by a large increase in epigraphic and manuscript evidence in this period. However, it still remained a minority in comparison to other Buddhist schools.
+
+Mahāyāna Buddhist institutions continued to grow in influence during the following centuries, with large monastic university complexes such as Nalanda (established by the 5th-century CE Gupta emperor, Kumaragupta I) and Vikramashila (established under Dharmapala c. 783 to 820) becoming quite powerful and influential. During this period of Late Mahāyāna, four major types of thought developed: Mādhyamaka, Yogācāra, Buddha-nature (Tathāgatagarbha), and the epistemological tradition of Dignaga and Dharmakirti. According to Dan Lusthaus, Mādhyamaka and Yogācāra have a great deal in common, and the commonality stems from early Buddhism.
+
+### Late Indian Buddhism and Tantra
+
+During the Gupta period (4th–6th centuries) and the empire of Harṣavardana (c. 590–647 CE), Buddhism continued to be influential in India, and large Buddhist learning institutions such as Nalanda and Valabahi Universities were at their peak. Buddhism also flourished under the support of the Pāla Empire (8th–12th centuries). Under the Guptas and Palas, Tantric Buddhism or Vajrayana developed and rose to prominence. It promoted new practices such as the use of mantras, dharanis, mudras, mandalas and the visualization of deities and Buddhas and developed a new class of literature, the Buddhist Tantras. This new esoteric form of Buddhism can be traced back to groups of wandering yogi magicians called mahasiddhas.
+
+The question of the origins of early Vajrayana has been taken up by various scholars. David Seyfort Ruegg has suggested that Buddhist tantra employed various elements of a "pan-Indian religious substrate" which is not specifically Buddhist, Shaiva or Vaishnava.
+
+According to Indologist Alexis Sanderson, various classes of Vajrayana literature developed as a result of royal courts sponsoring both Buddhism and Saivism. Sanderson has argued that Buddhist tantras can be shown to have borrowed practices, terms, rituals and more form Shaiva tantras. He argues that Buddhist texts even directly copied various Shaiva tantras, especially the Bhairava Vidyapitha tantras. Ronald M. Davidson meanwhile, argues that Sanderson's claims for direct influence from Shaiva Vidyapitha texts are problematic because "the chronology of the Vidyapitha tantras is by no means so well established" and that the Shaiva tradition also appropriated non-Hindu deities, texts and traditions. Thus while "there can be no question that the Buddhist tantras were heavily influenced by Kapalika and other Saiva movements" argues Davidson, "the influence was apparently mutual."
+
+Already during this later era, Buddhism was losing state support in other regions of India, including the lands of the Karkotas, the Pratiharas, the Rashtrakutas, the Pandyas and the Pallavas. This loss of support in favor of Hindu faiths like Vaishnavism and Shaivism, is the beginning of the long and complex period of the Decline of Buddhism in the Indian subcontinent. The Islamic invasions and conquest of India (10th to 12th century), further damaged and destroyed many Buddhist institutions, leading to its eventual near disappearance from India by the 1200s.
+
+### Spread to East and Southeast Asia
+
+The Silk Road transmission of Buddhism to China is most commonly thought to have started in the late 2nd or the 1st century CE, though the literary sources are all open to question. The first documented translation efforts by foreign Buddhist monks in China were in the 2nd century CE, probably as a consequence of the expansion of the Kushan Empire into the Chinese territory of the Tarim Basin.
+
+The first documented Buddhist texts translated into Chinese are those of the Parthian An Shigao (148–180 CE). The first known Mahāyāna scriptural texts are translations into Chinese by the Kushan monk Lokakṣema in Luoyang, between 178 and 189 CE. From China, Buddhism was introduced into its neighbours Korea (4th century), Japan (6th–7th centuries), and Vietnam (c. 1st–2nd centuries).
+
+During the Chinese Tang dynasty (618–907), Chinese Esoteric Buddhism was introduced from India and Chan Buddhism (Zen) became a major religion. Chan continued to grow in the Song dynasty (960–1279) and it was during this era that it strongly influenced Korean Buddhism and Japanese Buddhism. Pure Land Buddhism also became popular during this period and was often practised together with Chan. It was also during the Song that the entire Chinese canon was printed using over 130,000 wooden printing blocks.
+
+During the Indian period of Esoteric Buddhism (from the 8th century onwards), Buddhism spread from India to Tibet and Mongolia. Johannes Bronkhorst states that the esoteric form was attractive because it allowed both a secluded monastic community as well as the social rites and rituals important to laypersons and to kings for the maintenance of a political state during succession and wars to resist invasion. During the Middle Ages, Buddhism slowly declined in India, while it vanished from Persia and Central Asia as Islam became the state religion.
+
+The Theravada school arrived in Sri Lanka sometime in the 3rd century BCE. Sri Lanka became a base for its later spread to Southeast Asia after the 5th century CE (Myanmar, Malaysia, Indonesia, Thailand, Cambodia and coastal Vietnam). Theravada Buddhism was the dominant religion in Burma during the Mon Hanthawaddy Kingdom (1287–1552). It also became dominant in the Khmer Empire during the 13th and 14th centuries and in the Thai Sukhothai Kingdom during the reign of Ram Khamhaeng (1237/1247–1298).
+
+## Schools and traditions
+
+Buddhists generally classify themselves as either Theravāda or Mahāyāna. This classification is also used by some scholars and is the one ordinarily used in the English language. An alternative scheme used by some scholars divides Buddhism into the following three traditions or geographical or cultural areas: Theravāda (or "Southern Buddhism", "South Asian Buddhism"), East Asian Buddhism (or just "Eastern Buddhism") and Indo-Tibetan Buddhism (or "Northern Buddhism").
+
+Some scholars use other schemes. Buddhists themselves have a variety of other schemes. Hinayana (literally "lesser or inferior vehicle") is sometimes used by Mahāyāna followers to name the family of early philosophical schools and traditions from which contemporary Theravāda emerged, but as the Hinayana term is considered derogatory, a variety of other terms are used instead, including: Śrāvakayāna, Nikaya Buddhism, early Buddhist schools, sectarian Buddhism and conservative Buddhism.
+
+Not all traditions of Buddhism share the same philosophical outlook or treat the same concepts as central. Each tradition, however, does have its own core concepts, and some comparisons can be drawn between them:
+
+* Both Theravāda and Mahāyāna accept and revere the Buddha Sakyamuni as the founder, Mahāyāna also reveres numerous other Buddhas, such as Amitabha or Vairocana as well as many other bodhisattvas not revered in Theravāda.
+* Both accept the Middle Way, Dependent origination, the Four Noble Truths, the Noble Eightfold Path, the Three Jewels, the Three marks of existence and the Bodhipakṣadharmas (aids to awakening).
+* Mahāyāna focuses mainly on the bodhisattva path to Buddhahood which it sees as universal and to be practiced by all persons, while Theravāda does not focus on teaching this path and teaches the attainment of arhatship as a worthy goal to strive towards. The bodhisattva path is not denied in Theravāda, it is generally seen as a long and difficult path suitable for only a few. Thus the Bodhisattva path is normative in Mahāyāna, while it is an optional path for a heroic few in Theravāda.
+* Mahāyāna sees the arhat's nirvana as being imperfect and inferior or preliminary to full Buddhahood. It sees arhatship as selfish, since bodhisattvas vow to save all beings while arhats save only themselves. Theravāda meanwhile does not accept that the arhat's nirvana is an inferior or preliminary attainment, nor that it is a selfish deed to attain arhatship since not only are arhats described as compassionate but they have destroyed the root of greed, the sense of "I am".
+* Mahāyāna accepts the authority of the many Mahāyāna sutras along with the other Nikaya texts like the Agamas and the Pali canon (though it sees Mahāyāna texts as primary), while Theravāda does not accept that the Mahāyāna sutras are buddhavacana (word of the Buddha) at all.
+
+## Monasteries and temples
+
+Buddhist institutions are often housed and centred around monasteries (Sanskrit:viharas) and temples. Buddhist monastics originally followed a life of wandering, never staying in one place for long. During the three-month rainy season (vassa) they would gather together in one place for a period of intense practice and then depart again. Some of the earliest Buddhist monasteries were at groves (vanas) or woods (araññas), such as Jetavana and Sarnath's Deer Park. There originally seems to have been two main types of monasteries, monastic settlements (sangharamas) were built and supported by donors, and woodland camps (avasas) were set up by monks. Whatever structures were built in these locales were made out of wood and were sometimes temporary structures built for the rainy season. Over time, the wandering community slowly adopted more settled cenobitic forms of monasticism.
+
+There are many different forms of Buddhist structures. Classic Indian Buddhist institutions mainly made use of the following structures: monasteries, rock-hewn cave complexes (such as the Ajanta Caves), stupas (funerary mounds which contained relics), and temples such as the Mahabodhi Temple. In Southeast Asia, the most widespread institutions are centred on wats. East Asian Buddhist institutions also use various structures including monastic halls, temples, lecture halls, bell towers and pagodas. In Japanese Buddhist temples, these different structures are usually grouped together in an area termed the garan. In Indo-Tibetan Buddhism, Buddhist institutions are generally housed in gompas. They include monastic quarters, stupas and prayer halls with Buddha images. In the modern era, the Buddhist "meditation centre", which is mostly used by laypersons and often also staffed by them, has also become widespread.
+
+## Buddhism in the modern era
+
+### Colonial era and after
+
+Buddhism has faced various challenges and changes during the colonisation of Buddhist states by Christian countries and its persecution under modern states. Like other religions, the findings of modern science have challenged its basic premises. One response to some of these challenges has come to be called Buddhist modernism. Early Buddhist modernist figures such as the American convert Henry Olcott (1832–1907) and Anagarika Dharmapala (1864–1933) reinterpreted and promoted Buddhism as a scientific and rational religion which they saw as compatible with modern science.
+
+East Asian Buddhism meanwhile suffered under various wars which ravaged China during the modern era, such as the Taiping rebellion and World War II (which also affected Korean Buddhism). During the Republican period (1912–49), a new movement called Humanistic Buddhism was developed by figures such as Taixu (1899–1947), and though Buddhist institutions were destroyed during the Cultural Revolution (1966–76), there has been a revival of the religion in China after 1977. Japanese Buddhism also went through a period of modernisation during the Meiji period. In Central Asia meanwhile, the arrival of Communist repression to Tibet (1966–1980) and Mongolia (between 1924 and 1990) had a strong negative impact on Buddhist institutions, though the situation has improved somewhat since the 80s and 90s.
+
+In Afghanistan and Pakistan, militants have destroyed some historic Buddhist monuments.
+
+### Buddhism in the West
+
+While there were some encounters of Western travellers or missionaries such as St. Francis Xavier and Ippolito Desideri with Buddhist cultures, it was not until the 19th century that Buddhism began to be studied by Western scholars. It was the work of pioneering scholars such as Eugène Burnouf, Max Müller, Hermann Oldenberg and Thomas William Rhys Davids that paved the way for modern Buddhist studies in the West. The English words such as Buddhism, "Boudhist", "Bauddhist" and Buddhist were coined in the early 19th-century in the West, while in 1881, Rhys Davids founded the Pali Text Society – an influential Western resource of Buddhist literature in the Pali language and one of the earliest publisher of a journal on Buddhist studies. It was also during the 19th century that Asian Buddhist immigrants (mainly from China and Japan) began to arrive in Western countries such as the United States and Canada, bringing with them their Buddhist religion. This period also saw the first Westerners to formally convert to Buddhism, such as Helena Blavatsky and Henry Steel Olcott. An important event in the introduction of Buddhism to the West was the 1893 World Parliament of Religions, which for the first time saw well-publicized speeches by major Buddhist leaders alongside other religious leaders.
+
+The 20th century saw a prolific growth of new Buddhist institutions in Western countries, including the Buddhist Society, London (1924), Das Buddhistische Haus (1924) and Datsan Gunzechoinei in St Petersburg. The publication and translations of Buddhist literature in Western languages thereafter accelerated. After the second world war, further immigration from Asia, globalisation, the secularisation on Western culture as well a renewed interest in Buddhism among the 60s counterculture led to further growth in Buddhist institutions. Influential figures on post-war Western Buddhism include Shunryu Suzuki, Jack Kerouac, Alan Watts, Thích Nhất Hạnh, and the 14th Dalai Lama. While Buddhist institutions have grown, some of the central premises of Buddhism such as the cycles of rebirth and Four Noble Truths have been problematic in the West. In contrast, states Christopher Gowans, for "most ordinary [Asian] Buddhists, today as well as in the past, their basic moral orientation is governed by belief in karma and rebirth". Most Asian Buddhist laypersons, states Kevin Trainor, have historically pursued Buddhist rituals and practices seeking better rebirth, not nirvana or freedom from rebirth.
+
+Buddhism has spread across the world, and Buddhist texts are increasingly translated into local languages. While Buddhism in the West is often seen as exotic and progressive, in the East it is regarded as familiar and traditional. In countries such as Cambodia and Bhutan, it is recognised as the state religion and receives government support.
+
+### Neo-Buddhism movements
+
+A number of modern movements in Buddhism emerged during the second half of the 20th century. These new forms of Buddhism are diverse and significantly depart from traditional beliefs and practices.
+
+In India, B.R. Ambedkar launched the Navayana tradition – literally, "new vehicle". Ambedkar's Buddhism rejects the foundational doctrines and historic practices of traditional Theravada and Mahayana traditions, such as monk lifestyle after renunciation, karma, rebirth, samsara, meditation, nirvana, Four Noble Truths and others. Ambedkar's Navayana Buddhism considers these as superstitions and re-interprets the original Buddha as someone who taught about class struggle and social equality. Ambedkar urged low caste Indian Dalits to convert to his Marxism-inspired reinterpretation called the Navayana Buddhism, also known as Bhimayana Buddhism. Ambedkar's effort led to the expansion of Navayana Buddhism in India.
+
+The Thai King Mongkut (r. 1851–68), and his son Chulalongkorn (r. 1868–1910), were responsible for modern reforms of Thai Buddhism. Modern Buddhist movements include Secular Buddhism in many countries, Won Buddhism in Korea, the Dhammakaya movement in Thailand and several Japanese organisations, such as Shinnyo-en, Risshō Kōsei Kai or Soka Gakkai.
+
+Some of these movements have brought internal disputes and strife within regional Buddhist communities. For example, the Dhammakaya movement in Thailand teaches a "true self" doctrine, which traditional Theravada monks consider as heretically denying the fundamental anatta (not-self) doctrine of Buddhism.
+
+### Sexual abuse and misconduct
+
+Buddhism has not been immune from sexual abuse and misconduct scandals, with victims coming forward in various Buddhist schools such as Zen and Tibetan. "There are huge cover ups in the Catholic church, but what has happened within Tibetan Buddhism is totally along the same lines," says Mary Finnigan, an author and journalist who has been chronicling such alleged abuses since the mid-80s. One notably covered case in media of various Western countries was that of Sogyal Rinpoche which began in 1994, and ended with his retirement from his position as Rigpa's spiritual director in 2017.
+
+## Cultural influence
+
+Buddhism has had a profound influence on various cultures, especially in Asia. Buddhist philosophy, Buddhist art, Buddhist architecture, Buddhist cuisine and Buddhist festivals continue to be influential elements of the modern Culture of Asia, especially in East Asia and the Sinosphere as well as in Southeast Asia and the Indosphere. According to Litian Fang, Buddhism has "permeated a wide range of fields, such as politics, ethics, philosophy, literature, art and customs," in these Asian regions. Buddhist teachings influenced the development of modern Hinduism as well as other Asian religions like Taoism and Confucianism. Buddhist philosophers like Dignaga and Dharmakirti were very influential in the development of Indian logic and epistemology. Buddhist educational institutions like Nalanda and Vikramashila preserved various disciplines of classical Indian knowledge such as grammar, astronomy/astrology and medicine and taught foreign students from Asia.
+
+In the Western world, Buddhism has had a strong influence on modern New Age spirituality and other alternative spiritualities. This began with its influence on 20th century Theosophists such as Helena Blavatsky, which were some of the first Westerners to take Buddhism seriously as a spiritual tradition. More recently, Buddhist meditation practices have influenced the development of modern psychology, particularly the practice of Mindfulness-based stress reduction (MBSR) and other similar mindfulness based modalities. The influence of Buddhism on psychology can also be seen in certain forms of modern psychoanalysis.
+
+Shamanism is a widespread practice in some Buddhist societies. Buddhist monasteries have long existed alongside local shamanic traditions. Lacking an institutional orthodoxy, Buddhists adapted to the local cultures, blending their own traditions with pre-existing shamanic culture. Research into Himalayan religion has shown that Buddhist and shamanic traditions overlap in many respects: the worship of localized deities, healing rituals and exorcisms. The shamanic Gurung people have adopted some of the Buddhist beliefs such and rebirth but maintain the shamanic rites of "guiding the soul" after death.
+
+## Demographics
+
+Buddhism is practised by an estimated 488 million, 495 million, or 535 million people as of the 2010s, representing 7% to 8% of the world's total population. China is the country with the largest population of Buddhists, approximately 244 million or 18% of its total population. They are mostly followers of Chinese schools of Mahayana, making this the largest body of Buddhist traditions. Mahayana, also practised in broader East Asia, is followed by over half of world Buddhists.
+
+Buddhism is the dominant religion in Thailand, Cambodia, Tibet, Myanmar, Sri Lanka, Bhutan, Laos, Mongolia, Japan, Hong Kong, Macau, Singapore, and Vietnam. Large Buddhist populations live in Mainland China, Taiwan, North Korea, Nepal and South Korea. The Indian state of Maharashtra account for 77% of all Buddhists in India. In Russia, Buddhists form majority in Tuva (52%) and Kalmykia (53%). Buryatia (20%) and Zabaykalsky Krai (15%) also have significant Buddhist populations.
+
+Buddhism is also growing by conversion. In India, more than 85% of the total Buddhists have converted from Hinduism to Buddhism, and they are called neo-Buddhists or Ambedkarite Buddhists. In New Zealand, about 25–35% of the total Buddhists are converts to Buddhism. Buddhism has also spread to the Nordic countries; for example, the Burmese Buddhists founded in the city of Kuopio in North Savonia the first Buddhist monastery of Finland, named the Buddha Dhamma Ramsi monastery.
+

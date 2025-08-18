@@ -1,0 +1,156 @@
+# Seismometer
+
+A seismometer is an instrument that responds to ground noises and shaking such as caused by quakes, volcanic eruptions, and explosions. They are usually combined with a timing device and a recording device to form a seismograph. The output of such a device—formerly recorded on paper (see picture) or film, now recorded and processed digitally—is a seismogram. Such data is used to locate and characterize earthquakes, and to study the internal structure of Earth.
+
+## Basic principles
+
+A simple seismometer, sensitive to up-down motions of the Earth, is like a weight hanging from a spring, both suspended from a frame that moves along with any motion detected. The relative motion between the weight (called the mass) and the frame provides a measurement of the vertical ground motion. A rotating drum is attached to the frame and a pen is attached to the weight, thus recording any ground motion in a seismogram.
+
+Any movement from the ground moves the frame. The mass tends not to move because of its inertia, and by measuring the movement between the frame and the mass, the motion of the ground can be determined.
+
+Early seismometers used optical levers or mechanical linkages to amplify the small motions involved, recording on soot-covered paper or photographic paper. Modern instruments use electronics. In some systems, the mass is held nearly motionless relative to the frame by an electronic negative feedback loop. The motion of the mass relative to the frame is measured, and the feedback loop applies a magnetic or electrostatic force to keep the mass nearly motionless. The voltage needed to produce this force is the output of the seismometer, which is recorded digitally.
+
+In other systems the weight is allowed to move, and its motion produces an electrical charge in a coil attached to the mass which voltage moves through the magnetic field of a magnet attached to the frame. This design is often used in a geophone, which is used in exploration for oil and gas.
+
+Seismic observatories usually have instruments measuring three axes: north-south (y-axis), east-west (x-axis), and vertical (z-axis). If only one axis is measured, it is usually the vertical because it is less noisy and gives better records of some seismic waves.
+
+The foundation of a seismic station is critical. A professional station is sometimes mounted on bedrock. The best mountings may be in deep boreholes, which avoid thermal effects, ground noise and tilting from weather and tides. Other instruments are often mounted in insulated enclosures on small buried piers of unreinforced concrete. Reinforcing rods and aggregates would distort the pier as the temperature changes. A site is always surveyed for ground noise with a temporary installation before pouring the pier and laying conduit. Originally, European seismographs were placed in a particular area after a destructive earthquake. Today, they are spread to provide appropriate coverage (in the case of weak-motion seismology) or concentrated in high-risk regions (strong-motion seismology).
+
+## Nomenclature
+
+The word derives from the Greek σεισμός, seismós, a shaking or quake, from the verb σείω, seíō, to shake; and μέτρον, métron, to measure, and was coined by David Milne-Home in 1841, to describe an instrument designed by Scottish physicist James David Forbes.
+
+Seismograph is another Greek term from seismós and γράφω, gráphō, to draw. It is often used to mean seismometer, though it is more applicable to the older instruments in which the measuring and recording of ground motion were combined, than to modern systems, in which these functions are separated. Both types provide a continuous record of ground motion; this record distinguishes them from seismoscopes, which merely indicate that motion has occurred, perhaps with some simple measure of how large it was.
+
+The technical discipline concerning such devices is called seismometry, a branch of seismology.
+
+The concept of measuring the "shaking" of something means that the word "seismograph" might be used in a more general sense. For example, a monitoring station that tracks changes in electromagnetic noise affecting amateur radio waves presents an rf seismograph. And helioseismology studies the "quakes" on the Sun.
+
+## History
+
+The first seismometer was made in China during the 2nd century. It was invented by Zhang Heng, a Chinese mathematician and astronomer. The first Western description of the device comes from the French physicist and priest Jean de Hautefeuille in 1703. The modern seismometer was developed in the 19th century.
+
+Seismometers were placed on the Moon starting in 1969 as part of the Apollo Lunar Surface Experiments Package. In December 2018, a seismometer was deployed on the planet Mars by the InSight lander, the first time a seismometer was placed onto the surface of another planet.
+
+### Ancient era
+
+In Ancient Egypt, Amenhotep, son of Hapu invented a precursor of seismometer, a vertical wooden poles connected with wooden gutters on the central axis functioned to fill water into a vessel until full to detect earthquakes.
+
+In AD 132, Zhang Heng of China's Han dynasty is said to have invented the first seismoscope (by the definition above), which was called Houfeng Didong Yi (translated as, "instrument for measuring the seasonal winds and the movements of the Earth"). The description we have, from the History of the Later Han Dynasty, says that it was a large bronze vessel, about 2 meters in diameter; at eight points around the top were dragon's heads holding bronze balls. When there was an earthquake, one of the dragons' mouths would open and drop its ball into a bronze toad at the base, making a sound and supposedly showing the direction of the earthquake. On at least one occasion, probably at the time of a large earthquake in Gansu in AD 143, the seismoscope indicated an earthquake even though one was not felt. The available text says that inside the vessel was a central column that could move along eight tracks; this is thought to refer to a pendulum, though it is not known exactly how this was linked to a mechanism that would open only one dragon's mouth. The first earthquake recorded by this seismoscope was supposedly "somewhere in the east". Days later, a rider from the east reported this earthquake.
+
+### Early designs (1259–1839)
+
+By the 13th century, seismographic devices existed in the Maragheh observatory (founded 1259) in Persia, though it is unclear whether these were constructed independently or based on the first seismoscope. French physicist and priest Jean de Hautefeuille described a seismoscope in 1703, which used a bowl filled with mercury which would spill into one of eight receivers equally spaced around the bowl, though there is no evidence that he actually constructed the device. A mercury seismoscope was constructed in 1784 or 1785 by Atanasio Cavalli, a copy of which can be found at the University Library in Bologna, and a further mercury seismoscope was constructed by Niccolò Cacciatore in 1818. James Lind also built a seismological tool of unknown design or efficacy (known as an earthquake machine) in the late 1790s.
+
+Pendulum devices were developing at the same time. Neapolitan naturalist Nicola Cirillo set up a network of pendulum earthquake detectors following the 1731 Puglia Earthquake, where the amplitude was detected using a protractor to measure the swinging motion. Benedictine monk Andrea Bina further developed this concept in 1751, having the pendulum create trace marks in sand under the mechanism, providing both magnitude and direction of motion. Neapolitan clockmaker Domenico Salsano produced a similar pendulum which recorded using a paintbrush in 1783, labelling it a geo-sismometro, possibly the first use of a similar word to seismometer. Naturalist Nicolo Zupo devised an instrument to detect electrical disturbances and earthquakes at the same time (1784).
+
+The first moderately successful device for detecting the time of an earthquake was devised by Ascanio Filomarino in 1796, who improved upon Salsano's pendulum instrument, using a pencil to mark, and using a hair attached to the mechanism to inhibit the motion of a clock's balance wheel. This meant that the clock would only start once an earthquake took place, allowing determination of the time of incidence.
+
+After an earthquake taking place on October 4, 1834, Luigi Pagani observed that the mercury seismoscope held at Bologna University had completely spilled over, and did not provide useful information. He therefore devised a portable device that used lead shot to detect the direction of an earthquake, where the lead fell into four bins arranged in a circle, to determine the quadrant of earthquake incidence. He completed the instrument in 1841.
+
+### Early Modern designs (1839–1880)
+
+In response to a series of earthquakes near Comrie in Scotland in 1839, a committee was formed in the United Kingdom in order to produce better detection devices for earthquakes. The outcome of this was an inverted pendulum seismometer constructed by James David Forbes, first presented in a report by David Milne-Home in 1842, which recorded the measurements of seismic activity through the use of a pencil placed on paper above the pendulum. The designs provided did not prove effective, according to Milne's reports. It was Milne who coined the word seismometer in 1841, to describe this instrument. In 1843, the first horizontal pendulum was used in a seismometer, reported by Milne (though it is unclear if he was the original inventor). After these inventions, Robert Mallet published an 1848 paper where he suggested ideas for seismometer design, suggesting that such a device would need to register time, record amplitudes horizontally and vertically, and ascertain direction. His suggested design was funded, and construction was attempted, but his final design did not fulfill his expectations and suffered from the same problems as the Forbes design, being inaccurate and not self-recording.
+
+Karl Kreil constructed a seismometer in Prague between 1848 and 1850, which used a point-suspended rigid cylindrical pendulum covered in paper, drawn upon by a fixed pencil. The cylinder was rotated every 24 hours, providing an approximate time for a given quake.
+
+Luigi Palmieri, influenced by Mallet's 1848 paper, invented a seismometer in 1856 that could record the time of an earthquake. This device used metallic pendulums which closed an electric circuit with vibration, which then powered an electromagnet to stop a clock. Palmieri seismometers were widely distributed and used for a long time.
+
+By 1872, a committee in the United Kingdom led by James Bryce expressed their dissatisfaction with the current available seismometers, still using the large 1842 Forbes device located in Comrie Parish Church, and requested a seismometer which was compact, easy to install and easy to read. In 1875 they settled on a large example of the Mallet device, consisting of an array of cylindrical pins of various sizes installed at right angles to each other on a sand bed, where larger earthquakes would knock down larger pins. This device was constructed in 'Earthquake House' near Comrie, which can be considered the world's first purpose-built seismological observatory. As of 2013, no earthquake has been large enough to cause any of the cylinders to fall in either the original device or replicas.
+
+### The first seismographs (1880-)
+
+The first seismographs were invented in the 1870s and 1880s. The first seismograph was produced by Filippo Cecchi in around 1875. A seismoscope would trigger the device to begin recording, and then a recording surface would produce a graphical illustration of the tremors automatically (a seismogram). However, the instrument was not sensitive enough, and the first seismogram produced by the instrument was in 1887, by which time John Milne had already demonstrated his design in Japan.
+
+In 1880, the first horizontal pendulum seismometer was developed by the team of John Milne, James Alfred Ewing and Thomas Gray, who worked as foreign-government advisors in Japan, from 1880 to 1895. Milne, Ewing and Gray, all having been hired by the Meiji Government in the previous five years to assist Japan's modernization efforts, founded the Seismological Society of Japan in response to an Earthquake that took place on February 22, 1880, at Yokohama. Two instruments were constructed by Ewing over the next year, one being a common-pendulum seismometer and the other being the first seismometer using a damped horizontal pendulum. The innovative recording system allowed for a continuous record, the first to do so. The first seismogram was recorded on 3 November 1880 on both of Ewing's instruments. Modern seismometers would eventually descend from these designs. Milne has been referred to as the 'Father of modern seismology' and his seismograph design has been called the first modern seismometer.
+
+This produced the first effective measurement of horizontal motion. Gray would produce the first reliable method for recording vertical motion, which produced the first effective 3-axis recordings.
+
+An early special-purpose seismometer consisted of a large, stationary pendulum, with a stylus on the bottom. As the earth started to move, the heavy mass of the pendulum had the inertia to stay still within the frame. The result is that the stylus scratched a pattern corresponding with the Earth's movement. This type of strong-motion seismometer recorded upon a smoked glass (glass with carbon soot). While not sensitive enough to detect distant earthquakes, this instrument could indicate the direction of the pressure waves and thus help find the epicenter of a local quake. Such instruments were useful in the analysis of the 1906 San Francisco earthquake. Further analysis was performed in the 1980s, using these early recordings, enabling a more precise determination of the initial fault break location in Marin county and its subsequent progression, mostly to the south.
+
+Later, professional suites of instruments for the worldwide standard seismographic network had one set of instruments tuned to oscillate at fifteen seconds, and the other at ninety seconds, each set measuring in three directions. Amateurs or observatories with limited means tuned their smaller, less sensitive instruments to ten seconds. The basic damped horizontal pendulum seismometer swings like the gate of a fence. A heavy weight is mounted on the point of a long (from 10 cm to several meters) triangle, hinged at its vertical edge. As the ground moves, the weight stays unmoving, swinging the "gate" on the hinge.
+
+The advantage of a horizontal pendulum is that it achieves very low frequencies of oscillation in a compact instrument. The "gate" is slightly tilted, so the weight tends to slowly return to a central position. The pendulum is adjusted (before the damping is installed) to oscillate once per three seconds, or once per thirty seconds. The general-purpose instruments of small stations or amateurs usually oscillate once per ten seconds. A pan of oil is placed under the arm, and a small sheet of metal mounted on the underside of the arm drags in the oil to damp oscillations. The level of oil, position on the arm, and angle and size of sheet is adjusted until the damping is "critical", that is, almost having oscillation. The hinge is very low friction, often torsion wires, so the only friction is the internal friction of the wire. Small seismographs with low proof masses are placed in a vacuum to reduce disturbances from air currents.
+
+Zollner described torsionally suspended horizontal pendulums as early as 1869, but developed them for gravimetry rather than seismometry.
+
+Early seismometers had an arrangement of levers on jeweled bearings, to scratch smoked glass or paper. Later, mirrors reflected a light beam to a direct-recording plate or roll of photographic paper. Briefly, some designs returned to mechanical movements to save money. In mid-twentieth-century systems, the light was reflected to a pair of differential electronic photosensors called a photomultiplier. The voltage generated in the photomultiplier was used to drive galvanometers which had a small mirror mounted on the axis. The moving reflected light beam would strike the surface of the turning drum, which was covered with photo-sensitive paper. The expense of developing photo-sensitive paper caused many seismic observatories to switch to ink or thermal-sensitive paper.
+
+After World War II, the seismometers developed by Milne, Ewing and Gray were adapted into the widely used Press-Ewing seismometer.
+
+## Modern instruments
+
+Modern instruments use electronic sensors, amplifiers, and recording devices. Most are broadband covering a wide range of frequencies. Some seismometers can measure motions with frequencies from 500 Hz to 0.00118 Hz (1/500 = 0.002 seconds per cycle, to 1/0.00118 = 850 seconds per cycle). The mechanical suspension for horizontal instruments remains the garden-gate described above. Vertical instruments use some kind of constant-force suspension, such as the LaCoste suspension. The LaCoste suspension uses a zero-length spring to provide a long period (high sensitivity). Some modern instruments use a "triaxial" or "Galperin" design, in which three identical motion sensors are set at the same angle to the vertical but 120 degrees apart on the horizontal. Vertical and horizontal motions can be computed from the outputs of the three sensors.
+
+Seismometers unavoidably introduce some distortion into the signals they measure, but professionally designed systems have carefully characterized frequency transforms.
+
+Modern sensitivities come in three broad ranges: geophones, 50 to 750 V/m; local geologic seismographs, about 1,500 V/m; and teleseismographs, used for world survey, about 20,000 V/m. Instruments come in three main varieties: short period, long period and broadband. The short and long period measure velocity and are very sensitive, however they 'clip' the signal or go off-scale for ground motion that is strong enough to be felt by people. A 24-bit analog-to-digital conversion channel is commonplace. Practical devices are linear to roughly one part per million.
+
+Delivered seismometers come with two styles of output: analog and digital. Analog seismographs require analog recording equipment, possibly including an analog-to-digital converter. The output of a digital seismograph can be simply input to a computer. It presents the data in a standard digital format (often "SE2" over Ethernet).
+
+### Teleseismometers
+
+The modern broadband seismograph can record a very broad range of frequencies. It consists of a small "proof mass", confined by electrical forces, driven by sophisticated electronics. As the earth moves, the electronics attempt to hold the mass steady through a feedback circuit. The amount of force necessary to achieve this is then recorded.
+
+In most designs the electronics holds a mass motionless relative to the frame. This device is called a "force balance accelerometer". It measures acceleration instead of velocity of ground movement. Basically, the distance between the mass and some part of the frame is measured very precisely, by a linear variable differential transformer. Some instruments use a linear variable differential capacitor.
+
+That measurement is then amplified by electronic amplifiers attached to parts of an electronic negative feedback loop. One of the amplified currents from the negative feedback loop drives a coil very like a loudspeaker. The result is that the mass stays nearly motionless.
+
+Most instruments measure directly the ground motion using the distance sensor. The voltage generated in a sense coil on the mass by the magnet directly measures the instantaneous velocity of the ground. The current to the drive coil provides a sensitive, accurate measurement of the force between the mass and frame, thus measuring directly the ground's acceleration (using f=ma where f=force, m=mass, a=acceleration).
+
+One of the continuing problems with sensitive vertical seismographs is the buoyancy of their masses. The uneven changes in pressure caused by wind blowing on an open window can easily change the density of the air in a room enough to cause a vertical seismograph to show spurious signals. Therefore, most professional seismographs are sealed in rigid gas-tight enclosures. For example, this is why a common Streckeisen model has a thick glass base that must be glued to its pier without bubbles in the glue.
+
+It might seem logical to make the heavy magnet serve as a mass, but that subjects the seismograph to errors when the Earth's magnetic field moves. This is also why seismograph's moving parts are constructed from a material that interacts minimally with magnetic fields. A seismograph is also sensitive to changes in temperature so many instruments are constructed from low expansion materials such as nonmagnetic invar.
+
+The hinges on a seismograph are usually patented, and by the time the patent has expired, the design has been improved. The most successful public domain designs use thin foil hinges in a clamp.
+
+Another issue is that the transfer function of a seismograph must be accurately characterized, so that its frequency response is known. This is often the crucial difference between professional and amateur instruments. Most are characterized on a variable frequency shaking table.
+
+### Strong-motion seismometers
+
+Another type of seismometer is a digital strong-motion seismometer, or accelerograph. The data from such an instrument is essential to understand how an earthquake affects man-made structures, through earthquake engineering. The recordings of such instruments are crucial for the assessment of seismic hazard, through engineering seismology.
+
+A strong-motion seismometer measures acceleration. This can be mathematically integrated later to give velocity and position. Strong-motion seismometers are not as sensitive to ground motions as teleseismic instruments but they stay on scale during the strongest seismic shaking.
+
+Strong motion sensors are used for intensity meter applications.
+
+### Other forms
+
+Accelerographs and geophones are often heavy cylindrical magnets with a spring-mounted coil inside. As the case moves, the coil tends to stay stationary, so the magnetic field cuts the wires, inducing current in the output wires. They receive frequencies from several hundred hertz down to 1 Hz. Some have electronic damping, a low-budget way to get some of the performance of the closed-loop wide-band geologic seismographs.
+
+Strain-beam accelerometers constructed as integrated circuits are too insensitive for geologic seismographs (2002), but are widely used in geophones.
+
+Some other sensitive designs measure the current generated by the flow of a non-corrosive ionic fluid through an electret sponge or a conductive fluid through a magnetic field.
+
+### Interconnected seismometers
+
+Seismometers spaced in a seismic array can also be used to precisely locate, in three dimensions, the source of an earthquake, using the time it takes for seismic waves to propagate away from the hypocenter, the initiating point of fault rupture (See also Earthquake location). Interconnected seismometers are also used, as part of the International Monitoring System to detect underground nuclear test explosions, as well as for Earthquake early warning systems. These seismometers are often used as part of a large scale governmental or scientific project, but some organizations such as the Quake-Catcher Network, can use residential size detectors built into computers to detect earthquakes as well.
+
+In reflection seismology, an array of seismometers image sub-surface features. The data are reduced to images using algorithms similar to tomography. The data reduction methods resemble those of computer-aided tomographic medical imaging X-ray machines (CAT-scans), or imaging sonars.
+
+A worldwide array of seismometers can actually image the interior of the Earth in wave-speed and transmissivity. This type of system uses events such as earthquakes, impact events or nuclear explosions as wave sources. The first efforts at this method used manual data reduction from paper seismograph charts. Modern digital seismograph records are better adapted to direct computer use. With inexpensive seismometer designs and internet access, amateurs and small institutions have even formed a "public seismograph network".
+
+Seismographic systems used for petroleum or other mineral exploration historically used an explosive and a wireline of geophones unrolled behind a truck. Now most short-range systems use "thumpers" that hit the ground, and some small commercial systems have such good digital signal processing that a few sledgehammer strikes provide enough signal for short-distance refractive surveys. Exotic cross or two-dimensional arrays of geophones are sometimes used to perform three-dimensional reflective imaging of subsurface features. Basic linear refractive geomapping software (once a black art) is available off-the-shelf, running on laptop computers, using strings as small as three geophones. Some systems now come in an 18" (0.5 m) plastic field case with a computer, display and printer in the cover.
+
+Small seismic imaging systems are now sufficiently inexpensive to be used by civil engineers to survey foundation sites, locate bedrock, and find subsurface water.
+
+### Fiber optic cables as seismometers
+
+A new technique for detecting earthquakes has been found, using fiber optic cables. In 2016 a team of metrologists running frequency metrology experiments in England observed noise with a wave-form resembling the seismic waves generated by earthquakes. This was found to match seismological observations of an $M_w6.0$ earthquake in Italy, ~1400 km away. Further experiments in England, Italy, and with a submarine fiber optic cable to Malta detected additional earthquakes, including one 4,100 km away, and an $M_L3.4$ earthquake 89 km away from the cable.
+
+Seismic waves are detectable because they cause micrometer-scale changes in the length of the cable. As the length changes so does the time it takes a packet of light to traverse to the far end of the cable and back (using a second fiber). Using ultra-stable metrology-grade lasers, these extremely minute shifts of timing (on the order of femtoseconds) appear as phase-changes.
+
+The point of the cable first disturbed by an earthquake's p-wave (essentially a sound wave in rock) can be determined by sending packets in both directions in the looped pair of optical fibers; the difference in the arrival times of the first pair of perturbed packets indicates the distance along the cable. This point is also the point closest to the earthquake's epicenter, which should be on a plane perpendicular to the cable. The difference between the p-wave/s-wave arrival times provides a distance (under ideal conditions), constraining the epicenter to a circle. A second detection on a non-parallel cable is needed to resolve the ambiguity of the resulting solution. Additional observations constrain the location of the earthquake's epicenter, and may resolve the depth.
+
+This technique is expected to be a boon in observing earthquakes, especially the smaller ones, in vast portions of the global ocean where there are no seismometers, and at a cost much cheaper than ocean bottom seismometers.
+
+### Deep-Learning
+
+Researchers at Stanford University created a deep-learning algorithm called UrbanDenoiser which can detect earthquakes, particularly in urban cities. The algorithm filters out the background noise from the seismic noise gathered from busy cities in urban areas to detect earthquakes.
+
+## Recording
+
+Today, the most common recorder is a computer with an analog-to-digital converter, a disk drive and an internet connection; for amateurs, a PC with a sound card and associated software is adequate. Most systems record continuously, but some record only when a signal is detected, as shown by a short-term increase in the variation of the signal, compared to its long-term average (which can vary slowly because of changes in seismic noise), also known as a STA/LTA trigger.
+
+Prior to the availability of digital processing of seismic data in the late 1970s, the records were done in a few different forms on different types of media. A "Helicorder" drum was a device used to record data into photographic paper or in the form of paper and ink. A "Develocorder" was a machine that record data from up to 20 channels into a 16-mm film. The recorded film can be viewed by a machine. The reading and measuring from these types of media can be done by hand. After the digital processing has been used, the archives of the seismic data were recorded in magnetic tapes. Due to the deterioration of older magnetic tape medias, large number of waveforms from the archives are not recoverable.
+
