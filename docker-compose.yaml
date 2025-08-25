@@ -14,8 +14,8 @@ x-openrag: &openrag_template
     - ${DATA_VOLUME:-./data}:/app/data
     - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
     - ./openrag:/app/openrag # For dev mode
-    - /$SHARED_ENV:/ray_mount/.env # Shared environment variables
-    - /ray_mount/logs:/app/logs
+    - ./$SHARED_ENV:/ray_mount/.env # Shared environment variables
+    - ./ray_mount/logs:/app/logs
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
     - ${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
@@ -39,7 +39,7 @@ x-vllm: &vllm_template
     - HUGGING_FACE_HUB_TOKEN
   ipc: "host"
   volumes:
-    - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface # put ./vllm_cache if you want to have the weights on the vllm_cache folder in your project
+    - ${VLLM_CACHE:-./vllm_cache}:/.cache/huggingface # put ./vllm_cache if you want to have the weights on the vllm_cache folder in your project
   command: >
     --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
     --trust-remote-code
@@ -60,6 +60,20 @@ services:
     profiles:
       - ''
 
+  vllm-gpu:
+    <<: *vllm_template
+    image: vllm/vllm-openai:latest
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all 
+              capabilities: [gpu]
+    profiles:
+      - '' # Empty string gives default behavior (but does not run when cpu requested)
+
   # No GPU
   openrag-cpu:
     <<: *openrag_template
@@ -75,28 +89,12 @@ services:
     volumes:
       - ${DB_VOLUME:-./db}:/var/lib/postgresql/data
 
-  vllm-gpu:
-    <<: *vllm_template
-    image: vllm/vllm-openai:latest
-    runtime: nvidia
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all 
-              capabilities: [gpu]
-    profiles:
-      - '' # Empty string gives default behavior (but does not run when cpu requested)
-
   vllm-cpu:
     <<: *vllm_template
     build:
       context: extern/vllm
       dockerfile: Dockerfile.cpu
       target: vllm-openai
-    image: openrag-vllm-openai-cpu
     deploy: {}
     profiles:
       - 'cpu'
-
