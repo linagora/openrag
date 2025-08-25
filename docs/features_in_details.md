@@ -44,3 +44,6 @@ Chunks are stored in the **Milvus** vector database using the `Qwen/Qwen3-Embedd
 > Semantic similarity doesn't always mean relevance. Rerankers help refine results and reduce hallucinations by prioritizing the most relevant documents.
 
 * *Reranker: Documents are then reranked using the multilingual reranker **`Alibaba-NLP/gte-multilingual-reranker-base`** model from Hugging Face.
+
+> \[!INFO]
+> Reranking is not available on ARM architectures when using the CPU profile. This is particularly relevant for Apple Silicon devices. The reranking service should be disabled in such cases.
