@@ -29,7 +29,11 @@ services:
 
   reranker-cpu:
     <<: *reranker_template
+    platform: linux/amd64
     image: michaelf34/infinity:latest-cpu
+    build:
+      context: https://github.com/michaelfeil/infinity.git#main:libs/infinity_emb
+      dockerfile: Dockerfile.cpu_auto
     deploy: {}
     command: >
       v2

@@ -1,13 +1,15 @@
 # Ignore environment files
 .env
 
-# generate files and folders
+# generated files and folders
 .files/
 .chainlit/
 **/*chainlit.md
 .venv/
 qdrant_storage/
 vdb/volumes
+db/
+vllm_cache/
 
 # other files and folders
 misc
