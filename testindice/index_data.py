@@ -6,7 +6,7 @@ from pathlib import Path
 num_port = os.environ.get("APP_PORT")
 base_url = f"http://163.114.159.68:{num_port}"  # the base url of your running app for instance: 'http://localhost:8080'
 
-dir_name = "./test_brevet"  # Replace with your directory path
+dir_name = "./wikiarticle_text_test"  # Replace with your directory path
 dir_path = Path(dir_name).resolve()
 
 

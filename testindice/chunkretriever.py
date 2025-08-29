@@ -87,7 +87,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-b",
         "--base-url",
-        default="http://localhost:8080",
+        default="http://localhost:8090",
         help="Base URL of the OpenRAG API",
     )
     parser.add_argument("-p", "--partition", default="all", help="Partition to search")
