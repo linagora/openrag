@@ -1,6 +1,6 @@
 defaults:
-  - _self_  # TODO: Silences the hydra version migration warning (PLEASE REVIEW FOR BREAKING CHANGES)
-  - chunker: recursive_splitter # markdown_splitter # semantic_splitter # 
+  - _self_ # TODO: Silences the hydra version migration warning (PLEASE REVIEW FOR BREAKING CHANGES)
+  - chunker: recursive_splitter # markdown_splitter # semantic_splitter #
   - retriever: single
   - rag: ChatBotRag
 
@@ -89,7 +89,7 @@ loader:
     audio/mpeg: .mp3
   file_loaders:
     txt: TextLoader
-    pdf: ${oc.env:PDFLoader, MarkerLoader}  # DoclingLoader # MarkerLoader # PyMuPDFLoader # Custompymupdf4llm
+    pdf: ${oc.env:PDFLoader, MarkerLoader} # DoclingLoader # MarkerLoader # PyMuPDFLoader # Custompymupdf4llm
     eml: EmlLoader
     docx: MarkItDownLoader
     pptx: PPTXLoader
