@@ -11,7 +11,7 @@ logger = get_logger()
 
 class OpenAIEmbedding(BaseEmbedding):
     def __init__(self, embeddings_config: dict):
-        self.embedding_model = embeddings_config.get("model")
+        self.embedding_model = embeddings_config.get("model_name")
         self.base_url = embeddings_config.get("base_url")
         self.api_key = embeddings_config.get("api_key")
 

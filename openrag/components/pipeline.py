@@ -10,7 +10,10 @@ from utils.logger import get_logger
 from .grader import Grader
 from .llm import LLM
 from .map_reduce import RAGMapReduce
-from .reranker import Reranker
+if os.environ.get("RERANKER_OPENAI") == True:
+    from .reranker_openai import Reranker
+else:
+    from .reranker import Reranker
 from .retriever import ABCRetriever, RetrieverFactory
 from .utils import format_context, load_sys_template
 

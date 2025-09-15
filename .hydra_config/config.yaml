@@ -19,7 +19,7 @@ llm:
 vlm:
   <<: *llm_params
   base_url: ${oc.env:VLM_BASE_URL}
-  model: ${oc.env:VLM_MODEL}  
+  model: ${oc.env:VLM_MODEL}
   api_key: ${oc.env:VLM_API_KEY}
 
 semaphore:
@@ -31,12 +31,12 @@ embedder:
   model_name: ${oc.env:EMBEDDER_MODEL_NAME, jinaai/jina-embeddings-v3}
   base_url: ${oc.env:EMBEDDER_BASE_URL, http://vllm:8000/v1}
   api_key: ${oc.env:EMBEDDER_API_KEY, None}
-  
+
 vectordb:
   host: ${oc.env:VDB_HOST, milvus}
   port: ${oc.env:VDB_iPORT, 19530}
   connector_name: ${oc.env:VDB_CONNECTOR_NAME, milvus}
-  collection_name: ${oc.env:VDB_COLLECTION_NAME, vdb_test} 
+  collection_name: ${oc.env:VDB_COLLECTION_NAME, vdb_test}
   hybrid_search: true
   enable: true
 
