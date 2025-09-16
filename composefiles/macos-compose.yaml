@@ -1,13 +1,11 @@
 x-openrag: &openrag_template
-  #image: rcordier/openrag:latest
+  image: linagoraai/openrag:latest
   build:
     context: .
     dockerfile: Dockerfile
   volumes:
-    - ./.hydra_config:/app/.hydra_config
     - ./data:/app/data
     - ./.cache/huggingface:/app/model_weights # Model weights for RAG
-    - ./openrag:/app/openrag # For dev mode
     - ./ray_mount/.env:/ray_mount/.env # Shared environment variables
     - ./ray_mount/logs:/app/logs
   ports:
@@ -32,7 +30,7 @@ services:
   rdb:
     image: postgres:15
     environment:
-      - POSTGRES_PASSWORD=root
+      - POSTGRES_PASSWORD=root_password
       - POSTGRES_USER=root
     volumes:
       - ./db:/var/lib/postgresql/data
@@ -100,12 +98,10 @@ services:
       - "minio"
 
   indexer-ui:
-    build: 
-      context: ./extern/indexer-ui
-      dockerfile: Dockerfile
-      args:
-        - VITE_API_BASE_URL=${VITE_API_BASE_URL}
-        - VITE_INCLUDE_CREDENTIALS=${VITE_INCLUDE_CREDENTIALS}
+    image: linagoraai/indexer-ui:latest
     ports:
       - "8067:3000"
     restart: unless-stopped
+    environment:
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL}
+      - VITE_INCLUDE_CREDENTIALS=${VITE_INCLUDE_CREDENTIALS}
