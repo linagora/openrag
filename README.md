@@ -2,7 +2,7 @@
 
 ![RAG Architecture](./RAG_architecture.png)
 
-OpenRag is a lightweight, modular and extensible Retrieval-Augmented Generation (RAG) framework designed to explore and test advanced RAG techniques — 100% open source and focused on experimentation, not lock-in.
+[OpenRag](https://open-rag.ai/) is a lightweight, modular and extensible Retrieval-Augmented Generation (RAG) framework designed to explore and test advanced RAG techniques — 100% open source and focused on experimentation, not lock-in.
 
 > Built by the Linagora, OpenRag offers a sovereign-by-design alternative to mainstream RAG stacks.
 
@@ -15,9 +15,8 @@ OpenRag is a lightweight, modular and extensible Retrieval-Augmented Generation 
 - [🚀 Installation](#-installation)
   - [Prerequisites](#prerequisites)
   - [Installation and Configuration](#installation-and-configuration)
-  - [Configuration](#configuration)
 - [🔧 Troubleshooting](#-troubleshooting)
-- [🤝 Contributing](#-contributing)
+- [🤝 Support and Contributing](#-support-and-contributions)
 - [📜 License](#-license)
 
 
@@ -28,7 +27,7 @@ OpenRag is a lightweight, modular and extensible Retrieval-Augmented Generation 
 
 ## ✨ Key Features
 ### 📁 Rich File Format Support
-OpenRag supports a comprehensive range of file formats for seamless document ingestion:
+[OpenRag](https://open-rag.ai/) supports a comprehensive range of file formats for seamless document ingestion:
 
 * **Text Files**: `txt`, `md`
 * **Document Files**: `pdf`, `docx`, `doc`, `pptx` - Advanced PDF parsing with OCR support and Office document processing
@@ -46,6 +45,7 @@ Experience intuitive document management through our built-in web interface.
 
 * **Drag-and-drop file upload** with batch processing capabilities
 * **Real-time indexing progress** monitoring and status updates
+* **Admin Dashbord** to monitore RAG components (Indexer, VectorDB, TaskStateManager, etc)
 * **Partition management** - organize documents into logical collections
 * **Visual document preview** and metadata inspection
 * **Search and filtering** capabilities for indexed content
@@ -69,7 +69,7 @@ Engage with your documents through our sophisticated chat interface:
 
 
 ### 🔌 OpenAI API Compatibility
-OpenRAG API is tailored to be compatible with the OpenAI format (see the [openai-compatibility section](docs/api_documentation.md#-openai-compatible-chat) for more details), enabling seamless integration of your deployed RAG into popular frontends and workflows such as OpenWebUI, LangChain, N8N, and more. This ensures flexibility and ease of adoption without requiring custom adapters.
+[OpenRag](https://open-rag.ai/) API is tailored to be compatible with the OpenAI format (see the [openai-compatibility section](docs/api_documentation.md#-openai-compatible-chat) for more details), enabling seamless integration of your deployed RAG into popular frontends and workflows such as OpenWebUI, LangChain, N8N, and more. This ensures flexibility and ease of adoption without requiring custom adapters.
 
 <details>
 
@@ -98,10 +98,10 @@ See the section on [distributed deployment in a ray cluster](#5-distributed-depl
 </details>
 
 ### 🔍 Advanced Retrieval & Reranking
-OpenRAG Leverages state-of-the-art retrieval techniques for superior accuracy.
+[OpenRag](https://open-rag.ai/) Leverages state-of-the-art retrieval techniques for superior accuracy.
 
 <details>
-s
+
 <summary>Implemented advanced retrieval techniques</summary>
 
 * **Hybrid search** - combines semantic similarity with BM25 keyword matching
@@ -129,108 +129,34 @@ For more details, [see this file](docs/features_in_details.md)
 ### Installation and Configuration
 #### 1. Clone the repository:
 ```bash
-git clone git@github.com:linagora/openrag.git
-
-# # to clone the repo with the associated submodules
-# git clone --recurse-submodules git@github.com:linagora/openrag.git
+git clone --recurse-submodules git@github.com:linagora/openrag.git
 
 cd openrag
 git checkout main # or a given release
 ```
-
-#### 2. Create uv environment and install dependencies:
->[!IMPORTANT] 
-> Ensure you have Python 3.12 installed along with `uv`. For detailed installation instructions for uv, refer to the [uv official documentation](https://docs.astral.sh/uv/getting-started/installation/#pypi). You can either use `uv` or `pip` (if already available) or `curl`. Additional installation methods are outlined in the [documentation](https://docs.astral.sh/uv/getting-started/installation/#pypi).
+#### 2. Create a `.env` File
+Create a `.env` file at the root of the project, mirroring the structure of `.env.example`, to configure your environment and supply blank environment variables.
 
 ```bash
-# with pip
-pip install uv
-
-# with curl
-curl -LsSf https://astral.sh/uv/install.sh | sh
+cp .env.example .env
 ```
+#### 3. File Parser configuration 
+All supported file format parsers are pre-configured. For PDF processing, **[MarkerLoader](https://github.com/datalab-to/marker)** serves as the default parser, offering comprehensive support for OCR-scanned documents, complex layouts, tables, and embedded images. MarkerLoader operates efficiently on both GPU and CPU environments.
 
-To use the PostgreSQL database server, we must install the Psycopg2 package, which requires libpq-dev to provide the necessary components for building Psycopg2.
-```bash
-sudo apt-get install libpq-dev python3-dev
-```
+<details>
+<summary>For more PDF options</summary>
 
-```bash
-# Create a new environment with all dependencies
-cd openrag/
-uv sync
-```
+For CPU-only deployments or lightweight testing scenarios, you can consider switching to **`PyMuPDF4LLMLoader`** or **`PyMuPDFLoader`**. To change the loader, set the **`PDFLoader`** variable like this `PDFLoader=PyMuPDF4LLMLoader`.
 
-#### 3. Create a `.env` File
-Create a `.env` file at the root of the project, mirroring the structure of `.env.example`, to configure your environment.
-
-##### File Parser configuration 
-> For PDF indexing, multiple loader options are available. Set your choice using the **`PDFLoader`** env variable:
-  * **`MarkerLoader`** and **`DoclingLoader`** are recommended for optimal performance, especially on OCR-processed PDFs. They support both GPU and CPU execution.
-  * For lightweight testing on CPU, use **`PyMuPDF4LLMLoader`** or **`PyMuPDFLoader`**.
-    > ⚠️ These do **not** support non-searchable PDFs or image-based content and images are not handled.
-
-Other file formats (`txt`, `docx`, `doc`, `pptx`, audio type files, etc) are pre-configured.
-
-```bash
-# This is the minimal settings required.
-
-# LLM
-BASE_URL=
-API_KEY=
-MODEL=
-LLM_SEMAPHORE=10 # change with respect to your llm's capabilities
-
-# VLM for image captioning. You can put your LLM here if it's multimodal 
-VLM_BASE_URL=
-VLM_API_KEY=
-VLM_MODEL=
-VLM_SEMAPHORE=10
-
-# App
-APP_PORT=8080 # forwarded port of the fastapi
-
-# RETRIEVER
-CONTEXTUAL_RETRIEVAL=true # see the `### Chunking` section
-RETRIEVER_TOP_K=20 # Number of documents to return before reranking
-
-# EMBEDDER
-EMBEDDER_MODEL_NAME=Qwen/Qwen3-Embedding-0.6B
-EMBEDDER_API_KEY=EMPTY
-# VLLM_PORT=8000 forwarded port
-# EMBEDDER_BASE_URL=http://vllm:8000/v1
-
-# RERANKER
-RERANKER_ENABLED=true
-RERANKER_MODEL=Alibaba-NLP/gte-multilingual-reranker-base
-RERANKER_TOP_K=5 # Number of documents to return after reranking. increment it for better results if your llm has a wider context window
-
-# Prompts
-PROMPTS_DIR=../prompts/example3_en # you can use the fr version of the prompts '../prompts/example3'
-
-# Loaders
-PDFLoader=MarkerLoader
-MARKER_MAX_PROCESSES=2 # increment if you've enough gpu capacity
-
-# RAY, to better understand the RAY Parameters, see section 5 on RAY
-RAY_DEDUP_LOGS=0
-RAY_NUM_GPUS=0.1
-RAY_POOL_SIZE=1 # increment if you a cluster of machines
-RAY_MAX_TASKS_PER_WORKER=6 # Number of tasks per serializer instance
-RAY_DASHBOARD_PORT=8265
-RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 # critical with the newest version of UV
-
-
-# To enable HTTP authentication via HTTPBearer for the api endpoints
-AUTH_TOKEN=super-secret-token
-```
-
-##### Indexer UI
->[!IMPORTANT]
-> Before launching the app, You might want to configure **`Indexer UI` (A Web interface for intuitive document ingestion, indexing, and management.)** following the dedicated guide:
-➡ [Deploy with Indexer UI](docs/setup_indexerui.md)
+> ⚠️ **Important**: These alternative loaders have limitations - they cannot process non-searchable (image-based) PDFs and do not extract or handle embedded images.
+</details>
 
 #### 4.Deployment: Launch the app
+
+>[!IMPORTANT]
+> In case **`Indexer UI` (A Web interface for intuitive document ingestion, indexing, and management.)** is not configured already in your `.env`, follow this dedicated guide:
+➡ [Deploy with Indexer UI](docs/setup_indexerui.md)
+
 You can run the application with either GPU or CPU support, depending on your system:
 
 ```bash
@@ -240,52 +166,26 @@ docker compose up --build -d  # Use 'down' to stop
 # Start with CPU
 docker compose --profile cpu up --build -d # Use '--profile cpu down' to stop it properly
 ```
-> \[!TIP]
-> For quick testing on CPU, you can reduce computational load by adjusting the following settings in the **`.env`** file:
 
-```bash
-RERANKER_ENABLED=false # to disable ranking which is a costly operation
-# If you want to keep then, reduce `RETRIEVER_TOP_K` to 10 or 20 to reduce ranking computation
-```
 >[!WARNING]
-> These adjustments may affect performance and result quality but are appropriate for lightweight testing.
-
-> \[!INFO]
 > The initial launch is longer due to the installation of required dependencies.
 
 Once the app is up and running, visit `http://localhost:APP_PORT` or `http:X.X.X.X:APP_PORT` to access via:
 
-1. **`/docs`** – FastAPI’s full API documentation. See [this guide](docs/api_documentation.md) for more details on the endpoints.
+1. **`/docs`** – FastAPI’s full API documentation. See this [detailed overview of our api](docs/api_documentation.md) for more details on the endpoints.
+
+
 2. **`/chainlit`** – [Chainlit chat UI](https://docs.chainlit.io/get-started/overview) to chat with your partitions. To disable it (e.g., for backend-only use), set `WITH_CHAINLIT_UI=False`.
 
-> [!NOTE]
-> Chainlit UI has no authentication by default. To enable it, set the following in your `.env`:
+>[!NOTE]
+> Chainlit UI has no authentication by default. To enable it, follow the [dedicated guide](./docs/setup_chainlit_ui_auth.md). The same goes for chat data persistancy, enable it with this [guide](docs/chainlit_data_persistency.md)
 
-```bash
-CHAINLIT_AUTH_SECRET=...       # Generate with: uv run chainlit create-secret (or use any random value)
-CHAINLIT_USERNAME=Openrag
-CHAINLIT_PASSWORD=Openrag2025
-```
-> \[!IMPORTANT]
-> Chat history is **disabled** by default. To store conversations and related data, enable Chainlit’s data persistence layer.
-
-➡ [Enable Chainlit Data Persistence](docs/chainlit_data_persistency.md)
-
-
-3. If the **`Indexer UI`** (a web interface for easy document ingestion, indexing, and management) is enabled, you can access it at `http://localhost:INDEXERUI_PORT`. See [this guide](docs/setup_indexerui.md) for setup instructions.
-
+3. `http://localhost:INDEXERUI_PORT` to access the indexer ui for easy document ingestion, indexing, and management
 
 #### 5. Distributed deployment in a Ray cluster
 
 To scale **OpenRag** in a distributed environment using **Ray**, follow the dedicated guide:
-
 ➡ [Deploy OpenRag in a Ray cluster](docs/deploy_ray_cluster.md)
-
-#### 6. 🧠 API Overview
-
-This FastAPI-powered backend offers capabilities for document-based question answering (RAG), semantic search, and document indexing across multiple partitions. It exposes endpoints for interacting with a vector database and managing document ingestion, processing, and querying. See this document for [detailed overview of our api](docs/api_documentation.md).
-
-
 
 ## 🔧 Troubleshooting
 <details>

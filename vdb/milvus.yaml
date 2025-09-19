@@ -45,8 +45,8 @@ services:
       start_period: 90s
       timeout: 20s
       retries: 3
-    ports:
-      - "${VDB_PORT:-19530}:${VDB_iPORT:-19530}"
+    # ports:
+    #   - "${VDB_PORT:-19530}:${VDB_iPORT:-19530}"
     depends_on:
       - "etcd"
       - "minio"

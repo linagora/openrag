@@ -1,0 +1,2 @@
+PARTITION_PREFIX="openrag-"
+LEGACY_PARTITION_PREFIX="ragondin-"

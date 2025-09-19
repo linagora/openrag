@@ -1,4 +1,4 @@
 type: ''
 criteria: similarity
-top_k: ${oc.decode:${oc.env:RETRIEVER_TOP_K, 20}}
+top_k: ${oc.decode:${oc.env:RETRIEVER_TOP_K, 50}} # Number of documents to return before reranking
 similarity_threshold: 0.6

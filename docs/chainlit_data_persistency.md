@@ -1,73 +1,43 @@
 # Data Persistency
 
-Chainlit data layer can be activated using a git submodule:  
-https://github.com/OpenLLM-France/chainlit-datalayer/tree/main (forked from https://github.com/Chainlit/chainlit-datalayer).  
-With the fork, we industrialized the repo by dockerizing it.
+The [Chainlit data layer](https://docs.chainlit.io/data-layers/overview) allows you to persist conversations in chainlit.
+This project uses a [dockerized fork](https://github.com/Chainlit/chainlit-datalayer) for easier deployment and setup.
 
-- It deploys a PostgreSQL database for data persistency.
-- The implementation by Chainlit is cloud-compatible, and the same applies for local data persistency.
-- A local "fake" S3 bucket is deployed for local storage.
+In OpenRAG, one can activate **`Chainlit data layer`** following these steps:
 
-## Usage in Our App
+### Step 1: Set up authentication
+In fact, chainlit authentication is necessary for data persistency. Set chainlit authentication if not already done (refer to the [chainlit auth guide](./setup_chainlit_ui_auth.md))
 
-### Cloning with Submodules
-
-If you want to have everything at once, clone the project with submodule dependencies:
-
+### Step 2: Add the following variables
+To deploy the Chainlit data layer service, add the following variable:
 ```bash
-git clone --recurse-submodules <repository-url>
-```
-
-If you've already cloned this repo without submodules:
-
-```bash
-cd <project-name>
-git submodule update --init --recursive
-```
-
-> [!IMPORTANT]
-> To get the newest version of chainlit datalayer, run the following command
-```bash
-git submodule foreach 'git checkout main && git pull'
-```
-
-[!NOTE]  
-The `--init --recursive` flags will:
-- Initialize the submodules based on the existing `.gitmodules` file
-- Download all the submodule content
-- Handle nested submodules if any exist
-
-### Environment Variables
-
-After adding the submodule, add the following variables to your `.env` file:
-
-```bash
-# Chainlit UI authentication (Necessary for data persistency). Don't add it if it's already included
-CHAINLIT_AUTH_SECRET=... # has to be generated with with this command: 'uv run chainlit create-secret' but a random value works too.
-CHAINLIT_USERNAME=OpenRAG
-CHAINLIT_PASSWORD=OpenRAG2025
-
-## Chainlit data persistency
-# Persistency services (localstack + AWS (Deployed Locally))
+# Persistency services: postgres (localstack (AWS emulator deployed locally)
 CHAINLIT_DATALAYER_COMPOSE=extern/chainlit-datalayer/compose.yaml
+```
+This provides 2 services:
+- a postgres database to store users, feedbacks, chat history, etc
+- "s3 bucket" emulator to store elements (files attached in the chat). 
+> [!NOTE]
+> Chainlit datalayer is cloud-compatible, and the same applies for local data persistency. So for local storage, a cloud/s3 service emulator that runs in a container is deployed as well.
 
-## To link to the PostgreSQL instance.
-POSTGRES_USER=root
-POSTGRES_PASSWORD=root
-POSTGRES_DB=postgres
-POSTGRES_PORT=5432
+* Variables for the postgres data
+> [!IMPORTANT]
+> Knowing that OpenRAG already has a running postgres service (**`rdb`**) (refer to the [docker-compose.yaml](../docker-compose.yaml) file), there is no need to deploy another postgres service. In that case, comment out the postgres service definition in the [compose.yaml file](../extern/chainlit-datalayer/compose.yaml) and add the following variable to your .env
 
-DATABASE_URL=postgresql://${POSTGRES_USER:-root}:${POSTGRES_PASSWORD:-root}@postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-postgres} # for chainlit
+```bash
+DATABASE_URL=postgresql://root:root_password@rdb:5432/chainlit
+```
+* Variables for chainlit to use the **`S3 Bucket`**
+Add the following variables to your `.env` so that chainlit can use them to connect to the locally deployed S3 bucket
 
-## S3 configuration.
+```bash
+## S3 bucket configuration.
 BUCKET_NAME=my-bucket
 APP_AWS_ACCESS_KEY=random-key
 APP_AWS_SECRET_KEY=random-key
 APP_AWS_REGION=eu-central-1
-
-LOCALSTACK_PORT=4566
-DEV_AWS_ENDPOINT=http://localstack:${LOCALSTACK_PORT:-4566}
+DEV_AWS_ENDPOINT=http://localstack:4566
 ```
 
->[!IMPORTANT]  
->If you want to deactivate the service, comment out these variables, especially `CHAINLIT_DATALAYER_COMPOSE`.
+> [!IMPORTANT]  
+> If you want to deactivate the service, comment out these variables, especially `CHAINLIT_DATALAYER_COMPOSE`.

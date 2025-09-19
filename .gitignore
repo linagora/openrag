@@ -41,6 +41,8 @@ data/
 data/*
 !data/.gitkeep
 
+ray_mount
+
 **/*.env.compose
 kotaemon
 ./temps_img
@@ -67,3 +69,6 @@ services/*
 *.json
 *.csv
 *.pkl
+
+#helm
+charts/openrag-stack/charts/*.tgz

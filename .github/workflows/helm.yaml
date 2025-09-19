@@ -1,0 +1,60 @@
+name: Publish Helm Chart
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - "charts/**"
+  workflow_dispatch:
+
+env:
+  HELM_REGISTRY: ghcr.io
+  HELM_ORG: linagora
+
+jobs:
+  package-and-publish-chart:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
+      - name: Set chart version
+        run: |
+          BASE_VERSION=$(yq '.version' charts/openrag-stack/Chart.yaml)
+
+          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            # Keep version as-is for stable
+            CHART_VERSION="$BASE_VERSION"
+          else
+            # Append branch for dev builds
+            CHART_VERSION="${BASE_VERSION}-dev"
+            yq -i ".version = \"${CHART_VERSION}\"" charts/openrag-stack/Chart.yaml
+          fi
+
+          echo "CHART_VERSION=$CHART_VERSION" >> $GITHUB_ENV
+          echo "Using chart version: $CHART_VERSION"
+
+      - name: Helm dependency update
+        run: helm dependency update charts/openrag-stack
+
+      - name: Package chart
+        run: helm package charts/openrag-stack --destination .
+
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login $HELM_REGISTRY -u ${{ github.actor }} --password-stdin
+
+      - name: Push chart
+        run: |
+          helm push openrag-stack-${CHART_VERSION}.tgz oci://$HELM_REGISTRY/$HELM_ORG

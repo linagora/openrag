@@ -1,0 +1,148 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: raycluster
+  annotations:
+    ray.io/overwrite-container-cmd: "true"
+spec:
+  rayVersion: "2.47.1"
+  enableInTreeAutoscaling: false
+
+  headGroupSpec:
+    serviceType: ClusterIP
+    template:
+      spec:
+        initContainers:
+          - name: init-venv-sync
+            image: {{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}
+            command:
+              - sh
+              - -c
+              - |
+                if [ -f /app/.venv/.ready ]; then
+                  echo "Existing env detected, skipping install."
+                else
+                  echo "No env ready, cleaning and syncing..."
+                  rm -rf /app/.venv/*
+                  uv sync
+                  touch /app/.venv/.ready
+                fi
+            volumeMounts:
+              - name: venv
+                mountPath: /app/.venv
+
+        containers:
+          - name: ray-head
+            image: {{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}
+            command: ["uv"]
+            args:
+              - "run"
+              - "ray"
+              - "start"
+              - "--head"
+              - "--dashboard-host=0.0.0.0"
+              - "--dashboard-agent-listen-port=52365"
+              - "--metrics-export-port=8080"
+              - "--block"
+            ports:
+              - containerPort: 80
+                name: serve
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+              - containerPort: 6379
+                name: gcs
+              - containerPort: 8080
+                name: metrics
+            volumeMounts:
+              - name: model-weights
+                mountPath: /app/model_weights
+              - name: data
+                mountPath: /app/data
+              - name: logs
+                mountPath: /app/logs
+              - name: venv
+                mountPath: /app/.venv
+            envFrom:
+              - configMapRef:
+                  name: rag-env
+              - secretRef:
+                  name: rag-env-secrets
+            resources:
+              limits:
+                nvidia.com/gpu: 1
+        volumes:
+          - name: model-weights
+            persistentVolumeClaim:
+              claimName: rag-model-weights
+          - name: data
+            persistentVolumeClaim:
+              claimName: rag-data
+          - name: logs
+            persistentVolumeClaim:
+              claimName: rag-logs
+          - name: venv
+            persistentVolumeClaim:
+              claimName: rag-venv
+
+  workerGroupSpecs:
+  {{- range $i, $e := until (.Values.ray.workers.count | int) }}
+    - groupName: worker-group-{{ add $i 1 }}
+      replicas: {{ $.Values.ray.workers.replicas }}
+      minReplicas: {{ $.Values.ray.workers.minReplicas }}
+      maxReplicas: {{ $.Values.ray.workers.maxReplicas }}
+      template:
+        spec:
+          initContainers:
+            - name: init-venv
+              image: ghcr.io/linagora/openrag:dev-latest
+              command:
+                - sh
+                - -c
+                - |
+                  echo "Waiting for Python env in /app/.venv..."
+                  while [ ! -f /app/.venv/.ready ]; do
+                    sleep 3
+                  done
+                  echo "Venv is ready."
+              volumeMounts:
+                - name: venv
+                  mountPath: /app/.venv
+          containers:
+            - name: ray-worker
+              image: {{ $.Values.ray.image.repository }}:{{ $.Values.ray.image.tag }}
+              command: ["/bin/bash", "-lc", "--"]
+              args:
+                - uv run $KUBERAY_GEN_RAY_START_CMD
+              volumeMounts:
+                - name: model-weights
+                  mountPath: /app/model_weights
+                - name: data
+                  mountPath: /app/data
+                - name: logs
+                  mountPath: /app/logs
+                - name: venv
+                  mountPath: /app/.venv
+              envFrom:
+                - configMapRef:
+                    name: rag-env
+                - secretRef:
+                    name: rag-env-secrets
+              resources:
+                limits:
+                  nvidia.com/gpu: 1
+          volumes:
+            - name: model-weights
+              persistentVolumeClaim:
+                claimName: rag-model-weights
+            - name: data
+              persistentVolumeClaim:
+                claimName: rag-data
+            - name: logs
+              persistentVolumeClaim:
+                claimName: rag-logs
+            - name: venv
+              persistentVolumeClaim:
+                claimName: rag-venv
+  {{- end }}

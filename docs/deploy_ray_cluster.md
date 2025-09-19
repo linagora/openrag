@@ -20,7 +20,7 @@ MARKER_MAX_TASKS_PER_CHILD=10
 MARKER_MAX_PROCESSES=5 # Number of subprocesses <-> Number of concurrent pdfs per worker
 MARKER_MIN_PROCESSES=3 # Minimum number of subprocesses available before triggering a process pool reset.
 MARKER_POOL_SIZE=1 # Number of workers (typically 1 worker per cluster node)
-MARKER_NUM_GPUS=0.6
+MARKER_NUM_GPUS=0.01
 
 SHARED_ENV=/ray_mount/.env
 RAY_DASHBOARD_PORT=8265

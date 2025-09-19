@@ -40,7 +40,6 @@ WORKDIR /app/openrag
 COPY openrag/ .
 
 # Copy assests & config
-COPY public/ /app/public/
 COPY prompts/ /app/prompts/
 COPY .hydra_config/ /app/.hydra_config/
 ENV PYTHONPATH=/app/openrag/

@@ -6,13 +6,13 @@ This FastAPI-powered backend provides a comprehensive document-based question an
 
 ## 🔐 Authentication
 
-All endpoints require authentication when **enabled**. Include your `AUTH_TOKEN` in the HTTP request header:
+All endpoints require authentication when **enabled** (by addting a authorization token `AUTH_TOKEN` in your **`.env`**). Include your **`AUTH_TOKEN`** in the HTTP request header:
 
 ```
 Authorization: Bearer YOUR_AUTH_TOKEN
 ```
 
-For OpenAI-compatible endpoints, `AUTH_TOKEN` serves as the `api_key` parameter, or use a placeholder like `'sk-1234'` when authentication is disabled (necessary for when using OpenAI client).
+For OpenAI-compatible endpoints, `AUTH_TOKEN` serves as the `api_key` parameter. Use a placeholder like `'sk-1234'` when authentication is disabled (necessary for when using OpenAI client).
 
 ---
 
@@ -36,6 +36,9 @@ RAY_SERVE_PORT=8080                  # Port for Ray Serve HTTP proxy
 ```
 
 When using Ray Serve with a **remote cluster**, the HTTP server will be started on the **head node** of the cluster.
+
+> [!IMPORTANT]
+> When using Ray Serve, you must disable the **FastAPI `exception handler`** by setting `DISABLE_EXCEPTION_HANDLER=true` in your environment variables. Ray Serve is currently incompatible with FastAPI's exception handling middleware. Additionally, the Chainlit UI is disabled when using Ray Serve deployment.
 
 ## 🚀 API Endpoints
 ### ℹ️ System Health
@@ -61,7 +64,7 @@ Upload a new file to a specific partition for indexing.
 
 **Request Body (form-data):**
 - `file` (binary): File to upload
-- `metadata` (JSON string): File metadata (e.g., `{"file_type": "pdf"}`)
+- `metadata` (JSON string): File metadata (e.g., `{"owner": "user1"}`)
 
 **Responses:**
 - `201 Created`: Returns task status URL
@@ -206,10 +209,14 @@ OpenAI-compatible chat completion using **`RAG` pipeline**.
 {
   "model": "openrag-{partition_name}",
   "messages": [
-    {"role": "user", "content": "Your question here"}
+    {
+      "role": "user",
+      "content": "Your question here"
+    }
   ],
   "temperature": 0.7,
-  "stream": 0.3
+  "stream": 0.3,
+  ...
 }
 ```
 
@@ -220,29 +227,28 @@ POST /v1/completions
 
 OpenAI-compatible text completion endpoint.
 
-
 ## 💡 Usage Examples
 
 ### Bulk File Indexing
 
-For indexing multiple files programmatically, you can use this script [`data_indexer.py`](../utility/data_indexer.py) utility script in the [`📁 utility`](../utility/) folder.
+For indexing multiple files programmatically, you can use this script [`data_indexer.py`](../utility/data_indexer.py) utility script in the [`📁 utility`](../utility/) folder or simply use **`indexer ui`**.
 
 ### OpenAI Client Integration
 
-For detailed examples of using OpenAI clients with this API, see the [`openai_compatibility_guide.ipynb`](./utility/openai_compatibility_guide.ipynb) notebook in the [`📁 utility`](./utility/) folder.
+For detailed examples of using OpenAI clients with this API, see the [`openai_compatibility_guide.ipynb`](./utility/openai_compatibility_guide.ipynb) notebook in the [`📁 utility`](./utility/) folder or simply using **`IndexerUI`**.
 
 #### Example OpenAI Client Usage
 
 ```python
 from openai import OpenAI, AsyncOpenAI
 
-api_base_url = "http://localhost:8080" # api base url 
+api_base_url = "http://localhost:8080" # fastapi base url 
 base_url = f"{api_base_url}/v1"
 
-auth_key = 'sk-1234' # your api authentification key. AUTH_TOKEN from your .env
+auth_key = 'sk-1234' # your api authentification key, AUTH_TOKEN in your .env
 client = OpenAI(api_key=auth_key, base_url=base_url)
 
-your_partition=... # name of your partition
+your_partition= 'my_partition' # name of your partition
 model = f"openrag-{your_partition}"
 settings = {
     'model': model,

@@ -68,7 +68,7 @@ class BaseVectorDB(ABC):
         self,
         query: str,
         top_k: int = 5,
-        similarity_threshold: int = 0.80,
+        similarity_threshold: int = 0.60,
         partition: list[str] = None,
         filter: Optional[dict] = None,
     ) -> list[Document]:
@@ -76,7 +76,12 @@ class BaseVectorDB(ABC):
 
     @abstractmethod
     async def async_multi_query_search(
-        self, partition: list[str], queries: list[str], top_k_per_query: int = 5
+        self,
+        partition: list[str],
+        queries: list[str],
+        top_k_per_query: int = 5,
+        similarity_threshold: int = 0.6,
+        filter: Optional[dict] = None,
     ) -> list[Document]:
         pass
 
@@ -136,10 +141,7 @@ class MilvusDB(BaseVectorDB):
                 embeddings_config=self.config.embedder
             )
 
-            # search and index settings
             self.hybrid_search = self.config.vectordb.get("hybrid_search", True)
-            self.schema = self._create_schema()
-
             # partition related params
             self.rdb_host = self.config.rdb.host
             self.rdb_port = self.config.rdb.port
@@ -148,12 +150,13 @@ class MilvusDB(BaseVectorDB):
             self.partition_file_manager: PartitionFileManager = None
 
             # Initialize collection-related attributes
-            self._collection_name = None
-            collection_name = self.config.vectordb.get("collection_name", "vdb_test")
-            self.collection_name = collection_name
+            self.collection_name = self.config.vectordb.get(
+                "collection_name", "vdb_test"
+            )
+            self.collection_loaded = False
+            self.load_collection()
+
         except VDBError:
-            raise
-        except EmbeddingError:
             raise
 
         except Exception as e:
@@ -166,68 +169,69 @@ class MilvusDB(BaseVectorDB):
                 db_type="Milvus",
             )
 
-    @property
-    def collection_name(self):
-        return self._collection_name
-
-    @collection_name.setter
-    def collection_name(self, name: str):
-        self.logger = self.logger.bind(collection=name, database="Milvus")
-        index_params = self._create_index()
-
-        try:
-            if self._client.has_collection(name):
-                self.logger.warning(f"Collection `{name}` already exists. Loading it.")
-            else:
-                self.logger.info("Creating empty collection")
-                schema = self._create_schema()
-                consistency_level = "Strong"
-                try:
-                    self._client.create_collection(
-                        collection_name=name,
-                        schema=schema,
-                        consistency_level=consistency_level,
-                        index_params=index_params,
-                        enable_dynamic_field=True,
+    def load_collection(self):
+        if not self.collection_loaded:
+            self.logger = self.logger.bind(
+                collection=self.collection_name, database="Milvus"
+            )
+            try:
+                if self._client.has_collection(self.collection_name):
+                    self.logger.warning(
+                        f"Collection `{self.collection_name}` already exists. Loading it."
                     )
+                else:
+                    self.logger.info("Creating empty collection")
+                    index_params = self._create_index()
+                    schema = self._create_schema()
+                    consistency_level = "Strong"
+                    try:
+                        self._client.create_collection(
+                            collection_name=self.collection_name,
+                            schema=schema,
+                            consistency_level=consistency_level,
+                            index_params=index_params,
+                            enable_dynamic_field=True,
+                        )
+                    except MilvusException as e:
+                        self.logger.exception(
+                            f"Failed to create collection `{self.collection_name}`",
+                            error=str(e),
+                        )
+                        raise VDBCreateOrLoadCollectionError(
+                            f"Failed to create collection `{self.collection_name}`: {str(e)}",
+                            collection_name=self.collection_name,
+                            operation="create_collection",
+                        )
+                try:
+                    self._client.load_collection(self.collection_name)
+                    self.collection_loaded = True
                 except MilvusException as e:
                     self.logger.exception(
-                        f"Failed to create collection `{name}`", error=str(e)
+                        f"Failed to load collection `{self.collection_name}`",
+                        error=str(e),
                     )
                     raise VDBCreateOrLoadCollectionError(
-                        f"Failed to create collection `{name}`: {str(e)}",
-                        collection_name=name,
-                        operation="create_collection",
+                        f"Failed to load existing collection `{self.collection_name}`: {str(e)}",
+                        collection_name=self.collection_name,
+                        operation="load_collection",
                     )
 
-            try:
-                self._client.load_collection(name)
-            except MilvusException as e:
+                self.partition_file_manager = PartitionFileManager(
+                    database_url=f"postgresql://{self.rdb_user}:{self.rdb_password}@{self.rdb_host}:{self.rdb_port}/partitions_for_collection_{self.collection_name}",
+                    logger=self.logger,
+                )
+                self.logger.info("Milvus collection loaded.")
+            except VDBError:
+                raise
+            except Exception as e:
                 self.logger.exception(
-                    f"Failed to load collection `{name}`", error=str(e)
+                    f"Unexpected error setting collection name `{self.collection_name}`",
+                    error=str(e),
                 )
-                raise VDBCreateOrLoadCollectionError(
-                    f"Failed to load existing collection `{name}`: {str(e)}",
-                    collection_name=name,
-                    operation="load_collection",
+                raise UnexpectedVDBError(
+                    f"Unexpected error setting collection name `{self.collection_name}`: {str(e)}",
+                    collection_name=self.collection_name,
                 )
-
-            self.partition_file_manager = PartitionFileManager(
-                database_url=f"postgresql://{self.rdb_user}:{self.rdb_password}@{self.rdb_host}:{self.rdb_port}/partitions_for_collection_{name}",
-                logger=self.logger,
-            )
-            self.logger.info("Milvus collection loaded.")
-            self._collection_name = name
-        except VDBError:
-            raise
-        except Exception as e:
-            self.logger.exception(
-                f"Unexpected error setting collection name `{name}`", error=str(e)
-            )
-            raise UnexpectedVDBError(
-                f"Unexpected error setting collection name `{name}`: {str(e)}",
-                collection_name=name,
-            )
 
     def _create_schema(self):
         self.logger.info("Creating Schema")
@@ -382,32 +386,20 @@ class MilvusDB(BaseVectorDB):
 
     async def async_multi_query_search(
         self,
-        queries: list[str],
-        top_k_per_query: int = 5,
-        similarity_threshold: int = 0.80,
-        collection_name: Optional[str] = None,
+        partition,
+        queries,
+        top_k_per_query=5,
+        similarity_threshold=0.6,
+        filter=None,
     ) -> list[Document]:
-        """
-        Perform multiple asynchronous search queries concurrently and return the unique retrieved documents.
-
-        Args:
-            queries (list[str]): A list of search query strings.
-            top_k_per_query (int, optional): The number of top results to retrieve per query. Defaults to 5.
-            similarity_threshold (int, optional): The similarity threshold for filtering results. Defaults to 0.80.
-            collection_name (Optional[str], optional): The name of the collection to search within. Defaults to None.
-
-        Returns:
-            list[Document]: A list of unique retrieved documents.
-        """
-        # Set the collection name
-        self.collection_name = collection_name
         # Gather all search tasks concurrently
         search_tasks = [
             self.async_search(
                 query=query,
                 top_k=top_k_per_query,
                 similarity_threshold=similarity_threshold,
-                collection_name=collection_name,
+                partition=partition,
+                filter=filter,
             )
             for query in queries
         ]

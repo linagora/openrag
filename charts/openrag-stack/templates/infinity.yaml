@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-reranker
+  labels:
+    app.kubernetes.io/name: reranker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.reranker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: reranker
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: reranker
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      runtimeClassName: {{ .Values.reranker.runtimeClassName }}
+      containers:
+        - name: reranker
+          image: "{{ .Values.reranker.image.repository }}:{{ .Values.reranker.image.tag }}"
+          args:
+            - "v2"
+            - "--model-id"
+            - "{{ .Values.reranker.model.id }}"
+            - "--port"
+            - "{{ .Values.reranker.service.port }}"
+          ports:
+            - containerPort: {{ .Values.reranker.service.port }}
+          resources:
+            {{- toYaml .Values.reranker.resources | nindent 12 }}
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /app/.cache/huggingface
+          envFrom:
+            - configMapRef:
+                name: rag-env
+      volumes:
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: rag-model-weights
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-reranker
+  labels:
+    app.kubernetes.io/name: reranker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  selector:
+    app.kubernetes.io/name: reranker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: {{ .Values.reranker.service.port }}
+      targetPort: {{ .Values.reranker.service.port }}
+  type: {{ .Values.reranker.service.type }}

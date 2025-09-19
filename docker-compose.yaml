@@ -2,7 +2,7 @@ include:
   - vdb/milvus.yaml
   - ${CHAINLIT_DATALAYER_COMPOSE:-extern/dummy.yaml}
   - extern/infinity.yaml
-  - ${INDEXERUI_COMPOSE_FILE:-extern/dummy.yaml}
+  - ${INDEXERUI_COMPOSE_FILE:-extern/indexer-ui/docker-compose.yaml}
 
 x-openrag: &openrag_template
   image: ghcr.io/linagora/openrag:dev-latest
@@ -15,7 +15,7 @@ x-openrag: &openrag_template
     - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
     - ./openrag:/app/openrag # For dev mode
     - /$SHARED_ENV:/ray_mount/.env # Shared environment variables
-    - /ray_mount/logs:/app/logs
+    - ./ray_mount/logs:/app/logs
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
     - ${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
@@ -41,10 +41,20 @@ x-vllm: &vllm_template
   command: >
     --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
     --trust-remote-code
-    --gpu_memory_utilization 0.3
     --task embed
-  ports:
-    - ${VLLM_PORT:-8000}:8000
+    --gpu_memory_utilization 0.3
+  # --max-num-seqs 1
+  # --max-model-len ${MOX_MODEL_LEN:-2048}
+  # gpu_memory_utilization, max-num-seqs et max-model-len can be tuned depending on your GPU memory
+
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    interval: 15s
+    timeout: 5s
+    retries: 3
+    start_period: 60s
+  # ports:
+  #   - ${VLLM_PORT:-8000}:8000
 services:
   # GPU - default 
   openrag:
@@ -59,8 +69,10 @@ services:
     profiles:
       - ''
     depends_on:
-    - milvus
-    - vllm-gpu
+      milvus:
+        condition: service_healthy
+      vllm-gpu:
+        condition: service_healthy
 
   # No GPU
   openrag-cpu:
@@ -69,8 +81,10 @@ services:
     profiles:
       - 'cpu'
     depends_on:
-    - milvus
-    - vllm-cpu
+      milvus:
+        condition: service_healthy
+      vllm-cpu:
+        condition: service_healthy
 
   rdb:
     image: postgres:15
@@ -82,7 +96,7 @@ services:
 
   vllm-gpu:
     <<: *vllm_template
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.9.2
     runtime: nvidia
     deploy:
       resources:
@@ -102,6 +116,18 @@ services:
       target: vllm-openai
     image: openrag-vllm-openai-cpu
     deploy: {}
+    environment:
+      - VLLM_CPU_KVCACHE_SPACE=8
+    # Default value isn't sufficient for full context length
+    command: >
+      --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
+      --trust-remote-code
+      --dtype float32
+      --max-num-batched-tokens 32768
+    # dtype is required for aarch64 (https://github.com/vllm-project/vllm/issues/11327) and improves speed on amd64.
+    # max-num-batched-tokens is required for aarch64 because chunked prefill isn't supported by V1 vllm backend
+    # for aarch64 yet. On aarch64 max-num-batched-tokens must be equal max-model-len for now (without chunked prefill).
+    # For details see https://github.com/vllm-project/vllm/issues/21179
+
     profiles:
       - 'cpu'
-

@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     make \
     ssh \ 
     rsync \
+    wget \
     libpq-dev python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -35,7 +36,7 @@ COPY pyproject.toml uv.lock ./
 RUN pip3 install uv && \
     uv python install 3.12.7 && \
     uv python pin 3.12.7 
-    # && \uv sync --no-dev
+# && \uv sync --no-dev
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
@@ -46,10 +47,10 @@ WORKDIR /app/openrag
 COPY openrag/ .
 
 # Copy assests & config
-COPY public/ /app/public/
 COPY prompts/ /app/prompts/
 COPY .hydra_config/ /app/.hydra_config/
 
 RUN apt install -y 
+RUN ln -s /app/.venv/bin/ray /usr/local/bin/ray
 
 ENV PYTHONPATH=/app/openrag/

@@ -57,8 +57,8 @@ async def list_files(
             "link": str(
                 request.url_for(
                     "get_file",
-                    partition=_quote_param_value(file_dict["partition"]),
-                    file_id=_quote_param_value(file_dict["file_id"]),
+                    partition=_quote_param_value(file_dict.get("partition")),
+                    file_id=_quote_param_value(file_dict.get("file_id")),
                 )
             ),
             **file_dict,

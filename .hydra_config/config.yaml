@@ -31,7 +31,6 @@ embedder:
   model_name: ${oc.env:EMBEDDER_MODEL_NAME, jinaai/jina-embeddings-v3}
   base_url: ${oc.env:EMBEDDER_BASE_URL, http://vllm:8000/v1}
   api_key: ${oc.env:EMBEDDER_API_KEY, None}
-
 vectordb:
   host: ${oc.env:VDB_HOST, milvus}
   port: ${oc.env:VDB_iPORT, 19530}
@@ -49,7 +48,7 @@ rdb:
 reranker:
   enable: ${oc.decode:${oc.env:RERANKER_ENABLED, true}}
   model_name: ${oc.env:RERANKER_MODEL, Alibaba-NLP/gte-multilingual-reranker-base}
-  top_k: ${oc.decode:${oc.env:RERANKER_TOP_K, 5}}
+  top_k: ${oc.decode:${oc.env:RERANKER_TOP_K, 5}} # Number of documents to return after reranking. upgrade to 8 for better results if your llm has a wider context window
   base_url: ${oc.env:RERANKER_BASE_URL, http://reranker:${oc.env:RERANKER_PORT, 7997}}
 
 grader:
@@ -107,16 +106,16 @@ loader:
     aac: VideoAudioLoader
     md: MarkdownLoader
   marker_max_tasks_per_child: ${oc.decode:${oc.env:MARKER_MAX_TASKS_PER_CHILD, 10}}
-  marker_pool_size: ${oc.decode:${oc.env:MARKER_POOL_SIZE, 1}}
-  marker_max_processes: ${oc.decode:${oc.env:MARKER_MAX_PROCESSES, 2}}
+  marker_pool_size: ${oc.decode:${oc.env:MARKER_POOL_SIZE, 1}} # Value au increment if you have a cluster of machines
+  marker_max_processes: ${oc.decode:${oc.env:MARKER_MAX_PROCESSES, 2}} # Maximum number of concurrent PDF parsing processes
   marker_min_processes: ${oc.decode:${oc.env:MARKER_MIN_PROCESSES, 1}}
   marker_num_gpus: ${oc.decode:${oc.env:MARKER_NUM_GPUS, 0.01}}
   marker_timeout: ${oc.decode:${oc.env:MARKER_TIMEOUT, 3600}}
 
 ray:
   num_gpus: ${oc.decode:${oc.env:RAY_NUM_GPUS, 0.01}}
-  pool_size: ${oc.decode:${oc.env:RAY_POOL_SIZE, 1}}
-  max_tasks_per_worker: ${oc.decode:${oc.env:RAY_MAX_TASKS_PER_WORKER, 5}}
+  pool_size: ${oc.decode:${oc.env:RAY_POOL_SIZE, 1}} # Number of serializer actor instances
+  max_tasks_per_worker: ${oc.decode:${oc.env:RAY_MAX_TASKS_PER_WORKER, 8}} # Number of tasks per serializer instance
   indexer:
     max_task_retries: ${oc.decode:${oc.env:RAY_MAX_TASK_RETRIES, 2}}
     serialize_timeout: ${oc.decode:${oc.env:INDEXER_SERIALIZE_TIMEOUT, 36000}}
@@ -126,7 +125,7 @@ ray:
       search: ${oc.decode:${oc.env:INDEXER_SEARCH_CONCURRENCY, 100}}
       delete: ${oc.decode:${oc.env:INDEXER_DELETE_CONCURRENCY, 100}}
       chunk: ${oc.decode:${oc.env:INDEXER_CHUNK_CONCURRENCY, 1000}}
-      insert: ${oc.decode:${oc.env:INDEXER_INSERT_CONCURRENCY, 1}}
+      insert: ${oc.decode:${oc.env:INDEXER_INSERT_CONCURRENCY, 10}}
   semaphore:
     concurrency: ${oc.decode:${oc.env:RAY_SEMAPHORE_CONCURRENCY, 100000}}
   serve:

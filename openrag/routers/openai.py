@@ -13,6 +13,7 @@ from models.openai import (
 from openai import AsyncOpenAI
 from utils.dependencies import get_vectordb
 from utils.logger import get_logger
+import consts
 
 logger = get_logger()
 config = load_config()
@@ -69,9 +70,10 @@ async def list_models(
 
     models = []
     for partition in partitions:
+        model_id = f"{consts.PARTITION_PREFIX}{partition['partition']}"
         models.append(
             {
-                "id": f"openrag-{partition['partition']}",
+                "id": model_id,
                 "object": "model",
                 "created": partition["created_at"],
                 "owned_by": "OpenRAG",
@@ -79,19 +81,25 @@ async def list_models(
         )
 
     models.append(
-        {"id": "openrag-all", "object": "model", "created": 0, "owned_by": "OpenRAG"}
+        {"id": f"{consts.PARTITION_PREFIX}all", "object": "model", "created": 0, "owned_by": "OpenRAG"}
     )
     return JSONResponse(content={"object": "list", "data": models})
 
 
 async def __get_partition_name(model_name, app_state):
     vectordb = get_vectordb()
-    if not model_name.startswith("openrag-"):
+
+    partition_prefix = consts.PARTITION_PREFIX
+    if model_name.startswith(consts.LEGACY_PARTITION_PREFIX):
+        # XXX - This is for backward compatibility, but should eventually be removed
+        partition_prefix = consts.LEGACY_PARTITION_PREFIX
+
+    if not model_name.startswith(partition_prefix):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Model not found. Model should respect this format `openrag-{partition}`",
+            detail=f"Model not found. Model should respect this format: {consts.PARTITION_PREFIX}partition_name",
         )
-    partition = model_name.split("openrag-")[1]
+    partition = model_name.split(partition_prefix)[1]
     if partition != "all" and not await vectordb.partition_exists.remote(partition):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

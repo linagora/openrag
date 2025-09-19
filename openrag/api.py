@@ -63,6 +63,9 @@ INDEXERUI_URL: Optional[str] = os.getenv("INDEXERUI_URL", None)
 INDEXERUI_COMPOSE_FILE = os.getenv("INDEXERUI_COMPOSE_FILE", None)
 INDEXERUI_PORT: Optional[str] = os.getenv("INDEXERUI_PORT", "3042")
 
+DISABLE_EXCEPTION_HANDLER: bool = (
+    os.getenv("DISABLE_EXCEPTION_HANDLER", "false").lower() == "true"
+)
 
 security = HTTPBearer()
 
@@ -84,10 +87,12 @@ app = FastAPI(dependencies=dependencies)
 
 
 # Exception handlers
-@app.exception_handler(OpenRAGError)
-async def openrag_exception_handler(request: Request, exc: OpenRAGError):
-    logger.error("OpenRAGError occurred", error=str(exc))
-    return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
+if not DISABLE_EXCEPTION_HANDLER:
+
+    @app.exception_handler(OpenRAGError)
+    async def openrag_exception_handler(request: Request, exc: OpenRAGError):
+        logger.error("OpenRAGError occurred", error=str(exc))
+        return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
 
 
 # Add CORS middleware
@@ -150,7 +155,7 @@ if WITH_CHAINLIT_UI:
     # Mount the default front
     from chainlit.utils import mount_chainlit
 
-    mount_chainlit(app, "./chainlit/app_front.py", path="/chainlit")
+    mount_chainlit(app, "./app_front.py", path="/chainlit")
     app.include_router(
         openai_router, prefix="/v1", tags=[Tags.OPENAI]
     )  # cause chainlit uses openai api endpoints
