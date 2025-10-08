@@ -1,6 +1,7 @@
 import json
 from urllib.parse import quote
 
+import consts
 from components.pipeline import RagPipeline
 from config import load_config
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
@@ -13,17 +14,12 @@ from models.openai import (
 from openai import AsyncOpenAI
 from utils.dependencies import get_vectordb
 from utils.logger import get_logger
-import consts
 
 logger = get_logger()
 config = load_config()
 router = APIRouter()
 
 ragpipe = RagPipeline(config=config, logger=logger)
-
-
-def get_app_state(request: Request):
-    return request.app.state.app_state
 
 
 async def check_llm_model_availability(request: Request):
@@ -61,7 +57,6 @@ async def check_llm_model_availability(request: Request):
     response_description="A list of available models in OpenAI format",
 )
 async def list_models(
-    app_state=Depends(get_app_state),
     _: None = Depends(check_llm_model_availability),
     vectordb=Depends(get_vectordb),
 ):
@@ -81,12 +76,17 @@ async def list_models(
         )
 
     models.append(
-        {"id": f"{consts.PARTITION_PREFIX}all", "object": "model", "created": 0, "owned_by": "OpenRAG"}
+        {
+            "id": f"{consts.PARTITION_PREFIX}all",
+            "object": "model",
+            "created": 0,
+            "owned_by": "OpenRAG",
+        }
     )
     return JSONResponse(content={"object": "list", "data": models})
 
 
-async def __get_partition_name(model_name, app_state):
+async def __get_partition_name(model_name):
     vectordb = get_vectordb()
 
     partition_prefix = consts.PARTITION_PREFIX
@@ -144,7 +144,6 @@ def __prepare_sources(request: Request, docs: list[Document]):
 async def openai_chat_completion(
     request2: Request,
     request: OpenAIChatCompletionRequest = Body(...),
-    app_state=Depends(get_app_state),
     _: None = Depends(check_llm_model_availability),
 ):
     model_name = request.model
@@ -162,7 +161,7 @@ async def openai_chat_completion(
         )
 
     try:
-        partition = await __get_partition_name(model_name, app_state)
+        partition = await __get_partition_name(model_name)
     except Exception as e:
         log.warning("Invalid model or partition", error=str(e))
         raise
@@ -236,7 +235,6 @@ async def openai_chat_completion(
 async def openai_completion(
     request2: Request,
     request: OpenAICompletionRequest,
-    app_state=Depends(get_app_state),
     _: None = Depends(check_llm_model_availability),
 ):
     model_name = request.model
@@ -257,7 +255,7 @@ async def openai_completion(
         )
 
     try:
-        partition = await __get_partition_name(model_name, app_state)
+        partition = await __get_partition_name(model_name)
 
     except Exception as e:
         log.warning(f"Invalid model or partition: {e}")
