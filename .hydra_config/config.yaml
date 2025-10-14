@@ -52,8 +52,8 @@ reranker:
   top_k: ${oc.decode:${oc.env:RERANKER_TOP_K, 5}} # Number of documents to return after reranking. upgrade to 8 for better results if your llm has a wider context window
   base_url: ${oc.env:RERANKER_BASE_URL, http://reranker:${oc.env:RERANKER_PORT, 7997}}
 
-grader:
-  enable: false
+map_reduce:
+  map_reduce_n_docs: ${oc.decode:${oc.env:MAP_REDUCE_N_DOCS, 10}} # Number of documents to use in map-reduce
 
 verbose:
   verbose: true
@@ -108,7 +108,7 @@ loader:
     md: MarkdownLoader
   marker_max_tasks_per_child: ${oc.decode:${oc.env:MARKER_MAX_TASKS_PER_CHILD, 10}}
   marker_pool_size: ${oc.decode:${oc.env:MARKER_POOL_SIZE, 1}} # Value au increment if you have a cluster of machines
-  marker_max_processes: ${oc.decode:${oc.env:MARKER_MAX_PROCESSES, 2}}
+  marker_max_processes: ${oc.decode:${oc.env:MARKER_MAX_PROCESSES, 2}} # Maximum number of concurrent PDF parsing processes
   marker_min_processes: ${oc.decode:${oc.env:MARKER_MIN_PROCESSES, 1}}
   marker_num_gpus: ${oc.decode:${oc.env:MARKER_NUM_GPUS, 0.01}}
   marker_timeout: ${oc.decode:${oc.env:MARKER_TIMEOUT, 3600}}

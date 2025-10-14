@@ -7,16 +7,17 @@ from .utils import get_llm_semaphore
 
 logger = get_logger()
 
-system_prompt_map = """
-Vous êtes un modèle de langage spécialisé dans l’analyse et la synthèse d’informations. Ton rôle est d’examiner un texte fourni et d’en extraire les éléments nécessaires pour répondre à une question utilisateur.
-Analyse le texte en profondeur.
-Synthétise les informations essentielles qui peuvent aider à répondre à la requête.
+system_prompt_map = """Vous êtes un modèle de langage spécialisé dans l’analyse et la synthèse d’informations.
+Ton rôle est d’examiner un texte fourni et d’en extraire les éléments nécessaires pour répondre à une question de l'utilisateur en gardant des éléments de contexte.
+Analyse le texte en profondeur, synthétise les informations essentielles qui peuvent aider à répondre à la requête.
 Si le texte ne contient aucune donnée pertinente pour répondre à la question, réponds simplement : "Not pertinent" et n'ajoute pas de commentaires.
+
+Les sections « Références » d’une page qui n’apportent aucune information utile à la question ne doivent pas être considérées comme pertinentes.
 """
 
 
-system_prompt_reduce = """
-Vous êtes un assistant conversationnel IA spécialisé dans la recherche et la synthèse d'informations. Votre objectif est de fournir des réponses précises, fiables et bien structurées en utilisant exclusivement les documents récupérés (Contexte). Priorisez la clarté et l'exactitude dans vos réponses.
+system_prompt_reduce = """Vous êtes un assistant conversationnel IA spécialisé dans la recherche et la synthèse d'informations. Votre objectif est de fournir des réponses précises, fiables et bien structurées en utilisant exclusivement les documents récupérés (Contexte).
+Priorisez la clarté et l'exactitude dans vos réponses.
 Voici les règles à suivre :
 - Répondez dans la langue de la requête de l'utilisateur.
 - Utilisez uniquement les informations contenues dans le Contexte. Ne faites jamais d'inférences, de suppositions ou ne vous basez pas sur des connaissances externes.
@@ -40,6 +41,7 @@ class RAGMapReduce:
             base_url=self.config.llm["base_url"], api_key=self.config.llm["api_key"]
         )
         self.model = self.config.llm["model"]
+        self.map_reduce_n_docs = self.config.map_reduce["map_reduce_n_docs"]
 
     async def infer_llm_map(self, query, chunk: Document):
         async with get_llm_semaphore():
@@ -63,23 +65,23 @@ class RAGMapReduce:
             return relevancy, resp
 
     async def map(self, query: str, chunks: list[Document]):
+        chunks = chunks[: self.map_reduce_n_docs]
         logger.debug("Running map reduce", chunk_count=len(chunks), query=query)
         tasks = [self.infer_llm_map(query, chunk) for chunk in chunks]
         output = await tqdm.gather(
-            *tasks, desc="MAP_REDUCE Processing chunks", total=len(chunks)
+            *tasks, desc="Map & Reduce processing chunks", total=len(chunks)
         )
-        relevant_chunks_syntheses = [
+        chunks_summaries = [
             (synthesis, chunk)
             for chunk, (relevancy, synthesis) in zip(chunks, output)
             if relevancy
         ]
         logger.debug(
             "Map reduce completed",
-            relevant_chunk_count=len(relevant_chunks_syntheses),
+            relevant_chunks_count=len(chunks_summaries),
             query=query,
         )
-        # final_response = await infer_llm_reduce("\n".join(syntheses))
-        return relevant_chunks_syntheses
+        return chunks_summaries
 
 
 # async def infer_llm_reduce(text):

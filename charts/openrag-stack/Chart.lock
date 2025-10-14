@@ -1,0 +1,15 @@
+dependencies:
+- name: kuberay-operator
+  repository: https://ray-project.github.io/kuberay-helm/
+  version: 1.4.0
+- name: postgresql
+  repository: https://charts.bitnami.com/bitnami
+  version: 15.5.23
+- name: milvus
+  repository: https://zilliztech.github.io/milvus-helm/
+  version: 5.0.0
+- name: vllm-stack
+  repository: https://vllm-project.github.io/production-stack
+  version: 0.1.7
+digest: sha256:eb9f465f19be0d6d6c563c4eda6dc0f7b8e9331209420f14f01587f2ca29f965
+generated: "2025-09-04T13:28:20.5556128Z"

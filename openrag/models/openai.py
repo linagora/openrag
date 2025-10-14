@@ -21,6 +21,12 @@ class OpenAIChatCompletionRequest(BaseModel):
     stream: Optional[bool] = Field(False)
     max_tokens: Optional[int] = Field(1024)
     logprobs: Optional[int] = Field(None)
+    metadata: Optional[Dict[str, Any]] = Field(
+        {
+            "use_map_reduce": False,
+        },
+        description="Extra parameters for OpenAI API",
+    )
 
 
 class OpenAIChatCompletionChoice(BaseModel):

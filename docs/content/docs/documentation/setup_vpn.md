@@ -1,4 +1,6 @@
-# 🌐 VPN Setup for Remote Machines with WireGuard
+---
+title: 🌐 VPN Setup for Remote Machines with WireGuard
+---
 
 This guide helps you securely connect your remote machines using **WireGuard VPN**, allowing you to share files (NFS, etc.) as if they were on the same private network.
 
@@ -26,6 +28,8 @@ sudo nano /etc/wireguard/wg0.conf
 Paste the following:
 
 ```ini
+// /etc/wireguard/wg0.conf
+...
 [Interface]
 Address = 10.0.0.1/24
 PrivateKey = <SERVER_PRIVATE_KEY>
@@ -57,6 +61,8 @@ sudo nano /etc/wireguard/wg0.conf
 Paste the following:
 
 ```ini
+// /etc/wireguard/wg0.conf
+...
 [Interface]
 Address = 10.0.0.2/24
 PrivateKey = <CLIENT_PRIVATE_KEY>
@@ -113,8 +119,8 @@ Test the VPN connection:
 
 ---
 
-## 💡 Notes
-
+:::caution
 - After the VPN is up, you can configure services like **NFS** using the **10.0.0.0/24 private network**.
 - Make sure your firewall allows `UDP 51820`.
 - Adjust the `AllowedIPs` and network according to your needs.
+:::

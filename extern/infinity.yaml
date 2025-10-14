@@ -5,8 +5,8 @@ x-reranker: &reranker_template
         - reranker
   volumes:
     - ${VLLM_CACHE:-/root/.cache/huggingface}:/app/.cache/huggingface # Model weights for RAG
-  ports:
-    - ${RERANKER_PORT:-7997}:${RERANKER_PORT:-7997}
+  # ports:
+  #   - ${RERANKER_PORT:-7997}:${RERANKER_PORT:-7997}
 
 services:
   reranker:

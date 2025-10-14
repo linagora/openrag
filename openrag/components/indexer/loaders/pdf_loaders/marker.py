@@ -160,7 +160,7 @@ class MarkerPool:
         self.actors = [MarkerWorker.remote() for _ in range(self.pool_size)]
         self._queue: asyncio.Queue[ray.actor.ActorHandle] = asyncio.Queue()
 
-        for _ in range(self.pool_size):
+        for _ in range(self.max_processes):
             for actor in self.actors:
                 self._queue.put_nowait(actor)
 

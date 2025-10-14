@@ -1,0 +1,34 @@
+---
+title: 🦫 OpenRag — The Open RAG Experimentation Playground
+description: This is a page in my Starlight-powered site
+template: splash
+tableOfContents: false
+next: false
+---
+
+import { LinkCard, CardGrid, Card } from '@astrojs/starlight/components';
+import { Image } from 'astro:assets';
+import myImage from "../../assets/RAG_architecture.png";
+
+<Image src={myImage} alt="RAG Architecture" width={600} height={350} />
+
+[OpenRag](https://open-rag.ai/) is a lightweight, modular and extensible Retrieval-Augmented Generation (RAG) framework designed to explore and test advanced RAG techniques — 100% open source and focused on experimentation, not lock-in.
+
+> Built by Linagora, OpenRag offers a sovereign-by-design alternative to mainstream RAG stacks.
+
+## Getting Started
+
+<CardGrid>
+  <LinkCard 
+    title="Quick Start"
+    icon="open-book"
+    href="getting_started/quickstart" 
+    description='Step-by-step guide to get OpenRAG up and running quickly.'
+  />
+  <LinkCard
+    title="Other features" 
+    icon="information"
+    href="documentation/features_in_details"
+    description="More information you want to share."
+  />
+</CardGrid>

@@ -149,3 +149,91 @@ jobs:
                 console.log(`Could not delete tag ${release.tag_name}: ${error.message}`);
               }
             }
+
+  build-and-push-dev-image-ray:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate development version
+        id: dev_version
+        run: |
+          DATE=$(date +%Y%m%d)
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            VERSION="nightly-${DATE}-${SHORT_SHA}"
+          else
+            VERSION="dev-${DATE}-${SHORT_SHA}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ray
+          tags: |
+            type=raw,value=${{ steps.dev_version.outputs.version }}
+            type=raw,value=dev-latest
+            type=raw,value=nightly,enable=${{ github.event_name == 'schedule' }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.ray
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create development release (nightly only)
+        if: github.event_name == 'schedule'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.dev_version.outputs.version }}
+          name: "🌙 Nightly Release ${{ steps.dev_version.outputs.version }}"
+          body: |
+            ## 🌙 Nightly Development Release
+
+            This is an automated nightly release built from the latest `dev` branch.
+
+            **⚠️ This is a development build - not recommended for production use**
+
+            ### Docker Image
+            ```bash
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ray:${{ steps.dev_version.outputs.version }}
+            # or
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ray:nightly
+            ```
+
+            ### Build Information
+            - **Branch**: `dev`
+            - **Commit**: `${{ github.sha }}`
+            - **Build Date**: `$(date -u)`
+            - **Triggered by**: Nightly schedule
+
+            Full changelog: https://github.com/${{ github.repository }}/compare/main...dev
+          generateReleaseNotes: false
+          draft: false
+          prerelease: true
+          makeLatest: false

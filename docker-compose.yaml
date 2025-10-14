@@ -32,7 +32,7 @@ x-vllm: &vllm_template
     default:
       aliases:
         - vllm
-  restart: always
+  restart: on-failure
   environment:
     - HUGGING_FACE_HUB_TOKEN
   ipc: "host"
@@ -43,9 +43,16 @@ x-vllm: &vllm_template
     --trust-remote-code
     --task embed
     --gpu_memory_utilization 0.3
-    --max-num-seqs 1
+  # --max-num-seqs 1
   # --max-model-len ${MOX_MODEL_LEN:-2048}
   # gpu_memory_utilization, max-num-seqs et max-model-len can be tuned depending on your GPU memory
+
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    interval: 15s
+    timeout: 5s
+    retries: 3
+    start_period: 60s
   # ports:
   #   - ${VLLM_PORT:-8000}:8000
 services:
@@ -62,8 +69,12 @@ services:
     profiles:
       - ''
     depends_on:
-    - milvus
-    - vllm-gpu
+      rdb:
+        condition: service_started
+      milvus:
+        condition: service_healthy
+      vllm-gpu:
+        condition: service_healthy
 
   # No GPU
   openrag-cpu:
@@ -72,8 +83,12 @@ services:
     profiles:
       - 'cpu'
     depends_on:
-    - milvus
-    - vllm-cpu
+      rdb:
+        condition: service_started
+      milvus:
+        condition: service_healthy
+      vllm-cpu:
+        condition: service_healthy
 
   rdb:
     image: postgres:15

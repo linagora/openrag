@@ -1,4 +1,8 @@
-# 🪵 GlusterFS Setup for Shared Storage (Ray Cluster)
+---
+title: GlusterFS
+---
+
+## 🪵 GlusterFS Setup for Shared Storage (Ray Cluster)
 
 In a Ray distributed setup, **all worker nodes need access to certain shared resources** used by the application.  
 This includes:
@@ -13,7 +17,7 @@ This includes:
 ## 1️⃣ Setup VPN (if required)
 
 If your Ray nodes are **not on the same local network**, set up a VPN between them first.  
-➡ Refer to the dedicated [VPN setup guide](../docs/setup_vpn.md).  
+➡ Refer to the dedicated [VPN setup guide](/documentation/setup_vpn/).  
 You can skip this step if your nodes are already on the same LAN.
 
 ---
@@ -28,11 +32,11 @@ This guide assumes:
 
 ---
 
-### 🔧 Install GlusterFS
+### 🔧 Install GlusterFS and start the GlusterFS
 
 Run this on **all 4 machines**:
 
-```bash
+```bash title="installing and starting glusterfs..."
 sudo apt update
 sudo apt install -y glusterfs-server
 sudo systemctl enable --now glusterd
@@ -44,7 +48,7 @@ sudo systemctl enable --now glusterd
 
 From one node (e.g. the Ray head), run:
 
-```bash
+```bash title:"connecting nodes..."
 gluster peer probe <IP_OF_NODE_2>
 gluster peer probe <IP_OF_NODE_3>
 gluster peer probe <IP_OF_NODE_4>
@@ -52,7 +56,7 @@ gluster peer probe <IP_OF_NODE_4>
 
 Confirm with:
 
-```bash
+```bash title="shows the status of nodes"
 gluster peer status
 ```
 
@@ -62,7 +66,7 @@ gluster peer status
 
 On **each node**, run:
 
-```bash
+```bash title="create brick directories on each node"
 sudo mkdir -p /gluster/bricks/ray_mount
 ```
 

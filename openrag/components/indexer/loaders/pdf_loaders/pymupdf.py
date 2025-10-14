@@ -1,8 +1,8 @@
-import asyncio
 from pathlib import Path
+
+import pymupdf4llm
 from langchain_community.document_loaders import PyMuPDFLoader as pymupdf_loader
 from langchain_core.documents.base import Document
-import pymupdf4llm
 
 from ..base import BaseLoader
 
@@ -21,7 +21,7 @@ class PyMuPDFLoader(BaseLoader):
 
         s = ""
         for page_num, segment in enumerate(pages, start=1):
-            s = segment.page_content.strip() + f"\n[PAGE_{page_num}]\n"
+            s += segment.page_content.strip() + f"\n[PAGE_{page_num}]\n"
 
         doc = Document(page_content=s, metadata=metadata)
         if save_markdown:
@@ -36,16 +36,11 @@ class PyMuPDF4LLMLoader(BaseLoader):
     async def aload_document(
         self, file_path, metadata: dict = None, save_markdown=False
     ):
-        pages = await asyncio.to_thread(
-            pymupdf4llm.to_markdown,
-            file_path,
-            write_images=False,
-            page_chunks=True,
-        )
+        pages = pymupdf4llm.to_markdown(file_path, write_images=False, page_chunks=True)
 
         s = ""
         for page_num, segment in enumerate(pages, start=1):
-            s = segment.page_content.strip() + f"\n[PAGE_{page_num}]\n"
+            s += segment.get("text").strip() + f"\n[PAGE_{page_num}]\n"
 
         doc = Document(page_content=s, metadata=metadata)
         if save_markdown:

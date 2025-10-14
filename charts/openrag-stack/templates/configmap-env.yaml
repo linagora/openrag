@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-env
+data:
+{{- range $key, $value := .Values.env.config }}
+  {{ $key }}: "{{ tpl (printf "%v" $value) $ }}"
+{{- end }}

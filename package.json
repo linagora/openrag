@@ -1,0 +1,21 @@
+{
+  "name": "openrag",
+  "type": "module",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.35.2",
+    "@astrojs/starlight-tailwind": "^4.0.1",
+    "@fontsource-variable/space-grotesk": "^5.2.10",
+    "@tailwindcss/vite": "^4.1.13",
+    "astro": "^5.6.1",
+    "sharp": "^0.34.2",
+    "tailwindcss": "^4.1.13"
+  }
+}

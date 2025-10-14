@@ -1,7 +1,6 @@
 
 # How to backup OpenRag partition ?
 
-
 ```
 docker compose \
     run \
@@ -25,6 +24,15 @@ docker compose \
     openrag-cpu
 ```
 
+## Backup all partitions
+
+```bash
+docker compose run --build --rm \
+  -v ~/backup:/backup:rw \
+  --entrypoint "uv run /app/openrag/scripts/backup.py -o /backup/test.openrag" \
+  openrag
+# Use --include-only to specify the partitions to back up.
+```
 
 # How to restore OpenRag partition ?
 
@@ -49,6 +57,16 @@ docker compose \
     -v /my-backup-dir/:/backup:ro \
     --entrypoint "bash /app/openrag/scripts/entrypoint-restore.sh backup-file-without-path parition-name" \
     openrag-cpu
+```
+
+## Restore all partitions
+
+```bash
+docker compose run --build --rm \
+  -v ~/backup:/backup:rw \
+  --entrypoint "uv run /app/openrag/scripts/restore.py -i /backup/test.openrag" \
+  openrag
+# Use --include-only to specify the partitions to restore.
 ```
 
 # Backup dump format

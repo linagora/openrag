@@ -1,5 +1,6 @@
 # Ignore environment files
 .env
+node_modules
 
 # generate files and folders
 .files/
@@ -64,6 +65,13 @@ services/
 services/*
 !services/.gitkeep # Keep the placeholder
 
-*.json
 *.csv
 *.pkl
+
+#helm
+charts/openrag-stack/charts/*.tgz
+
+# Astro / Starlight
+.astro/
+dist/
+node_modules/

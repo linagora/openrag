@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 import chainlit as cl
 import httpx
 from chainlit.context import get_context
+from consts import PARTITION_PREFIX
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from utils.logger import get_logger
@@ -20,6 +21,14 @@ AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
 CHAINLIT_AUTH_SECRET = os.environ.get("CHAINLIT_AUTH_SECRET")
 CHAINLIT_USERNAME = os.environ.get("CHAINLIT_USERNAME", "OpenRAG")
 CHAINLIT_PASSWORD = os.environ.get("CHAINLIT_PASSWORD", "OpenRAG2025")
+
+commands = [
+    {
+        "id": "DeepSearch",
+        "icon": "brain-cog",
+        "description": "This uses a custom DeepSearch RAG mechanism (Map & Reduce) to handle complex queries.\nSlower but gives accurate answers.\nUse in an empty context as it consumes more tokens.",
+    },
+]
 
 headers = {
     "accept": "application/json",
@@ -74,7 +83,7 @@ async def chat_profile():
         models = output.data
         chat_profiles = []
         for i, m in enumerate(models, start=1):
-            partition = m.id.split("openrag-")[1]
+            partition = m.id.split(PARTITION_PREFIX)[1]
             description_template = "You are interacting with the **{name}** LLM.\n" + (
                 "The LLM's answers will be grounded on **all** partitions."
                 if "all" in m.id
@@ -106,6 +115,7 @@ async def on_chat_start():
                 url=f"{INTERNAL_BASE_URL}/health_check", headers=headers
             )
             print(response.text)
+        await cl.context.emitter.set_commands(commands)
     except Exception as e:
         logger.exception("An error occured while checking the API health", error=str(e))
         await cl.Message(
@@ -190,6 +200,9 @@ async def on_message(message: cl.Message):
         "temperature": 0.2,
         "stream": True,
         "frequency_penalty": 0.4,
+        "metadata": {
+            "use_map_reduce": message.command == "DeepSearch",
+        },
     }
 
     async with cl.Step(name="Searching for relevant documents..."):

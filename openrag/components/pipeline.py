@@ -1,5 +1,4 @@
 import copy
-import os
 from enum import Enum
 from pathlib import Path
 
@@ -7,7 +6,6 @@ from langchain_core.documents.base import Document
 from openai import AsyncOpenAI
 from utils.logger import get_logger
 
-from .grader import Grader
 from .llm import LLM
 from .map_reduce import RAGMapReduce
 from .reranker import Reranker
@@ -20,9 +18,6 @@ logger = get_logger()
 class RAGMODE(Enum):
     SIMPLERAG = "SimpleRag"
     CHATBOTRAG = "ChatBotRag"
-
-
-RAG_MAP_REDUCE = os.environ.get("RAG_MAP_REDUCE", "false").lower() == "true"
 
 
 class RetrieverPipeline:
@@ -38,37 +33,32 @@ class RetrieverPipeline:
         # reranker
         self.reranker = None
         self.reranker_enabled = config.reranker["enable"]
+        self.logger.debug("Reranker", enabled=self.reranker_enabled)
         self.reranker_top_k = int(config.reranker["top_k"])
 
+        # map reduce
+        self.map_reduce_n_docs = self.config.map_reduce["map_reduce_n_docs"]
+
         if self.reranker_enabled:
-            self.logger.debug("Reranker enabled", reranker=self.reranker_enabled)
             self.reranker = Reranker(self.logger, config)
 
-        # grader
-        self.grader: Grader = None
-        self.grader_enabled = config.grader["enable"]
-        if self.grader_enabled:
-            self.grader = Grader(config, logger=self.logger)
-
-    async def retrieve_docs(self, partition: list[str], query: str) -> list[Document]:
+    async def retrieve_docs(
+        self, partition: list[str], query: str, use_map_reduce: bool = False
+    ) -> list[Document]:
         docs = await self.retriever.retrieve(partition=partition, query=query)
+        top_k = (
+            max(self.map_reduce_n_docs, self.reranker_top_k)
+            if use_map_reduce
+            else self.reranker_top_k
+        )
         logger.debug("Documents retreived", document_count=len(docs))
         if docs:
-            # grade and filter out irrelevant docs
-            if self.grader_enabled:
-                docs = await self.grader.grade_docs(user_input=query, docs=docs)
-
             # rerank documents
             if self.reranker_enabled:
-                docs = await self.reranker.rerank(
-                    query, documents=docs, top_k=self.reranker_top_k
-                )
-
+                docs = await self.reranker.rerank(query, documents=docs, top_k=top_k)
+                logger.debug("Documents after reranking", document_count=len(docs))
             else:
-                docs = docs[: self.reranker_top_k]
-
-        logger.debug("Documents after reranking", document_count=len(docs))
-
+                docs = docs[:top_k]
         return docs
 
 
@@ -101,6 +91,7 @@ class RagPipeline:
         )
         self.max_contextualized_query_len = config.rag["max_contextualized_query_len"]
 
+        # map reduce
         self.map_reduce: RAGMapReduce = RAGMapReduce(config=config)
 
     async def generate_query(self, messages: list[dict]) -> str:
@@ -145,26 +136,29 @@ class RagPipeline:
         query = await self.generate_query(messages)
         logger.debug("Prepared query for chat completion", query=query)
 
+        metadata = payload.get("metadata", {})
+        use_map_reduce = metadata.get("use_map_reduce", False)
+        logger.info("Metadata parameters", use_map_reduce=use_map_reduce)
+
         # 2. get docs
         docs = await self.retriever_pipeline.retrieve_docs(
-            partition=partition, query=query
+            partition=partition, query=query, use_map_reduce=use_map_reduce
         )
 
-        # if RAG_MAP_REDUCE:
-        #     context = "Extracted documents:\n"
-        #     relevant_docs = []
-        #     res = await self.map_reduce.map(query=query, chunks=docs)
-        #     for synthesis, doc in res:
-        #         context += synthesis + "\n"
-        #         context += "-" * 40 + "\n"
-        #         relevant_docs.append(doc)
+        if use_map_reduce and docs:
+            context = "Extracted documents:\n"
+            summarized_docs = []
+            res = await self.map_reduce.map(query=query, chunks=docs)
 
-        #     logger.debug(context)
-        #     docs = relevant_docs
+            for i, (synthesis, doc) in enumerate(res):
+                context += f"* {i}: {synthesis}"
+                context += "\n" + "-" * 10 + "\n"
+                summarized_docs.append(
+                    Document(page_content=synthesis, metadata=doc.metadata)
+                )
 
-        # else:
-        #     # 3. Format the retrieved docs
-        #     context = format_context(docs)
+            # logger.debug("Context after map-reduce", context=context)
+            docs = summarized_docs
 
         # 3. Format the retrieved docs
         context = format_context(docs)
@@ -180,8 +174,6 @@ class RagPipeline:
                 "content": self.rag_sys_prompt.format(context=context),
             },
         )
-        # messages.append({"role": "tool", "name": "retriever", "content": f"Here are the retrieved documents: {context}"})
-
         payload["messages"] = messages
         return payload, docs
 

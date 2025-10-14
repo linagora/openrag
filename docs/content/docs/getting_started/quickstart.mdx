@@ -1,0 +1,68 @@
+---
+title: Quick Start
+---
+
+import { Tabs, TabItem, Code } from '@astrojs/starlight/components';
+import compose_ollama_cpu from '../../../assets/compose_ollama_cpu.yaml?raw';
+import env_ollama_cpu from '../../../assets/env_ollama_cpu.env?raw';
+import compose_linux_gpu from '../../../assets/compose_linux_gpu.yaml?raw';
+import env_linux_gpu from '../../../assets/env_linux_gpu.env?raw';
+
+OpenRAG is an open source Retrieval Augmented Generation (RAG) solution. This guide is a step-by-step walkthrough to help you get started with OpenRAG.
+
+- Before proceeding, ensure your hardware meets the [recommended specifications](/minimum-specifications).
+- Install [Docker](https://www.docker.com/get-started).
+
+## Docker
+
+Use the following `docker-compose.yml` file to set up a simple OpenRAG environment:
+
+<Tabs>
+    <TabItem label="Linux">
+        <Tabs>
+            <TabItem label="Nvidia GPU">
+                <details>
+                    <summary>Click to expand the docker-compose.yml content</summary>
+                    <Code code={compose_linux_gpu} lang="yaml" />
+                </details>
+                You will also need to provide some environment variables. Create a `.env` file in the same directory as your `docker-compose.yml` file with the following content:
+                <details>
+                    <summary>Click to expand the .env content</summary>
+                    <Code code={env_linux_gpu} lang="bash" />
+                </details>
+
+            </TabItem>
+            <TabItem label="CPU">
+                ```yaml
+                Nothing here
+                ```
+            </TabItem>
+        </Tabs>
+    </TabItem>
+    <TabItem label="MacOS">
+        The simplest way to run OpenRAG on MacOS is to use the ollama model inference server. For more in-depth deployment options, refer to the [Docker installation guide](/installation/docker).
+        <details>
+        <summary>Click to expand the docker-compose.yml content</summary>
+        <Code code={compose_ollama_cpu} lang="yaml" />
+        </details>
+
+        You will also need to provide some environment variables. Create a `.env` file in the same directory as your `docker-compose.yml` file with the following content:
+        <details>
+        <summary>Click to expand the .env content</summary>
+        <Code code={env_ollama_cpu} lang="bash" />   
+        </details>
+    </TabItem>
+</Tabs>
+
+## Ansible
+
+Clone the OpenRAG repository:
+```bash
+git clone https://github.com/linagora/openrag.git
+cd openrag
+```
+
+Run the provided deployment script and follow the instructions:
+```bash
+./ansible/deploy.sh
+```
