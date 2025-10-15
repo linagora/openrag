@@ -76,7 +76,7 @@ docker compose \
 ```bash
 docker compose run --build --rm \
   -v ~/backup:/backup:rw \
-  --entrypoint "uv run /app/openrag/scripts/restore.py -i /backup/test.openrag" \
+  --entrypoint "uv run /app/openrag/scripts/restore.py /backup/test.openrag"\
   openrag
 
 # Use --include-only to specify the partitions to restore.
