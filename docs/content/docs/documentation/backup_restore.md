@@ -1,7 +1,15 @@
+---
+title: How to backup or restore OpenRag partition/data ?
+---
 
-# How to backup OpenRag partition ?
+# How to backup partitions?
+## Backup one partition
 
-```
+:::caution
+It's better to stop `openrag-cpu` (or `openrag`) service before starting backup.
+:::
+
+```bash
 docker compose \
     run \
     --build \
@@ -9,12 +17,12 @@ docker compose \
     -v /my-backup-dir/:/backup:rw \
     --entrypoint "bash /app/openrag/scripts/entrypoint-backup.sh ${PARTITION_NAME}" \
     openrag-cpu
-```
-It's better to stop `openrag-cpu` (or `openrag`) service before starting backup.
 
+```
+
+:::info
 By default backup script creates plan text uncomressed file. To make things faster you can use multithread compressor the following way:
-
-```
+```bash
 docker compose \
     run \
     --build \
@@ -23,6 +31,8 @@ docker compose \
     --entrypoint "bash /app/openrag/scripts/entrypoint-backup-mt.sh ${PARTITION_NAME}" \
     openrag-cpu
 ```
+:::
+
 
 ## Backup all partitions
 
@@ -31,14 +41,16 @@ docker compose run --build --rm \
   -v ~/backup:/backup:rw \
   --entrypoint "uv run /app/openrag/scripts/backup.py -o /backup/test.openrag" \
   openrag
+
 # Use --include-only to specify the partitions to back up.
 ```
 
-# How to restore OpenRag partition ?
+# How to backup partitions?
+## How to restore OpenRag partition ?
 
 Start with dry run to ensure the backup file is correct:
 
-```
+```bash
 docker compose \
     run \
     --build \
@@ -49,7 +61,7 @@ docker compose \
 ```
 Backup files are expected to be in `/my-backup-dir/`. If the dry run is successful, run the following script to insert the data :
 
-```
+```bash
 docker compose \
     run \
     --build \
@@ -66,6 +78,7 @@ docker compose run --build --rm \
   -v ~/backup:/backup:rw \
   --entrypoint "uv run /app/openrag/scripts/restore.py -i /backup/test.openrag" \
   openrag
+
 # Use --include-only to specify the partitions to restore.
 ```
 
@@ -83,7 +96,8 @@ There are two types of sections:
 All `rdb` sections must appear before the `vdb` section.
 
 Example:
-```
+
+```txt
 rdb
 {"created": "2025-07-28T16:20:43.144796", "name": "frwiki-nocontext"}
 {"created_at": "2025-07-28T16:20:39.612784", "file_id": "10", "file_size": "13.57 KB", "filename": "Algorithmique.txt", "revid": "2962", "source": "/app/data/Algorithmique.txt", "title": "Algorithmique", "url": "https://fr.wikipedia.org/wiki?curid=10"}
@@ -101,4 +115,3 @@ vdb
 {"created_at": "2025-07-28T16:20:39.680783", "file_id": "7", "file_size": "11.01 KB", "filename": "Algèbre linéaire.txt", "page": 1, "partition": "frwiki-nocontext", "revid": "2523928", "source": "/app/data/Algèbre linéaire.txt", "text": "Ce n'est qu'au XIXsiècle que ...", "title": "Algèbre linéaire", "url": "https://fr.wikipedia.org/wiki?curid=7", "vector": [-0.0206298828125, -0.09765625, ...]}
 ...
 ```
-
