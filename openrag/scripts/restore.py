@@ -11,16 +11,6 @@ from components.indexer.vectordb.utils import PartitionFileManager
 from pymilvus import MilvusClient
 from utils.logger import get_logger
 
-# It will create a the Milvus collection if it doesn't exist
-vdb = MilvusDB.options(
-    name="Vectordb", namespace="openrag", lifetime="detached"
-).remote()
-
-ray.get(
-    vdb.__ray_ready__.remote()
-)  # ensure the actor is fully initialized and ready: collection and all created if nont existing
-print("VectorDB (Milvus) actor fully initialized")
-
 
 def read_rdb_section(
     fh: IO[str],
@@ -276,6 +266,22 @@ def main():
     args = parser.parse_args()
 
     logger = get_logger()
+
+
+    try:
+        # It will create a the Milvus collection if it doesn't exist
+        vdb_tmp = MilvusDB.options(
+            name="Vectordb", namespace="openrag", lifetime="detached"
+        ).remote()
+
+        ray.get(
+            vdb_tmp.__ray_ready__.remote()
+        )  # ensure the actor is fully initialized and ready: collection and all created if nont existing
+        print("VectorDB (Milvus) actor fully initialized")
+    except Exception as e:
+        logger.exception(f'Failed while trying to create Milvus collection: {e}')
+        # TODO: stop execution here
+
 
     rdb, vdb = load_openrag_config(logger)
 
