@@ -19,6 +19,7 @@ def read_rdb_section(
     added_documents: Dict[str, Set[str]],
     existing_partitions: Dict[str, Any],
     logger: Any,
+    user_id: int,
     verbose: bool = False,
     dry_run: bool = False,
 ) -> None:
@@ -32,6 +33,7 @@ def read_rdb_section(
         added_documents:      Dict mapping added partitions to sets of added file IDs.
         existing_partitions:  Dict of already existing partitions to avoid duplicates.
         logger:               Logger for status and error reporting.
+        user_id:              User id to pass to PartitionFileManager
         verbose:              If True, logs additional info.
         dry_run:              If True, no changes are made to the database.
     """
@@ -71,7 +73,7 @@ def read_rdb_section(
 
         if not dry_run:
             try:
-                res = pfm.add_file_to_partition(doc["file_id"], part["name"], doc)
+                res = pfm.add_file_to_partition(doc["file_id"], part["name"], doc, user_id)
             except Exception as e:
                 logger.exception(
                     f"{type(e)} in add_file_to_partition({doc['file_id']}, {part['name']}, ...)\n"
@@ -261,6 +263,12 @@ def main():
         action="store_true",
         help="Don't change the target database",
     )
+    parser.add_argument(
+        "-u",
+        "--user-id",
+        default=1,
+        help="Create partitions with this user-id"
+    )
     parser.add_argument("input", help="input file name")
 
     args = parser.parse_args()
@@ -329,6 +337,7 @@ def main():
                         added_documents,
                         existing_partitions,
                         logger,
+                        args.user_id,
                         args.verbose,
                         args.dry_run,
                     )
