@@ -5,13 +5,13 @@ from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse
 from utils.dependencies import get_task_state_manager
 
-from .utils import current_user, require_admin
+from .utils import require_admin
 
 # load config
 config = load_config()
 
 # Create an APIRouter instance
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 def _format_pool_info(worker_info: dict[str, int]) -> dict[str, int]:
@@ -26,9 +26,7 @@ def _format_pool_info(worker_info: dict[str, int]) -> dict[str, int]:
 
 
 @router.get("/info")
-async def get_queue_info(
-    admin=Depends(require_admin), task_state_manager=Depends(get_task_state_manager)
-):
+async def get_queue_info(task_state_manager=Depends(get_task_state_manager)):
     all_states: dict = await task_state_manager.get_all_states.remote()
     status_counts = Counter(all_states.values())
 
@@ -53,20 +51,14 @@ async def list_tasks(
     request: Request,
     task_status: str | None = None,
     task_state_manager=Depends(get_task_state_manager),
-    user=Depends(current_user),
 ):
     """
     - ?task_status=active  → QUEUED | SERIALIZING | CHUNKING | INSERTING
     - ?task_status=<exact> → exact match (case-insensitive)
     - (none)               → all tasks
     """
-    # fetch task info
-    if user.get("is_admin"):
-        all_info: dict[str, dict] = await task_state_manager.get_all_info.remote()
-    else:
-        all_info: dict[str, dict] = await task_state_manager.get_all_user_info.remote(
-            user.get("id")
-        )
+    # fetck task info
+    all_info: dict[str, dict] = await task_state_manager.get_all_info.remote()
 
     if task_status is None:
         filtered = all_info.items()

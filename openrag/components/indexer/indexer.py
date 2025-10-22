@@ -308,7 +308,6 @@ class TaskInfo:
 class TaskStateManager:
     def __init__(self):
         self.tasks: Dict[str, TaskInfo] = {}
-        self.user_index: Dict[int, set[str]] = {}
         self.lock = asyncio.Lock()
 
     async def _ensure_task(self, task_id: str) -> TaskInfo:
@@ -347,7 +346,6 @@ class TaskStateManager:
                 "metadata": metadata,
                 "user_id": user_id,
             }
-            self.user_index.setdefault(user_id, set()).add(task_id)
 
     @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: dict):
@@ -394,20 +392,6 @@ class TaskStateManager:
                     "details": info.details,
                 }
                 for task_id, info in self.tasks.items()
-            }
-
-    @ray.method(concurrency_group="queue_info")
-    async def get_all_user_info(self, user_id: int) -> Dict[str, dict]:
-        async with self.lock:
-            task_ids = self.user_index.get(user_id, set())
-            return {
-                tid: {
-                    "state": self.tasks[tid].state,
-                    "error": self.tasks[tid].error,
-                    "details": self.tasks[tid].details,
-                }
-                for tid in task_ids
-                if tid in self.tasks
             }
 
     @ray.method(concurrency_group="queue_info")
