@@ -90,6 +90,11 @@ async def get_file(
     vectordb=Depends(get_vectordb),
     partition_viewer=Depends(require_partition_viewer),
 ):
+    if not await vectordb.file_exists.remote(file_id, partition):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"'{file_id}' not found in partition '{partition}'",
+        )
     results = await vectordb.get_file_chunks.remote(
         partition=partition, file_id=file_id, include_id=True
     )
