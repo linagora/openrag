@@ -5,7 +5,6 @@ from datetime import datetime
 from typing import Dict, Optional
 
 from sqlalchemy import (
-    JSON,
     Boolean,
     CheckConstraint,
     Column,
@@ -16,6 +15,9 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     create_engine,
+)
+from sqlalchemy.dialects.postgresql import (
+    JSONB
 )
 from sqlalchemy.orm import (
     declarative_base,
@@ -45,7 +47,7 @@ class File(Base):
     partition_name = Column(
         String, ForeignKey("partitions.partition"), nullable=False, index=True
     )  # Added index
-    file_metadata = Column(JSON, nullable=True, default={})
+    file_metadata = Column(JSONB, nullable=True, default={})
 
     # relationship to the Partition object
     partition = relationship("Partition", back_populates="files")
@@ -55,6 +57,8 @@ class File(Base):
         UniqueConstraint("file_id", "partition_name", name="uix_file_id_partition"),
         # Additional composite index for common query patterns (partition first for better selectivity)
         Index("ix_partition_file", "partition_name", "file_id"),
+        # Metadata GIN index
+        Index("ix_files_metadata_gin", "file_metadata", postgresql_using="gin")
     )
 
     def to_dict(self):
