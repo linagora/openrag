@@ -18,12 +18,10 @@ if torch.cuda.is_available():
 else:  # On CPU
     NUM_GPUS = 0
 
-POOL_SIZE = config.ray.get("pool_size")
-MAX_TASKS_PER_WORKER = config.ray.get("max_tasks_per_worker")
 DICT_MIMETYPES = dict(config.loader["mimetypes"])
 
 
-@ray.remote(num_gpus=NUM_GPUS)
+@ray.remote
 class DocSerializer:
     def __init__(self, data_dir=None, **kwargs) -> None:
         from config import load_config
@@ -90,50 +88,3 @@ class DocSerializer:
         except Exception:
             log.exception("Failed to serialize document")
             raise
-
-
-@ray.remote
-class SerializerQueue:
-    def __init__(self):
-        from utils.logger import get_logger
-
-        self.logger = get_logger()
-        # Spawn pool of serializer workers
-        self.actors = [DocSerializer.remote() for _ in range(POOL_SIZE)]
-        # Build a slot-queue: each actor appears MAX_TASKS_PER_WORKER times
-        self._queue: asyncio.Queue[ray.actor.ActorHandle] = asyncio.Queue()
-
-        for _ in range(MAX_TASKS_PER_WORKER):
-            for actor in self.actors:
-                self._queue.put_nowait(actor)
-
-        self.total_slots = POOL_SIZE * MAX_TASKS_PER_WORKER
-        self.logger.info(
-            f"SerializerQueue: {POOL_SIZE} actors × {MAX_TASKS_PER_WORKER} slots = "
-            f"{POOL_SIZE * MAX_TASKS_PER_WORKER} all file concurrency"
-        )
-
-    async def submit_document(
-        self,
-        task_id: str,
-        path: Union[str, Path],
-        metadata: Optional[Dict] = {},
-    ) -> Document:
-        # wait until *any* slot is free
-        log = self.logger.bind(
-            file_id=metadata.get("file_id"),
-            partition=metadata.get("partition"),
-            task_id=task_id,
-        )
-        actor = await self._queue.get()
-        if actor:
-            log.info("Serializer worker allocated")
-        try:
-            # 2) hand off to that actor
-            doc: Document = await actor.serialize_document.remote(
-                task_id, path, metadata
-            )
-            return doc
-        finally:
-            # 3) always return the slot, even on error
-            await self._queue.put(actor)

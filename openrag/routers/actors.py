@@ -6,7 +6,7 @@ from ray.util.state import list_actors
 from utils.dependencies import (
     get_indexer,
     get_marker_pool,
-    get_serializer_queue,
+    get_serializer,
     get_task_state_manager,
     get_vectordb,
 )
@@ -22,7 +22,7 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 actor_creation_map = {
     "TaskStateManager": get_task_state_manager,
     "MarkerPool": get_marker_pool,
-    "SerializerQueue": get_serializer_queue,
+    "DocSerializer": get_serializer,
     "Indexer": get_indexer,
     "Vectordb": get_vectordb,
     "llmSemaphore": get_llm_semaphore,

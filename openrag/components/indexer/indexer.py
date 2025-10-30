@@ -58,9 +58,9 @@ class Indexer:
         import ray
         from ray.exceptions import TaskCancelledError
 
-        serializer_queue = ray.get_actor("SerializerQueue", namespace="openrag")
+        serializer = ray.get_actor("DocSerializer", namespace="openrag")
         # Kick off the remote task
-        future = serializer_queue.submit_document.remote(
+        future = serializer.serialize_document.remote(
             task_id, path, metadata=metadata
         )
 
@@ -77,7 +77,7 @@ class Indexer:
                 self.logger.warning(f"Task {task_id} was cancelled")
                 raise
             except Exception:
-                self.logger.exception("Task {task_id} failed with error")
+                self.logger.exception(f"Task {task_id} failed with error")
                 raise
         else:
             self.logger.warning(
@@ -150,7 +150,7 @@ class Indexer:
             await task_state_manager.set_state.remote(task_id, "COMPLETED")
 
         except Exception as e:
-            log.exception("Task {task_id} failed in add_file")
+            log.exception(f"Task {task_id} failed in add_file")
             tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
             await task_state_manager.set_state.remote(task_id, "FAILED")
             await task_state_manager.set_error.remote(task_id, tb)

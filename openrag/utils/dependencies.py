@@ -3,7 +3,7 @@ import ray.actor
 from components.indexer.indexer import Indexer, TaskStateManager
 from components.indexer.loaders.pdf_loaders.docling2 import DoclingPool
 from components.indexer.loaders.pdf_loaders.marker import MarkerPool
-from components.indexer.loaders.serializer import SerializerQueue
+from components.indexer.loaders.serializer import DocSerializer
 from components.indexer.vectordb.vectordb import ConnectorFactory
 from config import load_config
 
@@ -27,8 +27,8 @@ def get_task_state_manager():
     )
 
 
-def get_serializer_queue():
-    return get_or_create_actor("SerializerQueue", SerializerQueue, lifetime="detached")
+def get_serializer():
+    return get_or_create_actor("DocSerializer", DocSerializer, lifetime="detached")
 
 
 def get_marker_pool():
@@ -49,7 +49,7 @@ def get_vectordb():
 
 
 task_state_manager = get_task_state_manager()
-serializer_queue = get_serializer_queue()
+serializer = get_serializer()
 vectordb = get_vectordb()
 indexer = get_indexer()
 marker_pool = get_marker_pool()
