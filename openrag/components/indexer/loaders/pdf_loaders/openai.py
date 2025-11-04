@@ -6,6 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, List, Optional, Union
+import ray
 
 import pypdfium2 as pdfium
 from langchain.schema import Document
@@ -16,6 +17,16 @@ from utils.logger import logger
 from ..base import BaseLoader
 
 
+@ray.remote(max_concurrency=10)
+class PDFToImagesWorker:
+    def __init__(self):
+        pass
+
+    async def pdf_to_images(self, pdf_path: str, scale: float = 1.0) -> List[Image.Image]:
+        pdf = pdfium.PdfDocument(pdf_path)
+        return [p.render(scale=scale).to_pil() for p in pdf]
+
+pdf_worker = PDFToImagesWorker.remote()
 class OpenAILoader(BaseLoader, ABC):
     """Generic OpenAI-compatible loader for multimodal OCR-style models."""
 
@@ -36,7 +47,6 @@ class OpenAILoader(BaseLoader, ABC):
         self.llm_semaphore = asyncio.Semaphore(
             self.config.loader["openai"].get("concurrency_limit", 20)
         )
-
     async def aload_document(
         self,
         file_path: Union[str, Path],
@@ -51,7 +61,7 @@ class OpenAILoader(BaseLoader, ABC):
         file_path = str(file_path)
 
         try:
-            pages = self._pdf_to_images(file_path)
+            pages = await pdf_worker.pdf_to_images.remote(file_path)
             ocr_results = await self._run_ocr_on_pages(pages)
             markdown = await self._assemble_markdown(pages, ocr_results)
 
@@ -65,10 +75,6 @@ class OpenAILoader(BaseLoader, ABC):
         except Exception:
             logger.exception("Error in OpenAILoader.aload_document", path=file_path)
             raise
-
-    def _pdf_to_images(self, pdf_path: str, scale: float = 1.0) -> List[Image.Image]:
-        pdf = pdfium.PdfDocument(pdf_path)
-        return [p.render(scale=scale).to_pil() for p in pdf]
 
     async def _run_ocr_on_pages(self, pages: List[Image.Image]) -> List[dict]:
         tasks = [self._img2result(img) for img in pages]
