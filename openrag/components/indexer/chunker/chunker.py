@@ -2,6 +2,7 @@ import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timezone
 
 from components.prompts import CHUNK_CONTEXTUALIZER
 from components.utils import get_llm_semaphore, load_config
@@ -235,12 +236,14 @@ class RecursiveSplitter(BaseChunker):
             start_page = page_info["start_page"]
             end_page = page_info["end_page"]
             prev_page_num = end_page
-            filtered_chunks.append(
-                Document(
-                    page_content=chunk_w_context,
-                    metadata={**metadata, "page": start_page},
-                )
-            )
+            # Add temporal metadata: propagate file creation date if present, and add indexed timestamp
+            chunk_meta = {
+                **metadata,
+                "page": start_page,
+                "created_at": metadata.get("created_at"),
+                "indexed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            filtered_chunks.append(Document(page_content=chunk_w_context, metadata=chunk_meta))
         log.info("Document chunking completed")
         return filtered_chunks
 
@@ -352,12 +355,14 @@ class SemanticSplitter(BaseChunker):
             start_page = page_info["start_page"]
             end_page = page_info["end_page"]
             prev_page_num = end_page
-            filtered_chunks.append(
-                Document(
-                    page_content=chunk_w_context,
-                    metadata={**metadata, "page": start_page},
-                )
-            )
+            # Add temporal metadata: propagate file creation date if present, and add indexed timestamp
+            chunk_meta = {
+                **metadata,
+                "page": start_page,
+                "created_at": metadata.get("created_at"),
+                "indexed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            filtered_chunks.append(Document(page_content=chunk_w_context, metadata=chunk_meta))
         log.info("Document chunking completed")
         return filtered_chunks
 
@@ -457,12 +462,14 @@ class MarkDownSplitter(BaseChunker):
             start_page = page_info["start_page"]
             end_page = page_info["end_page"]
             prev_page_num = end_page
-            filtered_chunks.append(
-                Document(
-                    page_content=chunk_w_context,
-                    metadata={**metadata, "page": start_page},
-                )
-            )
+            # Add temporal metadata: propagate file creation date if present, and add indexed timestamp
+            chunk_meta = {
+                **metadata,
+                "page": start_page,
+                "created_at": metadata.get("created_at"),
+                "indexed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            filtered_chunks.append(Document(page_content=chunk_w_context, metadata=chunk_meta))
         log.info("Document chunking completed")
         return filtered_chunks
 

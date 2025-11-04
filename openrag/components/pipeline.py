@@ -1,10 +1,12 @@
 import copy
+from datetime import datetime, timezone
 from enum import Enum
 
 from components.prompts import QUERY_CONTEXTUALIZER_PROMPT, SYS_PROMPT_TMPLT
 from langchain_core.documents.base import Document
 from openai import AsyncOpenAI
 from utils.logger import get_logger
+from utils.temporal import TemporalQueryNormalizer
 
 from .llm import LLM
 from .map_reduce import RAGMapReduce
@@ -41,9 +43,11 @@ class RetrieverPipeline:
             self.reranker = Reranker(logger, config)
 
     async def retrieve_docs(
-        self, partition: list[str], query: str, use_map_reduce: bool = False
+        self, partition: list[str], query: str, use_map_reduce: bool = False, temporal_filter: dict = None
     ) -> list[Document]:
-        docs = await self.retriever.retrieve(partition=partition, query=query)
+        docs = await self.retriever.retrieve(
+            partition=partition, query=query, temporal_filter=temporal_filter
+        )
         top_k = (
             max(self.map_reduce_max_docs, self.reranker_top_k)
             if use_map_reduce
@@ -79,6 +83,9 @@ class RagPipeline:
 
         # map reduce
         self.map_reduce: RAGMapReduce = RAGMapReduce(config=config)
+        
+        # temporal query normalizer
+        self.temporal_normalizer = TemporalQueryNormalizer()
 
     async def generate_query(self, messages: list[dict]) -> str:
         match RAGMODE(self.rag_mode):
@@ -124,11 +131,19 @@ class RagPipeline:
 
         metadata = payload.get("metadata", {})
         use_map_reduce = metadata.get("use_map_reduce", False)
-        logger.info("Metadata parameters", use_map_reduce=use_map_reduce)
+        
+        # Extract temporal filter from query if not provided in metadata
+        temporal_filter = metadata.get("temporal_filter", None)
+        if not temporal_filter:
+            temporal_filter = self.temporal_normalizer.extract_temporal_filter(query)
+            if temporal_filter:
+                logger.info("Extracted temporal filter from query", temporal_filter=temporal_filter)
+        
+        logger.info("Metadata parameters", use_map_reduce=use_map_reduce, temporal_filter=temporal_filter)
 
         # 2. get docs
         docs = await self.retriever_pipeline.retrieve_docs(
-            partition=partition, query=query, use_map_reduce=use_map_reduce
+            partition=partition, query=query, use_map_reduce=use_map_reduce, temporal_filter=temporal_filter
         )
 
         if use_map_reduce and docs:
@@ -140,12 +155,17 @@ class RagPipeline:
         # 4. prepare the output
         messages: list = copy.deepcopy(messages)
 
+        # Get current datetime in UTC for temporal awareness
+        current_datetime = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
         # prepend the messages with the system prompt
         messages.insert(
             0,
             {
                 "role": "system",
-                "content": SYS_PROMPT_TMPLT.format(context=context),
+                "content": SYS_PROMPT_TMPLT.format(
+                    context=context, current_datetime=current_datetime
+                ),
             },
         )
         payload["messages"] = messages

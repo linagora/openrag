@@ -1,5 +1,6 @@
 # Import necessary modules and classes
 from abc import ABC, abstractmethod
+from typing import Optional
 
 from components.prompts import HYDE_PROMPT, MULTI_QUERY_PROMPT
 from langchain_core.documents.base import Document
@@ -26,7 +27,12 @@ class ABCRetriever(ABC):
         pass
 
     @abstractmethod
-    async def retrieve(self, partition: list[str], query: str) -> list[Document]:
+    async def retrieve(
+        self,
+        partition: list[str],
+        query: str,
+        temporal_filter: Optional[dict] = None,
+    ) -> list[Document]:
         pass
 
 
@@ -41,13 +47,28 @@ class BaseRetriever(ABCRetriever):
         self,
         partition: list[str],
         query: str,
+        temporal_filter: Optional[dict] = None,
     ) -> list[Document]:
         db = get_vectordb()
+        
+        # Build filter with temporal constraints if provided
+        filter_dict = {}
+        if temporal_filter:
+            if "created_after" in temporal_filter:
+                filter_dict["created_after"] = temporal_filter["created_after"]
+            if "created_before" in temporal_filter:
+                filter_dict["created_before"] = temporal_filter["created_before"]
+            if "indexed_after" in temporal_filter:
+                filter_dict["indexed_after"] = temporal_filter["indexed_after"]
+            if "indexed_before" in temporal_filter:
+                filter_dict["indexed_before"] = temporal_filter["indexed_before"]
+        
         chunks = await db.async_search.remote(
             query=query,
             partition=partition,
             top_k=self.top_k,
             similarity_threshold=self.similarity_threshold,
+            filter=filter_dict if filter_dict else None,
         )
         return chunks
 
@@ -79,7 +100,9 @@ class MultiQueryRetriever(BaseRetriever):
             prompt | llm | StrOutputParser() | (lambda x: x.split("[SEP]"))
         )
 
-    async def retrieve(self, partition: list[str], query: str) -> list[Document]:
+    async def retrieve(
+        self, partition: list[str], query: str, temporal_filter: Optional[dict] = None
+    ) -> list[Document]:
         db = get_vectordb()
         logger.debug("Generating multiple queries", k_queries=self.k_queries)
         generated_queries = await self.generate_queries.ainvoke(
@@ -88,11 +111,25 @@ class MultiQueryRetriever(BaseRetriever):
                 "k_queries": self.k_queries,
             }
         )
+        
+        # Build filter with temporal constraints if provided
+        filter_dict = {}
+        if temporal_filter:
+            if "created_after" in temporal_filter:
+                filter_dict["created_after"] = temporal_filter["created_after"]
+            if "created_before" in temporal_filter:
+                filter_dict["created_before"] = temporal_filter["created_before"]
+            if "indexed_after" in temporal_filter:
+                filter_dict["indexed_after"] = temporal_filter["indexed_after"]
+            if "indexed_before" in temporal_filter:
+                filter_dict["indexed_before"] = temporal_filter["indexed_before"]
+        
         chunks = await db.async_multi_query_search.remote(
             queries=generated_queries,
             partition=partition,
             top_k_per_query=self.top_k,
             similarity_threshold=self.similarity_threshold,
+            filter=filter_dict if filter_dict else None,
         )
         return chunks
 
@@ -121,18 +158,31 @@ class HyDeRetriever(BaseRetriever):
         hyde_document = await self.hyde_generator.ainvoke({"query": query})
         return hyde_document
 
-    async def retrieve(self, partition: list[str], query: str) -> list[Document]:
+    async def retrieve(self, partition: list[str], query: str, temporal_filter: Optional[dict] = None) -> list[Document]:
         db = get_vectordb()
         hyde = await self.get_hyde(query)
         queries = [hyde]
         if self.combine:
             queries.append(query)
 
+        # Build filter with temporal constraints if provided
+        filter_dict = {}
+        if temporal_filter:
+            if "created_after" in temporal_filter:
+                filter_dict["created_after"] = temporal_filter["created_after"]
+            if "created_before" in temporal_filter:
+                filter_dict["created_before"] = temporal_filter["created_before"]
+            if "indexed_after" in temporal_filter:
+                filter_dict["indexed_after"] = temporal_filter["indexed_after"]
+            if "indexed_before" in temporal_filter:
+                filter_dict["indexed_before"] = temporal_filter["indexed_before"]
+
         return await db.async_multi_query_search.remote(
             queries=queries,
             partition=partition,
             top_k_per_query=self.top_k,
             similarity_threshold=self.similarity_threshold,
+            filter=filter_dict if filter_dict else None,
         )
 
 

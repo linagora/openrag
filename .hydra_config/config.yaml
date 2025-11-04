@@ -51,6 +51,9 @@ reranker:
   model_name: ${oc.env:RERANKER_MODEL, Alibaba-NLP/gte-multilingual-reranker-base}
   top_k: ${oc.decode:${oc.env:RERANKER_TOP_K, 5}} # Number of documents to return after reranking. upgrade to 8 for better results if your llm has a wider context window
   base_url: ${oc.env:RERANKER_BASE_URL, http://reranker:${oc.env:RERANKER_PORT, 7997}}
+  # Temporal scoring parameters
+  temporal_weight: ${oc.decode:${oc.env:RERANKER_TEMPORAL_WEIGHT, 0.3}}  # Weight for temporal scoring (0.0-1.0), 0.3 means 30% temporal, 70% relevance
+  temporal_decay_days: ${oc.decode:${oc.env:RERANKER_TEMPORAL_DECAY_DAYS, 365}}  # Days for temporal score to decay to near zero
 
 map_reduce:
   # Number of documents to process in the initial mapping phase

@@ -262,6 +262,19 @@ class MilvusDB(BaseVectorDB):
             max_length=MAX_LENGTH,
         )
 
+        # Add temporal fields for temporal awareness
+        schema.add_field(
+            field_name="created_at",
+            datatype=DataType.VARCHAR,
+            max_length=64,
+        )
+
+        schema.add_field(
+            field_name="indexed_at",
+            datatype=DataType.VARCHAR,
+            max_length=64,
+        )
+
         schema.add_field(
             field_name="vector",
             datatype=DataType.FLOAT_VECTOR,
@@ -301,6 +314,19 @@ class MilvusDB(BaseVectorDB):
         # ADD index for partition field
         index_params.add_index(
             field_name="partition", index_type="INVERTED", index_name="partition_idx"
+        )
+
+        # Add indexes for temporal fields to enable efficient filtering
+        index_params.add_index(
+            field_name="created_at",
+            index_type="INVERTED",
+            index_name="created_at_idx",
+        )
+
+        index_params.add_index(
+            field_name="indexed_at",
+            index_type="INVERTED",
+            index_name="indexed_at_idx",
         )
 
         # Add index for vector field
@@ -430,8 +456,20 @@ class MilvusDB(BaseVectorDB):
             expr_parts.append(f"partition in {partition}")
 
         if filter:
+            # Handle temporal filters
+            if "created_after" in filter:
+                expr_parts.append(f"created_at >= '{filter['created_after']}'")
+            if "created_before" in filter:
+                expr_parts.append(f"created_at <= '{filter['created_before']}'")
+            if "indexed_after" in filter:
+                expr_parts.append(f"indexed_at >= '{filter['indexed_after']}'")
+            if "indexed_before" in filter:
+                expr_parts.append(f"indexed_at <= '{filter['indexed_before']}'")
+            
+            # Handle other filters (exact match)
             for key, value in filter.items():
-                expr_parts.append(f"{key} == '{value}'")
+                if key not in ["created_after", "created_before", "indexed_after", "indexed_before"]:
+                    expr_parts.append(f"{key} == '{value}'")
 
         # Join all parts with " and " only if there are multiple conditions
         expr = " and ".join(expr_parts) if expr_parts else ""
