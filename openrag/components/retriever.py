@@ -52,12 +52,21 @@ class BaseRetriever(ABCRetriever):
         db = get_vectordb()
         
         # Build filter with temporal constraints if provided
+        # Priority: datetime > modified_at > created_at > indexed_at
         filter_dict = {}
         if temporal_filter:
+            if "datetime_after" in temporal_filter:
+                filter_dict["datetime_after"] = temporal_filter["datetime_after"]
+            if "datetime_before" in temporal_filter:
+                filter_dict["datetime_before"] = temporal_filter["datetime_before"]
             if "created_after" in temporal_filter:
                 filter_dict["created_after"] = temporal_filter["created_after"]
             if "created_before" in temporal_filter:
                 filter_dict["created_before"] = temporal_filter["created_before"]
+            if "modified_after" in temporal_filter:
+                filter_dict["modified_after"] = temporal_filter["modified_after"]
+            if "modified_before" in temporal_filter:
+                filter_dict["modified_before"] = temporal_filter["modified_before"]
             if "indexed_after" in temporal_filter:
                 filter_dict["indexed_after"] = temporal_filter["indexed_after"]
             if "indexed_before" in temporal_filter:
@@ -113,12 +122,21 @@ class MultiQueryRetriever(BaseRetriever):
         )
         
         # Build filter with temporal constraints if provided
+        # Priority: datetime > modified_at > created_at > indexed_at
         filter_dict = {}
         if temporal_filter:
+            if "datetime_after" in temporal_filter:
+                filter_dict["datetime_after"] = temporal_filter["datetime_after"]
+            if "datetime_before" in temporal_filter:
+                filter_dict["datetime_before"] = temporal_filter["datetime_before"]
             if "created_after" in temporal_filter:
                 filter_dict["created_after"] = temporal_filter["created_after"]
             if "created_before" in temporal_filter:
                 filter_dict["created_before"] = temporal_filter["created_before"]
+            if "modified_after" in temporal_filter:
+                filter_dict["modified_after"] = temporal_filter["modified_after"]
+            if "modified_before" in temporal_filter:
+                filter_dict["modified_before"] = temporal_filter["modified_before"]
             if "indexed_after" in temporal_filter:
                 filter_dict["indexed_after"] = temporal_filter["indexed_after"]
             if "indexed_before" in temporal_filter:
@@ -166,12 +184,21 @@ class HyDeRetriever(BaseRetriever):
             queries.append(query)
 
         # Build filter with temporal constraints if provided
+        # Priority: datetime > modified_at > created_at > indexed_at
         filter_dict = {}
         if temporal_filter:
+            if "datetime_after" in temporal_filter:
+                filter_dict["datetime_after"] = temporal_filter["datetime_after"]
+            if "datetime_before" in temporal_filter:
+                filter_dict["datetime_before"] = temporal_filter["datetime_before"]
             if "created_after" in temporal_filter:
                 filter_dict["created_after"] = temporal_filter["created_after"]
             if "created_before" in temporal_filter:
                 filter_dict["created_before"] = temporal_filter["created_before"]
+            if "modified_after" in temporal_filter:
+                filter_dict["modified_after"] = temporal_filter["modified_after"]
+            if "modified_before" in temporal_filter:
+                filter_dict["modified_before"] = temporal_filter["modified_before"]
             if "indexed_after" in temporal_filter:
                 filter_dict["indexed_after"] = temporal_filter["indexed_after"]
             if "indexed_before" in temporal_filter:

@@ -137,8 +137,14 @@ async def add_file(
 
     # Append extra metadata
     metadata["file_size"] = human_readable_size(file_stat.st_size)
-    # Convert file creation time to UTC
-    metadata["created_at"] = datetime.fromtimestamp(file_stat.st_ctime, tz=timezone.utc).isoformat()
+    
+    # Use provided created_at if available, otherwise extract from file system
+    if "created_at" not in metadata or not metadata["created_at"]:
+        metadata["created_at"] = datetime.fromtimestamp(file_stat.st_ctime, tz=timezone.utc).isoformat()
+    
+    # Extract file modification time (always from file system)
+    metadata["modified_at"] = datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc).isoformat()
+    
     metadata["file_id"] = file_id
 
     # Indexing the file
@@ -216,8 +222,14 @@ async def put_file(
 
     # Append extra metadata
     metadata["file_size"] = human_readable_size(file_stat.st_size)
-    # Convert file creation time to UTC
-    metadata["created_at"] = datetime.fromtimestamp(file_stat.st_ctime, tz=timezone.utc).isoformat()
+    
+    # Use provided created_at if available, otherwise extract from file system
+    if "created_at" not in metadata or not metadata["created_at"]:
+        metadata["created_at"] = datetime.fromtimestamp(file_stat.st_ctime, tz=timezone.utc).isoformat()
+    
+    # Extract file modification time (always from file system)
+    metadata["modified_at"] = datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc).isoformat()
+    
     metadata["file_id"] = file_id
 
     # Indexing the file

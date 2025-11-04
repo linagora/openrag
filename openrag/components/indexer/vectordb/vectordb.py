@@ -262,9 +262,22 @@ class MilvusDB(BaseVectorDB):
             max_length=MAX_LENGTH,
         )
 
-        # Add temporal fields for temporal awareness
+        # Add temporal fields for temporal awareness (priority: datetime > modified_at > created_at > indexed_at)
+        # datetime: user-provided primary temporal field (highest priority)
+        schema.add_field(
+            field_name="datetime",
+            datatype=DataType.VARCHAR,
+            max_length=64,
+        )
+
         schema.add_field(
             field_name="created_at",
+            datatype=DataType.VARCHAR,
+            max_length=64,
+        )
+
+        schema.add_field(
+            field_name="modified_at",
             datatype=DataType.VARCHAR,
             max_length=64,
         )
@@ -318,9 +331,21 @@ class MilvusDB(BaseVectorDB):
 
         # Add indexes for temporal fields to enable efficient filtering
         index_params.add_index(
+            field_name="datetime",
+            index_type="INVERTED",
+            index_name="datetime_idx",
+        )
+
+        index_params.add_index(
             field_name="created_at",
             index_type="INVERTED",
             index_name="created_at_idx",
+        )
+
+        index_params.add_index(
+            field_name="modified_at",
+            index_type="INVERTED",
+            index_name="modified_at_idx",
         )
 
         index_params.add_index(
@@ -456,19 +481,33 @@ class MilvusDB(BaseVectorDB):
             expr_parts.append(f"partition in {partition}")
 
         if filter:
-            # Handle temporal filters
+            # Handle temporal filters (priority: datetime > modified_at > created_at > indexed_at)
+            if "datetime_after" in filter:
+                expr_parts.append(f"datetime >= '{filter['datetime_after']}'")
+            if "datetime_before" in filter:
+                expr_parts.append(f"datetime <= '{filter['datetime_before']}'")
             if "created_after" in filter:
                 expr_parts.append(f"created_at >= '{filter['created_after']}'")
             if "created_before" in filter:
                 expr_parts.append(f"created_at <= '{filter['created_before']}'")
+            if "modified_after" in filter:
+                expr_parts.append(f"modified_at >= '{filter['modified_after']}'")
+            if "modified_before" in filter:
+                expr_parts.append(f"modified_at <= '{filter['modified_before']}'")
             if "indexed_after" in filter:
                 expr_parts.append(f"indexed_at >= '{filter['indexed_after']}'")
             if "indexed_before" in filter:
                 expr_parts.append(f"indexed_at <= '{filter['indexed_before']}'")
             
             # Handle other filters (exact match)
+            temporal_keys = [
+                "datetime_after", "datetime_before",
+                "created_after", "created_before",
+                "modified_after", "modified_before",
+                "indexed_after", "indexed_before"
+            ]
             for key, value in filter.items():
-                if key not in ["created_after", "created_before", "indexed_after", "indexed_before"]:
+                if key not in temporal_keys:
                     expr_parts.append(f"{key} == '{value}'")
 
         # Join all parts with " and " only if there are multiple conditions

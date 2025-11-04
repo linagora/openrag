@@ -32,10 +32,16 @@ class Reranker:
         More recent documents get higher scores (0.0 to 1.0).
         
         Uses linear decay based on document age.
+        Priority: datetime > modified_at > created_at > indexed_at
         """
         try:
-            # Try to get created_at first, fallback to indexed_at
-            date_str = doc.metadata.get("created_at") or doc.metadata.get("indexed_at")
+            # Try datetime first (user-provided), then modified_at, then created_at, then indexed_at
+            date_str = (
+                doc.metadata.get("datetime") or 
+                doc.metadata.get("modified_at") or 
+                doc.metadata.get("created_at") or 
+                doc.metadata.get("indexed_at")
+            )
             
             if not date_str:
                 # No temporal information, return neutral score
