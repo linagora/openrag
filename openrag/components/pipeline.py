@@ -1,4 +1,5 @@
 import copy
+import json
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -137,11 +138,21 @@ class RagPipeline:
         if not temporal_filter:
             temporal_filter = self.temporal_normalizer.extract_temporal_filter(query)
             if temporal_filter:
-                logger.info("Extracted temporal filter from query", temporal_filter=temporal_filter)
-        
-        logger.info("Metadata parameters", use_map_reduce=use_map_reduce, temporal_filter=temporal_filter)
+                logger.info(
+                    "Extracted temporal filter from query",
+                    created_after=temporal_filter.get("created_after"),
+                    created_before=temporal_filter.get("created_before"),
+                    modified_after=temporal_filter.get("modified_after"),
+                    modified_before=temporal_filter.get("modified_before"),
+                    datetime_after=temporal_filter.get("datetime_after"),
+                    datetime_before=temporal_filter.get("datetime_before"),
+                )
 
-        # 2. get docs
+        logger.info(
+            "Metadata parameters",
+            use_map_reduce=use_map_reduce,
+            temporal_filter_present=temporal_filter is not None,
+        )        # 2. get docs
         docs = await self.retriever_pipeline.retrieve_docs(
             partition=partition, query=query, use_map_reduce=use_map_reduce, temporal_filter=temporal_filter
         )
@@ -159,15 +170,21 @@ class RagPipeline:
         current_datetime = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
         # prepend the messages with the system prompt
+        system_prompt_content = SYS_PROMPT_TMPLT.format(
+            context=context, current_datetime=current_datetime
+        )
         messages.insert(
             0,
             {
                 "role": "system",
-                "content": SYS_PROMPT_TMPLT.format(
-                    context=context, current_datetime=current_datetime
-                ),
+                "content": system_prompt_content,
             },
         )
+        
+        # Debug: log the formatted system prompt
+        logger.debug("System prompt with context", prompt_length=len(system_prompt_content), doc_count=len(docs))
+        logger.debug("Full system prompt", content=system_prompt_content)
+        
         payload["messages"] = messages
         return payload, docs
 

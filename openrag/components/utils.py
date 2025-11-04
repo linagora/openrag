@@ -122,16 +122,36 @@ def format_context(docs: list[Document]) -> str:
     if not docs:
         return "No document found from the database"
 
-    context = "Extracted documents:\n"
+    def format_date(iso_date: str) -> str:
+        """Convert ISO date to readable format: 2025-11-02 14:30"""
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(iso_date.replace('Z', '+00:00'))
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except:
+            return iso_date
+
+    context = "Extracted documents:\n\n"
     for i, doc in enumerate(docs, start=1):
-        # doc_id = f"[doc_{i}]"
-        # document = f"""
-        # *source*: {doc_id}
-        # content: \n{doc.page_content.strip()}\n
-        # """
-        document = f"""content: \n{doc.page_content.strip()}\n"""
+        # Build temporal metadata in a readable format
+        temporal_parts = []
+        if doc.metadata.get("datetime"):
+            temporal_parts.append(f"Document date: {format_date(doc.metadata['datetime'])}")
+        elif doc.metadata.get("modified_at"):
+            temporal_parts.append(f"Last modified: {format_date(doc.metadata['modified_at'])}")
+        elif doc.metadata.get("created_at"):
+            temporal_parts.append(f"Created: {format_date(doc.metadata['created_at'])}")
+        elif doc.metadata.get("indexed_at"):
+            temporal_parts.append(f"Indexed: {format_date(doc.metadata['indexed_at'])}")
+        
+        # Format document with temporal metadata in a natural way
+        document = f"Document {i}:\n"
+        if temporal_parts:
+            document += f"{temporal_parts[0]}\n"
+        document += f"{doc.page_content.strip()}\n"
+        
         context += document
-        context += "-" * 40 + "\n\n"
+        context += "-" * 60 + "\n\n"
 
     return context
 

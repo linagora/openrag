@@ -481,31 +481,46 @@ class MilvusDB(BaseVectorDB):
             expr_parts.append(f"partition in {partition}")
 
         if filter:
-            # Handle temporal filters (priority: datetime > modified_at > created_at > indexed_at)
-            if "datetime_after" in filter:
-                expr_parts.append(f"datetime >= '{filter['datetime_after']}'")
-            if "datetime_before" in filter:
-                expr_parts.append(f"datetime <= '{filter['datetime_before']}'")
-            if "created_after" in filter:
-                expr_parts.append(f"created_at >= '{filter['created_after']}'")
-            if "created_before" in filter:
-                expr_parts.append(f"created_at <= '{filter['created_before']}'")
-            if "modified_after" in filter:
-                expr_parts.append(f"modified_at >= '{filter['modified_after']}'")
-            if "modified_before" in filter:
-                expr_parts.append(f"modified_at <= '{filter['modified_before']}'")
-            if "indexed_after" in filter:
-                expr_parts.append(f"indexed_at >= '{filter['indexed_after']}'")
-            if "indexed_before" in filter:
-                expr_parts.append(f"indexed_at <= '{filter['indexed_before']}'")
-            
-            # Handle other filters (exact match)
+            # Handle temporal filters with OR logic across different timestamp fields
+            # This allows documents to match if ANY of their timestamp fields (datetime, modified_at, created_at, indexed_at) fall within the range
             temporal_keys = [
                 "datetime_after", "datetime_before",
                 "created_after", "created_before",
                 "modified_after", "modified_before",
                 "indexed_after", "indexed_before"
             ]
+            
+            # Build temporal conditions with OR logic
+            temporal_conditions = []
+            
+            # Extract the generic after/before values from created_after/created_before
+            after_value = filter.get("created_after") or filter.get("datetime_after") or filter.get("modified_after") or filter.get("indexed_after")
+            before_value = filter.get("created_before") or filter.get("datetime_before") or filter.get("modified_before") or filter.get("indexed_before")
+            
+            if after_value or before_value:
+                # For each timestamp field, create conditions
+                field_conditions = []
+                for field in ["datetime", "modified_at", "created_at", "indexed_at"]:
+                    field_parts = []
+                    if after_value:
+                        field_parts.append(f"{field} >= '{after_value}'")
+                    if before_value:
+                        field_parts.append(f"{field} <= '{before_value}'")
+                    
+                    if field_parts:
+                        # Each field condition: (field >= after AND field <= before)
+                        field_condition = " and ".join(field_parts)
+                        field_conditions.append(f"({field_condition})")
+                
+                # Combine all field conditions with OR
+                if field_conditions:
+                    temporal_expr = " or ".join(field_conditions)
+                    temporal_conditions.append(f"({temporal_expr})")
+            
+            if temporal_conditions:
+                expr_parts.extend(temporal_conditions)
+            
+            # Handle other filters (exact match)
             for key, value in filter.items():
                 if key not in temporal_keys:
                     expr_parts.append(f"{key} == '{value}'")
