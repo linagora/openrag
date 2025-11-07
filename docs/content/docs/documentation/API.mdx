@@ -219,8 +219,43 @@ curl -X POST http://localhost:8080/v1/chat/completions \
       }
     ],
     "temperature": 0.7,
-    "stream": false
+    "stream": false,
+    "metadata": {
+      "use_map_reduce": false,
+      "temporal_filter": {
+        "created_after": "2024-01-01T00:00:00Z",
+        "created_before": "2024-12-31T23:59:59Z"
+      }
+    }
   }'
+```
+
+**Temporal Filtering:**
+
+OpenRAG supports temporal filtering to retrieve documents from specific time periods. You can include a `temporal_filter` object in the `metadata` field:
+
+- **Automatic extraction**: If no `temporal_filter` is provided, OpenRAG automatically extracts temporal expressions from your query (e.g., "documents from 2024", "last week's updates")
+- **Manual filtering**: Explicitly specify date ranges using the following fields:
+  - `datetime_after` / `datetime_before`: Filter by document content datetime (highest priority)
+  - `modified_after` / `modified_before`: Filter by document modification date
+  - `created_after` / `created_before`: Filter by document creation date
+  - `indexed_after` / `indexed_before`: Filter by document indexing date
+
+All dates should be in ISO 8601 format (e.g., `2024-01-15T00:00:00Z`).
+
+**Example with temporal filter:**
+```python
+# Query documents from 2024 only
+response = client.chat.completions.create(
+    model="openrag-my_partition",
+    messages=[{"role": "user", "content": "What are the latest updates?"}],
+    metadata={
+        "temporal_filter": {
+            "created_after": "2024-01-01T00:00:00Z",
+            "created_before": "2024-12-31T23:59:59Z"
+        }
+    }
+)
 ```
 
 * Text Completions
@@ -260,6 +295,51 @@ response = client.chat.completions.create(
     messages=[
         {"role": "user", "content": "What information do you have about...?"}
     ]
+)
+```
+
+#### Example with Temporal Filtering
+
+```python
+from openai import OpenAI
+from datetime import datetime, timedelta, timezone
+
+client = OpenAI(api_key='your-auth-token', base_url="http://localhost:8080/v1")
+
+# Example 1: Query recent documents (last 30 days)
+thirty_days_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+response = client.chat.completions.create(
+    model="openrag-my_partition",
+    messages=[{"role": "user", "content": "What are the latest developments?"}],
+    extra_body={
+        "metadata": {
+            "temporal_filter": {
+                "indexed_after": thirty_days_ago
+            }
+        }
+    }
+)
+
+# Example 2: Query documents from a specific year
+response = client.chat.completions.create(
+    model="openrag-my_partition",
+    messages=[{"role": "user", "content": "What happened in 2024?"}],
+    extra_body={
+        "metadata": {
+            "temporal_filter": {
+                "created_after": "2024-01-01T00:00:00Z",
+                "created_before": "2024-12-31T23:59:59Z"
+            }
+        }
+    }
+)
+
+# Example 3: Let OpenRAG automatically extract temporal context from query
+# Queries like "last week", "documents from 2024", "recent changes" 
+# will automatically be filtered without explicit temporal_filter
+response = client.chat.completions.create(
+    model="openrag-my_partition",
+    messages=[{"role": "user", "content": "Show me documents from last week"}]
 )
 ```
 
