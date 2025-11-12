@@ -1,6 +1,7 @@
 import hashlib
 import os
 import secrets
+import enum
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -10,6 +11,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    Enum,
     ForeignKey,
     Index,
     Integer,
@@ -57,6 +59,21 @@ class File(Base):
         Index("ix_partition_file", "partition_name", "file_id"),
     )
 
+    # Directed many-to-many relationships
+    outgoing_relationships = relationship(
+        "FileRelationship",
+        foreign_keys="FileRelationship.source_file_id",
+        back_populates="source_file",
+        cascade="all, delete-orphan",
+    )
+
+    incoming_relationships = relationship(
+        "FileRelationship",
+        foreign_keys="FileRelationship.target_file_id",
+        back_populates="target_file",
+        cascade="all, delete-orphan",
+    )
+
     def to_dict(self):
         metadata = self.file_metadata or {}
         d = {"partition": self.partition_name, "file_id": self.file_id, **metadata}
@@ -64,6 +81,48 @@ class File(Base):
 
     def __repr__(self):
         return f"<File(id={self.id}, file_id='{self.file_id}', partition='{self.partition}')>"
+
+
+class FileRelationshipType(enum.Enum):
+    parent = "parent"
+    other = "other"
+
+
+class FileRelationship(Base):
+    __tablename__ = "file_relationships"
+
+    id = Column(Integer, primary_key=True)
+
+    # Directed edge: source → target
+    source_file_id = Column(Integer, ForeignKey("files.id", ondelete="CASCADE"), nullable=False)
+    target_file_id = Column(Integer, ForeignKey("files.id", ondelete="CASCADE"), nullable=False)
+
+    relationship_type = Column(
+        Enum(FileRelationshipType, name="file_relationship_type"),
+        nullable=False,
+    )
+
+    source_file = relationship(
+        "File",
+        foreign_keys=[source_file_id],
+        back_populates="outgoing_relationships",
+    )
+    target_file = relationship(
+        "File",
+        foreign_keys=[target_file_id],
+        back_populates="incoming_relationships",
+    )
+
+    __table_args__ = (
+        # Prevent duplicate edges of the same type
+        UniqueConstraint(
+            "source_file_id", "target_file_id", "relationship_type",
+            name="uix_file_relationship_unique"
+        ),
+        # Index for efficient traversal queries
+        Index("ix_file_rel_source_target", "source_file_id", "target_file_id"),
+        Index("ix_file_rel_type", "relationship_type"),
+)
 
 
 # In the Partition model
