@@ -230,6 +230,55 @@ POST /v1/completions
 
 OpenAI-compatible text completion endpoint.
 
+### 🔧 Tools
+
+Tools are useful features that can be called directly by the client.
+
+
+* List available tools
+```http
+GET /v1/tools
+```
+
+**Request:**
+```bash frame="none"
+curl http://localhost:8080/v1/tools
+```
+
+**Response:**
+```json
+[
+    {
+        "name": "Tool name",
+        "description": "Tool description"
+    }
+]
+```
+
+* Execute a tool
+```http
+POST /v1/tools/execute
+```
+
+The parameters are given in multipart.
+
+**Request:**
+```bash frame="none"
+curl -X POST http://localhost:8080/v1/tools/execute \
+  -H "Content-Type: multipart/form-data" \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -F "file=@file.pdf" \
+  -F 'tool={"name":"extractText"}' \
+  -F 'metadata={"mime":"application/pdf","name":"test.pdf"}' \
+```
+
+**Response:**
+```json
+{
+  "message": "File content"
+}
+```
+
 ## 💡 Usage Examples
 
 #### Bulk File Indexing
