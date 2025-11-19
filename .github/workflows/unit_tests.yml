@@ -1,0 +1,45 @@
+name: Unit tests
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('**/pyproject.toml', '**/uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ matrix.python-version }}-
+
+      - name: Install dependencies with uv
+        run: |
+          uv sync
+
+      - name: Run tests
+        run: |
+          uv run pytest
