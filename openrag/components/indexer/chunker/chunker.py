@@ -1,18 +1,14 @@
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from components.prompts import CHUNK_CONTEXTUALIZER
 from components.utils import get_llm_semaphore, load_config
-from langchain.text_splitter import TokenTextSplitter
 from langchain_core.documents.base import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_text_splitters import (
-    MarkdownHeaderTextSplitter,
-)
 from omegaconf import OmegaConf
 from tqdm.asyncio import tqdm
 from utils.logger import get_logger
@@ -23,115 +19,17 @@ logger = get_logger()
 config = load_config()
 
 
-class BaseChunker(ABC):
-    """Base class for document chunkers with built-in contextualization capability."""
+class PageTracker:
+    """Handles page number tracking for chunks."""
 
-    def __init__(
-        self,
-        chunk_size: int = 200,
-        chunk_overlap_rate: int = 0.2,
-        llm_config: Optional[dict] = None,
-        contextual_retrieval: bool = False,
-        **kwargs,
-    ):
-        self.chunk_size = chunk_size
-        self.chunk_overlap_rate = chunk_overlap_rate
-        self.chunk_overlap = int(self.chunk_size * self.chunk_overlap_rate)
-
-        self.token_text_splitter = TokenTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=self.chunk_overlap,
-            encoding_name="cl100k_base",
-        )
-
-        self.contextual_retrieval = contextual_retrieval
-        self.context_generator = None
+    def __init__(self):
         self._page_pattern = re.compile(r"\[PAGE_(\d+)\]")
 
-        self.llm = ChatOpenAI(**llm_config)
-
-        try:
-            if self.contextual_retrieval:
-                prompt = ChatPromptTemplate.from_template(template=CHUNK_CONTEXTUALIZER)
-                self.context_generator = (
-                    prompt | ChatOpenAI(**llm_config) | StrOutputParser()
-                ).with_retry(
-                    retry_if_exception_type=(Exception,),
-                    wait_exponential_jitter=False,
-                    stop_after_attempt=2,
-                )
-
-        except Exception as e:
-            raise ValueError("Error with context_generator: {}".format(e))
-
-    async def _generate_context(
-        self, first_chunks: str, prev_chunk: str, chunk: str, source: str
-    ) -> str:
-        """Generate context for a given chunk of text."""
-        async with get_llm_semaphore():
-            try:
-                return await self.context_generator.ainvoke(
-                    {
-                        "first_chunks": first_chunks,
-                        "prev_chunk": prev_chunk,
-                        "chunk": chunk,
-                        "source": source,
-                    }
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Error when contextualizing a chunk of document `{source}`: {e}"
-                )
-                return ""
-
-    async def _contextualize_chunks(self, chunks: list[str], source: str) -> list[str]:
-        """Contextualize a list of document chunks."""
-        if not self.contextual_retrieval or len(chunks) < 2:
-            return chunks
-
-        try:
-            tasks = []
-            for i in range(len(chunks)):
-                prev_chunk = "---\n".join(chunks[max(0, i - 2) : i]) if i > 0 else ""
-                curr_chunk = chunks[i]
-                first_chunks = "---\n".join(chunks[:2])  # first two chunks
-
-                tasks.append(
-                    self._generate_context(
-                        first_chunks=first_chunks,
-                        prev_chunk=prev_chunk,
-                        chunk=curr_chunk,
-                        source=source,
-                    )
-                )
-
-            contexts = await tqdm.gather(
-                *tasks,
-                total=len(tasks),
-                desc=f"Contextualizing chunks of *{Path(source).name}*",
-            )
-
-            # Format contextualized chunks
-            chunk_format = """Context: {chunk_context}\n\nChunk:\n{chunk}"""
-            contexts = [
-                chunk_format.format(
-                    chunk=chunk, chunk_context=context, source=Path(source).name
-                )
-                for chunk, context in zip(chunks, contexts)
-            ]
-
-            return contexts
-
-        except Exception as e:
-            logger.warning(f"Error when contextualizing chunks from `{source}`: {e}")
-            return chunks
-
-    def _get_chunk_page_info(self, chunk_str: str, previous_page=1):
+    def get_chunk_page_info(self, chunk_str: str, previous_page: int = 1) -> dict:
         """
         Determine the start and end pages for a text chunk containing [PAGE_N] separators.
         PAGE_N marks the end of page N - text before separator is on page N.
         """
-        # Find all page separator matches in the chunk
         matches = list(self._page_pattern.finditer(chunk_str))
 
         if not matches:
@@ -160,45 +58,123 @@ class BaseChunker(ABC):
 
         return {"start_page": start_page, "end_page": end_page}
 
-    @abstractmethod
-    async def split_document(self, docs: list[Document], task_id: str = None):
-        pass
+
+class ChunkContextualizer:
+    """Handles contextualization of document chunks."""
+
+    def __init__(self, llm_config: dict):
+        self.context_generator = self._create_context_generator(llm_config)
+
+    def _create_context_generator(self, llm_config: dict):
+        """Create the context generation chain."""
+        try:
+            prompt = ChatPromptTemplate.from_template(template=CHUNK_CONTEXTUALIZER)
+            return (prompt | ChatOpenAI(**llm_config) | StrOutputParser()).with_retry(
+                retry_if_exception_type=(Exception,),
+                wait_exponential_jitter=False,
+                stop_after_attempt=2,
+            )
+        except Exception as e:
+            raise ValueError(f"Error creating context generator: {e}")
+
+    async def _generate_context(
+        self, first_chunks: str, prev_chunk: str, chunk: str, source: str
+    ) -> str:
+        """Generate context for a given chunk of text."""
+        async with get_llm_semaphore():
+            try:
+                return await self.context_generator.ainvoke(
+                    {
+                        "first_chunks": first_chunks,
+                        "prev_chunk": prev_chunk,
+                        "chunk": chunk,
+                        "source": source,
+                    }
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Error contextualizing chunk of document `{source}`: {e}"
+                )
+                return ""
+
+    async def contextualize_chunks(self, chunks: List[str], source: str) -> List[str]:
+        """Contextualize a list of document chunks."""
+        if len(chunks) < 2:
+            return chunks
+
+        try:
+            first_chunks = "---\n".join(chunks[:2])
+
+            tasks = [
+                self._generate_context(
+                    first_chunks=first_chunks,
+                    prev_chunk="---\n".join(chunks[max(0, i - 2) : i]) if i > 0 else "",
+                    chunk=chunks[i],
+                    source=source,
+                )
+                for i in range(len(chunks))
+            ]
+
+            contexts = await tqdm.gather(
+                *tasks,
+                total=len(tasks),
+                desc=f"Contextualizing chunks of *{Path(source).name}*",
+            )
+
+            # Format contextualized chunks
+            chunk_format = "Context: {chunk_context}\n\nChunk:\n{chunk}"
+            return [
+                chunk_format.format(chunk=chunk, chunk_context=context)
+                for chunk, context in zip(chunks, contexts)
+            ]
+
+        except Exception as e:
+            logger.warning(f"Error contextualizing chunks from `{source}`: {e}")
+            return chunks
 
 
-class TokenSplitter(BaseChunker):
-    """TokenSplitter splits documents into chunks using TokenTextSplitter."""
+class BaseChunker(ABC):
+    """Base class for document chunkers with built-in contextualization capability."""
 
     def __init__(
         self,
-        chunk_size=200,
-        chunk_overlap_rate=0.2,
-        llm_config=None,
-        contextual_retrieval=False,
+        chunk_size: int = 200,
+        chunk_overlap_rate: float = 0.2,
+        llm_config: Optional[dict] = None,
+        contextual_retrieval: bool = False,
         **kwargs,
     ):
-        super().__init__(
-            chunk_size, chunk_overlap_rate, llm_config, contextual_retrieval, **kwargs
+        self.chunk_size = chunk_size
+        self.chunk_overlap_rate = chunk_overlap_rate
+        self.chunk_overlap = int(self.chunk_size * self.chunk_overlap_rate)
+
+        from langchain.text_splitter import TokenTextSplitter
+
+        self.token_text_splitter = TokenTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=self.chunk_overlap,
+            encoding_name="cl100k_base",
         )
 
-    async def split_document(self, doc: Document, task_id: str = None):
-        metadata = doc.metadata
-        log = logger.bind(
-            file_id=metadata.get("file_id"),
-            partition=metadata.get("partition"),
-            task_id=task_id,
+        self.llm = ChatOpenAI(**llm_config)
+        self.contextual_retrieval = contextual_retrieval
+        self.page_tracker = PageTracker()
+
+        # Initialize contextualizer only if needed
+        self.contextualizer = (
+            ChunkContextualizer(llm_config) if contextual_retrieval else None
         )
-        log.info("Starting document chunking")
-        source = metadata["source"]
 
-        # Split the document into chunks of text, tables, and images
-        all_content = doc.page_content.strip()
-        splits = split_md_elements(all_content)
-        splits = combine_md_elements(
-            splits, llm=self.llm, chunk_max_size=self.chunk_size
-        )  # cause some md elements are too small
+    def _prepare_markdown_elements(self, content: str) -> List[Tuple[str, str]]:
+        """Prepare and combine markdown elements from raw content."""
+        splits = split_md_elements(content)
+        return combine_md_elements(splits, llm=self.llm, chunk_max_size=self.chunk_size)
 
-        # Add overlap to image and table chunks
-        splits = add_overlap(
+    def _add_overlap_to_special_chunks(
+        self, splits: List[Tuple[str, str]]
+    ) -> List[Tuple[str, str]]:
+        """Add overlap to table and image chunks."""
+        return add_overlap(
             chunks=splits,
             target_chunk_types=["table", "image"],
             add_before=True,
@@ -206,62 +182,116 @@ class TokenSplitter(BaseChunker):
             chunk_overlap=self.chunk_overlap,
         )
 
-        # only split text elements into chunks
+    def _split_elements_into_chunks(self, splits: List[Tuple[str, str]]) -> List[str]:
+        """Split markdown elements into chunks, only text elements are chunked."""
         chunks = []
         for chunk_type, content in splits:
             if chunk_type == "text":
-                chunks.extend(self.token_text_splitter.split_text(content))
+                chunks.extend(self._split_text(content))
             else:
                 chunks.append(content)
+        return chunks
 
-        chunks_w_context = chunks  # Default to original chunks if no contextualization
+    @abstractmethod
+    def _split_text(self, text: str) -> List[str]:
+        """Split text content into chunks. Must be implemented by subclasses."""
+        pass
 
-        if self.contextual_retrieval:
-            log.info("Contextualizing chunks")
-            chunks_w_context = await self._contextualize_chunks(chunks, source=source)
+    async def _apply_contextualization(
+        self, chunks: List[str], source: str
+    ) -> List[str]:
+        """Apply contextualization if enabled."""
+        if not self.contextual_retrieval or not self.contextualizer:
+            return chunks
+        return await self.contextualizer.contextualize_chunks(chunks, source)
 
-        filtered_chunks = []
+    def _create_documents_from_chunks(
+        self,
+        chunks: List[str],
+        chunks_with_context: List[str],
+        metadata: dict,
+    ) -> List[Document]:
+        """Create Document objects from chunks with proper page tracking."""
+        documents = []
         prev_page_num = 1
-        for chunk, chunk_w_context in zip(chunks, chunks_w_context):
-            if not chunk.strip():  # skip empty chunks
+
+        for chunk, chunk_w_context in zip(chunks, chunks_with_context):
+            if not chunk.strip():
                 continue
 
-            page_info = self._get_chunk_page_info(
-                chunk_str=chunk, previous_page=prev_page_num
-            )
-            start_page = page_info["start_page"]
-            end_page = page_info["end_page"]
-            prev_page_num = end_page
-            filtered_chunks.append(
+            page_info = self.page_tracker.get_chunk_page_info(chunk, prev_page_num)
+            prev_page_num = page_info["end_page"]
+
+            documents.append(
                 Document(
                     page_content=chunk_w_context,
-                    metadata={**metadata, "page": start_page},
+                    metadata={**metadata, "page": page_info["start_page"]},
                 )
             )
+
+        return documents
+
+    async def split_document(
+        self, doc: Document, task_id: Optional[str] = None
+    ) -> List[Document]:
+        """Split document into chunks with optional contextualization."""
+        metadata = doc.metadata
+        log = logger.bind(
+            file_id=metadata.get("file_id"),
+            partition=metadata.get("partition"),
+            task_id=task_id,
+        )
+
+        log.info("Starting document chunking")
+        source = metadata["source"]
+
+        # Process document through pipeline
+        splits = self._prepare_markdown_elements(doc.page_content.strip())
+        splits = self._add_overlap_to_special_chunks(splits)
+        chunks = self._split_elements_into_chunks(splits)
+
+        # Apply contextualization if enabled
+        if self.contextual_retrieval:
+            log.info("Contextualizing chunks")
+        chunks_with_context = await self._apply_contextualization(chunks, source)
+
+        # Create final documents
+        documents = self._create_documents_from_chunks(
+            chunks, chunks_with_context, metadata
+        )
+
         log.info("Document chunking completed")
-        return filtered_chunks
+        return documents
+
+
+class TokenSplitter(BaseChunker):
+    """Splits documents using token text splitting."""
+
+    def _split_text(self, text: str) -> List[str]:
+        """Split text using token-based splitting."""
+        return self.token_text_splitter.split_text(text)
 
 
 class SemanticSplitter(BaseChunker):
-    """SemanticSplitter splits documents into semantically meaningful chunks."""
+    """Splits documents into semantically meaningful chunks."""
 
     def __init__(
         self,
-        chunk_size=200,
-        chunk_overlap_rate=0.2,
-        llm_config=None,
-        contextual_retrieval=False,
+        chunk_size: int = 200,
+        chunk_overlap_rate: float = 0.2,
+        llm_config: Optional[dict] = None,
+        contextual_retrieval: bool = False,
         embeddings: Optional[OpenAIEmbeddings] = None,
         breakpoint_threshold_amount: int = 85,
+        **kwargs,
     ):
         super().__init__(
-            chunk_size, chunk_overlap_rate, llm_config, contextual_retrieval
+            chunk_size, chunk_overlap_rate, llm_config, contextual_retrieval, **kwargs
         )
+
         from langchain_experimental.text_splitter import SemanticChunker
 
-        min_chunk_size_chars = (
-            int(chunk_size * 0.5) * 4
-        )  # 1 token = 4 characters on average
+        min_chunk_size_chars = int(chunk_size * 0.5) * 4
 
         self.semantic_splitter = SemanticChunker(
             embeddings=embeddings,
@@ -271,186 +301,68 @@ class SemanticSplitter(BaseChunker):
             min_chunk_size=min_chunk_size_chars,
         )
 
-    def split_text(self, text: str):
-        # split sematically meaningful chunks
+    def _split_text(self, text: str) -> List[str]:
+        """Split text using semantic chunking."""
+        # Create semantically meaningful chunks
         splits = self.semantic_splitter.split_text(text)
 
-        # regrouping chunks based on token length
+        # Regroup chunks based on token length (to avoid having too small chunks)
         splits = combine_chunks(
             chunks=splits, llm=self.llm, chunk_max_size=self.chunk_size
         )
 
-        # apply recursive character splitter to each chunk (this would add overlapping between text chunks)
-        splits_l = [self.token_text_splitter.split_text(s) for s in splits]
-        splits = sum(splits_l, [])
-        return splits
-
-    async def split_document(self, doc: Document, task_id: str = None):
-        metadata = doc.metadata
-        log = logger.bind(
-            file_id=metadata.get("file_id"),
-            partition=metadata.get("partition"),
-            task_id=task_id,
-        )
-        log.info("Starting document chunking")
-        source = metadata["source"]
-
-        # Split the document into chunks of text, tables, and images
-        all_content = doc.page_content.strip()
-        splits = split_md_elements(all_content)
-        splits = combine_md_elements(
-            splits, llm=self.llm, chunk_max_size=self.chunk_size
-        )
-
-        # Add overlap image and table chunks
-        splits = add_overlap(
-            chunks=splits,
-            target_chunk_types=["table", "image"],
-            add_before=True,
-            add_after=True,
-            chunk_overlap=self.chunk_overlap,
-        )
-
-        # only split text elements into chunks
-        chunks = []
-        for chunk_type, content in splits:
-            if chunk_type == "text":
-                chunks.extend(self.split_text(content))
-            else:
-                chunks.append(content)
-
-        # regrouping chunks based on token length
-        chunks = combine_chunks(
-            chunks=chunks, llm=self.llm, chunk_max_size=self.chunk_size
-        )
-
-        chunks_w_context = chunks  # Default to original chunks if no contextualization
-        if self.contextual_retrieval:
-            log.info("Contextualizing chunks")
-            chunks_w_context = await self._contextualize_chunks(chunks, source=source)
-
-        filtered_chunks = []
-        prev_page_num = 1
-        for chunk, chunk_w_context in zip(chunks, chunks_w_context):
-            if not chunk.strip():  # skip empty chunks
-                continue
-
-            page_info = self._get_chunk_page_info(
-                chunk_str=chunk, previous_page=prev_page_num
-            )
-            start_page = page_info["start_page"]
-            end_page = page_info["end_page"]
-            prev_page_num = end_page
-            filtered_chunks.append(
-                Document(
-                    page_content=chunk_w_context,
-                    metadata={**metadata, "page": start_page},
-                )
-            )
-        log.info("Document chunking completed")
-        return filtered_chunks
+        # Apply token text splitter to cut down any remaining large chunks
+        splits_nested = [self.token_text_splitter.split_text(s) for s in splits]
+        return [chunk for sublist in splits_nested for chunk in sublist]
 
 
 class MarkDownSplitter(BaseChunker):
+    """Splits documents based on markdown headers."""
+
     def __init__(
         self,
-        chunk_size=200,
-        chunk_overlap_rate=0.2,
-        llm_config=None,
-        contextual_retrieval=False,
+        chunk_size: int = 200,
+        chunk_overlap_rate: float = 0.2,
+        llm_config: Optional[dict] = None,
+        contextual_retrieval: bool = False,
         **kwargs,
     ):
         super().__init__(
             chunk_size, chunk_overlap_rate, llm_config, contextual_retrieval, **kwargs
         )
+
         headers_to_split_on = [
             ("#", "Header 1"),
             ("##", "Header 2"),
             ("###", "Header 3"),
-            # ("####", "Header 4"),
         ]
+        from langchain_text_splitters import MarkdownHeaderTextSplitter
+
         self.md_header_splitter = MarkdownHeaderTextSplitter(
             headers_to_split_on=headers_to_split_on,
             strip_headers=False,
         )
 
-    def split_md_chunks(self, text: str) -> list[str]:
-        # split the text into chunks based on headers
-        splits: list[Document] = self.md_header_splitter.split_text(text)
+    def _split_text(self, text: str) -> List[str]:
+        """Split text based on markdown headers."""
+        # Split by headers
+        splits: List[Document] = self.md_header_splitter.split_text(text)
 
-        # regrouping chunks based on token length
-        combined_elements = combine_chunks(
+        # Regroup based on token length
+        combined = combine_chunks(
             chunks=splits, llm=self.llm, chunk_max_size=self.chunk_size
         )
 
-        # use recursive splitter to further split the chunks (this would add overlapping between text chunks)
-        overlapped_elements = list(
-            map(lambda x: self.token_text_splitter.split_text(x), combined_elements)
-        )
-        return sum(overlapped_elements, [])
-
-    async def split_document(self, doc: Document, task_id: str = None):
-        metadata = doc.metadata
-        log = logger.bind(
-            file_id=metadata.get("file_id"),
-            partition=metadata.get("partition"),
-            task_id=task_id,
-        )
-        log.info("Starting document chunking")
-        source = metadata["source"]
-
-        # Split the document into chunks of text, tables, and images
-        all_content = doc.page_content.strip()
-        splits = split_md_elements(all_content)
-        splits = combine_md_elements(
-            splits, llm=self.llm, chunk_max_size=self.chunk_size
-        )
-
-        # Add overlap image and table chunks
-        splits = add_overlap(
-            chunks=splits,
-            target_chunk_types=["table", "image"],
-            add_before=True,
-            add_after=True,
-            chunk_overlap=self.chunk_overlap,
-        )
-
-        # only split text elements into chunks
-        chunks = []
-        for chunk_type, content in splits:
-            if chunk_type == "text":
-                chunks.extend(self.split_md_chunks(content))
-            else:
-                chunks.append(content)
-
-        chunks_w_context = chunks  # Default to original chunks if no contextualization
-        if self.contextual_retrieval:
-            log.info("Contextualizing chunks")
-            chunks_w_context = await self._contextualize_chunks(chunks, source=source)
-
-        filtered_chunks = []
-        prev_page_num = 1
-        for chunk, chunk_w_context in zip(chunks, chunks_w_context):
-            if not chunk.strip():  # skip empty chunks
-                continue
-
-            page_info = self._get_chunk_page_info(
-                chunk_str=chunk, previous_page=prev_page_num
-            )
-            start_page = page_info["start_page"]
-            end_page = page_info["end_page"]
-            prev_page_num = end_page
-            filtered_chunks.append(
-                Document(
-                    page_content=chunk_w_context,
-                    metadata={**metadata, "page": start_page},
-                )
-            )
-        log.info("Document chunking completed")
-        return filtered_chunks
+        # Apply token text splitter to cut down any remaining large chunks
+        overlapped_nested = [
+            self.token_text_splitter.split_text(chunk) for chunk in combined
+        ]
+        return [chunk for sublist in overlapped_nested for chunk in sublist]
 
 
 class ChunkerFactory:
+    """Factory for creating chunker instances."""
+
     CHUNKERS = {
         "token_splitter": TokenSplitter,
         "semantic_splitter": SemanticSplitter,
@@ -458,31 +370,25 @@ class ChunkerFactory:
     }
 
     @staticmethod
-    def create_chunker(
-        config: OmegaConf,
-        embedder: Optional[OpenAIEmbeddings] = None,
-    ) -> BaseChunker:
-        # Extract parameters
+    def create_chunker(config) -> BaseChunker:
+        """Create a chunker instance based on configuration."""
         chunker_params = OmegaConf.to_container(config.chunker, resolve=True)
         name = chunker_params.pop("name")
 
-        # Initialize and return the chunker
-        chunker_cls: BaseChunker = ChunkerFactory.CHUNKERS.get(name)
-
+        chunker_cls = ChunkerFactory.CHUNKERS.get(name)
         if not chunker_cls:
             raise ValueError(
-                f"Chunker '{name}' is not recognized."
-                f" Available chunkers: {list(ChunkerFactory.CHUNKERS.keys())}"
+                f"Chunker '{name}' not recognized. "
+                f"Available: {list(ChunkerFactory.CHUNKERS.keys())}"
             )
 
-        # Add embeddings if semantic splitter is selected
+        # Add embeddings for semantic splitter
         if name == "semantic_splitter":
-            embedder = OpenAIEmbeddings(
+            chunker_params["embeddings"] = OpenAIEmbeddings(
                 model=config.embedder.get("model_name"),
                 base_url=config.embedder.get("base_url"),
                 api_key=config.embedder.get("api_key"),
             )
-            chunker_params["embeddings"] = embedder
 
         chunker_params["llm_config"] = config.vlm
         return chunker_cls(**chunker_params)

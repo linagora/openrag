@@ -1,6 +1,6 @@
 defaults:
   - _self_ # TODO: Silences the hydra version migration warning (PLEASE REVIEW FOR BREAKING CHANGES)
-  - chunker: token_splitter # markdown_splitter # semantic_splitter #
+  - chunker: ${oc.env:CHUNKER, token_splitter} # token_splitter, semantic_splitter, markdown_splitter
   - retriever: ${oc.env:RETRIEVER_TYPE, single} # single # multiQuery # hyde
   - rag: ChatBotRag
 
