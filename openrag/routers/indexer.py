@@ -16,6 +16,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
+from components.files import save_file_to_disk
 from utils.dependencies import get_indexer, get_task_state_manager, get_vectordb
 from utils.logger import get_logger
 
@@ -124,20 +125,16 @@ async def add_file(
         )
 
     save_dir = Path(DATA_DIR)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    file_path = save_dir / Path(file.filename).name
-    metadata.update({"source": str(file_path), "filename": file.filename})
-
     try:
-        with open(file_path, "wb") as buffer:
-            buffer.write(await file.read())
-        log.debug("File saved to disk.")
+        file_path = await save_file_to_disk(file, save_dir, with_random_prefix=True)
     except Exception as e:
         log.exception("Failed to save file to disk.", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e),
         )
+
+    metadata.update({"source": str(file_path), "filename": file.filename})
     file_stat = Path(file_path).stat()
 
     # Append extra metadata
