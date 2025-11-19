@@ -17,6 +17,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
+from components.files import save_file_to_disk
 from utils.dependencies import get_indexer, get_task_state_manager, get_vectordb
 from utils.logger import get_logger
 
