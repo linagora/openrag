@@ -20,7 +20,7 @@ from utils.exceptions.base import EmbeddingError
 from utils.exceptions.vectordb import *
 from utils.logger import get_logger
 
-from ..embeddings import OpenAIEmbedding
+from ..embeddings import BaseEmbedding, EmbeddingFactory
 from .utils import PartitionFileManager
 
 logger = get_logger()
@@ -155,7 +155,7 @@ class MilvusDB(BaseVectorDB):
                 )
 
             # embedder
-            self.embedder: OpenAIEmbedding = OpenAIEmbedding(
+            self.embedder: BaseEmbedding = EmbeddingFactory.get_embedder(
                 embeddings_config=self.config.embedder
             )
 
@@ -376,7 +376,17 @@ class MilvusDB(BaseVectorDB):
                     file_id=file_id,
                 )
 
-            entities = await self.embedder.embed_documents(chunks)
+            entities = []
+            vectors = await self.embedder.aembed_documents(chunks)
+            for chunk, vector in zip(chunks, vectors):
+                entities.append(
+                    {
+                        "text": chunk.page_content,
+                        "vector": vector,
+                        **chunk.metadata,
+                    }
+                )
+
             await self._async_client.insert(
                 collection_name=self.collection_name,
                 data=entities,
@@ -454,7 +464,7 @@ class MilvusDB(BaseVectorDB):
         expr = " and ".join(expr_parts) if expr_parts else ""
 
         try:
-            query_vector = await self.embedder.embed_query(query)
+            query_vector = await self.embedder.aembed_query(query)
             vector_param = {
                 "data": [query_vector],
                 "anns_field": "vector",

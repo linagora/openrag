@@ -8,7 +8,7 @@ from components.utils import get_vlm_semaphore, load_config
 from langchain_core.documents.base import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 from langchain_text_splitters import (
     MarkdownHeaderTextSplitter,
     RecursiveCharacterTextSplitter,
@@ -17,6 +17,7 @@ from omegaconf import OmegaConf
 from tqdm.asyncio import tqdm
 from utils.logger import get_logger
 
+from ..embeddings import BaseEmbedding, EmbeddingFactory
 from .utils import add_overlap, combine_chunks, combine_md_elements, split_md_elements
 
 logger = get_logger()
@@ -254,7 +255,7 @@ class SemanticSplitter(BaseChunker):
         chunk_overlap_rate=0.2,
         llm_config=None,
         contextual_retrieval=False,
-        embeddings: Optional[OpenAIEmbeddings] = None,
+        embeddings: Optional[BaseEmbedding] = None,
         breakpoint_threshold_amount: int = 85,
     ):
         super().__init__(
@@ -477,7 +478,7 @@ class ChunkerFactory:
     @staticmethod
     def create_chunker(
         config: OmegaConf,
-        embedder: Optional[OpenAIEmbeddings] = None,
+        embedder: Optional[BaseEmbedding] = None,
     ) -> BaseChunker:
         # Extract parameters
         chunker_params = OmegaConf.to_container(config.chunker, resolve=True)
@@ -494,10 +495,8 @@ class ChunkerFactory:
 
         # Add embeddings if semantic splitter is selected
         if name == "semantic_splitter":
-            embedder = OpenAIEmbeddings(
-                model=config.embedder.get("model_name"),
-                base_url=config.embedder.get("base_url"),
-                api_key=config.embedder.get("api_key"),
+            embedder = EmbeddingFactory.get_embedder(
+                embeddings_config=dict(config.embedder)
             )
             chunker_params["embeddings"] = embedder
 

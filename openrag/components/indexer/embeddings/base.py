@@ -1,20 +1,9 @@
 from langchain_core.documents.base import Document
+from langchain_core.embeddings import Embeddings
 
 
-class BaseEmbedding:
+class BaseEmbedding(Embeddings):
     """Base class for all embedding models."""
-
-    async def embed_documents(self, chunks: list[Document], logger) -> list[dict]:
-        """
-        Asynchronously embed documents using the configured embedder.
-        """
-        raise NotImplementedError("This method should be implemented by subclasses.")
-
-    async def embed_query(self, query: str, logger) -> list[float]:
-        """
-        Asynchronously embed a query using the configured embedder.
-        """
-        raise NotImplementedError("This method should be implemented by subclasses.")
 
     @property
     def embedding_dimension(self) -> int:
@@ -23,3 +12,9 @@ class BaseEmbedding:
         This is used to validate the vector size during indexing and searching.
         """
         raise NotImplementedError("This method should be implemented by subclasses.")
+
+    def embed_documents(self, texts: list[str | Document]) -> list[list[float]]:
+        return super().embed_documents(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return super().embed_query(text)
