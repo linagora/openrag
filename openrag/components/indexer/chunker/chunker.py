@@ -5,13 +5,13 @@ from typing import Optional
 
 from components.prompts import CHUNK_CONTEXTUALIZER
 from components.utils import get_llm_semaphore, load_config
+from langchain.text_splitter import TokenTextSplitter
 from langchain_core.documents.base import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import (
     MarkdownHeaderTextSplitter,
-    RecursiveCharacterTextSplitter,
 )
 from omegaconf import OmegaConf
 from tqdm.asyncio import tqdm
@@ -37,6 +37,12 @@ class BaseChunker(ABC):
         self.chunk_size = chunk_size
         self.chunk_overlap_rate = chunk_overlap_rate
         self.chunk_overlap = int(self.chunk_size * self.chunk_overlap_rate)
+
+        self.token_text_splitter = TokenTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=self.chunk_overlap,
+            encoding_name="cl100k_base",
+        )
 
         self.contextual_retrieval = contextual_retrieval
         self.context_generator = None
@@ -159,8 +165,8 @@ class BaseChunker(ABC):
         pass
 
 
-class RecursiveSplitter(BaseChunker):
-    """RecursiveSplitter splits documents into chunks using recursive character splitting."""
+class TokenSplitter(BaseChunker):
+    """TokenSplitter splits documents into chunks using TokenTextSplitter."""
 
     def __init__(
         self,
@@ -172,15 +178,6 @@ class RecursiveSplitter(BaseChunker):
     ):
         super().__init__(
             chunk_size, chunk_overlap_rate, llm_config, contextual_retrieval, **kwargs
-        )
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-        self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
-            length_function=lambda x: self.llm.get_num_tokens(x)
-            if self.llm
-            else len(x),
         )
 
     async def split_document(self, doc: Document, task_id: str = None):
@@ -213,7 +210,7 @@ class RecursiveSplitter(BaseChunker):
         chunks = []
         for chunk_type, content in splits:
             if chunk_type == "text":
-                chunks.extend(self.splitter.split_text(content))
+                chunks.extend(self.token_text_splitter.split_text(content))
             else:
                 chunks.append(content)
 
@@ -274,14 +271,6 @@ class SemanticSplitter(BaseChunker):
             min_chunk_size=min_chunk_size_chars,
         )
 
-        self.recursive_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
-            length_function=lambda x: self.llm.get_num_tokens(x)
-            if self.llm
-            else len(x),
-        )
-
     def split_text(self, text: str):
         # split sematically meaningful chunks
         splits = self.semantic_splitter.split_text(text)
@@ -292,7 +281,7 @@ class SemanticSplitter(BaseChunker):
         )
 
         # apply recursive character splitter to each chunk (this would add overlapping between text chunks)
-        splits_l = [self.recursive_splitter.split_text(s) for s in splits]
+        splits_l = [self.token_text_splitter.split_text(s) for s in splits]
         splits = sum(splits_l, [])
         return splits
 
@@ -385,12 +374,6 @@ class MarkDownSplitter(BaseChunker):
             strip_headers=False,
         )
 
-        self.recursive_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
-            length_function=lambda x: self.llm.get_num_tokens(x),
-        )
-
     def split_md_chunks(self, text: str) -> list[str]:
         # split the text into chunks based on headers
         splits: list[Document] = self.md_header_splitter.split_text(text)
@@ -402,7 +385,7 @@ class MarkDownSplitter(BaseChunker):
 
         # use recursive splitter to further split the chunks (this would add overlapping between text chunks)
         overlapped_elements = list(
-            map(lambda x: self.recursive_splitter.split_text(x), combined_elements)
+            map(lambda x: self.token_text_splitter.split_text(x), combined_elements)
         )
         return sum(overlapped_elements, [])
 
@@ -469,7 +452,7 @@ class MarkDownSplitter(BaseChunker):
 
 class ChunkerFactory:
     CHUNKERS = {
-        "recursive_splitter": RecursiveSplitter,
+        "token_splitter": TokenSplitter,
         "semantic_splitter": SemanticSplitter,
         "markdown_splitter": MarkDownSplitter,
     }
