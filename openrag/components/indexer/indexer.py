@@ -12,8 +12,8 @@ from config import load_config
 from langchain_core.documents.base import Document
 
 from .chunker import BaseChunker, ChunkerFactory
+from components.files import serialize_file
 
-# from .chunkers import BaseChunker, ChunkerFactory
 
 config = load_config()
 save_uploaded_files = os.environ.get("SAVE_UPLOADED_FILES", "true").lower() == "true"
@@ -46,47 +46,8 @@ class Indexer:
         self.default_partition = "_default"
         self.enable_insertion = self.config.vectordb["enable"]
         self.handle = ray.get_actor("Indexer", namespace="openrag")
-        self.serialize_timeout = self.config.ray.indexer.serialize_timeout
+
         self.logger.info("Indexer actor initialized.")
-
-    async def serialize(
-        self,
-        task_id: str,
-        path: str,
-        metadata: Optional[Dict] = {},
-    ) -> Document:
-        import ray
-        from ray.exceptions import TaskCancelledError
-
-        serializer = ray.get_actor("DocSerializer", namespace="openrag")
-        # Kick off the remote task
-        future = serializer.serialize_document.remote(
-            task_id, path, metadata=metadata
-        )
-
-        # Wait for it to complete, with timeout
-        ready, _ = await asyncio.to_thread(
-            ray.wait, [future], timeout=self.serialize_timeout
-        )
-
-        if ready:
-            try:
-                doc = await ready[0]
-                return doc
-            except TaskCancelledError:
-                self.logger.warning(f"Task {task_id} was cancelled")
-                raise
-            except Exception:
-                self.logger.exception(f"Task {task_id} failed with error")
-                raise
-        else:
-            self.logger.warning(
-                f"Timeout: cancelling task {task_id} after {self.serialize_timeout}s"
-            )
-            ray.cancel(future, recursive=True)
-            raise TimeoutError(
-                f"Serialization task {task_id} timed out after {self.serialize_timeout} seconds"
-            )
 
     @ray.method(concurrency_group="chunk")
     async def chunk(
@@ -126,7 +87,7 @@ class Indexer:
             metadata = {**metadata, "partition": partition}
 
             # Serialize
-            doc = await self.serialize(task_id, path, metadata=metadata)
+            doc = await serialize_file(task_id, path, metadata=metadata)
 
             # Chunk
             await task_state_manager.set_state.remote(task_id, "CHUNKING")
