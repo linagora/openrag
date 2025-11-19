@@ -32,6 +32,7 @@ from routers.partition import router as partition_router
 from routers.queue import router as queue_router
 from routers.search import router as search_router
 from routers.users import router as users_router
+from routers.tools import router as tools_router
 from starlette.middleware.base import BaseHTTPMiddleware
 from utils.dependencies import get_vectordb
 from utils.exceptions import OpenRAGError
@@ -52,6 +53,7 @@ class Tags(Enum):
     QUEUE = ("Queue management",)
     ACTORS = ("Ray Actors",)
     USERS = ("User management",)
+    TOOLS = ("Tools",)
 
 
 class AppState:
@@ -199,6 +201,8 @@ app.include_router(queue_router, prefix="/queue", tags=[Tags.QUEUE])
 app.include_router(actors_router, prefix="/actors", tags=[Tags.ACTORS])
 # Mount the users router
 app.include_router(users_router, prefix="/users", tags=[Tags.USERS])
+
+app.include_router(tools_router, prefix="/v1", tags=[Tags.TOOLS])
 
 if WITH_OPENAI_API:
     # Mount the openai router

@@ -230,6 +230,7 @@ POST /v1/completions
 OpenAI-compatible text completion endpoint.
 
 #### Extra arguments
+
 * When using the openai endpoint /v1/chat/completions, one can provide extra arguments in the request body to customize the RAG behavior:
 - `spoken_style_answer`: boolean (default: false) - If true, the model will generate a succint spoken style conversational answer based on the retrieved documents.
 - `use_map_reduce`: boolean (default: false) - If true, the model will use a map-reduce strategy to aggregate information from multiple documents. For more information see the [map-reduce documentation](/openrag/documentation/env_vars/#map--reduce-configuration).
@@ -255,6 +256,55 @@ curl -X 'POST' 'http://localhost:8080/v1/chat/completions' \
     "spoken_style_answer": true
   }
 }'
+```
+
+### 🔧 Tools
+
+Tools are useful features that can be called directly by the client.
+
+
+* List available tools
+```http
+GET /v1/tools
+```
+
+**Request:**
+```bash frame="none"
+curl http://localhost:8080/v1/tools
+```
+
+**Response:**
+```json
+[
+    {
+        "name": "Tool name",
+        "description": "Tool description"
+    }
+]
+```
+
+* Execute a tool
+```http
+POST /v1/tools/execute
+```
+
+The parameters are given in multipart.
+
+**Request:**
+```bash frame="none"
+curl -X POST http://localhost:8080/v1/tools/execute \
+  -H "Content-Type: multipart/form-data" \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -F "file=@file.pdf" \
+  -F 'tool={"name":"extractText"}' \
+  -F 'metadata={"mime":"application/pdf","name":"test.pdf"}' \
+```
+
+**Response:**
+```json
+{
+  "message": "File content"
+}
 ```
 
 ## 💡 Usage Examples
