@@ -120,13 +120,8 @@ For more details, [see this file](docs/features_in_details.md)
 * **Enhanced Security**: Ensures data encryption both during transit and at rest.
 
 ## 🚀 Installation
-For comprehensive documentation and troubleshooting guidance, visit our [documentation site](https://linagora.github.io/openrag/).
 
-To run the documentation site locally for development:
-```bash
-npm i     # Install dependencies (it's like `uv init`)
-npm run dev   # Start the development server (like `uv run`)
-```
+For comprehensive documentation and troubleshooting guidance, visit our [documentation site](https://linagora.github.io/openrag/).
 
 ### Prerequisites
 - **Python 3.12** or higher recommended
@@ -220,6 +215,28 @@ Once the app is up and running, visit `http://localhost:APP_PORT` or `http:X.X.X
 To scale **OpenRag** in a distributed environment using **Ray**, follow the dedicated guide:
 ➡ [Deploy OpenRag in a Ray cluster](docs/deploy_ray_cluster.md)
 
+
+## Tests
+
+To run all unit tests:
+
+```bash
+uv run pytest
+```
+
+## Documentation
+
+For comprehensive documentation and troubleshooting guidance, visit our documentation site.
+
+To run the documentation site locally for development:
+```bash
+npm i     # Install dependencies
+npm run dev   # Start the development server
+```
+
+And then go to http://localhost:4321/openrag
+
+
 ## 🔧 Troubleshooting
 <details>
 <summary>Troubleshooting</summary>
@@ -249,6 +266,9 @@ sudo mkdir /app/model_weights
 sudo chmod 775 /app/model_weights
 ```
 </details>
+
+
+
 
 
 ## 🤝 Support and Contributions
