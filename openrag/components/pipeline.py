@@ -178,17 +178,27 @@ class RagPipeline:
         return payload, docs
 
     async def completions(self, partition: list[str], payload: dict):
-        payload, docs = await self._prepare_for_completions(
-            partition=partition, payload=payload
-        )
-        llm_output = self.llm_client.completions(request=payload)
-        return llm_output, docs
-
-    async def chat_completion(self, partition: list[str], payload: dict):
         try:
-            payload, docs = await self._prepare_for_chat_completion(
-                partition=partition, payload=payload
-            )
+            if partition is None:
+                docs = []
+            else:
+                payload, docs = await self._prepare_for_completions(
+                    partition=partition, payload=payload
+                )
+            llm_output = self.llm_client.completions(request=payload)
+            return llm_output, docs
+        except Exception as e:
+            logger.error(f"Error during chat completion: {str(e)}")
+            raise e
+
+    async def chat_completion(self, partition: list[str] | None, payload: dict):
+        try:
+            if partition is None:
+                docs = []
+            else:
+                payload, docs = await self._prepare_for_chat_completion(
+                    partition=partition, payload=payload
+                )
             llm_output = self.llm_client.chat_completion(request=payload)
             return llm_output, docs
         except Exception as e:

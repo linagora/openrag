@@ -136,7 +136,7 @@ async def openai_chat_completion(
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
 ):
-    model_name = request.model
+    model_name = request.model or config.llm.get("model")
     log = logger.bind(model=model_name, endpoint="/chat/completions")
 
     if (
@@ -151,10 +151,13 @@ async def openai_chat_completion(
         )
 
     try:
-        partitions = await get_partition_name(
-            model_name, user_partitions, is_admin=user["is_admin"]
-        )
-        log.debug(f"Using partitions: {partitions}")
+        if request.model is None:
+            partitions = None
+        else:
+            partitions = await get_partition_name(
+                model_name, user_partitions, is_admin=user["is_admin"]
+            )
+            log.debug(f"Using partitions: {partitions}")
     except Exception as e:
         log.warning("Invalid model or partition", error=str(e))
         raise
@@ -262,9 +265,12 @@ async def openai_completion(
         )
 
     try:
-        partitions = await get_partition_name(
-            model_name, user_partitions, is_admin=user["is_admin"]
-        )
+        if model_name is None:
+            partitions = None
+        else:
+            partitions = await get_partition_name(
+                model_name, user_partitions, is_admin=user["is_admin"]
+            )
 
     except Exception as e:
         log.warning(f"Invalid model or partition: {e}")

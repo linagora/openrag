@@ -14,7 +14,7 @@ class OpenAIMessage(BaseModel):
 class OpenAIChatCompletionRequest(BaseModel):
     """Modèle représentant une requête de complétion chat pour l'API OpenAI."""
 
-    model: str = Field(..., description="model name")
+    model: Optional[str] = Field(None, description="model name")
     messages: List[OpenAIMessage]
     temperature: Optional[float] = Field(0.3)
     top_p: Optional[float] = Field(1.0)
@@ -74,7 +74,7 @@ class OpenAICompletionChoice(BaseModel):
 class OpenAICompletionRequest(BaseModel):
     """Legacy OpenAI completion API"""
 
-    model: str = Field(..., description="model name")
+    model: Optional[str] = Field(None, description="model name")
     prompt: str
     best_of: Optional[int] = Field(1)
     echo: Optional[bool] = Field(False)
