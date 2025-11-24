@@ -3,6 +3,7 @@ name: Build and Release
 on:
   push:
     tags: ["v*"]
+    branches: [feat-push-dockerhub]
   workflow_dispatch:
 
 env:
