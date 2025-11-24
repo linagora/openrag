@@ -49,8 +49,8 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
             ${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=tag
-            type=raw,value=latest,enable={{is_default_branch}}
+#            type=ref,event=tag
+            type=raw,value=latest #,enable={{is_default_branch}}
 
       - name: Extract tag version
         id: get_version
