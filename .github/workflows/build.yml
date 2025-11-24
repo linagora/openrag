@@ -66,22 +66,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  release:
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
-    needs: [build-and-push-image]
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Create GitHub Release
-        uses: ncipollo/release-action@v1
-        with:
-          generateReleaseNotes: true
-          draft: false
-          prerelease: false
-
   build-and-push-image-ray:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
