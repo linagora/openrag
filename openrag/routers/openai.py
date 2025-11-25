@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from urllib.parse import quote
 
 import consts
@@ -85,7 +86,8 @@ def __prepare_sources(request: Request, docs: list[Document]):
     links = []
     for doc in docs:
         doc_metadata = dict(doc.metadata)
-        file_url = str(request.url_for("static", path=doc_metadata["filename"]))
+        filename = Path(doc_metadata.get("source")).name
+        file_url = str(request.url_for("static", path=filename))
         encoded_url = quote(file_url, safe=":/")
         links.append(
             {

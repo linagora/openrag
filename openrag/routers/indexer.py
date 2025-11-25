@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import ray
+from components.files import save_file_to_disk
 from config import load_config
 from fastapi import (
     APIRouter,
@@ -16,7 +17,6 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
-from components.files import save_file_to_disk
 from utils.dependencies import get_indexer, get_task_state_manager, get_vectordb
 from utils.logger import get_logger
 
@@ -158,7 +158,8 @@ async def add_file(
     )
 
 
-@router.delete("/partition/{partition}/file/{file_id}",
+@router.delete(
+    "/partition/{partition}/file/{file_id}",
     description="""Delete a file from a partition.
 
 **Parameters:**
@@ -185,7 +186,8 @@ async def delete_file(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.put("/partition/{partition}/file/{file_id}",
+@router.put(
+    "/partition/{partition}/file/{file_id}",
     description="""Update an existing file by replacing it.
 
 **Parameters:**
@@ -274,7 +276,8 @@ async def put_file(
     )
 
 
-@router.patch("/partition/{partition}/file/{file_id}",
+@router.patch(
+    "/partition/{partition}/file/{file_id}",
     description="""Update file metadata without re-uploading the file.
 
 **Parameters:**
@@ -317,7 +320,8 @@ async def patch_file(
     )
 
 
-@router.post("/partition/{partition}/file/{file_id}/copy",
+@router.post(
+    "/partition/{partition}/file/{file_id}/copy",
     description="""Copy a file from one partition to another.
 
 **Parameters:**
@@ -358,10 +362,14 @@ async def copy_file_between_partitions(
     await indexer.copy_file.remote(
         file_id=source_file_id, metadata=metadata, partition=source_partition, user=user
     )
-    return JSONResponse(status_code=status.HTTP_201_CREATED, content={"message": "File copied successfully."})
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED,
+        content={"message": "File copied successfully."},
+    )
 
 
-@router.get("/task/{task_id}",
+@router.get(
+    "/task/{task_id}",
     description="""Get the status of an indexing task.
 
 **Parameters:**
@@ -402,7 +410,8 @@ async def get_task_status(
     return JSONResponse(status_code=status.HTTP_200_OK, content=content)
 
 
-@router.get("/task/{task_id}/error",
+@router.get(
+    "/task/{task_id}/error",
     description="""Get error details for a failed task.
 
 **Parameters:**
@@ -438,7 +447,8 @@ async def get_task_error(
         )
 
 
-@router.get("/task/{task_id}/logs",
+@router.get(
+    "/task/{task_id}/logs",
     description="""Get logs for a specific task.
 
 **Parameters:**
@@ -488,7 +498,8 @@ async def get_task_logs(
         raise HTTPException(status_code=500, detail=f"Failed to fetch logs: {str(e)}")
 
 
-@router.delete("/task/{task_id}", 
+@router.delete(
+    "/task/{task_id}",
     name="cancel_task",
     description="""Cancel a running or queued task.
 
