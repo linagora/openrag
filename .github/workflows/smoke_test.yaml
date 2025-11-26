@@ -121,3 +121,22 @@ jobs:
           sed -i 's/"simplewiki-500-2"/"simplewiki-500"/g' backup/simplewiki-500-2.openrag
           diff <(grep -Ev '^{"created": ' backup/simplewiki-500.openrag) <(grep -Ev '^{"created": ' backup/simplewiki-500-2.openrag)
 
+      -
+        name: Index small documents (relations test)
+        run: |
+          echo "Sun is shining"                | .github/workflows/smoke_test/index_file.sh       http://localhost:8080 rel_test root.txt
+          echo "Cats meow"                     | .github/workflows/smoke_test/index_child_file.sh http://localhost:8080 rel_test child_a.txt root.txt
+          echo "There are letters in the text" | .github/workflows/smoke_test/index_child_file.sh http://localhost:8080 rel_test leaf_a.txt  child_a.txt
+          sleep 10s
+
+      -
+        name: Query small documents (relations test)
+        run: |
+          echo "Sun Is Shining" | .github/workflows/smoke_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "root.txt"
+          echo "Sun Is Shining" | .github/workflows/smoke_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "child_a.txt"
+          echo "Cats meow" | .github/workflows/smoke_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "root.txt"
+          echo "Cats meow" | .github/workflows/smoke_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "child_a.txt"
+          echo "Cats meow" | .github/workflows/smoke_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "leaf_a.txt"
+          echo "There are letters in the text" | .github/workflows/smoke_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "child_a.txt"
+          echo "There are letters in the text" | .github/workflows/smoke_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "leaf_a.txt"
+

@@ -45,6 +45,8 @@ class BaseRetriever(ABCRetriever):
         partition: list[str],
         query: str,
     ) -> list[Document]:
+        log = logger.bind(query=query, partition=partition)
+
         db = get_vectordb()
         chunks = await db.async_search.remote(
             query=query,
@@ -53,6 +55,25 @@ class BaseRetriever(ABCRetriever):
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
         )
+
+        extra_documents = []
+        file_ids = set()
+        for chunk in chunks:
+            file_ids.add(chunk.metadata['file_id'])
+
+        for file_id in file_ids:
+            linked_documents = await db.get_related_files.remote(file_id, 'parent', partition)
+            log.info(f'Got {len(linked_documents)} chunks from documents linked with {file_id}')
+            for linked_file_id in set([ d.metadata['file_id'] for d in linked_documents ]):
+                log.info("Linked : " + linked_file_id)
+
+            extra_documents.extend(linked_documents)
+
+        chunks.extend(extra_documents)
+
+        for file_id in set( [ d.metadata['file_id'] for d in chunks ] ):
+            log.info(f'Found: {file_id}')
+
         return chunks
 
 

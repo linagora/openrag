@@ -298,20 +298,93 @@ class PartitionFileManager:
                     )
                     session.add(membership)
 
+                target_files = {}
+                if 'rels' in file_metadata:
+                    for rel in file_metadata['rels']:
+                        if rel['target'] in target_files:
+                            continue
+                        file_object = session.query(File).filter_by(
+                                file_id=rel['target'],
+                                partition_name=partition).one_or_none()
+                        if file_object is None:
+                            raise Exception(f'Can\'t find {rel["target"]} referenced from {file_id}')
+                        target_files[rel['target']] = { 'obj': file_object, 'type': rel['type'] }
+
                 # Add file to partition
                 file = File(
                     file_id=file_id,
                     partition_name=partition,  # Use string directly
                     file_metadata=file_metadata,
                 )
+                objects = [ file ]
 
-                session.add(file)
+                for target_id, target_details in target_files.items():
+                    log.info(f"before rel: {file_id} ")
+                    r = FileRelationship(
+                        source_file=file,
+                        target_file=target_details['obj'],
+                        relationship_type=target_details['type']
+                    )
+                    log.info("after rels")
+                    objects.append(r)
+
+                session.add_all(objects)
                 session.commit()
                 log.info("Added file successfully")
                 return True
-            except Exception:
+            except Exception as e:
                 session.rollback()
-                log.exception("Error adding file to partition")
+                log.exception(f"Error adding file to partition: {e}")
+                raise
+
+    def get_related_file_ids(self, file_id, relationship_type: str, partition: str):
+        log = self.logger.bind(file_id=id)
+        with self.Session() as session:
+            try:
+                current_file = (
+                    session.query(File.id)
+                    .filter(File.file_id == file_id, File.partition_name.in_(partition))
+                    .first()
+                )
+                if not current_file:
+                    log.warning(f"File {file_id} doesn't exist in partition {partition}")
+                    return False
+
+                file_pk = current_file.id
+                log.info(f'current file {file_id} id is {file_pk}')
+
+                outgoing_rels = (
+                    session.query(FileRelationship, File.file_id)
+                    .join(File, File.id == FileRelationship.target_file_id)
+                    .filter(FileRelationship.source_file_id==file_pk,
+                            FileRelationship.relationship_type==relationship_type)
+                    .all()
+                )
+                log.info(f"{len(outgoing_rels)} out rels")
+                for rel, fle in outgoing_rels:
+                    log.opt(raw=True).info(f"{rel.id}: {fle}\n")
+
+                incoming_rels = (
+                    session.query(FileRelationship, File.file_id)
+                    .join(File, File.id == FileRelationship.source_file_id)
+                    .filter(FileRelationship.target_file_id==file_pk,
+                            FileRelationship.relationship_type==relationship_type)
+                    .all()
+                )
+                log.info(f"{len(incoming_rels)} in rels")
+                for rel, fle in incoming_rels:
+                    log.opt(raw=True).info(f"{rel.id}: {fle}\n")
+
+                ids = {
+                    'outgoing': list({file_id for rel, file_id in outgoing_rels}),
+                    'incoming': list({file_id for rel, file_id in incoming_rels})
+                }
+
+                return ids
+
+            except Exception as e:
+                session.rollback()
+                log.exception(f"Error: {e}")
                 raise
 
     def remove_file_from_partition(self, file_id: str, partition: str):

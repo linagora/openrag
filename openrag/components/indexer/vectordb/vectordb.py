@@ -601,6 +601,40 @@ class MilvusDB(BaseVectorDB):
 
         return output_docs
 
+    async def get_related_files(self, file_id, relationship_type: str, partition: str):
+        log = self.logger.bind(file_id=str(file_id))
+        try:
+            related_ids = self.partition_file_manager.get_related_file_ids(
+                file_id=file_id,
+                relationship_type=relationship_type,
+                partition=partition
+            )
+
+            # merge two groups of related_ids -> ids
+            ids = related_ids['outgoing'] + related_ids['incoming']
+
+            self.logger.opt(raw=True).info(f'Query {ids} from {self.collection_name}\n')
+            response = await self._async_client.query(
+                collection_name=self.collection_name,
+                filter=f"file_id in {ids}"
+            )
+
+            self.logger.info(f'Got {len(response)} responses')
+
+            return _parse_documents_from_search_results([ [ { 'entity': r } for r in response ] ])
+        except MilvusException as e:
+            self.logger.exception("Search failed in Milvus", error=str(e))
+            raise VDBSearchError(
+                f"Search failed in Milvus: {str(e)}",
+                collection_name=self.collection_name,
+            )
+        except Exception as e:
+            self.logger.exception("Unexpected error occurred", error=str(e))
+            raise UnexpectedVDBError(
+                f"Unexpected error occurred: {str(e)}",
+                collection_name=self.collection_name,
+            )
+
     async def delete_file(self, file_id: str, partition: str):
         log = self.logger.bind(file_id=file_id, partition=partition)
         try:
