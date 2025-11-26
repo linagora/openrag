@@ -127,7 +127,7 @@ jobs:
           echo "Sun is shining"                | .github/workflows/smoke_test/index_file.sh       http://localhost:8080 rel_test root.txt
           echo "Cats meow"                     | .github/workflows/smoke_test/index_child_file.sh http://localhost:8080 rel_test child_a.txt root.txt
           echo "There are letters in the text" | .github/workflows/smoke_test/index_child_file.sh http://localhost:8080 rel_test leaf_a.txt  child_a.txt
-          sleep 10s
+          sleep 30s
 
       -
         name: Query small documents (relations test)
