@@ -227,8 +227,35 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 ```http
 POST /v1/completions
 ```
-
 OpenAI-compatible text completion endpoint.
+
+#### Extra arguments
+* When using the openai endpoint /v1/chat/completions, one can provide extra arguments in the request body to customize the RAG behavior:
+- `spoken_style_answer`: boolean (default: false) - If true, the model will generate a succint spoken style conversational answer based on the retrieved documents.
+- `use_map_reduce`: boolean (default: false) - If true, the model will use a map-reduce strategy to aggregate information from multiple documents. For more information see the [map-reduce documentation](/openrag/documentation/env_vars/#map--reduce-configuration).
+
+These arguments are supplied via the metadata field of the OpenAI request body. Example:
+
+```bash title="Enabling conversational answer with openai chat completions endpoint"
+curl -X 'POST' 'http://localhost:8080/v1/chat/completions' \
+  -H 'accept: application/json' \
+  -H 'Authorization: Bearer YOUR_AUTH_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "openrag-{partition_name}",
+  "messages": [
+    {
+      "role": "user",
+      "content": "your_query"
+    }
+  ],
+  "temperature": 0.3,
+  "stream": false,
+  "metadata": {
+    "spoken_style_answer": true
+  }
+}'
+```
 
 ## 💡 Usage Examples
 

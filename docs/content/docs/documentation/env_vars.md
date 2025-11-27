@@ -434,4 +434,5 @@ Always set a strong **`AUTH_TOKEN`** in production environments. Never leave it 
 
 ### Chainlit
 [See this](/openrag/documentation/setup_chainlit_ui_auth/) for chainlit authentification
+
 [See this](/openrag/documentation/chainlit_data_persistency/) for chainlit data persistency
