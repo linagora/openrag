@@ -1,7 +1,11 @@
 import copy
 from enum import Enum
 
-from components.prompts import QUERY_CONTEXTUALIZER_PROMPT, SYS_PROMPT_TMPLT
+from components.prompts import (
+    QUERY_CONTEXTUALIZER_PROMPT,
+    SPOKEN_STYLE_ANSWER_PROMPT,
+    SYS_PROMPT_TMPLT,
+)
 from langchain_core.documents.base import Document
 from openai import AsyncOpenAI
 from utils.logger import get_logger
@@ -122,8 +126,15 @@ class RagPipeline:
         logger.debug("Prepared query for chat completion", query=query)
 
         metadata = payload.get("metadata", {})
+
         use_map_reduce = metadata.get("use_map_reduce", False)
-        logger.info("Metadata parameters", use_map_reduce=use_map_reduce)
+        spoken_style_answer = metadata.get("spoken_style_answer", False)
+
+        logger.debug(
+            "Metadata parameters",
+            use_map_reduce=use_map_reduce,
+            spoken_style_answer=spoken_style_answer,
+        )
 
         # 2. get docs
         docs = await self.retriever_pipeline.retrieve_docs(
@@ -140,11 +151,13 @@ class RagPipeline:
         messages: list = copy.deepcopy(messages)
 
         # prepend the messages with the system prompt
+        prompt = SPOKEN_STYLE_ANSWER_PROMPT if spoken_style_answer else SYS_PROMPT_TMPLT
+
         messages.insert(
             0,
             {
                 "role": "system",
-                "content": SYS_PROMPT_TMPLT.format(context=context),
+                "content": prompt.format(context=context),
             },
         )
         payload["messages"] = messages

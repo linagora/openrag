@@ -30,6 +30,11 @@ commands = [
         "icon": "brain-cog",
         "description": "This uses a custom DeepSearch RAG mechanism (Map & Reduce) to handle complex queries.\nSlower but gives accurate answers.\nUse in an empty context as it consumes more tokens.",
     },
+    {
+        "id": "SpokenStyleAnswer",
+        "icon": "audio-lines",
+        "description": "Get a conversational text answer suitable for voice assistants.\nThe answer is concise, clear, and factual.",
+    },
 ]
 
 
@@ -236,6 +241,7 @@ async def on_message(message: cl.Message):
         "frequency_penalty": 0.4,
         "metadata": {
             "use_map_reduce": message.command == "DeepSearch",
+            "spoken_style_answer": message.command == "SpokenStyleAnswer",
         },
     }
 

@@ -79,6 +79,7 @@ prompts:
   query_contextualizer: query_contextualizer_tmpl.txt
   chunk_contextualizer: chunk_contextualizer_tmpl.txt
   image_describer: image_captioning_tmpl.txt
+  spoken_style_answer: spoken_style_answer_tmpl.txt
 
   # query templates for different retriever types
   hyde: hyde.txt

@@ -24,8 +24,9 @@ class OpenAIChatCompletionRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = Field(
         {
             "use_map_reduce": False,
+            "spoken_style_answer": False,
         },
-        description="Extra parameters for OpenAI API",
+        description="Extra custom parameters for OpenAI API",
     )
 
 
