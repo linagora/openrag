@@ -90,6 +90,11 @@ jobs:
           pip3 install -r utility/requirements.txt
 
       -
+        name: Wait for OpenRag to start
+        run: |
+          .github/workflows/related_docs_test/wait_for_services.sh
+
+      -
         name: Index small documents (relations test)
         run: |
           echo "Sun is shining"                | .github/workflows/related_docs_test/index_file.sh       http://localhost:8080 rel_test root.txt
