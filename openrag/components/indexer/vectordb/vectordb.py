@@ -616,7 +616,7 @@ class MilvusDB(BaseVectorDB):
             self.logger.opt(raw=True).info(f'Query {ids} from {self.collection_name}\n')
             response = await self._async_client.query(
                 collection_name=self.collection_name,
-                filter=f"file_id in {ids}"
+                filter=f"partition in {partition} and file_id in {ids}"
             )
 
             self.logger.info(f'Got {len(response)} responses')

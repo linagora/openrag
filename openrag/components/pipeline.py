@@ -82,7 +82,9 @@ class RagPipeline:
         self.contextualizer = AsyncOpenAI(
             base_url=config.llm["base_url"], api_key=config.llm["api_key"]
         )
-        self.max_contextualized_query_len = config.rag["max_contextualized_query_len"]
+
+        if self.rag_mode in [ RAGMODE.CHATBOTRAG ]:
+            self.max_contextualized_query_len = config.rag["max_contextualized_query_len"]
 
         # map reduce
         self.map_reduce: RAGMapReduce = RAGMapReduce(config=config)
