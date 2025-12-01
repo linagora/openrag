@@ -19,5 +19,19 @@ while true; do
 fi
 done
 
+
+LLAMACPP_ADDR=`docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' openrag-llamacpp-server-1`
+
+while true; do
+  STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${LLAMACPP_ADDR}:8080/health_check")
+  if [ "$STATUS_CODE" -eq 200 ]; then
+    echo "$(date): llama-cpp is up and running"
+    break
+  else
+    echo "$(date): Health check of llama-cpp server failed with status $STATUS_CODE, retrying..."
+    sleep 10
+fi
+done
+
 sleep 30s
 
