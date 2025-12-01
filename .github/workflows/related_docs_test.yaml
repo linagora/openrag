@@ -105,7 +105,9 @@ jobs:
       -
         name: Query small documents (relations test)
         run: |
+          echo "Q1"
           echo "Sun Is Shining" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "root.txt"
+          echo "Q2"
           echo "Sun Is Shining" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "child_a.txt"
           echo "Cats meow" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "root.txt"
           echo "Cats meow" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "child_a.txt"
