@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  index-backup-restore:
+  related-docs-test:
     runs-on: ubuntu-latest
     steps:
       - name: Update apt and install packages
