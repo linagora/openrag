@@ -6,6 +6,8 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/rewrite-target: /$1
     nginx.ingress.kubernetes.io/use-regex: "true"  
+    nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+
 spec:
   ingressClassName: {{ .Values.ingress.className | quote }}
   rules:

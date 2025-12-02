@@ -16,6 +16,8 @@ ray:
     replicas: 1
     minReplicas: 1
     maxReplicas: 1
+  nodeSelector:
+    gpu-role: serving
   image:
     repository: ghcr.io/linagora/openrag-ray
     tag: latest
@@ -86,6 +88,11 @@ vllm:
         vllmConfig:
           gpuMemoryUtilization: 0.3
           extraArgs: ["--trust-remote-code", "--task", "embed"]
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: gpu-role
+                operator: In
+                values: ["serving"]
 
       - name: "whisper"
         repository: "ghcr.io/linagora/vllm-whisper"
@@ -103,6 +110,11 @@ vllm:
         vllmConfig:
           gpuMemoryUtilization: 0.5
           extraArgs: ["--trust-remote-code", "--async-scheduling"]
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: gpu-role
+                operator: In
+                values: ["serving"]
 
       - name: "llm"
         repository: "vllm/vllm-openai"
@@ -129,6 +141,12 @@ vllm:
             requestCPU: 8
             requestMemory: "32Gi"
             requestGPU: 2
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: gpu-role
+                operator: In
+                values: ["llm"]
+        pvcStorage: "50Gi"
   routerSpec:
     enableRouter: false
 
@@ -139,6 +157,8 @@ reranker:
   image:
     repository: michaelf34/infinity
     tag: latest
+  nodeSelector:
+    gpu-role: serving
   model:
     id: Alibaba-NLP/gte-multilingual-reranker-base
   command:

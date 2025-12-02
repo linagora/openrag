@@ -3,6 +3,9 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: rag-model-weights
+  annotations:
+    "helm.sh/resource-policy": keep
+
 spec:
   accessModes:
     - {{ .Values.persistence.accessMode }}
@@ -15,6 +18,8 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: rag-data
+  annotations:
+    "helm.sh/resource-policy": keep
 spec:
   accessModes:
     - {{ .Values.persistence.accessMode }}
@@ -27,6 +32,8 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: rag-logs
+  annotations:
+    "helm.sh/resource-policy": keep
 spec:
   accessModes:
     - {{ .Values.persistence.accessMode }}
@@ -39,6 +46,8 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: rag-venv
+  annotations:
+    "helm.sh/resource-policy": keep
 spec:
   accessModes:
     - {{ .Values.persistence.accessMode }}

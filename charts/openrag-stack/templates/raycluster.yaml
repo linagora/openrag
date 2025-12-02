@@ -12,6 +12,7 @@ spec:
     serviceType: ClusterIP
     template:
       spec:
+        nodeSelector: {{- toYaml .Values.ray.nodeSelector | nindent 12 }}
         initContainers:
           - name: init-venv-sync
             image: {{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}
