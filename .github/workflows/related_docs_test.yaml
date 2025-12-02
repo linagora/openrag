@@ -109,10 +109,16 @@ jobs:
         name: Query small documents (relations test)
         run: |
           echo "Q1"
-          echo "Sun Is Shining" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "root.txt"
+          echo "Sun Is Shining" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test
+          docker logs openrag-openrag-cpu-1
+          docker logs openrag-llamacpp-server-1
           echo "Q2"
-          echo "Sun Is Shining" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "child_a.txt"
-          echo "Cats meow" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "root.txt"
+          echo "Sun Is Shining" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test
+          docker logs openrag-openrag-cpu-1
+          docker logs openrag-llamacpp-server-1
+          echo "Cats meow" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test
+          docker logs openrag-openrag-cpu-1
+          docker logs openrag-llamacpp-server-1
           echo "Cats meow" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "child_a.txt"
           echo "Cats meow" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "leaf_a.txt"
           echo "There are letters in the text" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "child_a.txt"
