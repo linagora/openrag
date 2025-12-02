@@ -98,9 +98,12 @@ jobs:
         name: Index small documents (relations test)
         run: |
           echo "Sun is shining"                | .github/workflows/related_docs_test/index_file.sh       http://localhost:8080 rel_test root.txt
+          echo "I1"
           echo "Cats meow"                     | .github/workflows/related_docs_test/index_child_file.sh http://localhost:8080 rel_test child_a.txt root.txt
+          echo "I2"
           echo "There are letters in the text" | .github/workflows/related_docs_test/index_child_file.sh http://localhost:8080 rel_test leaf_a.txt  child_a.txt
-          sleep 60s
+          echo "I3"
+          sleep 10s
 
       -
         name: Query small documents (relations test)
