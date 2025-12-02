@@ -140,6 +140,7 @@ services:
       LLAMA_ARG_ALIAS: SmolLM2-135M
       LLAMA_ARG_MODEL_URL: https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q2_K.gguf
       LLAMA_ARG_CTX_SIZE: 8192
+      LLAMA_ARG_N_PREDICT: 32
       LLAMA_ARG_N_PARALLEL: 1
       LLAMA_ARG_ENDPOINT_METRICS: 1
       LLAMA_ARG_PORT: 8080
