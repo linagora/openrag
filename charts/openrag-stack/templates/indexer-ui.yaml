@@ -1,0 +1,53 @@
+{{- if .Values.indexerUi.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-indexer-ui
+  labels:
+    app.kubernetes.io/name: indexer-ui
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.indexerUi.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: indexer-ui
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: indexer-ui
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: indexer-ui
+          image: {{ .Values.indexerUi.image }}
+          imagePullPolicy: {{ .Values.indexerUi.imagePullPolicy }}
+          env:
+            {{- range $key, $value := .Values.indexerUi.env }}
+            - name: {{ $key }}
+              value: "{{ $value }}"
+            {{- end }}
+          ports:
+            - containerPort: {{ .Values.indexerUi.service.targetPort }}
+          resources:
+            {{- toYaml .Values.indexerUi.resources | nindent 12 }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-indexer-ui
+  labels:
+    app.kubernetes.io/name: indexer-ui
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  type: {{ .Values.indexerUi.service.type }}
+  ports:
+    - port: {{ .Values.indexerUi.service.port }}
+      targetPort: {{ .Values.indexerUi.service.targetPort }}
+      {{- if eq .Values.indexerUi.service.type "NodePort" }}
+      nodePort: {{ .Values.indexerUi.service.nodePort }}
+      {{- end }}
+  selector:
+    app: indexer-ui
+{{- end }}

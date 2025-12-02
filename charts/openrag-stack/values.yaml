@@ -12,7 +12,7 @@ persistence:
 
 ray:
   workers:
-    count: 2
+    count: 1
     replicas: 1
     minReplicas: 1
     maxReplicas: 1
@@ -65,6 +65,8 @@ milvus:
 # === vLLM (embedder) ===
 vllm:
   embedderModelName: &embedderModel "Qwen/Qwen3-Embedding-0.6B"
+  whisperModelName: &whisperModel "openai/whisper-large-v3-turbo"
+  llmModelName: &llmModel "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
   servingEngineSpec:
     enableEngine: true
     modelSpec:
@@ -84,7 +86,51 @@ vllm:
         vllmConfig:
           gpuMemoryUtilization: 0.3
           extraArgs: ["--trust-remote-code", "--task", "embed"]
-    servicePort: &vllmPort 8000
+
+      - name: "whisper"
+        repository: "ghcr.io/linagora/vllm-whisper"
+        tag: "latest"
+        modelURL: *whisperModel
+        replicaCount: 1
+        requestCPU: 4
+        requestMemory: "16Gi"
+        requestGPU: 1
+        limitCPU: 4
+        limitMemory: "16Gi"
+        hf_token:
+          secretName: rag-env-secrets
+          secretKey: HF_TOKEN
+        vllmConfig:
+          gpuMemoryUtilization: 0.5
+          extraArgs: ["--trust-remote-code", "async-scheduling"]
+
+      - name: "llm"
+        repository: "vllm/vllm-openai"
+        tag: "latest"
+        modelURL: *llmModel
+        replicaCount: 0
+        requestCPU: 8
+        requestMemory: "32Gi"
+        requestGPU: 2
+        limitCPU: 8
+        limitMemory: "32Gi"
+        hf_token:
+          secretName: rag-env-secrets
+          secretKey: HF_TOKEN
+        vllmConfig:
+          v1: 1
+          tensorParallelSize: 2
+          pipelineParallelSize: 1
+          maxModelLen: 32768
+          extraArgs: ["--trust-remote-code"]
+        shmSize: "20Gi"
+        raySpec:
+          headNode:
+            requestCPU: 8
+            requestMemory: "32Gi"
+            requestGPU: 2
+  routerSpec:
+    enableRouter: false
 
 # === Infinity reranker ===
 reranker:
@@ -113,10 +159,33 @@ reranker:
     limits:
       cpu: "4"
       memory: "16Gi"
+
+indexerUi:
+  enabled: true
+
+  image: "linagoraai/indexer-ui:latest"
+  imagePullPolicy: IfNotPresent
+
+  replicaCount: 1
+
+  env:
+    API_BASE_URL: "http://localhost:8080"
+    INCLUDE_CREDENTIALS: "false"
+
+  service:
+    type: ClusterIP
+    port: 3000
+    targetPort: 3000
+
+  ingress:
+    enabled: false
+
+  resources: {}
+
 # === OpenRAG main app ===
 openrag:
   image:
-    repository: ghcr.io/linagora/openrag
+    repository: linagoraai/openrag
     tag: latest
   service:
     type: ClusterIP
@@ -143,8 +212,8 @@ ingress:
 env:
   config:
     # LLM
-    BASE_URL: "https://example.com/v1/"
-    MODEL: "Mistral-Small-3.1-24B-Instruct-2503"
+    BASE_URL: "http://{{ .Release.Name }}-llm-engine-service/v1"
+    MODEL: *llmModel
     LLM_SEMAPHORE: "50"
 
     # VLM
@@ -181,7 +250,7 @@ env:
 
     # Embedder
     EMBEDDER_MODEL_NAME: *embedderModel
-    EMBEDDER_BASE_URL: "http://{{ .Release.Name }}-embedder-engine-service:{{ .Values.vllm.servingEngineSpec.servicePort }}/v1"
+    EMBEDDER_BASE_URL: "http://{{ .Release.Name }}-embedder-engine-service/v1"
 
     # Reranker
     RERANKER_MODEL: *rerankerModel
@@ -201,6 +270,7 @@ env:
     MARKER_MIN_PROCESSES: "3"
     MARKER_POOL_SIZE: "3"
     MARKER_NUM_GPUS: "0.6"
+    TRANSCRIBER_BASE_URL: "http://{{ .Release.Name }}-whisper-engine-service/v1"
 
     # Ray
     RAY_NUM_GPUS: "0.1"
@@ -218,5 +288,6 @@ env:
     API_KEY: "sk-xxxx" # LLM API KEY
     VLM_API_KEY: "sk-xxxx" # VLM API KEY
     EMBEDDER_API_KEY: "EMPTY"
+    TRANSCRIBER_API_KEY: "EMPTY"
     AUTH_TOKEN: "sk-xxxx" # API KEY for OpenRAG
     HF_TOKEN: "hf_xxxx" # HuggingFace token
