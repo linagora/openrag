@@ -243,7 +243,6 @@ env:
 
     # App
     APP_PORT: "8080"
-    APP_HOST: "0.0.0.0"
     ENABLE_RAY_SERVE: "true"
     RAY_SERVE_NUM_REPLICAS: "4"
     RAY_SERVE_PORT: "80"
@@ -263,10 +262,6 @@ env:
     POSTGRES_PORT: *pgPort
     POSTGRES_USER: *pgUser
     POSTGRES_PASSWORD: *pgPass
-
-    # Retriever
-    CONTEXTUAL_RETRIEVAL: "true"
-    RETRIEVER_TOP_K: "15"
 
     # Embedder
     EMBEDDER_MODEL_NAME: *embedderModel
