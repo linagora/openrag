@@ -21,7 +21,7 @@ payload=$(jq -nc \
 
 #echo ${payload}
 
-response=`curl -X POST "${ENDPOINT_URL}/v1/chat/completions" \
+response=`curl --connect-timeout 600 -X POST "${ENDPOINT_URL}/v1/chat/completions" \
   -H "accept: application/json" \
   -H "Content-Type: application/json" \
   -d "$payload"`
