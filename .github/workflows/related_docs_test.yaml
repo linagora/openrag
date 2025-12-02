@@ -109,6 +109,8 @@ jobs:
         name: Query small documents (relations test)
         run: |
           echo "Q1"
+          docker logs openrag-openrag-cpu-1
+          docker logs openrag-llamacpp-server-1
           echo "Sun Is Shining" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test
           docker logs openrag-openrag-cpu-1
           docker logs openrag-llamacpp-server-1
