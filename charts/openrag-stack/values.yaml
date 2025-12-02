@@ -102,7 +102,7 @@ vllm:
           secretKey: HF_TOKEN
         vllmConfig:
           gpuMemoryUtilization: 0.5
-          extraArgs: ["--trust-remote-code", "async-scheduling"]
+          extraArgs: ["--trust-remote-code", "--async-scheduling"]
 
       - name: "llm"
         repository: "vllm/vllm-openai"
