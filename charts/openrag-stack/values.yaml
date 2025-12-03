@@ -48,13 +48,13 @@ milvus:
   indexNode: { enabled: false }
   minio:
     mode: distributed
-    replicas: 4
+    replicas: 3
     persistence:
       enabled: true
       size: 20Gi
       storageClass: *storageClass
   etcd:
-    replicaCount: 3
+    replicaCount: 2
     persistence:
       enabled: true
       size: 10Gi
@@ -147,6 +147,31 @@ vllm:
                 operator: In
                 values: ["llm"]
         pvcStorage: "50Gi"
+      - name: "vlm"
+        repository: "vllm/vllm-openai"
+        tag: "v0.11.2"
+        modelURL: *vlmModel
+        replicaCount: 1
+        requestCPU: 8
+        requestMemory: "32Gi"
+        requestGPU: 1
+        limitCPU: 8
+        limitMemory: "32Gi"
+        hf_token:
+          secretName: rag-env-secrets
+          secretKey: HF_TOKEN
+        vllmConfig:
+          v1: 1
+          tensorParallelSize: 1
+          pipelineParallelSize: 1
+          maxModelLen: 8192
+          extraArgs: ["--trust-remote-code"]
+        shmSize: "20Gi"
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: gpu-role
+                operator: In
+                values: ["vlm"]
   routerSpec:
     enableRouter: false
 
@@ -232,12 +257,12 @@ ingress:
 env:
   config:
     # LLM
-    BASE_URL: "http://{{ .Release.Name }}-llm-engine-service/v1"
+    BASE_URL: "http://{{ .Release.Name }}-llm-engine-service/v1/"
     MODEL: *llmModel
     LLM_SEMAPHORE: "50"
 
     # VLM
-    VLM_BASE_URL: "https://example.com/v1/"
+    VLM_BASE_URL: "http://{{ .Release.Name }}-vlm-engine-service/v1/"
     VLM_MODEL: "Qwen2.5-VL-7B-Instruct"
     VLM_SEMAPHORE: "50"
 
