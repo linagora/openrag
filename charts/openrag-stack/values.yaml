@@ -67,6 +67,7 @@ milvus:
 # === vLLM (embedder) ===
 vllm:
   embedderModelName: &embedderModel "Qwen/Qwen3-Embedding-0.6B"
+  vlmModelName: &vlmModel "Qwen/Qwen2.5-VL-7B-Instruct"
   whisperModelName: &whisperModel "openai/whisper-large-v3-turbo"
   llmModelName: &llmModel "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
   servingEngineSpec:
@@ -263,7 +264,7 @@ env:
 
     # VLM
     VLM_BASE_URL: "http://{{ .Release.Name }}-vlm-engine-service/v1/"
-    VLM_MODEL: "Qwen2.5-VL-7B-Instruct"
+    VLM_MODEL: *vlmModel
     VLM_SEMAPHORE: "50"
 
     # App
