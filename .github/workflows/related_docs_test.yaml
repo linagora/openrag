@@ -99,26 +99,17 @@ jobs:
         run: |
           echo "Sun is shining"                | .github/workflows/related_docs_test/index_file.sh       http://localhost:8080 rel_test root.txt
           sleep 10s
-          echo "I1"
           echo "Cats meow"                     | .github/workflows/related_docs_test/index_child_file.sh http://localhost:8080 rel_test child_a.txt root.txt
-          echo "I2"
           sleep 10s
           echo "There are letters in the text" | .github/workflows/related_docs_test/index_child_file.sh http://localhost:8080 rel_test leaf_a.txt  child_a.txt
-          echo "I3"
           sleep 30s
 
       -
         name: Query small documents (relations test)
         run: |
-          echo "Q1"
-          docker logs openrag-openrag-cpu-1
-          echo "Sun Is Shining" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test
-          docker logs openrag-openrag-cpu-1
-          echo "Q2"
-          echo "Sun Is Shining" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test
-          docker logs openrag-openrag-cpu-1
-          echo "Cats meow" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test
-          docker logs openrag-openrag-cpu-1
+          echo "Sun Is Shining" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "root.txt"
+          echo "Sun Is Shining" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "child_a.txt"
+          echo "Cats meow" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "root.txt"
           echo "Cats meow" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "child_a.txt"
           echo "Cats meow" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "leaf_a.txt"
           echo "There are letters in the text" | .github/workflows/related_docs_test/chat_completion.sh http://localhost:8080 rel_test | grep -v '{\\"' | grep file_id | grep "child_a.txt"

@@ -26,7 +26,7 @@ response=`curl --connect-timeout 600 -X POST "${ENDPOINT_URL}/v1/chat/completion
   -H "Content-Type: application/json" \
   -d "$payload"`
 
-echo $response | jq .
+#echo $response | jq .
 
 extra=`echo $response | jq '.extra | fromjson'`
 
