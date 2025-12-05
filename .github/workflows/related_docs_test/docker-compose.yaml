@@ -130,21 +130,12 @@ services:
     profiles:
       - 'cpu'
 
-  llamacpp-server:
-    networks:
-      default:
-        aliases:
-          - llamacpp
-    image: ghcr.io/ggml-org/llama.cpp:server
-    environment:
-      LLAMA_ARG_ALIAS: SmolLM2-135M
-      LLAMA_ARG_MODEL_URL: https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q2_K.gguf
-      LLAMA_ARG_CACHE_RAM: 0
-      LLAMA_ARG_CTX_SIZE: 1024
-      LLAMA_ARG_N_PREDICT: 16
-      LLAMA_ARG_N_PARALLEL: 1
-      LLAMA_ARG_ENDPOINT_METRICS: 1
-      LLAMA_ARG_PORT: 8080
+  mock-llm:
+    build:
+      context: .github/workflows/related_docs_test/mock-llm
+      dockerfile: Dockerfile.mock-llm
+    ports:
+      - 8001:8080
     profiles:
       - 'cpu'
 
