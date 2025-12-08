@@ -185,9 +185,10 @@ The retriever fetches relevant documents from the vector database based on query
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
+| `RETRIEVER_TYPE` | str | single | Retrieval strategy to use. Options: `single`, `multiQuery`, `hyde` |
 | `RETRIEVER_TOP_K` | int | 50 | Number of documents to retrieve before reranking.|
 | `SIMILARITY_THRESHOLD` | float | 0.6 | Minimum similarity score (0.0-1.0) for document retrieval. Documents below this threshold are filtered out |
-| `RETRIEVER_TYPE` | str | single | Retrieval strategy to use. Options: `single`, `multiQuery`, `hyde` |
+| `WITH_SURROUNDING_CHUNKS` | `bool` | true | When enabled, retrieves adjacent chunks (preceding and following) for each matched document to provide additional context.|
 
 #### Retrieval Strategies
 

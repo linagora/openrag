@@ -1,3 +1,4 @@
 type: ''
 top_k: ${oc.decode:${oc.env:RETRIEVER_TOP_K, 50}} # Number of documents to return before reranking
 similarity_threshold: ${oc.decode:${oc.env:SIMILARITY_THRESHOLD, 0.6}} # Minimum similarity score for document retrieval
+with_surrounding_chunks: ${oc.decode:${oc.env:WITH_SURROUNDING_CHUNKS, true}} # Whether to include surrounding chunks for each retrieved chunk
