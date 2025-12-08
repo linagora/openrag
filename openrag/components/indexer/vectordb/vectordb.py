@@ -1,4 +1,5 @@
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
@@ -73,6 +74,7 @@ class BaseVectorDB(ABC):
         similarity_threshold: int = 0.60,
         partition: list[str] = None,
         filter: Optional[dict] = None,
+        with_surrounding_chunks: bool = False,
     ) -> list[Document]:
         pass
 
@@ -84,6 +86,7 @@ class BaseVectorDB(ABC):
         top_k_per_query: int = 5,
         similarity_threshold: int = 0.6,
         filter: Optional[dict] = None,
+        with_surrounding_chunks: bool = False,
     ) -> list[Document]:
         pass
 
@@ -123,6 +126,9 @@ analyzer_params = {
                 "[Image Placeholder]",
                 "_english_",
                 "_french_",
+                "[CHUNK_START]",
+                "[CHUNK_END]",
+                "[CONTEXT]",
             ],  # Defines custom stop words and includes the English and French stop word list
         }
     ],
@@ -378,11 +384,13 @@ class MilvusDB(BaseVectorDB):
 
             entities = []
             vectors = await self.embedder.aembed_documents(chunks)
-            for chunk, vector in zip(chunks, vectors):
+            order_metadata_l: list[dict] = _gen_chunk_order_metadata(n=len(chunks))
+            for chunk, vector, order_metadata in zip(chunks, vectors, order_metadata_l):
                 entities.append(
                     {
                         "text": chunk.page_content,
                         "vector": vector,
+                        **order_metadata,
                         **chunk.metadata,
                     }
                 )
@@ -423,6 +431,7 @@ class MilvusDB(BaseVectorDB):
         top_k_per_query=5,
         similarity_threshold=0.6,
         filter=None,
+        with_surrounding_chunks=False,
     ) -> list[Document]:
         # Gather all search tasks concurrently
         search_tasks = [
@@ -432,6 +441,7 @@ class MilvusDB(BaseVectorDB):
                 similarity_threshold=similarity_threshold,
                 partition=partition,
                 filter=filter,
+                with_surrounding_chunks=with_surrounding_chunks,
             )
             for query in queries
         ]
@@ -451,6 +461,7 @@ class MilvusDB(BaseVectorDB):
         similarity_threshold: int = 0.80,
         partition: list[str] = None,
         filter: Optional[dict] = None,
+        with_surrounding_chunks: bool = False,
     ) -> list[Document]:
         expr_parts = []
         if partition != ["all"]:
@@ -509,7 +520,17 @@ class MilvusDB(BaseVectorDB):
                     **vector_param,
                 )
 
-            return _parse_documents_from_search_results(response)
+            docs = _parse_documents_from_search_results(response)
+            if with_surrounding_chunks:
+                self.logger.debug("Fetching surrounding chunks")
+                surrounding_chunks = await self.get_surrounding_chunks(docs)
+                self.logger.debug(
+                    "Fetched surrounding chunks", count=len(surrounding_chunks)
+                )
+                docs.extend(surrounding_chunks)
+
+            return docs
+
         except MilvusException as e:
             self.logger.exception("Search failed in Milvus", error=str(e))
             raise VDBSearchError(
@@ -530,6 +551,53 @@ class MilvusDB(BaseVectorDB):
                 collection_name=self.collection_name,
                 partition=partition,
             )
+
+    async def get_surrounding_chunks(self, docs: list[Document]) -> list[Document]:
+        existant_ids = set(doc.metadata.get("_id") for doc in docs)
+
+        # Collect all prev/next section IDs
+        section_ids = [
+            section_id
+            for doc in docs
+            for section_id in [
+                doc.metadata.get("prev_section_id"),
+                doc.metadata.get("next_section_id"),
+            ]
+            if section_id is not None
+        ]
+
+        if not section_ids:
+            return []
+
+        # Query all sections in parallel
+        tasks = [
+            self._async_client.query(
+                collection_name=self.collection_name,
+                filter=f"section_id == {section_id}",
+                limit=1,
+            )
+            for section_id in section_ids
+        ]
+        responses = await asyncio.gather(*tasks)
+
+        # Build output, skipping duplicates
+        output_docs = []
+        for response in responses:
+            doc_id = response[0].get("_id")
+            if doc_id not in existant_ids:
+                existant_ids.add(doc_id)
+                output_docs.append(
+                    Document(
+                        page_content=response[0]["text"],
+                        metadata={
+                            key: value
+                            for key, value in response[0].items()
+                            if key not in ["text", "vector"]
+                        },
+                    )
+                )
+
+        return output_docs
 
     async def delete_file(self, file_id: str, partition: str):
         log = self.logger.bind(file_id=file_id, partition=partition)
@@ -949,7 +1017,25 @@ class MilvusDB(BaseVectorDB):
             )
 
 
-def _parse_documents_from_search_results(search_results):
+def _gen_chunk_order_metadata(n: int = 20) -> list[dict]:
+    # Use base timestamp + index to ensure uniqueness
+    base_ts = int(time.time_ns())
+    ids: list[int] = [base_ts + i for i in range(n)]
+    L = []
+    for i in range(n):
+        prev_chunk_id = ids[i - 1] if i > 0 else None
+        next_chunk_id = ids[i + 1] if i < n - 1 else None
+        L.append(
+            {
+                "prev_section_id": prev_chunk_id,
+                "section_id": ids[i],
+                "next_section_id": next_chunk_id,
+            }
+        )
+    return L
+
+
+def _parse_documents_from_search_results(search_results) -> list[Document]:
     if not search_results:
         return []
 
