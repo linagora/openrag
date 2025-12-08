@@ -162,6 +162,21 @@ def detect_language(text: str):
     return outputs[0].get("lang")
 
 
+# Initialize language detector
+lang_detect_cache_dir = "/app/model_weights/"
+lang_detector_config = LangDetectConfig(
+    max_input_length=1024,  # chars
+    model="auto",
+    cache_dir=lang_detect_cache_dir,
+)
+lang_detector: LangDetector = LangDetector(config=lang_detector_config)
+
+
+def detect_language(text: str):
+    outputs = lang_detector.detect(text, k=1)
+    return outputs[0].get("lang")
+
+
 def get_llm_semaphore() -> DistributedSemaphore:
     return DistributedSemaphore(
         name="llmSemaphore",
