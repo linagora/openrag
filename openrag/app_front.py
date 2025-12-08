@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -47,6 +48,16 @@ def get_headers(api_key):
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
+
+
+def sanitize_filename(filename: str) -> str:
+    # Replace spaces and special chars with hyphens or underscores
+    filename = re.sub(r"[,\s]+", "_", filename)
+    # Remove double underscores
+    filename = re.sub(r"__+", "_", filename)
+    # Remove other problematic characters
+    filename = re.sub(r"[^\w\-.]+", "", filename)
+    return filename
 
 
 if PERSISTENCY:
@@ -173,7 +184,9 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
     d = {}
     headers = get_headers(api_key)
     for i, s in enumerate(metadata_sources):
-        filename = Path(s["filename"])
+        filename = s["filename"]
+        filename = sanitize_filename(filename)  # Sanitize filename
+        filename = Path(filename)
         file_url = s["file_url"]
         file_url = file_url.replace(
             INTERNAL_BASE_URL, external_url
