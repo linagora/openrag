@@ -14,6 +14,7 @@ class OpenAIEmbedding(BaseEmbedding):
         self.embedding_model = embeddings_config.get("model_name")
         self.base_url = embeddings_config.get("base_url")
         self.api_key = embeddings_config.get("api_key")
+        self.max_model_len = embeddings_config.get("max_model_len", 8192)
         self._sync_client = OpenAI(base_url=self.base_url, api_key=self.api_key)
 
     @property
@@ -34,7 +35,9 @@ class OpenAIEmbedding(BaseEmbedding):
 
         try:
             response = self._sync_client.embeddings.create(
-                model=self.embedding_model, input=texts
+                model=self.embedding_model,
+                input=texts,
+                extra_body={"truncate_prompt_tokens": self.max_model_len},
             )
             return [vector.embedding for vector in response.data]
 
