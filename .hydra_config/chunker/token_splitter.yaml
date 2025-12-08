@@ -1,8 +1,0 @@
-defaults:
-  - base
-name: markdown_splitter
-
-
-# https://chat.deepseek.com/a/chat/s/28913c5d-1f62-40b0-9247-4655994fe16b
-# 3000 c => 750 tokens => 
-# 1 p => 2000 c => 500 tokens

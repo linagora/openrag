@@ -150,4 +150,4 @@ class BaseLoader(ABC):
                 )
                 image_description = ""
 
-            return f"""<image_description>\n{image_description}\n</image_description>"""
+            return f"""<image_description>\n\n{image_description}\n\n</image_description>"""
