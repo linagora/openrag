@@ -1,4 +1,0 @@
-defaults:
-  - base
-name: semantic_splitter
-breakpoint_threshold_amount: 95

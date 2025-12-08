@@ -5,6 +5,7 @@ from abc import ABCMeta
 
 import ray
 from config import load_config
+from fast_langdetect import LangDetectConfig, LangDetector
 from langchain_core.documents.base import Document
 
 # Global variables
@@ -134,6 +135,21 @@ def format_context(docs: list[Document]) -> str:
         context += "-" * 40 + "\n\n"
 
     return context
+
+
+# Initialize language detector
+lang_detect_cache_dir = "/app/model_weights/"
+lang_detector_config = LangDetectConfig(
+    max_input_length=1024,  # chars
+    model="auto",
+    cache_dir=lang_detect_cache_dir,
+)
+lang_detector: LangDetector = LangDetector(config=lang_detector_config)
+
+
+def detect_language(text: str):
+    outputs = lang_detector.detect(text, k=1)
+    return outputs[0].get("lang")
 
 
 def get_llm_semaphore() -> DistributedSemaphore:

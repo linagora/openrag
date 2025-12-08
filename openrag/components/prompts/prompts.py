@@ -30,7 +30,7 @@ def load_prompt(
 # Load prompts
 SYS_PROMPT_TMPLT = load_prompt("sys_prompt")
 QUERY_CONTEXTUALIZER_PROMPT = load_prompt("query_contextualizer")
-CHUNK_CONTEXTUALIZER = load_prompt("chunk_contextualizer")
+CHUNK_CONTEXTUALIZER_PROMPT = load_prompt("chunk_contextualizer")
 IMAGE_DESCRIBER = load_prompt("image_describer")
 
 # Retrievers prompts

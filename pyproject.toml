@@ -46,7 +46,7 @@ dependencies = [
     "html-to-markdown>=2.4.0",
     "langdetect>=1.0.9",
     "alembic>=1.17.0",
-    "langdetect>=1.0.9",
+    "fast-langdetect>=1.0.0",
 ]
 
 [dependency-groups]
