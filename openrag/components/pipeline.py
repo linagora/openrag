@@ -71,8 +71,12 @@ class RagPipeline:
         # retriever pipeline
         self.retriever_pipeline = RetrieverPipeline(config=config)
 
+        # RAG
         self.rag_mode = config.rag["mode"]
         self.chat_history_depth = config.rag["chat_history_depth"]
+        self.max_context_tokens = config.reranker.get("top_k", 10) * config.chunker.get(
+            "chunk_size", 512
+        )
 
         self.llm_client = LLM(config.llm, logger)
         self.contextualizer = AsyncOpenAI(
@@ -145,7 +149,7 @@ class RagPipeline:
             docs = await self.map_reduce.map(query=query, chunks=docs)
 
         # 3. Format the retrieved docs
-        context = format_context(docs)
+        context = format_context(docs, max_context_tokens=self.max_context_tokens)
 
         # 4. prepare the output
         messages: list = copy.deepcopy(messages)
@@ -176,7 +180,7 @@ class RagPipeline:
         )
 
         # 3. Format the retrieved docs
-        context = format_context(docs)
+        context = format_context(docs, max_context_tokens=self.max_context_tokens)
 
         # 4. prepare the output
         if docs:

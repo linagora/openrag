@@ -98,7 +98,7 @@ As noted in [this PR](https://github.com/linagora/openrag/pull/134), the current
 |------------------------|------|----------------------|-------------|
 | `CHUNKER`              | `str`  | recursive_splitter   | Defines the chunking strategy: `recursive_splitter`, `semantic_splitter`, or `markdown_splitter`. |
 | `CONTEXTUAL_RETRIEVAL` | `bool` | true                 | Enables contextual retrieval to chunk context, a technique introduced by Anthropic to improve retrieval performance ([Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval)) |
-| `CHUNK_SIZE`           | `int`  | 512                  | Maximum size (in characters) of each chunk. |
+| `CHUNK_SIZE`           | `int`  | 512                  | Maximum size (in tokens) of each chunk. |
 | `CHUNK_OVERLAP_RATE`   | `float`| 0.2                  | Percentage of overlap between consecutive chunks. |
 
 After files are converted to Markdown, only the **text content** is chunked.
@@ -214,9 +214,13 @@ The current Infinity server interface is not OpenAI-compatible, which limits int
 |----------|------|---------|-------------|
 | `RERANKER_ENABLED` | `bool` | true | Enable or disable the reranking mechanism |
 | `RERANKER_MODEL` | `str` | Alibaba-NLP/gte-multilingual-reranker-base | Model used for reranking documents.|
-| `RERANKER_TOP_K` | `int` | 5 | Number of top documents to return after reranking. Increase to 8 for better results if your LLM has a wider context window |
+| `RERANKER_TOP_K` | `int` | 10 | Number of top documents to return after reranking. This is the number of docs we put into the llm context. Increase for better accuracy if your llm has a wider context length.|
 | `RERANKER_BASE_URL` | `str` | http://reranker:7997 | Base URL of the reranker service |
 | `RERANKER_PORT` | `int` | 7997 | Port on which the reranker service listens |
+
+:::note[Context Window Management]
+**`RERANKER_TOP_K`** also determines the total context size passed to the LLM. Reranked chunks are concatenated sequentially up to a maximum context length of **`RERANKER_TOP_K × CHUNK_SIZE`** tokens (default: 10 × 512 toks = 5,120 toks).
+:::
 
 ## Extra
 ### Prompts
