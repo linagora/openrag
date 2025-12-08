@@ -7,9 +7,12 @@ import ray
 from config import load_config
 from fast_langdetect import LangDetectConfig, LangDetector
 from langchain_core.documents.base import Document
+from langchain_openai import ChatOpenAI
+from utils.logger import get_logger
 
 # Global variables
 config = load_config()
+logger = get_logger()
 
 
 class SingletonMeta(type):
@@ -119,22 +122,29 @@ class DistributedSemaphore:
         ray.get(self._actor.cleanup.remote())
 
 
-def format_context(docs: list[Document]) -> str:
+def format_context(docs: list[Document], max_context_tokens: int = 4096) -> str:
     if not docs:
         return "No document found from the database"
 
-    context = "Extracted documents:\n"
-    for i, doc in enumerate(docs, start=1):
-        # doc_id = f"[doc_{i}]"
-        # document = f"""
-        # *source*: {doc_id}
-        # content: \n{doc.page_content.strip()}\n
-        # """
-        document = f"""content: \n{doc.page_content.strip()}\n"""
-        context += document
-        context += "-" * 40 + "\n\n"
+    llm = ChatOpenAI(**config.llm)
+    _length_function = llm.get_num_tokens
 
-    return context
+    docs_with_tokens = list(map(lambda d: (_length_function(d.page_content), d), docs))
+
+    reduced_docs = []
+
+    total_tokens = 0
+    for n_tokens, doc in docs_with_tokens:
+        if total_tokens + n_tokens > max_context_tokens:
+            break
+        reduced_docs.append(doc.page_content)
+        total_tokens += n_tokens
+
+    sep = "-" * 10 + "\n\n"
+    logger.debug(
+        "Context formatted", total_tokens=total_tokens, doc_count=len(reduced_docs)
+    )
+    return f"{sep}".join(reduced_docs)
 
 
 # Initialize language detector
