@@ -42,7 +42,7 @@ x-vllm: &vllm_template
     --trust-remote-code
     --task embed
     --gpu_memory_utilization 0.3
-    --max-model-len ${MAX_MODEL_LEN:-8194}
+    --max-model-len ${MAX_MODEL_LEN:-8192}
   # --max-num-seqs 1
   # gpu_memory_utilization, max-num-seqs et max-model-len can be tuned depending on your GPU memory
 
@@ -139,7 +139,7 @@ services:
       --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
       --trust-remote-code
       --dtype float32
-      --max-model-len ${MAX_MODEL_LEN:-8194}
+      --max-model-len ${MAX_MODEL_LEN:-8192}
     #  --max-num-batched-tokens 32768
     # dtype is required for aarch64 (https://github.com/vllm-project/vllm/issues/11327) and improves speed on amd64.
     # max-num-batched-tokens is required for aarch64 because chunked prefill isn't supported by V1 vllm backend
