@@ -1,0 +1,21 @@
+services:
+  vllm-cpu:
+    image: openeuler/vllm-cpu:0.9.1-oe2403lts
+    build: null
+    environment:
+      - VLLM_TARGET_DEVICE=cpu
+      - VLLM_LOGGING_LEVEL=DEBUG
+      - VLLM_CPU_KVCACHE_SPACE=8
+    command: >
+      --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
+      --trust-remote-code
+      --dtype float32
+      --device cpu
+      --max-num-seqs 8
+      --max-model-len ${MAX_MODEL_LEN:-2048}
+    profiles:
+      - "cpu"
+    security_opt:
+      - seccomp=unconfined
+    healthcheck:
+      disable: true

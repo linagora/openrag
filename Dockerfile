@@ -30,18 +30,23 @@ COPY pyproject.toml uv.lock ./
 RUN pip3 install uv && \
     uv python install 3.12.7 && \
     uv python pin 3.12.7
-    # && \ uv sync --no-dev
+#   && uv sync --no-dev
+
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
+
+# Copy source code, assets and config
+# COPY openrag/ /app/openrag
+COPY openrag/ .
+COPY prompts/ /app/prompts/
+COPY .hydra_config/ /app/.hydra_config/
+
+ENV PYTHONPATH=/app/openrag/
+ENV APP_iPORT=${APP_iPORT:-8080}
+
 # Set workdir for source code
 WORKDIR /app/openrag
 
-# Copy source code
-COPY openrag/ .
+# ENV UV_PROJECT_ENVIRONMENT=/app/.venv
 
-# Copy assests & config
-COPY prompts/ /app/prompts/
-COPY .hydra_config/ /app/.hydra_config/
-ENV PYTHONPATH=/app/openrag/
-ENV APP_iPORT=${APP_iPORT:-8080}
 ENTRYPOINT ../entrypoint.sh
