@@ -13,33 +13,114 @@ jobs:
       matrix:
         python-version: ["3.12"]
 
+    env:
+      APP_PORT: 8080
+      RAG_BASE_URL: http://localhost:8080
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install uv
+      - name: env file
         run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          cp tests/.env-tests .env
+
+      # Move storage to /mnt to avoid disk space issues
+      - name: Free up space and move Docker storage to /mnt
+        run: |
+          echo "Stopping Docker..."
+          sudo systemctl stop docker
+
+          echo "Creating new Docker root at /mnt/docker..."
+          sudo mkdir -p /mnt/docker
+          sudo rsync -aqxP /var/lib/docker/ /mnt/docker
+
+          echo "Updating Docker daemon config..."
+          echo '{"data-root": "/mnt/docker"}' | sudo tee /etc/docker/daemon.json
+
+          cat /etc/docker/daemon.json
+
+          echo "Restarting Docker..."
+          sudo systemctl start docker
+
+          echo "Verifying Docker root directory:"
+          docker info | grep "Docker Root Dir"
+
+      # Setup docker builds with cache
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build openrag image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: linagoraai/openrag:latest
+          push: false
+          cache-from: type=gha,scope=openrag
+          cache-to: type=gha,mode=max,scope=openrag
+
+      - name: Build vllm CPU image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./extern/vllm
+          file: ./extern/vllm/Dockerfile.cpu
+          target: vllm-openai
+          tags: openrag-vllm-openai-cpu
+          push: false
+          cache-from: type=gha,scope=vllm-cpu
+          cache-to: type=gha,mode=max,scope=vllm-cpu
+
+
+      # Start openRAG CPU
+      - name: Start openRAG CPU
+        run: |
+          docker compose --profile cpu up -d
+
+      - name: Wait for RAG API
+        run: |
+          echo "Waiting for RAG API on ${RAG_BASE_URL}..."
+          for i in {1..60}; do
+            if curl -fsS "${RAG_BASE_URL}/health_check" > /dev/null 2>&1; then
+              echo "RAG API is up!"
+              exit 0
+            fi
+            sleep 5
+          done
+          docker compose logs
+          exit 1
+
+      # Install uv with cache
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
 
       - name: Cache uv
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/uv
+          path: ~/.cache/uv
           key: uv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('**/pyproject.toml', '**/uv.lock') }}
           restore-keys: |
             uv-${{ runner.os }}-${{ matrix.python-version }}-
 
-      - name: Install dependencies with uv
+      # Install deps for tests
+      - name: Install with test dependencies
         run: |
-          uv sync
+          uv pip install -e ".[test]"
 
+      # Run actual tests
       - name: Run tests
         run: |
-          uv run pytest
+          uv run pytest -vv tests
+
+
+      # Dump logs on failure
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+
+      # Proper shutdown
+      - name: Shutdown openRAG
+        if: always()
+        run: |
+          docker compose down -v
+
