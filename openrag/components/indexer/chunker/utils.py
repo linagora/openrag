@@ -1,5 +1,5 @@
 import re
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 # Regex to match a Markdown table (header + delimiter + at least one row)
 TABLE_RE = re.compile(
@@ -191,7 +191,7 @@ def parse_markdown_table(markdown_table):
 def chunk_table(
     table_element: MDElement,
     chunk_size: int = 512,
-    length_function: Optional[callable] = None,
+    length_function: Optional[Callable[[str], int]] = None,
 ) -> list[MDElement]:
     txt = clean_markdown_table_spacing(table_element.content)
     header_lines, groups = parse_markdown_table(txt)
@@ -244,7 +244,11 @@ def chunk_table(
 
     # wrap into MDElement list
     return [
-        MDElement(type="table", content=subtable, page_number=table_element.page_number)
+        MDElement(
+            type="table",
+            content=subtable,
+            page_number=table_element.page_number,
+        )
         for subtable in subtables
     ]
 

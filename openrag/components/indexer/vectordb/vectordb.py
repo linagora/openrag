@@ -583,6 +583,8 @@ class MilvusDB(BaseVectorDB):
         # Build output, skipping duplicates
         output_docs = []
         for response in responses:
+            if not response:
+                continue
             doc_id = response[0].get("_id")
             if doc_id not in existant_ids:
                 existant_ids.add(doc_id)

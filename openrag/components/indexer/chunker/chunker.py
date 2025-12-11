@@ -1,4 +1,3 @@
-from abc import ABC
 from typing import Literal, Optional
 
 from components.prompts import CHUNK_CONTEXTUALIZER_PROMPT
@@ -106,7 +105,7 @@ class ChunkContextualizer:
             return chunks
 
 
-class BaseChunker(ABC):
+class BaseChunker:
     """Base class for document chunkers with built-in contextualization capability."""
 
     def __init__(

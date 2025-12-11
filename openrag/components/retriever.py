@@ -56,7 +56,7 @@ class BaseRetriever(ABCRetriever):
         return chunks
 
 
-class SingleRetreiver(BaseRetriever):
+class SingleRetriever(BaseRetriever):
     pass
 
 
@@ -144,7 +144,7 @@ class HyDeRetriever(BaseRetriever):
 
 class RetrieverFactory:
     RETRIEVERS = {
-        "single": BaseRetriever,
+        "single": SingleRetriever,
         "multiQuery": MultiQueryRetriever,
         "hyde": HyDeRetriever,
     }
@@ -156,7 +156,7 @@ class RetrieverFactory:
         retriever_type = retreiverConfig.pop("type")
         retriever_cls = RetrieverFactory.RETRIEVERS.get(retriever_type, None)
 
-        if retriever_type is None:
+        if retriever_cls is None:
             raise ValueError(f"Unknown retriever type: {retriever_type}")
 
         retreiverConfig["llm"] = ChatOpenAI(**config.llm)

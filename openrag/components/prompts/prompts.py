@@ -12,7 +12,7 @@ def load_prompt(
     prompt_name: str,
     prompts_dir: Path = prompts_dir,
     prompt_mapping: dict = prompt_mapping,
-) -> tuple[str, str]:
+) -> str:
     file_name = prompt_mapping.get(prompt_name, None)
     if not file_name:
         raise ValueError(f"No associated file name found for prompt: `{prompt_name}`")
