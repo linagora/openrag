@@ -11,6 +11,19 @@ logger = get_logger()
 
 class OpenAIEmbedding(BaseEmbedding):
     def __init__(self, embeddings_config: dict):
+        """
+        Initialize the embedding backend from a configuration dictionary and create a synchronous OpenAI client.
+        
+        Parameters:
+            embeddings_config (dict): Configuration mapping with keys:
+                - model_name (str): Name of the embedding model to use.
+                - base_url (str): Base URL for the OpenAI-compatible API.
+                - api_key (str): API key for authenticating requests.
+                - max_model_len (int, optional): Maximum token length to use for truncation; defaults to 8192.
+        
+        Side effects:
+            Sets instance attributes `embedding_model`, `base_url`, `api_key`, `max_model_len` and initializes a synchronous OpenAI client at `self._sync_client`.
+        """
         self.embedding_model = embeddings_config.get("model_name")
         self.base_url = embeddings_config.get("base_url")
         self.api_key = embeddings_config.get("api_key")
@@ -28,7 +41,20 @@ class OpenAIEmbedding(BaseEmbedding):
 
     def embed_documents(self, texts: list[str | Document]) -> list[list[float]]:
         """
-        Embed documents using the configured embedder.
+        Compute embedding vectors for a list of input strings or Document objects.
+        
+        Given a list of strings or a list of Document instances, returns an embedding vector for each input in the same order. If Documents are provided, their page_content is used as the input text.
+        
+        Parameters:
+            texts (list[str | Document]): Input items to embed; each item is either a raw text string or a Document whose page_content will be embedded.
+        
+        Returns:
+            list[list[float]]: A list where each element is an embedding vector (list of floats) corresponding to the input at the same index.
+        
+        Raises:
+            EmbeddingAPIError: If the embedding API returns an error.
+            EmbeddingResponseError: If the API response has an unexpected format or missing embedding data.
+            UnexpectedEmbeddingError: For any other failures that occur while generating embeddings.
         """
         if isinstance(texts[0], Document):
             texts = [doc.page_content for doc in texts]

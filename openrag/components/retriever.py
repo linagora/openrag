@@ -35,6 +35,14 @@ class BaseRetriever(ABCRetriever):
     def __init__(
         self, top_k=6, similarity_threshold=0.95, with_surrounding_chunks=True, **kwargs
     ):
+        """
+        Initialize the base retriever with retrieval parameters.
+        
+        Parameters:
+            top_k (int): Maximum number of chunks to return per query.
+            similarity_threshold (float): Minimum similarity score (0 to 1) required for a chunk to be considered a match.
+            with_surrounding_chunks (bool): If True, include surrounding context chunks around each matched chunk in search results.
+        """
         super().__init__(top_k, similarity_threshold, **kwargs)
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
@@ -45,6 +53,16 @@ class BaseRetriever(ABCRetriever):
         partition: list[str],
         query: str,
     ) -> list[Document]:
+        """
+        Retrieve relevant document chunks from the vector database for a query within the given partition.
+        
+        Parameters:
+            partition (list[str]): Identifiers or keys that restrict which vectors/documents to search.
+            query (str): The text query used to find relevant document chunks.
+        
+        Returns:
+            list[Document]: Document chunks matching the query, ordered by relevance.
+        """
         db = get_vectordb()
         chunks = await db.async_search.remote(
             query=query,
@@ -84,6 +102,16 @@ class MultiQueryRetriever(BaseRetriever):
         )
 
     async def retrieve(self, partition: list[str], query: str) -> list[Document]:
+        """
+        Generate multiple sub-queries from the input query and retrieve matching documents across those queries.
+        
+        Parameters:
+            partition (list[str]): List of partition identifiers to restrict the vector search.
+            query (str): The input query used to generate multiple sub-queries.
+        
+        Returns:
+            list[Document]: Documents retrieved for the generated queries.
+        """
         db = get_vectordb()
         logger.debug("Generating multiple queries", k_queries=self.k_queries)
         generated_queries = await self.generate_queries.ainvoke(
@@ -127,6 +155,16 @@ class HyDeRetriever(BaseRetriever):
         return hyde_document
 
     async def retrieve(self, partition: list[str], query: str) -> list[Document]:
+        """
+        Generate a synthetic "Hyde" query from the input query, optionally include the original query, and retrieve matching documents using a multi-query vector search.
+        
+        Parameters:
+            partition (list[str]): Identifiers of the partition(s) to restrict the search to.
+            query (str): The user's original query used to generate the Hyde query (and optionally included in the search).
+        
+        Returns:
+            list[Document]: Retrieved document chunks matching the generated queries ordered by relevance.
+        """
         db = get_vectordb()
         hyde = await self.get_hyde(query)
         queries = [hyde]

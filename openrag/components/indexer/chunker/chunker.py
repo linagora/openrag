@@ -27,10 +27,30 @@ class ChunkContextualizer:
     """Handles contextualization of document chunks."""
 
     def __init__(self, llm_config: dict):
+        """
+        Initialize the ChunkContextualizer and build its internal context-generation pipeline.
+        
+        Parameters:
+            llm_config (dict): Configuration for the language model used to construct the context generator (e.g., model name, temperature, other LLM settings).
+        
+        Raises:
+            ValueError: If creating the context generator fails.
+        """
         self.context_generator = self._create_context_generator(llm_config)
 
     def _create_context_generator(self, llm_config: dict):
-        """Create the context generation chain."""
+        """
+        Builds a chat-based prompt chain used to generate contextual content for document chunks.
+        
+        Parameters:
+            llm_config (dict): Configuration passed to the chat LLM (e.g., model, temperature, credentials).
+        
+        Returns:
+            chain: A configured prompt-LLM-output parser chain with retry behavior applied.
+        
+        Raises:
+            ValueError: If the context generator cannot be created.
+        """
         try:
             prompt = ChatPromptTemplate.from_template(
                 template=CHUNK_CONTEXTUALIZER_PMPT
@@ -50,7 +70,18 @@ class ChunkContextualizer:
         current_chunk: Document,
         source: str,
     ) -> str:
-        """Generate context for a given chunk of text."""
+        """
+        Produce contextual text for a chunk using the provided first chunks, previous chunks, and source.
+        
+        Parameters:
+            first_chunks (list[Document]): Leading chunks from the same document used as initial context.
+            prev_chunks (list[Document]): Chunks that immediately precede the current chunk to provide local context.
+            current_chunk (Document): The chunk to generate context for.
+            source (str): Identifier or origin of the document (e.g., filename or URL).
+        
+        Returns:
+            str: Generated contextual text for the chunk; an empty string if generation fails.
+        """
         async with get_vlm_semaphore():
             try:
                 return await self.context_generator.ainvoke(
@@ -70,7 +101,16 @@ class ChunkContextualizer:
     async def contextualize_chunks(
         self, chunks: list[Document], metadata: dict = None
     ) -> list[Document]:
-        """Contextualize a list of document chunks."""
+        """
+        Create contextualized documents for a sequence of chunks by attaching generated context to each chunk.
+        
+        Parameters:
+            chunks (list[Document]): Ordered document chunks to contextualize. Each chunk's metadata should include a "source" key on the first item if available.
+            metadata (dict, optional): Additional metadata to apply (unused unless needed by contextualizer).
+        
+        Returns:
+            list[Document]: If fewer than two chunks, returns documents whose content is formatted for standalone chunks. Otherwise returns documents whose content combines the original chunk content with generated contextual content for that chunk. If an error occurs during contextualization, returns the original input `chunks`.
+        """
 
         if len(chunks) < 2:
             return [
@@ -126,6 +166,16 @@ class BaseChunker(ABC):
         contextual_retrieval: bool = False,
         **kwargs,
     ):
+        """
+        Initialize the base chunker with size, overlap settings, and optional contextual retrieval support.
+        
+        Parameters:
+            chunk_size (int): Target maximum tokens per chunk.
+            chunk_overlap_rate (float): Fraction of `chunk_size` to overlap between adjacent chunks; used to compute `chunk_overlap` as an integer.
+            llm_config (Optional[dict]): Configuration passed to the LLM client used for token counting and optional context generation.
+            contextual_retrieval (bool): If True, create a ChunkContextualizer to augment chunks with generated context; otherwise no contextualizer is created.
+            **kwargs: Additional unused keyword arguments for forward compatibility.
+        """
         self.chunk_size = chunk_size
         self.chunk_overlap_rate = chunk_overlap_rate
         self.chunk_overlap = int(self.chunk_size * self.chunk_overlap_rate)
@@ -145,7 +195,16 @@ class BaseChunker(ABC):
     async def _apply_contextualization(
         self, chunks: list[Document], metadata: dict = None
     ) -> list[Document]:
-        """Apply contextualization if enabled."""
+        """
+        Contextualize a list of document chunks when contextual retrieval is enabled.
+        
+        Parameters:
+            chunks (list[Document]): Documents to potentially contextualize.
+            metadata (dict, optional): Additional metadata to pass to the contextualizer.
+        
+        Returns:
+            list[Document]: Documents augmented with generated contextual content when contextualization is enabled; otherwise the original `chunks`.
+        """
         if not self.contextual_retrieval:
             return chunks
 
@@ -154,7 +213,19 @@ class BaseChunker(ABC):
     def _prepare_md_elements(
         self, content: str
     ) -> tuple[list[MDElement], list[MDElement]]:
-        """Prepare and combine markdown elements from raw content."""
+        """
+        Split markdown content into text elements and large tables/images.
+        
+        Splits the input content into markdown elements, filters out image placeholders,
+        and separates elements into two groups:
+        - text elements: regular text and tables/images whose token length is 100 or less
+        - tables_and_images: table or image elements whose token length is greater than 100
+        
+        Returns:
+            tuple[list[MDElement], list[MDElement]]: A pair (texts, tables_and_images) where
+                `texts` contains elements suitable for normal text chunking and
+                `tables_and_images` contains large tables/images to be handled separately.
+        """
         md_elements: list[MDElement] = split_md_elements(content)
 
         tables_and_images, texts = [], []
@@ -177,7 +248,12 @@ class BaseChunker(ABC):
         return texts, tables_and_images
 
     def split_text(self, text: str) -> list[str]:
-        """Split text into chunks using the text splitter."""
+        """
+        Split the input text into chunks according to the configured text splitter.
+        
+        Returns:
+            list[str]: A list of text chunk strings produced from the input.
+        """
         if not self.text_splitter:
             logger.warning(
                 "Text splitter not initialized. Initializing with default RecursiveCharacterTextSplitter."
@@ -195,6 +271,19 @@ class BaseChunker(ABC):
     def _get_chunks(
         self, content: str, metadata: dict = None, log=None
     ) -> list[Document]:
+        """
+        Split document content into page-aware chunk Documents for text, tables, and images.
+        
+        This creates Document objects for each text chunk and for each table/image element found in the content. Large tables are further split into multiple table chunks. Each returned Document has `page_content` set to the chunk text and `metadata` augmented with a "page" number and "chunk_type" (one of "text", "table", or the element's type).
+        
+        Parameters:
+            content (str): Raw document content to be split.
+            metadata (dict, optional): Base metadata to merge into each chunk's metadata.
+            log (logging.Logger, optional): Logger used for debug messages; defaults to module logger.
+        
+        Returns:
+            list[Document]: List of chunk Documents sorted by their `metadata["page"]`.
+        """
         log = log or logger
         texts, tables_and_images = self._prepare_md_elements(content=content)
         combined_texts = "\n".join([e.content for e in texts])
@@ -257,7 +346,16 @@ class BaseChunker(ABC):
     async def split_document(
         self, doc: Document, task_id: Optional[str] = None
     ) -> list[Document]:
-        """Split document into chunks with optional contextualization."""
+        """
+        Split a Document into smaller Document chunks and optionally enrich them with contextual content.
+        
+        Parameters:
+            doc (Document): The source document to split; its metadata may be preserved on resulting chunks.
+            task_id (Optional[str]): Optional identifier included in logging context for this split operation.
+        
+        Returns:
+            list[Document]: A list of Documents representing the generated chunks (text, tables, or images), each carrying chunk-specific metadata.
+        """
         metadata = doc.metadata
         log = logger.bind(
             file_id=metadata.get("file_id"),
@@ -287,6 +385,16 @@ class RecursiveSplitter(BaseChunker):
         contextual_retrieval=False,
         **kwargs,
     ):
+        """
+        Initialize the RecursiveSplitter and configure its text splitter used for splitting content into chunks.
+        
+        Parameters:
+        	chunk_size (int): Target maximum tokens per chunk.
+        	chunk_overlap_rate (float): Fraction of chunk overlap between adjacent chunks (0.0-1.0).
+        	llm_config (dict | None): Configuration for the language model client used elsewhere in the chunker.
+        	contextual_retrieval (bool): Whether contextual retrieval/schema enrichment is enabled for produced chunks.
+        	**kwargs: Additional keyword arguments forwarded to the base chunker initializer.
+        """
         super().__init__(
             chunk_size, chunk_overlap_rate, llm_config, contextual_retrieval, **kwargs
         )

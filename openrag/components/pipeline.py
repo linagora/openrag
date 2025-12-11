@@ -66,6 +66,26 @@ class RetrieverPipeline:
 
 class RagPipeline:
     def __init__(self, config) -> None:
+        """
+        Initialize a RagPipeline configured for retrieval-augmented generation.
+        
+        Parameters:
+            config: Configuration object or mapping containing keys used by the pipeline:
+                - retriever: settings passed to RetrieverPipeline constructor.
+                - rag: dict with "mode", "chat_history_depth", and "max_contextualized_query_len".
+                - reranker: may contain "top_k" (used when computing max_context_tokens).
+                - chunker: may contain "chunk_size" (used when computing max_context_tokens).
+                - llm: settings used to create the LLM client and contextualizer (expects "base_url" and "api_key").
+        
+        Notes:
+            The constructor creates and stores these attributes on the instance:
+            - retriever_pipeline: RetrieverPipeline configured from `config`.
+            - rag_mode and chat_history_depth from `config.rag`.
+            - max_context_tokens computed as reranker.top_k * chunker.chunk_size (defaults: top_k=10, chunk_size=512).
+            - llm_client and contextualizer initialized from `config.llm`.
+            - max_contextualized_query_len from `config.rag`.
+            - map_reduce: RAGMapReduce initialized from `config`.
+        """
         self.config = config
 
         # retriever pipeline
@@ -122,6 +142,24 @@ class RagPipeline:
                 return contextualized_query
 
     async def _prepare_for_chat_completion(self, partition: list[str], payload: dict):
+        """
+        Prepare messages and context for a chat completion by retrieving and formatting relevant documents.
+        
+        This updates the provided payload's "messages" by truncating the chat history to the pipeline's configured depth, retrieving documents relevant to a generated query, optionally running map-reduce on those documents, and prepending a system message containing the formatted context. The payload may include a "metadata" dict with keys recognized by the pipeline to control retrieval and formatting.
+        
+        Parameters:
+            partition (list[str]): Identifiers for the document partitions to search.
+            payload (dict): Request payload containing:
+                - "messages" (list[dict]): Chat messages (each with "role" and "content"); only the most recent messages up to the pipeline's chat_history_depth are used.
+                - "metadata" (optional, dict): Optional flags:
+                    - "use_map_reduce" (bool): If true, run map-reduce on retrieved documents before formatting.
+                    - "spoken_style_answer" (bool): If true, use a spoken-style system prompt when prepending context.
+        
+        Returns:
+            tuple: (updated_payload, docs)
+                - updated_payload (dict): The input payload with "messages" replaced by the prepared message list that begins with a system prompt containing the formatted context.
+                - docs (list): The list of retrieved documents (possibly processed into chunks by map-reduce).
+        """
         messages = payload["messages"]
         messages = messages[-self.chat_history_depth :]  # limit history depth
 
@@ -168,6 +206,16 @@ class RagPipeline:
         return payload, docs
 
     async def _prepare_for_completions(self, partition: list[str], payload: dict):
+        """
+        Prepare a prompt by retrieving and formatting relevant documents for a completion request.
+        
+        Parameters:
+            partition (list[str]): List of collection or partition identifiers to search for relevant documents.
+            payload (dict): Completion request payload containing a "prompt" string which will be augmented with context.
+        
+        Returns:
+            tuple: (payload, docs) where `payload` is the updated request payload with the possibly rewritten "prompt", and `docs` is the list of retrieved Document objects used to build the context.
+        """
         prompt = payload["prompt"]
 
         # 1. get the query

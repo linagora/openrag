@@ -69,17 +69,18 @@ class BaseLoader(ABC):
         image_data: Union[Image.Image, str],
     ) -> str:
         """
-        Creates a description for an image using the LLM model.
-
-        Args:
-            image_data: Can be one of:
-                - PIL.Image object
-                - str: HTTP/HTTPS URL
-                - str: data URI (data:image/...;base64,...)
-            semaphore: Semaphore to control access to the LLM model
-
+        Generate a textual description of an image using the configured LLM.
+        
+        Parameters:
+            image_data (PIL.Image or str): Image input which may be:
+                - a PIL.Image instance,
+                - an HTTP/HTTPS URL string,
+                - a data URI string (e.g., "data:image/...;base64,..."),
+                - or a raw base64-encoded image string.
+        
         Returns:
-            str: Description of the image wrapped in XML tags
+            str: The image description wrapped in an XML fragment:
+                 <image_description>\n\n{description}\n\n</image_description>.
         """
         async with get_vlm_semaphore():
             try:

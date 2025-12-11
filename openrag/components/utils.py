@@ -116,12 +116,29 @@ class DistributedSemaphore:
         await self._actor.release.remote()
 
     def cleanup(self):
+        """
+        Ensure the distributed semaphore actor exists, invoke its cleanup routine remotely, and wait for that cleanup to complete.
+        
+        This will initialize the actor if it is not already created, call the actor's `cleanup` method to release any held semaphore permits, and block until the remote call finishes.
+        """
         if self._actor is None:
             self._init_actor()
         ray.get(self._actor.cleanup.remote())
 
 
 def format_context(docs: list[Document], max_context_tokens: int = 4096) -> str:
+    """
+    Builds a token-limited context string from a list of Document objects.
+    
+    Counts each document's tokens using the ChatOpenAI token function and concatenates document.page_content values in original order until adding another document would exceed max_context_tokens. When docs is empty, returns the literal "No document found from the database".
+    
+    Parameters:
+        docs (list[Document]): Documents whose page_content will be considered for the context.
+        max_context_tokens (int): Maximum allowed cumulative token count for the returned context.
+    
+    Returns:
+        str: Concatenated document contents separated by a ten-dash line and a blank line, or the empty-database message when no documents are provided.
+    """
     if not docs:
         return "No document found from the database"
 
@@ -147,6 +164,12 @@ def format_context(docs: list[Document], max_context_tokens: int = 4096) -> str:
 
 
 def get_llm_semaphore() -> DistributedSemaphore:
+    """
+    Create a DistributedSemaphore configured for language model (LLM) operations.
+    
+    Returns:
+        DistributedSemaphore: A semaphore named "llmSemaphore" with its `max_concurrent_ops` set from `config.semaphore.llm_semaphore`.
+    """
     return DistributedSemaphore(
         name="llmSemaphore",
         max_concurrent_ops=config.semaphore.llm_semaphore,

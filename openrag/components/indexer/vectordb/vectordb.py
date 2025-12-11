@@ -76,6 +76,20 @@ class BaseVectorDB(ABC):
         filter: Optional[dict] = None,
         with_surrounding_chunks: bool = False,
     ) -> list[Document]:
+        """
+        Perform a semantic search for the given query and return matching Documents ranked by relevance.
+        
+        Parameters:
+            query (str): The natural-language query to search for.
+            top_k (int): Maximum number of top results to return per query candidate.
+            similarity_threshold (float): Minimum similarity score required for a result to be included (0.0–1.0).
+            partition (list[str] | None): Optional list of partition names to limit the search scope.
+            filter (dict | None): Optional structured filter applied to document metadata to narrow results.
+            with_surrounding_chunks (bool): If True, include adjacent (previous/next) chunks related to each matched document.
+        
+        Returns:
+            list[Document]: Documents matching the query, ordered by relevance; if `with_surrounding_chunks` is True, returned list also contains surrounding chunks associated with matched documents.
+        """
         pass
 
     @abstractmethod
@@ -88,6 +102,20 @@ class BaseVectorDB(ABC):
         filter: Optional[dict] = None,
         with_surrounding_chunks: bool = False,
     ) -> list[Document]:
+        """
+        Run multiple queries concurrently against the vector store and return matching documents.
+        
+        Parameters:
+            partition (list[str]): One or more partition names to restrict the search.
+            queries (list[str]): Query strings to search for; each query is searched independently.
+            top_k_per_query (int): Maximum number of results to return for each individual query.
+            similarity_threshold (float): Minimum similarity score required for a result to be included.
+            filter (Optional[dict]): Optional attribute filter to apply to search results.
+            with_surrounding_chunks (bool): If True, include neighboring chunks (context) for matched documents.
+        
+        Returns:
+            list[Document]: Documents matching any of the provided queries. Results from all queries are combined and de-duplicated by document id; each document includes its metadata and text (and surrounding chunks when requested).
+        """
         pass
 
     @abstractmethod
@@ -352,7 +380,21 @@ class MilvusDB(BaseVectorDB):
         return self._client.list_collections()
 
     async def async_add_documents(self, chunks: list[Document], user: dict) -> None:
-        """Asynchronously add documents to the vector store."""
+        """
+        Add a list of document chunks into the collection and register the file in the partition manager.
+        
+        Asynchronously embeds each chunk, attaches per-chunk order and metadata, inserts the resulting entities into the vector store, and records the file entry in the partition file manager.
+        
+        Parameters:
+            chunks (list[Document]): Ordered list of document chunks to insert; each chunk must include metadata containing at least `file_id` and `partition`.
+            user (dict): User information used to record ownership (expects an `id` key).
+        
+        Raises:
+            VDBInsertError: If the file_id already exists in the target partition.
+            EmbeddingError: If embedding the chunks fails.
+            VDBError: For errors returned by the vector database client or partition file manager.
+            UnexpectedVDBError: For any other unexpected errors during insertion or registration.
+        """
 
         try:
             file_metadata = dict(chunks[0].metadata)
@@ -434,6 +476,20 @@ class MilvusDB(BaseVectorDB):
         with_surrounding_chunks=False,
     ) -> list[Document]:
         # Gather all search tasks concurrently
+        """
+        Run multiple searches in parallel for the given queries and return a deduplicated list of matching Documents.
+        
+        Parameters:
+            partition (str | list[str]): Partition name or list of partition names to restrict the searches.
+            queries (list[str]): Query strings to search for.
+            top_k_per_query (int): Number of top results to retrieve per query.
+            similarity_threshold (float): Minimum similarity score required for a result to be included.
+            filter (dict | None): Optional attribute filter to apply to each search.
+            with_surrounding_chunks (bool): If True, include surrounding chunks (previous/next sections) for matched documents.
+        
+        Returns:
+            list[Document]: List of Documents matching any of the queries, deduplicated by each document's metadata["_id"].
+        """
         search_tasks = [
             self.async_search(
                 query=query,
@@ -463,6 +519,25 @@ class MilvusDB(BaseVectorDB):
         filter: Optional[dict] = None,
         with_surrounding_chunks: bool = False,
     ) -> list[Document]:
+        """
+        Perform a nearest-neighbor search for the given text query in the collection and return matching Documents.
+        
+        Parameters:
+        	query (str): Text query to search for.
+        	top_k (int): Maximum number of results to return per search.
+        	similarity_threshold (float): Cosine similarity radius used to filter results; higher values require closer matches.
+        	partition (list[str] | None): List of partition names to restrict the search to, or ["all"] to search every partition.
+        	filter (Optional[dict]): Mapping of field names to values; each pair is applied as an equality condition in the search expression.
+        	with_surrounding_chunks (bool): If True, include neighboring chunks (previous/next sections) of matched documents in the results.
+        
+        Returns:
+        	list[Document]: Matching Documents from the vector store; when `with_surrounding_chunks` is True, includes additional surrounding chunk Documents.
+        
+        Raises:
+        	VDBSearchError: If the underlying Milvus search fails.
+        	EmbeddingError: If query embedding fails.
+        	UnexpectedVDBError: For any other unexpected errors during the search.
+        """
         expr_parts = []
         if partition != ["all"]:
             expr_parts.append(f"partition in {partition}")
@@ -553,6 +628,15 @@ class MilvusDB(BaseVectorDB):
             )
 
     async def get_surrounding_chunks(self, docs: list[Document]) -> list[Document]:
+        """
+        Fetches neighboring chunks referenced by the given documents' prev/next section IDs.
+        
+        Parameters:
+            docs (list[Document]): Documents whose metadata may contain `prev_section_id`, `next_section_id`, and `_id` used to locate and deduplicate surrounding chunks.
+        
+        Returns:
+            list[Document]: Documents representing surrounding chunks (each with `page_content` and metadata). Original documents and duplicate surrounding chunks are excluded; returns an empty list if no surrounding sections are found.
+        """
         existant_ids = set(doc.metadata.get("_id") for doc in docs)
 
         # Collect all prev/next section IDs
@@ -600,6 +684,14 @@ class MilvusDB(BaseVectorDB):
         return output_docs
 
     async def delete_file(self, file_id: str, partition: str):
+        """
+        Delete all chunks for a given file from the collection partition and remove the file record from the partition file manager.
+        
+        Raises:
+            VDBDeleteError: If the Milvus deletion operation fails.
+            VDBError: Propagates known vector database errors from lower-level operations.
+            UnexpectedVDBError: For any other unexpected exception raised during deletion.
+        """
         log = self.logger.bind(file_id=file_id, partition=partition)
         try:
             res = await self._async_client.delete(
@@ -1006,6 +1098,16 @@ class MilvusDB(BaseVectorDB):
             )
 
     def _check_file_exists(self, file_id, partition: str):
+        """
+        Validate that a file with the given identifier exists in the specified partition.
+        
+        Parameters:
+        	file_id (str): Identifier of the file to check.
+        	partition (str): Name of the partition to check within.
+        
+        Raises:
+        	VDBFileNotFoundError: If the file does not exist in the partition; includes `collection_name`, `partition`, and `file_id` in the error context.
+        """
         if not self.partition_file_manager.file_exists_in_partition(
             file_id=file_id, partition=partition
         ):
@@ -1019,6 +1121,15 @@ class MilvusDB(BaseVectorDB):
 
 def _gen_chunk_order_metadata(n: int = 20) -> list[dict]:
     # Use base timestamp + index to ensure uniqueness
+    """
+    Generate a sequence of chunk-order metadata dictionaries with unique section IDs.
+    
+    Parameters:
+        n (int): Number of metadata entries to generate.
+    
+    Returns:
+        list[dict]: A list of dictionaries, each containing `prev_section_id`, `section_id`, and `next_section_id`. `section_id` values are unique and derived from the current time to avoid collisions.
+    """
     base_ts = int(time.time_ns())
     ids: list[int] = [base_ts + i for i in range(n)]
     L = []
@@ -1036,6 +1147,15 @@ def _gen_chunk_order_metadata(n: int = 20) -> list[dict]:
 
 
 def _parse_documents_from_search_results(search_results) -> list[Document]:
+    """
+    Convert Milvus-style search results into a list of Document objects.
+    
+    Parameters:
+        search_results (list): Search results expected as a list of result lists (e.g., per-query results). Each inner result is a dict with an "entity" key whose value is a mapping that includes "text" and other metadata fields.
+    
+    Returns:
+        list[Document]: List of Documents built from the first inner result list. Each Document.page_content is set to the entity's "text" and metadata contains all entity fields except "text" and "vector". An empty list is returned when input is empty.
+    """
     if not search_results:
         return []
 

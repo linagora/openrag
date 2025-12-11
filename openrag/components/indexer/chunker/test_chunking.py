@@ -22,7 +22,11 @@ class TestSplitMdElements:
         assert md_text == elements[0].content
 
     def test_single_table(self):
-        """Test parsing a single markdown table."""
+        """
+        Verify that split_md_elements extracts a single markdown table between text blocks.
+        
+        Asserts the parsed elements list contains three items in order: a text element, a table element, and a trailing text element, and that the table element's content includes the header "Header 1".
+        """
 
         md_text = "Some text before.\n\n| Header 1 | Header 2 |\n|----------|----------|\n| Cell 1   | Cell 2   |\n| Cell 3   | Cell 4   |\n\nSome text after."
         elements = split_md_elements(md_text)
@@ -195,7 +199,15 @@ class TestChunkTable:
     """Test suite for chunk_table function."""
 
     def mock_length_function(self, text):
-        """Mock function that estimates token count (~4 chars per token)."""
+        """
+        Estimate the number of tokens by assuming one token per four characters.
+        
+        Parameters:
+            text (str): Input text to estimate token count for.
+        
+        Returns:
+            int: Estimated token count computed as floor(len(text) / 4).
+        """
         return len(text) // 4
 
     def test_small_table_no_chunking(self):
