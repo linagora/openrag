@@ -101,6 +101,20 @@ def __prepare_sources(request: Request, docs: list[Document]):
     return links
 
 
+def is_direct_llm_model(
+    request: OpenAIChatCompletionRequest | OpenAICompletionRequest
+) -> bool:
+    """Check if request should use direct LLM (no RAG partition).
+    
+    Returns True if model is None, empty, or matches the configured default model.
+    """
+    return (
+        request.model is None
+        or request.model == ""
+        or request.model == config.llm.get("model")
+    )
+
+
 @router.post(
     "/chat/completions",
     summary="OpenAI compatible chat completion endpoint using RAG",
@@ -109,6 +123,7 @@ def __prepare_sources(request: Request, docs: list[Document]):
 **Model Selection:**
 - `openrag-{partition_name}`: Query only the specified partition
 - `openrag-all`: Query across all available partitions
+- empty or model name: Use the LLM directly
 
 **Request Format:**
 Accepts OpenAI-compatible chat completion requests with:
@@ -153,7 +168,7 @@ async def openai_chat_completion(
         )
 
     try:
-        if request.model is None:
+        if is_direct_llm_model(request):
             partitions = None
         else:
             partitions = await get_partition_name(
@@ -223,6 +238,7 @@ async def openai_chat_completion(
 **Model Selection:**
 - `openrag-{partition_name}`: Query only the specified partition
 - `openrag-all`: Query across all available partitions
+- empty or model name: Use the LLM directly
 
 **Request Format:**
 Accepts OpenAI-compatible completion requests with:
@@ -249,7 +265,7 @@ async def openai_completion(
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
 ):
-    model_name = request.model
+    model_name = request.model or config.llm.get("model")
     log = logger.bind(model=model_name, endpoint="/completions")
 
     if not request.prompt:
@@ -267,7 +283,7 @@ async def openai_completion(
         )
 
     try:
-        if model_name is None:
+        if is_direct_llm_model(request):
             partitions = None
         else:
             partitions = await get_partition_name(

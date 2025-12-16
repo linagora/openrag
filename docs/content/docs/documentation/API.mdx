@@ -224,7 +224,10 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 ```
 
 You can also direclty use this endpoint with no RAG pipeline, i.e. to directly use the LLM.
-For that, simply do not specify any model: 
+For that, instead of using the `openrag` prefix for the model, you can:
+- Specify no model
+- Specify an empty model
+- Specify the openRAG configured model, e.g. `Mistral-Small-3.1-24B-Instruct-2503`.
 
 **Request Body:**
 ```bash frame="none" title="Testing the openai OpenRAG chat completions endpoint with curl"
@@ -232,13 +235,14 @@ curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
   -d '{
+    "model": "",
     "messages": [
       {
         "role": "user",
         "content": "Your question here"
       }
     ],
-    "temperature": 0.7,
+    "temperature": 0.1max,
     "stream": false
   }'
 ```
