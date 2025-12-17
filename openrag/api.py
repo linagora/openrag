@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Optional
 
 import uvicorn
+from importlib.metadata import version as get_package_version
+
 from config import load_config
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
@@ -73,7 +76,7 @@ WITH_CHAINLIT_UI: Optional[bool] = (
 )
 WITH_OPENAI_API: Optional[bool] = os.getenv("WITH_OPENAI_API", "true").lower() == "true"
 
-app = FastAPI()
+app = FastAPI(version=get_package_version("openrag"))
 
 
 def custom_openapi():
@@ -81,7 +84,7 @@ def custom_openapi():
         return app.openapi_schema
     openapi_schema = get_openapi(
         title="Openrag API",
-        version="1.0.0",
+        version=app.version,
         routes=app.routes,
     )
     # Add global security
@@ -185,6 +188,13 @@ app.mount(
 async def health_check(request: Request):
     # TODO : Error reporting about llm and vlm
     return "RAG API is up."
+
+
+@app.get(
+    "/version", summary="Get openRAG version", dependencies=[]
+)
+def get_version():
+    return {"version": app.version}
 
 
 # Mount the indexer router

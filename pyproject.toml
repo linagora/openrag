@@ -1,6 +1,6 @@
 [project]
 name = "openrag"
-version = "0.1.0"
+version = "1.1.6"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -57,3 +57,11 @@ dev = [
 lint = [
     "ruff>=0.14.1",
 ]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["openrag*"]
