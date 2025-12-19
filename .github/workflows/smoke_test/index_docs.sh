@@ -2,11 +2,12 @@
 
 source venv/bin/activate
 
+SERVICE_NAME=openrag-openrag-cpu-1
 docker container ls
-OPENRAG_ADDR=`docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' openrag-openrag-cpu-1`
-docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' openrag-openrag-cpu-1
+OPENRAG_ADDR=`docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${SERVICE_NAME}`
+docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${SERVICE_NAME}
 
-docker logs openrag-openrag-cpu-1
+docker logs ${SERVICE_NAME}
 
 while true; do
   STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${OPENRAG_ADDR}:8080/health_check")
@@ -14,7 +15,8 @@ while true; do
     echo "$(date): API is up and running"
     break
   else
-    echo "$(date): Health check failed with status $STATUS_CODE, retrying..."
+    echo "$(date): ${SERVICE_NAME} : Health check failed with status $STATUS_CODE, retrying..."
+    docker logs ${SERVICE_NAME}
     sleep 10
 fi
 done
@@ -26,7 +28,7 @@ python3 utility/data_indexer.py \
     -d .github/workflows/data/simplewiki-500/ \
     -p simplewiki-500
 
-docker logs openrag-openrag-cpu-1
+docker logs ${SERVICE_NAME}
 
-.github/workflows/smoke_test/wait_for_tasks_completed.sh openrag-openrag-cpu-1 8080 500
+.github/workflows/smoke_test/wait_for_tasks_completed.sh ${SERVICE_NAME} 8080 500
 
