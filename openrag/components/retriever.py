@@ -170,7 +170,7 @@ class EmailRetriever(BaseRetriever):
         return chunks
 
 
-class SingleRetreiver(BaseRetriever):
+class SingleRetriever(BaseRetriever):
     pass
 
 
