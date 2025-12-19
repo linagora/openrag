@@ -17,7 +17,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
-    create_engine,
+    create_engine
 )
 from sqlalchemy.orm import (
     declarative_base,
@@ -85,6 +85,7 @@ class File(Base):
 
 class FileRelationshipType(enum.Enum):
     parent = "parent"
+    email_thread = "email_thread"
     other = "other"
 
 
@@ -299,16 +300,9 @@ class PartitionFileManager:
                     session.add(membership)
 
                 target_files = {}
-                if 'rels' in file_metadata:
-                    for rel in file_metadata['rels']:
-                        if rel['target'] in target_files:
-                            continue
-                        file_object = session.query(File).filter_by(
-                                file_id=rel['target'],
-                                partition_name=partition).one_or_none()
-                        if file_object is None:
-                            raise Exception(f'Can\'t find {rel["target"]} referenced from {file_id}')
-                        target_files[rel['target']] = { 'obj': file_object, 'type': rel['type'] }
+
+                for k in file_metadata:
+                    log.info(f'file_metadata {k} = ...')
 
                 # Add file to partition
                 file = File(
@@ -316,19 +310,39 @@ class PartitionFileManager:
                     partition_name=partition,  # Use string directly
                     file_metadata=file_metadata,
                 )
-                objects = [ file ]
 
-                for target_id, target_details in target_files.items():
-                    log.info(f"before rel: {file_id} ")
-                    r = FileRelationship(
-                        source_file=file,
-                        target_file=target_details['obj'],
-                        relationship_type=target_details['type']
-                    )
-                    log.info("after rels")
-                    objects.append(r)
+                session.add(file)
+                session.flush()
 
-                session.add_all(objects)
+                if 'rels' in file_metadata:
+                    for rel in file_metadata['rels']:
+                        if rel['target'] in target_files and rel['type'] in target_files[rel['target']]:
+                            continue
+                        log.info(f"new rel : {rel['target']} {rel['type']}")
+                        file_object = session.query(File).filter_by(
+                                file_id=rel['target'],
+                                partition_name=partition).one_or_none()
+                        if file_object is None:
+                            raise Exception(f'Can\'t find {rel["target"]} referenced from {file_id}')
+                        if rel['target'] not in target_files:
+                            target_files[rel['target']] = {}
+                        target_files[rel['target']][rel['type']] = file_object
+
+                    objects = []
+
+                    for target_id in target_files:
+                        for rel_type in target_files[target_id]:
+                            log.info(f"before rel: {file_id} {rel_type}")
+                            r = FileRelationship(
+                                source_file=file,
+                                target_file=target_files[target_id][rel_type],
+                                relationship_type=rel_type
+                            )
+                            log.info("after rels")
+                            objects.append(r)
+
+                    session.add_all(objects)
+
                 session.commit()
                 log.info("Added file successfully")
                 return True
@@ -337,8 +351,50 @@ class PartitionFileManager:
                 log.exception(f"Error adding file to partition: {e}")
                 raise
 
+
+    def get_all_rels(self, file_id, file_ids: list, relationship_type: str, partition: str):
+        """ Finds all files that have `file_ids` as target with `relationship_type`
+        """
+        log = self.logger.bind(file_id=file_id)
+        with self.Session() as session:
+            try:
+                ids = (
+                    session.query(File.id)
+                    .filter(File.file_id.in_(file_ids), File.partition_name.in_(partition))
+                    .all()
+                )
+                log.info(f"len(ids) == {len(ids)}")
+                if 0 == len(ids):
+                    log.warning(f"Files from the list {file_ids} in {partition} don't have any links.")
+                    return []
+
+                ids = [ item.id for item in ids ]
+
+                rels = (
+                    session.query(FileRelationship, File.file_id)
+                    .join(File, File.id == FileRelationship.source_file_id)
+                    .filter(
+                        FileRelationship.target_file_id.in_(ids),
+                        FileRelationship.relationship_type==relationship_type
+                    )
+                    .all()
+                )
+
+                source_file_ids = [ file_id for rel, file_id in rels ]
+
+                for rel, fle in rels:
+                    log.opt(raw=True).info(f"{rel.id}: {rel.source_file_id} -> {rel.target_file_id} | {fle}\n")
+
+                return source_file_ids
+
+            except Exception as e:
+                session.rollback()
+                log.exception(f"Error: {e}")
+                raise
+
+
     def get_related_file_ids(self, file_id, relationship_type: str, partition: str):
-        log = self.logger.bind(file_id=id)
+        log = self.logger.bind(file_id=file_id)
         with self.Session() as session:
             try:
                 current_file = (

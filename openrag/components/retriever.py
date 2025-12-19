@@ -77,7 +77,100 @@ class BaseRetriever(ABCRetriever):
         return chunks
 
 
-class SingleRetriever(BaseRetriever):
+class EmailRetriever(BaseRetriever):
+    def __init__(self, top_k=6, similarity_threshold=0.95, **kwargs):
+        super().__init__(top_k, similarity_threshold, **kwargs)
+
+    def get_parent_id(self, doc):
+        log = logger.bind(query="get_parent_id", partition="get_parent_id")
+
+        try:
+            for rel in doc.metadata['rels']:
+                if rel['type'] in ['parent']:
+                    return rel['target']
+        except Exception as e:
+            log.error(f'get_parent_id failed: {e}')
+            raise
+
+        log.info(f'No parent found: {doc.metadata["file_id"]}')
+        return None
+
+    def get_branch(self, docs, curr_chunk):
+        log = logger.bind(query="get_branch", partition="get_branch")
+
+        id2doc = {}
+        id2parent_id = {}
+        id2child_ids = {}
+
+        all_docs = docs + [ curr_chunk ]
+
+        for doc in all_docs:
+            id2doc[doc.metadata['file_id']] = doc
+            parent_id = self.get_parent_id(doc)
+            id2parent_id[doc.metadata['file_id']] = parent_id
+            if parent_id is not None and parent_id != doc.metadata['file_id']:
+                if parent_id not in id2child_ids:
+                    id2child_ids[parent_id] = []
+                id2child_ids[parent_id].append(doc.metadata['file_id'])
+
+        # From current to root
+        curr_id = curr_chunk.metadata['file_id']
+        subtree = []
+        while curr_id != id2parent_id[curr_id]:
+            curr_id = id2parent_id[curr_id]
+            if curr_id is None:
+                break
+            subtree.append(curr_id)
+
+        # From current to leaves
+        q = []
+        q.extend(id2child_ids[curr_chunk.metadata['file_id']])
+        while len(q) > 0:
+            curr_id = q.pop(0)
+            subtree.append(curr_id)
+            if curr_id in id2child_ids:
+                q.extend(id2child_ids[curr_id])
+
+        return [ id2doc[doc_id] for doc_id in subtree ]
+
+    async def retrieve(
+        self,
+        partition: list[str],
+        query: str,
+    ) -> list[Document]:
+        log = logger.bind(query=query, partition=partition)
+
+        db = get_vectordb()
+        chunks = await db.async_search.remote(
+            query=query,
+            partition=partition,
+            top_k=self.top_k,
+            similarity_threshold=self.similarity_threshold,
+        )
+
+        extra_documents = []
+        file_ids = set()
+        for chunk in chunks:
+            file_ids.add(chunk.metadata['file_id'])
+
+            file_id = chunk.metadata['file_id']
+
+            linked_documents = await db.get_related_files.remote(file_id, 'email_thread', partition, True)
+            log.info(f'Got {len(linked_documents)} chunks from documents linked with {file_id}')
+            for linked_file_id in set([ d.metadata['file_id'] for d in linked_documents ]):
+                log.info("Linked : " + linked_file_id)
+
+            extra_documents.extend(self.get_branch(linked_documents, chunk))
+
+        chunks.extend(extra_documents)
+
+        for file_id in set( [ d.metadata['file_id'] for d in chunks ] ):
+            log.info(f'Found: {file_id}')
+
+        return chunks
+
+
+class SingleRetreiver(BaseRetriever):
     pass
 
 
@@ -168,6 +261,7 @@ class RetrieverFactory:
         "single": SingleRetriever,
         "multiQuery": MultiQueryRetriever,
         "hyde": HyDeRetriever,
+        "email": EmailRetriever,
     }
 
     @classmethod

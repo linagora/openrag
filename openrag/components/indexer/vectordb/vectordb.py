@@ -355,6 +355,24 @@ class MilvusDB(BaseVectorDB):
         """Asynchronously add documents to the vector store."""
 
         try:
+            # Special handing for e-mails in Twake Mail
+            for ch in chunks:
+                if ch.metadata['doctype'] in [ "com.linagora.email" ]:
+                    if 'rels' not in ch.metadata:
+                        ch.metadata['rels'] = []
+
+                    if ch.metadata.get('parent_id') not in {None, ''}:
+                        ch.metadata['rels'].append({
+                            'target': ch.metadata['parent_id'],
+                            'type': 'parent'
+                        })
+
+                    if ch.metadata.get('relationship_id') not in {None, ''}:
+                        ch.metadata['rels'].append({
+                            'target': ch.metadata['relationship_id'],
+                            'type': 'email_thread'
+                        })
+
             file_metadata = dict(chunks[0].metadata)
             file_metadata.pop("page")
             file_id, partition = (
@@ -601,7 +619,7 @@ class MilvusDB(BaseVectorDB):
 
         return output_docs
 
-    async def get_related_files(self, file_id, relationship_type: str, partition: str):
+    async def get_related_files(self, file_id, relationship_type: str, partition: str, same_group=False):
         log = self.logger.bind(file_id=str(file_id))
         try:
             related_ids = self.partition_file_manager.get_related_file_ids(
@@ -612,6 +630,16 @@ class MilvusDB(BaseVectorDB):
 
             # merge two groups of related_ids -> ids
             ids = related_ids['outgoing'] + related_ids['incoming']
+
+            if same_group:
+                all_rels = self.partition_file_manager.get_all_rels(
+                    file_id=file_id,
+                    file_ids=ids,
+                    relationship_type=relationship_type,
+                    partition=partition
+                )
+
+                ids += all_rels
 
             self.logger.opt(raw=True).info(f'Query {ids} from {self.collection_name}\n')
             response = await self._async_client.query(
