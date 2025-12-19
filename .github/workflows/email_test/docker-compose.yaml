@@ -131,7 +131,7 @@ services:
     # for aarch64 yet. On aarch64 max-num-batched-tokens must be equal max-model-len for now (without chunked prefill).
     # For details see https://github.com/vllm-project/vllm/issues/21179
     profiles:
-      - "never" #"cpu"
+      - "cpu"
 
   mock-llm:
     build:
