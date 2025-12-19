@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  related-docs-test:
+  email-test:
     runs-on: ubuntu-latest
     steps:
       - name: Update apt and install packages
