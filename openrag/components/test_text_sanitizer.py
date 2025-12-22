@@ -2,7 +2,6 @@
 Tests for text sanitization utilities.
 """
 
-import pytest
 from components.text_sanitizer import (
     sanitize_text,
     clean_markdown_table_spacing,
