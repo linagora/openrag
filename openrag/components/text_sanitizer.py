@@ -7,6 +7,7 @@ special characters, and other artifacts that don't add value.
 """
 
 import re
+import unicodedata
 
 
 def sanitize_text(
@@ -49,7 +50,6 @@ def sanitize_text(
     
     # Normalize unicode to NFC form (composed form)
     if normalize_unicode:
-        import unicodedata
         text = unicodedata.normalize('NFC', text)
     
     # Remove zero-width spaces and similar invisible characters
@@ -134,6 +134,12 @@ def sanitize_extracted_text(text: str) -> str:
     
     This applies a standard set of cleaning operations suitable for
     text extraction endpoints and general document processing.
+    Uses the default sanitization settings which include:
+    - Normalize whitespace
+    - Remove control characters
+    - Remove zero-width characters
+    - Limit consecutive newlines to 2
+    - Normalize Unicode
     
     Args:
         text: The extracted text to sanitize
@@ -141,11 +147,4 @@ def sanitize_extracted_text(text: str) -> str:
     Returns:
         Sanitized text
     """
-    return sanitize_text(
-        text,
-        normalize_whitespace=True,
-        remove_control_chars=True,
-        remove_zero_width_chars=True,
-        max_consecutive_newlines=2,
-        normalize_unicode=True,
-    )
+    return sanitize_text(text)
