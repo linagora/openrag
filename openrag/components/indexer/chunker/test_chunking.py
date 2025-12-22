@@ -3,10 +3,10 @@
 from components.indexer.chunker.utils import (
     MDElement,
     chunk_table,
-    clean_markdown_table_spacing,
     get_chunk_page_number,
     split_md_elements,
 )
+from components.text_sanitizer import clean_markdown_table_spacing
 
 
 class TestSplitMdElements:

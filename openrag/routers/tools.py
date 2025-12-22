@@ -6,6 +6,7 @@ from config import load_config
 from fastapi import APIRouter, Depends, Form, HTTPException, status, UploadFile
 from fastapi.responses import JSONResponse
 from components.files import save_file_to_disk, serialize_file
+from components.text_sanitizer import sanitize_extracted_text
 from utils.logger import get_logger
 import ray
 from pydantic import BaseModel
@@ -107,9 +108,12 @@ async def execute_tool(
             doc = await serialize_file(task_id, path=file_path, metadata=metadata)
             logger.debug(f"extractText done for task {task_id}")
 
+            # Sanitize the extracted text to remove useless characters and improve quality
+            sanitized_content = sanitize_extracted_text(doc.page_content)
+
             return JSONResponse(
                 status_code=status.HTTP_200_OK,
-                content={"message": doc.page_content},
+                content={"message": sanitized_content},
             )
         else:
             raise HTTPException(
