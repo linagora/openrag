@@ -7,7 +7,6 @@ special characters, and other artifacts that don't add value.
 """
 
 import re
-from typing import Optional
 
 
 def sanitize_text(
