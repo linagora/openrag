@@ -1,6 +1,8 @@
 import re
 from typing import Callable, Literal, Optional
 
+from components.text_sanitizer import clean_markdown_table_spacing
+
 # Regex to match a Markdown table (header + delimiter + at least one row)
 TABLE_RE = re.compile(
     r"((?:^|\n)\|.*?\|\r?\n\|\s*[:-]+(?:\s*\|[:-]+)*\|\r?\n(?:\|.*?\|\r?\n)+)",
@@ -252,29 +254,3 @@ def chunk_table(
         for subtable in subtables
     ]
 
-
-def clean_markdown_table_spacing(markdown_table: str) -> str:
-    """
-    Normalize spacing inside a markdown table:
-    - trims each cell
-    - keeps table shape intact
-    """
-
-    cleaned_lines = []
-
-    for line in markdown_table.strip().split("\n"):
-        if "|" not in line:
-            cleaned_lines.append(line.strip())
-            continue
-
-        # Split row into cells (preserve leading/trailing pipes)
-        parts = line.split("|")
-
-        # Strip each cell except the outer empty ones
-        cleaned_cells = [cell.strip() for cell in parts]
-
-        # Rebuild with a single space around each cell
-        new_line = "| " + " | ".join(cleaned_cells[1:-1]) + " |"
-        cleaned_lines.append(new_line)
-
-    return "\n".join(cleaned_lines)

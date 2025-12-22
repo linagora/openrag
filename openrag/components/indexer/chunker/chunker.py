@@ -1,6 +1,7 @@
 from typing import Literal, Optional
 
 from components.prompts import CHUNK_CONTEXTUALIZER_PROMPT
+from components.text_sanitizer import sanitize_text
 from components.utils import detect_language, get_vlm_semaphore, load_config
 from langchain_core.documents.base import Document
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -197,7 +198,19 @@ class BaseChunker:
         log = log or logger
         texts, tables_and_images = self._prepare_md_elements(content=content)
         combined_texts = "\n".join([e.content for e in texts])
-        text_chunks = self.split_text(combined_texts)
+        
+        # Sanitize the combined text before chunking to remove excessive whitespace
+        # and useless characters, which saves tokens and improves quality
+        sanitized_texts = sanitize_text(
+            combined_texts,
+            normalize_whitespace=True,
+            remove_control_chars=True,
+            remove_zero_width_chars=True,
+            max_consecutive_newlines=2,
+            normalize_unicode=True,
+        )
+        
+        text_chunks = self.split_text(sanitized_texts)
 
         # Manage tables and images as separate chunks
         chunks = []
