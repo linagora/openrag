@@ -2,10 +2,10 @@
 Tests for text sanitization utilities.
 """
 
-from components.text_sanitizer import (
-    sanitize_text,
+from .text_sanitizer import (
     clean_markdown_table_spacing,
     sanitize_extracted_text,
+    sanitize_text,
 )
 
 
@@ -123,7 +123,7 @@ class TestCleanMarkdownTableSpacing:
         """Test trimming excessive spaces within cells."""
         table = "| Header 1    | Header 2     |\n|-------------|-------------|\n|  Cell 1   |   Cell 2    |"
         result = clean_markdown_table_spacing(table)
-        
+
         assert (
             result
             == "| Header 1 | Header 2 |\n| ------------- | ------------- |\n| Cell 1 | Cell 2 |"
@@ -133,14 +133,14 @@ class TestCleanMarkdownTableSpacing:
         """Test normalizing inconsistent spacing across rows."""
         table = "|Header1|Header2|\n|---|---|\n|  A  |B|"
         result = clean_markdown_table_spacing(table)
-        
+
         assert result == "| Header1 | Header2 |\n| --- | --- |\n| A | B |"
 
     def test_empty_cells(self):
         """Test handling of empty cells."""
         table = "| Col1 | Col2 | Col3 |\n|------|------|------|\n| Data |      | More |\n|      | Data |      |"
         result = clean_markdown_table_spacing(table)
-        
+
         assert (
             result
             == "| Col1 | Col2 | Col3 |\n| ------ | ------ | ------ |\n| Data |  | More |\n|  | Data |  |"
@@ -150,7 +150,7 @@ class TestCleanMarkdownTableSpacing:
         """Test table with varying amounts of whitespace."""
         table = "|  A   |   B    |    C     |\n|------|--------|----------|\n|1|2|3|"
         result = clean_markdown_table_spacing(table)
-        
+
         assert (
             result == "| A | B | C |\n| ------ | -------- | ---------- |\n| 1 | 2 | 3 |"
         )
@@ -163,7 +163,7 @@ class TestSanitizeExtractedText:
         """Test that all default sanitizations are applied."""
         text = "  Hello    world\x00\t\twith\n\n\n\nmany\u200bissues   \n"
         result = sanitize_extracted_text(text)
-        
+
         # Should have normalized spaces
         assert "    " not in result
         # Should have removed control chars
@@ -193,9 +193,9 @@ class TestSanitizeExtractedText:
         
         And zero-width\u200bspaces.
         """
-        
+
         result = sanitize_extracted_text(text)
-        
+
         # Check that text is cleaned properly
         assert "    " not in result  # No excessive spaces
         assert "\t\t" not in result  # No multiple tabs

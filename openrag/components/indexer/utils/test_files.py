@@ -2,8 +2,9 @@ import io
 from pathlib import Path
 
 import pytest
-from components.files import sanitize_filename, save_file_to_disk
 from fastapi import UploadFile
+
+from .files import sanitize_filename, save_file_to_disk
 
 
 @pytest.mark.asyncio
@@ -35,7 +36,8 @@ async def test_save_file_to_disk_with_random_prefix(tmp_path, monkeypatch):
         return "PREFIX_1234_test.txt"
 
     monkeypatch.setattr(
-        "components.files.make_unique_filename", fake_make_unique_filename
+        "openrag.components.indexer.utils.files.make_unique_filename",
+        fake_make_unique_filename,
     )
 
     file_content = b"hello world"

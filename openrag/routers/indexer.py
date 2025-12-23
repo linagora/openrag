@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import ray
-from components.files import sanitize_filename, save_file_to_disk
+from components.indexer.utils.files import sanitize_filename, save_file_to_disk
 from config import load_config
 from fastapi import (
     APIRouter,
@@ -17,7 +17,6 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
-from components.files import save_file_to_disk
 from utils.dependencies import get_indexer, get_task_state_manager, get_vectordb
 from utils.logger import get_logger
 

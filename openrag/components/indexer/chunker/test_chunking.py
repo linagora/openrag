@@ -6,7 +6,7 @@ from components.indexer.chunker.utils import (
     get_chunk_page_number,
     split_md_elements,
 )
-from components.text_sanitizer import clean_markdown_table_spacing
+from components.indexer.utils.text_sanitizer import clean_markdown_table_spacing
 
 
 class TestSplitMdElements:

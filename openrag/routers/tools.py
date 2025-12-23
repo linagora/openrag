@@ -1,15 +1,16 @@
 import json
-from typing import List
 from pathlib import Path
+from typing import List
 
-from config import load_config
-from fastapi import APIRouter, Depends, Form, HTTPException, status, UploadFile
-from fastapi.responses import JSONResponse
-from components.files import save_file_to_disk, serialize_file
-from components.text_sanitizer import sanitize_extracted_text
-from utils.logger import get_logger
 import ray
+from components.indexer.utils.files import save_file_to_disk, serialize_file
+from components.indexer.utils.text_sanitizer import sanitize_extracted_text
+from config import load_config
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from utils.logger import get_logger
+
 from .utils import (
     validate_file_format,
     validate_metadata,

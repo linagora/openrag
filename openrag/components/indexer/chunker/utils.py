@@ -1,7 +1,7 @@
 import re
 from typing import Callable, Literal, Optional
 
-from components.text_sanitizer import clean_markdown_table_spacing
+from components.indexer.utils.text_sanitizer import clean_markdown_table_spacing
 
 # Regex to match a Markdown table (header + delimiter + at least one row)
 TABLE_RE = re.compile(
@@ -253,4 +253,3 @@ def chunk_table(
         )
         for subtable in subtables
     ]
-

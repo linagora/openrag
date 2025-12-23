@@ -12,8 +12,7 @@ from config import load_config
 from langchain_core.documents.base import Document
 
 from .chunker import BaseChunker, ChunkerFactory
-from components.files import serialize_file
-
+from .utils import serialize_file
 
 config = load_config()
 save_uploaded_files = os.environ.get("SAVE_UPLOADED_FILES", "true").lower() == "true"

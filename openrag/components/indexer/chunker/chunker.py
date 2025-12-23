@@ -1,7 +1,7 @@
 from typing import Literal, Optional
 
+from components.indexer.utils.text_sanitizer import sanitize_text
 from components.prompts import CHUNK_CONTEXTUALIZER_PROMPT
-from components.text_sanitizer import sanitize_text
 from components.utils import detect_language, get_vlm_semaphore, load_config
 from langchain_core.documents.base import Document
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -198,7 +198,7 @@ class BaseChunker:
         log = log or logger
         texts, tables_and_images = self._prepare_md_elements(content=content)
         combined_texts = "\n".join([e.content for e in texts])
-        
+
         # Sanitize the combined text before chunking to remove excessive whitespace
         # and useless characters, which saves tokens and improves quality
         sanitized_texts = sanitize_text(
@@ -209,7 +209,7 @@ class BaseChunker:
             max_consecutive_newlines=2,
             normalize_unicode=True,
         )
-        
+
         text_chunks = self.split_text(sanitized_texts)
 
         # Manage tables and images as separate chunks
@@ -217,7 +217,7 @@ class BaseChunker:
         for e in tables_and_images:
             if e.type == "table" and self._length_function(e.content) > self.chunk_size:
                 # Chunk large tables separately
-                log.debug(f"Chunking tables from page {e.page_number}")
+                # log.debug(f"Chunking tables from page {e.page_number}")
                 subtables = chunk_table(
                     table_element=e,
                     chunk_size=self.chunk_size,
