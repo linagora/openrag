@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Tuple, Callable, List
 
@@ -93,9 +94,20 @@ class TemporalQueryNormalizer:
             # Italian
             "fa",
         ]
+        # Build regexes from folded (accent-stripped) forms so accents are optional
+        def _fold_list(words):
+            folded = []
+            for w in words:
+                f = unicodedata.normalize('NFD', w)
+                f = ''.join(ch for ch in f if not unicodedata.combining(ch))
+                folded.append(f)
+            return folded
 
-        prefix_re = r"\b(?:" + "|".join(re.escape(p) for p in self.relative_prefix_words) + r")\b\s*(\d+)\s*(\w+)"
-        suffix_re = r"\b(\d+)\s*(\w+)\s*(?:" + "|".join(re.escape(s) for s in self.relative_suffix_words) + r")\b"
+        folded_prefixes = _fold_list(self.relative_prefix_words)
+        folded_suffixes = _fold_list(self.relative_suffix_words)
+
+        prefix_re = r"\b(?:" + "|".join(re.escape(p) for p in folded_prefixes) + r")\b\s*(\d+)\s*(\w+)"
+        suffix_re = r"\b(\d+)\s*(\w+)\s*(?:" + "|".join(re.escape(s) for s in folded_suffixes) + r")\b"
 
         self.relative_prefix_pattern = re.compile(prefix_re, re.IGNORECASE)
         self.relative_suffix_pattern = re.compile(suffix_re, re.IGNORECASE)
@@ -178,8 +190,12 @@ class TemporalQueryNormalizer:
     # -------------------- Extraction logic --------------------
 
     def _extract_relative(self, query: str):
+        # Fold accents in the query so accents are optional in user input
+        folded_query = unicodedata.normalize('NFD', query)
+        folded_query = ''.join(ch for ch in folded_query if not unicodedata.combining(ch))
+
         # Prefer explicit contextual prefixes like "last", "past", etc.
-        m = self.relative_prefix_pattern.search(query)
+        m = self.relative_prefix_pattern.search(folded_query)
         if m:
             value = int(m.group(1))
             unit = m.group(2).lower()
@@ -188,7 +204,7 @@ class TemporalQueryNormalizer:
                 return self._last_n_days(days)
 
         # Also accept suffixes like "5 years ago"
-        m = self.relative_suffix_pattern.search(query)
+        m = self.relative_suffix_pattern.search(folded_query)
         if m:
             value = int(m.group(1))
             unit = m.group(2).lower()
@@ -199,9 +215,13 @@ class TemporalQueryNormalizer:
         return None
 
     def _extract_keywords(self, query: str):
-        q = query.lower()
+        q = unicodedata.normalize('NFD', query)
+        q = ''.join(ch for ch in q if not unicodedata.combining(ch)).lower()
         for word, offset in self.keyword_ranges.items():
-            if word in q:
+            # fold keyword before searching
+            kw = unicodedata.normalize('NFD', word)
+            kw = ''.join(ch for ch in kw if not unicodedata.combining(ch)).lower()
+            if kw in q:
                 day = datetime.now(timezone.utc) - timedelta(days=offset)
                 start = day.replace(hour=0, minute=0, second=0, microsecond=0)
                 end = day.replace(hour=23, minute=59, second=59, microsecond=999999)
