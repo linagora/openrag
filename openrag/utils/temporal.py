@@ -42,8 +42,8 @@ class TemporalQueryNormalizer:
         # Matches: number + optional space + word OR word + optional space + number
         self.relative_number_pattern = r'(\d+)\s*\w+|\w+\s+(\d+)'
         
-        # English patterns for backward compatibility
-        self.english_patterns = {
+        # Common patterns as a last resort (English-centric)
+        self.common_languages_patterns = {
             r'\b(today|aujourd\'hui|heute|hoy|oggi|hoje)\b': lambda: self._get_today(),
             r'\b(yesterday|hier|ayer|ieri|ontem)\b': lambda: self._get_yesterday(),
             r'\b(last|past|recent)\b': lambda: self._get_last_n_days(30),
@@ -242,7 +242,7 @@ class TemporalQueryNormalizer:
         
         # 3. Try English patterns as fallback
         query_lower = query.lower()
-        for pattern, date_func in self.english_patterns.items():
+        for pattern, date_func in self.common_languages_patterns.items():
             match = re.search(pattern, query_lower, re.IGNORECASE)
             if match:
                 try:
