@@ -268,21 +268,18 @@ class MilvusDB(BaseVectorDB):
             field_name="datetime",
             datatype=DataType.VARCHAR,
             max_length=64,
-            nullable=True
         )
 
         schema.add_field(
             field_name="created_at",
             datatype=DataType.VARCHAR,
             max_length=64,
-            nullable=True
         )
 
         schema.add_field(
             field_name="modified_at",
             datatype=DataType.VARCHAR,
             max_length=64,
-            nullable=True
         )
 
         schema.add_field(
@@ -415,66 +412,21 @@ class MilvusDB(BaseVectorDB):
 
             entities = await self.embedder.embed_documents(chunks)
 
-            expected_fields = [
-                "text",
-                "partition",
-                "file_id",
-                "datetime",
-                "created_at",
-                "modified_at",
-                "indexed_at",
-                "vector",
-            ]
-
+            # Milvus text/VARCHAR fields should not be null. Ensure temporal
+            # and other text fields are present; use empty string when missing.
             for ent, chunk in zip(entities, chunks):
                 md = dict(getattr(chunk, "metadata", {}) or {})
 
-                # text: prefer chunk page_content
-                if ent.get("text") is None:
-                    ent["text"] = getattr(chunk, "page_content", None)
+                # Temporal text fields: prefer metadata value, otherwise empty string
+                for tf in ("datetime", "created_at", "modified_at", "indexed_at"):
+                    if ent.get(tf) is None:
+                        ent[tf] = md.get(tf, "")
 
-                # partition and file_id: prefer file-level metadata, fall back to chunk metadata
-                ent.setdefault("partition", file_metadata.get("partition") or md.get("partition"))
-                ent.setdefault("file_id", file_metadata.get("file_id") or md.get("file_id"))
-
-                # Temporal fields: prefer chunk metadata, otherwise None
-                ent["datetime"] = (
-                    md.get("datetime") if md.get("datetime") is not None else ent.get("datetime")
-                )
-                if ent.get("datetime") is None:
-                    ent["datetime"] = None
-
-                ent["created_at"] = (
-                    md.get("created_at") if md.get("created_at") is not None else ent.get("created_at")
-                )
-                if ent.get("created_at") is None:
-                    ent["created_at"] = None
-
-                ent["modified_at"] = (
-                    md.get("modified_at") if md.get("modified_at") is not None else ent.get("modified_at")
-                )
-                if ent.get("modified_at") is None:
-                    ent["modified_at"] = None
-
-                ent["indexed_at"] = (
-                    md.get("indexed_at") if md.get("indexed_at") is not None else ent.get("indexed_at")
-                )
-                if ent.get("indexed_at") is None:
-                    ent["indexed_at"] = None
-
-                # Ensure vector key exists. Embedder should provide it; if not, try common alternative keys.
-                if ent.get("vector") is None:
-                    if ent.get("embedding") is not None:
-                        ent["vector"] = ent.pop("embedding")
-                    elif ent.get("embedding_vector") is not None:
-                        ent["vector"] = ent.pop("embedding_vector")
-                    else:
-                        ent["vector"] = None
-
-                # Ensure any other expected fields exist (set to None)
-                for f in expected_fields:
-                    if f not in ent:
-                        ent[f] = None
+                # Ensure partition and file_id are always present as strings
+                if ent.get("partition") is None:
+                    ent["partition"] = md.get("partition", "")
+                if ent.get("file_id") is None:
+                    ent["file_id"] = md.get("file_id", "")
 
             await self._async_client.insert(
                 collection_name=self.collection_name,
