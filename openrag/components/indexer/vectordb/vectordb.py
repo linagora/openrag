@@ -414,6 +414,68 @@ class MilvusDB(BaseVectorDB):
                 )
 
             entities = await self.embedder.embed_documents(chunks)
+
+            expected_fields = [
+                "text",
+                "partition",
+                "file_id",
+                "datetime",
+                "created_at",
+                "modified_at",
+                "indexed_at",
+                "vector",
+            ]
+
+            for ent, chunk in zip(entities, chunks):
+                md = dict(getattr(chunk, "metadata", {}) or {})
+
+                # text: prefer chunk page_content
+                if ent.get("text") is None:
+                    ent["text"] = getattr(chunk, "page_content", None)
+
+                # partition and file_id: prefer file-level metadata, fall back to chunk metadata
+                ent.setdefault("partition", file_metadata.get("partition") or md.get("partition"))
+                ent.setdefault("file_id", file_metadata.get("file_id") or md.get("file_id"))
+
+                # Temporal fields: prefer chunk metadata, otherwise None
+                ent["datetime"] = (
+                    md.get("datetime") if md.get("datetime") is not None else ent.get("datetime")
+                )
+                if ent.get("datetime") is None:
+                    ent["datetime"] = None
+
+                ent["created_at"] = (
+                    md.get("created_at") if md.get("created_at") is not None else ent.get("created_at")
+                )
+                if ent.get("created_at") is None:
+                    ent["created_at"] = None
+
+                ent["modified_at"] = (
+                    md.get("modified_at") if md.get("modified_at") is not None else ent.get("modified_at")
+                )
+                if ent.get("modified_at") is None:
+                    ent["modified_at"] = None
+
+                ent["indexed_at"] = (
+                    md.get("indexed_at") if md.get("indexed_at") is not None else ent.get("indexed_at")
+                )
+                if ent.get("indexed_at") is None:
+                    ent["indexed_at"] = None
+
+                # Ensure vector key exists. Embedder should provide it; if not, try common alternative keys.
+                if ent.get("vector") is None:
+                    if ent.get("embedding") is not None:
+                        ent["vector"] = ent.pop("embedding")
+                    elif ent.get("embedding_vector") is not None:
+                        ent["vector"] = ent.pop("embedding_vector")
+                    else:
+                        ent["vector"] = None
+
+                # Ensure any other expected fields exist (set to None)
+                for f in expected_fields:
+                    if f not in ent:
+                        ent[f] = None
+
             await self._async_client.insert(
                 collection_name=self.collection_name,
                 data=entities,
