@@ -83,7 +83,7 @@ jobs:
                 - .env
               shm_size: 4gb
               healthcheck:
-                test: ["CMD", "curl", "-sf", "http://localhost:8080/health_check"]
+                  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2).read()"]
                 interval: 5s
                 timeout: 3s
                 retries: 30
@@ -119,15 +119,21 @@ jobs:
               environment:
                 - VLLM_USE_V1=0
               ipc: "host"
+              cap_add:
+                - SYS_NICE
+                - SYS_PTRACE
+              security_opt:
+                - seccomp:unconfined
               volumes:
                 - ./model_weights:/root/.cache/huggingface
               command: >
+                --host 0.0.0.0
                 --model ibm-granite/granite-embedding-small-english-r2
                 --trust-remote-code
                 --dtype float32
                 --max-model-len 512
               healthcheck:
-                test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+                test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2).read()"]
                 interval: 5s
                 timeout: 3s
                 retries: 40
@@ -158,7 +164,7 @@ jobs:
                 - ./volumes/minio:/minio_data
               command: minio server /minio_data --console-address ":9001"
               healthcheck:
-                test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+                test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/minio/health/live', timeout=2).read()"]
                 interval: 5s
                 timeout: 3s
                 retries: 10
@@ -174,7 +180,7 @@ jobs:
               volumes:
                 - ./volumes/milvus:/var/lib/milvus
               healthcheck:
-                test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+                test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9091/healthz', timeout=2).read()"]
                 interval: 5s
                 timeout: 3s
                 retries: 20
@@ -205,6 +211,17 @@ jobs:
           docker compose -f docker-compose.integration.yaml up -d
           echo "Services starting..."
           docker compose -f docker-compose.integration.yaml ps
+
+      - name: Debug health status (vLLM)
+        if: always()
+        run: |
+          set -x
+          docker compose -f docker-compose.integration.yaml ps
+          cid=$(docker compose -f docker-compose.integration.yaml ps -q vllm-cpu)
+          echo "vLLM container id: $cid"
+          docker inspect --format='Status={{.State.Status}} Health={{json .State.Health}}' "$cid" || true
+          docker logs "$cid" --tail=200 || true
+
 
       # Wait for health check
       - name: Wait for services to be healthy
