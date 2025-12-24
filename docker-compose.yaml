@@ -151,3 +151,7 @@ services:
     # For details see https://github.com/vllm-project/vllm/issues/21179
     profiles:
       - "cpu"
+
+networks:
+  default:
+    name: openrag_default
