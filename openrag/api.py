@@ -76,7 +76,12 @@ WITH_CHAINLIT_UI: Optional[bool] = (
 )
 WITH_OPENAI_API: Optional[bool] = os.getenv("WITH_OPENAI_API", "true").lower() == "true"
 
-app = FastAPI(version=get_package_version("openrag"))
+try:
+    app_version = get_package_version("openrag")
+except Exception:
+    app_version = "unknown"
+
+app = FastAPI(version=app_version)
 
 
 def custom_openapi():
@@ -185,7 +190,7 @@ app.mount(
 
 
 @app.get(
-    "/health_check", summary="Toy endpoint to check that the api is up", dependencies=[]
+    "/health_check", summary="Health check endpoint for API", dependencies=[]
 )
 async def health_check(request: Request):
     # TODO : Error reporting about llm and vlm
