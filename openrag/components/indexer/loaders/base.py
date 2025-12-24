@@ -12,6 +12,8 @@ from langchain_openai import ChatOpenAI
 from PIL import Image
 from utils.logger import get_logger
 
+from utils.external_resource_errors import is_external_resource_error
+
 logger = get_logger()
 config = load_config()
 
@@ -145,9 +147,23 @@ class BaseLoader(ABC):
                 image_description = response.content
 
             except Exception as e:
-                logger.exception(
-                    "Error while generating image description", error=str(e)
-                )
+                is_external, status_code, url = is_external_resource_error(e)
+                if is_external:
+                    # Log external resource errors as warnings, not exceptions
+                    # These are expected when VLM cannot fetch external URLs
+                    log_msg = "Failed to fetch external image resource"
+                    log_extra = {"error": str(e)}
+                    if status_code:
+                        log_extra["http_status"] = status_code
+                    if url:
+                        log_extra["url"] = url
+                    elif self._is_http_url(str(image_data)):
+                        log_extra["url"] = str(image_data)
+                    logger.warning(log_msg, **log_extra)
+                else:
+                    logger.exception(
+                        "Error while generating image description", error=str(e)
+                    )
                 image_description = ""
 
             return f"""<image_description>\n\n{image_description}\n\n</image_description>"""
