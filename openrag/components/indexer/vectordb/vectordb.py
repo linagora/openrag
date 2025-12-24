@@ -268,18 +268,21 @@ class MilvusDB(BaseVectorDB):
             field_name="datetime",
             datatype=DataType.VARCHAR,
             max_length=64,
+            nullable=True
         )
 
         schema.add_field(
             field_name="created_at",
             datatype=DataType.VARCHAR,
             max_length=64,
+            nullable=True
         )
 
         schema.add_field(
             field_name="modified_at",
             datatype=DataType.VARCHAR,
             max_length=64,
+            nullable=True
         )
 
         schema.add_field(
