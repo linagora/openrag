@@ -115,6 +115,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/docs",
             "/openapi.json",
             "/redoc",
+            "/health_check",
+            "/version"
         ] or request.url.path.startswith("/chainlit"):  # Allow all chainlit subroutes
             return await call_next(request)
 
