@@ -33,15 +33,18 @@ def get_logger():
 
     # JSON logs to file for later use (e.g. Grafana ingestion)
     log_dir = config.paths.log_dir if hasattr(config.paths, "log_dir") else "logs"
-    os.makedirs(log_dir, exist_ok=True)
-
-    logger.add(
-        f"{log_dir}/app.json",
-        serialize=True,
-        level=config.verbose.level,
-        rotation="10 MB",
-        retention="10 days",
-        enqueue=True,
-    )
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        logger.add(
+            f"{log_dir}/app.json",
+            serialize=True,
+            level=config.verbose.level,
+            rotation="10 MB",
+            retention="10 days",
+            enqueue=True,
+        )
+    except PermissionError:
+        # Skip file logging if we don't have permission (e.g., during tests)
+        pass
 
     return logger

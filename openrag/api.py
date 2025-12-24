@@ -1,4 +1,9 @@
 import os
+import warnings
+
+# Filter SyntaxWarning from pydub (invalid escape sequences in regex)
+# This is a known issue in pydub 0.25.1 that hasn't been fixed upstream
+warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
 
 import ray
 from dotenv import dotenv_values
