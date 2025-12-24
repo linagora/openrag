@@ -62,7 +62,43 @@ class TemporalQueryNormalizer:
             "jahr": 365, "jahre": 365,
         }
 
-        self.relative_pattern = re.compile(r'(\d+)\s*(\w+)', re.IGNORECASE)
+        self.relative_prefix_words = [
+            # English
+            "last", "past", "previous", "in the last", "in the past", "over the past",
+            "within the past", "during the past", "for the past", "over the last", "in last",
+
+            # Spanish
+            "hace", "últimos", "últimas", "último", "última",
+
+            # French
+            "il y a", "derniers", "dernières", "dernier", "dernière",
+
+            # German
+            "vor", "letzten", "letzte", "letztes",
+
+            # Portuguese
+            "há", "ultimos", "últimos", "ultimas", "últimas",
+
+            # Italian
+            "fa", "ultimi", "ultime", "ultimo", "ultima",
+        ]
+
+        self.relative_suffix_words = [
+            # English
+            "ago",
+
+            # Spanish/Portuguese
+            "atrás",
+
+            # Italian
+            "fa",
+        ]
+
+        prefix_re = r"\b(?:" + "|".join(re.escape(p) for p in self.relative_prefix_words) + r")\b\s*(\d+)\s*(\w+)"
+        suffix_re = r"\b(\d+)\s*(\w+)\s*(?:" + "|".join(re.escape(s) for s in self.relative_suffix_words) + r")\b"
+
+        self.relative_prefix_pattern = re.compile(prefix_re, re.IGNORECASE)
+        self.relative_suffix_pattern = re.compile(suffix_re, re.IGNORECASE)
 
         # Low-ambiguity multilingual keywords
         self.keyword_ranges = {
@@ -142,10 +178,20 @@ class TemporalQueryNormalizer:
     # -------------------- Extraction logic --------------------
 
     def _extract_relative(self, query: str):
-        for match in self.relative_pattern.finditer(query):
-            value = int(match.group(1))
-            unit = match.group(2).lower()
+        # Prefer explicit contextual prefixes like "last", "past", etc.
+        m = self.relative_prefix_pattern.search(query)
+        if m:
+            value = int(m.group(1))
+            unit = m.group(2).lower()
+            if unit in self.time_units:
+                days = value * self.time_units[unit]
+                return self._last_n_days(days)
 
+        # Also accept suffixes like "5 years ago"
+        m = self.relative_suffix_pattern.search(query)
+        if m:
+            value = int(m.group(1))
+            unit = m.group(2).lower()
             if unit in self.time_units:
                 days = value * self.time_units[unit]
                 return self._last_n_days(days)
@@ -202,12 +248,28 @@ class TemporalQueryNormalizer:
         if not temporal_filter:
             return query
 
-        parts = []
-        if "created_after" in temporal_filter:
-            d = datetime.fromisoformat(temporal_filter["created_after"])
-            parts.append(f"from {d.strftime('%B %Y')}")
-        if "created_before" in temporal_filter:
-            d = datetime.fromisoformat(temporal_filter["created_before"])
-            parts.append(f"until {d.strftime('%B %Y')}")
+        try:
+            parts = []
+            after = before = None
+            
+            if "created_after" in temporal_filter:
+                after = datetime.fromisoformat(temporal_filter["created_after"])
+            if "created_before" in temporal_filter:
+                before = datetime.fromisoformat(temporal_filter["created_before"])
+            
+            # Check if it's a single day (start and end on same date)
+            if after and before and after.date() == before.date():
+                parts.append(f"on {after.strftime('%-d %B %Y')}")
+            else:
+                if after:
+                    parts.append(f"from {after.strftime('%-d %B %Y')}")
+                if before:
+                    parts.append(f"until {before.strftime('%-d %B %Y')}")
+            
+            return f"{query} ({' '.join(parts)})" if parts else query
+        except (ValueError, KeyError):
+            # Invalid temporal filter, return original query
+            return query
+            
 
         return f"{query} ({' '.join(parts)})"
