@@ -60,62 +60,36 @@ jobs:
         run: |
           cp .github/workflows/integration_tests/.env ./
 
-      # Create compose override with pre-built images and fast health checks
-      - name: Create compose override
+      # Create standalone compose file (no includes to avoid conflicts)
+      - name: Create compose file
         run: |
           cat > docker-compose.integration.yaml << 'EOF'
-          # Integration test overrides - uses pre-built images and aggressive timeouts
-          include:
-            - vdb/milvus.yaml
-
-          x-openrag: &openrag_template
-            image: ghcr.io/linagora/openrag2:dev-latest
-            volumes:
-              - ${CONFIG_VOLUME:-./.hydra_config}:/app/.hydra_config
-              - ${DATA_VOLUME:-./data}:/app/data
-              - ${MODEL_WEIGHTS_VOLUME:-./model_weights}:/app/model_weights
-              - ./openrag:/app/openrag
-              - ./logs:/app/logs
-            ports:
-              - "8080:8080"
-              - "8265:8265"
-            networks:
-              default:
-                aliases:
-                  - openrag
-            env_file:
-              - .env
-            shm_size: 4gb
-            healthcheck:
-              test: ["CMD", "curl", "-sf", "http://localhost:8080/health_check"]
-              interval: 5s
-              timeout: 3s
-              retries: 30
-              start_period: 30s
-
-          x-vllm: &vllm_template
-            networks:
-              default:
-                aliases:
-                  - vllm
-            restart: "no"
-            environment:
-              - VLLM_USE_V1=0
-            ipc: "host"
-            volumes:
-              - ${MODEL_WEIGHTS_VOLUME:-./model_weights}:/root/.cache/huggingface
-            healthcheck:
-              test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
-              interval: 5s
-              timeout: 3s
-              retries: 40
-              start_period: 60s
-
+          # Integration test - standalone compose with fast health checks
           services:
             openrag-cpu:
-              <<: *openrag_template
-              profiles:
-                - 'cpu'
+              image: ghcr.io/linagora/openrag2:dev-latest
+              volumes:
+                - ./.hydra_config:/app/.hydra_config
+                - ./data:/app/data
+                - ./model_weights:/app/model_weights
+                - ./openrag:/app/openrag
+                - ./logs:/app/logs
+              ports:
+                - "8080:8080"
+                - "8265:8265"
+              networks:
+                default:
+                  aliases:
+                    - openrag
+              env_file:
+                - .env
+              shm_size: 4gb
+              healthcheck:
+                test: ["CMD", "curl", "-sf", "http://localhost:8080/health_check"]
+                interval: 5s
+                timeout: 3s
+                retries: 30
+                start_period: 30s
               depends_on:
                 rdb:
                   condition: service_started
@@ -138,35 +112,78 @@ jobs:
                 retries: 10
 
             vllm-cpu:
-              <<: *vllm_template
               image: public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v0.9.2
+              networks:
+                default:
+                  aliases:
+                    - vllm
+              restart: "no"
+              environment:
+                - VLLM_USE_V1=0
+              ipc: "host"
+              volumes:
+                - ./model_weights:/root/.cache/huggingface
               command: >
                 --model ibm-granite/granite-embedding-small-english-r2
                 --trust-remote-code
                 --dtype float32
                 --max-model-len 512
-              profiles:
-                - 'cpu'
-
-            # Override Milvus services with faster health checks
-            etcd:
               healthcheck:
+                test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+                interval: 5s
+                timeout: 3s
+                retries: 40
+                start_period: 60s
+
+            etcd:
+              image: quay.io/coreos/etcd:v3.5.16
+              environment:
+                - ETCD_AUTO_COMPACTION_MODE=revision
+                - ETCD_AUTO_COMPACTION_RETENTION=1000
+                - ETCD_QUOTA_BACKEND_BYTES=4294967296
+                - ETCD_SNAPSHOT_COUNT=50000
+              volumes:
+                - ./volumes/etcd:/etcd
+              command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+              healthcheck:
+                test: ["CMD", "etcdctl", "endpoint", "health"]
                 interval: 5s
                 timeout: 3s
                 retries: 10
 
             minio:
+              image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+              environment:
+                MINIO_ACCESS_KEY: minioadmin
+                MINIO_SECRET_KEY: minioadmin
+              volumes:
+                - ./volumes/minio:/minio_data
+              command: minio server /minio_data --console-address ":9001"
               healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
                 interval: 5s
                 timeout: 3s
                 retries: 10
 
             milvus:
+              image: milvusdb/milvus:v2.5.4
+              command: ["milvus", "run", "standalone"]
+              security_opt:
+                - seccomp:unconfined
+              environment:
+                ETCD_ENDPOINTS: etcd:2379
+                MINIO_ADDRESS: minio:9000
+              volumes:
+                - ./volumes/milvus:/var/lib/milvus
               healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
                 interval: 5s
                 timeout: 3s
                 retries: 20
                 start_period: 30s
+              depends_on:
+                - etcd
+                - minio
           EOF
 
       # Cache HuggingFace models
@@ -181,15 +198,15 @@ jobs:
 
       - name: Create required directories
         run: |
-          mkdir -p model_weights data db logs .hydra_config
+          mkdir -p model_weights data db logs .hydra_config volumes/etcd volumes/minio volumes/milvus
           cp -r .hydra_config/* .hydra_config/ 2>/dev/null || true
 
       # Start services
       - name: Start Docker Compose stack
         run: |
-          docker compose -f docker-compose.integration.yaml --profile cpu up -d
+          docker compose -f docker-compose.integration.yaml up -d
           echo "Services starting..."
-          docker compose -f docker-compose.integration.yaml --profile cpu ps
+          docker compose -f docker-compose.integration.yaml ps
 
       # Wait for health check
       - name: Wait for services to be healthy
@@ -202,7 +219,7 @@ jobs:
                 break
               fi
               echo "Still waiting... checking service status:"
-              docker compose -f docker-compose.integration.yaml --profile cpu ps
+              docker compose -f docker-compose.integration.yaml ps
               sleep 5
             done
           '
@@ -224,22 +241,22 @@ jobs:
         if: failure()
         run: |
           echo "=== Docker Compose Status ==="
-          docker compose -f docker-compose.integration.yaml --profile cpu ps -a
+          docker compose -f docker-compose.integration.yaml ps -a
           echo ""
           echo "=== OpenRAG Logs ==="
-          docker compose -f docker-compose.integration.yaml --profile cpu logs openrag-cpu --tail=200 || true
+          docker compose -f docker-compose.integration.yaml logs openrag-cpu --tail=200 || true
           echo ""
           echo "=== vLLM Logs ==="
-          docker compose -f docker-compose.integration.yaml --profile cpu logs vllm-cpu --tail=100 || true
+          docker compose -f docker-compose.integration.yaml logs vllm-cpu --tail=100 || true
           echo ""
           echo "=== Milvus Logs ==="
-          docker compose -f docker-compose.integration.yaml --profile cpu logs milvus --tail=50 || true
+          docker compose -f docker-compose.integration.yaml logs milvus --tail=50 || true
           echo ""
           echo "=== PostgreSQL Logs ==="
-          docker compose -f docker-compose.integration.yaml --profile cpu logs rdb --tail=50 || true
+          docker compose -f docker-compose.integration.yaml logs rdb --tail=50 || true
 
       # Cleanup
       - name: Cleanup
         if: always()
         run: |
-          docker compose -f docker-compose.integration.yaml --profile cpu down -v || true
+          docker compose -f docker-compose.integration.yaml down -v || true
