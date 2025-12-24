@@ -63,11 +63,11 @@ jobs:
       # Create standalone compose file (no includes to avoid conflicts)
       - name: Create compose file
         run: |
-          cat > docker-compose.integration.yaml << 'EOF'
+          cat > docker-compose.integration.yaml << EOF
           # Integration test - standalone compose with fast health checks
           services:
             openrag-cpu:
-              image: ghcr.io/linagora/openrag2:dev-latest
+              image: ${{ env.OPENRAG_IMAGE }}
               volumes:
                 - ./.hydra_config:/app/.hydra_config
                 - ./data:/app/data
@@ -112,7 +112,7 @@ jobs:
                 retries: 10
 
             vllm-cpu:
-              image: public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v0.9.2
+              image: ${{ env.VLLM_CPU_IMAGE }}
               networks:
                 default:
                   aliases:
