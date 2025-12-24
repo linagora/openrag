@@ -1,8 +1,7 @@
 # Fast integration tests - starts full stack and verifies /health_check
 # Target: under 5 minutes (vs 45-75 min for smoke_test)
 #
-# Uses official pre-built vLLM CPU image from AWS ECR:
-# https://gallery.ecr.aws/q9t5s3a7/vllm-cpu-release-repo
+# Uses openeuler/vllm-cpu which works without AVX512 (unlike AWS ECR image)
 
 name: Integration Tests
 
@@ -14,9 +13,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # Official vLLM CPU image from AWS ECR (no build required)
-  VLLM_CPU_IMAGE: public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v0.9.2
   OPENRAG_IMAGE: ghcr.io/${{ github.repository }}:dev-latest
+  VLLM_CPU_IMAGE: openeuler/vllm-cpu:latest
 
 jobs:
   integration-test:
@@ -50,8 +48,8 @@ jobs:
           docker pull quay.io/coreos/etcd:v3.5.16 &
           docker pull minio/minio:RELEASE.2023-03-20T20-16-18Z &
           docker pull milvusdb/milvus:v2.5.4 &
-          docker pull ${{ env.OPENRAG_IMAGE }} &
           docker pull ${{ env.VLLM_CPU_IMAGE }} &
+          docker pull ${{ env.OPENRAG_IMAGE }} &
           wait
           echo "Image pull complete"
 
