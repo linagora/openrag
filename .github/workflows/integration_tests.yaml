@@ -1,7 +1,9 @@
 # Fast integration tests - starts full stack and verifies /health_check
-# Target: under 5 minutes (vs 45-75 min for smoke_test)
+# Target: under 10 minutes
 #
-# Uses openeuler/vllm-cpu which works without AVX512 (unlike AWS ECR image)
+# Builds OpenRAG from source with Docker layer caching
+# Uses a mock embedder since real vLLM CPU images require AVX512
+# which GitHub Actions runners don't have
 
 name: Integration Tests
 
@@ -13,25 +15,22 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  OPENRAG_IMAGE: ghcr.io/${{ github.repository }}:dev-latest
-  VLLM_CPU_IMAGE: openeuler/vllm-cpu:latest
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   integration-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
-      packages: read
+      packages: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Docker Compose
-        uses: docker/setup-compose-action@v1
-        with:
-          version: v2.34.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -40,32 +39,124 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Pre-pull all images in parallel for speed
-      - name: Pre-pull Docker images
+      # Pull dependency images in background while we build OpenRAG
+      - name: Pre-pull dependency images (background)
         run: |
-          echo "Pulling all images in parallel..."
-          docker pull postgres:15 &
-          docker pull quay.io/coreos/etcd:v3.5.16 &
-          docker pull minio/minio:RELEASE.2023-03-20T20-16-18Z &
-          docker pull milvusdb/milvus:v2.5.4 &
-          docker pull ${{ env.VLLM_CPU_IMAGE }} &
-          docker pull ${{ env.OPENRAG_IMAGE }} &
-          wait
-          echo "Image pull complete"
+          echo "Pulling dependency images in parallel (background)..."
+          (
+            docker pull postgres:15 &
+            docker pull quay.io/coreos/etcd:v3.5.16 &
+            docker pull minio/minio:RELEASE.2023-03-20T20-16-18Z &
+            docker pull milvusdb/milvus:v2.5.4 &
+            docker pull python:3.12-slim &
+            wait
+            echo "Background image pull complete"
+          ) &
+          echo $! > /tmp/pull_pid
+          echo "Image pulls started in background (PID: $(cat /tmp/pull_pid))"
+
+      # Build OpenRAG image with layer caching
+      - name: Build OpenRAG image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: openrag:integration-test
+          cache-from: |
+            type=gha
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-latest
+          cache-to: type=gha,mode=max
+
+      # Wait for background pulls to complete
+      - name: Wait for image pulls
+        run: |
+          if [ -f /tmp/pull_pid ]; then
+            PID=$(cat /tmp/pull_pid)
+            echo "Waiting for image pulls (PID: $PID)..."
+            wait $PID 2>/dev/null || true
+          fi
+          echo "All images ready"
 
       # Setup environment
       - name: Setup environment
         run: |
           cp .github/workflows/integration_tests/.env ./
 
-      # Create standalone compose file (no includes to avoid conflicts)
+      # Create mock embedder script
+      - name: Create mock embedder
+        run: |
+          cat > mock_embedder.py << 'PYTHON_EOF'
+          """Mock embedder that responds to vLLM-compatible API calls."""
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+          import json
+
+          class MockHandler(BaseHTTPRequestHandler):
+              def log_message(self, format, *args):
+                  print(f"[MockEmbedder] {args[0]}")
+
+              def do_GET(self):
+                  if self.path == "/health" or self.path == "/v1/models":
+                      self.send_response(200)
+                      self.send_header("Content-Type", "application/json")
+                      self.end_headers()
+                      if self.path == "/health":
+                          self.wfile.write(b'{"status":"ok"}')
+                      else:
+                          self.wfile.write(json.dumps({
+                              "data": [{"id": "ibm-granite/granite-embedding-small-english-r2"}]
+                          }).encode())
+                  else:
+                      self.send_response(404)
+                      self.end_headers()
+
+              def do_POST(self):
+                  if self.path == "/v1/embeddings":
+                      content_length = int(self.headers.get("Content-Length", 0))
+                      body = self.rfile.read(content_length)
+                      data = json.loads(body) if body else {}
+
+                      # Generate fake embeddings (384 dimensions for granite-small)
+                      inputs = data.get("input", [])
+                      if isinstance(inputs, str):
+                          inputs = [inputs]
+
+                      embeddings = []
+                      for i, _ in enumerate(inputs):
+                          # Simple deterministic fake embedding
+                          embedding = [0.01 * (j % 100) for j in range(384)]
+                          embeddings.append({"object": "embedding", "index": i, "embedding": embedding})
+
+                      response = {
+                          "object": "list",
+                          "data": embeddings,
+                          "model": data.get("model", "mock-model"),
+                          "usage": {"prompt_tokens": len(inputs) * 10, "total_tokens": len(inputs) * 10}
+                      }
+
+                      self.send_response(200)
+                      self.send_header("Content-Type", "application/json")
+                      self.end_headers()
+                      self.wfile.write(json.dumps(response).encode())
+                  else:
+                      self.send_response(404)
+                      self.end_headers()
+
+          if __name__ == "__main__":
+              server = HTTPServer(("0.0.0.0", 8000), MockHandler)
+              print("[MockEmbedder] Starting on port 8000...")
+              server.serve_forever()
+          PYTHON_EOF
+
+      # Create standalone compose file
       - name: Create compose file
         run: |
-          cat > docker-compose.integration.yaml << EOF
+          cat > docker-compose.integration.yaml << 'EOF'
           # Integration test - standalone compose with fast health checks
           services:
             openrag-cpu:
-              image: ${{ env.OPENRAG_IMAGE }}
+              image: openrag:integration-test
               volumes:
                 - ./.hydra_config:/app/.hydra_config
                 - ./data:/app/data
@@ -83,7 +174,7 @@ jobs:
                 - .env
               shm_size: 4gb
               healthcheck:
-                  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2).read()"]
+                test: ["CMD", "curl", "-sf", "http://localhost:8080/health_check"]
                 interval: 5s
                 timeout: 3s
                 retries: 30
@@ -93,7 +184,7 @@ jobs:
                   condition: service_started
                 milvus:
                   condition: service_healthy
-                vllm-cpu:
+                mock-embedder:
                   condition: service_healthy
 
             rdb:
@@ -109,35 +200,21 @@ jobs:
                 timeout: 3s
                 retries: 10
 
-            vllm-cpu:
-              image: ${{ env.VLLM_CPU_IMAGE }}
+            mock-embedder:
+              image: python:3.12-slim
               networks:
                 default:
                   aliases:
                     - vllm
-              restart: "no"
-              environment:
-                - VLLM_USE_V1=0
-              ipc: "host"
-              cap_add:
-                - SYS_NICE
-                - SYS_PTRACE
-              security_opt:
-                - seccomp:unconfined
               volumes:
-                - ./model_weights:/root/.cache/huggingface
-              command: >
-                --host 0.0.0.0
-                --model ibm-granite/granite-embedding-small-english-r2
-                --trust-remote-code
-                --dtype float32
-                --max-model-len 512
+                - ./mock_embedder.py:/app/mock_embedder.py:ro
+              command: python /app/mock_embedder.py
               healthcheck:
-                test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2).read()"]
-                interval: 5s
+                test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+                interval: 2s
                 timeout: 3s
-                retries: 40
-                start_period: 60s
+                retries: 10
+                start_period: 5s
 
             etcd:
               image: quay.io/coreos/etcd:v3.5.16
@@ -164,7 +241,7 @@ jobs:
                 - ./volumes/minio:/minio_data
               command: minio server /minio_data --console-address ":9001"
               healthcheck:
-                test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/minio/health/live', timeout=2).read()"]
+                test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
                 interval: 5s
                 timeout: 3s
                 retries: 10
@@ -180,7 +257,7 @@ jobs:
               volumes:
                 - ./volumes/milvus:/var/lib/milvus
               healthcheck:
-                test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9091/healthz', timeout=2).read()"]
+                test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
                 interval: 5s
                 timeout: 3s
                 retries: 20
@@ -190,20 +267,9 @@ jobs:
                 - minio
           EOF
 
-      # Cache HuggingFace models
-      - name: Cache HuggingFace models
-        uses: actions/cache@v4
-        with:
-          path: model_weights
-          key: hf-models-granite-embedding-small-${{ runner.os }}
-          restore-keys: |
-            hf-models-granite-embedding-small-
-            hf-models-
-
       - name: Create required directories
         run: |
           mkdir -p model_weights data db logs .hydra_config volumes/etcd volumes/minio volumes/milvus
-          cp -r .hydra_config/* .hydra_config/ 2>/dev/null || true
 
       # Start services
       - name: Start Docker Compose stack
@@ -211,17 +277,6 @@ jobs:
           docker compose -f docker-compose.integration.yaml up -d
           echo "Services starting..."
           docker compose -f docker-compose.integration.yaml ps
-
-      - name: Debug health status (vLLM)
-        if: always()
-        run: |
-          set -x
-          docker compose -f docker-compose.integration.yaml ps
-          cid=$(docker compose -f docker-compose.integration.yaml ps -q vllm-cpu)
-          echo "vLLM container id: $cid"
-          docker inspect --format='Status={{.State.Status}} Health={{json .State.Health}}' "$cid" || true
-          docker logs "$cid" --tail=200 || true
-
 
       # Wait for health check
       - name: Wait for services to be healthy
@@ -261,8 +316,8 @@ jobs:
           echo "=== OpenRAG Logs ==="
           docker compose -f docker-compose.integration.yaml logs openrag-cpu --tail=200 || true
           echo ""
-          echo "=== vLLM Logs ==="
-          docker compose -f docker-compose.integration.yaml logs vllm-cpu --tail=100 || true
+          echo "=== Mock Embedder Logs ==="
+          docker compose -f docker-compose.integration.yaml logs mock-embedder --tail=100 || true
           echo ""
           echo "=== Milvus Logs ==="
           docker compose -f docker-compose.integration.yaml logs milvus --tail=50 || true
