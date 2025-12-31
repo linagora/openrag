@@ -1,6 +1,7 @@
 import asyncio
 import atexit
 import threading
+import time
 from abc import ABCMeta
 
 import ray
@@ -57,9 +58,10 @@ class LLMSemaphore(metaclass=SingletonMeta):
         """Ensure semaphore is released at shutdown"""
         while self._semaphore.locked():
             self._semaphore.release()
+            time.sleep(0.001)  # Prevent CPU spin
 
 
-@ray.remote(max_restarts=-1, max_concurrency=config.ray.semaphore.concurrency)
+@ray.remote(max_restarts=5, max_concurrency=config.ray.semaphore.concurrency)
 class DistributedSemaphoreActor:
     def __init__(self, max_concurrent_ops: int):
         self.semaphore = asyncio.Semaphore(max_concurrent_ops)
@@ -73,6 +75,7 @@ class DistributedSemaphoreActor:
     def cleanup(self):
         while self.semaphore.locked():
             self.semaphore.release()
+            time.sleep(0.001)  # Prevent CPU spin
 
 
 class DistributedSemaphore:
