@@ -67,8 +67,8 @@ class MarkerWorker:
         if self.pool:
             self.logger.warning("Resetting multiprocessing pool")
             self.pool.close()
-            self.pool.join()
-            self.pool.terminate()
+            self.pool.terminate()  # Force kill first
+            self.pool.join()       # Then wait for cleanup
             self.pool = None
         try:
             if mp.get_start_method(allow_none=True) != "spawn":
@@ -145,6 +145,16 @@ class MarkerWorker:
     def get_current_pool_size(self):
         return len([p for p in self.pool._pool if p.is_alive()])
 
+    def __del__(self):
+        """Clean up multiprocessing pool on actor destruction"""
+        if self.pool:
+            try:
+                self.pool.close()
+                self.pool.terminate()
+                self.pool.join()
+            except Exception:
+                pass  # Best effort cleanup
+
 
 @ray.remote
 class MarkerPool:
@@ -185,8 +195,16 @@ class MarkerPool:
             # Ensure the worker pool is healthy
             await self.ensure_worker_pool_healthy(worker)
         try:
-            markdown, images = await worker.process_pdf.remote(file_path)
+            # Add timeout at pool level to prevent indefinite hangs
+            timeout = self.config.loader.get("marker_timeout", 3600)
+            markdown, images = await asyncio.wait_for(
+                worker.process_pdf.remote(file_path),
+                timeout=timeout
+            )
             return markdown, images
+        except asyncio.TimeoutError:
+            self.logger.error(f"MarkerPool timeout for {file_path}")
+            raise
         except Exception as e:
             self.logger.exception(
                 "Error processing PDF with MarkerWorker", error=str(e)
