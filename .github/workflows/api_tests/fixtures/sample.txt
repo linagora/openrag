@@ -1,0 +1,42 @@
+Sample Document for API Testing
+
+This is a sample document used for testing the OpenRAG API.
+
+Introduction
+============
+
+OpenRAG is a Retrieval-Augmented Generation system that combines document indexing
+with semantic search capabilities. This document is used to verify that the API
+endpoints work correctly.
+
+Content
+=======
+
+The system supports various file formats including:
+- Plain text files (.txt)
+- Markdown documents (.md)
+- PDF documents (.pdf)
+- Microsoft Word documents (.docx)
+
+Features
+========
+
+1. Document Indexing: Upload and index documents for semantic search
+2. Semantic Search: Find relevant documents using natural language queries
+3. RAG Integration: Combine search results with language models
+4. Partition Management: Organize documents into separate collections
+
+Testing
+=======
+
+This fixture file is used in automated tests to verify:
+- File upload functionality
+- Document indexing pipeline
+- Search capabilities
+- API response formats
+
+Conclusion
+==========
+
+The OpenRAG API provides a comprehensive set of endpoints for document management
+and retrieval-augmented generation workflows.

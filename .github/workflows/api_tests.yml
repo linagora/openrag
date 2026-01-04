@@ -1,0 +1,86 @@
+name: API Tests
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  api-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up Docker Compose
+        uses: docker/setup-compose-action@v1
+        with:
+          version: v2.34.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          pip install pytest httpx pytest-timeout
+
+      - name: Build and start services
+        working-directory: .github/workflows/api_tests
+        run: |
+          docker compose build
+          docker compose up -d
+
+          echo "Waiting for services to be ready..."
+
+          # Wait for mock-vllm
+          echo "Waiting for mock-vllm..."
+          timeout 60 bash -c 'until curl -sf http://localhost:8000/health 2>/dev/null; do sleep 2; done' || true
+
+          # Wait for OpenRAG API
+          echo "Waiting for OpenRAG API..."
+          for i in {1..60}; do
+            if curl -sf http://localhost:8080/health_check 2>/dev/null; then
+              echo "OpenRAG API ready after $i attempts"
+              break
+            fi
+            echo "Attempt $i/60 - waiting..."
+            sleep 5
+          done
+
+          # Final check
+          if ! curl -sf http://localhost:8080/health_check; then
+            echo "OpenRAG API failed to start"
+            docker compose logs openrag
+            exit 1
+          fi
+
+          echo "All services ready!"
+
+      - name: Run API tests
+        env:
+          OPENRAG_API_URL: http://localhost:8080
+        run: |
+          pytest tests/api_tests/ -v --timeout=120 --tb=short
+
+      - name: Show logs on failure
+        if: failure()
+        working-directory: .github/workflows/api_tests
+        run: |
+          echo "=== OpenRAG Logs ==="
+          docker compose logs openrag --tail=100
+          echo "=== Mock VLLM Logs ==="
+          docker compose logs mock-vllm --tail=50
+          echo "=== Milvus Logs ==="
+          docker compose logs milvus --tail=50
+
+      - name: Cleanup
+        if: always()
+        working-directory: .github/workflows/api_tests
+        run: |
+          docker compose down -v
