@@ -14,7 +14,6 @@ dependencies = [
     "langchain-core>=0.3.39",
     "langchain-experimental>=0.3.4",
     "langchain-huggingface>=0.1.2",
-    "langchain-milvus>=0.1.8",
     "langchain-openai>=0.3.7",
     "loguru>=0.7.3",
     "marker-pdf>=0.2.17",
@@ -50,6 +49,7 @@ dependencies = [
     "ruff>=0.14.1",
     "librosa>=0.11.0",
     "cairosvg>=2.7.0",
+    "pymilvus>=2.5.12",
 ]
 
 [dependency-groups]

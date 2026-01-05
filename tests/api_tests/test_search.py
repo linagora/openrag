@@ -87,3 +87,58 @@ class TestSemanticSearch:
         )
         # May return empty results or error
         assert response.status_code in [200, 404, 500]
+<<<<<<< Updated upstream
+=======
+
+    def test_search_with_include_related(self, api_client, indexed_folder_partition, exact_match_query, folder_files):
+        """Test search with include_related retrieves all files with same relationship_id.
+
+        This test verifies that when searching with include_related=True, and it's relevant for folder or thread relationships.
+        """
+        # Search without include_related first
+        response_without = api_client.get(
+            f"/search/partition/{indexed_folder_partition}",
+            params={"text": exact_match_query, "top_k": 1, "include_related": False},
+        )
+        assert response_without.status_code == 200
+        data_without = response_without.json()
+        assert "documents" in data_without
+
+        # Should get at least one result (the matching chunk)
+
+        initial_count = len(data_without.get("documents", []))
+        assert initial_count > 0, "Should find at least one matching chunk"
+
+        # Search with include_related
+        response_with = api_client.get(
+            f"/search/partition/{indexed_folder_partition}",
+            params={"text": exact_match_query, "top_k": 1, "include_related": True},
+        )
+        assert response_with.status_code == 200
+        data_with = response_with.json()
+        assert "documents" in data_with
+
+        # Should get more results (chunks from all 3 files in the folder)
+        expanded_count = len(data_with.get("documents", []))
+        assert expanded_count > initial_count, (
+            f"include_related should expand results. Got {expanded_count} vs {initial_count} without"
+        )
+
+        # Verify all documents have the same relationship_id
+        relationship_ids = {doc["metadata"].get("relationship_id") for doc in data_with["documents"]}
+        assert None not in relationship_ids, (
+            f"All documents should carry relationship_id metadata. Got: {relationship_ids}"
+        )
+
+        # verify that the relationship_id matches the expected one
+        expected_relationship_id = folder_files["file1.txt"][1]  # relationship_id used during indexing
+        assert relationship_ids.pop() == expected_relationship_id, (
+            f"Documents should have relationship_id {expected_relationship_id}"
+        )
+
+        # verify that we got all 3 files' chunks
+        filenames = {doc["metadata"].get("filename") for doc in data_with["documents"]}
+
+        expected_filenames = {"file1.txt", "file2.txt", "file3.txt"}
+        assert filenames == expected_filenames, f"Expected files {expected_filenames}, got {filenames}"
+>>>>>>> Stashed changes

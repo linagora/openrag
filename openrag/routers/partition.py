@@ -42,8 +42,12 @@ async def list_existant_partitions(
 ):
     if len(partitions) == 1 and partitions[0]["partition"] == "all":
         partitions = await vectordb.list_partitions.remote()
-    logger.debug("Returned list of existing partitions.", partition_count=len(partitions))
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"partitions": partitions})
+    logger.debug(
+        "Returned list of existing partitions.", partition_count=len(partitions)
+    )
+    return JSONResponse(
+        status_code=status.HTTP_200_OK, content={"partitions": partitions}
+    )
 
 
 @router.delete(
@@ -100,7 +104,9 @@ async def list_files(
     partition_viewer=Depends(require_partition_viewer),
 ):
     log = logger.bind(partition=partition)
-    file_obj_l = await vectordb.list_partition_files.remote(partition=partition, limit=limit)
+    file_obj_l = await vectordb.list_partition_files.remote(
+        partition=partition, limit=limit
+    )
     file_dicts = file_obj_l.get("files", [])
     log.debug("Listed files in partition", file_count=len(file_dicts))
 
@@ -151,11 +157,18 @@ async def get_file(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"'{file_id}' not found in partition '{partition}'",
         )
-    results = await vectordb.get_file_chunks.remote(partition=partition, file_id=file_id, include_id=True)
+    results = await vectordb.get_file_chunks.remote(
+        partition=partition, file_id=file_id, include_id=True
+    )
 
-    documents = [{"link": str(request.url_for("get_extract", extract_id=doc.metadata["_id"]))} for doc in results]
+    documents = [
+        {"link": str(request.url_for("get_extract", extract_id=doc.metadata["_id"]))}
+        for doc in results
+    ]
 
-    metadata = {k: v for k, v in results[0].metadata.items() if k != "_id"} if results else {}
+    metadata = (
+        {k: v for k, v in results[0].metadata.items() if k != "_id"} if results else {}
+    )
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -191,10 +204,14 @@ async def list_all_chunks(
     vectordb=Depends(get_vectordb),
     partition_viewer=Depends(require_partition_viewer),
 ):
-    chunks = await vectordb.list_all_chunk.remote(partition=partition, include_embedding=include_embedding)
+    chunks = await vectordb.list_all_chunk.remote(
+        partition=partition, include_embedding=include_embedding
+    )
     chunks = [
         {
-            "link": str(request.url_for("get_extract", extract_id=chunk.metadata["_id"])),
+            "link": str(
+                request.url_for("get_extract", extract_id=chunk.metadata["_id"])
+            ),
             "content": chunk.page_content,
             "metadata": chunk.metadata,
         }
@@ -222,7 +239,9 @@ Returns 201 Created on successful creation.
 Returns 409 Conflict if partition already exists.
 """,
 )
-async def create_partition(request: Request, partition: str, vectordb=Depends(get_vectordb)):
+async def create_partition(
+    request: Request, partition: str, vectordb=Depends(get_vectordb)
+):
     if await vectordb.partition_exists.remote(partition):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -304,7 +323,9 @@ async def add_partition_user(
     """
     log = logger.bind(partition=partition, user_id=user_id)
 
-    await vectordb.add_partition_member.remote(partition=partition, user_id=user_id, role=role)
+    await vectordb.add_partition_member.remote(
+        partition=partition, user_id=user_id, role=role
+    )
 
     log.debug("User added to partition successfully")
     return Response(status_code=status.HTTP_201_CREATED)
@@ -380,7 +401,97 @@ async def update_partition_user_role(
     """
     log = logger.bind(partition=partition, user_id=user_id, role=role)
 
-    await vectordb.update_partition_member_role.remote(partition=partition, user_id=user_id, new_role=role)
+    await vectordb.update_partition_member_role.remote(
+        partition=partition, user_id=user_id, new_role=role
+    )
 
     log.debug("User role updated successfully")
     return Response(status_code=status.HTTP_200_OK)
+
+
+# Document relationship endpoints
+
+
+@router.get(
+    "/{partition}/relationships/{relationship_id}",
+    description="""Get all files in a relationship group.
+
+**Parameters:**
+- `partition`: The partition name
+- `relationship_id`: The relationship group identifier (e.g., email thread ID, folder path)
+
+**Response:**
+Returns all files that share the same relationship_id:
+- `files`: List of file objects with metadata
+
+**Use Cases:**
+- Get all emails in a thread
+- Get all documents in a folder
+- Get all related documents in a group
+
+**Permissions:**
+- Requires partition viewer role or higher
+""",
+)
+async def get_related_files(
+    request: Request,
+    partition: str,
+    relationship_id: str,
+    vectordb=Depends(get_vectordb),
+    partition_viewer=Depends(require_partition_viewer),
+):
+    log = logger.bind(partition=partition, relationship_id=relationship_id)
+    files = await vectordb.get_files_by_relationship.remote(partition=partition, relationship_id=relationship_id)
+    log.debug("Listed related files", file_count=len(files))
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"files": files},
+    )
+
+
+@router.get(
+    "/{partition}/file/{file_id}/ancestors",
+    description="""Get the ancestor path for a file.
+
+**Parameters:**
+- `partition`: The partition name
+- `file_id`: The file identifier (can be any node in a hierarchy)
+
+**Response:**
+Returns the complete path from root to the specified file:
+- `ancestors`: Ordered list of file objects (root first, target file last)
+
+**Use Cases:**
+- Get the email thread path from original email to a reply
+- Get the folder hierarchy path to a file
+- Reconstruct conversation history
+
+**Note:**
+This returns only the direct ancestor path, not sibling branches.
+For email threads with parallel branches, each branch has its own ancestor path.
+
+**Permissions:**
+- Requires partition viewer role or higher
+""",
+)
+async def get_file_ancestors(
+    request: Request,
+    partition: str,
+    file_id: str,
+    vectordb=Depends(get_vectordb),
+    partition_viewer=Depends(require_partition_viewer),
+):
+    log = logger.bind(partition=partition, file_id=file_id)
+
+    if not await vectordb.file_exists.remote(file_id, partition):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"'{file_id}' not found in partition '{partition}'",
+        )
+
+    ancestors = await vectordb.get_file_ancestors.remote(partition=partition, file_id=file_id)
+    log.debug("Listed file ancestors", ancestor_count=len(ancestors))
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"ancestors": ancestors},
+    )

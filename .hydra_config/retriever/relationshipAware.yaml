@@ -1,0 +1,7 @@
+defaults:
+  - base
+
+type: relationshipAware
+related_limit: ${oc.decode:${oc.env:RELATED_LIMIT, 20}}
+include_related: ${oc.decode:${oc.env:INCLUDE_RELATED, false}}
+include_ancestors: ${oc.decode:${oc.env:INCLUDE_ANCESTORS, false}}
