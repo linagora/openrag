@@ -1,3 +1,4 @@
+import asyncio
 from typing import Literal, Optional
 
 from components.indexer.utils.text_sanitizer import sanitize_text
@@ -17,6 +18,13 @@ from .utils import MDElement, chunk_table, get_chunk_page_number, split_md_eleme
 
 logger = get_logger()
 config = load_config()
+
+# Timeout for individual chunk contextualization LLM calls (in seconds)
+CONTEXTUALIZATION_TIMEOUT = config.chunker.get("contextualization_timeout", 120)
+# Maximum concurrent contextualization tasks to prevent system overload
+MAX_CONCURRENT_CONTEXTUALIZATION = config.chunker.get(
+    "max_concurrent_contextualization", 10
+)
 
 BASE_CHUNK_FORMAT = (
     "* filename: {filename}\n\n[CHUNK_START]\n\n{content}\n\n[CHUNK_END]"
@@ -60,8 +68,17 @@ class ChunkContextualizer:
                     SystemMessage(content=CHUNK_CONTEXTUALIZER_PROMPT),
                     HumanMessage(content=user_msg),
                 ]
-                output = await self.context_generator.ainvoke(messages)
+                output = await asyncio.wait_for(
+                    self.context_generator.ainvoke(messages),
+                    timeout=CONTEXTUALIZATION_TIMEOUT,
+                )
                 return output.content
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Timeout contextualizing chunk of document `{filename}` "
+                    f"after {CONTEXTUALIZATION_TIMEOUT}s"
+                )
+                return ""
             except Exception as e:
                 logger.warning(
                     f"Error contextualizing chunk of document `{filename}`: {e}"
@@ -74,24 +91,36 @@ class ChunkContextualizer:
         lang: Literal["fr", "en"] = "en",
         filename: str = "",
     ) -> list[Document]:
-        """Contextualize a list of document chunks."""
+        """Contextualize a list of document chunks.
+
+        Processes chunks in batches to prevent overwhelming the system with
+        too many concurrent LLM requests.
+        """
         try:
             first_chunks = chunks[:2]
-            tasks = [
-                self._generate_context(
-                    first_chunks=first_chunks,
-                    prev_chunks=chunks[max(0, i - 2) : i] if i > 0 else [],
-                    current_chunk=chunks[i],
-                    lang=lang,
-                )
-                for i in range(len(chunks))
-            ]
+            contexts = []
+            batch_size = MAX_CONCURRENT_CONTEXTUALIZATION
 
-            contexts = await tqdm.gather(
-                *tasks,
-                total=len(tasks),
-                desc=f"Contextualizing chunks of *{filename}*",
-            )
+            # Process chunks in batches to limit concurrent LLM calls
+            for batch_start in range(0, len(chunks), batch_size):
+                batch_end = min(batch_start + batch_size, len(chunks))
+                batch_tasks = [
+                    self._generate_context(
+                        first_chunks=first_chunks,
+                        prev_chunks=chunks[max(0, i - 2) : i] if i > 0 else [],
+                        current_chunk=chunks[i],
+                        lang=lang,
+                    )
+                    for i in range(batch_start, batch_end)
+                ]
+
+                batch_contexts = await tqdm.gather(
+                    *batch_tasks,
+                    total=len(batch_tasks),
+                    desc=f"Contextualizing chunks of *{filename}* "
+                    f"[{batch_start + 1}-{batch_end}/{len(chunks)}]",
+                )
+                contexts.extend(batch_contexts)
 
             return [
                 Document(
