@@ -357,7 +357,7 @@ class MilvusDB(BaseVectorDB):
         try:
             # Special handing for e-mails in Twake Mail
             for ch in chunks:
-                if ch.metadata['doctype'] in [ "com.linagora.email" ]:
+                if ch.metadata.get('doctype') in [ "com.linagora.email" ]:
                     if 'rels' not in ch.metadata:
                         ch.metadata['rels'] = []
 
