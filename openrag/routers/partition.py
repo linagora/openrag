@@ -384,3 +384,91 @@ async def update_partition_user_role(
 
     log.debug("User role updated successfully")
     return Response(status_code=status.HTTP_200_OK)
+
+
+# Document relationship endpoints
+
+
+@router.get(
+    "/{partition}/relationships/{relationship_id}",
+    description="""Get all files in a relationship group.
+
+**Parameters:**
+- `partition`: The partition name
+- `relationship_id`: The relationship group identifier (e.g., email thread ID, folder path)
+
+**Response:**
+Returns all files that share the same relationship_id:
+- `files`: List of file objects with metadata
+
+**Use Cases:**
+- Get all emails in a thread
+- Get all documents in a folder
+- Get all related documents in a group
+
+**Permissions:**
+- Requires partition viewer role or higher
+""",
+)
+async def get_related_files(
+    request: Request,
+    partition: str,
+    relationship_id: str,
+    vectordb=Depends(get_vectordb),
+    partition_viewer=Depends(require_partition_viewer),
+):
+    log = logger.bind(partition=partition, relationship_id=relationship_id)
+    files = await vectordb.get_files_by_relationship.remote(partition=partition, relationship_id=relationship_id)
+    log.debug("Listed related files", file_count=len(files))
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"files": files},
+    )
+
+
+@router.get(
+    "/{partition}/file/{file_id}/ancestors",
+    description="""Get the ancestor path for a file.
+
+**Parameters:**
+- `partition`: The partition name
+- `file_id`: The file identifier (can be any node in a hierarchy)
+
+**Response:**
+Returns the complete path from root to the specified file:
+- `ancestors`: Ordered list of file objects (root first, target file last)
+
+**Use Cases:**
+- Get the email thread path from original email to a reply
+- Get the folder hierarchy path to a file
+- Reconstruct conversation history
+
+**Note:**
+This returns only the direct ancestor path, not sibling branches.
+For email threads with parallel branches, each branch has its own ancestor path.
+
+**Permissions:**
+- Requires partition viewer role or higher
+""",
+)
+async def get_file_ancestors(
+    request: Request,
+    partition: str,
+    file_id: str,
+    vectordb=Depends(get_vectordb),
+    partition_viewer=Depends(require_partition_viewer),
+):
+    log = logger.bind(partition=partition, file_id=file_id)
+
+    if not await vectordb.file_exists.remote(file_id, partition):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"'{file_id}' not found in partition '{partition}'",
+        )
+
+    ancestors = await vectordb.get_file_ancestors.remote(partition=partition, file_id=file_id)
+    log.debug("Listed file ancestors", ancestor_count=len(ancestors))
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"ancestors": ancestors},
+    )
