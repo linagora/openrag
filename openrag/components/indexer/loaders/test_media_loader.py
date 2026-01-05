@@ -99,7 +99,7 @@ class TestAudioSegmentOperations:
                 loaded = AudioSegment.from_file(mp3_path, format="mp3")
                 # MP3 may have slight duration differences due to encoding
                 assert abs(len(loaded) - 1000) < 100
-            except Exception:
+            except (FileNotFoundError, OSError):
                 # Skip if ffmpeg not available
                 pytest.skip("ffmpeg not available for MP3 encoding")
 
@@ -214,7 +214,6 @@ class TestAudioChunking:
             min_silence_len=min_silence_len_ms,
             silence_thresh=silence_thresh_db,
         )
-        silences = [(start, end) for start, end in silences]
 
         chunks = []
         start = 0
