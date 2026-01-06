@@ -83,6 +83,8 @@ do
     done
 done
 
+sleep 30s
+
 # Verification : thread 1
 
 # Positive tests
