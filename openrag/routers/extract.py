@@ -66,6 +66,8 @@ async def get_extract(
                 detail=f"User does not have access to extract '{extract_id}'.",
             )
         log.info("Extract successfully retrieved.")
+    except HTTPException:
+        raise
     except Exception as e:
         log.exception("Failed to retrieve extract.", error=str(e))
         raise HTTPException(

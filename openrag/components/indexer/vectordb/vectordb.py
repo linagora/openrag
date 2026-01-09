@@ -709,15 +709,22 @@ class MilvusDB(BaseVectorDB):
         """
         Retrieve a chunk by its ID.
         Args:
-            chunk_id (str): The ID of the chunk to retrieve.
+            chunk_id (str): The ID of the chunk to retrieve (Milvus Int64 _id as string).
         Returns:
-            Document: The retrieved chunk.
+            Document: The retrieved chunk, or None if not found or invalid ID format.
         """
         log = self.logger.bind(chunk_id=chunk_id)
+        # Milvus _id is Int64, so we need to convert the string to int
+        try:
+            chunk_id_int = int(chunk_id)
+        except (ValueError, TypeError):
+            log.warning("Invalid chunk_id format - must be an integer")
+            return None
+
         try:
             response = await self._async_client.query(
                 collection_name=self.collection_name,
-                filter=f"_id == {chunk_id}",
+                filter=f"_id == {chunk_id_int}",
                 limit=1,
             )
             if response:
