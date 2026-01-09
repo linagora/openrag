@@ -69,6 +69,9 @@ map_reduce:
 verbose:
   level: ${oc.env:LOG_LEVEL, DEBUG}
 
+server:
+  preferred_url_scheme: ${oc.env:PREFERRED_URL_SCHEME, null}
+
 paths:
   prompts_dir: ${oc.env:PROMPTS_DIR, ../prompts/example1}
   data_dir: ${oc.env:DATA_DIR, ../data}

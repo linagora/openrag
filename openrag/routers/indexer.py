@@ -45,6 +45,18 @@ LOG_FILE = Path(config.paths.log_dir or "logs") / "app.json"
 ACCEPTED_FILE_FORMATS = dict(config.loader["file_loaders"]).keys()
 DICT_MIMETYPES = dict(config.loader["mimetypes"])
 
+# URL scheme configuration
+PREFERRED_URL_SCHEME = config.server.preferred_url_scheme
+
+
+def build_url(request: Request, route_name: str, **path_params) -> str:
+    """Build a URL using the preferred scheme if configured."""
+    url = request.url_for(route_name, **path_params)
+    if PREFERRED_URL_SCHEME:
+        url = url.replace(scheme=PREFERRED_URL_SCHEME)
+    return str(url)
+
+
 # Create an APIRouter instance
 router = APIRouter()
 
@@ -159,8 +171,8 @@ async def add_file(
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
         content={
-            "task_status_url": str(
-                request.url_for("get_task_status", task_id=task.task_id().hex())
+            "task_status_url": build_url(
+                request, "get_task_status", task_id=task.task_id().hex()
             )
         },
     )
@@ -282,8 +294,8 @@ async def put_file(
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
         content={
-            "task_status_url": str(
-                request.url_for("get_task_status", task_id=task.task_id().hex())
+            "task_status_url": build_url(
+                request, "get_task_status", task_id=task.task_id().hex()
             )
         },
     )
@@ -418,7 +430,7 @@ async def get_task_status(
     }
 
     if state == "FAILED":
-        content["error_url"] = str(request.url_for("get_task_error", task_id=task_id))
+        content["error_url"] = build_url(request, "get_task_error", task_id=task_id)
 
     return JSONResponse(status_code=status.HTTP_200_OK, content=content)
 
