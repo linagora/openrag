@@ -25,8 +25,8 @@ class TestOpenAICompatibleAPI:
             "/v1/chat/completions",
             json={"model": "openrag-all", "messages": []}
         )
-        # 404 if endpoint disabled, 400/422/500 if enabled but invalid input
-        assert response.status_code in [400, 404, 422, 500]
+        # 404 if endpoint disabled, 400/422 if enabled but invalid input
+        assert response.status_code in [400, 404, 422]
 
     def test_chat_completions_invalid_model(self, api_client):
         """Test chat completions with invalid model."""
@@ -38,7 +38,7 @@ class TestOpenAICompatibleAPI:
             }
         )
         # Should return error for invalid model, 404 if endpoint disabled
-        assert response.status_code in [200, 400, 404, 500]
+        assert response.status_code in [400, 404, 422]
 
     def test_completions_endpoint(self, api_client):
         """Test completions endpoint exists or is disabled."""

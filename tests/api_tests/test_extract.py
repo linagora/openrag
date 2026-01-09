@@ -8,8 +8,7 @@ class TestExtract:
     def test_get_nonexistent_extract(self, api_client):
         """Test retrieving non-existent extract returns error."""
         response = api_client.get("/extract/nonexistent-id-12345")
-        # May return 404 or 500 depending on implementation
-        assert response.status_code in [404, 500]
+        assert response.status_code == 404
 
     def test_extract_invalid_id_format(self, api_client):
         """Test extract with invalid ID format."""

@@ -32,4 +32,4 @@ class TestUserManagement:
     def test_get_nonexistent_user(self, api_client):
         """Test getting non-existent user."""
         response = api_client.get("/users/99999")
-        assert response.status_code in [404, 500]
+        assert response.status_code == 404

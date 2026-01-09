@@ -127,4 +127,4 @@ class TestTaskStatus:
     def test_get_nonexistent_task(self, api_client):
         """Test getting non-existent task returns error."""
         response = api_client.get("/indexer/task/nonexistent-task-12345")
-        assert response.status_code in [404, 500]
+        assert response.status_code == 404

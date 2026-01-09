@@ -40,7 +40,11 @@ jobs:
 
           # Wait for mock-vllm
           echo "Waiting for mock-vllm..."
-          timeout 60 bash -c 'until curl -sf http://localhost:8000/health 2>/dev/null; do sleep 2; done' || true
+          if ! timeout 60 bash -c 'until curl -sf http://localhost:8000/health 2>/dev/null; do sleep 2; done'; then
+            echo "Mock VLLM failed to start"
+            docker compose logs mock-vllm
+            exit 1
+          fi
 
           # Wait for OpenRAG API
           echo "Waiting for OpenRAG API..."

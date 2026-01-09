@@ -27,7 +27,9 @@ class TestPartitionCRUD:
 
     def test_create_duplicate_partition_fails(self, api_client, test_partition_name):
         """Test creating duplicate partition returns error."""
-        api_client.post(f"/partition/{test_partition_name}")
+        first_response = api_client.post(f"/partition/{test_partition_name}")
+        assert first_response.status_code in [200, 201]
+
         response = api_client.post(f"/partition/{test_partition_name}")
         assert response.status_code in [400, 409]
 
@@ -51,4 +53,4 @@ class TestPartitionCRUD:
     def test_delete_nonexistent_partition(self, api_client):
         """Test deleting non-existent partition returns error."""
         response = api_client.delete("/partition/nonexistent-partition-xyz123")
-        assert response.status_code in [404, 500]
+        assert response.status_code == 404
