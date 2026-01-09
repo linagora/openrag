@@ -36,6 +36,7 @@ x-vllm: &vllm_template
   restart: on-failure
   environment:
     - HUGGING_FACE_HUB_TOKEN
+    - VLLM_SLEEP_WHEN_IDLE=1  # Avoid 100% CPU usage when idle
   ipc: "host"
   volumes:
     - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface # put ./vllm_cache if you want to have the weights on the vllm_cache folder in your project
