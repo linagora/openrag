@@ -166,6 +166,8 @@ async def openai_chat_completion(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The last message must be a non-empty user message",
         )
+    
+    log.debug(f"Received chat completion request with messages: {request.messages}")
 
     try:
         if is_direct_llm_model(request):
