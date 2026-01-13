@@ -100,6 +100,8 @@ As noted in [this PR](https://github.com/linagora/openrag/pull/134), the current
 | `CONTEXTUAL_RETRIEVAL` | `bool` | true                 | Enables contextual retrieval to chunk context, a technique introduced by Anthropic to improve retrieval performance ([Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval)) |
 | `CHUNK_SIZE`           | `int`  | 512                  | Maximum size (in characters) of each chunk. |
 | `CHUNK_OVERLAP_RATE`   | `float`| 0.2                  | Percentage of overlap between consecutive chunks. |
+| `CONTEXTUALIZATION_TIMEOUT` | `int` | 120 | Timeout in seconds for individual chunk contextualization LLM calls. Prevents long-running contextualization tasks from blocking the system. |
+| `MAX_CONCURRENT_CONTEXTUALIZATION` | `int` | 10 | Maximum number of concurrent chunk contextualization tasks. Limits parallel LLM requests to prevent CPU exhaustion during batch indexing. |
 
 After files are converted to Markdown, only the **text content** is chunked.
 **Image descriptions and Markdown tables are not chunked.**
