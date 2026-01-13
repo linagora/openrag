@@ -102,10 +102,10 @@ def __prepare_sources(request: Request, docs: list[Document]):
 
 
 def is_direct_llm_model(
-    request: OpenAIChatCompletionRequest | OpenAICompletionRequest
+    request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
 ) -> bool:
     """Check if request should use direct LLM (no RAG partition).
-    
+
     Returns True if model is None, empty, or matches the configured default model.
     """
     return (
@@ -197,22 +197,35 @@ async def openai_chat_completion(
     if request.stream:
 
         async def stream_response():
-            async for line in llm_output:
-                if line.startswith("data:"):
-                    if "[DONE]" in line:
-                        yield f"{line}\n\n"
-                    else:
-                        try:
-                            data_str = line[len("data: ") :]
-                            data = json.loads(data_str)
-                            data["model"] = model_name
-                            data["extra"] = metadata_json
-                            yield f"data: {json.dumps(data)}\n\n"
-                        except json.JSONDecodeError as e:
-                            log.exception(
-                                "Failed to decode streamed chunk.", error=str(e)
-                            )
-                            raise
+            try:
+                async for line in llm_output:
+                    if line.startswith("data:"):
+                        if "[DONE]" in line:
+                            yield f"{line}\n\n"
+                        else:
+                            try:
+                                data_str = line[len("data: ") :]
+                                data = json.loads(data_str)
+                                data["model"] = model_name
+                                data["extra"] = metadata_json
+                                yield f"data: {json.dumps(data)}\n\n"
+                            except json.JSONDecodeError as e:
+                                log.error(
+                                    "Failed to decode streamed chunk.", error=str(e)
+                                )
+                                raise
+            except Exception as e:
+                log.warning("Error while generating streaming answer", error=str(e))
+                error_chunk = {
+                    "error": {
+                        "message": f"Error while generating answer: {str(e)}",
+                        "type": "error",
+                        "param": None,
+                        "code": "ERROR_ANSWER_GENERATION",
+                    }
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
 
         return StreamingResponse(stream_response(), media_type="text/event-stream")
     else:

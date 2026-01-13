@@ -1,7 +1,7 @@
+import copy
 import json
 
 import httpx
-import copy
 from utils.logger import get_logger
 
 logger = get_logger()
