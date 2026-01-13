@@ -248,7 +248,7 @@ def get_app_state(request: Request):
 
 
 async def check_llm_model_availability(request: Request):
-    models = {"VLM": config.vlm, "LLM": config.llm}
+    models = {"LLM": config.llm, "VLM": config.vlm}
     for model_type, param in models.items():
         try:
             client = AsyncOpenAI(api_key=param["api_key"], base_url=param["base_url"])
@@ -260,10 +260,12 @@ async def check_llm_model_availability(request: Request):
                     detail=f"Only these models ({available_models}) are available for your `{model_type}`. Please check your configuration file.",
                 )
         except Exception as e:
-            logger.exception("Failed to validate model", model=model_type)
+            logger.exception("Failed to validate model", model=model_type, error=str(e))
+            if isinstance(e, HTTPException):
+                raise
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Error while checking the `{model_type}` endpoint: {str(e)}",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error while checking the `{model_type}` endpoint, it seems not available at this moment",
             )
 
 
