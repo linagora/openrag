@@ -1,5 +1,6 @@
-import asyncio
 from typing import Literal, Optional
+
+import openai
 
 from components.indexer.utils.text_sanitizer import sanitize_text
 from components.prompts import CHUNK_CONTEXTUALIZER_PROMPT
@@ -36,6 +37,8 @@ class ChunkContextualizer:
     """Handles contextualization of document chunks."""
 
     def __init__(self, llm_config: dict):
+        llm_config: dict = dict(llm_config)
+        llm_config.update({"timeout": CONTEXTUALIZATION_TIMEOUT})
         self.context_generator = ChatOpenAI(**llm_config)
 
     async def _generate_context(
@@ -68,20 +71,19 @@ class ChunkContextualizer:
                     SystemMessage(content=CHUNK_CONTEXTUALIZER_PROMPT),
                     HumanMessage(content=user_msg),
                 ]
-                output = await asyncio.wait_for(
-                    self.context_generator.ainvoke(messages),
-                    timeout=CONTEXTUALIZATION_TIMEOUT,
-                )
+                output = await self.context_generator.ainvoke(messages)
                 return output.content
-            except asyncio.TimeoutError:
+            except openai.APITimeoutError:
                 logger.warning(
-                    f"Timeout contextualizing chunk of document `{filename}` "
-                    f"after {CONTEXTUALIZATION_TIMEOUT}s"
+                    f"OpenAI API timeout contextualizing chunk after {CONTEXTUALIZATION_TIMEOUT}s",
+                    filename=filename,
                 )
                 return ""
             except Exception as e:
                 logger.warning(
-                    f"Error contextualizing chunk of document `{filename}`: {e}"
+                    "Error contextualizing chunk of document",
+                    filename=filename,
+                    error=str(e),
                 )
                 return ""
 
