@@ -7,7 +7,11 @@ from typing import Dict, Optional
 
 import aiofiles
 import consts
+from components.utils import load_config
 from fastapi import UploadFile
+
+config = load_config()
+SERIALIZE_TIMEOUT = config.indexer.get("serialize_timeout", 3600)
 
 
 def sanitize_filename(filename: str) -> str:
@@ -70,23 +74,32 @@ async def save_file_to_disk(
 
 async def serialize_file(task_id: str, path: str, metadata: Optional[Dict] = {}):
     import ray
-    from ray.exceptions import TaskCancelledError
+    from ray.exceptions import TaskCancelledError, RayTaskError
 
     serializer = ray.get_actor("DocSerializer", namespace="openrag")
     # Kick off the remote task
     future = serializer.serialize_document.remote(task_id, path, metadata=metadata)
 
-    # Wait for it to complete, with timeout
-    ready, _ = await asyncio.to_thread(ray.wait, [future])
+    try:
+        # Wait for task to complete, with timeout
+        ready, pending = await asyncio.to_thread(
+            ray.wait, [future], num_returns=1, timeout=SERIALIZE_TIMEOUT
+        )
+        if not ready:
+            ray.cancel(future, recursive=True)
+            raise TimeoutError(
+                f"Serialization task {task_id} timed out after {SERIALIZE_TIMEOUT}s"
+            )
+        return await asyncio.to_thread(ray.get, ready[0])
 
-    if ready:
-        try:
-            doc = await ready[0]
-            return doc
-        except TaskCancelledError:
-            raise
-        except Exception:
-            raise
-    else:
+    except asyncio.CancelledError:
+        # Stop ray task if asyncio task was cancelled
         ray.cancel(future, recursive=True)
-        raise TimeoutError(f"Serialization task {task_id} timed out after seconds")
+        raise
+
+    except TaskCancelledError:
+        # Ray task was cancelled
+        raise
+
+    except RayTaskError as e:
+        raise RuntimeError(f"Serialization task {task_id} failed") from e
