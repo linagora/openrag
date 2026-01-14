@@ -188,6 +188,8 @@ class MarkerPool:
             await worker.setup_mp.remote()
 
     async def process_pdf(self, file_path: str):
+        from components.ray_utils import call_ray_actor_with_timeout
+
         # Wait until any slot is free
         worker = await self._queue.get()
         if worker:
@@ -195,21 +197,13 @@ class MarkerPool:
             # Ensure the worker pool is healthy
             await self.ensure_worker_pool_healthy(worker)
         try:
-            # Add timeout at pool level to prevent indefinite hangs
             timeout = self.config.loader.get("marker_timeout", 3600)
-            markdown, images = await asyncio.wait_for(
-                worker.process_pdf.remote(file_path),
-                timeout=timeout
+            future = worker.process_pdf.remote(file_path)
+            return await call_ray_actor_with_timeout(
+                future,
+                timeout=timeout,
+                task_description=f"MarkerPool PDF processing ({file_path})",
             )
-            return markdown, images
-        except asyncio.TimeoutError:
-            self.logger.error(f"MarkerPool timeout for {file_path}")
-            raise
-        except Exception as e:
-            self.logger.exception(
-                "Error processing PDF with MarkerWorker", error=str(e)
-            )
-            raise
         finally:
             await self._queue.put(worker)
             self.logger.debug("MarkerWorker returned to pool")
@@ -227,6 +221,8 @@ class MarkerLoader(BaseLoader):
         metadata: Optional[Dict] = None,
         save_markdown: bool = False,
     ) -> Document:
+        from components.ray_utils import call_ray_actor_with_timeout
+
         if metadata is None:
             metadata = {}
 
@@ -234,7 +230,13 @@ class MarkerLoader(BaseLoader):
         start = time.time()
 
         try:
-            markdown, images = await self.worker.process_pdf.remote(file_path_str)
+            timeout = self.config.loader.get("marker_timeout", 3600)
+            future = self.worker.process_pdf.remote(file_path_str)
+            markdown, images = await call_ray_actor_with_timeout(
+                future,
+                timeout=timeout,
+                task_description=f"MarkerLoader PDF loading ({file_path_str})",
+            )
 
             if not markdown:
                 raise RuntimeError(f"Conversion failed for {file_path_str}")
