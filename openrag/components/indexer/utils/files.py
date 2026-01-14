@@ -74,7 +74,7 @@ async def save_file_to_disk(
 async def serialize_file(task_id: str, path: str, metadata: Optional[Dict] = {}):
     import ray
 
-    from .ray_utils import call_ray_actor_with_timeout
+    from components.ray_utils import call_ray_actor_with_timeout
 
     serializer = ray.get_actor("DocSerializer", namespace="openrag")
     future = serializer.serialize_document.remote(task_id, path, metadata=metadata)

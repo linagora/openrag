@@ -127,7 +127,7 @@ loader:
   marker_pool_size: ${oc.decode:${oc.env:MARKER_POOL_SIZE, 1}} # Value au increment if you have a cluster of machines
   marker_max_processes: ${oc.decode:${oc.env:MARKER_MAX_PROCESSES, 2}} # Maximum number of concurrent PDF parsing processes
   marker_min_processes: ${oc.decode:${oc.env:MARKER_MIN_PROCESSES, 1}}
-  marker_num_gpus: ${oc.decode:${oc.env:MARKER_NUM_GPUS, 0.01}}
+  marker_num_gpus: ${oc.decode:${oc.env:MARKER_NUM_GPUS, 0.01}} # See https://docs.ray.io/en/latest/cluster/kubernetes/user-guides/gpu.html
   marker_timeout: ${oc.decode:${oc.env:MARKER_TIMEOUT, 3600}}
   transcriber:
     base_url: ${oc.env:TRANSCRIBER_BASE_URL, http://transcriber:8000/v1}
@@ -153,7 +153,7 @@ ray:
   max_tasks_per_worker: ${oc.decode:${oc.env:RAY_MAX_TASKS_PER_WORKER, 8}} # Number of tasks per serializer instance
   indexer:
     max_task_retries: ${oc.decode:${oc.env:RAY_MAX_TASK_RETRIES, 2}}
-    serialize_timeout: ${oc.decode:${oc.env:INDEXER_SERIALIZE_TIMEOUT, 36000}}
+    serialize_timeout: ${oc.decode:${oc.env:INDEXER_SERIALIZE_TIMEOUT, 3600}}
     concurrency_groups:
       default: ${oc.decode:${oc.env:INDEXER_DEFAULT_CONCURRENCY, 1000}}
       update: ${oc.decode:${oc.env:INDEXER_UPDATE_CONCURRENCY, 100}}

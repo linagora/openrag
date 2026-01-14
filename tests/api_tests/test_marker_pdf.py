@@ -26,10 +26,19 @@ def pdf_file_path():
 
 
 def wait_for_task(api_client, task_id: str, timeout: int = TASK_TIMEOUT) -> dict:
-    """Wait for task completion, polling status endpoint."""
+    """Wait for task completion, polling status endpoint.
+
+    Handles 404 responses gracefully as task may not be registered yet.
+    """
     start = time.time()
     while time.time() - start < timeout:
         response = api_client.get(f"/indexer/task/{task_id}")
+
+        # Task might not be registered yet, retry on 404
+        if response.status_code == 404:
+            time.sleep(0.5)
+            continue
+
         if response.status_code != 200:
             raise AssertionError(f"Task status failed: {response.text}")
 
@@ -104,7 +113,7 @@ class TestMarkerPDFIndexing:
         """Test that PDF processing goes through expected states."""
         file_id = "marker-pdf-test-3"
         observed_states = set()
-        valid_states = {"SERIALIZING", "CHUNKING", "INSERTING", "COMPLETED", "FAILED"}
+        valid_states = {"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING", "COMPLETED", "FAILED"}
 
         with open(pdf_file_path, "rb") as f:
             response = api_client.post(
@@ -143,9 +152,9 @@ class TestExtractTextPDF:
         """Test extracting text from PDF via extractText tool."""
         with open(pdf_file_path, "rb") as f:
             response = api_client.post(
-                "/tools/execute",
+                "/v1/tools/execute",
                 files={"file": (pdf_file_path.name, f, "application/pdf")},
-                data={"tool": "extractText"},
+                data={"tool": '{"name": "extractText"}'},
             )
 
         assert response.status_code == 200, f"Extract failed: {response.text}"
@@ -159,9 +168,9 @@ class TestExtractTextPDF:
         """Test that extracted text contains expected content."""
         with open(pdf_file_path, "rb") as f:
             response = api_client.post(
-                "/tools/execute",
+                "/v1/tools/execute",
                 files={"file": (pdf_file_path.name, f, "application/pdf")},
-                data={"tool": "extractText"},
+                data={"tool": '{"name": "extractText"}'},
             )
 
         result = response.json()

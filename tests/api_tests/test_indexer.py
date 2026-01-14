@@ -118,9 +118,15 @@ class TestTaskStatus:
         else:
             pytest.skip("No task ID in response")
 
-        # Check task status
-        task_response = api_client.get(task_path)
-        assert task_response.status_code == 200
+        # Check task status (retry on 404 as task may not be registered yet)
+        import time
+        for _ in range(10):
+            task_response = api_client.get(task_path)
+            if task_response.status_code != 404:
+                break
+            time.sleep(0.5)
+
+        assert task_response.status_code == 200, f"Task status failed: {task_response.text}"
         task_data = task_response.json()
         assert "task_state" in task_data
 

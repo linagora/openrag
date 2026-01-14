@@ -85,18 +85,18 @@ services:
       dockerfile: Dockerfile
     environment:
       - EMBEDDER_MODEL_NAME=mock-embedding-model
-      - EMBEDDER_BASE_URL=http://vllm:8000/v1
+      - EMBEDDER_BASE_URL=http://vllm:8000/v1/
       - EMBEDDER_API_KEY=EMPTY
       - POSTGRES_HOST=rdb
       - POSTGRES_USER=root
       - POSTGRES_PASSWORD=root_password
       - VDB_HOST=milvus
-      - BASE_URL=http://localhost:8001/
-      - API_KEY=sk-test
-      - MODEL=test-model
-      - VLM_BASE_URL=http://localhost:8002/
-      - VLM_API_KEY=sk-test
-      - VLM_MODEL=test-vlm
+      - BASE_URL=http://vllm:8000/v1/
+      - API_KEY=EMPTY
+      - MODEL=mock-chat-model
+      - VLM_BASE_URL=http://vllm:8000/v1/
+      - VLM_API_KEY=EMPTY
+      - VLM_MODEL=mock-vlm-model
       - RERANKER_ENABLED=false
       - WITH_CHAINLIT_UI=false
       - WITH_OPENAI_API=true
