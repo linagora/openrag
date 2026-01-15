@@ -19,10 +19,8 @@ __pycache__/
 **/*upload_dir
 
 # Ignore some local files
-*.pdf
 *.ipynb
 **/*.ipynb
-CR.md
 
 
 # Ignore Python bytecode files
