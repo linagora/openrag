@@ -57,8 +57,10 @@ The main application entry point is `openrag/api.py` which creates a FastAPI app
 
 **Ray Actors** (distributed components):
 - `Indexer` (`openrag/components/indexer/indexer.py`) - Handles document ingestion, chunking, and insertion into vector DB
-- `TaskStateManager` (`openrag/components/indexer/indexer.py`) - Tracks async task states (CHUNKING, INSERTING, COMPLETED, FAILED)
+- `TaskStateManager` (`openrag/components/indexer/indexer.py`) - Tracks async task states: QUEUED → SERIALIZING → CHUNKING → INSERTING → COMPLETED (or FAILED)
 - `Vectordb` / `MilvusDB` (`openrag/components/indexer/vectordb/vectordb.py`) - Vector database operations with hybrid search (dense + BM25 sparse)
+- `DocSerializer` - Serializes files to Document objects using appropriate loaders
+- `MarkerPool` / `MarkerWorker` - Pool of workers for PDF processing with Marker
 
 **Pipeline Classes**:
 - `RagPipeline` (`openrag/components/pipeline.py`) - Orchestrates retrieval and LLM generation
@@ -89,6 +91,7 @@ Each file type has a dedicated loader that converts to markdown:
 - `partition.py` - Partition management (multi-tenant document collections)
 - `users.py` - User and membership management
 - `queue.py` - Task queue monitoring
+- `tools.py` - Tools like `extractText` at `/v1/tools/execute` (tool param requires JSON: `{"name": "extractText"}`)
 
 ### Configuration
 
@@ -103,8 +106,17 @@ Environment variables override config values (see `.env.example`).
 ### Testing Structure
 
 - Unit tests: `openrag/components/**/test_*.py` (pytest)
-- API integration tests: `tests/api/*.robot` (Robot Framework)
+- API integration tests: `tests/api_tests/*.py` (pytest, requires running server)
+- Robot Framework tests: `tests/api/*.robot`
 - Test config in `pytest.ini` sets `CONFIG_PATH` and `PROMPTS_DIR`
+
+**Running integration tests locally with act:**
+```bash
+# Run API tests using GitHub Actions locally
+act -j api-tests -W .github/workflows/api_tests.yml --bind
+```
+
+**Mock VLLM for CI:** `.github/workflows/api_tests/mock_vllm.py` provides fake embeddings and completions endpoints for testing without a real LLM.
 
 ## Key Patterns
 
@@ -120,6 +132,25 @@ task_state_manager = ray.get_actor("TaskStateManager", namespace="openrag")
 await vectordb.async_search.remote(query=query, partition=partition)
 ```
 
+### Ray Actor Timeout and Cancellation
+
+Use the centralized utility for calling Ray actors with proper timeout and cancellation handling:
+
+```python
+from components.ray_utils import call_ray_actor_with_timeout
+
+result = await call_ray_actor_with_timeout(
+    future=actor.method.remote(args),
+    timeout=TIMEOUT_SECONDS,
+    task_description="Description for error messages",
+)
+```
+
+This handles:
+- Timeout with `ray.wait()` and `ray.cancel()`
+- `asyncio.CancelledError` propagation
+- `RayTaskError` and `TaskCancelledError` handling
+
 ### Custom Exceptions
 
 All custom exceptions inherit from `OpenRAGError` (`openrag/utils/exceptions/`):
@@ -133,4 +164,17 @@ Uses Loguru with structured logging:
 from utils.logger import get_logger
 logger = get_logger()
 logger.bind(file_id=file_id, partition=partition).info("Message")
+```
+
+### Import Conventions
+
+Use absolute imports from the `openrag/` directory (which is the Python path root):
+```python
+# Correct - absolute imports
+from components.ray_utils import call_ray_actor_with_timeout
+from utils.logger import get_logger
+from config import load_config
+
+# Avoid relative imports across packages
+# from .ray_utils import ...  # Only within same package
 ```
