@@ -3,3 +3,5 @@ reviews:
     base_branches:
       - .*
   abort_on_close: false
+  suggested_labels: true
+  auto_apply_labels: true
