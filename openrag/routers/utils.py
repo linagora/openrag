@@ -298,3 +298,9 @@ async def get_partition_name(model_name, user_partitions, is_admin=False):
     if partition == "all" and not (is_admin and SUPER_ADMIN_MODE):
         return user_partitions
     return [partition]
+
+
+def truncate(value: str, max_chars: int = 1000) -> str:
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars] + f"... [truncated {len(value) - max_chars} chars]"

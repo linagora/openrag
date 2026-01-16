@@ -21,6 +21,7 @@ from .utils import (
     current_user_or_admin_partitions,
     current_user_or_admin_partitions_list,
     get_partition_name,
+    truncate,
 )
 
 logger = get_logger()
@@ -167,7 +168,10 @@ async def openai_chat_completion(
             detail="The last message must be a non-empty user message",
         )
     
-    log.debug(f"Received chat completion request with messages: {request.messages}")
+    log.debug(
+        "Received chat completion request with messages: {}",
+        truncate(str(request.messages)),
+    )
 
     try:
         if is_direct_llm_model(request):
