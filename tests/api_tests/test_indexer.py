@@ -1,9 +1,13 @@
 """Indexer API tests - file upload and indexing."""
 
+import os
 import time
 from pathlib import Path
 
 import pytest
+
+# Check if image captioning is enabled (disabled in CI)
+IMAGE_CAPTIONING_ENABLED = os.environ.get("IMAGE_CAPTIONING", "").lower() not in ("false", "0", "")
 
 RESOURCES_DIR = Path(__file__).parent.parent / "resources"
 PDF_FILE = RESOURCES_DIR / "test_file.pdf"
@@ -314,3 +318,84 @@ class TestSVGIndexing:
         file_data = file_response.json()
         assert "documents" in file_data
         assert len(file_data["documents"]) > 0, "No documents created from SVG file"
+
+
+@pytest.mark.skipif(not IMAGE_CAPTIONING_ENABLED, reason="IMAGE_CAPTIONING disabled")
+class TestImageCaptioning:
+    """Test image captioning during file indexing."""
+
+    def test_markdown_with_data_uri_image_gets_captioned(
+        self, api_client, created_partition, sample_markdown_with_image
+    ):
+        """Test that data URI images in markdown are captioned."""
+        file_id = "image-caption-test"
+
+        with open(sample_markdown_with_image, "rb") as f:
+            response = api_client.post(
+                f"/indexer/partition/{created_partition}/file/{file_id}",
+                files={"file": ("test.md", f, "text/markdown")},
+                data={"metadata": "{}"},
+            )
+
+        task_id = get_task_id(response.json())
+        wait_for_task(api_client, task_id)
+
+        # Retrieve indexed content
+        file_response = api_client.get(f"/partition/{created_partition}/file/{file_id}")
+        assert file_response.status_code == 200
+
+        file_data = file_response.json()
+        documents = file_data.get("documents", [])
+        assert len(documents) > 0
+
+        # Verify image was replaced with caption (not raw data URI)
+        indexed_content = " ".join(doc.get("page_content", "") for doc in documents)
+        assert "data:image/png;base64" not in indexed_content, "Image should be captioned, not raw"
+        assert "<image_description>" in indexed_content or "image" in indexed_content.lower()
+
+    def test_markdown_with_http_image_url(self, api_client, created_partition, tmp_path):
+        """Test that HTTP image URLs in markdown are handled based on config.
+
+        When image_captioning_url=true: URL should be replaced with caption.
+        When image_captioning_url=false: URL should remain unchanged.
+        """
+        # Use a placeholder URL (won't actually be fetched if captioning disabled)
+        image_url = "https://example.com/test-image.png"
+        content = f"# Test\n\n![test image]({image_url})\n\nSome text."
+
+        md_file = tmp_path / "test_http_image.md"
+        md_file.write_text(content)
+        file_id = "http-image-caption-test"
+
+        with open(md_file, "rb") as f:
+            response = api_client.post(
+                f"/indexer/partition/{created_partition}/file/{file_id}",
+                files={"file": ("test.md", f, "text/markdown")},
+                data={"metadata": "{}"},
+            )
+
+        task_id = get_task_id(response.json())
+        wait_for_task(api_client, task_id)
+
+        # Retrieve indexed content
+        file_response = api_client.get(f"/partition/{created_partition}/file/{file_id}")
+        assert file_response.status_code == 200
+
+        file_data = file_response.json()
+        documents = file_data.get("documents", [])
+        assert len(documents) > 0
+
+        indexed_content = " ".join(doc.get("page_content", "") for doc in documents)
+
+        # Check behavior based on whether URL captioning is enabled
+        url_was_captioned = "<image_description>" in indexed_content
+        url_preserved = image_url in indexed_content
+
+        # One of these must be true (either captioned or preserved)
+        assert url_was_captioned or url_preserved, "HTTP image URL should either be captioned or preserved unchanged"
+
+        # They should be mutually exclusive
+        if url_was_captioned:
+            assert not url_preserved, "URL should not appear if it was captioned"
+        if url_preserved:
+            assert not url_was_captioned, "Caption should not appear if URL was preserved"

@@ -94,3 +94,14 @@ def created_partition(api_client, test_partition_name):
         api_client.delete(f"/partition/{test_partition_name}")
     except Exception:
         pass
+
+
+@pytest.fixture
+def sample_markdown_with_image(tmp_path):
+    """Create markdown file with embedded data URI image."""
+    # Small 1x1 red PNG as data URI
+    data_uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+    content = f"# Test Document\n\n![sample image]({data_uri})\n\nTest content."
+    file_path = tmp_path / "test_with_image.md"
+    file_path.write_text(content)
+    return file_path
