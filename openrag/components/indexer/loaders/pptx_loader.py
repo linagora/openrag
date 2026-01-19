@@ -6,7 +6,6 @@ import pptx
 from html_to_markdown import convert
 from langchain_core.documents.base import Document
 from PIL import Image
-from tqdm.asyncio import tqdm
 from utils.logger import get_logger
 
 from .base import BaseLoader
@@ -140,15 +139,11 @@ class PPTXLoader(BaseLoader):
         self.image_placeholder = r"<image>"
         self.converter = PPTXConverter(image_placeholder=self.image_placeholder, page_separator=self.page_sep)
 
-    async def get_captions(self, images):
-        tasks = [self.get_image_description(image_data=img) for img in images]
-        return await tqdm.gather(*tasks, desc="Generating captions")
-
     async def aload_document(self, file_path, metadata=None, save_markdown=False):
         md_content, imgs = self.converter.convert(local_path=file_path)
 
         if self.image_captioning:
-            images_captions = await self.get_captions(imgs)
+            images_captions = await self.caption_images(imgs, desc="Generating captions")
 
             for caption in images_captions:
                 md_content = re.sub(

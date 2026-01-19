@@ -85,11 +85,14 @@ Each file type has a dedicated loader that converts to markdown:
 - `MarkdownLoader`, `TextLoader` (`txt_loader.py`) - Markdown and plain text files
 
 **Loader base class:** All loaders inherit from `BaseLoader` (`base.py`) which provides:
-- `self.image_captioning` - whether image captioning is enabled
+- `self.image_captioning` - whether image captioning is enabled (use this, not `self.config.loader["image_captioning"]`)
 - `self.config` - Hydra config access
-- `self.get_image_description(url=..., image_data=...)` - VLM-based image captioning
+- `get_image_description(image_data)` - Low-level VLM captioning (accepts PIL Image, HTTP URL, or data URI)
+- `caption_images(images, desc)` - Caption a list of PIL images concurrently with progress bar
+- `replace_markdown_images_with_captions(content, ...)` - Find and replace markdown image references with captions
+- Class regex patterns: `HTTP_IMAGE_PATTERN`, `DATA_URI_IMAGE_PATTERN`
 
-**Loader image captioning pattern:** Loaders that process images must check `self.image_captioning` before calling `self.get_image_description()`. Access additional loader config via `self.config.loader.get("option_name", default)`.
+**Loader image captioning pattern:** Loaders that process images must check `self.image_captioning` before captioning. Use the shared methods above rather than duplicating captioning logic. Access additional loader config via `self.config.loader.get("option_name", default)`.
 
 **Image handling approaches:**
 - PDF/DOCX/PPTX: Extract binary image data from file, pass to VLM directly

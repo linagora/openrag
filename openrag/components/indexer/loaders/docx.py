@@ -5,7 +5,6 @@ from io import BytesIO
 from langchain_core.documents.base import Document
 from markitdown import MarkItDown
 from PIL import Image
-from tqdm.asyncio import tqdm
 from utils.logger import get_logger
 
 from .base import BaseLoader
@@ -27,17 +26,14 @@ class DocxLoader(BaseLoader):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.converter = MarkItDown()
-        # Pattern for HTTP/HTTPS images (linked images in docx)
-        self._http_img_pattern = re.compile(r"!\[(.*?)\]\((https?://[^)]+)\)")
 
     async def aload_document(self, file_path, metadata, save_markdown=False):
         result = self.converter.convert(file_path).text_content
 
         if self.image_captioning:
-            # Handle embedded images (data URIs)
+            # Handle embedded images (extracted from docx zip)
             images = self.get_images_from_zip(file_path)
-
-            captions = await self.get_captions(images)
+            captions = await self.caption_images(images, desc="Captioning embedded images")
             for caption in captions:
                 result = re.sub(
                     r"!\[.*?\]\(data:image/.*?\)",
@@ -46,29 +42,13 @@ class DocxLoader(BaseLoader):
                     count=1,
                 )
 
-            # Handle linked images (HTTP URLs) if enabled
-            image_captioning_url = self.config.loader.get("image_captioning_url", False)
-            http_matches = self._http_img_pattern.findall(result)
-
-            if http_matches:
-                if image_captioning_url:
-                    tasks = {}
-                    for alt, url in http_matches:
-                        markdown_syntax = f"![{alt}]({url})"
-                        tasks[markdown_syntax] = self.get_image_description(url)
-
-                    if tasks:
-                        url_captions = await tqdm.gather(*tasks.values(), desc="Captioning linked images")
-                        url_captions_dict = dict(zip(tasks.keys(), url_captions))
-
-                        for md_syntax, caption in url_captions_dict.items():
-                            result = result.replace(md_syntax, caption)
-                else:
-                    logger.debug(
-                        "Found HTTP image URLs but URL captioning is disabled",
-                        http_images=len(http_matches),
-                    )
-
+            # Handle linked images (HTTP URLs) using shared method
+            # Only caption HTTP URLs, data URIs are already handled above
+            result = await self.replace_markdown_images_with_captions(
+                result,
+                caption_data_uris=False,
+                desc="Captioning linked images",
+            )
         else:
             logger.info("Image captioning disabled. Ignoring images.")
 
@@ -76,10 +56,6 @@ class DocxLoader(BaseLoader):
         if save_markdown:
             self.save_content(result, str(file_path))
         return doc
-
-    async def get_captions(self, images):
-        tasks = [self.get_image_description(image_data=img) for img in images]
-        return await tqdm.gather(*tasks, desc="Generating captions")
 
     def get_images_from_zip(self, input_file):
         with zipfile.ZipFile(input_file, "r") as docx:

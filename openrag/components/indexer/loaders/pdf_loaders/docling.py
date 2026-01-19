@@ -15,7 +15,6 @@ from docling.datamodel.pipeline_options import (
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc.document import PictureItem
 from langchain_core.documents.base import Document
-from tqdm.asyncio import tqdm
 from utils.logger import get_logger
 
 from ..base import BaseLoader
@@ -70,9 +69,10 @@ class DoclingLoader(BaseLoader):
             s += f"\n[PAGE_{i}]\n"
 
         enriched_content = s
-        if self.config.loader["image_captioning"]:
-            pictures = result.document.pictures
-            descriptions = await self.get_captions(pictures)
+        if self.image_captioning:
+            pictures: list[PictureItem] = result.document.pictures
+            images = [p.image.pil_image for p in pictures]
+            descriptions = await self.caption_images(images, desc="Captioning imgs")
             for description in descriptions:
                 enriched_content = enriched_content.replace("<!-- image -->", description, 1)
         else:
@@ -82,15 +82,3 @@ class DoclingLoader(BaseLoader):
         if save_markdown:
             self.save_content(enriched_content, str(file_path))
         return doc
-
-    async def get_captions(self, pictures: list[PictureItem]):
-        tasks = []
-        for picture in pictures:
-            tasks.append(self.get_image_description(picture.image.pil_image))
-        try:
-            results = await tqdm.gather(*tasks, desc="Captioning imgs")
-        except asyncio.CancelledError:
-            for task in tasks:
-                task.cancel()
-            raise
-        return results

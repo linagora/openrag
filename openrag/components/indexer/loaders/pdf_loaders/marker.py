@@ -9,7 +9,6 @@ import torch
 from config import load_config
 from langchain_core.documents.base import Document
 from marker.converters.pdf import PdfConverter
-from tqdm.asyncio import tqdm
 from utils.logger import get_logger
 
 from ..base import BaseLoader
@@ -232,11 +231,11 @@ class MarkerLoader(BaseLoader):
             if not markdown:
                 raise RuntimeError(f"Conversion failed for {file_path_str}")
 
-            if self.config["loader"]["image_captioning"]:
-                captions_dict = await self._get_captions(images)
-                for key, desc in captions_dict.items():
-                    tag = f"![]({key})"
-                    markdown = markdown.replace(tag, desc)
+            if self.image_captioning:
+                keys = list(images.keys())
+                captions = await self.caption_images(list(images.values()))
+                for key, caption in zip(keys, captions):
+                    markdown = markdown.replace(f"![]({key})", caption)
 
             else:
                 logger.debug("Image captioning disabled.")
@@ -257,28 +256,3 @@ class MarkerLoader(BaseLoader):
         except Exception:
             logger.exception("Error in aload_document", path=file_path_str)
             raise
-
-    async def _get_captions(self, img_dict: dict) -> dict:
-        if not img_dict:
-            return {}
-
-        tasks = []
-        keys = []
-        for key, picture in img_dict.items():
-            tasks.append(self.get_image_description(image_data=picture))
-            keys.append(key)
-
-        try:
-            results = await tqdm.gather(*tasks, desc="Captioning images")
-            assert len(keys) == len(results), "Mismatch between keys and results count"
-            result_dict = dict(zip(keys, results))
-            return result_dict
-
-        except asyncio.CancelledError:
-            logger.warning("Image captioning tasks cancelled")
-            for task in tasks:
-                task.cancel()
-            raise
-        except Exception as e:
-            logger.exception("Error during image captioning", error=str(e))
-            return {}
