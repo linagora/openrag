@@ -91,6 +91,7 @@ prompts:
 
 loader:
   image_captioning: ${oc.decode:${oc.env:IMAGE_CAPTIONING, true}}
+  image_captioning_url: ${oc.decode:${oc.env:IMAGE_CAPTIONING_URL, true}}
   save_markdown: ${oc.decode:${oc.env:SAVE_MARKDOWN, false}}
   mimetypes:
     text/plain: .txt

@@ -147,15 +147,20 @@ class PPTXLoader(BaseLoader):
     async def aload_document(self, file_path, metadata=None, save_markdown=False):
         md_content, imgs = self.converter.convert(local_path=file_path)
 
-        images_captions = await self.get_captions(imgs)
+        if self.image_captioning:
+            images_captions = await self.get_captions(imgs)
 
-        for caption in images_captions:
-            md_content = re.sub(
-                self.image_placeholder,
-                caption.replace("\\", "/"),
-                md_content,
-                count=1,
-            )
+            for caption in images_captions:
+                md_content = re.sub(
+                    self.image_placeholder,
+                    caption.replace("\\", "/"),
+                    md_content,
+                    count=1,
+                )
+        else:
+            logger.info("Image captioning disabled. Ignoring images.")
+            # Remove image placeholders when captioning is disabled
+            md_content = md_content.replace(self.image_placeholder, "")
 
         doc = Document(page_content=md_content, metadata=metadata)
         if save_markdown:

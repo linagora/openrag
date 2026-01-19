@@ -78,10 +78,22 @@ The main application entry point is `openrag/api.py` which creates a FastAPI app
 ### File Loaders (`openrag/components/indexer/loaders/`)
 
 Each file type has a dedicated loader that converts to markdown:
-- `MarkerLoader` (default for PDF) - Supports OCR, complex layouts, tables
-- `DocxLoader`, `PPTXLoader`, `DocLoader` - Office formats
+- `MarkerLoader` (default for PDF, in `pdf_loaders/`) - Supports OCR, complex layouts, tables
+- `DocxLoader`, `PPTXLoader`, `DocLoader` - Office formats (uses MarkItDown library)
 - `ImageLoader` - VLM-powered image captioning
 - `VideoAudioLoader` - Audio transcription via Whisper
+- `MarkdownLoader`, `TextLoader` (`txt_loader.py`) - Markdown and plain text files
+
+**Loader base class:** All loaders inherit from `BaseLoader` (`base.py`) which provides:
+- `self.image_captioning` - whether image captioning is enabled
+- `self.config` - Hydra config access
+- `self.get_image_description(url=..., image_data=...)` - VLM-based image captioning
+
+**Loader image captioning pattern:** Loaders that process images must check `self.image_captioning` before calling `self.get_image_description()`. Access additional loader config via `self.config.loader.get("option_name", default)`.
+
+**Image handling approaches:**
+- PDF/DOCX/PPTX: Extract binary image data from file, pass to VLM directly
+- Markdown: Parse image URLs from text; HTTP URLs require `IMAGE_CAPTIONING_URL=true`
 
 ### API Routers (`openrag/routers/`)
 

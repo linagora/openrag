@@ -19,6 +19,7 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `IMAGE_CAPTIONING` | `bool` | `true` | If `true`, an LLM is used to describe images and convert them into text using a [specific prompt](https://github.com/linagora/openrag/blob/main/prompts/example1/image_captioning_tmpl.txt). The image in files are replaced by their descriptions |
+| `IMAGE_CAPTIONING_URL` | `bool` | `true` | If `true`, HTTP/HTTPS image URLs in markdown files are fetched and described by the VLM. |
 | `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing is saved. Useful for debugging and verifying the correctness of the generated markdown. |
 |`SAVE_UPLOADED_FILES`|`bool`|`false`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
 | `PDFLoader` | `str` | `MarkerLoader` | Specifies the PDF parsing engine to use. Available options: `PyMuPDFLoader`, `PyMuPDF4LLMLoader`, `MarkerLoader` and `DotsOCRLoader`.|

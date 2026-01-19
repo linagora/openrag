@@ -90,22 +90,28 @@ class MarkdownLoader(BaseLoader):
             total_images=total_images,
         )
 
-        if total_images > 0:
+        if total_images > 0 and self.image_captioning:
+            # Check if URL captioning is enabled
+            image_captioning_url = self.config.loader.get("image_captioning_url", False)
+
             # Process all images concurrently
             tasks = {}
 
-            # HTTP/HTTPS images
             for alt, url in itertools.chain(http_matches, data_uri_matches):
+                # Skip HTTP URLs if URL captioning is disabled
+                if not image_captioning_url and url.startswith(("http://", "https://")):
+                    continue
                 markdown_syntax = f"![{alt}]({url})"
                 tasks[markdown_syntax] = self.get_image_description(url)
 
-            image_to_description = await tqdm.gather(*tasks.values(), desc="Captioning images")
-            image_to_description = dict(zip(tasks.keys(), image_to_description))
+            if tasks:  # Only process if there are tasks
+                image_to_description = await tqdm.gather(*tasks.values(), desc="Captioning images")
+                image_to_description = dict(zip(tasks.keys(), image_to_description))
 
-            # Replace images with descriptions
-            logger.debug("Replacing image references", image_count=len(image_to_description))
-            for md_syntax, description in image_to_description.items():
-                content = content.replace(md_syntax, description)
+                # Replace images with descriptions
+                logger.debug("Replacing image references", image_count=len(image_to_description))
+                for md_syntax, description in image_to_description.items():
+                    content = content.replace(md_syntax, description)
 
         doc = Document(page_content=content, metadata=metadata)
         if save_markdown:
