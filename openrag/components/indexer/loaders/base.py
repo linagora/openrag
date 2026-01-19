@@ -9,6 +9,7 @@ from components.prompts import IMAGE_DESCRIBER
 from components.utils import get_vlm_semaphore, load_config
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
+from openai import BadRequestError
 from PIL import Image
 from tqdm.asyncio import tqdm
 from utils.external_resource_errors import is_external_resource_error
@@ -137,13 +138,18 @@ class BaseLoader(ABC):
                 response = await self.vlm_endpoint.ainvoke([message])
                 image_description = response.content
 
+            except BadRequestError as e:
+                # VLM returned 400 - log as warning without stack trace
+                logger.warning("VLM rejected image captioning request", error=str(e)[:300])
+                image_description = ""
+
             except Exception as e:
                 is_external, status_code, url = is_external_resource_error(e)
                 if is_external:
                     # Log external resource errors as warnings, not exceptions
                     # These are expected when VLM cannot fetch external URLs
                     log_msg = "Failed to fetch external image resource"
-                    log_extra = {"error": str(e)}
+                    log_extra = {"error": str(e)[:200]}
                     if status_code:
                         log_extra["http_status"] = status_code
                     if url:
