@@ -49,6 +49,7 @@ dependencies = [
     "fast-langdetect>=1.0.0",
     "ruff>=0.14.1",
     "librosa>=0.11.0",
+    "cairosvg>=2.7.0",
 ]
 
 [dependency-groups]

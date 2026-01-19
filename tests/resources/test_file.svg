@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="800" height="300" viewBox="0 0 800 300" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect x="0" y="0" width="800" height="300" fill="#f6f7fb"/>
+
+  <!-- Border -->
+  <rect x="20" y="20" width="760" height="260" rx="18" fill="none" stroke="#2b2f36" stroke-width="3"/>
+
+  <!-- Title text -->
+  <text x="400" y="150"
+        text-anchor="middle"
+        dominant-baseline="middle"
+        font-family="Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif"
+        font-size="48"
+        font-weight="700"
+        fill="#1b1f24">
+    Hello from SVG 👋
+  </text>
+
+  <!-- Subtitle -->
+  <text x="400" y="205"
+        text-anchor="middle"
+        dominant-baseline="middle"
+        font-family="Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif"
+        font-size="18"
+        fill="#4b5563">
+    Edit the text inside the &lt;text&gt; elements
+  </text>
+</svg>

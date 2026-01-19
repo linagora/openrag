@@ -284,3 +284,33 @@ class TestErrorHandling:
 
             # Either state is acceptable - task should not hang
             assert state in ["COMPLETED", "FAILED"], f"Task stuck in state: {state}"
+
+
+class TestSVGIndexing:
+    """Test SVG file indexing (Issue #127)."""
+
+    def test_upload_svg_file(self, api_client, created_partition):
+        """Test uploading and indexing an SVG file."""
+        svg_file = RESOURCES_DIR / "test_file.svg"
+        file_id = "test-svg-001"
+
+        with open(svg_file, "rb") as f:
+            response = api_client.post(
+                f"/indexer/partition/{created_partition}/file/{file_id}",
+                files={"file": ("test_file.svg", f, "image/svg+xml")},
+                data={"metadata": "{}"},
+            )
+
+        assert response.status_code in [200, 201, 202]
+
+        data = response.json()
+        task_id = get_task_id(data)
+        wait_for_task(api_client, task_id)
+
+        # Verify file was indexed
+        file_response = api_client.get(f"/partition/{created_partition}/file/{file_id}")
+        assert file_response.status_code == 200
+
+        file_data = file_response.json()
+        assert "documents" in file_data
+        assert len(file_data["documents"]) > 0, "No documents created from SVG file"
