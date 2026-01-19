@@ -36,7 +36,6 @@ class MarkerWorker:
         self.page_sep = "[PAGE_SEP]"
 
         self._workers = self.config.loader.get("marker_max_processes")
-        self.maxtasksperchild = self.config.loader.get("marker_max_tasks_per_child", 5)
 
         self.converter_config = {
             "output_format": "markdown",
@@ -47,7 +46,7 @@ class MarkerWorker:
         }
         os.environ["RAY_ADDRESS"] = "auto"
 
-        self.pool = None
+        self.executor = None
         self.init_resources()
 
     def init_resources(self):
@@ -61,14 +60,24 @@ class MarkerWorker:
         self.setup_mp()
 
     def setup_mp(self):
+        """Initialize ProcessPoolExecutor for PDF processing.
+
+        We use ProcessPoolExecutor instead of multiprocessing.Pool because:
+        - Ray actors run as daemon processes
+        - Pool workers are daemonic by default and cannot spawn children
+        - The pdftext library (used by Marker) internally spawns processes
+        - ProcessPoolExecutor workers are non-daemon, allowing nested process creation
+        """
+        from concurrent.futures import ProcessPoolExecutor
+
         import torch.multiprocessing as mp
 
-        if self.pool:
-            self.logger.warning("Resetting multiprocessing pool")
-            self.pool.close()
-            self.pool.terminate()  # Force kill first
-            self.pool.join()  # Then wait for cleanup
-            self.pool = None
+        if self.executor:
+            self.logger.warning("Resetting ProcessPoolExecutor")
+            self.executor.shutdown(wait=False, cancel_futures=True)
+            self.executor = None
+
+        # Ensure spawn method for CUDA compatibility
         try:
             if mp.get_start_method(allow_none=True) != "spawn":
                 mp.set_start_method("spawn", force=True)
@@ -76,14 +85,13 @@ class MarkerWorker:
             self.logger.warning("Process start method already set, using existing method")
 
         self.logger.info(f"Initializing MarkerWorker with {self._workers} workers")
-        ctx = mp.get_context("spawn")
-        self.pool = ctx.Pool(
-            processes=self._workers,
+        self.executor = ProcessPoolExecutor(
+            max_workers=self._workers,
             initializer=self._worker_init,
             initargs=(self.model_dict,),
-            maxtasksperchild=self.maxtasksperchild,
+            mp_context=mp.get_context("spawn"),
         )
-        self.logger.info("MarkerWorker initialized with multiprocessing pool")
+        self.logger.info("MarkerWorker initialized with ProcessPoolExecutor")
 
     @staticmethod
     def _worker_init(model_dict):
@@ -113,18 +121,20 @@ class MarkerWorker:
                 torch.cuda.ipc_collect()
 
     async def process_pdf(self, file_path: str):
-        from multiprocessing.context import TimeoutError as MPTimeoutError
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
 
-        config = self.converter_config.copy()
+        converter_config = self.converter_config.copy()
         loop = asyncio.get_event_loop()
+        timeout = self.config.loader.get("marker_timeout", 3600)
 
         def run_with_timeout():
-            async_result = self.pool.apply_async(self._process_pdf, (file_path, config))
+            future = self.executor.submit(self._process_pdf, file_path, converter_config)
             try:
-                result = async_result.get(timeout=self.config.loader.get("marker_timeout"))
+                result = future.result(timeout=timeout)
                 return result
-            except MPTimeoutError:
+            except FuturesTimeoutError:
                 self.logger.exception("MarkerWorker child process timed out", path=file_path)
+                future.cancel()
                 raise
             except Exception:
                 self.logger.exception("Error processing with MarkerWorker", path=file_path)
@@ -134,15 +144,17 @@ class MarkerWorker:
         return result.markdown, result.images
 
     def get_current_pool_size(self):
-        return len([p for p in self.pool._pool if p.is_alive()])
+        # ProcessPoolExecutor manages worker lifecycle automatically
+        # Return count of alive worker processes
+        if self.executor is None:
+            return 0
+        return len([p for p in self.executor._processes.values() if p.is_alive()])
 
     def __del__(self):
-        """Clean up multiprocessing pool on actor destruction"""
-        if self.pool:
+        """Clean up ProcessPoolExecutor on actor destruction"""
+        if self.executor:
             try:
-                self.pool.close()
-                self.pool.terminate()
-                self.pool.join()
+                self.executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 pass  # Best effort cleanup
 
