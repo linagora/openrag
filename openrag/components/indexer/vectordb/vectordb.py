@@ -330,14 +330,23 @@ class MilvusDB(BaseVectorDB):
 
         # Add indexes for document relationship fields (dynamic fields)
         index_params.add_index(
-            field_name="relationship_id",
+            field_name="$meta",
             index_type="INVERTED",
             index_name="relationship_id_idx",
+            params={
+                "json_cast_type": "varchar",
+                "json_path": '$meta["relationship_id"]',
+            },
         )
+
         index_params.add_index(
-            field_name="parent_id",
+            field_name="$meta",
             index_type="INVERTED",
             index_name="parent_id_idx",
+            params={
+                "json_cast_type": "varchar",
+                "json_path": '$meta["parent_id"]',
+            },
         )
 
         return index_params
@@ -980,9 +989,7 @@ class MilvusDB(BaseVectorDB):
 
     # Document relationship methods
 
-    def get_files_by_relationship(
-        self, partition: str, relationship_id: str
-    ) -> list[dict]:
+    def get_files_by_relationship(self, partition: str, relationship_id: str) -> list[dict]:
         """Get all files sharing a relationship_id within a partition.
 
         Args:
@@ -1006,13 +1013,9 @@ class MilvusDB(BaseVectorDB):
         Returns:
             List of file dictionaries ordered from root to the specified file
         """
-        return self.partition_file_manager.get_file_ancestors(
-            partition=partition, file_id=file_id
-        )
+        return self.partition_file_manager.get_file_ancestors(partition=partition, file_id=file_id)
 
-    async def get_related_chunks(
-        self, partition: str, relationship_id: str, limit: int = 100
-    ) -> list[Document]:
+    async def get_related_chunks(self, partition: str, relationship_id: str, limit: int = 100) -> list[Document]:
         """Get all chunks for files in a relationship group.
 
         Args:
@@ -1049,9 +1052,7 @@ class MilvusDB(BaseVectorDB):
             for res in results
         ]
 
-    async def get_ancestor_chunks(
-        self, partition: str, file_id: str, limit: int = 100
-    ) -> list[Document]:
+    async def get_ancestor_chunks(self, partition: str, file_id: str, limit: int = 100) -> list[Document]:
         """Get all chunks for ancestor files (direct path from root to file).
 
         Args:
@@ -1062,9 +1063,7 @@ class MilvusDB(BaseVectorDB):
         Returns:
             List of Document objects ordered by ancestry
         """
-        ancestor_file_ids = self.partition_file_manager.get_ancestor_file_ids(
-            partition=partition, file_id=file_id
-        )
+        ancestor_file_ids = self.partition_file_manager.get_ancestor_file_ids(partition=partition, file_id=file_id)
 
         if not ancestor_file_ids:
             return []

@@ -37,7 +37,6 @@ class TestFolderScenario:
                     "filename": f"document_{i}.pdf",
                     "partition": "test_partition",
                     "relationship_id": folder_id,
-                    "parent_id": folder_id,
                 },
             )
             documents.append(doc)
@@ -66,9 +65,9 @@ class TestFolderScenario:
     @pytest.mark.asyncio
     async def test_index_folder_files_share_relationship_id(self, folder_documents):
         """Test that all files in a folder share the same relationship_id."""
-        relationship_ids = set(
+        relationship_ids = {
             doc.metadata.get("relationship_id") for doc in folder_documents
-        )
+        }
         assert len(relationship_ids) == 1
         assert "folder_shared_docs" in relationship_ids
 
@@ -234,14 +233,11 @@ class TestEmailThreadScenario:
         return vectordb
 
     @pytest.mark.asyncio
-    async def test_index_email_thread_all_share_thread_id(
-        self, email_thread_documents
-    ):
+    async def test_index_email_thread_all_share_thread_id(self, email_thread_documents):
         """Test that all emails in thread share the same relationship_id."""
-        relationship_ids = set(
-            doc.metadata.get("relationship_id")
-            for doc in email_thread_documents["all"]
-        )
+        relationship_ids = {
+            doc.metadata.get("relationship_id") for doc in email_thread_documents["all"]
+        }
         assert len(relationship_ids) == 1
         assert "thread_abc123" in relationship_ids
 

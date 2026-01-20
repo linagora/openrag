@@ -11,7 +11,7 @@ to support document relationships (e.g., email threads, folder hierarchies).
 - parent_id: Hierarchical parent reference (e.g., parent email file_id, parent folder)
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
@@ -36,9 +36,9 @@ def index_exists(index_name: str, table_name: str) -> bool:
 
 # revision identifiers, used by Alembic.
 revision: str = "a1b2c3d4e5f6"
-down_revision: Union[str, Sequence[str], None] = "cd642e4502d8"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = "cd642e4502d8"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:

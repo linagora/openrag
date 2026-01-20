@@ -79,6 +79,71 @@ Upload a new file to a specific partition for indexing.
 - `201 Created`: Returns task status URL
 - `409 Conflict`: File already exists in partition
 
+##### Upload files while modeling relations between them
+
+OpenRAG supports document relationships to enable context-aware retrieval. You can model relationships between files using the `metadata` field during upload.
+
+###### **For Folder-Related Documents**
+To represent native folder-based relationships between files, rely exclusively on `relationship_id`:
+
+```http
+POST /indexer/partition/{partition}/file/{file_id}
+Authorization: Bearer YOUR_AUTH_TOKEN
+Content-Type: multipart/form-data
+
+file: <binary data>
+metadata: {
+  "relationship_id": "documents/projects/2024/q1",
+  ...
+}
+```
+
+**Key Points:**
+- `relationship_id`: Represents the logical grouping, such as a project name or folder path (for example: `documents/projects/2024/q1`, `folder1`, `folder2`).
+
+###### **For Email Threads**
+To keep track of email threads and reply hierarchies, use both `relationship_id` (thread grouping) and `parent_id` (reply hierarchy):
+
+**Example: Original Email (Root)**
+```http
+POST /indexer/partition/emails/file/email_a_id
+Authorization: Bearer YOUR_AUTH_TOKEN
+Content-Type: multipart/form-data
+
+file: <email binary data>
+metadata: {
+  "relationship_id": "thread-123",
+  "parent_id": null,
+  ...
+}
+```
+
+**Example: Reply Email (Child)**
+```http
+POST /indexer/partition/emails/file/email_b_id
+Authorization: Bearer YOUR_AUTH_TOKEN
+Content-Type: multipart/form-data
+
+file: <email binary data>
+metadata: {
+  "relationship_id": "thread-123",
+  "parent_id": "email_a_id",
+  ...
+}
+```
+
+**Key Points:**
+- `relationship_id`: Email thread ID (same for all emails in the conversation)
+- `parent_id`: ID of the email being replied to (null for root email)
+- Email should be indexed as a separate file
+
+**Benefits:**
+- Context-aware search retrieval (see [search parameters](/openrag/documentation/API#search-across-multiple-partitions))
+- Use `include_related=true` to get all files in the same folder/thread
+- Use `include_ancestors=true` to get parent emails in the reply chain (emails only)
+
+For more details, see the [Document Relationships documentation](/openrag/documentation/linked_files).
+
 #### Replace Existing File
 ```http
 PUT /indexer/partition/{partition}/file/{file_id}
@@ -148,6 +213,10 @@ Perform semantic search across specified partitions.
 - `partitions` (optional): List of partition names (default: `["all"]`)
 - `text` (required): Search query text
 - `top_k` (optional): Number of results to return (default: `5`)
+- `include_related` (optional): Include chunks from files with same relationship_id (default: false)
+  * use for folder-related documents to get all files in the same folder/thread
+- `include_ancestors` (optional): Include ancestor documents based on parent_id (default: false)
+  * use for email threads to get parent emails in the reply chain
 
 **Responses:**
 - `200 OK`: JSON list of document links (HATEOAS format)
@@ -163,6 +232,10 @@ Search within a specific partition only.
 **Query Parameters:**
 - `text` (required): Search query text
 - `top_k` (optional): Number of results (default: `5`)
+- `include_related` (optional): Include chunks from files with same relationship_id (default: false)
+  * use for folder-related documents to get all files in the same folder/thread
+- `include_ancestors` (optional): Include ancestor documents based on parent_id (default: false)
+  * use for email threads to get parent emails in the reply chain
 
 **Response:** Same as multi-partition search
 
