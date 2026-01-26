@@ -38,8 +38,8 @@ uv run pytest -k "test_chunk"
 ### Linting
 
 ```bash
-uv run ruff check openrag/
-uv run ruff format openrag/
+uv run ruff check openrag/ tests/
+uv run ruff format openrag/ tests/
 ```
 
 ### Documentation Site
@@ -107,6 +107,73 @@ Each file type has a dedicated loader that converts to markdown:
 - `users.py` - User and membership management
 - `queue.py` - Task queue monitoring
 - `tools.py` - Tools like `extractText` at `/v1/tools/execute` (tool param requires JSON: `{"name": "extractText"}`)
+
+### User Management & Authentication
+
+The system uses token-based authentication with role-based access control (RBAC) for multi-tenant partition access.
+
+**Database Schema** (PostgreSQL with SQLAlchemy, in `openrag/components/indexer/vectordb/utils.py`):
+- `users` - User accounts with `id`, `external_user_id`, `display_name`, `token` (SHA-256 hashed), `is_admin`
+- `partition_memberships` - Join table linking users to partitions with roles (`owner`, `editor`, `viewer`)
+- `partitions` - Document collections with cascade delete to memberships
+
+**Authentication Flow** (`openrag/api.py` - `AuthMiddleware`):
+1. Token extracted from `Authorization: Bearer <token>` header (or `?token=` query param for `/static` routes)
+2. Token hashed with SHA-256, looked up in database
+3. User info and accessible partitions set on `request.state.user` and `request.state.user_partitions`
+4. Bypassed for: `/docs`, `/openapi.json`, `/redoc`, `/health_check`, `/version`, `/chainlit/*`
+5. If `AUTH_TOKEN` env var is not set, defaults to admin user (id=1) for all requests
+
+**Role Hierarchy** (`openrag/routers/utils.py`):
+```python
+ROLE_HIERARCHY = {"viewer": 1, "editor": 2, "owner": 3}
+```
+
+**Permission Dependencies** (`openrag/routers/utils.py`):
+- `require_admin` - User must have `is_admin=True`
+- `require_partition_viewer` / `require_partition_editor` / `require_partition_owner` - Check partition membership role
+- `SUPER_ADMIN_MODE=true` env var allows admin users (`is_admin=True`) to bypass partition checks; regular users remain restricted to their partition memberships
+
+**User API Endpoints** (`/users/`):
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/users/` | GET | Admin | List all users |
+| `/users/info` | GET | Any | Get current user info |
+| `/users/` | POST | Admin | Create user (returns token once) |
+| `/users/{user_id}` | DELETE | Admin | Delete user (cannot delete id=1) |
+| `/users/{user_id}/regenerate_token` | POST | Admin/self | Regenerate API token |
+
+**Partition Membership Endpoints** (`/partition/{partition}/users`):
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/partition/{partition}/users` | GET | Owner | List partition members |
+| `/partition/{partition}/users` | POST | Owner | Add user with role |
+| `/partition/{partition}/users/{user_id}` | DELETE | Owner | Remove user |
+| `/partition/{partition}/users/{user_id}` | PATCH | Owner | Update user role |
+
+**Core Implementation** (`PartitionFileManager` in `openrag/components/indexer/vectordb/utils.py`):
+```python
+# User operations (called via MilvusDB Ray actor)
+await vectordb.create_user.remote(display_name="Name", is_admin=False)
+await vectordb.get_user_by_token.remote(token)
+await vectordb.regenerate_user_token.remote(user_id)
+
+# Membership operations
+await vectordb.add_partition_member.remote(partition, user_id, role="editor")
+await vectordb.update_partition_member_role.remote(partition, user_id, "owner")
+await vectordb.list_partition_members.remote(partition)
+```
+
+**Token Format**: `"or-" + secrets.token_hex(16)` (34-char string, shown only once on creation/regeneration)
+
+**Bootstrap**: On startup, ensures admin user (id=1) exists using `AUTH_TOKEN` env var or generates a random token.
+
+**Multi-Partition Search**: Users can search across all their accessible partitions:
+- Search endpoint: `GET /search?partitions=all&text=query`
+- Chat completions: `POST /v1/chat/completions` with `"model": "openrag-all"`
+- For regular users, `all` resolves to their partition memberships only
+- For admins with `SUPER_ADMIN_MODE=true`, `all` resolves to all system partitions
+- Model prefix is `openrag-` (legacy: `ragondin-`)
 
 ### Configuration
 
