@@ -3,36 +3,61 @@ Pytest fixtures for OpenRAG API tests.
 """
 
 import os
-import time
 import uuid
 
 import httpx
 import pytest
 
 API_BASE_URL = os.environ.get("OPENRAG_API_URL", "http://localhost:8080")
+AUTH_TOKEN = os.environ.get("AUTH_TOKEN")
+
+
+def is_auth_enabled():
+    """Check if authentication is enabled."""
+    return AUTH_TOKEN is not None and AUTH_TOKEN != "none"
 
 
 @pytest.fixture(scope="session")
 def api_client():
-    """Create HTTP client for API tests."""
-    with httpx.Client(base_url=API_BASE_URL, timeout=30.0) as client:
+    """Create HTTP client for API tests (uses admin token if AUTH_TOKEN is set)."""
+    headers = {}
+    if is_auth_enabled():
+        headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
+    with httpx.Client(base_url=API_BASE_URL, timeout=30.0, headers=headers) as client:
         yield client
 
 
-@pytest.fixture(scope="session", autouse=True)
-def wait_for_api():
-    """Wait for OpenRAG API to be ready."""
-    max_retries = 60
-    for i in range(max_retries):
-        try:
-            response = httpx.get(f"{API_BASE_URL}/health_check", timeout=5.0)
-            if response.status_code == 200:
-                print(f"API ready after {i + 1} attempts")
-                return
-        except httpx.RequestError:
-            pass
-        time.sleep(2)
-    pytest.fail(f"API not ready after {max_retries * 2} seconds")
+@pytest.fixture
+def created_user(api_client):
+    """Create a regular user and return their info, clean up after test."""
+    if not is_auth_enabled():
+        pytest.skip("Authentication is disabled")
+
+    display_name = f"test-user-{uuid.uuid4().hex[:8]}"
+    external_id = f"ext-{uuid.uuid4().hex[:8]}"
+
+    response = api_client.post(
+        "/users/",
+        data={"display_name": display_name, "external_user_id": external_id},
+    )
+    assert response.status_code == 201, f"Failed to create user: {response.text}"
+    user = response.json()
+
+    yield user
+
+    # Cleanup
+    try:
+        api_client.delete(f"/users/{user['id']}")
+    except Exception:
+        pass
+
+
+@pytest.fixture
+def user_client(created_user):
+    """Create HTTP client authenticated as the created regular user."""
+    headers = {"Authorization": f"Bearer {created_user['token']}"}
+    with httpx.Client(base_url=API_BASE_URL, timeout=30.0, headers=headers) as client:
+        yield client
 
 
 @pytest.fixture

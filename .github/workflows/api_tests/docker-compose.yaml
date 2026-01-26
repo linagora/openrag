@@ -107,6 +107,8 @@ services:
       - RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
       - RAY_memory_monitor_refresh_ms=0
       - PROMPTS_DIR=../prompts/example1
+      - AUTH_TOKEN=${AUTH_TOKEN:-test-admin-token}
+      - SUPER_ADMIN_MODE=${SUPER_ADMIN_MODE:-true}
     ports:
       - "8080:8080"
     volumes:

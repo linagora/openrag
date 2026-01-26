@@ -69,6 +69,7 @@ jobs:
       - name: Run API tests
         env:
           OPENRAG_API_URL: http://localhost:8080
+          AUTH_TOKEN: test-admin-token
         run: |
           pytest tests/api_tests/ -v --timeout=120 --tb=short
 
