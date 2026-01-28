@@ -105,3 +105,62 @@ def sample_markdown_with_image(tmp_path):
     file_path = tmp_path / "test_with_image.md"
     file_path.write_text(content)
     return file_path
+
+
+query = """Project Alpha Overview
+
+This document describes the main objectives of Project Alpha.
+The project aims to develop a new AI-powered analytics platform.
+Key stakeholders include the engineering and product teams.
+"""
+
+
+@pytest.fixture
+def folder_files(tmp_path):
+    """Create multiple files simulating a folder with related documents."""
+    # Create unique content for each file that will be chunked
+    relationship_id_1 = "folder1"
+    relationship_id_2 = "folder2"
+    files = {
+        "file1.txt": (query, relationship_id_1),
+        "file2.txt": (
+            """Project Alpha Technical Specifications
+
+The system will use machine learning models for predictive analytics.
+Backend infrastructure includes microservices architecture.
+Database: PostgreSQL with vector extensions for embeddings.
+""",
+            relationship_id_1,
+        ),
+        "file3.txt": (
+            """Project Alpha Timeline
+
+Phase 1: Requirements gathering (Q1 2026)
+Phase 2: Development and testing (Q2-Q3 2026)
+Phase 3: Deployment and monitoring (Q4 2026)
+Expected completion: December 2026.
+""",
+            relationship_id_1,
+        ),
+        "file4.txt": ("""Project Beta Overview""", relationship_id_2),
+    }
+
+    file_paths = {}
+    for filename, (content, relationship_id) in files.items():
+        file_path = tmp_path / filename
+        file_path.write_text(content)
+        file_paths[filename] = (file_path, relationship_id)
+
+    return file_paths
+
+
+@pytest.fixture
+def exact_match_query():
+    """Return a query that should exactly match a chunk from folder_files.
+
+    Since embeddings are deterministic (MD5-based) and files are small enough
+    to be single chunks, searching with the complete file content should return
+    a perfect match.
+    """
+    # This should exactly match file1.txt as a complete chunk
+    return query

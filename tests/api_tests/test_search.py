@@ -45,6 +45,44 @@ class TestSemanticSearch:
 
         return created_partition
 
+    @pytest.fixture
+    def indexed_folder_partition(self, api_client, created_partition, folder_files):
+        """Create partition and index multiple related files with same relationship_id."""
+
+        for filename, (file_path, relationship_id) in folder_files.items():
+            file_id = filename.replace(".", "-")
+
+            with open(file_path, "rb") as f:
+                response = api_client.post(
+                    f"/indexer/partition/{created_partition}/file/{file_id}",
+                    files={"file": (filename, f, "text/plain")},
+                    data={"metadata": f'{{"relationship_id": "{relationship_id}"}}'},
+                )
+
+            data = response.json()
+
+            # Wait for each file to be indexed
+            if "task_status_url" in data:
+                task_url = data["task_status_url"]
+                task_path = "/" + "/".join(task_url.split("/")[3:])
+            elif "task_id" in data:
+                task_path = f"/indexer/task/{data['task_id']}"
+            else:
+                time.sleep(3)
+                continue
+
+            for _ in range(30):
+                task_response = api_client.get(task_path)
+                task_data = task_response.json()
+                state = task_data.get("task_state", "")
+                if state in ["SUCCESS", "COMPLETED", "success", "completed"]:
+                    break
+                elif state in ["FAILED", "failed", "FAILURE", "failure"]:
+                    pytest.skip(f"Indexing failed for {filename}: {task_data}")
+                time.sleep(2)
+
+        return created_partition
+
     def test_search_partition(self, api_client, indexed_partition):
         """Test searching within a partition."""
         response = api_client.get(
@@ -87,8 +125,6 @@ class TestSemanticSearch:
         )
         # May return empty results or error
         assert response.status_code in [200, 404, 500]
-<<<<<<< Updated upstream
-=======
 
     def test_search_with_include_related(self, api_client, indexed_folder_partition, exact_match_query, folder_files):
         """Test search with include_related retrieves all files with same relationship_id.
@@ -129,6 +165,12 @@ class TestSemanticSearch:
         assert None not in relationship_ids, (
             f"All documents should carry relationship_id metadata. Got: {relationship_ids}"
         )
+        relationship_ids = {
+            doc["metadata"].get("relationship_id")
+            for doc in data_with["documents"]
+            if doc["metadata"].get("relationship_id")
+        }
+        assert len(relationship_ids) == 1, f"All documents should have same relationship_id, got: {relationship_ids}"
 
         # verify that the relationship_id matches the expected one
         expected_relationship_id = folder_files["file1.txt"][1]  # relationship_id used during indexing
@@ -141,4 +183,3 @@ class TestSemanticSearch:
 
         expected_filenames = {"file1.txt", "file2.txt", "file3.txt"}
         assert filenames == expected_filenames, f"Expected files {expected_filenames}, got {filenames}"
->>>>>>> Stashed changes
