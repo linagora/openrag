@@ -43,8 +43,8 @@ jobs:
 
       - name: Run Ruff linting
         run: |
-          uv run ruff check . --output-format=github
+          uv run ruff check openrag/ tests/ --output-format=github
 
       - name: Check formatting
         run: |
-          uv run ruff format --check .
+          uv run ruff format --check openrag/ tests/

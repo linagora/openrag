@@ -23,7 +23,6 @@ class TestOpenAICompatibleAPI:
         assert "data" in data
         assert data["object"] == "list"
 
-
     def test_completions_endpoint(self, api_client):
         """Test completions endpoint exists or is disabled."""
         response = api_client.post("/v1/completions", json={"model": "openrag-all", "prompt": "Test"})
@@ -38,7 +37,6 @@ class TestOpenAICompatibleAPI:
         """Test chat completions endpoint with invalid messages."""
         response = api_client.post("/v1/chat/completions", json={"model": "openrag-all", "messages": []})
         assert response.status_code == 400
-
 
     def test_chat_completions_invalid_model(self, api_client):
         """Test chat completions with invalid model."""
