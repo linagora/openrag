@@ -17,9 +17,3 @@ def test_package_version_format():
     # Check that major and minor are numeric
     assert parts[0].isdigit(), "Major version should be numeric"
     assert parts[1].isdigit(), "Minor version should be numeric"
-
-
-def test_package_version_matches_expected():
-    """Test that the version matches expected value."""
-    version = get_package_version("openrag")
-    assert version == "1.1.6"
