@@ -20,17 +20,36 @@ class LLM:
             "Authorization": f"Bearer {self._api_key}",
         }
 
-    async def completions(self, request: dict):
+    def _extract_llm_overrides(self, request: dict):
+        """Extract and apply LLM overrides from metadata.llm_override."""
+        metadata = request.get("metadata") or {}
+        llm_override = metadata.pop("llm_override", None) or {}
+
         request.pop("model")
         payload = copy.deepcopy(self.default_llm_config)
         payload.update(request)
+
+        if llm_override.get("model"):
+            payload["model"] = llm_override["model"]
+
+        base_url = (llm_override.get("base_url") or self._base_url).rstrip("/")
+        api_key = llm_override.get("api_key") or self._api_key
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+
+        return payload, base_url, headers
+
+    async def completions(self, request: dict):
+        payload, base_url, headers = self._extract_llm_overrides(request)
 
         timeout = httpx.Timeout(4 * 10)
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 response = await client.post(
-                    url=f"{self._base_url}completions",
-                    headers=self.headers,
+                    url=f"{base_url}/completions",
+                    headers=headers,
                     json=payload,
                 )
                 response.raise_for_status()
@@ -43,10 +62,8 @@ class LLM:
                 raise ValueError(f"Invalid JSON in API response: {str(e)}")
 
     async def chat_completion(self, request: dict):
-        request.pop("model")
-        payload = copy.deepcopy(self.default_llm_config)
-        payload.update(request)
-        stream = request["stream"]
+        payload, base_url, headers = self._extract_llm_overrides(request)
+        stream = payload["stream"]
 
         timeout = httpx.Timeout(4 * 60)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -54,8 +71,8 @@ class LLM:
                 try:
                     async with client.stream(
                         "POST",
-                        url=f"{self._base_url}chat/completions",
-                        headers=self.headers,
+                        url=f"{base_url}/chat/completions",
+                        headers=headers,
                         json=payload,
                     ) as response:
                         if response.status_code >= 400:
@@ -73,8 +90,8 @@ class LLM:
             else:  # Handle non-streaming response
                 try:
                     response = await client.post(
-                        url=f"{self._base_url}chat/completions",
-                        headers=self.headers,
+                        url=f"{base_url}/chat/completions",
+                        headers=headers,
                         json=payload,
                     )
                     response.raise_for_status()
