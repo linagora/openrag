@@ -1,11 +1,12 @@
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Response, status
 from fastapi.responses import JSONResponse
-from utils.dependencies import get_vectordb
+from utils.dependencies import get_task_state_manager, get_vectordb
 from utils.logger import get_logger
 
-from .utils import require_admin
+from .utils import DEFAULT_FILE_QUOTA, current_user, require_admin
 
 logger = get_logger()
+task_state_manager = get_task_state_manager()
 router = APIRouter()
 
 
@@ -46,14 +47,50 @@ Returns current user details including:
 - `display_name`: User's display name
 - `is_admin`: Admin status
 - Additional user metadata
+    - indexed_files: Number of files currently indexed for this user
+    - pending_files: Number of files pending indexing for this user
+    - total_files: Total of indexed + pending files
+    - file_quota: Effective file quota for this user (considering admin status and user-specific quota)
+        -1: Unlimited
+        >0: Specific file limit
 
 **Note:** No special permissions required - returns info for the authenticated user.
 """,
 )
-async def get_current_user(request: Request):
+async def get_current_user_info(user=Depends(current_user), vectordb=Depends(get_vectordb)):
     """Get current authenticated user info"""
-    user = request.state.user
-    return user
+
+    user_id = user.get("id")
+    is_admin = user.get("is_admin", False)
+
+    if is_admin:
+        user_quota = float("inf")
+    elif DEFAULT_FILE_QUOTA <= 0:
+        user_quota = float("inf")
+    else:
+        user_quota = user.get("file_quota", None)
+        if user_quota is None:
+            user_quota = DEFAULT_FILE_QUOTA
+        elif user_quota <= 0:
+            user_quota = float("inf")
+
+    indexed_count = user.get("file_count", 0)  # Get indexed file count from user info
+    pending_count = await task_state_manager.get_user_pending_task_count.remote(
+        user_id
+    )  # Get pending task count from task manager
+
+    total = indexed_count + pending_count
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            **user,
+            "file_count": indexed_count,
+            "pending_files": pending_count,
+            "total_files": total,
+            "file_quota": -1 if user_quota == float("inf") else user_quota,
+        },
+    )
 
 
 @router.post(
@@ -64,6 +101,10 @@ async def get_current_user(request: Request):
 - `display_name`: User's display name (optional, form data)
 - `external_user_id`: External system user ID (optional, form data)
 - `is_admin`: Grant admin privileges (default: false, form data)
+- `file_quota`: File quota for the user (optional, form data).
+    * `None` or not provided: Use global default quota (`DEFAULT_FILE_QUOTA` env var)
+    * `<=0`: Unlimited
+    * `>0`: Specific limit for this user. The value can exceed the global default quota.
 
 **Permissions:**
 - Requires admin role
@@ -84,6 +125,7 @@ async def create_user(
     external_user_id: str | None = Form(None),
     is_admin: bool = Form(False),
     vectordb=Depends(get_vectordb),
+    file_quota: int | None = Form(None),
     admin_user=Depends(require_admin),
 ):
     """
@@ -93,6 +135,7 @@ async def create_user(
         display_name=display_name,
         external_user_id=external_user_id,
         is_admin=is_admin,
+        file_quota=file_quota,
     )
     logger.info("Created new user", user_id=user["id"])
     return JSONResponse(status_code=status.HTTP_201_CREATED, content=user)
@@ -192,3 +235,41 @@ async def regenerate_user_token(user_id: int, vectordb=Depends(get_vectordb)):
     user = await vectordb.regenerate_user_token.remote(user_id)
     logger.info("Regenerated user token", user_id=user_id)
     return JSONResponse(status_code=status.HTTP_200_OK, content=user)
+
+
+@router.patch(
+    "/{user_id}/quota",
+    description="""Update a user's file quota.
+
+**Parameters:**
+- `user_id`: User identifier
+- `file_quota`: New file quota value (form data)
+    * `None` or not provided: Use global default (`DEFAULT_FILE_QUOTA` env var)
+    * `<=0`: Unlimited
+    * `>0`: Specific limit for this user
+
+**Permissions:**
+- Requires admin role
+
+**Response:**
+Returns 200 OK with success message.
+
+**Note:** Admins always have unlimited quota regardless of this setting.
+""",
+)
+async def update_user_quota(
+    user_id: int,
+    file_quota: int | None = Form(None),
+    vectordb=Depends(get_vectordb),
+    admin_user=Depends(require_admin),
+):
+    """
+    Update a user's file quota.
+    """
+    await vectordb.update_user_quota.remote(user_id, file_quota)
+
+    logger.debug("Updated user quota", user_id=user_id, file_quota=file_quota)
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"message": f"Quota for user {user_id} updated to {file_quota}"},
+    )

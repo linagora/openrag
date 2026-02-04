@@ -146,7 +146,7 @@ class Indexer:
         await vectordb.async_add_documents.remote(chunks, user)
 
     @ray.method(concurrency_group="delete")
-    async def delete_file(self, file_id: str, partition: str) -> bool:
+    async def delete_file(self, file_id: str, partition: str, user: dict) -> bool:
         log = self.logger.bind(file_id=file_id, partition=partition)
         vectordb = ray.get_actor("Vectordb", namespace="openrag")
         if not self.enable_insertion:
@@ -154,7 +154,7 @@ class Indexer:
             return False
 
         try:
-            await vectordb.delete_file.remote(file_id, partition)
+            await vectordb.delete_file.remote(file_id, partition, user_id=user.get("id"))
             log.info("Deleted file from partition.", file_id=file_id, partition=partition)
 
         except Exception as e:
@@ -180,7 +180,7 @@ class Indexer:
             for doc in docs:
                 doc.metadata.update(metadata)
 
-            await self.delete_file(file_id, partition)
+            await self.delete_file(file_id, partition, user=user)
             await vectordb.async_add_documents.remote(docs, user=user)
 
             log.info("Metadata updated for file.")
@@ -380,3 +380,16 @@ class TaskStateManager:
             "max_tasks_per_worker": MAX_TASKS_PER_WORKER,
             "total_capacity": POOL_SIZE * MAX_TASKS_PER_WORKER,
         }
+
+    @ray.method(concurrency_group="queue_info")
+    async def get_user_pending_task_count(self, user_id: int) -> int:
+        """Count tasks for a user that are not yet COMPLETED or FAILED."""
+        async with self.lock:
+            task_ids = self.user_index.get(user_id, set())
+            pending_states = {"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"}
+            count = 0
+            for tid in task_ids:
+                info = self.tasks.get(tid)
+                if info and info.state in pending_states:
+                    count += 1
+            return count

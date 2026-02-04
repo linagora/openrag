@@ -107,6 +107,8 @@ services:
       - RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
       - RAY_memory_monitor_refresh_ms=0
       - PROMPTS_DIR=../prompts/example1
+      - DEFAULT_FILE_QUOTA=10
+      - AUTH_TOKEN=secret-token
     ports:
       - "8080:8080"
     volumes:

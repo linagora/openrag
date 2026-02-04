@@ -19,7 +19,7 @@ Stores information about API users and administrators.
 | `token`        | String (unique, hashed) | SHA-256 hash of the user’s API token |
 | `is_admin`     | Boolean | Marks system administrator users |
 | `created_at`   | DateTime | Timestamp of creation |
-
+| `file_quota`   | Integer (nullable) | Max files allowed for that user |
 **Relationships**
 - `memberships`: one-to-many → `PartitionMembership`
 
@@ -96,6 +96,17 @@ Defines the many-to-many relationship between **users** and **partitions**, incl
 - Roles (`owner`, `editor`, `viewer`) determine what users can do in each partition.  
 - `is_admin` users are privileged globally (admin endpoints, user management).  
 - `SUPER_ADMIN_MODE=true` allows the global admin to bypass all partition-level restrictions.  
+
+---
+
+## **File Quotas**
+Limits the number of files a user can upload (indexed files + pending tasks).
+
+- Admins always have unlimited quota and can update quota for a given user
+- `DEFAULT_FILE_QUOTA <= 0` to disable quota checking. 
+- `DEFAULT_FILE_QUOTA > 0` to set a default quota for all users.
+
+The default value `DEFAULT_FILE_QUOTA` is -1, meaning that file quota checking is bypassed.
 
 ---
 

@@ -32,6 +32,9 @@ ROLE_HIERARCHY = {
     "owner": 3,
 }
 
+# File quota per user
+DEFAULT_FILE_QUOTA = config.rdb.get("default_file_quota", 0)
+
 
 def current_user(request: Request):
     """Return the authenticated user from request.state"""
@@ -176,6 +179,66 @@ def require_admin(user=Depends(current_user)):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin privileges required",
         )
+    return user
+
+
+async def check_user_file_quota(
+    user=Depends(current_user),
+    vectordb=Depends(get_vectordb),
+):
+    """
+    Check if user has reached their file quota.
+    Quota = indexed files + pending indexing tasks.
+
+    Quota logic:
+    - Admins bypass this check
+    - DEFAULT_FILE_QUOTA <= 0 → to disabled quota checking
+    - user.file_quota = None → use global DEFAULT_FILE_QUOTA
+    - user.file_quota <= 0 → unlimited
+    - user.file_quota > 0 → specific limit
+    """
+
+    # Admins have unlimited quota
+    if user.get("is_admin"):
+        return user
+
+    if DEFAULT_FILE_QUOTA <= 0:  # to disabled quota checking
+        return user
+
+    # Determine quota
+    user_quota = user.get("file_quota")
+
+    if user_quota is None:
+        # Use global quota
+        user_quota = DEFAULT_FILE_QUOTA
+
+    if user_quota <= 0:  # unlimited quota
+        return user
+
+    # Now user_quota > 0
+
+    user_id = user.get("id")
+    indexed_count = user.get("file_count", 0)  # Get indexed file count from user info
+    pending_count = await task_state_manager.get_user_pending_task_count.remote(
+        user_id
+    )  # Get pending task count from task manager
+
+    total = indexed_count + pending_count
+
+    logger.debug(
+        "User file quota check",
+        user_id=user_id,
+        indexed_count=indexed_count,
+        pending_count=pending_count,
+        user_quota=user_quota,
+    )
+
+    if total >= user_quota:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"File quota exceeded. You have {indexed_count} indexed files and {pending_count} pending tasks. Limit: {user_quota}",
+        )
+
     return user
 
 

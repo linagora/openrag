@@ -46,6 +46,7 @@ rdb:
   port: ${oc.env:POSTGRES_PORT, 5432}
   user: ${oc.env:POSTGRES_USER, root}
   password: ${oc.env:POSTGRES_PASSWORD, root_password}
+  default_file_quota: ${oc.decode:${oc.env:DEFAULT_FILE_QUOTA, -1}}
 
 reranker:
   enable: ${oc.decode:${oc.env:RERANKER_ENABLED, true}}

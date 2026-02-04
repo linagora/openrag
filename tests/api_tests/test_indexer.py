@@ -14,14 +14,19 @@ PDF_FILE = RESOURCES_DIR / "test_file.pdf"
 TASK_TIMEOUT = 180  # 3 minutes for file processing
 
 
-def wait_for_task(api_client, task_id: str, timeout: int = TASK_TIMEOUT) -> dict:
+def wait_for_task(
+    api_client,
+    task_id: str,
+    timeout: int = TASK_TIMEOUT,
+    headers: dict | None = None,
+) -> dict:
     """Wait for task completion, polling status endpoint.
 
     Handles 404 responses gracefully as task may not be registered yet.
     """
     start = time.time()
     while time.time() - start < timeout:
-        response = api_client.get(f"/indexer/task/{task_id}")
+        response = api_client.get(f"/indexer/task/{task_id}", headers=headers)
 
         # Task might not be registered yet, retry on 404
         if response.status_code == 404:
@@ -399,3 +404,115 @@ class TestImageCaptioning:
             assert not url_preserved, "URL should not appear if it was captioned"
         if url_preserved:
             assert not url_was_captioned, "Caption should not appear if URL was preserved"
+
+
+class TestUserQuotaEnforcement:
+    """Test user file quota enforcement during file uploads."""
+
+    def _create_user_with_quota(self, api_client, display_name: str, file_quota: int | None = None):
+        """Helper to create a user with specific quota and return user data with token."""
+        data = {"display_name": display_name}
+        if file_quota is not None:
+            data["file_quota"] = file_quota
+        response = api_client.post("/users/", data=data)
+        assert response.status_code == 201, f"Failed to create user: {response.text}"
+        return response.json()
+
+    def _create_partition(self, api_client, partition_name: str, user_token: str):
+        """Helper to create a partition for user user given its token."""
+        # Create partition as the user
+        response = api_client.post(
+            f"/partition/{partition_name}",
+            headers={"Authorization": f"Bearer {user_token}"},
+        )
+        assert response.status_code in [200, 201], f"Failed to create partition: {response.text}"
+
+    def _upload_file(self, api_client, partition: str, file_id: str, user_token: str, content: str = "Test content"):
+        """Helper to upload a file as a specific user."""
+        import io
+
+        file_obj = io.BytesIO(content.encode())
+        headers = {"Authorization": f"Bearer {user_token}"}
+        response = api_client.post(
+            f"/indexer/partition/{partition}/file/{file_id}",
+            files={"file": (f"{file_id}.txt", file_obj, "text/plain")},
+            data={"metadata": "{}"},
+            headers=headers,
+        )
+        return response
+
+    def _cleanup_user(self, api_client, user_id: int):
+        """Helper to clean up a user."""
+        try:
+            api_client.delete(f"/users/{user_id}")
+        except Exception:
+            pass
+
+    def _cleanup_partition(self, api_client, partition_name: str):
+        """Helper to clean up a partition."""
+        try:
+            api_client.delete(f"/partition/{partition_name}")
+        except Exception:
+            pass
+
+    def test_unlimited_quota_user_can_exceed_default(self, api_client, tmp_path):
+        """Test that user with unlimited quota (<=0) can upload beyond default limit (11 files)."""
+        # Create user with unlimited quota (0 means unlimited)
+        user = self._create_user_with_quota(api_client, "unlimited_quota_user", file_quota=0)
+        user_id = user["id"]
+        user_token = user["token"]
+        partition_name = f"quota-test-unlimited-{user_id}"
+
+        try:
+            self._create_partition(api_client, partition_name, user_token)
+
+            # Upload 11 files (exceeds default quota of 10)
+            for i in range(11):
+                response = self._upload_file(api_client, partition_name, f"file-{i}", user_token, f"Content {i}")
+                assert response.status_code in [200, 201, 202], (
+                    f"File {i} upload failed with status {response.status_code}: {response.text}"
+                )
+                # Wait for task if needed
+                if response.status_code in [200, 201, 202]:
+                    data = response.json()
+                    if "task_status_url" in data:
+                        task_id = get_task_id(data)
+                        wait_for_task(api_client, task_id, headers={"Authorization": f"Bearer {user_token}"})
+
+        finally:
+            self._cleanup_partition(api_client, partition_name)
+            self._cleanup_user(api_client, user_id)
+
+    def test_quota_limit_blocks_excess_uploads(self, api_client, tmp_path):
+        """Test that user with quota 5 cannot upload a 6th file."""
+        # Create user with quota of 5
+        user = self._create_user_with_quota(api_client, "limited_quota_user", file_quota=5)
+        user_id = user["id"]
+        user_token = user["token"]
+        partition_name = f"quota-test-limited-{user_id}"
+
+        try:
+            self._create_partition(api_client, partition_name, user_token)
+
+            # Upload 5 files successfully
+            for i in range(5):
+                response = self._upload_file(api_client, partition_name, f"file-{i}", user_token, f"Content {i}")
+                assert response.status_code in [200, 201, 202], (
+                    f"File {i} upload should succeed, got {response.status_code}: {response.text}"
+                )
+                # Wait for task to complete
+                if response.status_code in [200, 201, 202]:
+                    data = response.json()
+                    if "task_status_url" in data:
+                        task_id = get_task_id(data)
+                        wait_for_task(api_client, task_id, headers={"Authorization": f"Bearer {user_token}"})
+
+            # 6th file should be rejected due to quota
+            response = self._upload_file(api_client, partition_name, "file-5", user_token, "Content 5")
+            assert response.status_code == 403, (
+                f"6th file should be rejected with 403 Forbidden, got {response.status_code}: {response.text}"
+            )
+
+        finally:
+            self._cleanup_partition(api_client, partition_name)
+            self._cleanup_user(api_client, user_id)

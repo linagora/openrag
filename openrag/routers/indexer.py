@@ -21,6 +21,7 @@ from utils.dependencies import get_indexer, get_task_state_manager, get_vectordb
 from utils.logger import get_logger
 
 from .utils import (
+    check_user_file_quota,
     current_user_partitions,
     ensure_partition_role,
     human_readable_size,
@@ -122,6 +123,7 @@ async def add_file(
     task_state_manager=Depends(get_task_state_manager),
     vectordb=Depends(get_vectordb),
     user=Depends(require_partition_editor),
+    _quota_check=Depends(check_user_file_quota),
 ):
     log = logger.bind(
         file_id=file_id,
@@ -196,7 +198,7 @@ async def delete_file(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"'{file_id}' not found in partition '{partition}'",
         )
-    await indexer.delete_file.remote(file_id, partition)
+    await indexer.delete_file.remote(file_id, partition, user=user)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -249,7 +251,7 @@ async def put_file(
         )
 
     # Delete the existing file from the vector database
-    await indexer.delete_file.remote(file_id, partition)
+    await indexer.delete_file.remote(file_id, partition, user=user)
 
     save_dir = Path(DATA_DIR)
     try:
@@ -361,6 +363,7 @@ async def copy_file_between_partitions(
     indexer=Depends(get_indexer),
     user=Depends(require_partition_editor),
     user_partitions=Depends(current_user_partitions),
+    _quota_check=Depends(check_user_file_quota),
 ):
     # Make sure user has access to destination partition
     await ensure_partition_role(

@@ -10,12 +10,14 @@ import httpx
 import pytest
 
 API_BASE_URL = os.environ.get("OPENRAG_API_URL", "http://localhost:8080")
+OPENRAG_ADMIN_TOKEN = os.environ.get("OPENRAG_ADMIN_TOKEN", "secret-token")
 
 
 @pytest.fixture(scope="session")
 def api_client():
     """Create HTTP client for API tests."""
-    with httpx.Client(base_url=API_BASE_URL, timeout=30.0) as client:
+    headers = {"Authorization": f"Bearer {OPENRAG_ADMIN_TOKEN}"}
+    with httpx.Client(base_url=API_BASE_URL, timeout=30.0, headers=headers) as client:
         yield client
 
 
