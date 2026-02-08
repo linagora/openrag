@@ -4,3 +4,4 @@
 [submodule "extern/indexer-ui"]
 	path = extern/indexer-ui
 	url = https://github.com/linagora/openrag-admin-ui.git
+	branch = feat/handling_user_file_quota
