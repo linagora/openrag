@@ -763,11 +763,6 @@ class MilvusDB(BaseVectorDB):
             self.logger.exception("Failed to list partitions", error=str(e))
             raise
 
-    def get_user_file_count(self, user_id: int) -> int:
-        """Get the count of files owned by a user (for quota checking)."""
-        self._check_user_exists(user_id)
-        return self.partition_file_manager.get_user_file_count(user_id)
-
     def collection_exists(self, collection_name: str):
         """
         Check if a collection exists in Milvus

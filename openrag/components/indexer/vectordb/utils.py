@@ -577,16 +577,6 @@ class PartitionFileManager:
         with self.Session() as s:
             return s.query(PartitionMembership).filter_by(user_id=user_id, partition_name=partition).first() is not None
 
-    def get_user_file_count(self, user_id: int) -> int:
-        """Count files in partitions where user is owner or editor."""
-        with self.Session() as s:
-            return (
-                s.query(File)
-                .join(PartitionMembership, File.partition_name == PartitionMembership.partition_name)
-                .filter(PartitionMembership.user_id == user_id, PartitionMembership.role.in_(["owner", "editor"]))
-                .count()
-            )
-
     def update_user_quota(self, user_id: int, file_quota: int | None) -> dict:
         """
         Update a user's file quota.

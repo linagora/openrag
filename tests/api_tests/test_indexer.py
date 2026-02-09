@@ -516,3 +516,105 @@ class TestUserQuotaEnforcement:
         finally:
             self._cleanup_partition(api_client, partition_name)
             self._cleanup_user(api_client, user_id)
+
+    def _get_user_file_count(self, api_client, user_token: str) -> int:
+        """Helper to get the file_count for a user."""
+        response = api_client.get(
+            "/users/info",
+            headers={"Authorization": f"Bearer {user_token}"},
+        )
+        assert response.status_code == 200, f"Failed to get user info: {response.text}"
+        return response.json().get("file_count", 0)
+
+    def test_file_count_increments_on_upload(self, api_client):
+        """Test that file_count increments when a user uploads files."""
+        user = self._create_user_with_quota(api_client, "file_count_test_user", file_quota=0)
+        user_id = user["id"]
+        user_token = user["token"]
+        partition_name = f"file-count-test-{user_id}"
+
+        try:
+            # Initial file_count should be 0
+            initial_count = self._get_user_file_count(api_client, user_token)
+            assert initial_count == 0, f"Initial file_count should be 0, got {initial_count}"
+
+            self._create_partition(api_client, partition_name, user_token)
+
+            # Upload 3 files and verify count increments
+            for i in range(1, 4):
+                response = self._upload_file(api_client, partition_name, f"file-{i}", user_token, f"Content {i}")
+                assert response.status_code in [200, 201, 202], (
+                    f"File {i} upload failed with status {response.status_code}: {response.text}"
+                )
+                # Wait for task to complete
+                data = response.json()
+                if "task_status_url" in data:
+                    task_id = get_task_id(data)
+                    wait_for_task(api_client, task_id, headers={"Authorization": f"Bearer {user_token}"})
+
+                # Verify file_count incremented
+                current_count = self._get_user_file_count(api_client, user_token)
+                expected_count = i
+                assert current_count == expected_count, (
+                    f"After uploading file {i}, file_count should be {expected_count}, got {current_count}"
+                )
+
+        finally:
+            self._cleanup_partition(api_client, partition_name)
+            self._cleanup_user(api_client, user_id)
+
+    def test_file_count_decrements_on_delete(self, api_client):
+        """Test that file_count decrements when a user deletes files or a partition."""
+        user = self._create_user_with_quota(api_client, "file_count_delete_test_user", file_quota=0)
+        user_id = user["id"]
+        user_token = user["token"]
+        partition_name = f"file-count-delete-test-{user_id}"
+
+        try:
+            self._create_partition(api_client, partition_name, user_token)
+
+            # Upload 5 files
+            for i in range(5):
+                response = self._upload_file(api_client, partition_name, f"file-{i}", user_token, f"Content {i}")
+                assert response.status_code in [200, 201, 202]
+                data = response.json()
+                if "task_status_url" in data:
+                    task_id = get_task_id(data)
+                    wait_for_task(api_client, task_id, headers={"Authorization": f"Bearer {user_token}"})
+
+            # Verify file_count is 5
+            count_after_upload = self._get_user_file_count(api_client, user_token)
+            assert count_after_upload == 5, f"After uploading 5 files, file_count should be 5, got {count_after_upload}"
+
+            headers = {"Authorization": f"Bearer {user_token}"}
+
+            # Delete one file
+            response = api_client.delete(f"/partition/{partition_name}/file/file-0", headers=headers)
+            assert response.status_code in [200, 204], f"Failed to delete file: {response.text}"
+
+            # Verify file_count decremented to 4
+            count_after_delete = self._get_user_file_count(api_client, user_token)
+            assert count_after_delete == 4, f"After deleting 1 file, file_count should be 4, got {count_after_delete}"
+
+            # Delete another file
+            response = api_client.delete(f"/partition/{partition_name}/file/file-1", headers=headers)
+            assert response.status_code in [200, 204], f"Failed to delete file: {response.text}"
+
+            # Verify file_count decremented to 3
+            count_after_second_delete = self._get_user_file_count(api_client, user_token)
+            assert count_after_second_delete == 3, (
+                f"After deleting 2 files, file_count should be 3, got {count_after_second_delete}"
+            )
+
+            # Delete the partition (with remaining 3 files)
+            response = api_client.delete(f"/partition/{partition_name}", headers=headers)
+            assert response.status_code in [200, 204], f"Failed to delete partition: {response.text}"
+
+            # Verify file_count decremented to 0
+            count_after_partition_delete = self._get_user_file_count(api_client, user_token)
+            assert count_after_partition_delete == 0, (
+                f"After deleting partition with 3 files, file_count should be 0, got {count_after_partition_delete}"
+            )
+
+        finally:
+            self._cleanup_partition(api_client, partition_name)
