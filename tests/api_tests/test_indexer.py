@@ -589,7 +589,8 @@ class TestUserQuotaEnforcement:
             headers = {"Authorization": f"Bearer {user_token}"}
 
             # Delete one file
-            response = api_client.delete(f"/partition/{partition_name}/file/file-0", headers=headers)
+            response = api_client.delete(f"/indexer/partition/{partition_name}/file/file-0", headers=headers)
+
             assert response.status_code in [200, 204], f"Failed to delete file: {response.text}"
 
             # Verify file_count decremented to 4
@@ -597,7 +598,7 @@ class TestUserQuotaEnforcement:
             assert count_after_delete == 4, f"After deleting 1 file, file_count should be 4, got {count_after_delete}"
 
             # Delete another file
-            response = api_client.delete(f"/partition/{partition_name}/file/file-1", headers=headers)
+            response = api_client.delete(f"/indexer/partition/{partition_name}/file/file-1", headers=headers)
             assert response.status_code in [200, 204], f"Failed to delete file: {response.text}"
 
             # Verify file_count decremented to 3
@@ -617,4 +618,4 @@ class TestUserQuotaEnforcement:
             )
 
         finally:
-            self._cleanup_partition(api_client, partition_name)
+            self._cleanup_user(api_client, user_id)

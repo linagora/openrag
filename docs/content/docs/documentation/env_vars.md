@@ -417,7 +417,7 @@ The following environment variables configure the FastAPI server and control acc
 | `APP_PORT` | `number` | `8000` | Port number on which the FastAPI application listens for incoming requests. |
 | `AUTH_TOKEN` | `string` | `EMPTY` | An authentication token is required to access protected API endpoints. By default, this token corresponds to the API key of the created admin (see [Admin Bootstrapping](/openrag/documentation/user_auth/#2-admin-bootstrapping)). If left empty, authentication is disabled. |
 | `SUPER_ADMIN_MODE` | `boolean` | `false` | Enables super admin privileges when set to `true`, [granting unrestricted access](/openrag/documentation/data_model/#access-control) to all operations and bypassing standard access controls. This is for debugging |
-| `DEFAULT_FILE_QUOTA` | `int` | `0` | Default per-user file quota. `<=0` disables quotas globally; `>0` sets the default limit when a user has no explicit quota. |
+| `DEFAULT_FILE_QUOTA` | `int` | `-1` | Default per-user file quota. `<=0` disables quotas globally; `>0` sets the default limit when a user has no explicit quota. |
 |`API_NUM_WORKERS`|`int`|1|Number of uvicorn workers|
 | `PREFERRED_URL_SCHEME` | `string` | `null` | URL scheme (`http` or `https`) used when generating URLs in API responses (e.g., `task_status_url`). When running behind a reverse proxy that terminates SSL, set this to `https` to ensure generated URLs use the correct scheme. If unset, the scheme from the incoming request is used. |
 

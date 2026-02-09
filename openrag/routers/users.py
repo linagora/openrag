@@ -74,18 +74,18 @@ async def get_current_user_info(user=Depends(current_user), vectordb=Depends(get
         elif user_quota <= 0:
             user_quota = float("inf")
 
-    indexed_count = user.get("file_count", 0)  # Get indexed file count from user info
+    file_count = user.get("file_count", 0)  # Get indexed file count from user info
     pending_count = await task_state_manager.get_user_pending_task_count.remote(
         user_id
     )  # Get pending task count from task manager
 
-    total = indexed_count + pending_count
+    total = file_count + pending_count
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={
             **user,
-            "file_count": indexed_count,
+            "file_count": file_count,
             "pending_files": pending_count,
             "total_files": total,
             "file_quota": -1 if user_quota == float("inf") else user_quota,

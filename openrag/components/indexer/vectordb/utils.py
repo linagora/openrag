@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     create_engine,
+    func,
 )
 from sqlalchemy.orm import (
     declarative_base,
@@ -32,7 +33,7 @@ from utils.logger import get_logger
 logger = get_logger()
 config = load_config()
 
-DEFAULT_FILE_QUOTA = config.rdb.get("default_file_quota", 0)
+DEFAULT_FILE_QUOTA = config.rdb.get("default_file_quota", -1)
 
 Base = declarative_base()
 
@@ -72,8 +73,6 @@ class File(Base):
         d = {
             "partition": self.partition_name,
             "file_id": self.file_id,
-            "relationship_id": self.relationship_id,
-            "parent_id": self.parent_id,
             **metadata,
         }
         return d
@@ -226,8 +225,6 @@ class PartitionFileManager:
             partition: Partition name
             file_metadata: Additional metadata as JSON
             user_id: User ID for ownership (creates partition membership)
-            relationship_id: Groups related documents (e.g., email thread ID, folder path)
-            parent_id: Hierarchical parent reference (e.g., parent email file_id)
         """
         log = self.logger.bind(file_id=file_id, partition=partition)
         with self.Session() as session:
@@ -262,7 +259,7 @@ class PartitionFileManager:
                 # Increment file_count for the user
                 user = session.query(User).filter(User.id == user_id).first()
                 if user:
-                    user.file_count += 1
+                    user.file_count = User.file_count + 1
 
                 session.commit()
                 log.info("Added file successfully")
@@ -285,7 +282,7 @@ class PartitionFileManager:
                     # Decrement file_count for the user
                     user = session.query(User).filter(User.id == user_id).first()
                     if user and user.file_count > 0:
-                        user.file_count -= 1
+                        user.file_count = User.file_count - 1
 
                     session.commit()
                     log.info(f"Removed file {file_id} from partition {partition}")
@@ -309,7 +306,7 @@ class PartitionFileManager:
                 if file_count > 0:
                     user = session.query(User).filter(User.id == user_id).first()
                     if user:
-                        user.file_count = max(0, user.file_count - file_count)
+                        user.file_count = func.greatest(0, User.file_count - file_count)
 
                 session.delete(partition_obj)  # Will delete all files due to cascade
                 session.commit()
@@ -364,13 +361,8 @@ class PartitionFileManager:
             token = f"or-{secrets.token_hex(16)}"
             hashed_token = self.hash_token(token)
 
-            if self.file_quota_per_user > 0:  # Quotas enabled globally
-                if file_quota is None:
-                    file_quota = self.file_quota_per_user  # default to default quota
-                elif file_quota > 0:
-                    file_quota = file_quota  # use specified quota
-                else:
-                    pass  # unlimited
+            if self.file_quota_per_user > 0 and file_quota is None:
+                file_quota = self.file_quota_per_user  # default to default quota
 
             user = User(
                 display_name=display_name,

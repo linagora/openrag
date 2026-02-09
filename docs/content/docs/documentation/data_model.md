@@ -117,4 +117,3 @@ The default value `DEFAULT_FILE_QUOTA` is -1, meaning that file quota checking i
 - During authentication, the incoming Bearer token is hashed and compared with the stored hash.
 
 ---
-

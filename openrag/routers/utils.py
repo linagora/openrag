@@ -33,7 +33,7 @@ ROLE_HIERARCHY = {
 }
 
 # File quota per user
-DEFAULT_FILE_QUOTA = config.rdb.get("default_file_quota", 0)
+DEFAULT_FILE_QUOTA = config.rdb.get("default_file_quota", -1)
 
 
 def current_user(request: Request):
@@ -192,7 +192,7 @@ async def check_user_file_quota(
 
     Quota logic:
     - Admins bypass this check
-    - DEFAULT_FILE_QUOTA <= 0 → to disabled quota checking
+    - DEFAULT_FILE_QUOTA <= 0 → disabled quota checking
     - user.file_quota = None → use global DEFAULT_FILE_QUOTA
     - user.file_quota <= 0 → unlimited
     - user.file_quota > 0 → specific limit
@@ -202,7 +202,7 @@ async def check_user_file_quota(
     if user.get("is_admin"):
         return user
 
-    if DEFAULT_FILE_QUOTA <= 0:  # to disabled quota checking
+    if DEFAULT_FILE_QUOTA <= 0:  # disabled quota checking
         return user
 
     # Determine quota
