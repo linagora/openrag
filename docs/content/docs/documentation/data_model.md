@@ -20,6 +20,7 @@ Stores information about API users and administrators.
 | `is_admin`     | Boolean | Marks system administrator users |
 | `created_at`   | DateTime | Timestamp of creation |
 | `file_quota`   | Integer (nullable) | Max files allowed for that user |
+| `file_count`| Integer (default=0) | Number of uploaded files.|
 **Relationships**
 - `memberships`: one-to-many → `PartitionMembership`
 
