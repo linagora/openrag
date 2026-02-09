@@ -52,6 +52,7 @@ Returns models in OpenAI-compatible format with:
     response_description="A list of available models in OpenAI format",
 )
 async def list_models(
+    _: None = Depends(check_llm_model_availability),
     vectordb=Depends(get_vectordb),
     user_partitions=Depends(current_user_or_admin_partitions),
 ):
@@ -143,9 +144,9 @@ Set `stream: true` for Server-Sent Events (SSE) streaming responses.
 async def openai_chat_completion(
     request2: Request,
     request: OpenAIChatCompletionRequest = Body(...),
+    _: None = Depends(check_llm_model_availability),
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
-    _: None = Depends(check_llm_model_availability),
 ):
     model_name = request.model or config.llm.get("model")
     log = logger.bind(model=model_name, endpoint="/chat/completions")
@@ -263,9 +264,9 @@ Returns OpenAI-compatible response with additional `extra` field containing:
 async def openai_completion(
     request2: Request,
     request: OpenAICompletionRequest,
+    _: None = Depends(check_llm_model_availability),
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
-    _: None = Depends(check_llm_model_availability),
 ):
     model_name = request.model or config.llm.get("model")
     log = logger.bind(model=model_name, endpoint="/completions")

@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any
 
 import consts
-import openai
 from config import load_config
 from fastapi import Depends, Form, HTTPException, Request, UploadFile, status
 from openai import AsyncOpenAI
@@ -301,38 +300,25 @@ def get_app_state(request: Request):
 
 
 async def check_llm_model_availability(request: Request):
-    llm_param = config.llm
-    base_url = llm_param.get("base_url")
-    model = llm_param.get("model")
-    api_key = llm_param.get("api_key")
-    timeout = 30
-
-    log = logger.bind(base_url=llm_param["base_url"], model=llm_param["model"], model_type="LLM")
-    try:
-        log.debug("Validating model")
-        client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
-        openai_models = await client.models.list(timeout=timeout)
-        available_models = {m.id for m in openai_models.data}
-        if model not in available_models:
+    models = {"LLM": config.llm, "VLM": config.vlm}
+    for model_type, param in models.items():
+        try:
+            client = AsyncOpenAI(api_key=param["api_key"], base_url=param["base_url"])
+            openai_models = await client.models.list()
+            available_models = {m.id for m in openai_models.data}
+            if param["model"] not in available_models:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Only these models ({available_models}) are available for your `{model_type}`. Please check your configuration file.",
+                )
+        except Exception as e:
+            logger.exception("Failed to validate model", model=model_type, error=str(e))
+            if isinstance(e, HTTPException):
+                raise
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"The underlying model '{model}' is not available via this endpoint.",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error while checking the `{model_type}` endpoint, it seems not available at this moment",
             )
-    except openai.APIError as e:
-        log.error("API Endpoint error while validating model", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"OpenAI API Endpoint error: {str(e)}",
-        )
-
-    except Exception as e:
-        log.exception("Failed to validate model", error=str(e))
-        if isinstance(e, HTTPException):
-            raise
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal Error : {str(e)}",
-        )
 
 
 async def get_partition_name(model_name, user_partitions, is_admin=False):

@@ -47,14 +47,6 @@ class File(Base):
     partition_name = Column(String, ForeignKey("partitions.partition"), nullable=False, index=True)  # Added index
     file_metadata = Column(JSON, nullable=True, default={})
 
-    # Document relationship fields
-    relationship_id = Column(
-        String, nullable=True, index=True
-    )  # Groups related documents (e.g., email thread ID, folder path)
-    parent_id = Column(
-        String, nullable=True, index=True
-    )  # Hierarchical parent reference (e.g., parent email, parent folder)
-
     # relationship to the Partition object
     partition = relationship("Partition", back_populates="files")
 
@@ -63,18 +55,11 @@ class File(Base):
         UniqueConstraint("file_id", "partition_name", name="uix_file_id_partition"),
         # Additional composite index for common query patterns (partition first for better selectivity)
         Index("ix_partition_file", "partition_name", "file_id"),
-        # Indexes for relationship queries
-        Index("ix_relationship_partition", "relationship_id", "partition_name"),
-        Index("ix_parent_partition", "parent_id", "partition_name"),
     )
 
     def to_dict(self):
         metadata = self.file_metadata or {}
-        d = {
-            "partition": self.partition_name,
-            "file_id": self.file_id,
-            **metadata,
-        }
+        d = {"partition": self.partition_name, "file_id": self.file_id, **metadata}
         return d
 
     def __repr__(self):
@@ -215,17 +200,9 @@ class PartitionFileManager:
         partition: str,
         file_metadata: dict | None = None,
         user_id: int | None = None,
-        relationship_id: None | str = None,
-        parent_id: None | str = None,
     ):
-        """Add a file to a partition with optional relationship fields.
+        """Add a file to a partition - Optimized with direct partition lookup"""
 
-        Args:
-            file_id: Unique identifier for the file
-            partition: Partition name
-            file_metadata: Additional metadata as JSON
-            user_id: User ID for ownership (creates partition membership)
-        """
         log = self.logger.bind(file_id=file_id, partition=partition)
         with self.Session() as session:
             try:
@@ -250,8 +227,6 @@ class PartitionFileManager:
                     file_id=file_id,
                     partition_name=partition,
                     file_metadata=file_metadata,
-                    relationship_id=relationship_id,
-                    parent_id=parent_id,
                 )
 
                 session.add(file)
@@ -594,112 +569,3 @@ class PartitionFileManager:
     def hash_token(self, token: str) -> str:
         """Return a SHA-256 hash of a token string."""
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-    # Document relationship methods
-
-    def get_files_by_relationship(self, partition: str, relationship_id: str) -> list[dict]:
-        """Get all files sharing a relationship_id within a partition.
-
-        Args:
-            partition: Partition name
-            relationship_id: The relationship group identifier
-
-        Returns:
-            List of file dictionaries
-        """
-        with self.Session() as session:
-            files = (
-                session.query(File)
-                .filter(
-                    File.partition_name == partition,
-                    File.relationship_id == relationship_id,
-                )
-                .all()
-            )
-            return [f.to_dict() for f in files]
-
-    def get_file_ids_by_relationship(self, partition: str, relationship_id: str) -> list[str]:
-        """Get file_ids for all files sharing a relationship_id.
-
-        Args:
-            partition: Partition name
-            relationship_id: The relationship group identifier
-
-        Returns:
-            List of file_id strings
-        """
-        with self.Session() as session:
-            results = (
-                session.query(File.file_id)
-                .filter(
-                    File.partition_name == partition,
-                    File.relationship_id == relationship_id,
-                )
-                .all()
-            )
-            return [r[0] for r in results]
-
-    def get_file_ancestors(self, partition: str, file_id: str) -> list[dict]:
-        """Get all ancestors of a file using recursive CTE.
-
-        Returns ordered list from root to the specified file (direct path only).
-
-        Args:
-            partition: Partition name
-            file_id: The file identifier to find ancestors for
-
-        Returns:
-            List of file dictionaries ordered from root to the specified file
-        """
-        from sqlalchemy import text
-
-        with self.Session() as session:
-            # Recursive CTE for ancestor traversal
-            query = text("""
-                WITH RECURSIVE ancestors AS (
-                    -- Base case: start with the target file
-                    SELECT id, file_id, partition_name, parent_id, file_metadata,
-                           relationship_id, 0 as depth
-                    FROM files
-                    WHERE file_id = :file_id AND partition_name = :partition
-
-                    UNION ALL
-
-                    -- Recursive case: get parent
-                    SELECT f.id, f.file_id, f.partition_name, f.parent_id,
-                           f.file_metadata, f.relationship_id, a.depth + 1
-                    FROM files f
-                    INNER JOIN ancestors a ON f.file_id = a.parent_id
-                        AND f.partition_name = a.partition_name
-                )
-                SELECT * FROM ancestors ORDER BY depth DESC
-            """)
-
-            result = session.execute(query, {"file_id": file_id, "partition": partition})
-
-            return [
-                {
-                    "file_id": row.file_id,
-                    "partition": row.partition_name,
-                    "parent_id": row.parent_id,
-                    "relationship_id": row.relationship_id,
-                    "depth": row.depth,
-                    **(row.file_metadata or {}),
-                }
-                for row in result
-            ]
-
-    def get_ancestor_file_ids(self, partition: str, file_id: str) -> list[str]:
-        """Get file_ids for all ancestors of a file.
-
-        Returns ordered list from root to the specified file (direct path only).
-
-        Args:
-            partition: Partition name
-            file_id: The file identifier to find ancestors for
-
-        Returns:
-            List of file_id strings ordered from root to the specified file
-        """
-        ancestors = self.get_file_ancestors(partition, file_id)
-        return [a["file_id"] for a in ancestors]

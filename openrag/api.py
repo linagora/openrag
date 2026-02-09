@@ -214,15 +214,18 @@ app.include_router(users_router, prefix="/users", tags=[Tags.USERS])
 
 app.include_router(tools_router, prefix="/v1", tags=[Tags.TOOLS])
 
-# Mount openai router if either OpenAI API or Chainlit UI is enabled (chainlit uses openai api endpoints)
-if WITH_OPENAI_API or WITH_CHAINLIT_UI:
+
+if WITH_OPENAI_API:
+    # Mount the openai router
     app.include_router(openai_router, prefix="/v1", tags=[Tags.OPENAI])
+
 
 if WITH_CHAINLIT_UI:
     # Mount the default front
     from chainlit.utils import mount_chainlit
 
     mount_chainlit(app, "./app_front.py", path="/chainlit")
+    app.include_router(openai_router, prefix="/v1", tags=[Tags.OPENAI])  # cause chainlit uses openai api endpoints
 
 if __name__ == "__main__":
     if config.ray.serve.enable:
