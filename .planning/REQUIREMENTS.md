@@ -66,22 +66,25 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BUG-01 | — | Pending |
-| SEC-01 | — | Pending |
-| SEC-02 | — | Pending |
-| SEC-03 | — | Pending |
-| DEBT-01 | — | Pending |
-| DEBT-02 | — | Pending |
-| DEBT-03 | — | Pending |
-| DEBT-04 | — | Pending |
-| PERF-01 | — | Pending |
-| PERF-02 | — | Pending |
+| BUG-01 | Phase 1 | Pending |
+| SEC-01 | Phase 1 | Pending |
+| SEC-03 | Phase 1 | Pending |
+| SEC-02 (routers) | Phase 2 | Pending |
+| SEC-02 (components, pipeline) | Phase 3 | Pending |
+| PERF-01 | Phase 4 | Pending |
+| PERF-02 | Phase 4 | Pending |
+| DEBT-01 | Phase 5 | Pending |
+| DEBT-02 | Phase 5 | Pending |
+| DEBT-03 | Phase 6 | Pending |
+| DEBT-04 | Phase 6 | Pending |
 
 **Coverage:**
 - v1 requirements: 10 total
-- Mapped to phases: 0
-- Unmapped: 10 ⚠️
+- Mapped to phases: 10
+- Unmapped: 0 ✓
+
+**Note:** SEC-02 is split across Phase 2 (API layer/routers) and Phase 3 (core services/components/pipeline) due to the large scope (~40+ instances).
 
 ---
 *Requirements defined: 2026-02-10*
-*Last updated: 2026-02-10 after initial definition*
+*Last updated: 2026-02-10 after roadmap creation*
