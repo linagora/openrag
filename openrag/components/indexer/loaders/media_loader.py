@@ -7,7 +7,7 @@ import librosa
 import numpy as np
 from components.utils import get_audio_semaphore
 from langchain_core.documents.base import Document
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIError
 from pydub import AudioSegment, silence
 from tqdm.asyncio import tqdm
 from utils.logger import get_logger
@@ -58,8 +58,13 @@ class AudioTranscriber:
             try:
                 result = await self._transcribe_chunk(tmp_path, language)
                 return result
+            except APIError as e:
+                # OpenAI API errors - gracefully degrade by returning empty transcript
+                logger.warning("Audio transcription API error", chunk=tmp_path.name, error=str(e)[:200])
+                return ""
             except Exception as e:
-                logger.exception(f"Error transcribing chunk {tmp_path.name}", error=str(e))
+                # Unexpected errors - log and return empty transcript for graceful degradation
+                logger.exception("Error transcribing chunk", chunk=tmp_path.name, error=str(e))
                 return ""
             finally:
                 tmp_path.unlink(missing_ok=True)
@@ -77,8 +82,13 @@ class AudioTranscriber:
                 kwargs["language"] = language
             result = await self.client.audio.transcriptions.create(**kwargs)
             return result.text.strip()
+        except APIError as e:
+            # OpenAI API errors - gracefully degrade by returning empty transcript
+            logger.warning("Audio transcription API error", chunk=wav_path.name, error=str(e)[:200])
+            return ""
         except Exception as e:
-            logger.exception(f"Error transcribing chunk {wav_path.name}", error=str(e))
+            # Unexpected errors - log and return empty transcript for graceful degradation
+            logger.exception("Error transcribing chunk", chunk=wav_path.name, error=str(e))
             return ""
 
     async def _get_audio_chunks(self, sound: AudioSegment) -> list[AudioSegment]:
@@ -122,7 +132,12 @@ class AudioTranscriber:
             return fallback_language  # Fallback to English
         try:
             return langdetect.detect(text)
+        except langdetect.LangDetectException as e:
+            # Expected failure for non-textual content or too-short text
+            logger.warning("Language detection failed", error=str(e))
+            return fallback_language
         except Exception as e:
+            # Unexpected language detection errors
             logger.exception("Language detection failed", error=str(e))
             return fallback_language
         finally:

@@ -125,11 +125,20 @@ class PPTXConverter:
             separator = "|" + "|".join(["---"] * len(data[0])) + "|"
             return md + "\n".join([header, separator] + markdown_table[1:])
         except ValueError as e:
-            # Handle the specific error for unsupported chart types
+            # Handle unsupported chart types (expected error)
             if "unsupported plot type" in str(e):
+                logger.debug("Unsupported chart type encountered")
                 return "\n\n[unsupported chart]\n\n"
-        except Exception:
-            # Catch any other exceptions that might occur
+            # Other ValueError - log and return placeholder
+            logger.warning("Chart conversion value error", error=str(e))
+            return "\n\n[unsupported chart]\n\n"
+        except (AttributeError, IndexError) as e:
+            # Missing chart data or unexpected structure
+            logger.warning("Chart structure error", error=str(e))
+            return "\n\n[unsupported chart]\n\n"
+        except Exception as e:
+            # Unexpected errors - log and gracefully degrade
+            logger.warning("Chart conversion failed", error=str(e))
             return "\n\n[unsupported chart]\n\n"
 
 
