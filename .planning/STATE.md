@@ -12,7 +12,7 @@ See: .planning/PROJECT.md (updated 2026-02-10)
 Phase: 2 of 6 (Exception Handling API Layer)
 Plan: 2 of 3 in current phase
 Status: Executing
-Last activity: 2026-02-10 — Completed 02-02-PLAN.md
+Last activity: 2026-02-10 — Completed 02-01-PLAN.md
 
 Progress: [█████░░░░░] 50%
 
@@ -36,6 +36,7 @@ Progress: [█████░░░░░] 50%
 
 *Updated after each plan completion*
 | Phase 02 P01 | 149 | 2 tasks | 1 files |
+| Phase 02 P03 | 3 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -56,6 +57,11 @@ Recent decisions affecting current work:
 - [Phase 01-quick-security-fixes]: Validate domains as list of non-empty strings to prevent type confusion attacks
 - [Phase 02-02]: OSError is the base class for all disk I/O errors (IOError, PermissionError, FileNotFoundError)
 - [Phase 02-02]: Ray actor not-found errors manifest as ValueError, not RayTaskError
+- [Phase 02]: Catch asyncio.CancelledError FIRST in streaming to detect client disconnection
+- [Phase 02]: Use generic error messages for Exception catch-all to prevent internal detail exposure
+- [Phase 02-03]: Preserve cleanup logic in tools.py finally block with nested try/except
+- [Phase 02-03]: Use httpx.TimeoutException and httpx.HTTPError for LLM availability checks with 503/504 status codes
+- [Phase 02-03]: Ray actor not-found errors are ValueError not RayTaskError
 
 ### Pending Todos
 
@@ -68,5 +74,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 02-02-PLAN.md
+Stopped at: Completed 02-01-PLAN.md
 Resume file: None
