@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-02-10)
 
 **Core value:** Improve codebase reliability and security by eliminating known bugs, replacing broad exception handling, hardening SQL construction, and fixing performance bottlenecks — without changing external behavior.
-**Current focus:** Phase 2 - Exception Handling API Layer
+**Current focus:** Phase 3 - Exception Handling Core Services
 
 ## Current Position
 
-Phase: 2 of 6 (Exception Handling API Layer)
-Plan: 3 of 3 in current phase (COMPLETE)
-Status: Phase Complete
-Last activity: 2026-02-10 — Completed 02-03-PLAN.md
+Phase: 3 of 6 (Exception Handling Core Services)
+Plan: 1 of 4 in current phase (IN PROGRESS)
+Status: Executing phase 3 plans
+Last activity: 2026-02-10 — Completed 03-04-PLAN.md
 
-Progress: [██████░░░░] 60%
+Progress: [███████░░░] 70%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6
+- Total plans completed: 7
 - Average duration: 2 min
-- Total execution time: 0.2 hours
+- Total execution time: 0.24 hours
 
 **By Phase:**
 
@@ -29,10 +29,11 @@ Progress: [██████░░░░] 60%
 |-------|-------|-------|----------|
 | 01 | 3 | 3 min | 1 min |
 | 02 | 3 | 9 min | 3 min |
+| 03 | 1 | 2 min | 2 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-02 (1 min), 01-03 (1 min), 02-01 (3 min), 02-02 (3 min), 02-03 (3 min)
-- Trend: Phase 2 plans taking ~3min each (router refactoring)
+- Last 5 plans: 01-03 (1 min), 02-01 (3 min), 02-02 (3 min), 02-03 (3 min), 03-04 (2 min)
+- Trend: Phase 3 starting with ~2min per plan (exception handling)
 
 *Updated after each plan completion*
 
@@ -41,6 +42,7 @@ Progress: [██████░░░░] 60%
 | Phase 02 P01 | 3 min | 2 tasks | 1 file |
 | Phase 02 P02 | 3 min | 2 tasks | 2 files |
 | Phase 02 P03 | 3 min | 2 tasks | 4 files |
+| Phase 03 P04 | 2 min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -66,6 +68,9 @@ Recent decisions affecting current work:
 - [Phase 02-03]: Preserve cleanup logic in tools.py finally block with nested try/except
 - [Phase 02-03]: Use httpx.TimeoutException and httpx.HTTPError for LLM availability checks with 503/504 status codes
 - [Phase 02-03]: Ray actor not-found errors are ValueError not RayTaskError
+- [Phase 03-04]: Catch asyncio.CancelledError first in LLM streaming (client disconnection)
+- [Phase 03-04]: Keep broad Exception handler in map-reduce for graceful degradation
+- [Phase 03-04]: Keep broad Exception handler in reranker (model-specific errors vary)
 
 ### Pending Todos
 
@@ -78,5 +83,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 02-03-PLAN.md (Phase 2 Complete)
+Stopped at: Completed 03-04-PLAN.md
 Resume file: None
