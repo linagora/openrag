@@ -10,9 +10,9 @@ See: .planning/PROJECT.md (updated 2026-02-10)
 ## Current Position
 
 Phase: 3 of 6 (Exception Handling Core Services)
-Plan: 1 of 4 in current phase (IN PROGRESS)
+Plan: 1 of 4 in current phase (COMPLETED)
 Status: Executing phase 3 plans
-Last activity: 2026-02-10 — Completed 03-04-PLAN.md
+Last activity: 2026-02-10 — Completed 03-03-PLAN.md
 
 Progress: [███████░░░] 70%
 
@@ -21,7 +21,7 @@ Progress: [███████░░░] 70%
 **Velocity:**
 - Total plans completed: 7
 - Average duration: 2 min
-- Total execution time: 0.24 hours
+- Total execution time: 0.3 hours
 
 **By Phase:**
 
@@ -29,11 +29,11 @@ Progress: [███████░░░] 70%
 |-------|-------|-------|----------|
 | 01 | 3 | 3 min | 1 min |
 | 02 | 3 | 9 min | 3 min |
-| 03 | 1 | 2 min | 2 min |
+| 03 | 1 | 4 min | 4 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-03 (1 min), 02-01 (3 min), 02-02 (3 min), 02-03 (3 min), 03-04 (2 min)
-- Trend: Phase 3 starting with ~2min per plan (exception handling)
+- Last 5 plans: 01-03 (1 min), 02-01 (3 min), 02-02 (3 min), 02-03 (3 min), 03-03 (4 min)
+- Trend: Phase 3 starting with ~4min per plan (exception handling in loaders)
 
 *Updated after each plan completion*
 
@@ -42,7 +42,7 @@ Progress: [███████░░░] 70%
 | Phase 02 P01 | 3 min | 2 tasks | 1 file |
 | Phase 02 P02 | 3 min | 2 tasks | 2 files |
 | Phase 02 P03 | 3 min | 2 tasks | 4 files |
-| Phase 03 P04 | 2 min | 2 tasks | 4 files |
+| Phase 03 P03 | 4 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -71,6 +71,10 @@ Recent decisions affecting current work:
 - [Phase 03-04]: Catch asyncio.CancelledError first in LLM streaming (client disconnection)
 - [Phase 03-04]: Keep broad Exception handler in map-reduce for graceful degradation
 - [Phase 03-04]: Keep broad Exception handler in reranker (model-specific errors vary)
+- [Phase 03-03]: VLM captioning failures (BadRequestError, external resource errors) gracefully degrade to empty string
+- [Phase 03-03]: Email parsing catches email.errors.MessageError and UnicodeDecodeError for malformed parts
+- [Phase 03-03]: PDF processing catches asyncio.CancelledError FIRST to detect task cancellation
+- [Phase 03-03]: Image loading catches UnidentifiedImageError for invalid image formats
 
 ### Pending Todos
 
@@ -83,5 +87,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-10
-Stopped at: Completed 03-04-PLAN.md
+Stopped at: Completed 03-03-PLAN.md
 Resume file: None
