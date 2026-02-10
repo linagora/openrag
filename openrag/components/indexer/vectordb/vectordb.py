@@ -16,6 +16,7 @@ from pymilvus import (
     MilvusException,
     RRFRanker,
 )
+from sqlalchemy import URL
 from utils.exceptions.base import EmbeddingError
 from utils.exceptions.vectordb import *
 from utils.logger import get_logger
@@ -225,8 +226,16 @@ class MilvusDB(BaseVectorDB):
                         operation="load_collection",
                     )
 
+                database_url = URL.create(
+                    drivername="postgresql",
+                    username=self.rdb_user,
+                    password=self.rdb_password,
+                    host=self.rdb_host,
+                    port=self.rdb_port,
+                    database=f"partitions_for_collection_{self.collection_name}",
+                )
                 self.partition_file_manager = PartitionFileManager(
-                    database_url=f"postgresql://{self.rdb_user}:{self.rdb_password}@{self.rdb_host}:{self.rdb_port}/partitions_for_collection_{self.collection_name}",
+                    database_url=database_url,
                     logger=self.logger,
                 )
                 self.logger.info("Milvus collection loaded.")
