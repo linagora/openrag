@@ -10,6 +10,8 @@ import ray
 import torch
 from config import load_config
 from langchain_core.documents.base import Document
+from utils.exceptions.embeddings import EmbeddingError
+from utils.exceptions.vectordb import VDBError
 
 from .chunker import BaseChunker, ChunkerFactory
 from .utils import serialize_file
@@ -119,25 +121,51 @@ class Indexer:
             # Mark task as completed
             await task_state_manager.set_state.remote(task_id, "COMPLETED")
 
-        except Exception as e:
-            log.exception(f"Task {task_id} failed in add_file")
+        except OSError as e:
+            # File I/O errors (FileNotFoundError, PermissionError, etc.)
+            log.error("File operation failed", path=path, error=str(e))
             tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
             await task_state_manager.set_state.remote(task_id, "FAILED")
             await task_state_manager.set_error.remote(task_id, tb)
             raise
 
+        except VDBError as e:
+            # Database errors (already typed from vectordb)
+            log.error("Database operation failed", error=str(e))
+            tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            await task_state_manager.set_state.remote(task_id, "FAILED")
+            await task_state_manager.set_error.remote(task_id, tb)
+            raise
+
+        except EmbeddingError as e:
+            # Embedding errors (already typed from embeddings)
+            log.error("Embedding generation failed", error=str(e))
+            tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            await task_state_manager.set_state.remote(task_id, "FAILED")
+            await task_state_manager.set_error.remote(task_id, tb)
+            raise
+
+        except Exception as e:
+            # Truly unexpected errors
+            log.exception("Unexpected error during file ingestion", task_id=task_id)
+            tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            await task_state_manager.set_state.remote(task_id, "FAILED")
+            await task_state_manager.set_error.remote(task_id, tb)
+            raise RuntimeError("An unexpected error occurred during file processing")
+
         finally:
+            # GPU cleanup
             if torch.cuda.is_available():
                 gc.collect()
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
+
+            # File cleanup - nest try/except per Phase 2 decision
             try:
-                # Cleanup input file
                 if not save_uploaded_files:
                     Path(path).unlink(missing_ok=True)
-                    log.debug(f"Deleted input file: {path}")
             except Exception as cleanup_err:
-                log.warning(f"Failed to delete input file {path}: {cleanup_err}")
+                log.warning("Failed to delete input file", path=path, error=str(cleanup_err))
         return True
 
     @ray.method(concurrency_group="insert")
@@ -157,9 +185,15 @@ class Indexer:
             await vectordb.delete_file.remote(file_id, partition)
             log.info("Deleted file from partition.", file_id=file_id, partition=partition)
 
-        except Exception as e:
-            log.exception("Error in delete_file", error=str(e))
+        except VDBError as e:
+            # Database errors (already typed from vectordb)
+            log.error("Database operation failed in delete_file", error=str(e))
             raise
+
+        except Exception as e:
+            # Unexpected errors
+            log.exception("Unexpected error in delete_file")
+            raise RuntimeError("An unexpected error occurred during file deletion")
 
     @ray.method(concurrency_group="update")
     async def update_file_metadata(
@@ -184,9 +218,16 @@ class Indexer:
             await vectordb.async_add_documents.remote(docs, user=user)
 
             log.info("Metadata updated for file.")
-        except Exception as e:
-            log.exception("Error in update_file_metadata", error=str(e))
+
+        except VDBError as e:
+            # Database errors (already typed from vectordb)
+            log.error("Database operation failed in update_file_metadata", error=str(e))
             raise
+
+        except Exception as e:
+            # Unexpected errors
+            log.exception("Unexpected error in update_file_metadata")
+            raise RuntimeError("An unexpected error occurred during metadata update")
 
     @ray.method(concurrency_group="update")
     async def copy_file(
@@ -216,9 +257,16 @@ class Indexer:
                 new_file_id=metadata.get("file_id"),
                 new_partition=metadata.get("partition"),
             )
-        except Exception as e:
-            log.exception("Error in copy_file", error=str(e))
+
+        except VDBError as e:
+            # Database errors (already typed from vectordb)
+            log.error("Database operation failed in copy_file", error=str(e))
             raise
+
+        except Exception as e:
+            # Unexpected errors
+            log.exception("Unexpected error in copy_file")
+            raise RuntimeError("An unexpected error occurred during file copy")
 
     @ray.method(concurrency_group="search")
     async def asearch(
