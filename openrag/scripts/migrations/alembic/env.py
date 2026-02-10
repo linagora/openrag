@@ -3,7 +3,7 @@ from logging.config import fileConfig
 from alembic import context
 from components.indexer.vectordb.utils import Base
 from config import load_config
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import URL, engine_from_config, pool
 
 rag_config = load_config()
 
@@ -25,10 +25,15 @@ rdb_host = rag_config.rdb.host
 
 collection_name = rag_config.vectordb.collection_name
 
-database_url = (
-    f"postgresql://{rdb_user}:{rdb_password}@{rdb_host}:{rdb_port}/partitions_for_collection_{collection_name}"
+database_url = URL.create(
+    drivername="postgresql",
+    username=rdb_user,
+    password=rdb_password,
+    host=rdb_host,
+    port=rdb_port,
+    database=f"partitions_for_collection_{collection_name}",
 )
-config.set_main_option("sqlalchemy.url", database_url)
+config.set_main_option("sqlalchemy.url", database_url.render_as_string(hide_password=False))
 
 # add your model's MetaData object here
 # for 'autogenerate' support
