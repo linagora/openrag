@@ -62,10 +62,13 @@ Plans:
   2. Pipeline and retriever components distinguish between retrieval failures, LLM failures, and data errors
   3. Ray actor method exception propagation is explicit and typed
   4. All 93 existing tests continue passing
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 03-01: [TBD during planning]
+- [ ] 03-01-PLAN.md — Replace 17 exception handlers in vectordb and metadata operations
+- [ ] 03-02-PLAN.md — Replace 10 exception handlers in indexer, embeddings, and chunker
+- [ ] 03-03-PLAN.md — Replace 19 exception handlers in document loaders
+- [ ] 03-04-PLAN.md — Replace 5 exception handlers in pipeline and LLM components
 
 ### Phase 4: Async Infrastructure
 **Goal**: Eliminate blocking I/O operations in async contexts
