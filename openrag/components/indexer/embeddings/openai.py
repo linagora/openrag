@@ -23,8 +23,18 @@ class OpenAIEmbedding(BaseEmbedding):
             # Test call to get embedding dimension
             output = self.embed_documents([Document(page_content="test")])
             return len(output[0])
-        except Exception:
-            raise
+
+        except openai.APIError as e:
+            logger.error("Failed to get embedding dimension", error=str(e))
+            raise EmbeddingAPIError(f"API error: {e}", model_name=self.embedding_model)
+
+        except (IndexError, AttributeError) as e:
+            logger.error("Invalid embedding response format", error=str(e))
+            raise EmbeddingResponseError("Unexpected response format", error=str(e))
+
+        except Exception as e:
+            logger.exception("Unexpected error getting embedding dimension")
+            raise UnexpectedEmbeddingError("An unexpected error occurred")
 
     def embed_documents(self, texts: list[str | Document]) -> list[list[float]]:
         """
@@ -62,7 +72,7 @@ class OpenAIEmbedding(BaseEmbedding):
         except Exception as e:
             logger.exception("Unexpected error while embedding documents", error=str(e))
             raise UnexpectedEmbeddingError(
-                f"Failed to embed documents: {e!s}",
+                "An unexpected error occurred during document embedding",
                 model_name=self.embedding_model,
                 base_url=self.base_url,
                 error=str(e),
