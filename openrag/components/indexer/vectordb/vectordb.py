@@ -178,7 +178,7 @@ class MilvusDB(BaseVectorDB):
         except Exception as e:
             self.logger.exception("Unexpected error initializing Milvus clients", error=str(e))
             raise VDBConnectionError(
-                f"Unexpected error initializing Milvus clients: {e!s}",
+                "An unexpected database error occurred",
                 db_url=uri,
                 db_type="Milvus",
             )
@@ -247,7 +247,7 @@ class MilvusDB(BaseVectorDB):
                     error=str(e),
                 )
                 raise UnexpectedVDBError(
-                    f"Unexpected error setting collection name `{self.collection_name}`: {e!s}",
+                    "An unexpected database error occurred",
                     collection_name=self.collection_name,
                 )
 
@@ -410,10 +410,16 @@ class MilvusDB(BaseVectorDB):
             self.logger.exception("VectorDB operation failed", error=str(e))
             raise
 
+        except MilvusException as e:
+            self.logger.exception("Milvus insert operation failed", error=str(e))
+            raise VDBInsertError(
+                "Failed to insert document into collection",
+                collection_name=self.collection_name,
+            )
         except Exception as e:
             self.logger.exception("Unexpected error while adding a document", error=str(e))
             raise UnexpectedVDBError(
-                f"Unexpected error while adding a document: {e!s}",
+                "An unexpected database error occurred",
                 collection_name=self.collection_name,
             )
 
@@ -585,7 +591,7 @@ class MilvusDB(BaseVectorDB):
         except Exception as e:
             self.logger.exception("Unexpected error occurred", error=str(e))
             raise UnexpectedVDBError(
-                f"Unexpected error occurred: {e!s}",
+                "An unexpected database error occurred",
                 collection_name=self.collection_name,
                 partition=partition,
             )
@@ -659,7 +665,7 @@ class MilvusDB(BaseVectorDB):
         except Exception as e:
             log.exception("Unexpected error while deleting file chunks", error=str(e))
             raise UnexpectedVDBError(
-                f"Unexpected error while deleting file chunks {file_id}: {e!s}",
+                "An unexpected database error occurred",
                 collection_name=self.collection_name,
                 partition=partition,
                 file_id=file_id,
@@ -716,8 +722,8 @@ class MilvusDB(BaseVectorDB):
 
         except Exception as e:
             log.exception("Unexpected error while getting file chunks", error=str(e))
-            raise VDBSearchError(
-                f"Unexpected error while getting file chunks {file_id}: {e!s}",
+            raise UnexpectedVDBError(
+                "An unexpected database error occurred",
                 collection_name=self.collection_name,
                 partition=partition,
                 file_id=file_id,
@@ -761,7 +767,7 @@ class MilvusDB(BaseVectorDB):
         except Exception as e:
             log.exception("Unexpected error while retrieving chunk", error=str(e))
             raise UnexpectedVDBError(
-                f"Unexpected error while retrieving chunk {chunk_id}: {e!s}",
+                "An unexpected database error occurred",
                 collection_name=self.collection_name,
             )
 
@@ -771,6 +777,8 @@ class MilvusDB(BaseVectorDB):
         """
         try:
             return self.partition_file_manager.file_exists_in_partition(file_id=file_id, partition=partition)
+        except VDBError:
+            raise
         except Exception as e:
             self.logger.exception(
                 "File existence check failed.",
@@ -778,7 +786,12 @@ class MilvusDB(BaseVectorDB):
                 partition=partition,
                 error=str(e),
             )
-            return False
+            raise UnexpectedVDBError(
+                "An unexpected database error occurred",
+                collection_name=self.collection_name,
+                partition=partition,
+                file_id=file_id,
+            )
 
     def list_partition_files(self, partition: str, limit: int | None = None):
         try:
@@ -794,7 +807,7 @@ class MilvusDB(BaseVectorDB):
                 error=str(e),
             )
             raise UnexpectedVDBError(
-                f"Unexpected error while listing files in partition {partition}: {e!s}",
+                "An unexpected database error occurred",
                 collection_name=self.collection_name,
                 partition=partition,
             )
@@ -802,9 +815,14 @@ class MilvusDB(BaseVectorDB):
     def list_partitions(self):
         try:
             return self.partition_file_manager.list_partitions()
+        except VDBError:
+            raise
         except Exception as e:
             self.logger.exception("Failed to list partitions", error=str(e))
-            raise
+            raise UnexpectedVDBError(
+                "An unexpected database error occurred",
+                collection_name=self.collection_name,
+            )
 
     def collection_exists(self, collection_name: str):
         """
@@ -838,7 +856,7 @@ class MilvusDB(BaseVectorDB):
         except Exception as e:
             log.exception("Unexpected error while deleting partition", error=str(e))
             raise UnexpectedVDBError(
-                f"Unexpected error while deleting partition {partition}: {e!s}",
+                "An unexpected database error occurred",
                 collection_name=self.collection_name,
                 partition=partition,
             )
@@ -850,9 +868,15 @@ class MilvusDB(BaseVectorDB):
         log = self.logger.bind(partition=partition)
         try:
             return self.partition_file_manager.partition_exists(partition=partition)
+        except VDBError:
+            raise
         except Exception as e:
             log.exception("Partition existence check failed.", error=str(e))
-            return False
+            raise UnexpectedVDBError(
+                "An unexpected database error occurred",
+                collection_name=self.collection_name,
+                partition=partition,
+            )
 
     async def list_all_chunk(self, partition: str, include_embedding: bool = True):
         """
@@ -920,7 +944,7 @@ class MilvusDB(BaseVectorDB):
                 error=str(e),
             )
             raise UnexpectedVDBError(
-                f"Unexpected error while listing all chunks in partition {partition}: {e!s}",
+                "An unexpected database error occurred",
                 collection_name=self.collection_name,
                 partition=partition,
             )
