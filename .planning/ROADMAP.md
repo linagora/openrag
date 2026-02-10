@@ -30,10 +30,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Database connection URLs are constructed using SQLAlchemy URL.create() instead of string concatenation
   3. File upload metadata is validated against Pydantic schema before processing
   4. All 93 existing tests continue passing
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 01-01: [TBD during planning]
+- [ ] 01-01-PLAN.md — Fix nested httpx.Timeout bug in Chainlit frontend
+- [ ] 01-02-PLAN.md — Replace unsafe PostgreSQL URL string interpolation with SQLAlchemy URL.create()
+- [ ] 01-03-PLAN.md — Add Pydantic schema validation for file upload metadata
 
 ### Phase 2: Exception Handling - API Layer
 **Goal**: Replace broad exception handling with specific exception types in all API routers
@@ -112,7 +114,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Quick Security Fixes | 0/? | Not started | - |
+| 1. Quick Security Fixes | 0/3 | Not started | - |
 | 2. Exception Handling - API Layer | 0/? | Not started | - |
 | 3. Exception Handling - Core Services | 0/? | Not started | - |
 | 4. Async Infrastructure | 0/? | Not started | - |
