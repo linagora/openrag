@@ -224,6 +224,7 @@ The RAG pipeline comes with preconfigured prompts **`./prompts/example1`**. Here
 | Template File | Purpose |
 |---------------|---------|
 | `sys_prompt_tmpl.txt` | System prompt that defines the assistant's behavior and role |
+| `spoken_style_answer_tmpl.txt` | Template for converting responses to a more natural, conversational spoken style (oral / audio type of answer)|
 | `query_contextualizer_tmpl.txt` | Template for adding context to user queries |
 | `chunk_contextualizer_tmpl.txt` | Template for contextualizing document chunks during indexing |
 | `image_captioning_tmpl.txt` | Template for generating image descriptions using the VLM |
