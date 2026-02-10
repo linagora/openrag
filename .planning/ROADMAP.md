@@ -79,10 +79,11 @@ Plans:
   2. Restore script uses async Ray actor calls instead of blocking ray.get()
   3. No blocking file operations occur in async request handlers
   4. All 93 existing tests continue passing
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 04-01: [TBD during planning]
+- [ ] 04-01-PLAN.md — Convert BaseLoader.save_content to async and update callers, plus async restore script
+- [ ] 04-02-PLAN.md — Convert blocking file I/O in 6 loaders to asyncio.to_thread
 
 ### Phase 5: Script & Health Hardening
 **Goal**: Make restore script resilient to failures and improve health check observability
@@ -122,6 +123,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 1. Quick Security Fixes | 0/3 | Not started | - |
 | 2. Exception Handling - API Layer | 0/? | Not started | - |
 | 3. Exception Handling - Core Services | 0/? | Not started | - |
-| 4. Async Infrastructure | 0/? | Not started | - |
+| 4. Async Infrastructure | 0/2 | Not started | - |
 | 5. Script & Health Hardening | 0/? | Not started | - |
 | 6. Configuration Cleanup | 0/? | Not started | - |
