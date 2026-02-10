@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from urllib.parse import quote
@@ -12,7 +13,10 @@ from models.openai import (
     OpenAIChatCompletionRequest,
     OpenAICompletionRequest,
 )
+from ray.exceptions import RayTaskError, TaskCancelledError
 from utils.dependencies import get_vectordb
+from utils.exceptions.base import OpenRAGError
+from utils.exceptions.vectordb import VDBPartitionNotFound
 from utils.logger import get_logger
 
 from .utils import (
@@ -125,6 +129,7 @@ Accepts OpenAI-compatible chat completion requests with:
 - `messages`: Array of chat messages (last must be from user)
 - `model`: Model/partition to use
 - `stream`: Optional streaming response (true/false)
+- `metadata.domains`: Optional list of domain IDs to filter retrieved documents (OR logic)
 - Standard OpenAI parameters (temperature, max_tokens, etc.)
 
 **RAG Process:**
@@ -169,18 +174,43 @@ async def openai_chat_completion(
         else:
             partitions = await get_partition_name(model_name, user_partitions, is_admin=user["is_admin"])
             log.debug(f"Using partitions: {partitions}")
+    except HTTPException:
+        raise
+    except VDBPartitionNotFound as e:
+        log.warning("Partition not found", partition=model_name, error=e.message)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=e.message,
+        )
     except Exception as e:
         log.warning("Invalid model or partition", error=str(e))
-        raise
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid model or partition name",
+        )
 
     try:
         llm_output, docs = await ragpipe.chat_completion(partition=partitions, payload=request.model_dump())
         log.debug("RAG chat completion pipeline executed.")
-    except Exception as e:
-        log.exception("Chat completion failed.", error=str(e))
+    except HTTPException:
+        raise
+    except OpenRAGError as e:
+        log.warning("Chat completion failed with OpenRAG error", code=e.code, error=e.message)
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=e.message,
+        )
+    except (RayTaskError, TaskCancelledError) as e:
+        log.exception("Chat completion failed due to Ray task error", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Chat completion failed: {e!s}",
+            detail="Chat completion processing failed",
+        )
+    except Exception as e:
+        log.exception("Chat completion failed with unexpected error", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during chat completion",
         )
 
     metadata = __prepare_sources(request2, docs)
@@ -204,11 +234,38 @@ async def openai_chat_completion(
                             except json.JSONDecodeError as e:
                                 log.error("Failed to decode streamed chunk.", error=str(e))
                                 raise
-            except Exception as e:
-                log.warning("Error while generating streaming answer", error=str(e))
+            except asyncio.CancelledError:
+                log.info("Client disconnected during streaming")
+                return
+            except (RayTaskError, TaskCancelledError) as e:
+                log.exception("Ray task error during streaming", error=str(e))
                 error_chunk = {
                     "error": {
-                        "message": f"Error while generating answer: {str(e)}",
+                        "message": "Streaming processing failed",
+                        "type": "error",
+                        "param": None,
+                        "code": "RAY_TASK_ERROR",
+                    }
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+            except OpenRAGError as e:
+                log.warning("OpenRAG error during streaming", code=e.code, error=e.message)
+                error_chunk = {
+                    "error": {
+                        "message": e.message,
+                        "type": "error",
+                        "param": None,
+                        "code": e.code,
+                    }
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                log.exception("Unexpected error during streaming", error=str(e))
+                error_chunk = {
+                    "error": {
+                        "message": "An unexpected error occurred during streaming",
                         "type": "error",
                         "param": None,
                         "code": "ERROR_ANSWER_GENERATION",
@@ -225,11 +282,19 @@ async def openai_chat_completion(
             chunk["extra"] = metadata_json
             log.debug("Returning non-streaming completion chunk.")
             return JSONResponse(content=chunk)
+        except HTTPException:
+            raise
+        except OpenRAGError as e:
+            log.warning("Error generating non-streaming answer", code=e.code, error=e.message)
+            raise HTTPException(
+                status_code=e.status_code,
+                detail=e.message,
+            )
         except Exception as e:
-            log.warning("Error while generating answer", error=str(e))
+            log.exception("Unexpected error generating non-streaming answer", error=str(e))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error while generating answer: {e!s}",
+                detail="An unexpected error occurred while generating answer",
             )
 
 
@@ -247,6 +312,7 @@ async def openai_chat_completion(
 Accepts OpenAI-compatible completion requests with:
 - `prompt`: Text prompt for completion
 - `model`: Model/partition to use
+- `metadata.domains`: Optional list of domain IDs to filter retrieved documents (OR logic)
 - Standard OpenAI parameters (temperature, max_tokens, etc.)
 
 **RAG Process:**
@@ -290,19 +356,43 @@ async def openai_completion(
             partitions = None
         else:
             partitions = await get_partition_name(model_name, user_partitions, is_admin=user["is_admin"])
-
-    except Exception as e:
-        log.warning(f"Invalid model or partition: {e}")
+    except HTTPException:
         raise
+    except VDBPartitionNotFound as e:
+        log.warning("Partition not found", partition=model_name, error=e.message)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=e.message,
+        )
+    except Exception as e:
+        log.warning("Invalid model or partition", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid model or partition name",
+        )
 
     try:
         llm_output, docs = await ragpipe.completions(partition=partitions, payload=request.model_dump())
         log.debug("RAG completion pipeline executed.")
-    except Exception as e:
-        log.exception("Completion request failed.", error=str(e))
+    except HTTPException:
+        raise
+    except OpenRAGError as e:
+        log.warning("Completion failed with OpenRAG error", code=e.code, error=e.message)
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=e.message,
+        )
+    except (RayTaskError, TaskCancelledError) as e:
+        log.exception("Completion failed due to Ray task error", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Completion failed: {e!s}",
+            detail="Completion processing failed",
+        )
+    except Exception as e:
+        log.exception("Completion failed with unexpected error", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during completion",
         )
 
     metadata = __prepare_sources(request2, docs)
@@ -313,9 +403,17 @@ async def openai_completion(
         complete_response["extra"] = metadata_json
         log.debug("Returning completion response.")
         return JSONResponse(content=complete_response)
+    except HTTPException:
+        raise
+    except OpenRAGError as e:
+        log.warning("Error getting completion response", code=e.code, error=e.message)
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=e.message,
+        )
     except Exception as e:
-        log.warning("No response from LLM.", error=str(e))
+        log.exception("Unexpected error getting completion response", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"No response from LLM: {e!s}",
+            detail="An unexpected error occurred while getting completion response",
         )
