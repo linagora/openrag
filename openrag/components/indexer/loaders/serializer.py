@@ -84,6 +84,11 @@ class DocSerializer:
                 torch.cuda.ipc_collect()
             log.info("Document serialized successfully")
             return doc
+        except OSError as e:
+            # File operation failed (file not found, permission denied, etc.)
+            log.error("File operation failed during serialization", path=str(path), error=str(e))
+            raise RuntimeError(f"Cannot read file: {e}")
         except Exception as e:
-            log.exception("Failed to serialize document", error=str(e))
-            raise
+            # Loader-specific errors or unexpected failures
+            log.exception("Failed to serialize document", path=str(path), file_type=file_ext, error=str(e))
+            raise RuntimeError("Failed to serialize document: unsupported format or corrupted file")
