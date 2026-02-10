@@ -66,7 +66,7 @@ if AUTH_TOKEN:
     @cl.password_auth_callback
     async def auth_callback(username: str, password: str):
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout=httpx.Timeout(4 * 60.0))) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(4 * 60.0)) as client:
                 response = await client.get(
                     url=f"{INTERNAL_BASE_URL}/users/info",
                     headers=get_headers(password),
@@ -131,7 +131,7 @@ async def on_chat_start():
     api_key = user.metadata.get("api_key", "sk-1234") if user else "sk-1234"
     logger.debug("New Chat Started", internal_base_url=INTERNAL_BASE_URL)
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout=httpx.Timeout(4 * 60.0))) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(4 * 60.0)) as client:
             response = await client.get(
                 url=f"{INTERNAL_BASE_URL}/health_check",
                 headers=get_headers(api_key),
