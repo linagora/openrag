@@ -121,11 +121,23 @@ async def execute_tool(
 
     except HTTPException:
         raise
+    except OSError as e:
+        logger.error("Failed to process uploaded file", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process uploaded file",
+        )
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse tool parameters", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid tool parameters",
+        )
     except Exception as e:
         logger.exception("Failed during tool execution.", extra={"error": str(e)})
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Tool execution failed due to an internal error.",
+            detail="An unexpected error occurred during tool execution",
         )
     finally:
         # Cleanup of the temporary file

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import consts
+import httpx
 from config import load_config
 from fastapi import Depends, Form, HTTPException, Request, UploadFile, status
 from models.indexer import FileMetadataSchema
@@ -264,13 +265,25 @@ async def check_llm_model_availability(request: Request):
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Only these models ({available_models}) are available for your `{model_type}`. Please check your configuration file.",
                 )
+        except HTTPException:
+            raise
+        except httpx.TimeoutException:
+            logger.warning("LLM model availability check timed out", model=model_type)
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="LLM service timed out",
+            )
+        except httpx.HTTPError as e:
+            logger.warning("LLM model availability check failed", model=model_type, error=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="LLM service is unavailable",
+            )
         except Exception as e:
-            logger.exception("Failed to validate model", model=model_type, error=str(e))
-            if isinstance(e, HTTPException):
-                raise
+            logger.exception("Failed to check LLM model availability", model=model_type, error=str(e))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error while checking the `{model_type}` endpoint, it seems not available at this moment",
+                detail="Failed to check LLM model availability",
             )
 
 
