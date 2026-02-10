@@ -68,18 +68,20 @@ class ChunkContextualizer:
                 ]
                 output = await self.context_generator.ainvoke(messages)
                 return output.content
+
             except openai.APITimeoutError:
-                logger.warning(
-                    f"OpenAI API timeout contextualizing chunk after {CONTEXTUALIZATION_TIMEOUT}s",
-                    filename=filename,
-                )
+                # VLM timeout - graceful degradation
+                logger.warning("VLM context generation timeout", timeout=CONTEXTUALIZATION_TIMEOUT)
                 return ""
+
+            except openai.APIError as e:
+                # Other VLM API errors - log but don't fail chunking
+                logger.error("VLM context generation failed", error=str(e))
+                return ""
+
             except Exception as e:
-                logger.warning(
-                    "Error contextualizing chunk of document",
-                    filename=filename,
-                    error=str(e),
-                )
+                # Unexpected errors - log but still gracefully degrade
+                logger.exception("Unexpected error during context generation")
                 return ""
 
     async def contextualize_chunks(
@@ -131,7 +133,7 @@ class ChunkContextualizer:
             ]
 
         except Exception as e:
-            logger.warning(f"Error contextualizing chunks from `{filename}`: {e}")
+            logger.exception("Error contextualizing chunks", filename=filename)
             return chunks
 
 
