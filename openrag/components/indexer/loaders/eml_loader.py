@@ -1,5 +1,6 @@
 import datetime
 import email
+import email.errors
 import io
 import os
 import tempfile
@@ -7,7 +8,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from langchain_core.documents.base import Document
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from . import get_loader_classes
 from .base import BaseLoader
@@ -52,7 +53,8 @@ class EmlLoader(BaseLoader):
             if email_data["header"]["date"]:
                 try:
                     email_data["header"]["date"] = parsedate_to_datetime(email_data["header"]["date"]).isoformat()
-                except Exception:
+                except (ValueError, TypeError, email.errors.MessageError):
+                    # Invalid date format - keep original string
                     pass
 
             # Extract body content and attachments
@@ -98,7 +100,8 @@ class EmlLoader(BaseLoader):
                                 # Use plain text as primary body content
                                 if content_type == "text/plain" or not body_content:
                                     body_content = text_content
-                            except Exception as e:
+                            except (UnicodeDecodeError, email.errors.MessageError) as e:
+                                # Failed to decode email text part - skip this part
                                 print(f"Failed to decode text content: {e}")
 
             # Extract body content
@@ -140,7 +143,11 @@ class EmlLoader(BaseLoader):
                                         metadata={"source": f"attachment:{filename}"},
                                     )
                                     attachments_text += f"Content:\n{attachment_doc.page_content}\n"
+                                except OSError as e:
+                                    # File I/O error - skip this attachment
+                                    attachments_text += f"Cannot read attachment file: {str(e)[:200]}...\n"
                                 except Exception as e:
+                                    # Loader-specific errors - try fallback loaders
                                     attachments_text += f"Failed to process attachment with loader ({loader_cls.__name__}): {str(e)[:200]}...\n"
 
                                     # Special fallback handling for PDFs with alternative loaders
@@ -179,7 +186,11 @@ class EmlLoader(BaseLoader):
                                                         attachments_text += f"Content (via {fallback_loader_name}):\n{attachment_doc.page_content}\n"
                                                         fallback_success = True
                                                         break
+                                                except OSError as fallback_e:
+                                                    # File I/O error - skip fallback
+                                                    attachments_text += f"Fallback {fallback_loader_name} file error: {str(fallback_e)[:100]}...\n"
                                                 except Exception as fallback_e:
+                                                    # Fallback loader failed - try next
                                                     attachments_text += f"Fallback {fallback_loader_name} also failed: {str(fallback_e)[:100]}...\n"
 
                                         if not fallback_success:
@@ -197,7 +208,11 @@ class EmlLoader(BaseLoader):
                                                 attachments_text += (
                                                     "Image attachment present but image captioning disabled\n"
                                                 )
+                                        except (OSError, UnidentifiedImageError) as img_e:
+                                            # Invalid or unreadable image
+                                            attachments_text += f"Image fallback failed (invalid image): {str(img_e)[:100]}...\n"
                                         except Exception as img_e:
+                                            # Unexpected image processing error
                                             attachments_text += f"Image fallback also failed: {str(img_e)[:100]}...\n"
 
                                     # Try text fallback for other text-based formats
@@ -213,7 +228,11 @@ class EmlLoader(BaseLoader):
                                                 )
                                             else:
                                                 attachments_text += "No readable text found in attachment\n"
+                                        except UnicodeDecodeError as text_e:
+                                            # Text decoding failed
+                                            attachments_text += f"Text fallback failed (encoding error): {str(text_e)[:100]}...\n"
                                         except Exception as text_e:
+                                            # Unexpected text extraction error
                                             attachments_text += f"Text fallback failed: {str(text_e)[:100]}...\n"
                                 finally:
                                     # Clean up temporary file
@@ -237,8 +256,9 @@ class EmlLoader(BaseLoader):
                                     # Generate caption using the base loader's method
                                     caption = await self.get_image_description(image_data=image)
                                     attachments_text += f"Image Description:\n{caption}\n"
-                                except Exception as e:
-                                    attachments_text += f"Failed to generate image caption: {str(e)[:200]}...\n"
+                                except (OSError, UnidentifiedImageError) as e:
+                                    # Invalid or corrupted image
+                                    attachments_text += f"Failed to generate image caption (invalid image): {str(e)[:200]}...\n"
                                     # Try to show basic image info if available
                                     try:
                                         size_info = f"Image size: {len(attachment['raw'])} bytes"
@@ -247,6 +267,9 @@ class EmlLoader(BaseLoader):
                                         )
                                     except Exception:
                                         attachments_text += "Image attachment present but corrupted or unreadable\n"
+                                except Exception as e:
+                                    # Unexpected image captioning error (VLM errors handled in base.py)
+                                    attachments_text += f"Failed to generate image caption: {str(e)[:200]}...\n"
 
                             elif content_type.startswith("text/"):
                                 # For text attachments, decode directly
@@ -255,7 +278,11 @@ class EmlLoader(BaseLoader):
                             else:
                                 # For other binary content, just show metadata
                                 attachments_text += f"Binary content (size: {len(attachment['raw'])} bytes)\n"
+                        except OSError as e:
+                            # File I/O error creating temp file
+                            attachments_text += f"Cannot create temp file for attachment: {e}\n"
                         except Exception as e:
+                            # Unexpected error processing attachment
                             attachments_text += f"Content could not be processed: {e}\n"
                     attachments_text += "---\n"
 
@@ -298,7 +325,14 @@ class EmlLoader(BaseLoader):
                 with open(markdown_path, "w", encoding="utf-8") as md_file:
                     md_file.write(content_body)
                 metadata["markdown_path"] = str(markdown_path)
+        except OSError as e:
+            # File I/O error reading email file
+            raise ValueError(f"Cannot read email file: {e}")
+        except email.errors.MessageError as e:
+            # Email parsing error
+            raise ValueError(f"Invalid email format: {e}")
         except Exception as e:
+            # Unexpected error
             raise ValueError(f"Failed to parse the EML file {file_path}: {e}")
 
         document = Document(page_content=content_body, metadata=metadata)
