@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from ray.exceptions import RayTaskError
 from utils.dependencies import get_vectordb
+from utils.exceptions.base import VDBError
 from utils.logger import get_logger
 
 from .utils import current_user_or_admin_partitions_list
@@ -67,11 +69,20 @@ async def get_extract(
         log.info("Extract successfully retrieved.")
     except HTTPException:
         raise
+    except VDBError:
+        # Let global handler in api.py convert to JSON response
+        raise
+    except RayTaskError as e:
+        log.exception("Failed to retrieve document chunk", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve document chunk",
+        )
     except Exception as e:
         log.exception("Failed to retrieve extract.", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve extract: {e!s}",
+            detail="An unexpected error occurred while retrieving chunk",
         )
 
     return JSONResponse(

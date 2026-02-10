@@ -2,6 +2,7 @@ import ray
 from components.utils import get_llm_semaphore, get_vlm_semaphore
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
+from ray.exceptions import RayTaskError
 from ray.util.state import list_actors
 from utils.dependencies import (
     get_indexer,
@@ -63,11 +64,17 @@ async def list_ray_actors():
             for a in list_actors()
         ]
         return JSONResponse(status_code=status.HTTP_200_OK, content={"actors": actors})
-    except Exception:
-        logger.exception("Error getting actor summaries")
+    except RayTaskError as e:
+        logger.exception("Failed to retrieve actor list", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve actor summaries.",
+            detail="Failed to retrieve actor list",
+        )
+    except Exception as e:
+        logger.exception("Error getting actor summaries", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while listing actors",
         )
 
 
@@ -116,11 +123,17 @@ async def restart_actor(
         logger.info(f"Killed actor: {actor_name}")
     except ValueError:
         logger.warning("Actor not found. Creating new instance.", actor=actor_name)
-    except Exception as e:
-        logger.exception("Failed to kill actor", actor=actor_name)
+    except RayTaskError as e:
+        logger.exception("Failed to kill actor", actor=actor_name, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to kill actor {actor_name}: {e!s}",
+            detail="Failed to kill actor",
+        )
+    except Exception as e:
+        logger.exception("Failed to kill actor", actor=actor_name, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while killing actor",
         )
 
     try:
@@ -136,9 +149,21 @@ async def restart_actor(
                 "actor_id": new_actor._actor_id.hex(),
             },
         )
-    except Exception as e:
-        logger.exception("Failed to restart actor", actor=actor_name)
+    except ValueError as e:
+        logger.error("Actor not found during restart", actor=actor_name, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Actor not found",
+        )
+    except RayTaskError as e:
+        logger.exception("Failed to restart actor", actor=actor_name, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to restart actor {actor_name}: {e!s}",
+            detail="Failed to restart actor",
+        )
+    except Exception as e:
+        logger.exception("Failed to restart actor", actor=actor_name, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while restarting actor",
         )

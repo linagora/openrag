@@ -17,6 +17,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
+from ray.exceptions import RayTaskError
 from utils.dependencies import get_indexer, get_task_state_manager, get_vectordb
 from utils.logger import get_logger
 
@@ -25,6 +26,7 @@ from .utils import (
     ensure_partition_role,
     human_readable_size,
     require_partition_editor,
+    require_partition_viewer,
     require_task_owner,
     validate_file_format,
     validate_file_id,
@@ -141,11 +143,19 @@ async def add_file(
         original_filename = file.filename
         file.filename = sanitize_filename(file.filename)
         file_path = await save_file_to_disk(file, save_dir, with_random_prefix=True)
-    except Exception as e:
-        log.exception("Failed to save file to disk.", error=str(e))
+    except HTTPException:
+        raise
+    except OSError:
+        log.exception("Failed to save file to disk", file_id=file_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Failed to save uploaded file due to storage error",
+        )
+    except Exception:
+        log.exception("Unexpected error saving file", file_id=file_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while saving the file",
         )
 
     metadata.update(
@@ -256,11 +266,19 @@ async def put_file(
         original_filename = file.filename
         file.filename = sanitize_filename(file.filename)
         file_path = await save_file_to_disk(file, save_dir, with_random_prefix=True)
-    except Exception:
-        log.exception("Failed to save file to disk.")
+    except HTTPException:
+        raise
+    except OSError:
+        log.exception("Failed to save file to disk", file_id=file_id, partition=partition)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to save uploaded file.",
+            detail="Failed to save uploaded file due to storage error",
+        )
+    except Exception:
+        log.exception("Unexpected error saving file", file_id=file_id, partition=partition)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while saving the file",
         )
 
     metadata.update(
@@ -379,6 +397,88 @@ async def copy_file_between_partitions(
     )
 
 
+@router.put(
+    "/partition/{partition}/file/{file_id}/domains",
+    description="""Set or replace domains for a file.
+
+**Parameters:**
+- `partition`: The partition name
+- `file_id`: The file identifier
+
+**Request Body:**
+JSON array of domain strings.
+
+**Behavior:**
+- Replaces all existing domains for the file
+- Send an empty array to clear domains
+- Pure PostgreSQL operation (no Milvus changes)
+
+**Response:**
+Returns 200 OK with updated domains.
+""",
+)
+async def set_file_domains(
+    partition: str,
+    file_id: str,
+    domains: list[str],
+    vectordb=Depends(get_vectordb),
+    user=Depends(require_partition_editor),
+):
+    await vectordb.set_file_domains.remote(file_id, partition, domains)
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"file_id": file_id, "partition": partition, "domains": domains},
+    )
+
+
+@router.get(
+    "/partition/{partition}/file/{file_id}/domains",
+    description="""Get domains for a file.
+
+**Parameters:**
+- `partition`: The partition name
+- `file_id`: The file identifier
+
+**Response:**
+Returns the list of domains assigned to the file.
+""",
+)
+async def get_file_domains(
+    partition: str,
+    file_id: str,
+    vectordb=Depends(get_vectordb),
+    user=Depends(require_partition_viewer),
+):
+    domains = await vectordb.get_file_domains.remote(file_id, partition)
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"file_id": file_id, "partition": partition, "domains": domains},
+    )
+
+
+@router.get(
+    "/partition/{partition}/domains",
+    description="""List all unique domains in a partition.
+
+**Parameters:**
+- `partition`: The partition name
+
+**Response:**
+Returns a list of all unique domain strings in the partition.
+""",
+)
+async def list_partition_domains(
+    partition: str,
+    vectordb=Depends(get_vectordb),
+    user=Depends(require_partition_viewer),
+):
+    domains = await vectordb.list_partition_domains.remote(partition)
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"partition": partition, "domains": domains},
+    )
+
+
 @router.get(
     "/task/{task_id}",
     description="""Get the status of an indexing task.
@@ -451,10 +551,22 @@ async def get_task_error(
         return {"task_id": task_id, "traceback": error.splitlines()}
     except HTTPException:
         raise
-    except Exception:
+    except RayTaskError:
+        logger.bind(task_id=task_id).exception("Failed to retrieve task error information")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve task error.",
+            detail="Failed to retrieve task error information",
+        )
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task error information not found",
+        )
+    except Exception:
+        logger.bind(task_id=task_id).exception("Unexpected error retrieving task error")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while retrieving task error",
         )
 
 
@@ -499,8 +611,24 @@ async def get_task_logs(task_id: str, max_lines: int = 100, task_details=Depends
         return JSONResponse(content={"task_id": task_id, "logs": logs[::-1]})  # restore order
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch logs: {e!s}")
+    except OSError:
+        logger.bind(task_id=task_id).exception("Failed to read log file")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to read task log file",
+        )
+    except json.JSONDecodeError:
+        logger.bind(task_id=task_id).exception("Malformed log file")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Task log file format is invalid",
+        )
+    except Exception:
+        logger.bind(task_id=task_id).exception("Unexpected error retrieving task logs")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while retrieving task logs",
+        )
 
 
 @router.delete(
@@ -532,6 +660,22 @@ async def cancel_task(
 
         ray.cancel(obj_ref["ref"], recursive=True)
         return {"message": f"Cancellation signal sent for task {task_id}"}
-    except Exception as e:
-        logger.exception("Failed to cancel task.")
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except RayTaskError:
+        logger.bind(task_id=task_id).exception("Failed to cancel task execution")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to cancel task execution",
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found",
+        )
+    except Exception:
+        logger.bind(task_id=task_id).exception("Unexpected error cancelling task")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while cancelling the task",
+        )
