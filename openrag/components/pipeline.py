@@ -44,8 +44,10 @@ class RetrieverPipeline:
         if self.reranker_enabled:
             self.reranker = Reranker(logger, config)
 
-    async def retrieve_docs(self, partition: list[str], query: str, use_map_reduce: bool = False) -> list[Document]:
-        docs = await self.retriever.retrieve(partition=partition, query=query)
+    async def retrieve_docs(
+        self, partition: list[str], query: str, use_map_reduce: bool = False, filter: dict | None = None
+    ) -> list[Document]:
+        docs = await self.retriever.retrieve(partition=partition, query=query, filter=filter)
         top_k = max(self.map_reduce_max_docs, self.reranker_top_k) if use_map_reduce else self.reranker_top_k
         logger.debug("Documents retreived", document_count=len(docs))
         if docs:
@@ -117,20 +119,25 @@ class RagPipeline:
         query = await self.generate_query(messages)
         logger.debug("Prepared query for chat completion", query=query)
 
-        metadata = payload.get("metadata", {})
+        metadata = payload.get("metadata", {}) or {}
 
         use_map_reduce = metadata.get("use_map_reduce", False)
         spoken_style_answer = metadata.get("spoken_style_answer", False)
+        domains = metadata.get("domains")
 
         logger.debug(
             "Metadata parameters",
             use_map_reduce=use_map_reduce,
             spoken_style_answer=spoken_style_answer,
+            domains=domains,
         )
+
+        # Build filter from metadata
+        search_filter = {"domains": domains} if domains else None
 
         # 2. get docs
         docs = await self.retriever_pipeline.retrieve_docs(
-            partition=partition, query=query, use_map_reduce=use_map_reduce
+            partition=partition, query=query, use_map_reduce=use_map_reduce, filter=search_filter
         )
 
         if use_map_reduce and docs:
@@ -157,11 +164,14 @@ class RagPipeline:
 
     async def _prepare_for_completions(self, partition: list[str], payload: dict):
         prompt = payload["prompt"]
+        metadata = payload.get("metadata", {}) or {}
+        domains = metadata.get("domains")
+        search_filter = {"domains": domains} if domains else None
 
         # 1. get the query
         query = await self.generate_query(messages=[{"role": "user", "content": prompt}])
         # 2. get docs
-        docs = await self.retriever_pipeline.retrieve_docs(partition=partition, query=query)
+        docs = await self.retriever_pipeline.retrieve_docs(partition=partition, query=query, filter=search_filter)
 
         # 3. Format the retrieved docs
         context = format_context(docs, max_context_tokens=self.max_context_tokens)
