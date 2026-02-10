@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 
@@ -58,17 +59,29 @@ class LLM:
                         headers=self.headers,
                         json=payload,
                     ) as response:
-                        if response.status_code >= 400:
-                            await response.aread()
-                            error_detail = response.text
-                            raise ValueError(f"LLM API error ({response.status_code}): {error_detail}")
+                        response.raise_for_status()
                         async for line in response.aiter_lines():
                             yield line
-                except ValueError:
+
+                except asyncio.CancelledError:
+                    # MUST be first per Phase 2 decision
+                    logger.info("LLM streaming cancelled by client")
                     raise
+
+                except httpx.HTTPStatusError as e:
+                    # 4xx/5xx responses
+                    logger.error("LLM API returned error", status_code=e.response.status_code)
+                    raise
+
+                except httpx.RequestError as e:
+                    # Network/connection failures
+                    logger.error("Network error during LLM streaming", error=str(e))
+                    raise
+
                 except Exception as e:
-                    logger.error(f"Error while streaming chat completion: {str(e)}")
-                    raise
+                    # Truly unexpected errors
+                    logger.exception("Unexpected error during LLM streaming")
+                    raise RuntimeError("An unexpected error occurred during streaming")
 
             else:  # Handle non-streaming response
                 try:

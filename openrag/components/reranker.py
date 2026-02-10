@@ -38,10 +38,6 @@ class Reranker:
                 return output
 
             except Exception as e:
-                self.logger.error(
-                    "Reranking failed",
-                    error=str(e),
-                    model_name=self.model_name,
-                    documents_count=len(documents),
-                )
-                raise e
+                # Model-specific errors (depends on reranker implementation)
+                self.logger.exception("Reranking failed", query=query[:100], doc_count=len(documents))
+                raise RuntimeError("An unexpected error occurred during reranking")
