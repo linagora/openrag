@@ -102,9 +102,18 @@ class MarkerWorker:
             )
             render = converter(file_path)
             return render
-        except Exception as e:
-            logger.exception("Error processing PDF", path=file_path, error=str(e))
+        except asyncio.CancelledError:
+            # Cancellation request - propagate immediately
+            logger.info("PDF processing cancelled", path=file_path)
             raise
+        except OSError as e:
+            # File I/O error
+            logger.error("Cannot read PDF file", path=file_path, error=str(e))
+            raise RuntimeError(f"Cannot read PDF file: {e}")
+        except Exception as e:
+            # Marker library errors or unexpected failures
+            logger.exception("Error processing PDF", path=file_path, error=str(e))
+            raise RuntimeError("Failed to process PDF document")
         finally:
             gc.collect()
             if torch.cuda.is_available():
@@ -124,6 +133,10 @@ class MarkerWorker:
                 return result
             except MPTimeoutError:
                 self.logger.exception("MarkerWorker child process timed out", path=file_path)
+                raise RuntimeError(f"PDF processing timed out")
+            except asyncio.CancelledError:
+                # Cancellation - propagate
+                self.logger.info("PDF processing cancelled", path=file_path)
                 raise
             except Exception:
                 self.logger.exception("Error processing with MarkerWorker", path=file_path)
@@ -253,6 +266,15 @@ class MarkerLoader(BaseLoader):
             logger.info(f"Processed {file_path_str} in {duration:.2f}s")
             return doc
 
+        except asyncio.CancelledError:
+            # Cancellation - propagate immediately (MUST be first)
+            logger.info("PDF loading cancelled", path=file_path_str)
+            raise
+        except OSError as e:
+            # File I/O error
+            logger.error("Cannot read PDF file", path=file_path_str, error=str(e))
+            raise RuntimeError(f"Cannot read PDF file: {e}")
         except Exception:
+            # Ray actor errors or PDF processing failures
             logger.exception("Error in aload_document", path=file_path_str)
             raise
