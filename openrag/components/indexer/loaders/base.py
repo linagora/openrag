@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import binascii
 import re
 from abc import ABC, abstractmethod
 from io import BytesIO
@@ -116,8 +117,13 @@ class BaseLoader(ABC):
                             base64.b64decode(image_data)
                             image_url = f"data:image/png;base64,{image_data}"
                             logger.debug("Processing raw base64 string")
-                        except Exception:
-                            logger.error(f"Invalid image data type or format: {type(image_data)}")
+                        except (ValueError, base64.binascii.Error) as e:
+                            # Invalid base64 data
+                            logger.warning("Failed to decode base64 image", error=str(e)[:100])
+                            return """\n<image_description>\nInvalid image data format\n</image_description>\n"""
+                        except Exception as e:
+                            # PIL image opening errors or other unexpected issues
+                            logger.warning("Failed to process image data", error=str(e)[:100])
                             return """\n<image_description>\nInvalid image data format\n</image_description>\n"""
                     else:
                         logger.error(f"Unsupported image data type: {type(image_data)}")

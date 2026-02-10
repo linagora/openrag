@@ -3,7 +3,7 @@ from pathlib import Path
 
 import cairosvg
 from langchain_core.documents import Document
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from utils.logger import get_logger
 
 from .base import BaseLoader
@@ -29,7 +29,16 @@ class ImageLoader(BaseLoader):
                 img = Image.open(BytesIO(png_data))
             else:
                 img = Image.open(path)
+        except OSError as e:
+            # File not found, permission denied, etc.
+            log.error("Cannot read image file", file_path=str(path), error=str(e))
+            raise ImageLoadError(f"Cannot read image file: {e}") from e
+        except UnidentifiedImageError as e:
+            # Invalid image format
+            log.error("Invalid image format", file_path=str(path), error=str(e))
+            raise ImageLoadError(f"Invalid image format: {e}") from e
         except Exception as e:
+            # SVG conversion errors or other unexpected issues
             log.error(
                 "Failed to load image file",
                 file_path=str(path),
