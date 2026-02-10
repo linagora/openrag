@@ -16,6 +16,7 @@ from pymilvus import (
     MilvusException,
     RRFRanker,
 )
+from sqlalchemy import URL
 from utils.exceptions.base import EmbeddingError
 from utils.exceptions.vectordb import *
 from utils.logger import get_logger
@@ -225,8 +226,16 @@ class MilvusDB(BaseVectorDB):
                         operation="load_collection",
                     )
 
+                database_url = URL.create(
+                    drivername="postgresql",
+                    username=self.rdb_user,
+                    password=self.rdb_password,
+                    host=self.rdb_host,
+                    port=self.rdb_port,
+                    database=f"partitions_for_collection_{self.collection_name}"
+                )
                 self.partition_file_manager = PartitionFileManager(
-                    database_url=f"postgresql://{self.rdb_user}:{self.rdb_password}@{self.rdb_host}:{self.rdb_port}/partitions_for_collection_{self.collection_name}",
+                    database_url=database_url,
                     logger=self.logger,
                 )
                 self.logger.info("Milvus collection loaded.")
@@ -361,6 +370,9 @@ class MilvusDB(BaseVectorDB):
                     file_id=file_id,
                 )
 
+            # Extract domains before inserting into Milvus (not stored as chunk metadata)
+            domains = file_metadata.pop("domains", None)
+
             entities = []
             vectors = await self.embedder.aembed_documents(chunks)
             order_metadata_l: list[dict] = _gen_chunk_order_metadata(n=len(chunks))
@@ -386,6 +398,10 @@ class MilvusDB(BaseVectorDB):
                 file_metadata=file_metadata,
                 user_id=user.get("id"),
             )
+
+            if domains:
+                self.partition_file_manager.set_file_domains(file_id, partition, domains)
+
             self.logger.info(f"File '{file_id}' added to partition '{partition}'")
         except EmbeddingError as e:
             self.logger.exception("Embedding failed", error=str(e))
@@ -431,6 +447,8 @@ class MilvusDB(BaseVectorDB):
                     retrieved_chunks[document.metadata["_id"]] = document
         return list(retrieved_chunks.values())
 
+    DOMAIN_BATCH_SIZE = 1000
+
     async def async_search(
         self,
         query: str,
@@ -440,13 +458,60 @@ class MilvusDB(BaseVectorDB):
         filter: dict | None = None,
         with_surrounding_chunks: bool = False,
     ) -> list[Document]:
+        filter = dict(filter) if filter else {}
+
+        # Resolve domains to file_ids via PostgreSQL
+        if "domains" in filter:
+            domains = filter.pop("domains")
+            partition_for_lookup = partition[0] if partition != ["all"] else None
+            file_ids = self.partition_file_manager.get_file_ids_by_domains(partition_for_lookup, domains)
+            if not file_ids:
+                return []
+
+            if len(file_ids) <= self.DOMAIN_BATCH_SIZE:
+                filter["file_id"] = file_ids
+            else:
+                # Split into batches, run parallel searches, merge results
+                batches = [file_ids[i : i + self.DOMAIN_BATCH_SIZE] for i in range(0, len(file_ids), self.DOMAIN_BATCH_SIZE)]
+                tasks = []
+                for batch in batches:
+                    batch_filter = {**filter, "file_id": batch}
+                    tasks.append(
+                        self._search_with_filter(
+                            query, top_k, similarity_threshold, partition, batch_filter, with_surrounding_chunks
+                        )
+                    )
+                batch_results = await asyncio.gather(*tasks)
+                merged = {}
+                for results in batch_results:
+                    for doc in results:
+                        merged[doc.metadata["_id"]] = doc
+                return sorted(merged.values(), key=lambda d: d.metadata.get("_id", 0), reverse=True)[:top_k]
+
+        return await self._search_with_filter(
+            query, top_k, similarity_threshold, partition, filter, with_surrounding_chunks
+        )
+
+    async def _search_with_filter(
+        self,
+        query: str,
+        top_k: int,
+        similarity_threshold: float,
+        partition: list[str],
+        filter: dict,
+        with_surrounding_chunks: bool,
+    ) -> list[Document]:
         expr_parts = []
         if partition != ["all"]:
             expr_parts.append(f"partition in {partition}")
 
         if filter:
             for key, value in filter.items():
-                expr_parts.append(f"{key} == '{value}'")
+                if isinstance(value, list):
+                    formatted = ", ".join(f"'{v}'" for v in value)
+                    expr_parts.append(f"{key} in [{formatted}]")
+                else:
+                    expr_parts.append(f"{key} == '{value}'")
 
         # Join all parts with " and " only if there are multiple conditions
         expr = " and ".join(expr_parts) if expr_parts else ""
@@ -919,6 +984,20 @@ class MilvusDB(BaseVectorDB):
         self._check_membership_exists(partition, user_id)
         self.partition_file_manager.remove_partition_member(partition, user_id)
         self.logger.info(f"User_id {user_id} removed from partition '{partition}'.")
+
+    # Domain management (pure PostgreSQL, no Milvus interaction)
+
+    async def set_file_domains(self, file_id: str, partition: str, domains: list[str]):
+        self._check_file_exists(file_id, partition)
+        self.partition_file_manager.set_file_domains(file_id, partition, domains)
+
+    async def get_file_domains(self, file_id: str, partition: str) -> list[str]:
+        self._check_file_exists(file_id, partition)
+        return self.partition_file_manager.get_file_domains(file_id, partition)
+
+    async def list_partition_domains(self, partition: str) -> list[str]:
+        self._check_partition_exists(partition)
+        return self.partition_file_manager.list_partition_domains(partition)
 
     def _check_user_exists(self, user_id: int):
         if not self.partition_file_manager.user_exists(user_id):
