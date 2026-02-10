@@ -97,6 +97,24 @@ class User(Base):
     memberships = relationship("PartitionMembership", back_populates="user", cascade="all, delete-orphan")
 
 
+class FileDomain(Base):
+    __tablename__ = "file_domains"
+
+    id = Column(Integer, primary_key=True)
+    file_id = Column(String, nullable=False)
+    partition_name = Column(
+        String,
+        ForeignKey("partitions.partition", ondelete="CASCADE"),
+        nullable=False,
+    )
+    domain = Column(String, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("file_id", "partition_name", "domain", name="uix_file_domain"),
+        Index("ix_partition_domain", "partition_name", "domain"),
+    )
+
+
 class PartitionMembership(Base):
     __tablename__ = "partition_memberships"
 
@@ -136,8 +154,8 @@ class PartitionFileManager:
 
         except Exception as e:
             raise VDBConnectionError(
-                f"Failed to connect to database: {e!s}",
-                db_url=database_url,
+                "An unexpected database error occurred",
+                db_url=str(database_url),
                 db_type="SQLAlchemy",
             )
 
@@ -225,10 +243,14 @@ class PartitionFileManager:
                 session.commit()
                 log.info("Added file successfully")
                 return True
-            except Exception:
+            except Exception as e:
                 session.rollback()
-                log.exception("Error adding file to partition")
-                raise
+                log.exception("Error adding file to partition", error=str(e))
+                raise VDBInsertError(
+                    "An unexpected database error occurred",
+                    file_id=file_id,
+                    partition=partition,
+                )
 
     def remove_file_from_partition(self, file_id: str, partition: str):
         """Remove a file from its partition - Optimized without join"""
@@ -246,8 +268,12 @@ class PartitionFileManager:
                 return False
             except Exception as e:
                 session.rollback()
-                log.error(f"Error removing file: {e}")
-                raise e
+                log.exception("Error removing file", error=str(e))
+                raise VDBDeleteError(
+                    "An unexpected database error occurred",
+                    file_id=file_id,
+                    partition=partition,
+                )
 
     def delete_partition(self, partition: str):
         """Delete a partition and all its files"""
@@ -292,6 +318,58 @@ class PartitionFileManager:
             return session.query(
                 session.query(File).filter(File.file_id == file_id, File.partition_name == partition).exists()
             ).scalar()
+
+    # Domains
+
+    def get_file_ids_by_domains(self, partition: str | None, domains: list[str]) -> list[str]:
+        """Get file_ids matching ANY of the given domains in a partition (or all partitions if None)."""
+        with self.Session() as session:
+            query = session.query(FileDomain.file_id).filter(FileDomain.domain.in_(domains))
+            if partition is not None:
+                query = query.filter(FileDomain.partition_name == partition)
+            rows = query.distinct().all()
+            return [row[0] for row in rows]
+
+    def set_file_domains(self, file_id: str, partition: str, domains: list[str]):
+        """Replace all domains for a file with the given list."""
+        with self.Session() as session:
+            try:
+                session.query(FileDomain).filter(
+                    FileDomain.file_id == file_id,
+                    FileDomain.partition_name == partition,
+                ).delete()
+                for domain in domains:
+                    session.add(FileDomain(file_id=file_id, partition_name=partition, domain=domain))
+                session.commit()
+            except Exception as e:
+                session.rollback()
+                self.logger.exception("Error setting file domains", error=str(e))
+                raise VDBInsertError(
+                    "An unexpected database error occurred",
+                    file_id=file_id,
+                    partition=partition,
+                )
+
+    def get_file_domains(self, file_id: str, partition: str) -> list[str]:
+        """Get domains for a file in a partition."""
+        with self.Session() as session:
+            rows = (
+                session.query(FileDomain.domain)
+                .filter(FileDomain.file_id == file_id, FileDomain.partition_name == partition)
+                .all()
+            )
+            return [row[0] for row in rows]
+
+    def list_partition_domains(self, partition: str) -> list[str]:
+        """List all unique domains in a partition."""
+        with self.Session() as session:
+            rows = (
+                session.query(FileDomain.domain)
+                .filter(FileDomain.partition_name == partition)
+                .distinct()
+                .all()
+            )
+            return [row[0] for row in rows]
 
     # Users
 
