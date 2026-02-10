@@ -80,7 +80,8 @@ class RAGMapReduce:
                 )
                 return output_chunk
             except Exception as e:
-                logger.error("Error during chunk relevancy inference", error=str(e))
+                # Graceful degradation - mark chunk as irrelevant on error
+                logger.warning("Failed to infer chunk relevancy", chunk_id=chunk.metadata.get("id"), error=str(e)[:200])
                 return SummarizedChunk(relevancy=False, summary="")
 
     async def map_batch(
