@@ -46,10 +46,12 @@ Plans:
   2. Generic HTTP 500 responses include structured error details without exposing internals
   3. Streaming endpoints handle cancellation and timeout exceptions explicitly
   4. All 93 existing tests continue passing
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 02-01: [TBD during planning]
+- [ ] 02-01-PLAN.md — Replace 8 exception handlers in OpenAI router (streaming and non-streaming endpoints)
+- [ ] 02-02-PLAN.md — Replace 5 exception handlers in indexer router (file operations and task management)
+- [ ] 02-03-PLAN.md — Replace 6 exception handlers in tools, utils, actors, and extract routers
 
 ### Phase 3: Exception Handling - Core Services
 **Goal**: Replace broad exception handling with specific exception types in components and pipeline
