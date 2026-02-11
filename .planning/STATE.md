@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-10)
 ## Current Position
 
 Phase: 5 of 6 (Script Health Hardening)
-Plan: 1 of 2 in current phase (COMPLETE)
-Status: Phase 5 In Progress
-Last activity: 2026-02-11 — Phase 5 Plan 1 complete
+Plan: 2 of 2 in current phase (COMPLETE)
+Status: Phase 5 Complete
+Last activity: 2026-02-11 — Phase 5 Plan 2 complete
 
-Progress: [█████████████░░░░░░░] 13/16 plans (81%)
+Progress: [██████████████░░░░░░] 14/16 plans (87%)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 11
+- Total plans completed: 12
 - Average duration: 3 min
-- Total execution time: 0.5 hours
+- Total execution time: 0.6 hours
 
 **By Phase:**
 
@@ -31,11 +31,11 @@ Progress: [█████████████░░░░░░░] 13/16 p
 | 02 | 3 | 9 min | 3 min |
 | 03 | 2 | 9 min | 5 min |
 | 04 | 2 | 6 min | 3 min |
-| 05 | 1 | 2 min | 2 min |
+| 05 | 2 | 4 min | 2 min |
 
 **Recent Trend:**
-- Last 5 plans: 03-02 (5 min), 03-03 (4 min), 04-01 (3 min), 04-02 (3 min), 05-01 (2 min)
-- Trend: Phase 5 started - health endpoint enhancement (2 min)
+- Last 5 plans: 03-03 (4 min), 04-01 (3 min), 04-02 (3 min), 05-01 (2 min), 05-02 (2 min)
+- Trend: Phase 5 complete - consistent 2 min script hardening work
 
 *Updated after each plan completion*
 
@@ -50,6 +50,7 @@ Progress: [█████████████░░░░░░░] 13/16 p
 | Phase 04 P01 | 3 min | 2 tasks | 7 files |
 | Phase 04 P02 | 3 min | 2 tasks | 6 files |
 | Phase 05 P01 | 2 min | 2 tasks | 1 file |
+| Phase 05 P02 | 2 min | 2 tasks | 1 file |
 
 ## Accumulated Context
 
@@ -97,6 +98,11 @@ Recent decisions affecting current work:
 - [Phase 05-01]: Mark LLM as critical, VLM as non-critical (VLM only for image captioning)
 - [Phase 05-01]: Probe /health endpoint on LLM and VLM services (VLLM standard)
 - [Phase 05-01]: Use asyncio.gather for concurrent probes (minimizes health check latency)
+- [Phase 05-02]: Track restoration state in restore_state dict (partitions_created, files_added, files_failed, chunks_inserted, errors)
+- [Phase 05-02]: Distinguish critical failures (parse errors, connection errors) from non-critical (individual file insert failures)
+- [Phase 05-02]: Rollback VDB first then RDB on critical failure (prevents orphaned vectors, worse than orphaned RDB entries)
+- [Phase 05-02]: Log progress milestones every 100 files
+- [Phase 05-02]: Cap error list at 100 entries to prevent memory issues
 
 ### Pending Todos
 
@@ -109,5 +115,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-11
-Stopped at: Completed 05-01-PLAN.md (health check enhancement) - Phase 5 Plan 1 Complete
+Stopped at: Completed 05-02-PLAN.md (restore script hardening) - Phase 5 Complete
 Resume file: None
