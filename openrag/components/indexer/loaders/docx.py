@@ -1,3 +1,4 @@
+import asyncio
 import re
 import zipfile
 from io import BytesIO
@@ -28,11 +29,12 @@ class DocxLoader(BaseLoader):
         self.converter = MarkItDown()
 
     async def aload_document(self, file_path, metadata, save_markdown=False):
-        result = self.converter.convert(file_path).text_content
+        convert_result = await asyncio.to_thread(self.converter.convert, file_path)
+        result = convert_result.text_content
 
         if self.image_captioning:
             # Handle embedded images (extracted from docx zip)
-            images = self.get_images_from_zip(file_path)
+            images = await asyncio.to_thread(self.get_images_from_zip, file_path)
             captions = await self.caption_images(images, desc="Captioning embedded images")
             for caption in captions:
                 result = re.sub(
@@ -54,7 +56,7 @@ class DocxLoader(BaseLoader):
 
         doc = Document(page_content=result, metadata=metadata)
         if save_markdown:
-            self.save_content(result, str(file_path))
+            await self.save_content(result, str(file_path))
         return doc
 
     def get_images_from_zip(self, input_file):
