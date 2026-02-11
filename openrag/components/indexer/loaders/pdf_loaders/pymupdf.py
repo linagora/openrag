@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pymupdf4llm
@@ -23,7 +24,7 @@ class PyMuPDFLoader(BaseLoader):
 
         doc = Document(page_content=s, metadata=metadata)
         if save_markdown:
-            self.save_content(s, str(file_path))
+            await self.save_content(s, str(file_path))
         return doc
 
 
@@ -32,7 +33,9 @@ class PyMuPDF4LLMLoader(BaseLoader):
         super().__init__(**kwargs)
 
     async def aload_document(self, file_path, metadata: dict = None, save_markdown=False):
-        pages = pymupdf4llm.to_markdown(file_path, write_images=False, page_chunks=True)
+        pages = await asyncio.to_thread(
+            pymupdf4llm.to_markdown, file_path, write_images=False, page_chunks=True
+        )
 
         s = ""
         for page_num, segment in enumerate(pages, start=1):
@@ -40,5 +43,5 @@ class PyMuPDF4LLMLoader(BaseLoader):
 
         doc = Document(page_content=s, metadata=metadata)
         if save_markdown:
-            self.save_content(s, str(file_path))
+            await self.save_content(s, str(file_path))
         return doc

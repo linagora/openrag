@@ -1,3 +1,4 @@
+import asyncio
 import html
 import re
 from io import BytesIO
@@ -149,7 +150,7 @@ class PPTXLoader(BaseLoader):
         self.converter = PPTXConverter(image_placeholder=self.image_placeholder, page_separator=self.page_sep)
 
     async def aload_document(self, file_path, metadata=None, save_markdown=False):
-        md_content, imgs = self.converter.convert(local_path=file_path)
+        md_content, imgs = await asyncio.to_thread(self.converter.convert, local_path=file_path)
 
         if self.image_captioning:
             images_captions = await self.caption_images(imgs, desc="Generating captions")
@@ -168,5 +169,5 @@ class PPTXLoader(BaseLoader):
 
         doc = Document(page_content=md_content, metadata=metadata)
         if save_markdown:
-            self.save_content(md_content, str(file_path))
+            await self.save_content(md_content, str(file_path))
         return doc
