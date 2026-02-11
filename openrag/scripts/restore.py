@@ -378,7 +378,36 @@ async def main():
                 first_10=restore_state["errors"][:10],
             ).warning("Restore completed with file-level errors")
     except Exception as e:
-        logger.error("Error: " + str(e))
+        logger.bind(
+            error=str(e),
+            partitions_created=restore_state["partitions_created"],
+            files_added=restore_state["files_added"],
+            files_failed=restore_state["files_failed"],
+        ).error("Critical restore failure - initiating rollback")
+
+        # Rollback in reverse order: VDB first, then RDB
+        for partition_name in reversed(restore_state["partitions_created"]):
+            # 1. Delete from VDB first (no FK constraints, orphaned vectors are worse)
+            try:
+                client.delete(
+                    collection_name=vdb["collection_name"],
+                    filter=f'partition == "{partition_name}"',
+                )
+                logger.info(f"VDB rollback succeeded for partition: {partition_name}")
+            except Exception:
+                logger.exception(f"VDB rollback failed for partition {partition_name}")
+
+            # 2. Delete from RDB (cascades to files via FK)
+            try:
+                pfm.delete_partition(partition_name)
+                logger.info(f"RDB rollback succeeded for partition: {partition_name}")
+            except Exception:
+                logger.exception(f"RDB rollback failed for partition {partition_name}")
+
+        logger.bind(
+            partitions_rolled_back=len(restore_state["partitions_created"]),
+        ).error("Rollback complete")
+
         raise
     finally:
         client.close()
