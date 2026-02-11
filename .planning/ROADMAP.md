@@ -109,10 +109,10 @@ Plans:
   2. Legacy partition prefix backward compatibility is either removed or marked deprecated with migration timeline
   3. Configuration loading emits no warnings during application startup
   4. All 93 existing tests continue passing
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 06-01: [TBD during planning]
+- [ ] 06-01-PLAN.md — Fix Hydra version_base, add legacy prefix deprecation warning, and verification tests
 
 ## Progress
 
@@ -126,4 +126,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 3. Exception Handling - Core Services | 0/? | Not started | - |
 | 4. Async Infrastructure | 0/2 | Not started | - |
 | 5. Script & Health Hardening | 0/? | Not started | - |
-| 6. Configuration Cleanup | 0/? | Not started | - |
+| 6. Configuration Cleanup | 0/1 | Not started | - |
