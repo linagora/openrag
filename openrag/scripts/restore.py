@@ -19,6 +19,7 @@ def read_rdb_section(
     added_documents: dict[str, set[str]],
     existing_partitions: dict[str, Any],
     logger: Any,
+    restore_state: dict[str, Any],
     user_id: int,
     verbose: bool = False,
     dry_run: bool = False,
@@ -69,19 +70,44 @@ def read_rdb_section(
             try:
                 res = pfm.add_file_to_partition(doc["file_id"], part["name"], doc, user_id)
             except Exception as e:
-                logger.exception(
-                    f"{type(e)} in add_file_to_partition({doc['file_id']}, {part['name']}, ...)\n" + str(e)
-                )
-                raise
+                # Non-critical failure: log and continue instead of raising
+                logger.bind(
+                    file_id=doc["file_id"],
+                    partition=part["name"],
+                    error_type=type(e).__name__,
+                ).error(f"Failed to add file to partition: {str(e)}")
+                restore_state["files_failed"] += 1
+                if len(restore_state["errors"]) < 100:
+                    restore_state["errors"].append(
+                        {
+                            "file_id": doc["file_id"],
+                            "partition": part["name"],
+                            "error": str(e),
+                        }
+                    )
+                res = False
         else:
             res = True
 
         if res:
             if part["name"] not in added_documents:
                 added_documents[part["name"]] = set()
+                # Track partition creation (first file added successfully)
+                restore_state["partitions_created"].append(part["name"])
             added_documents[part["name"]].add(doc["file_id"])
+            restore_state["files_added"] += 1
         else:
-            logger.error(f"Can't add file {doc['file_id']} to partition {part['name']}")
+            if not dry_run:
+                logger.error(f"Can't add file {doc['file_id']} to partition {part['name']}")
+
+        # Log progress every 100 files
+        total_files = restore_state["files_added"] + restore_state["files_failed"]
+        if total_files > 0 and total_files % 100 == 0:
+            logger.bind(
+                files_added=restore_state["files_added"],
+                files_failed=restore_state["files_failed"],
+                total_processed=total_files,
+            ).info("Restore progress")
 
 
 def insert_into_vdb(
@@ -126,6 +152,7 @@ def read_vdb_section(
     client: MilvusClient,
     batch_size: int,
     logger: Any,
+    restore_state: dict[str, Any],
     verbose: bool = False,
     dry_run: bool = False,
 ) -> None:
@@ -155,6 +182,7 @@ def read_vdb_section(
 
         if len(batch) >= batch_size:
             insert_into_vdb(client, collection_name, batch, logger, verbose, dry_run)
+            restore_state["chunks_inserted"] += len(batch)
             batch = []
 
         chunk = json.loads(line)
@@ -165,6 +193,7 @@ def read_vdb_section(
 
     if len(batch) > 0:
         insert_into_vdb(client, collection_name, batch, logger, verbose, dry_run)
+        restore_state["chunks_inserted"] += len(batch)
 
 
 def open_backup_file(file_name: str, logger: Any) -> IO[str]:
@@ -254,15 +283,25 @@ async def main():
 
     logger = get_logger()
 
+    restore_state = {
+        "partitions_created": [],  # List of partition names created in RDB
+        "files_added": 0,  # Count of files successfully added
+        "files_failed": 0,  # Count of files that failed
+        "chunks_inserted": 0,  # Count of VDB chunks inserted
+        "errors": [],  # List of error dicts: {"file_id", "partition", "error"}
+    }
+
     try:
         # It will create a the Milvus collection if it doesn't exist
         vdb_tmp = MilvusDB.options(name="Vectordb", namespace="openrag", lifetime="detached").remote()
 
-        await vdb_tmp.__ray_ready__.remote()  # ensure the actor is fully initialized and ready: collection and all created if nont existing
+        await (
+            vdb_tmp.__ray_ready__.remote()
+        )  # ensure the actor is fully initialized and ready: collection and all created if nont existing
         print("VectorDB (Milvus) actor fully initialized")
     except Exception as e:
         logger.exception(f"Failed while trying to create Milvus collection: {e}")
-        # TODO: stop execution here
+        return 1
 
     rdb, vdb = load_openrag_config(logger)
 
@@ -306,6 +345,7 @@ async def main():
                         added_documents,
                         existing_partitions,
                         logger,
+                        restore_state,
                         args.user_id,
                         args.verbose,
                         args.dry_run,
@@ -319,9 +359,24 @@ async def main():
                         client,
                         args.batch_size,
                         logger,
+                        restore_state,
                         args.verbose,
                         args.dry_run,
                     )
+
+        # Log final summary
+        logger.bind(
+            partitions_restored=len(restore_state["partitions_created"]),
+            files_added=restore_state["files_added"],
+            files_failed=restore_state["files_failed"],
+            chunks_inserted=restore_state["chunks_inserted"],
+        ).info("Restore completed")
+
+        if restore_state["errors"]:
+            logger.bind(
+                total_errors=len(restore_state["errors"]),
+                first_10=restore_state["errors"][:10],
+            ).warning("Restore completed with file-level errors")
     except Exception as e:
         logger.error("Error: " + str(e))
         raise
