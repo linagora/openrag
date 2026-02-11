@@ -31,7 +31,7 @@ database_url = URL.create(
     password=rdb_password,
     host=rdb_host,
     port=rdb_port,
-    database=f"partitions_for_collection_{collection_name}"
+    database=f"partitions_for_collection_{collection_name}",
 )
 # config.set_main_option expects a string, so convert URL object
 config.set_main_option("sqlalchemy.url", str(database_url))

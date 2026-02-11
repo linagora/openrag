@@ -12,6 +12,7 @@ class FileMetadataSchema(BaseModel):
     Metadata is passed as JSON in the file upload form and contains
     optional file processing hints and domain filtering configuration.
     """
+
     mimetype: str | None = None
     domains: list[str] = Field(default_factory=list)
 
@@ -19,7 +20,7 @@ class FileMetadataSchema(BaseModel):
     # (existing code may pass extra fields we don't validate)
     model_config = {"extra": "allow"}
 
-    @field_validator('domains')
+    @field_validator("domains")
     @classmethod
     def validate_domains(cls, v):
         """Ensure domains is a list of non-empty strings."""

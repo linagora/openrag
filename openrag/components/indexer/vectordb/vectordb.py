@@ -232,7 +232,7 @@ class MilvusDB(BaseVectorDB):
                     password=self.rdb_password,
                     host=self.rdb_host,
                     port=self.rdb_port,
-                    database=f"partitions_for_collection_{self.collection_name}"
+                    database=f"partitions_for_collection_{self.collection_name}",
                 )
                 self.partition_file_manager = PartitionFileManager(
                     database_url=database_url,
@@ -472,7 +472,9 @@ class MilvusDB(BaseVectorDB):
                 filter["file_id"] = file_ids
             else:
                 # Split into batches, run parallel searches, merge results
-                batches = [file_ids[i : i + self.DOMAIN_BATCH_SIZE] for i in range(0, len(file_ids), self.DOMAIN_BATCH_SIZE)]
+                batches = [
+                    file_ids[i : i + self.DOMAIN_BATCH_SIZE] for i in range(0, len(file_ids), self.DOMAIN_BATCH_SIZE)
+                ]
                 tasks = []
                 for batch in batches:
                     batch_filter = {**filter, "file_id": batch}

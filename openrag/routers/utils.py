@@ -205,17 +205,11 @@ async def validate_metadata(metadata: Any | None = Form(None)):
         return validated.model_dump()
 
     except json.JSONDecodeError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid JSON in metadata"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON in metadata")
     except ValidationError as e:
         # Format Pydantic validation errors for user-friendly response
         errors = "; ".join(f"{err['loc'][0]}: {err['msg']}" for err in e.errors())
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid metadata: {errors}"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid metadata: {errors}")
 
 
 async def validate_file_format(
