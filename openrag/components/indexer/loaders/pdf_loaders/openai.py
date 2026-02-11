@@ -58,7 +58,7 @@ class OpenAILoader(BaseLoader, ABC):
             markdown = await self._assemble_markdown(pages, ocr_results)
 
             if save_markdown:
-                self.save_content(markdown, file_path)
+                await self.save_content(markdown, file_path)
 
             duration = time.time() - start_time
             logger.info(f"Processed {file_path} in {duration:.2f}s")

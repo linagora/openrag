@@ -133,7 +133,7 @@ class MarkerWorker:
                 return result
             except MPTimeoutError:
                 self.logger.exception("MarkerWorker child process timed out", path=file_path)
-                raise RuntimeError(f"PDF processing timed out")
+                raise RuntimeError("PDF processing timed out")
             except asyncio.CancelledError:
                 # Cancellation - propagate
                 self.logger.info("PDF processing cancelled", path=file_path)
@@ -260,7 +260,7 @@ class MarkerLoader(BaseLoader):
             doc = Document(page_content=markdown, metadata=metadata)
 
             if save_markdown:
-                self.save_content(markdown, file_path_str)
+                await self.save_content(markdown, file_path_str)
 
             duration = time.time() - start
             logger.info(f"Processed {file_path_str} in {duration:.2f}s")

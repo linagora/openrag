@@ -51,10 +51,14 @@ class BaseLoader(ABC):
     ):
         pass
 
-    def save_content(self, text_content: str, path: str):
-        path = re.sub(r"\..*", ".md", path)
+    def _write_file(self, path: str, content: str):
+        """Synchronous helper for file writing."""
         with open(path, "w", encoding="utf-8") as f:
-            f.write(text_content)
+            f.write(content)
+
+    async def save_content(self, text_content: str, path: str):
+        path = re.sub(r"\..*", ".md", path)
+        await asyncio.to_thread(self._write_file, path, text_content)
         logger.debug(f"Document saved to {path}")
 
     def _pil_image_to_base64(self, image: Image.Image) -> str:
@@ -117,7 +121,7 @@ class BaseLoader(ABC):
                             base64.b64decode(image_data)
                             image_url = f"data:image/png;base64,{image_data}"
                             logger.debug("Processing raw base64 string")
-                        except (ValueError, base64.binascii.Error) as e:
+                        except (ValueError, binascii.Error) as e:
                             # Invalid base64 data
                             logger.warning("Failed to decode base64 image", error=str(e)[:100])
                             return """\n<image_description>\nInvalid image data format\n</image_description>\n"""
