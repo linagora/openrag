@@ -1,5 +1,6 @@
 import json
 import os
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -286,7 +287,14 @@ async def get_partition_name(model_name, user_partitions, is_admin=False):
 
     partition_prefix = consts.PARTITION_PREFIX
     if model_name.startswith(consts.LEGACY_PARTITION_PREFIX):
-        # XXX - This is for backward compatibility, but should eventually be removed
+        warnings.warn(
+            f"The partition prefix '{consts.LEGACY_PARTITION_PREFIX}' is deprecated "
+            f"and will be removed in a future version. "
+            f"Please update your model names to use '{consts.PARTITION_PREFIX}' instead. "
+            f"Example: '{consts.LEGACY_PARTITION_PREFIX}mypartition' -> '{consts.PARTITION_PREFIX}mypartition'",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         partition_prefix = consts.LEGACY_PARTITION_PREFIX
 
     if not model_name.startswith(partition_prefix):
