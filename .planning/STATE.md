@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-10)
 
 ## Current Position
 
-Phase: 5 of 6 (Script Health Hardening)
-Plan: 2 of 2 in current phase (COMPLETE)
-Status: Phase 5 Complete
-Last activity: 2026-02-11 — Phase 5 Plan 2 complete
+Phase: 6 of 6 (Configuration Cleanup)
+Plan: 1 of 1 in current phase (COMPLETE)
+Status: Phase 6 Complete - FINAL PHASE COMPLETE
+Last activity: 2026-02-11 — Phase 6 Plan 1 complete
 
-Progress: [██████████████░░░░░░] 14/16 plans (87%)
+Progress: [████████████████████] 15/16 plans (93%)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 12
+- Total plans completed: 13
 - Average duration: 3 min
-- Total execution time: 0.6 hours
+- Total execution time: 0.7 hours
 
 **By Phase:**
 
@@ -32,10 +32,11 @@ Progress: [██████████████░░░░░░] 14/16 p
 | 03 | 2 | 9 min | 5 min |
 | 04 | 2 | 6 min | 3 min |
 | 05 | 2 | 4 min | 2 min |
+| 06 | 1 | 4 min | 4 min |
 
 **Recent Trend:**
-- Last 5 plans: 03-03 (4 min), 04-01 (3 min), 04-02 (3 min), 05-01 (2 min), 05-02 (2 min)
-- Trend: Phase 5 complete - consistent 2 min script hardening work
+- Last 5 plans: 04-01 (3 min), 04-02 (3 min), 05-01 (2 min), 05-02 (2 min), 06-01 (4 min)
+- Trend: Phase 6 complete - configuration cleanup took 4 min
 
 *Updated after each plan completion*
 
@@ -51,6 +52,7 @@ Progress: [██████████████░░░░░░] 14/16 p
 | Phase 04 P02 | 3 min | 2 tasks | 6 files |
 | Phase 05 P01 | 2 min | 2 tasks | 1 file |
 | Phase 05 P02 | 2 min | 2 tasks | 1 file |
+| Phase 06 P01 | 4 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -103,6 +105,9 @@ Recent decisions affecting current work:
 - [Phase 05-02]: Rollback VDB first then RDB on critical failure (prevents orphaned vectors, worse than orphaned RDB entries)
 - [Phase 05-02]: Log progress milestones every 100 files
 - [Phase 05-02]: Cap error list at 100 entries to prevent memory issues
+- [Phase 06-01]: Use version_base=None for forward compatibility with Hydra updates
+- [Phase 06-01]: Use Python stdlib DeprecationWarning for legacy partition prefix
+- [Phase 06-01]: Test warning behavior directly rather than full integration (avoids circular imports)
 
 ### Pending Todos
 
@@ -115,5 +120,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-11
-Stopped at: Completed 05-02-PLAN.md (restore script hardening) - Phase 5 Complete
+Stopped at: Completed 06-01-PLAN.md (configuration cleanup) - Phase 6 Complete - FINAL PHASE COMPLETE
 Resume file: None
