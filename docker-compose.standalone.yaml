@@ -1,0 +1,319 @@
+# OpenRAG Standalone Docker Compose
+# This file allows you to run OpenRAG without cloning the source code repository
+# 
+# Prerequisites:
+# 1. Download this file and .env.example (or create a .env file)
+# 2. Copy .env.example to .env: cp .env.example .env
+# 3. Configure your .env file with your LLM API credentials
+# 4. Run: docker compose -f docker-compose.standalone.yaml up
+#
+# For GPU support (default): docker compose -f docker-compose.standalone.yaml up
+# For CPU only: docker compose -f docker-compose.standalone.yaml --profile cpu up
+
+x-openrag: &openrag_template
+  image: linagoraai/openrag:latest
+  volumes:
+    - ${DATA_VOLUME:-./data}:/app/data
+    - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights
+    - ${SHARED_ENV:-.env}:/ray_mount/.env
+    - ${LOGS_VOLUME:-./logs}:/app/logs
+  ports:
+    - ${APP_PORT:-8080}:${APP_iPORT:-8080}
+    - ${RAY_DASHBOARD_PORT:-8265}:8265
+    - ${CHAINLIT_PORT:-8090}:${CHAINLIT_PORT:-8090}
+  networks:
+    default:
+      aliases:
+        - openrag
+  env_file:
+    - ${SHARED_ENV:-.env}
+  shm_size: 10.24gb
+  restart: unless-stopped
+
+x-vllm-env: &vllm_env
+  HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+  VLLM_SLEEP_WHEN_IDLE: 1
+
+x-vllm: &vllm_template
+  networks:
+    default:
+      aliases:
+        - vllm
+  restart: on-failure
+  environment:
+    <<: *vllm_env
+  ipc: "host"
+  volumes:
+    - ${VLLM_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+  command: >
+    --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
+    --trust-remote-code
+    --task embed
+    --gpu_memory_utilization 0.3
+    --max-model-len ${MAX_MODEL_LEN:-8192}
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    interval: 20s
+    timeout: 5s
+    retries: 4
+    start_period: 90s
+
+x-reranker: &reranker_template
+  networks:
+    default:
+      aliases:
+        - reranker
+  volumes:
+    - ${VLLM_CACHE:-~/.cache/huggingface}:/app/.cache/huggingface
+  restart: unless-stopped
+
+services:
+  # ===========================================
+  # Vector Database Stack (Milvus + Dependencies)
+  # ===========================================
+  
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.16
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ${MILVUS_VOLUME_DIRECTORY:-./volumes}/etcd:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - default
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - ${MILVUS_VOLUME_DIRECTORY:-./volumes}/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - default
+
+  milvus:
+    image: milvusdb/milvus:v2.5.4
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - ${MILVUS_VOLUME_DIRECTORY:-./volumes}/milvus:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    depends_on:
+      - etcd
+      - minio
+    restart: unless-stopped
+    networks:
+      - default
+
+  # ===========================================
+  # Relational Database (PostgreSQL)
+  # ===========================================
+  
+  rdb:
+    image: postgres:15
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-root_password}
+      - POSTGRES_USER=${POSTGRES_USER:-root}
+    volumes:
+      - ${DB_VOLUME:-./db}:/var/lib/postgresql/data
+    expose:
+      - 5432
+    restart: unless-stopped
+    networks:
+      - default
+
+  # ===========================================
+  # Embedding Service (vLLM) - GPU Version
+  # ===========================================
+  
+  vllm-gpu:
+    <<: *vllm_template
+    image: vllm/vllm-openai:v0.9.2
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      <<: *vllm_env
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    profiles:
+      - ""
+
+  # ===========================================
+  # Embedding Service (vLLM) - CPU Version
+  # ===========================================
+  
+  vllm-cpu:
+    <<: *vllm_template
+    image: vllm/vllm-openai:v0.9.2
+    deploy: {}
+    environment:
+      <<: *vllm_env
+      VLLM_CPU_KVCACHE_SPACE: 8
+    command: >
+      --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
+      --trust-remote-code
+      --dtype float32
+      --max-model-len ${MAX_MODEL_LEN:-8192}
+    profiles:
+      - "cpu"
+
+  # ===========================================
+  # Reranker Service (Infinity) - GPU Version
+  # ===========================================
+  
+  reranker:
+    <<: *reranker_template
+    image: michaelf34/infinity
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all 
+              capabilities: [gpu]
+    command: >
+      v2
+      --model-id ${RERANKER_MODEL:-Alibaba-NLP/gte-multilingual-reranker-base}
+      --port ${RERANKER_PORT:-7997}
+    profiles:
+      - ""
+
+  # ===========================================
+  # Reranker Service (Infinity) - CPU Version
+  # ===========================================
+  
+  reranker-cpu:
+    <<: *reranker_template
+    image: michaelf34/infinity:latest-cpu
+    deploy: {}
+    command: >
+      v2
+      --engine torch
+      --model-id ${RERANKER_MODEL:-Alibaba-NLP/gte-multilingual-reranker-base}
+      --port ${RERANKER_PORT:-7997}
+    profiles:
+      - "cpu"
+
+  # ===========================================
+  # OpenRAG Main Application - GPU Version
+  # ===========================================
+  
+  openrag:
+    <<: *openrag_template
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+     - NVIDIA_VISIBLE_DEVICES=all
+     - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    profiles:
+      - ""
+    depends_on:
+      rdb:
+        condition: service_started
+      milvus:
+        condition: service_healthy
+      vllm-gpu:
+        condition: service_healthy
+
+  # ===========================================
+  # OpenRAG Main Application - CPU Version
+  # ===========================================
+  
+  openrag-cpu:
+    <<: *openrag_template
+    deploy: {}
+    profiles:
+      - "cpu"
+    depends_on:
+      rdb:
+        condition: service_started
+      milvus:
+        condition: service_healthy
+      vllm-cpu:
+        condition: service_healthy
+
+  # ===========================================
+  # Indexer UI (Frontend)
+  # ===========================================
+  
+  indexer-ui:
+    image: linagoraai/indexer-ui:latest
+    environment:
+      - API_BASE_URL=${API_BASE_URL:-http://localhost:${APP_PORT:-8080}}
+      - INCLUDE_CREDENTIALS=${INCLUDE_CREDENTIALS:-false}
+    ports:
+      - "${INDEXERUI_PORT:-3042}:3000"
+    restart: unless-stopped
+    networks:
+      - default
+
+  # ===========================================
+  # Audio Transcription Service (Optional)
+  # Uncomment if you need audio/speech processing
+  # ===========================================
+  
+  # transcriber:
+  #   image: vllm/vllm-openai:v0.9.2
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+  #   environment:
+  #     - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+  #     - VLLM_MAX_AUDIO_CLIP_FILESIZE_MB=10000
+  #   ipc: "host"
+  #   volumes:
+  #     - ${VLLM_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+  #   command: >
+  #     --model ${TRANSCRIBER_MODEL:-openai/whisper-large-v3-turbo}
+  #     --trust-remote-code
+  #     --async-scheduling
+  #     --gpu_memory_utilization 0.3
+  #   restart: on-failure
+  #   networks:
+  #     - default
+  #   profiles:
+  #     - ""
+
+networks:
+  default:
+    name: openrag_default
