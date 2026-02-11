@@ -80,5 +80,5 @@ class DoclingLoader(BaseLoader):
 
         doc = Document(page_content=enriched_content, metadata=metadata)
         if save_markdown:
-            self.save_content(enriched_content, str(file_path))
+            await self.save_content(enriched_content, str(file_path))
         return doc

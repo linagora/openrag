@@ -228,5 +228,5 @@ class VideoAudioLoader(BaseLoader):
             await asyncio.to_thread(os.remove, audio_path_wav)
         doc = Document(page_content=content, metadata=metadata)
         if save_markdown:
-            self.save_content(content, str(file_path))
+            await self.save_content(content, str(file_path))
         return doc
