@@ -1,9 +1,12 @@
+import asyncio
 import os
+import time
 import warnings
 from enum import Enum
 from importlib.metadata import version as get_package_version
 from pathlib import Path
 
+import httpx
 import ray
 import uvicorn
 from config import load_config
@@ -186,10 +189,84 @@ app.state.app_state = AppState(config)
 app.mount("/static", StaticFiles(directory=DATA_DIR.resolve(), check_dir=True), name="static")
 
 
+async def check_service_health(base_url: str, service_name: str) -> dict:
+    """
+    Probe a service health endpoint with timeout.
+
+    Args:
+        base_url: Base URL of the service (e.g., "http://localhost:8000")
+        service_name: Human-readable name for logging
+
+    Returns:
+        dict with status (healthy/unhealthy/timeout/unreachable/error),
+        response_time_ms, and error message if applicable
+    """
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as client:
+            response = await client.get(f"{base_url}/health")
+            elapsed_ms = response.elapsed.total_seconds() * 1000
+
+            if response.status_code == 200:
+                return {"status": "healthy", "response_time_ms": round(elapsed_ms, 2)}
+            else:
+                return {
+                    "status": "unhealthy",
+                    "error": f"HTTP {response.status_code}",
+                    "response_time_ms": round(elapsed_ms, 2),
+                }
+    except httpx.TimeoutException:
+        return {"status": "timeout", "error": "Service did not respond within 3s"}
+    except httpx.ConnectError:
+        return {"status": "unreachable", "error": "Connection refused"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 @app.get("/health_check", summary="Health check endpoint for API", dependencies=[])
 async def health_check(request: Request):
-    # TODO : Error reporting about llm and vlm
-    return "RAG API is up."
+    """
+    Health check endpoint with LLM and VLM service probes.
+
+    Returns HTTP 200 for healthy/degraded, HTTP 503 for unhealthy.
+    LLM is critical, VLM is non-critical (used only for image captioning).
+    """
+    config = request.app.state.app_state.config
+
+    # Probe LLM and VLM services concurrently
+    llm_base_url = config.llm.get("base_url", "")
+    vlm_base_url = config.vlm.get("base_url", "")
+
+    results = await asyncio.gather(
+        check_service_health(llm_base_url, "llm"), check_service_health(vlm_base_url, "vlm"), return_exceptions=True
+    )
+
+    # Handle gather results (defensive: check if any result is an Exception)
+    llm_result = results[0] if not isinstance(results[0], Exception) else {"status": "error", "error": str(results[0])}
+    vlm_result = results[1] if not isinstance(results[1], Exception) else {"status": "error", "error": str(results[1])}
+
+    # Determine overall status
+    llm_healthy = llm_result.get("status") == "healthy"
+    vlm_healthy = vlm_result.get("status") == "healthy"
+
+    if llm_healthy and vlm_healthy:
+        overall_status = "healthy"
+        status_code = 200
+    elif llm_healthy and not vlm_healthy:
+        # VLM is non-critical (only used for image captioning)
+        overall_status = "degraded"
+        status_code = 200
+    else:
+        # LLM is critical - any LLM failure is unhealthy
+        overall_status = "unhealthy"
+        status_code = 503
+
+    response_data = {
+        "status": overall_status,
+        "checks": {"api": {"status": "healthy"}, "llm": llm_result, "vlm": vlm_result},
+        "timestamp": time.time(),
+    }
+
+    return JSONResponse(status_code=status_code, content=response_data)
 
 
 @app.get("/version", summary="Get openRAG version", dependencies=[])
