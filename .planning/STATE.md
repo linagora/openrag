@@ -5,7 +5,7 @@
 See: .planning/PROJECT.md (updated 2026-02-10)
 
 **Core value:** Improve codebase reliability and security by eliminating known bugs, replacing broad exception handling, hardening SQL construction, and fixing performance bottlenecks — without changing external behavior.
-**Current focus:** Phase 3 Complete — Next: Phase 4
+**Current focus:** Phase 4 Complete — Next: Phase 5
 
 ## Current Position
 
