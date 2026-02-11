@@ -1,3 +1,4 @@
+import asyncio
 from io import BytesIO
 from pathlib import Path
 
@@ -19,16 +20,19 @@ class ImageLoader(BaseLoader):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+    def _load_image(self, path: Path):
+        """Load image file, converting SVG to PNG if needed."""
+        if path.suffix.lower() == ".svg":
+            png_data = cairosvg.svg2png(url=str(path))
+            return Image.open(BytesIO(png_data))
+        else:
+            return Image.open(path)
+
     async def aload_document(self, file_path, metadata=None, save_markdown=False):
         path = Path(file_path)
 
         try:
-            # Handle SVG files by converting to PNG first
-            if path.suffix.lower() == ".svg":
-                png_data = cairosvg.svg2png(url=str(path))
-                img = Image.open(BytesIO(png_data))
-            else:
-                img = Image.open(path)
+            img = await asyncio.to_thread(self._load_image, path)
         except OSError as e:
             # File not found, permission denied, etc.
             log.error("Cannot read image file", file_path=str(path), error=str(e))
@@ -50,5 +54,5 @@ class ImageLoader(BaseLoader):
         description = await self.get_image_description(image_data=img)
         doc = Document(page_content=description, metadata=metadata)
         if save_markdown:
-            self.save_content(description, str(path))
+            await self.save_content(description, str(path))
         return doc
