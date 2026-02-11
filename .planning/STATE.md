@@ -5,21 +5,21 @@
 See: .planning/PROJECT.md (updated 2026-02-10)
 
 **Core value:** Improve codebase reliability and security by eliminating known bugs, replacing broad exception handling, hardening SQL construction, and fixing performance bottlenecks — without changing external behavior.
-**Current focus:** Phase 4 Complete — Next: Phase 5
+**Current focus:** Phase 5 In Progress — Script Health Hardening
 
 ## Current Position
 
-Phase: 4 of 6 (Async Infrastructure)
-Plan: 2 of 2 in current phase (COMPLETE)
-Status: Phase 4 Complete
-Last activity: 2026-02-11 — Phase 4 Plan 2 complete
+Phase: 5 of 6 (Script Health Hardening)
+Plan: 1 of 2 in current phase (COMPLETE)
+Status: Phase 5 In Progress
+Last activity: 2026-02-11 — Phase 5 Plan 1 complete
 
-Progress: [████████████░░░░░░░░] 12/16 plans (75%)
+Progress: [█████████████░░░░░░░] 13/16 plans (81%)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 10
+- Total plans completed: 11
 - Average duration: 3 min
 - Total execution time: 0.5 hours
 
@@ -31,10 +31,11 @@ Progress: [████████████░░░░░░░░] 12/16 p
 | 02 | 3 | 9 min | 3 min |
 | 03 | 2 | 9 min | 5 min |
 | 04 | 2 | 6 min | 3 min |
+| 05 | 1 | 2 min | 2 min |
 
 **Recent Trend:**
-- Last 5 plans: 03-01 (5 min), 03-02 (5 min), 03-03 (4 min), 04-01 (3 min), 04-02 (3 min)
-- Trend: Phase 4 complete - consistent 3 min async infrastructure work
+- Last 5 plans: 03-02 (5 min), 03-03 (4 min), 04-01 (3 min), 04-02 (3 min), 05-01 (2 min)
+- Trend: Phase 5 started - health endpoint enhancement (2 min)
 
 *Updated after each plan completion*
 
@@ -48,6 +49,7 @@ Progress: [████████████░░░░░░░░] 12/16 p
 | Phase 03 P03 | 4 min | 2 tasks | 7 files |
 | Phase 04 P01 | 3 min | 2 tasks | 7 files |
 | Phase 04 P02 | 3 min | 2 tasks | 6 files |
+| Phase 05 P01 | 2 min | 2 tasks | 1 file |
 
 ## Accumulated Context
 
@@ -91,6 +93,10 @@ Recent decisions affecting current work:
 - [Phase 04-02]: Use asyncio.to_thread pattern from media_loader.py for consistency across all loaders
 - [Phase 04-02]: Create sync helper methods for complex blocking operations (encapsulation and testability)
 - [Phase 04-02]: Use direct asyncio.to_thread for simple single-operation calls (clarity and brevity)
+- [Phase 05-01]: Use httpx.Timeout(3.0) for service health probes (simple timeout form from Phase 01 decision)
+- [Phase 05-01]: Mark LLM as critical, VLM as non-critical (VLM only for image captioning)
+- [Phase 05-01]: Probe /health endpoint on LLM and VLM services (VLLM standard)
+- [Phase 05-01]: Use asyncio.gather for concurrent probes (minimizes health check latency)
 
 ### Pending Todos
 
@@ -103,5 +109,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-11
-Stopped at: Completed 04-02-PLAN.md (async loader file I/O) - Phase 4 Complete
+Stopped at: Completed 05-01-PLAN.md (health check enhancement) - Phase 5 Plan 1 Complete
 Resume file: None
