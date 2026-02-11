@@ -5,7 +5,8 @@ def test_health_check(api_client):
     """Test health check endpoint returns OK."""
     response = api_client.get("/health_check")
     assert response.status_code == 200
-    assert "RAG API is up" in response.text
+    data = response.json()
+    assert data["status"] in ("healthy", "degraded")
 
 
 def test_openapi_docs_accessible(api_client):
