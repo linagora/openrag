@@ -243,8 +243,9 @@ async def health_check(request: Request):
     config = request.app.state.app_state.config
 
     # Probe LLM and VLM services concurrently
-    llm_base_url = config.llm.get("base_url", "")
-    vlm_base_url = config.vlm.get("base_url", "")
+    # Strip API path (e.g. /v1/) to get the service root for health probes
+    llm_base_url = config.llm.get("base_url", "").split("/v1")[0]
+    vlm_base_url = config.vlm.get("base_url", "").split("/v1")[0]
 
     results = await asyncio.gather(
         check_service_health(llm_base_url, "llm"), check_service_health(vlm_base_url, "vlm"), return_exceptions=True
