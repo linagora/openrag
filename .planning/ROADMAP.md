@@ -94,10 +94,11 @@ Plans:
   2. Restore script stops execution and rolls back on critical failures
   3. Restore script logs detailed progress with file counts and error summaries
   4. All 93 existing tests continue passing
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 05-01: [TBD during planning]
+- [ ] 05-01-PLAN.md — Enhance health check endpoint with LLM/VLM service probes and response time metrics
+- [ ] 05-02-PLAN.md — Harden restore script with rollback, progress tracking, and error summaries
 
 ### Phase 6: Configuration Cleanup
 **Goal**: Remove technical debt from configuration and legacy compatibility code
