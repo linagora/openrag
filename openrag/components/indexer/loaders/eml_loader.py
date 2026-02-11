@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import email
 import email.errors
@@ -28,10 +29,20 @@ class EmlLoader(BaseLoader):
         # Get available loaders for processing attachments
         self.loader_classes = get_loader_classes(config=self.config)
 
+    def _read_file_bytes(self, file_path):
+        """Read file bytes (blocking operation for thread pool)."""
+        with open(file_path, "rb") as fhdl:
+            return fhdl.read()
+
+    def _write_temp_file(self, suffix, data):
+        """Write temp file (blocking operation for thread pool)."""
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+            temp_file.write(data)
+            return temp_file.name
+
     async def aload_document(self, file_path, metadata: dict | None = None, save_markdown: bool = False):
         try:
-            with open(file_path, "rb") as fhdl:
-                raw_email = fhdl.read()
+            raw_email = await asyncio.to_thread(self._read_file_bytes, file_path)
 
             # Parse email using standard email library
             email_msg = email.message_from_bytes(raw_email)
@@ -131,9 +142,9 @@ class EmlLoader(BaseLoader):
 
                             if loader_cls:
                                 # Save attachment to temporary file
-                                with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_file:
-                                    temp_file.write(attachment["raw"])
-                                    temp_file_path = temp_file.name
+                                temp_file_path = await asyncio.to_thread(
+                                    self._write_temp_file, file_ext, attachment["raw"]
+                                )
 
                                 try:
                                     # Use appropriate loader to process attachment
@@ -236,8 +247,8 @@ class EmlLoader(BaseLoader):
                                             attachments_text += f"Text fallback failed: {str(text_e)[:100]}...\n"
                                 finally:
                                     # Clean up temporary file
-                                    if os.path.exists(temp_file_path):
-                                        os.unlink(temp_file_path)
+                                    if await asyncio.to_thread(os.path.exists, temp_file_path):
+                                        await asyncio.to_thread(os.unlink, temp_file_path)
 
                             # Special handling for images with captioning if no specific loader or captioning is enabled
                             elif file_ext in [
@@ -321,10 +332,8 @@ class EmlLoader(BaseLoader):
 
             # Save content body to a file if requested
             if save_markdown:
-                markdown_path = Path(file_path).with_suffix(".md")
-                with open(markdown_path, "w", encoding="utf-8") as md_file:
-                    md_file.write(content_body)
-                metadata["markdown_path"] = str(markdown_path)
+                await self.save_content(content_body, str(file_path))
+                metadata["markdown_path"] = str(Path(file_path).with_suffix(".md"))
         except OSError as e:
             # File I/O error reading email file
             raise ValueError(f"Cannot read email file: {e}")
