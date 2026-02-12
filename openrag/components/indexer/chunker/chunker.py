@@ -79,7 +79,7 @@ class ChunkContextualizer:
                 logger.error("VLM context generation failed", error=str(e))
                 return ""
 
-            except Exception as e:
+            except Exception:
                 # Unexpected errors - log but still gracefully degrade
                 logger.exception("Unexpected error during context generation")
                 return ""
@@ -132,7 +132,7 @@ class ChunkContextualizer:
                 for chunk, context in zip(chunks, contexts, strict=True)
             ]
 
-        except Exception as e:
+        except Exception:
             logger.exception("Error contextualizing chunks", filename=filename)
             return chunks
 

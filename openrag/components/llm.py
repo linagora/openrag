@@ -3,6 +3,7 @@ import copy
 import json
 
 import httpx
+from utils.exceptions.common import UnexpectedError
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -79,9 +80,8 @@ class LLM:
                     raise
 
                 except Exception as e:
-                    # Truly unexpected errors
                     logger.exception("Unexpected error during LLM streaming")
-                    raise RuntimeError("An unexpected error occurred during streaming")
+                    raise UnexpectedError("An unexpected error occurred during streaming") from e
 
             else:  # Handle non-streaming response
                 try:

@@ -4,6 +4,7 @@ from infinity_client import Client
 from infinity_client.api.default import rerank
 from infinity_client.models import RerankInput, ReRankResult
 from langchain_core.documents.base import Document
+from utils.exceptions.common import UnexpectedError
 
 
 class Reranker:
@@ -38,6 +39,5 @@ class Reranker:
                 return output
 
             except Exception as e:
-                # Model-specific errors (depends on reranker implementation)
                 self.logger.exception("Reranking failed", query=query[:100], doc_count=len(documents))
-                raise RuntimeError("An unexpected error occurred during reranking")
+                raise UnexpectedError("An unexpected error occurred during reranking") from e
