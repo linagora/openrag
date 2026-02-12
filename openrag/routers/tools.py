@@ -118,15 +118,6 @@ async def execute_tool(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Tool {tool['name']} not found",
             )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Failed during tool execution.", extra={"error": str(e)})
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Tool execution failed due to an internal error.",
-        )
     finally:
         # Cleanup of the temporary file
         if file_path is not None:
