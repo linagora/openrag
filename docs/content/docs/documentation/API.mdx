@@ -202,6 +202,9 @@ Perform semantic search across specified partitions.
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
+| `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering (optional). Supports comparison, range, and logical operators. |
+| `filter_params` (optional)     | object  | None    | Dictionary of parameter values for templated filters. Use with placeholders in filter expression for better performance. |
+
 
 **Responses:**
 - `200 OK`: JSON list of document links (HATEOAS format)
@@ -223,6 +226,8 @@ Search within a specific partition only.
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
+| `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering (optional). Supports comparison, range, and logical operators. |
+| `filter_params` (optional)     | object  | None    | Dictionary of parameter values for templated filters. Use with placeholders in filter expression for better performance. |
 
 **Response:** Same as multi-partition search
 
@@ -233,7 +238,7 @@ GET /search/partition/{partition}/file/{file_id}
 
 Search within a particular file in a partition.
 
-**Query Parameters:** Same as partition search
+**Query Parameters:** Same as partition search, including `filter` and `filter_params`.
 **Response:** Same as other search endpoints
 
 ---

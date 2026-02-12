@@ -443,9 +443,10 @@ class MilvusDB(BaseVectorDB):
         self,
         query: str,
         top_k: int = 5,
-        similarity_threshold: int = 0.80,
+        similarity_threshold: float = 0.80,
         partition: list[str] = None,
-        filter: dict | None = None,
+        filter: str | None = None,
+        filter_params: dict | None = None,
         with_surrounding_chunks: bool = False,
     ) -> list[Document]:
         expr_parts = []
@@ -453,11 +454,11 @@ class MilvusDB(BaseVectorDB):
             expr_parts.append(f"partition in {partition}")
 
         if filter:
-            for key, value in filter.items():
-                expr_parts.append(f"{key} == '{value}'")
+            expr_parts.append(filter)
 
         # Join all parts with " and " only if there are multiple conditions
         expr = " and ".join(expr_parts) if expr_parts else ""
+        filter_params = filter_params or {}
 
         try:
             query_vector = await self.embedder.aembed_query(query)
@@ -474,6 +475,7 @@ class MilvusDB(BaseVectorDB):
                 },
                 "limit": top_k,
                 "expr": expr,
+                "expr_params": filter_params,
             }
             if self.hybrid_search:
                 sparse_param = {
@@ -485,6 +487,7 @@ class MilvusDB(BaseVectorDB):
                     },
                     "limit": top_k,
                     "expr": expr,
+                    "expr_params": filter_params,
                 }
                 reqs = [
                     AnnSearchRequest(**vector_param),
@@ -496,12 +499,12 @@ class MilvusDB(BaseVectorDB):
                     ranker=RRFRanker(100),
                     output_fields=["*"],
                     limit=top_k,
+                    expr_params=filter_params,
                 )
             else:
                 response = await self._async_client.search(
                     collection_name=self.collection_name,
                     output_fields=["*"],
-                    limit=top_k,
                     **vector_param,
                 )
 

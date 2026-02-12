@@ -225,12 +225,12 @@ class Indexer:
         self,
         query: str,
         top_k: int = 5,
-        similarity_threshold: float = 0.80,
+        similarity_threshold: float = 0.60,
         partition: str | list[str] | None = None,
-        filter: dict | None = None,
+        filter: str | None = None,
+        filter_params: dict | None = None,
     ) -> list[Document]:
         partition_list = self._check_partition_list(partition)
-        filter = filter or {}
         vectordb = ray.get_actor("Vectordb", namespace="openrag")
         return await vectordb.async_search.remote(
             query=query,
@@ -238,6 +238,7 @@ class Indexer:
             top_k=top_k,
             similarity_threshold=similarity_threshold,
             filter=filter,
+            filter_params=filter_params,
         )
 
     def _check_partition_str(self, partition: str | None) -> str:
