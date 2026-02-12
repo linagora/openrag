@@ -3,6 +3,7 @@ from typing import Any
 
 import ray
 from ray.exceptions import RayTaskError, TaskCancelledError
+from utils.exceptions.common import RayActorError
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -33,7 +34,7 @@ async def call_ray_actor_with_timeout(
         TimeoutError: If the task exceeds the timeout
         asyncio.CancelledError: If the calling coroutine is cancelled
         TaskCancelledError: If the Ray task was cancelled
-        RuntimeError: If the Ray task failed with an error
+        RayActorError: If the Ray task failed with an error
     """
     try:
         result = await asyncio.wait_for(asyncio.gather(future), timeout=timeout)
@@ -54,4 +55,4 @@ async def call_ray_actor_with_timeout(
         raise
 
     except RayTaskError as e:
-        raise RuntimeError(f"{task_description} failed") from e
+        raise RayActorError(f"{task_description} failed") from e

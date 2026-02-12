@@ -2,6 +2,7 @@ from typing import Literal
 
 import openai
 from components.indexer.utils.text_sanitizer import sanitize_text
+from utils.exceptions.base import OpenRAGError
 from components.prompts import CHUNK_CONTEXTUALIZER_PROMPT
 from components.utils import detect_language, get_vlm_semaphore, load_config
 from langchain_core.documents.base import Document
@@ -79,7 +80,7 @@ class ChunkContextualizer:
                 logger.error("VLM context generation failed", error=str(e))
                 return ""
 
-            except Exception as e:
+            except Exception:
                 # Unexpected errors - log but still gracefully degrade
                 logger.exception("Unexpected error during context generation")
                 return ""
@@ -132,7 +133,9 @@ class ChunkContextualizer:
                 for chunk, context in zip(chunks, contexts, strict=True)
             ]
 
-        except Exception as e:
+        except OpenRAGError:
+            raise
+        except Exception:
             logger.exception("Error contextualizing chunks", filename=filename)
             return chunks
 

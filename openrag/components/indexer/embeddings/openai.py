@@ -32,7 +32,7 @@ class OpenAIEmbedding(BaseEmbedding):
             logger.error("Invalid embedding response format", error=str(e))
             raise EmbeddingResponseError("Unexpected response format", error=str(e))
 
-        except Exception as e:
+        except Exception:
             logger.exception("Unexpected error getting embedding dimension")
             raise UnexpectedEmbeddingError("An unexpected error occurred")
 

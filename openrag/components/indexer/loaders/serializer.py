@@ -5,6 +5,7 @@ import ray
 import torch
 from config import load_config
 from langchain_core.documents.base import Document
+from utils.exceptions.common import FileStorageError, UnexpectedError
 
 from . import get_loader_classes
 
@@ -85,10 +86,8 @@ class DocSerializer:
             log.info("Document serialized successfully")
             return doc
         except OSError as e:
-            # File operation failed (file not found, permission denied, etc.)
             log.error("File operation failed during serialization", path=str(path), error=str(e))
-            raise RuntimeError(f"Cannot read file: {e}")
+            raise FileStorageError(f"Cannot read file: {e}") from e
         except Exception as e:
-            # Loader-specific errors or unexpected failures
             log.exception("Failed to serialize document", path=str(path), file_type=file_ext, error=str(e))
-            raise RuntimeError("Failed to serialize document: unsupported format or corrupted file")
+            raise UnexpectedError("Failed to serialize document: unsupported format or corrupted file") from e

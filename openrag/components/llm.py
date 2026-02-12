@@ -3,6 +3,7 @@ import copy
 import json
 
 import httpx
+from utils.exceptions.common import UnexpectedError
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -38,10 +39,10 @@ class LLM:
                 data = response.json()
                 yield data
             except httpx.HTTPStatusError as e:
-                error_detail = e.response.text
-                raise ValueError(f"LLM API error ({e.response.status_code}): {error_detail}")
+                logger.error("LLM API returned error", status_code=e.response.status_code)
+                raise UnexpectedError(f"LLM API error ({e.response.status_code})") from e
             except json.JSONDecodeError as e:
-                raise ValueError(f"Invalid JSON in API response: {str(e)}")
+                raise UnexpectedError("Invalid JSON in LLM API response") from e
 
     async def chat_completion(self, request: dict):
         request.pop("model")
@@ -71,17 +72,16 @@ class LLM:
                 except httpx.HTTPStatusError as e:
                     # 4xx/5xx responses
                     logger.error("LLM API returned error", status_code=e.response.status_code)
-                    raise
+                    raise UnexpectedError(f"LLM API error ({e.response.status_code})") from e
 
                 except httpx.RequestError as e:
                     # Network/connection failures
                     logger.error("Network error during LLM streaming", error=str(e))
-                    raise
+                    raise UnexpectedError("Network error during LLM streaming") from e
 
                 except Exception as e:
-                    # Truly unexpected errors
                     logger.exception("Unexpected error during LLM streaming")
-                    raise RuntimeError("An unexpected error occurred during streaming")
+                    raise UnexpectedError("An unexpected error occurred during streaming") from e
 
             else:  # Handle non-streaming response
                 try:
@@ -94,7 +94,7 @@ class LLM:
                     data = response.json()
                     yield data
                 except httpx.HTTPStatusError as e:
-                    error_detail = e.response.text
-                    raise ValueError(f"LLM API error ({e.response.status_code}): {error_detail}")
+                    logger.error("LLM API returned error", status_code=e.response.status_code)
+                    raise UnexpectedError(f"LLM API error ({e.response.status_code})") from e
                 except json.JSONDecodeError as e:
-                    raise ValueError(f"Invalid JSON in API response: {str(e)}")
+                    raise UnexpectedError("Invalid JSON in LLM API response") from e

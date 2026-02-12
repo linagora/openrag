@@ -152,7 +152,7 @@ class PartitionFileManager:
             AUTH_TOKEN = os.getenv("AUTH_TOKEN")
             self._ensure_admin_user(AUTH_TOKEN)
 
-        except Exception as e:
+        except Exception:
             raise VDBConnectionError(
                 "An unexpected database error occurred",
                 db_url=str(database_url),

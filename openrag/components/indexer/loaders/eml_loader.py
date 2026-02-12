@@ -9,6 +9,7 @@ from pathlib import Path
 
 from langchain_core.documents.base import Document
 from PIL import Image, UnidentifiedImageError
+from utils.exceptions.common import FileStorageError, UnexpectedError
 
 from . import get_loader_classes
 from .base import BaseLoader
@@ -327,13 +328,13 @@ class EmlLoader(BaseLoader):
                 metadata["markdown_path"] = str(markdown_path)
         except OSError as e:
             # File I/O error reading email file
-            raise ValueError(f"Cannot read email file: {e}")
+            raise FileStorageError(f"Cannot read email file: {e}") from e
         except email.errors.MessageError as e:
             # Email parsing error
-            raise ValueError(f"Invalid email format: {e}")
+            raise UnexpectedError(f"Invalid email format: {e}") from e
         except Exception as e:
             # Unexpected error
-            raise ValueError(f"Failed to parse the EML file {file_path}: {e}")
+            raise UnexpectedError(f"Failed to parse the EML file {file_path}: {e}") from e
 
         document = Document(page_content=content_body, metadata=metadata)
         return document

@@ -9,6 +9,7 @@ import torch
 from config import load_config
 from langchain_core.documents.base import Document
 from marker.converters.pdf import PdfConverter
+from utils.exceptions.common import FileStorageError, UnexpectedError
 from utils.logger import get_logger
 
 from ..base import BaseLoader
@@ -107,13 +108,11 @@ class MarkerWorker:
             logger.info("PDF processing cancelled", path=file_path)
             raise
         except OSError as e:
-            # File I/O error
             logger.error("Cannot read PDF file", path=file_path, error=str(e))
-            raise RuntimeError(f"Cannot read PDF file: {e}")
+            raise FileStorageError(f"Cannot read PDF file: {e}") from e
         except Exception as e:
-            # Marker library errors or unexpected failures
             logger.exception("Error processing PDF", path=file_path, error=str(e))
-            raise RuntimeError("Failed to process PDF document")
+            raise UnexpectedError("Failed to process PDF document") from e
         finally:
             gc.collect()
             if torch.cuda.is_available():
@@ -133,7 +132,7 @@ class MarkerWorker:
                 return result
             except MPTimeoutError:
                 self.logger.exception("MarkerWorker child process timed out", path=file_path)
-                raise RuntimeError(f"PDF processing timed out")
+                raise UnexpectedError("PDF processing timed out")
             except asyncio.CancelledError:
                 # Cancellation - propagate
                 self.logger.info("PDF processing cancelled", path=file_path)
@@ -242,7 +241,7 @@ class MarkerLoader(BaseLoader):
             )
 
             if not markdown:
-                raise RuntimeError(f"Conversion failed for {file_path_str}")
+                raise UnexpectedError(f"Conversion failed for {file_path_str}")
 
             if self.image_captioning:
                 keys = list(images.keys())
@@ -271,9 +270,8 @@ class MarkerLoader(BaseLoader):
             logger.info("PDF loading cancelled", path=file_path_str)
             raise
         except OSError as e:
-            # File I/O error
             logger.error("Cannot read PDF file", path=file_path_str, error=str(e))
-            raise RuntimeError(f"Cannot read PDF file: {e}")
+            raise FileStorageError(f"Cannot read PDF file: {e}") from e
         except Exception:
             # Ray actor errors or PDF processing failures
             logger.exception("Error in aload_document", path=file_path_str)

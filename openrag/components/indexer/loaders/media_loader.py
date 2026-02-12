@@ -7,7 +7,7 @@ import librosa
 import numpy as np
 from components.utils import get_audio_semaphore
 from langchain_core.documents.base import Document
-from openai import AsyncOpenAI, APIError
+from openai import APIError, AsyncOpenAI
 from pydub import AudioSegment, silence
 from tqdm.asyncio import tqdm
 from utils.logger import get_logger

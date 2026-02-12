@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import binascii
 import re
 from abc import ABC, abstractmethod
 from io import BytesIO
