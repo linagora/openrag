@@ -233,9 +233,10 @@ async def on_message(message: cl.Message):
             # Stream the response using OpenAI client directly
             stream = await client.chat.completions.create(**data)
             async for chunk in stream:
-                if sources is None:
+                if chunk.extra:
                     extra = json.loads(chunk.extra)
-                    sources = extra["sources"]
+                    if "sources" in extra:
+                        sources = extra["sources"]
 
                 if chunk.choices and chunk.choices[0].delta.content:
                     token = chunk.choices[0].delta.content
