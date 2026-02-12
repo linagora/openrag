@@ -26,7 +26,7 @@ def api_client():
     headers = {}
     if is_auth_enabled():
         headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
-    with httpx.Client(base_url=API_BASE_URL, timeout=30.0, headers=headers) as client:
+    with httpx.Client(base_url=API_BASE_URL, timeout=60.0, headers=headers) as client:
         yield client
 
 
@@ -59,7 +59,7 @@ def created_user(api_client):
 def user_client(created_user):
     """Create HTTP client authenticated as the created regular user."""
     headers = {"Authorization": f"Bearer {created_user['token']}"}
-    with httpx.Client(base_url=API_BASE_URL, timeout=30.0, headers=headers) as client:
+    with httpx.Client(base_url=API_BASE_URL, timeout=60.0, headers=headers) as client:
         yield client
 
 
@@ -122,6 +122,56 @@ def created_partition(api_client, test_partition_name):
         api_client.delete(f"/partition/{test_partition_name}")
     except Exception:
         pass
+
+
+TASK_TIMEOUT = 180  # 3 minutes for file processing
+
+
+def wait_for_task(
+    api_client,
+    task_id: str,
+    timeout: int = TASK_TIMEOUT,
+    headers: dict | None = None,
+) -> dict:
+    """Wait for task completion, polling status endpoint.
+
+    Handles 404 responses gracefully as task may not be registered yet.
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        response = api_client.get(f"/indexer/task/{task_id}", headers=headers)
+
+        # Task might not be registered yet, retry on 404
+        if response.status_code == 404:
+            time.sleep(0.5)
+            continue
+
+        if response.status_code != 200:
+            raise AssertionError(f"Task status failed: {response.text}")
+
+        status = response.json()
+        state = (status.get("task_state") or "").upper()
+
+        if state in {"COMPLETED", "SUCCESS"}:
+            return status
+        elif state in {"FAILED", "FAILURE"}:
+            raise AssertionError(f"Task failed: {status}")
+
+        time.sleep(1)
+
+    raise TimeoutError(f"Task {task_id} did not complete within {timeout}s")
+
+
+def wait_for_indexing(api_client, response_data: dict, timeout: int = TASK_TIMEOUT):
+    """Wait for file indexing task to complete, extracting task_id from response."""
+    if "task_id" in response_data:
+        return wait_for_task(api_client, response_data["task_id"], timeout)
+    elif "task_status_url" in response_data:
+        # Extract task_id from URL like http://host/indexer/task/{task_id}
+        task_id = response_data["task_status_url"].split("/")[-1]
+        return wait_for_task(api_client, task_id, timeout)
+    else:
+        time.sleep(5)
 
 
 @pytest.fixture

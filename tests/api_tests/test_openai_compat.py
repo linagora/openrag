@@ -1,11 +1,13 @@
 """OpenAI-compatible API tests."""
 
+import json
 import time
 import uuid
 
 import pytest
 
 from . import conftest
+from .conftest import wait_for_indexing
 
 
 class TestOpenAICompatibleAPI:
@@ -77,6 +79,159 @@ class TestOpenAICompatibleAPI:
         assert response.status_code == 413
         body = response.json()
         assert "exceeds maximum token limit" in body["detail"].lower()
+
+
+class TestSourceFiltering:
+    """Test source citation filtering in chat completion responses.
+
+    These tests require a partition with indexed documents so the RAG pipeline
+    produces numbered [Source N] context and the mock LLM appends [Sources: 1].
+    """
+
+    @pytest.fixture(scope="class")
+    def indexed_partition(self, api_client, tmp_path_factory):
+        """Create a partition with an indexed file, shared across all tests in the class."""
+        partition = f"test-src-filter-{uuid.uuid4().hex[:8]}"
+        response = api_client.post(f"/partition/{partition}")
+        assert response.status_code in [200, 201], f"Failed to create partition: {response.text}"
+
+        content = "This is a test document about artificial intelligence and machine learning.\n"
+        file_path = tmp_path_factory.mktemp("source_filter") / "test_doc.txt"
+        file_path.write_text(content)
+
+        with open(file_path, "rb") as f:
+            response = api_client.post(
+                f"/indexer/partition/{partition}/file/source-filter-doc",
+                files={"file": ("test.txt", f, "text/plain")},
+                data={"metadata": "{}"},
+            )
+        assert response.status_code in [200, 201, 202]
+        wait_for_indexing(api_client, response.json())
+
+        yield partition
+
+        try:
+            api_client.delete(f"/partition/{partition}")
+        except Exception:
+            pass
+
+    def test_non_streaming_sources_stripped_from_content(self, api_client, indexed_partition):
+        """Non-streaming: [Sources: ...] block should be stripped from response content."""
+        response = api_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": f"openrag-{indexed_partition}",
+                "messages": [{"role": "user", "content": "Tell me about machine learning"}],
+                "stream": False,
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+
+        # Content should not contain the [Sources: ...] block
+        content = data["choices"][0]["message"]["content"]
+        assert "[Sources:" not in content, f"Sources block should be stripped, got: {content!r}"
+
+    def test_non_streaming_extra_has_filtered_sources(self, api_client, indexed_partition):
+        """Non-streaming: extra field should contain filtered source list."""
+        response = api_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": f"openrag-{indexed_partition}",
+                "messages": [{"role": "user", "content": "Tell me about machine learning"}],
+                "stream": False,
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+
+        assert "extra" in data
+        extra = json.loads(data["extra"])
+        assert "sources" in extra
+        assert isinstance(extra["sources"], list)
+        assert len(extra["sources"]) > 0, "Should have at least one filtered source"
+
+    def test_streaming_content_clean(self, api_client, indexed_partition):
+        """Streaming: accumulated content should not contain [Sources: ...] block."""
+        with api_client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={
+                "model": f"openrag-{indexed_partition}",
+                "messages": [{"role": "user", "content": "Tell me about machine learning"}],
+                "stream": True,
+            },
+        ) as response:
+            assert response.status_code == 200
+
+            full_content = ""
+            for line in response.iter_lines():
+                if not line.startswith("data:"):
+                    continue
+                if "[DONE]" in line:
+                    break
+                chunk = json.loads(line[len("data: ") :])
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                if delta.get("content"):
+                    full_content += delta["content"]
+
+        assert "[Sources:" not in full_content, f"Sources block should be stripped, got: {full_content!r}"
+
+    def test_streaming_has_role_delta(self, api_client, indexed_partition):
+        """Streaming: first chunk should contain role delta."""
+        with api_client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={
+                "model": f"openrag-{indexed_partition}",
+                "messages": [{"role": "user", "content": "Tell me about machine learning"}],
+                "stream": True,
+            },
+        ) as response:
+            saw_role = False
+            for line in response.iter_lines():
+                if not line.startswith("data:"):
+                    continue
+                if "[DONE]" in line:
+                    break
+                chunk = json.loads(line[len("data: ") :])
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                if "role" in delta:
+                    saw_role = True
+                    break
+
+        assert saw_role, "Should emit a role delta chunk"
+
+    def test_streaming_has_finish_reason(self, api_client, indexed_partition):
+        """Streaming: should emit a chunk with finish_reason before DONE."""
+        with api_client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={
+                "model": f"openrag-{indexed_partition}",
+                "messages": [{"role": "user", "content": "Tell me about machine learning"}],
+                "stream": True,
+            },
+        ) as response:
+            finish_reason = None
+            finish_extra = None
+            for line in response.iter_lines():
+                if not line.startswith("data:"):
+                    continue
+                if "[DONE]" in line:
+                    break
+                chunk = json.loads(line[len("data: ") :])
+                choice = chunk.get("choices", [{}])[0]
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+                    finish_extra = chunk.get("extra")
+
+        assert finish_reason == "stop", f"Expected finish_reason='stop', got {finish_reason!r}"
+        # Finish chunk should carry filtered sources in extra
+        assert finish_extra is not None, "Finish chunk should have extra field"
+        extra = json.loads(finish_extra)
+        assert "sources" in extra
+        assert isinstance(extra["sources"], list)
 
 
 class TestChatCompletionsMultiPartition:

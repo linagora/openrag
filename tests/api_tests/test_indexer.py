@@ -6,47 +6,13 @@ from pathlib import Path
 
 import pytest
 
+from .conftest import TASK_TIMEOUT, wait_for_task
+
 # Check if image captioning is enabled (disabled in CI)
 IMAGE_CAPTIONING_ENABLED = os.environ.get("IMAGE_CAPTIONING", "").lower() not in ("false", "0", "")
 
 RESOURCES_DIR = Path(__file__).parent.parent / "resources"
 PDF_FILE = RESOURCES_DIR / "test_file.pdf"
-TASK_TIMEOUT = 180  # 3 minutes for file processing
-
-
-def wait_for_task(
-    api_client,
-    task_id: str,
-    timeout: int = TASK_TIMEOUT,
-    headers: dict | None = None,
-) -> dict:
-    """Wait for task completion, polling status endpoint.
-
-    Handles 404 responses gracefully as task may not be registered yet.
-    """
-    start = time.time()
-    while time.time() - start < timeout:
-        response = api_client.get(f"/indexer/task/{task_id}", headers=headers)
-
-        # Task might not be registered yet, retry on 404
-        if response.status_code == 404:
-            time.sleep(0.5)
-            continue
-
-        if response.status_code != 200:
-            raise AssertionError(f"Task status failed: {response.text}")
-
-        status = response.json()
-        state = status.get("task_state")
-
-        if state == "COMPLETED":
-            return status
-        elif state == "FAILED":
-            raise AssertionError(f"Task failed: {status}")
-
-        time.sleep(1)
-
-    raise TimeoutError(f"Task {task_id} did not complete within {timeout}s")
 
 
 def get_task_id(response_data: dict) -> str:

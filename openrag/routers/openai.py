@@ -5,7 +5,12 @@ from urllib.parse import quote
 
 import consts
 from components.pipeline import RagPipeline
-from components.utils import get_num_tokens
+from components.utils import (
+    extract_and_strip_sources_block,
+    filter_sources_by_citations,
+    get_num_tokens,
+    stream_with_source_filtering,
+)
 from config import load_config
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -317,27 +322,15 @@ async def openai_chat_completion(
     llm_output, docs = await ragpipe.chat_completion(partition=partitions, payload=request.model_dump())
     log.debug("RAG chat completion pipeline executed.")
 
-    metadata = __prepare_sources(request2, docs)
-    metadata_json = json.dumps({"sources": metadata})
+    sources = __prepare_sources(request2, docs)
+    all_sources_json = json.dumps({"sources": sources})
 
     if request.stream:
 
         async def stream_response():
             try:
-                async for line in llm_output:
-                    if line.startswith("data:"):
-                        if "[DONE]" in line:
-                            yield f"{line}\n\n"
-                        else:
-                            try:
-                                data_str = line[len("data: ") :]
-                                data = json.loads(data_str)
-                                data["model"] = model_name
-                                data["extra"] = metadata_json
-                                yield f"data: {json.dumps(data)}\n\n"
-                            except json.JSONDecodeError as e:
-                                log.error("Failed to decode streamed chunk.", error=str(e))
-                                raise
+                async for sse_line in stream_with_source_filtering(llm_output, sources, model_name, all_sources_json):
+                    yield sse_line
             except asyncio.CancelledError:
                 log.info("Client disconnected during streaming")
                 return
@@ -352,7 +345,13 @@ async def openai_chat_completion(
     else:
         chunk = await llm_output.__anext__()
         chunk["model"] = model_name
-        chunk["extra"] = metadata_json
+
+        content = chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+        clean_content, citations = extract_and_strip_sources_block(content)
+        chunk["choices"][0]["message"]["content"] = clean_content
+
+        filtered = filter_sources_by_citations(sources, citations)
+        chunk["extra"] = json.dumps({"sources": filtered})
         log.debug("Returning non-streaming completion chunk.")
         return JSONResponse(content=chunk)
 
@@ -419,10 +418,15 @@ async def openai_completion(
     llm_output, docs = await ragpipe.completions(partition=partitions, payload=request.model_dump())
     log.debug("RAG completion pipeline executed.")
 
-    metadata = __prepare_sources(request2, docs)
-    metadata_json = json.dumps({"sources": metadata})
+    sources = __prepare_sources(request2, docs)
 
     complete_response = await llm_output.__anext__()
-    complete_response["extra"] = metadata_json
+
+    text = complete_response.get("choices", [{}])[0].get("text", "") or ""
+    clean_text, citations = extract_and_strip_sources_block(text)
+    complete_response["choices"][0]["text"] = clean_text
+
+    filtered = filter_sources_by_citations(sources, citations)
+    complete_response["extra"] = json.dumps({"sources": filtered})
     log.debug("Returning completion response.")
     return JSONResponse(content=complete_response)

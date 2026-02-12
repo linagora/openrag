@@ -148,7 +148,8 @@ class RagPipeline:
             docs = await self.map_reduce.map(query=query, chunks=docs)
 
         # 3. Format the retrieved docs
-        context, n_docs = format_context(docs, max_context_tokens=self.max_context_tokens)
+        context, included_indices = format_context(docs, max_context_tokens=self.max_context_tokens)
+        docs = [docs[i] for i in included_indices]
 
         # 4. prepare the output
         messages: list = copy.deepcopy(messages)
@@ -164,7 +165,7 @@ class RagPipeline:
             },
         )
         payload["messages"] = messages
-        return payload, docs[:n_docs]
+        return payload, docs
 
     async def _prepare_for_completions(self, partition: list[str], payload: dict):
         prompt = payload["prompt"]
@@ -175,18 +176,19 @@ class RagPipeline:
         docs = await self.retriever_pipeline.retrieve_docs(partition=partition, query=query)
 
         # 3. Format the retrieved docs
-        context, n_docs = format_context(docs, max_context_tokens=self.max_context_tokens)
+        context, included_indices = format_context(docs, max_context_tokens=self.max_context_tokens)
+        docs = [docs[i] for i in included_indices]
 
         # 4. prepare the output
         if docs:
             prompt = f"""Given the content
             {context}
             Complete the following prompt: {prompt}
-            """
+            At the very end of your response, on a new line, list which source numbers you used: [Sources: 1, 3]"""
 
         payload["prompt"] = prompt
 
-        return payload, docs[:n_docs]
+        return payload, docs
 
     async def completions(self, partition: list[str], payload: dict):
         if partition is None:

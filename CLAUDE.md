@@ -98,6 +98,18 @@ Each file type has a dedicated loader that converts to markdown:
 - PDF/DOCX/PPTX: Extract binary image data from file, pass to VLM directly
 - Markdown: Parse image URLs from text; HTTP URLs require `IMAGE_CAPTIONING_URL=true`
 
+### Source Citation Filtering
+
+The RAG pipeline filters out false-positive sources by having the LLM self-report which sources it actually used:
+
+1. `format_context()` (`openrag/components/utils.py`) numbers each source (`[Source 1]`, `[Source 2]`, ...) in the context and returns `(formatted_text, included_indices)` — the indices track which docs fit within the token budget
+2. Prompt templates (`prompts/example1/*.txt`) instruct the LLM to append `[Sources: 1, 3, 5]` at the end of its response
+3. `extract_and_strip_sources_block()` strips this tag from the response before sending to the client
+4. `filter_sources_by_citations()` filters the source metadata to only include cited sources (falls back to all sources if none match)
+5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
+
+The `extra` field in API responses is a JSON string: `{"sources": [filtered_source_list]}`.
+
 ### API Routers (`openrag/routers/`)
 
 - `openai.py` - OpenAI-compatible `/v1/chat/completions` endpoint
@@ -224,7 +236,7 @@ Environment variables override config values (see `.env.example`).
 act -j api-tests -W .github/workflows/api_tests.yml --bind
 ```
 
-**Mock VLLM for CI:** `.github/workflows/api_tests/mock_vllm.py` provides fake embeddings and completions endpoints for testing without a real LLM.
+**Mock VLLM for CI:** `.github/workflows/api_tests/mock_vllm.py` provides fake embeddings and completions endpoints (streaming and non-streaming) for testing without a real LLM. Pydantic request models use `ConfigDict(extra="allow")` to accept vendor-specific fields like `extra_body`.
 
 ## Key Patterns
 
