@@ -1,0 +1,9 @@
+# Runtime data
+data/
+db/
+volumes/
+ray_mount/
+.cache/
+
+# Sensitive files
+.env

@@ -1,0 +1,72 @@
+# Shared infrastructure for all deployment modes
+# Usage: always include this as the base, then add a mode-specific overlay
+
+services:
+  rdb:
+    image: postgres:15
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-root}
+      - POSTGRES_USER=${POSTGRES_USER:-root}
+    volumes:
+      - ${DB_VOLUME:-./db}:/var/lib/postgresql/data
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.16
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ${MILVUS_VOLUME_DIRECTORY:-./volumes}/etcd:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - ${MILVUS_VOLUME_DIRECTORY:-./volumes}/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus:
+    image: milvusdb/milvus:v2.5.4
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - ${MILVUS_VOLUME_DIRECTORY:-./volumes}/milvus:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "${VDB_PORT:-19530}:19530"
+    depends_on:
+      - etcd
+      - minio
+
+  indexer-ui:
+    image: linagoraai/indexer-ui:latest
+    ports:
+      - "${INDEXERUI_PORT:-8067}:3000"
+    environment:
+      - API_BASE_URL=${API_BASE_URL:-http://localhost:${APP_PORT:-8080}}
+      - INCLUDE_CREDENTIALS=${INCLUDE_CREDENTIALS:-false}
+    restart: unless-stopped

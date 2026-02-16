@@ -1,0 +1,91 @@
+# Server deployment: vLLM for embeddings (GPU), reranker enabled
+# Usage: docker compose -f deploy/docker-compose.base.yaml -f deploy/docker-compose.server.yaml up -d
+
+services:
+  openrag:
+    image: linagoraai/openrag:latest
+    volumes:
+      - ${DATA_VOLUME:-./data}:/app/data
+      - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights
+      - ./ray_mount/.env:/ray_mount/.env
+      - ./ray_mount/logs:/app/logs
+    ports:
+      - ${APP_PORT:-8080}:${APP_iPORT:-8080}
+      - ${RAY_DASHBOARD_PORT:-8265}:8265
+    networks:
+      default:
+        aliases:
+          - openrag
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-root}
+    shm_size: 10.24gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      rdb:
+        condition: service_started
+      milvus:
+        condition: service_healthy
+      vllm:
+        condition: service_healthy
+
+  vllm:
+    image: vllm/vllm-openai:v0.9.2
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      default:
+        aliases:
+          - vllm
+    restart: on-failure
+    environment:
+      - HUGGING_FACE_HUB_TOKEN
+    ipc: "host"
+    volumes:
+      - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface
+    command: >
+      --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
+      --trust-remote-code
+      --task embed
+      --gpu_memory_utilization 0.3
+      --max-model-len ${MAX_MODEL_LEN:-8192}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 4
+      start_period: 90s
+
+  reranker:
+    image: michaelf34/infinity
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      default:
+        aliases:
+          - reranker
+    volumes:
+      - ${VLLM_CACHE:-/root/.cache/huggingface}:/app/.cache/huggingface
+    command: >
+      v2
+      --model-id ${RERANKER_MODEL:-Alibaba-NLP/gte-multilingual-reranker-base}
+      --port ${RERANKER_PORT:-7997}

@@ -14,7 +14,7 @@ class OpenAIEmbedding(BaseEmbedding):
         self.embedding_model = embeddings_config.get("model_name")
         self.base_url = embeddings_config.get("base_url")
         self.api_key = embeddings_config.get("api_key")
-        self.max_model_len = embeddings_config.get("max_model_len", 8192)
+        self.max_model_len = embeddings_config.get("max_model_len")
         self._sync_client = OpenAI(base_url=self.base_url, api_key=self.api_key)
 
     @property
@@ -34,11 +34,10 @@ class OpenAIEmbedding(BaseEmbedding):
             texts = [doc.page_content for doc in texts]
 
         try:
-            response = self._sync_client.embeddings.create(
-                model=self.embedding_model,
-                input=texts,
-                extra_body={"truncate_prompt_tokens": self.max_model_len},
-            )
+            kwargs = {"model": self.embedding_model, "input": texts}
+            if self.max_model_len:
+                kwargs["extra_body"] = {"truncate_prompt_tokens": self.max_model_len}
+            response = self._sync_client.embeddings.create(**kwargs)
             return [vector.embedding for vector in response.data]
 
         except openai.APIError as e:

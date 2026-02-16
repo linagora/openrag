@@ -1,0 +1,59 @@
+# Local laptop deployment: Ollama for embeddings, external LLM/VLM, no reranker
+# Usage: docker compose -f deploy/docker-compose.base.yaml -f deploy/docker-compose.local.yaml up -d
+
+services:
+  openrag:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: openrag:local
+    volumes:
+      - ./data:/app/data
+      - ./.cache/huggingface:/app/model_weights
+      - ./ray_mount/.env:/ray_mount/.env
+      - ./ray_mount/logs:/app/logs
+    ports:
+      - ${APP_PORT:-8090}:8080
+      - ${RAY_DASHBOARD_PORT:-8265}:8265
+    networks:
+      default:
+        aliases:
+          - openrag
+    env_file:
+      - .env
+    environment:
+      - APP_PORT=${APP_PORT:-8090}
+      - AUTH_TOKEN=${AUTH_TOKEN:-OpenRAG}
+      - RERANKER_ENABLED=false
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-root}
+      - MARKER_MAX_PROCESSES=1
+      - INDEXERUI_COMPOSE_FILE=true
+      - INDEXERUI_PORT=${INDEXERUI_PORT:-8067}
+      - INDEXERUI_URL=http://localhost:${INDEXERUI_PORT:-8067}
+      - RAY_DEDUP_LOGS=0
+      - RAY_ENABLE_UV_RUN_RUNTIME_ENV=0s
+      - RAY_memory_monitor_refresh_ms=0
+    shm_size: 10.24gb
+    deploy: {}
+    depends_on:
+      - milvus
+      - ollama
+
+  indexer-ui:
+    environment:
+      - API_BASE_URL=http://localhost:${APP_PORT:-8090}
+      - INCLUDE_CREDENTIALS=true
+
+  ollama:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.ollama
+    image: openrag-ollama:local
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:

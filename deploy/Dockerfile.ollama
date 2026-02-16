@@ -1,0 +1,4 @@
+FROM ollama/ollama:latest
+
+# Pre-pull the embedding model at build time (no runtime download needed)
+RUN bash -c 'ollama serve & sleep 5 && ollama pull qwen3-embedding:4b; pkill ollama; true'
