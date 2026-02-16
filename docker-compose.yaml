@@ -77,7 +77,6 @@ services:
   # GPU - default
   openrag:
     <<: *openrag_template
-    gpus: all
     runtime: nvidia
     environment:
      - NVIDIA_VISIBLE_DEVICES=all
@@ -126,7 +125,6 @@ services:
   vllm-gpu:
     <<: *vllm_template
     image: vllm/vllm-openai:v0.9.2
-    gpus: all
     environment:
       <<: *vllm_env
       NVIDIA_VISIBLE_DEVICES: all
