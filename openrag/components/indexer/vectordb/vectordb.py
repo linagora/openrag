@@ -235,7 +235,7 @@ class MilvusDB(BaseVectorDB):
                     database=f"partitions_for_collection_{self.collection_name}",
                 )
                 self.partition_file_manager = PartitionFileManager(
-                    database_url=database_url,
+                    database_url=database_url.render_as_string(hide_password=False),
                     logger=self.logger,
                 )
                 self.logger.info("Milvus collection loaded.")
