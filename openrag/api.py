@@ -195,6 +195,16 @@ async def openrag_exception_handler(request: Request, exc: OpenRAGError):
     return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger = get_logger()
+    logger.exception("Unhandled exception", error=str(exc))
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "[UNEXPECTED_ERROR]: An unexpected error occurred", "extra": {}},
+    )
+
+
 # Add CORS middleware
 allow_origins = [
     "http://localhost:3042",

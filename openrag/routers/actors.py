@@ -51,24 +51,17 @@ Returns list of all Ray actors with:
 )
 async def list_ray_actors():
     """List all known Ray actors and their status."""
-    try:
-        actors = [
-            {
-                "actor_id": a.actor_id,
-                "name": a.name,
-                "class_name": a.class_name,
-                "state": a.state,
-                "namespace": a.ray_namespace,
-            }
-            for a in list_actors()
-        ]
-        return JSONResponse(status_code=status.HTTP_200_OK, content={"actors": actors})
-    except Exception:
-        logger.exception("Error getting actor summaries")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve actor summaries.",
-        )
+    actors = [
+        {
+            "actor_id": a.actor_id,
+            "name": a.name,
+            "class_name": a.class_name,
+            "state": a.state,
+            "namespace": a.ray_namespace,
+        }
+        for a in list_actors()
+    ]
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"actors": actors})
 
 
 @router.post(
@@ -116,29 +109,16 @@ async def restart_actor(
         logger.info(f"Killed actor: {actor_name}")
     except ValueError:
         logger.warning("Actor not found. Creating new instance.", actor=actor_name)
-    except Exception as e:
-        logger.exception("Failed to kill actor", actor=actor_name)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to kill actor {actor_name}: {e!s}",
-        )
 
-    try:
-        new_actor = actor_creation_map[actor_name]()
-        if "Semaphore" in actor_name:
-            new_actor = new_actor._actor
-        logger.info(f"Restarted actor: {actor_name}")
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "message": f"Actor {actor_name} restarted successfully.",
-                "actor_name": actor_name,
-                "actor_id": new_actor._actor_id.hex(),
-            },
-        )
-    except Exception as e:
-        logger.exception("Failed to restart actor", actor=actor_name)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to restart actor {actor_name}: {e!s}",
-        )
+    new_actor = actor_creation_map[actor_name]()
+    if "Semaphore" in actor_name:
+        new_actor = new_actor._actor
+    logger.info(f"Restarted actor: {actor_name}")
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "message": f"Actor {actor_name} restarted successfully.",
+            "actor_name": actor_name,
+            "actor_id": new_actor._actor_id.hex(),
+        },
+    )

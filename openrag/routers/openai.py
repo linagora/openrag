@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from urllib.parse import quote
@@ -11,6 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.documents.base import Document
 from models.openai import OpenAIChatCompletionRequest, OpenAICompletionRequest
 from utils.dependencies import get_vectordb
+from utils.exceptions.base import OpenRAGError
 from utils.logger import get_logger
 
 from .utils import (
@@ -37,6 +39,19 @@ _max_model_tokens: int | None = None
 async def _cache_max_model_tokens():
     global _max_model_tokens
     _max_model_tokens = await _fetch_max_model_tokens()
+
+
+def _make_sse_error(message: str, code: str) -> str:
+    """Format an error as an SSE data chunk for streaming responses."""
+    chunk = {
+        "error": {
+            "message": message,
+            "type": "error",
+            "param": None,
+            "code": code,
+        }
+    }
+    return f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n"
 
 
 @router.get(
@@ -293,25 +308,14 @@ async def openai_chat_completion(
         truncate(str(request.messages)),
     )
 
-    try:
-        if is_direct_llm_model(request):
-            partitions = None
-        else:
-            partitions = await get_partition_name(model_name, user_partitions, is_admin=user["is_admin"])
-            log.debug(f"Using partitions: {partitions}")
-    except Exception as e:
-        log.warning("Invalid model or partition", error=str(e))
-        raise
+    if is_direct_llm_model(request):
+        partitions = None
+    else:
+        partitions = await get_partition_name(model_name, user_partitions, is_admin=user["is_admin"])
+        log.debug(f"Using partitions: {partitions}")
 
-    try:
-        llm_output, docs = await ragpipe.chat_completion(partition=partitions, payload=request.model_dump())
-        log.debug("RAG chat completion pipeline executed.")
-    except Exception as e:
-        log.exception("Chat completion failed.", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Chat completion failed: {e!s}",
-        )
+    llm_output, docs = await ragpipe.chat_completion(partition=partitions, payload=request.model_dump())
+    log.debug("RAG chat completion pipeline executed.")
 
     metadata = __prepare_sources(request2, docs)
     metadata_json = json.dumps({"sources": metadata})
@@ -334,33 +338,23 @@ async def openai_chat_completion(
                             except json.JSONDecodeError as e:
                                 log.error("Failed to decode streamed chunk.", error=str(e))
                                 raise
+            except asyncio.CancelledError:
+                log.info("Client disconnected during streaming")
+                return
+            except OpenRAGError as e:
+                log.warning("OpenRAG error during streaming", code=e.code, error=e.message)
+                yield _make_sse_error(e.message, e.code)
             except Exception as e:
-                log.warning("Error while generating streaming answer", error=str(e))
-                error_chunk = {
-                    "error": {
-                        "message": f"Error while generating answer: {str(e)}",
-                        "type": "error",
-                        "param": None,
-                        "code": "ERROR_ANSWER_GENERATION",
-                    }
-                }
-                yield f"data: {json.dumps(error_chunk)}\n\n"
-                yield "data: [DONE]\n\n"
+                log.warning("Error during streaming", error=str(e))
+                yield _make_sse_error("An unexpected error occurred during streaming", "UNEXPECTED_ERROR")
 
         return StreamingResponse(stream_response(), media_type="text/event-stream")
     else:
-        try:
-            chunk = await llm_output.__anext__()
-            chunk["model"] = model_name
-            chunk["extra"] = metadata_json
-            log.debug("Returning non-streaming completion chunk.")
-            return JSONResponse(content=chunk)
-        except Exception as e:
-            log.warning("Error while generating answer", error=str(e))
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error while generating answer: {e!s}",
-            )
+        chunk = await llm_output.__anext__()
+        chunk["model"] = model_name
+        chunk["extra"] = metadata_json
+        log.debug("Returning non-streaming completion chunk.")
+        return JSONResponse(content=chunk)
 
 
 @router.post(
@@ -417,37 +411,18 @@ async def openai_completion(
 
     check_tokens_limit(request, log)
 
-    try:
-        if is_direct_llm_model(request):
-            partitions = None
-        else:
-            partitions = await get_partition_name(model_name, user_partitions, is_admin=user["is_admin"])
+    if is_direct_llm_model(request):
+        partitions = None
+    else:
+        partitions = await get_partition_name(model_name, user_partitions, is_admin=user["is_admin"])
 
-    except Exception as e:
-        log.warning(f"Invalid model or partition: {e}")
-        raise
-
-    try:
-        llm_output, docs = await ragpipe.completions(partition=partitions, payload=request.model_dump())
-        log.debug("RAG completion pipeline executed.")
-    except Exception as e:
-        log.exception("Completion request failed.", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Completion failed: {e!s}",
-        )
+    llm_output, docs = await ragpipe.completions(partition=partitions, payload=request.model_dump())
+    log.debug("RAG completion pipeline executed.")
 
     metadata = __prepare_sources(request2, docs)
     metadata_json = json.dumps({"sources": metadata})
 
-    try:
-        complete_response = await llm_output.__anext__()
-        complete_response["extra"] = metadata_json
-        log.debug("Returning completion response.")
-        return JSONResponse(content=complete_response)
-    except Exception as e:
-        log.warning("No response from LLM.", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"No response from LLM: {e!s}",
-        )
+    complete_response = await llm_output.__anext__()
+    complete_response["extra"] = metadata_json
+    log.debug("Returning completion response.")
+    return JSONResponse(content=complete_response)

@@ -48,31 +48,23 @@ async def get_extract(
     user_partitions=Depends(current_user_or_admin_partitions_list),
 ):
     log = logger.bind(extract_id=extract_id)
-    try:
-        chunk = await vectordb.get_chunk_by_id.remote(extract_id)
-        if chunk is None:
-            log.warning("Extract not found.")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Extract '{extract_id}' not found.",
-            )
-        chunk_partition = chunk.metadata["partition"]
-        log.info(f"User partitions: {user_partitions}, Chunk partition: {chunk_partition}")
-        if chunk_partition not in user_partitions and user_partitions != ["all"]:
-            log.warning("User does not have access to this extract.")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"User does not have access to extract '{extract_id}'.",
-            )
-        log.info("Extract successfully retrieved.")
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.exception("Failed to retrieve extract.", error=str(e))
+
+    chunk = await vectordb.get_chunk_by_id.remote(extract_id)
+    if chunk is None:
+        log.warning("Extract not found.")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve extract: {e!s}",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Extract '{extract_id}' not found.",
         )
+    chunk_partition = chunk.metadata["partition"]
+    log.info(f"User partitions: {user_partitions}, Chunk partition: {chunk_partition}")
+    if chunk_partition not in user_partitions and user_partitions != ["all"]:
+        log.warning("User does not have access to this extract.")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"User does not have access to extract '{extract_id}'.",
+        )
+    log.info("Extract successfully retrieved.")
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,

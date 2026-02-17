@@ -125,13 +125,6 @@ async def add_file(
     user=Depends(require_partition_editor),
     _quota_check=Depends(check_user_file_quota),
 ):
-    log = logger.bind(
-        file_id=file_id,
-        partition=partition,
-        filename=file.filename,
-        user=user.get("display_name"),
-    )
-
     if await vectordb.file_exists.remote(file_id, partition):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -139,16 +132,9 @@ async def add_file(
         )
 
     save_dir = Path(DATA_DIR)
-    try:
-        original_filename = file.filename
-        file.filename = sanitize_filename(file.filename)
-        file_path = await save_file_to_disk(file, save_dir, with_random_prefix=True)
-    except Exception as e:
-        log.exception("Failed to save file to disk.", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
-        )
+    original_filename = file.filename
+    file.filename = sanitize_filename(file.filename)
+    file_path = await save_file_to_disk(file, save_dir, with_random_prefix=True)
 
     metadata.update(
         {
@@ -242,8 +228,6 @@ async def put_file(
     vectordb=Depends(get_vectordb),
     user=Depends(require_partition_editor),
 ):
-    log = logger.bind(file_id=file_id, partition=partition, filename=file.filename)
-
     if not await vectordb.file_exists.remote(file_id, partition):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -254,16 +238,9 @@ async def put_file(
     await indexer.delete_file.remote(file_id, partition)
 
     save_dir = Path(DATA_DIR)
-    try:
-        original_filename = file.filename
-        file.filename = sanitize_filename(file.filename)
-        file_path = await save_file_to_disk(file, save_dir, with_random_prefix=True)
-    except Exception:
-        log.exception("Failed to save file to disk.")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to save uploaded file.",
-        )
+    original_filename = file.filename
+    file.filename = sanitize_filename(file.filename)
+    file_path = await save_file_to_disk(file, save_dir, with_random_prefix=True)
 
     metadata.update(
         {
@@ -444,21 +421,13 @@ async def get_task_error(
     task_state_manager=Depends(get_task_state_manager),
     task_details=Depends(require_task_owner),
 ):
-    try:
-        error = await task_state_manager.get_error.remote(task_id)
-        if error is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"No error found for task '{task_id}'.",
-            )
-        return {"task_id": task_id, "traceback": error.splitlines()}
-    except HTTPException:
-        raise
-    except Exception:
+    error = await task_state_manager.get_error.remote(task_id)
+    if error is None:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve task error.",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No error found for task '{task_id}'.",
         )
+    return {"task_id": task_id, "traceback": error.splitlines()}
 
 
 @router.get(
@@ -478,32 +447,27 @@ Returns task logs including:
 """,
 )
 async def get_task_logs(task_id: str, max_lines: int = 100, task_details=Depends(require_task_owner)):
-    try:
-        if not LOG_FILE.exists():
-            raise HTTPException(status_code=500, detail="Log file not found.")
+    if not LOG_FILE.exists():
+        raise HTTPException(status_code=500, detail="Log file not found.")
 
-        logs = []
-        with open(LOG_FILE, errors="replace") as f:
-            for line in reversed(list(f)):
-                try:
-                    record = json.loads(line).get("record", {})
-                    if record.get("extra", {}).get("task_id") == task_id:
-                        logs.append(
-                            f"{record['time']['repr']} - {record['level']['name']} - {record['message']} - {(record['extra'])}"
-                        )
-                        if len(logs) >= max_lines:
-                            break
-                except json.JSONDecodeError:
-                    continue
+    logs = []
+    with open(LOG_FILE, errors="replace") as f:
+        for line in reversed(list(f)):
+            try:
+                record = json.loads(line).get("record", {})
+                if record.get("extra", {}).get("task_id") == task_id:
+                    logs.append(
+                        f"{record['time']['repr']} - {record['level']['name']} - {record['message']} - {(record['extra'])}"
+                    )
+                    if len(logs) >= max_lines:
+                        break
+            except json.JSONDecodeError:
+                continue
 
-        if not logs:
-            raise HTTPException(status_code=404, detail=f"No logs found for task '{task_id}'")
+    if not logs:
+        raise HTTPException(status_code=404, detail=f"No logs found for task '{task_id}'")
 
-        return JSONResponse(content={"task_id": task_id, "logs": logs[::-1]})  # restore order
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch logs: {e!s}")
+    return JSONResponse(content={"task_id": task_id, "logs": logs[::-1]})  # restore order
 
 
 @router.delete(
@@ -528,13 +492,9 @@ async def cancel_task(
     task_state_manager=Depends(get_task_state_manager),
     task_details=Depends(require_task_owner),
 ):
-    try:
-        obj_ref = await task_state_manager.get_object_ref.remote(task_id)
-        if obj_ref is None:
-            raise HTTPException(404, f"No ObjectRef stored for task {task_id}")
+    obj_ref = await task_state_manager.get_object_ref.remote(task_id)
+    if obj_ref is None:
+        raise HTTPException(404, f"No ObjectRef stored for task {task_id}")
 
-        ray.cancel(obj_ref["ref"], recursive=True)
-        return {"message": f"Cancellation signal sent for task {task_id}"}
-    except Exception as e:
-        logger.exception("Failed to cancel task.")
-        raise HTTPException(status_code=500, detail=str(e))
+    ray.cancel(obj_ref["ref"], recursive=True)
+    return {"message": f"Cancellation signal sent for task {task_id}"}
