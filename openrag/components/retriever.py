@@ -27,7 +27,7 @@ class ABCRetriever(ABC):
         pass
 
     @abstractmethod
-    async def retrieve(self, partition: list[str], query: str) -> list[Document]:
+    async def retrieve(self, partition: list[str], query: str, filter: dict | None = None) -> list[Document]:
         pass
 
 
@@ -43,6 +43,7 @@ class BaseRetriever(ABCRetriever):
         self,
         partition: list[str],
         query: str,
+        filter: dict | None = None,
     ) -> list[Document]:
         db = get_vectordb()
         chunks = await db.async_search.remote(
@@ -50,6 +51,7 @@ class BaseRetriever(ABCRetriever):
             partition=partition,
             top_k=self.top_k,
             similarity_threshold=self.similarity_threshold,
+            filter=filter,
             with_surrounding_chunks=self.with_surrounding_chunks,
         )
         return chunks
@@ -78,7 +80,7 @@ class MultiQueryRetriever(BaseRetriever):
         prompt: ChatPromptTemplate = ChatPromptTemplate.from_template(MULTI_QUERY_PROMPT)
         self.generate_queries = prompt | llm | StrOutputParser() | (lambda x: x.split("[SEP]"))
 
-    async def retrieve(self, partition: list[str], query: str) -> list[Document]:
+    async def retrieve(self, partition: list[str], query: str, filter: dict | None = None) -> list[Document]:
         db = get_vectordb()
         logger.debug("Generating multiple queries", k_queries=self.k_queries)
         generated_queries = await self.generate_queries.ainvoke(
@@ -92,6 +94,7 @@ class MultiQueryRetriever(BaseRetriever):
             partition=partition,
             top_k_per_query=self.top_k,
             similarity_threshold=self.similarity_threshold,
+            filter=filter,
             with_surrounding_chunks=self.with_surrounding_chunks,
         )
         return chunks
@@ -121,7 +124,7 @@ class HyDeRetriever(BaseRetriever):
         hyde_document = await self.hyde_generator.ainvoke({"query": query})
         return hyde_document
 
-    async def retrieve(self, partition: list[str], query: str) -> list[Document]:
+    async def retrieve(self, partition: list[str], query: str, filter: dict | None = None) -> list[Document]:
         db = get_vectordb()
         hyde = await self.get_hyde(query)
         queries = [hyde]
@@ -133,6 +136,7 @@ class HyDeRetriever(BaseRetriever):
             partition=partition,
             top_k_per_query=self.top_k,
             similarity_threshold=self.similarity_threshold,
+            filter=filter,
             with_surrounding_chunks=self.with_surrounding_chunks,
         )
 
