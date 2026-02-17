@@ -8,7 +8,7 @@ on:
 jobs:
   api-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -48,12 +48,12 @@ jobs:
 
           # Wait for OpenRAG API
           echo "Waiting for OpenRAG API..."
-          for i in {1..60}; do
+          for i in {1..180}; do
             if curl -sf http://localhost:8080/health_check 2>/dev/null; then
               echo "OpenRAG API ready after $i attempts"
               break
             fi
-            echo "Attempt $i/60 - waiting..."
+            echo "Attempt $i/180 - waiting..."
             sleep 5
           done
 
