@@ -1,6 +1,7 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
+from datetime import UTC, datetime
 
 import numpy as np
 import ray
@@ -139,6 +140,7 @@ class MilvusDB(BaseVectorDB):
 
             self.config = load_config()
             self.logger = get_logger()
+            self.time_fields = ["datetime", "created_at", "updated_at", "indexed_at"]
 
             # init milvus clients
             self.port = self.config.vectordb.get("port")
@@ -274,6 +276,9 @@ class MilvusDB(BaseVectorDB):
             dim=self.embedder.embedding_dimension,
         )
 
+        # for time_field in self.time_fields:
+        #     schema.add_field(field_name=time_field, datatype=DataType.TIMESTAMPTZ, nullable=True)
+
         if self.hybrid_search:
             # Add sparse field for BM25 - this will be auto-generated
             schema.add_field(
@@ -327,6 +332,13 @@ class MilvusDB(BaseVectorDB):
                 "bm25_b": 0.75,
             },
         )
+        # # indexes for dates TIMESTAMPTZ field
+        # for time_field in self.time_fields:
+        #     index_params.add_index(
+        #         field_name=time_field,
+        #         index_type="STL_SORT",  # Index for TIMESTAMPTZ
+        #         index_name=f"{time_field}_idx",
+        #     )
 
         return index_params
 
@@ -370,11 +382,14 @@ class MilvusDB(BaseVectorDB):
             entities = []
             vectors = await self.embedder.aembed_documents(chunks)
             order_metadata_l: list[dict] = _gen_chunk_order_metadata(n=len(chunks))
+            indexed_at = datetime.now(UTC).isoformat()
+
             for chunk, vector, order_metadata in zip(chunks, vectors, order_metadata_l):
                 entities.append(
                     {
                         "text": chunk.page_content,
                         "vector": vector,
+                        "indexed_at": indexed_at,
                         **order_metadata,
                         **chunk.metadata,
                     }
@@ -386,6 +401,7 @@ class MilvusDB(BaseVectorDB):
             )
 
             # insert file_id and partition into partition_file_manager
+            file_metadata.update({"indexed_at": indexed_at})
             self.partition_file_manager.add_file_to_partition(
                 file_id=file_id,
                 partition=partition,
@@ -499,12 +515,26 @@ class MilvusDB(BaseVectorDB):
                     ranker=RRFRanker(100),
                     output_fields=["*"],
                     limit=top_k,
-                    expr_params=filter_params,
                 )
             else:
+                vector_param = {
+                    "data": [query_vector],
+                    "anns_field": "vector",
+                    "search_params": {
+                        "metric_type": "COSINE",
+                        "params": {
+                            "ef": 64,
+                            "radius": similarity_threshold,
+                            "range_filter": 1.0,
+                        },
+                    },
+                    "limit": top_k,
+                }
                 response = await self._async_client.search(
                     collection_name=self.collection_name,
                     output_fields=["*"],
+                    filter=expr,
+                    filter_params=filter_params,
                     **vector_param,
                 )
 
@@ -615,29 +645,22 @@ class MilvusDB(BaseVectorDB):
         log = self.logger.bind(file_id=file_id, partition=partition)
         try:
             self._check_file_exists(file_id, partition)
-            # Adjust filter expression based on the type of value
-            filter_expression = "partition == {partition} and file_id == {file_id}"
-            filter_params = {"partition": partition, "file_id": file_id}
-
-            # Pagination parameters
-            offset = 0
-            results = []
+            filter_expr = f'partition == "{partition}" and file_id == "{file_id}"'
             excluded_keys = ["text", "vector", "_id"] if not include_id else ["text", "vector"]
 
+            results = []
+            iterator = self._client.query_iterator(
+                collection_name=self.collection_name,
+                filter=filter_expr,
+                batch_size=limit,
+                output_fields=["*"],
+            )
             while True:
-                response = await self._async_client.query(
-                    collection_name=self.collection_name,
-                    filter=filter_expression,
-                    filter_params=filter_params,
-                    limit=limit,
-                    offset=offset,
-                )
-
-                if not response:
-                    break  # No more results
-
-                results.extend(response)
-                offset += len(response)  # Move offset forward
+                batch = iterator.next()
+                if not batch:
+                    iterator.close()
+                    break
+                results.extend(batch)
 
             docs = [
                 Document(

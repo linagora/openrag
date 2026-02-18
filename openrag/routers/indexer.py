@@ -48,6 +48,30 @@ DICT_MIMETYPES = dict(config.loader["mimetypes"])
 # URL scheme configuration
 PREFERRED_URL_SCHEME = config.server.preferred_url_scheme
 
+# DATETIME FIELDS: Fields provided by the client
+
+TEMPORAL_FIELDS = ["datetime", "created_at", "updated_at"]
+
+
+def get_temporal_fields(metadata: dict, file_stat, log) -> None:
+    temporal_fields = {}
+
+    ## Use provided created_at if available, otherwise extract from file system
+    for field in TEMPORAL_FIELDS:
+        datetime_str = metadata.get(field, None)
+        if datetime_str:
+            try:
+                # Try parsing the provided datetime to ensure it's valid
+                d = datetime.fromisoformat(datetime_str)
+                temporal_fields[field] = d.isoformat()
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid ISO 8601 datetime field ({datetime_str}) for field '{field}'.",
+                )
+
+    return temporal_fields
+
 
 def build_url(request: Request, route_name: str, **path_params) -> str:
     """Build a URL using the preferred scheme if configured."""
@@ -99,8 +123,13 @@ JSON string containing file metadata. Example:
     "mimetype": "text/plain",
     "author": "John Doe",
     ...
+    "created_at": "2024-01-01T12:00:00Z"  // Optional temporal field (ISO 8601)
 }
 ```
+
+**Temporal Fields:**
+- You can provide temporal fields such as `created_at`, `updated_at`, or `datetime` in the metadata for time-based queries and filtering.
+- Datetime values must be in ISO 8601 format (e.g., `2024-01-01T12:00:00Z`).
 
 **Common Mimetypes:**
 - `text/plain` - Plain text files
@@ -159,8 +188,11 @@ async def add_file(
 
     # Append extra metadata
     metadata["file_size"] = human_readable_size(file_stat.st_size)
-    metadata["created_at"] = datetime.fromtimestamp(file_stat.st_ctime).isoformat()
     metadata["file_id"] = file_id
+
+    ## Add temporal fields to metadata, using provided values if available, otherwise extracting from file system
+    temporal_fields = get_temporal_fields(metadata, file_stat, log)
+    metadata.update(temporal_fields)
 
     # Indexing the file
     task = indexer.add_file.remote(path=file_path, metadata=metadata, partition=partition, user=user)
@@ -222,8 +254,13 @@ JSON string containing file metadata. Example:
     "mimetype": "text/plain",
     "author": "John Doe",
     ...
+    "created_at": "2024-01-01T12:00:00Z"  // Optional temporal field (ISO 8601)
 }
 ```
+
+**Temporal Fields:**
+- You can provide temporal fields such as `created_at`, `updated_at`, or `datetime` in the metadata for time-based queries and filtering.
+- Datetime values must be in ISO 8601 format (e.g., `2024-01-01T12:00:00Z`).
 
 **Response:**
 Returns 202 Accepted with a task status URL for tracking indexing progress.
@@ -275,8 +312,11 @@ async def put_file(
 
     # Append extra metadata
     metadata["file_size"] = human_readable_size(file_stat.st_size)
-    metadata["created_at"] = datetime.fromtimestamp(file_stat.st_ctime).isoformat()
     metadata["file_id"] = file_id
+
+    ## Add temporal fields to metadata, using provided values if available, otherwise extracting from file system
+    temporal_fields = get_temporal_fields(metadata, file_stat, log)
+    metadata.update(temporal_fields)
 
     # Indexing the file
     task = indexer.add_file.remote(path=file_path, metadata=metadata, partition=partition, user=user)

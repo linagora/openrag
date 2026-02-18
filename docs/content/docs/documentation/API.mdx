@@ -78,6 +78,22 @@ Upload a new file to a specific partition for indexing.
 - `201 Created`: Returns task status URL
 - `409 Conflict`: File already exists in partition
 
+##### Temporal Filtering
+OpenRAG supports temporal filtering to retrieve documents from specific time periods.
+The client can include temporal fields to allow temporal aware search in search endpoints.
+
+4 temporal fields are automatically added to the schema of the collection:
+
+* `datetime`: ISO 8601 format date of the primary timestamp of when a file is created in your system
+* `created_at`: ISO 8601 format date of when the file was created
+* `updated_at`: ISO 8601 format date of when the file was last modified
+* `indexed_at`: ISO 8601 format date of when the file was indexed in the vector database
+
+:::info
+`datetime`, `created_at` and `updated_at` are provided by the client in the metadata of the file during upload, while `indexed_at` is automatically set by openRAG at indexing time.
+:::
+
+
 ##### Upload files while modeling relations between them
 
 OpenRAG supports document relationships to enable context-aware retrieval.
