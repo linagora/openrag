@@ -38,11 +38,12 @@ jobs:
 
           echo "Waiting for services to be ready..."
 
-          # Wait for mock-vllm
-          echo "Waiting for mock-vllm..."
-          if ! timeout 60 bash -c 'until curl -sf http://localhost:8000/health 2>/dev/null; do sleep 2; done'; then
-            echo "Mock VLLM failed to start"
-            docker compose logs mock-vllm
+          # Wait for Ollama embedder
+          echo "Waiting for Ollama model to be pulled..."
+          MODEL="${EMBEDDER_MODEL_NAME:-qwen3-embedding:0.6b}"
+          if ! timeout 30 bash -c "until curl -sf http://localhost:11434/api/tags 2>/dev/null | grep -q \"${MODEL%:*}\"; do sleep 5; done"; then
+            echo "Ollama model failed to pull"
+            docker compose logs ollama
             exit 1
           fi
 
@@ -79,8 +80,8 @@ jobs:
         run: |
           echo "=== OpenRAG Logs ==="
           docker compose logs openrag --tail=100
-          echo "=== Mock VLLM Logs ==="
-          docker compose logs mock-vllm --tail=50
+          echo "=== Ollama Embedder Logs ==="
+          docker compose logs ollama --tail=50
           echo "=== Milvus Logs ==="
           docker compose logs milvus --tail=50
 

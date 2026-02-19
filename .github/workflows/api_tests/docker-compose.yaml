@@ -1,24 +1,32 @@
 # Minimal compose for API testing without VLLM
 # Uses mock embedding server instead
 
-services:
-  # Mock VLLM embedding server
-  mock-vllm:
-    build:
-      context: .
-      dockerfile: Dockerfile.mock-vllm
+services:  
+  # Ollama openai embedder server
+  ollama:
+    image: alpine/ollama:latest
     ports:
-      - "8000:8000"
+      - "11434:11434"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/bin/ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       default:
         aliases:
-          - vllm
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 2s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
+          - ollama
+    entrypoint: /bin/sh
+    command: >
+      -c "
+      /bin/ollama serve &
+      sleep 10 &&
+      /bin/ollama pull ${EMBEDDER_MODEL_NAME:-qwen3-embedding:0.6b} &&
+      /bin/ollama pull gemma3:270m &&
+      wait
+      "
 
   # PostgreSQL for user/partition management
   rdb:
@@ -84,19 +92,19 @@ services:
       context: ../../../
       dockerfile: Dockerfile
     environment:
-      - EMBEDDER_MODEL_NAME=mock-embedding-model
-      - EMBEDDER_BASE_URL=http://vllm:8000/v1/
+      - EMBEDDER_MODEL_NAME=${EMBEDDER_MODEL_NAME:-qwen3-embedding:0.6b}
+      - EMBEDDER_BASE_URL=http://ollama:11434/v1
       - EMBEDDER_API_KEY=EMPTY
       - POSTGRES_HOST=rdb
       - POSTGRES_USER=root
       - POSTGRES_PASSWORD=root_password
       - VDB_HOST=milvus
-      - BASE_URL=http://vllm:8000/v1/
+      - BASE_URL=http://ollama:11434/v1/
       - API_KEY=EMPTY
-      - MODEL=mock-chat-model
-      - VLM_BASE_URL=http://vllm:8000/v1/
+      - MODEL=gemma3:270m
+      - VLM_BASE_URL=http://ollama:11434/v1/
       - VLM_API_KEY=EMPTY
-      - VLM_MODEL=mock-vlm-model
+      - VLM_MODEL=gemma3:270m
       - RERANKER_ENABLED=false
       - WITH_CHAINLIT_UI=false
       - WITH_OPENAI_API=true
@@ -115,8 +123,8 @@ services:
     volumes:
       - test_data:/app/data
     depends_on:
-      mock-vllm:
-        condition: service_healthy
+      # ollama:
+      #   condition: service_healthy
       milvus:
         condition: service_healthy
       rdb:
