@@ -524,3 +524,63 @@ The API uses standard HTTP status codes:
 - `409 Conflict`: Resource already exists
 
 Error responses include detailed JSON messages to help with debugging and integration.
+
+
+## Sequence diagrams
+
+### External Indexing Flow
+
+An external indexer uses an admin token to create a user, then uses the returned user token for all subsequent operations.
+
+```mermaid
+sequenceDiagram
+    participant Indexer
+    participant OpenRAG
+
+    Note over Indexer, OpenRAG: 1. Create User (admin token)
+
+    Indexer->>OpenRAG: POST /users<br/>Authorization: Bearer {admin_token}<br/>{display_name: "alice"}
+    OpenRAG-->>Indexer: 201 {id: 2, token: "or-xxx..."}
+    Indexer->>Indexer: Store user token "or-xxx..."
+
+    Note over Indexer, OpenRAG: 2. Create Partition (user token). Automatically grants owner rights to the user
+
+    Indexer->>OpenRAG: POST /partition/{partition}<br/>Authorization: Bearer or-xxx...
+    OpenRAG-->>Indexer: 201 Created
+
+    Note over Indexer, OpenRAG: 3. Index a File (user token)
+
+    Indexer->>Indexer: New data
+
+    Indexer->>OpenRAG: POST /indexer/partition/{partition}/file/{file_id}<br/>Authorization: Bearer or-xxx...<br/>Body: multipart (file + metadata)
+    OpenRAG->>OpenRAG: Validate token, check file quota
+    OpenRAG-->>Indexer: 201 {task_status_url: "{task_url}"}
+
+    Note over OpenRAG: Background: serialize → chunk → embed → store
+
+```
+
+### Chat Completion Flow
+
+Query indexed documents via the OpenAI-compatible chat completions endpoint.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant OpenRAG
+    participant LLM
+
+    Client->>OpenRAG: POST /v1/chat/completions<br/>Authorization: Bearer or-xxx...<br/>{model: "openrag-{partition}",<br/>messages: [...], stream: true}
+
+    OpenRAG->>OpenRAG: Authenticate user
+    OpenRAG->>OpenRAG: Resolve partition from model name
+    OpenRAG->>OpenRAG: Check user has access to partition
+    OpenRAG->>OpenRAG: Retrieve relevant documents
+    OpenRAG->>OpenRAG: Build prompt with retrieved context
+    OpenRAG->>LLM: Query LLM
+
+    loop SSE Stream
+        OpenRAG-->>Client: data: {delta: {content: "..."},<br/>sources: [...]}
+    end
+    OpenRAG-->>Client: data: [DONE]
+```

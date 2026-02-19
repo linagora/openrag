@@ -65,9 +65,9 @@ Stores information about API users and administrators.
 | `is_admin`     | Boolean | Marks system administrator users |
 | `created_at`   | DateTime | Timestamp of creation |
 | `file_quota`   | Integer (nullable) | Max files allowed for that user |
-| `file_count`| Integer (default=0) | Number of uploaded files.|
-**Relationships**
-- `memberships`: one-to-many → `PartitionMembership`
+| `file_count`   | Integer (default=0) | Number of uploaded files |
+
+**Relationships:** `memberships` one-to-many → `PartitionMembership`
 
 ---
 
@@ -245,12 +245,13 @@ flowchart LR
 
 ---
 
-## **File Quotas**
+## File Quotas
+
 Limits the number of files a user can upload (indexed files + pending tasks).
 
 - Admins always have unlimited quota and can update quota for a given user
-- `DEFAULT_FILE_QUOTA < 0` to disable quota checking. 
-- `DEFAULT_FILE_QUOTA >= 0` to set a default quota for all users.
+- `DEFAULT_FILE_QUOTA < 0` to disable quota checking (e.g., default `-1`)
+- `DEFAULT_FILE_QUOTA >= 0` to set a default quota for all users (note: `0` means users may upload zero files — quota is still enforced)
 
 The default value `DEFAULT_FILE_QUOTA` is -1, meaning that file quota checking is bypassed.
 
