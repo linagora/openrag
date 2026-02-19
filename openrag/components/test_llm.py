@@ -1,5 +1,4 @@
 import pytest
-
 from components.llm import LLM
 
 
@@ -48,15 +47,11 @@ class TestExtractLlmOverrides:
         assert base_url == "http://custom-llm:9000/v1"
         assert headers["Authorization"] == "Bearer custom-key"
 
-
-
     def test_trailing_slash_stripped_from_base_url(self, llm):
         request = {
             "model": "openrag-my-partition",
             "stream": False,
-            "metadata": {
-                "llm_override": {"base_url": "http://custom:8000/v1///"}
-            },
+            "metadata": {"llm_override": {"base_url": "http://custom:8000/v1///"}},
         }
         _, base_url, _ = llm._extract_llm_overrides(request)
 
