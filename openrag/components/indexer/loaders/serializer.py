@@ -55,7 +55,7 @@ class DocSerializer:
         log.info("Starting document serialization")
 
         p = Path(path)
-        file_ext = p.suffix
+        file_ext = p.suffix.lower()
         mimetype = metadata.get("mimetype", None)
         # Get appropriate loader for the file type
         if mimetype is None:
