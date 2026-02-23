@@ -43,7 +43,6 @@ COPY openrag/ .
 
 # Copy assests & config
 COPY prompts/ /app/prompts/
-COPY .hydra_config/ /app/.hydra_config/
 ENV PYTHONPATH=/app/openrag/
 ENV APP_iPORT=${APP_iPORT:-8080}
 ENTRYPOINT ../entrypoint.sh

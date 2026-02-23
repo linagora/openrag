@@ -9,7 +9,7 @@ from components.utils import load_config
 from fastapi import UploadFile
 
 config = load_config()
-SERIALIZE_TIMEOUT = config.ray.indexer.get("serialize_timeout", 3600)
+SERIALIZE_TIMEOUT = config.ray.indexer.serialize_timeout
 
 
 def sanitize_filename(filename: str) -> str:

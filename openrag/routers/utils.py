@@ -23,8 +23,8 @@ FORBIDDEN_CHARS_IN_FILE_ID = set("/")  # set('"<>#%{}|\\^`[]')
 LOG_FILE = Path(config.paths.log_dir or "logs") / "app.json"
 
 # supported file formats or mimetypes
-ACCEPTED_FILE_FORMATS = dict(config.loader["file_loaders"]).keys()
-DICT_MIMETYPES = dict(config.loader["mimetypes"])
+ACCEPTED_FILE_FORMATS = config.loader.file_loaders.model_dump().keys()
+DICT_MIMETYPES = dict(config.loader.mimetypes._mapping)
 
 ROLE_HIERARCHY = {
     "viewer": 1,
@@ -33,7 +33,7 @@ ROLE_HIERARCHY = {
 }
 
 # File quota per user
-DEFAULT_FILE_QUOTA = config.rdb.get("default_file_quota", -1)
+DEFAULT_FILE_QUOTA = config.rdb.default_file_quota
 
 
 def current_user(request: Request):
@@ -307,9 +307,9 @@ async def get_openai_models(base_url: str, api_key: str, timeout: int = 30):
 
 async def check_llm_model_availability(request: Request):
     llm_param = config.llm
-    base_url = llm_param.get("base_url")
-    model = llm_param.get("model")
-    api_key = llm_param.get("api_key")
+    base_url = llm_param.base_url
+    model = llm_param.model
+    api_key = llm_param.api_key
 
     log = logger.bind(base_url=base_url, model=model)
     try:

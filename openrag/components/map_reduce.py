@@ -49,13 +49,13 @@ From this document, identify and comprehensively summarize the information usefu
 class RAGMapReduce:
     def __init__(self, config):
         self.config = config
-        self.slm: ChatOpenAI = ChatOpenAI(**config.llm).with_structured_output(SummarizedChunk)
+        self.slm: ChatOpenAI = ChatOpenAI(**config.llm.model_dump()).with_structured_output(SummarizedChunk)
         map_reduce_config = self.config.map_reduce
-        self.initial_batch_size = map_reduce_config["initial_batch_size"]
-        self.expansion_batch_size = map_reduce_config["expansion_batch_size"]
-        self.max_total_documents = map_reduce_config["max_total_documents"]
+        self.initial_batch_size = map_reduce_config.initial_batch_size
+        self.expansion_batch_size = map_reduce_config.expansion_batch_size
+        self.max_total_documents = map_reduce_config.max_total_documents
 
-        self.debug = map_reduce_config.get("debug", True)
+        self.debug = map_reduce_config.debug
 
         assert self.max_total_documents >= self.initial_batch_size, (
             "`max_total_documents` must be greater than or equal to `initial_batch_size`"

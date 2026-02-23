@@ -114,7 +114,7 @@ def is_direct_llm_model(
 
     Returns True if model is None, empty, or matches the configured default model.
     """
-    return request.model is None or request.model == "" or request.model == config.llm.get("model")
+    return request.model is None or request.model == "" or request.model == config.llm.model
 
 
 async def _fetch_max_model_tokens() -> int:
@@ -123,10 +123,10 @@ async def _fetch_max_model_tokens() -> int:
     Queries `/v1/models` and looks for `max_model_len` for the configured LLM model.
     Falls back to `config.llm_context.max_llm_context_size` (default 8192) if unavailable.
     """
-    default_limit = int(config.llm_context.get("max_llm_context_size", 8192))
-    model_id = config.llm.get("model")
+    default_limit = config.llm_context.max_llm_context_size
+    model_id = config.llm.model
     try:
-        openai_models = await get_openai_models(base_url=config.llm["base_url"], api_key=config.llm["api_key"])
+        openai_models = await get_openai_models(base_url=config.llm.base_url, api_key=config.llm.api_key)
         model = next((m for m in openai_models if m.id == model_id), None)
         if model is None:
             logger.warning(f"No model found for {model_id}. Using default context size.")
@@ -151,7 +151,7 @@ def get_max_model_tokens() -> int:
     """Return the cached max model token limit (populated at startup)."""
     if _max_model_tokens is not None:
         return _max_model_tokens
-    return int(config.llm_context.get("max_llm_context_size", 8192))
+    return config.llm_context.max_llm_context_size
 
 
 def validate_tokens_limit(
@@ -172,7 +172,7 @@ def validate_tokens_limit(
 
         if isinstance(request, OpenAIChatCompletionRequest):
             message_tokens = sum(_length_function(m.content or "") + 4 for m in request.messages)
-            default_output_tokens = int(config.llm_context.get("max_output_tokens", 1024))
+            default_output_tokens = config.llm_context.max_output_tokens
             requested_tokens = request.max_tokens or default_output_tokens
             total_tokens_needed = message_tokens + requested_tokens
 
@@ -195,7 +195,7 @@ def validate_tokens_limit(
 
         elif isinstance(request, OpenAICompletionRequest):
             prompt_tokens = _length_function(request.prompt)
-            default_output_tokens = int(config.llm_context.get("max_output_tokens", 1024))
+            default_output_tokens = config.llm_context.max_output_tokens
             requested_tokens = request.max_tokens or default_output_tokens
             total_tokens_needed = prompt_tokens + requested_tokens
 
@@ -276,7 +276,7 @@ async def openai_chat_completion(
     user_partitions=Depends(current_user_or_admin_partitions_list),
     _: None = Depends(check_llm_model_availability),
 ):
-    model_name = request.model or config.llm.get("model")
+    model_name = request.model or config.llm.model
     log = logger.bind(model=model_name, endpoint="/chat/completions")
 
     if not request.messages or request.messages[-1].role != "user" or not request.messages[-1].content:
@@ -398,7 +398,7 @@ async def openai_completion(
     user_partitions=Depends(current_user_or_admin_partitions_list),
     _: None = Depends(check_llm_model_availability),
 ):
-    model_name = request.model or config.llm.get("model")
+    model_name = request.model or config.llm.model
     log = logger.bind(model=model_name, endpoint="/completions")
 
     if not request.prompt:

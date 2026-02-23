@@ -7,7 +7,6 @@ from components.utils import detect_language, get_vlm_semaphore, load_config
 from langchain_core.documents.base import Document
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from omegaconf import OmegaConf
 from tqdm.asyncio import tqdm
 from utils.logger import get_logger
 
@@ -20,9 +19,9 @@ logger = get_logger()
 config = load_config()
 
 # Timeout for individual chunk contextualization LLM calls (in seconds)
-CONTEXTUALIZATION_TIMEOUT = config.chunker.get("contextualization_timeout", 120)
+CONTEXTUALIZATION_TIMEOUT = config.chunker.contextualization_timeout
 # Maximum concurrent contextualization tasks to prevent system overload
-MAX_CONCURRENT_CONTEXTUALIZATION = config.chunker.get("max_concurrent_contextualization", 10)
+MAX_CONCURRENT_CONTEXTUALIZATION = config.chunker.max_concurrent_contextualization
 
 BASE_CHUNK_FORMAT = "* filename: {filename}\n\n[CHUNK_START]\n\n{content}\n\n[CHUNK_END]"
 CHUNK_FORMAT = "[CONTEXT]\n\n{chunk_context}\n\n" + BASE_CHUNK_FORMAT
@@ -343,11 +342,11 @@ class ChunkerFactory:
 
     @staticmethod
     def create_chunker(
-        config: OmegaConf,
+        config,
         embedder: BaseEmbedding | None = None,
     ) -> BaseChunker:
         # Extract parameters
-        chunker_params = OmegaConf.to_container(config.chunker, resolve=True)
+        chunker_params = config.chunker.model_dump()
         name = chunker_params.pop("name")
 
         # Initialize and return the chunker
@@ -358,5 +357,5 @@ class ChunkerFactory:
                 f"Chunker '{name}' is not recognized. Available chunkers: {list(ChunkerFactory.CHUNKERS.keys())}"
             )
 
-        chunker_params["llm_config"] = config.vlm
+        chunker_params["llm_config"] = config.vlm.model_dump()
         return chunker_cls(**chunker_params)

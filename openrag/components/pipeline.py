@@ -32,10 +32,10 @@ class RetrieverPipeline:
         self.retriever: BaseRetriever = RetrieverFactory.create_retriever(config=config)
 
         # reranker
-        self.reranker_enabled = config.reranker["enable"]
+        self.reranker_enabled = config.reranker.enable
         self.reranker = Reranker(logger, config)
         logger.debug("Reranker", enabled=self.reranker_enabled)
-        self.reranker_top_k = config.reranker["top_k"]
+        self.reranker_top_k = config.reranker.top_k
 
     async def retrieve_docs(self, partition: list[str], query: str, top_k: int | None = None) -> list[Document]:
         docs = await self.retriever.retrieve(partition=partition, query=query)
@@ -78,13 +78,13 @@ class RagPipeline:
         self.retriever_pipeline = RetrieverPipeline()
 
         # RAG
-        self.rag_mode = config.rag["mode"]
-        self.chat_history_depth = config.rag["chat_history_depth"]
-        self.max_context_tokens = config.reranker.get("top_k", 10) * config.chunker.get("chunk_size", 512)
+        self.rag_mode = config.rag.mode
+        self.chat_history_depth = config.rag.chat_history_depth
+        self.max_context_tokens = config.reranker.top_k * config.chunker.chunk_size
 
         self.llm_client = LLM(config.llm, logger)
-        self.contextualizer = AsyncOpenAI(base_url=config.llm["base_url"], api_key=config.llm["api_key"])
-        self.max_contextualized_query_len = config.rag["max_contextualized_query_len"]
+        self.contextualizer = AsyncOpenAI(base_url=config.llm.base_url, api_key=config.llm.api_key)
+        self.max_contextualized_query_len = config.rag.max_contextualized_query_len
 
         # map reduce
         self.map_reduce: RAGMapReduce = RAGMapReduce(config=config)
@@ -102,13 +102,13 @@ class RagPipeline:
                 for m in messages:
                     chat_history += f"{m['role']}: {m['content']}\n"
 
-                params = dict(config.llm_params)
+                params = config.llm_params.model_dump()
                 params.pop("max_retries")
                 params["max_completion_tokens"] = self.max_contextualized_query_len
                 params["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
 
                 response = await self.contextualizer.chat.completions.create(
-                    model=config.llm["model"],
+                    model=config.llm.model,
                     messages=[
                         {"role": "system", "content": QUERY_CONTEXTUALIZER_PROMPT},
                         {
@@ -141,7 +141,7 @@ class RagPipeline:
         )
 
         # 2. get docs
-        top_k = config.map_reduce["max_total_documents"] if use_map_reduce else None
+        top_k = config.map_reduce.max_total_documents if use_map_reduce else None
         docs = await self.retriever_pipeline.retrieve_docs(partition=partition, query=query, top_k=top_k)
 
         if use_map_reduce and docs:

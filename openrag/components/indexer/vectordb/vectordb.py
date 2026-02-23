@@ -142,8 +142,8 @@ class MilvusDB(BaseVectorDB):
             self.logger = get_logger()
 
             # init milvus clients
-            self.port = self.config.vectordb.get("port")
-            self.host = self.config.vectordb.get("host")
+            self.port = self.config.vectordb.port
+            self.host = self.config.vectordb.host
             uri = f"http://{self.host}:{self.port}"
             self.uri = uri
             try:
@@ -159,7 +159,7 @@ class MilvusDB(BaseVectorDB):
             # embedder
             self.embedder: BaseEmbedding = EmbeddingFactory.get_embedder(embeddings_config=self.config.embedder)
 
-            self.hybrid_search = self.config.vectordb.get("hybrid_search", True)
+            self.hybrid_search = self.config.vectordb.hybrid_search
             # partition related params
             self.rdb_host = self.config.rdb.host
             self.rdb_port = self.config.rdb.port
@@ -168,7 +168,7 @@ class MilvusDB(BaseVectorDB):
             self.partition_file_manager: PartitionFileManager = None
 
             # Initialize collection-related attributes
-            self.collection_name = self.config.vectordb.get("collection_name", "vdb_test")
+            self.collection_name = self.config.vectordb.collection_name
             self.collection_loaded = False
             self.load_collection()
 
@@ -1131,7 +1131,7 @@ class ConnectorFactory:
 
     @staticmethod
     def get_vectordb_cls():
-        name = config.vectordb.get("connector_name")
+        name = config.vectordb.connector_name
         vdb_cls = ConnectorFactory.CONNECTORS.get(name)
         if not vdb_cls:
             raise ValueError(f"VECTORDB '{name}' is not supported.")

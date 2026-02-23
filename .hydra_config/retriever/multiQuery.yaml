@@ -1,5 +1,0 @@
-defaults:
-  - base
-
-type: multiQuery
-k_queries: 3

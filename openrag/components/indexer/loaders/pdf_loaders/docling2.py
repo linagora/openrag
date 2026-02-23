@@ -26,11 +26,11 @@ config = load_config()
 
 
 if torch.cuda.is_available():
-    DOCLING_NUM_GPUS = config.loader.get("docling_num_gpus", 0.01)
+    DOCLING_NUM_GPUS = config.loader.docling_num_gpus
 else:  # On CPU
     DOCLING_NUM_GPUS = 0
 
-DOCLING_MAX_TASKS_PER_WORKER = config.loader.get("docling_max_tasks_per_worker", 2)
+DOCLING_MAX_TASKS_PER_WORKER = config.loader.docling_max_tasks_per_worker
 
 
 @ray.remote(num_gpus=DOCLING_NUM_GPUS)
@@ -70,7 +70,7 @@ class DoclingPool:
 
         self.logger = get_logger()
         self.config = load_config()
-        self.pool_size = config.loader.get("docling_pool_size", 1)
+        self.pool_size = config.loader.docling_pool_size
 
         self.actors = [DoclingWorker.remote() for _ in range(self.pool_size)]
         self._queue: asyncio.Queue[ray.actor.ActorHandle] = asyncio.Queue()
@@ -109,7 +109,7 @@ class DoclingLoader2(BaseLoader):
             s += f"\n[PAGE_{i}]\n"
 
         enriched_content = s
-        if self.config.loader["image_captioning"]:
+        if self.config.loader.image_captioning:
             pictures = result.document.pictures
             descriptions = await self.get_captions(pictures)
             for description in descriptions:

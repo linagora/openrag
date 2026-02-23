@@ -1,8 +1,0 @@
-type: ''
-top_k: ${oc.decode:${oc.env:RETRIEVER_TOP_K, 50}} # Number of documents to return before reranking
-similarity_threshold: ${oc.decode:${oc.env:SIMILARITY_THRESHOLD, 0.6}} # Minimum similarity score for document retrieval
-with_surrounding_chunks: ${oc.decode:${oc.env:WITH_SURROUNDING_CHUNKS, false}} # Whether to include surrounding chunks for each retrieved chunk
-include_related: ${oc.decode:${oc.env:INCLUDE_RELATED, true}}
-include_ancestors: ${oc.decode:${oc.env:INCLUDE_ANCESTORS, true}}
-related_limit: ${oc.decode:${oc.env:RELATED_LIMIT, 10}}
-max_ancestor_depth: ${oc.decode:${oc.env:MAX_DEPTH, 10}} # Maximum depth for ancestor retrieval (null = unlimited)

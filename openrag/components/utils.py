@@ -83,7 +83,7 @@ _cached_length_function = None
 def get_num_tokens():
     global _cached_length_function
     if _cached_length_function is None:
-        llm = ChatOpenAI(**config.llm)
+        llm = ChatOpenAI(**config.llm.model_dump())
         _cached_length_function = llm.get_num_tokens
     return _cached_length_function
 

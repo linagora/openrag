@@ -30,7 +30,7 @@ def get_serializer():
 
 
 def get_marker_pool():
-    pdf_loader = config.loader.file_loaders.get("pdf")
+    pdf_loader = config.loader.file_loaders.pdf
     match pdf_loader:
         case "DoclingLoader2":
             return get_or_create_actor("DoclingPool", DoclingPool, lifetime="detached")

@@ -1,6 +1,0 @@
-defaults:
-  - base
-
-type: hyde
-# Extra params
-combine: False

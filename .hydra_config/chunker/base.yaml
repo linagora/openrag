@@ -1,5 +1,0 @@
-contextual_retrieval: ${oc.decode:${oc.env:CONTEXTUAL_RETRIEVAL, true}}
-contextualization_timeout: ${oc.decode:${oc.env:CONTEXTUALIZATION_TIMEOUT, 120}}
-max_concurrent_contextualization: ${oc.decode:${oc.env:MAX_CONCURRENT_CONTEXTUALIZATION, 10}}
-chunk_size: ${oc.decode:${oc.env:CHUNK_SIZE, 512}}
-chunk_overlap_rate: ${oc.decode:${oc.env:CHUNK_OVERLAP_RATE, 0.2}}

@@ -34,7 +34,7 @@ from utils.logger import get_logger
 logger = get_logger()
 config = load_config()
 
-DEFAULT_FILE_QUOTA = config.rdb.get("default_file_quota", -1)
+DEFAULT_FILE_QUOTA = config.rdb.default_file_quota
 
 Base = declarative_base()
 

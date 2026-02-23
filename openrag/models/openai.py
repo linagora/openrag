@@ -4,7 +4,7 @@ from config import load_config
 from pydantic import BaseModel, Field
 
 config = load_config()
-default_max_tokens = int(config.llm_context.get("max_output_tokens", 1024))
+default_max_tokens = config.llm_context.max_output_tokens
 
 
 # Classes pour la compatibilité OpenAI

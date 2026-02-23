@@ -1,4 +1,0 @@
-# Config for chatbot RAG
-mode: ''
-chat_history_depth: 4
-max_contextualized_query_len: 512

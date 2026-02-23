@@ -12,11 +12,11 @@ config = load_config()
 
 # Set ray resources
 if torch.cuda.is_available():
-    NUM_GPUS = config.ray.get("num_gpus")
+    NUM_GPUS = config.ray.num_gpus
 else:  # On CPU
     NUM_GPUS = 0
 
-DICT_MIMETYPES = dict(config.loader["mimetypes"])
+DICT_MIMETYPES = dict(config.loader.mimetypes._mapping)
 
 
 @ray.remote(max_restarts=5)
@@ -30,7 +30,7 @@ class DocSerializer:
         self.data_dir = data_dir
         self.kwargs = kwargs
         self.kwargs["config"] = self.config
-        self.save_markdown = self.config.loader.get("save_markdown", False)
+        self.save_markdown = self.config.loader.save_markdown
 
         # Initialize loader classes:
         self.loader_classes = get_loader_classes(config=self.config)

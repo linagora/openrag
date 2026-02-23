@@ -17,20 +17,20 @@ from .utils import serialize_file
 config = load_config()
 save_uploaded_files = os.environ.get("SAVE_UPLOADED_FILES", "true").lower() == "true"
 
-POOL_SIZE = config.ray.get("pool_size")
-MAX_TASKS_PER_WORKER = config.ray.get("max_tasks_per_worker")
+POOL_SIZE = config.ray.pool_size
+MAX_TASKS_PER_WORKER = config.ray.max_tasks_per_worker
 
 
 @ray.remote(
     max_concurrency=config.ray.indexer.concurrency_groups.default,
     max_task_retries=config.ray.indexer.max_task_retries,
     concurrency_groups={
-        "update": config.ray.indexer.concurrency_groups["update"],
-        "search": config.ray.indexer.concurrency_groups["search"],
-        "delete": config.ray.indexer.concurrency_groups["delete"],
-        "insert": config.ray.indexer.concurrency_groups["insert"],
-        "chunk": config.ray.indexer.concurrency_groups["chunk"],
-        "serialize": config.ray.indexer.concurrency_groups["serialize"],
+        "update": config.ray.indexer.concurrency_groups.update,
+        "search": config.ray.indexer.concurrency_groups.search,
+        "delete": config.ray.indexer.concurrency_groups.delete,
+        "insert": config.ray.indexer.concurrency_groups.insert,
+        "chunk": config.ray.indexer.concurrency_groups.chunk,
+        "serialize": config.ray.indexer.concurrency_groups.serialize,
     },
 )
 class Indexer:
@@ -44,7 +44,7 @@ class Indexer:
         self.chunker: BaseChunker = ChunkerFactory.create_chunker(self.config)
 
         self.default_partition = "_default"
-        self.enable_insertion = self.config.vectordb["enable"]
+        self.enable_insertion = self.config.vectordb.enable
         self.handle = ray.get_actor("Indexer", namespace="openrag")
 
         self.logger.info("Indexer actor initialized.")

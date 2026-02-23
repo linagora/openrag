@@ -43,8 +43,8 @@ FORBIDDEN_CHARS_IN_FILE_ID = set("/")  # set('"<>#%{}|\\^`[]')
 LOG_FILE = Path(config.paths.log_dir or "logs") / "app.json"
 
 # supported file formats or mimetypes
-ACCEPTED_FILE_FORMATS = dict(config.loader["file_loaders"]).keys()
-DICT_MIMETYPES = dict(config.loader["mimetypes"])
+ACCEPTED_FILE_FORMATS = config.loader.file_loaders.model_dump().keys()
+DICT_MIMETYPES = dict(config.loader.mimetypes._mapping)
 
 # URL scheme configuration
 PREFERRED_URL_SCHEME = config.server.preferred_url_scheme

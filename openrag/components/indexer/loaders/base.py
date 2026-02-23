@@ -27,7 +27,7 @@ class BaseLoader(ABC):
     def __init__(self, **kwargs) -> None:
         self.page_sep = "[PAGE_SEP]"
         self.config = kwargs.get("config")
-        settings: dict = dict(self.config.vlm)
+        settings: dict = self.config.vlm.model_dump()
         model_settings = {
             "temperature": 0.2,
             "max_retries": 3,
@@ -36,8 +36,8 @@ class BaseLoader(ABC):
         }
         settings.update(model_settings)
 
-        self.image_captioning = self.config.loader.get("image_captioning", True)
-        self.image_captioning_url = self.config.loader.get("image_captioning_url", True)
+        self.image_captioning = self.config.loader.image_captioning
+        self.image_captioning_url = self.config.loader.image_captioning_url
 
         self.vlm_endpoint = ChatOpenAI(**settings).with_retry(stop_after_attempt=2)
 

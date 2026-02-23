@@ -188,7 +188,7 @@ class EmlLoader(BaseLoader):
                                     # Try fallback processing for images
                                     if file_ext in [".png", ".jpg", ".jpeg", ".svg"]:
                                         try:
-                                            if self.config.loader.get("image_captioning", False):
+                                            if self.config.loader.image_captioning:
                                                 # Try to load image directly from bytes as fallback
                                                 image = Image.open(io.BytesIO(attachment["raw"]))
                                                 caption = await self.get_image_description(image_data=image)
@@ -226,7 +226,7 @@ class EmlLoader(BaseLoader):
                                 ".jpg",
                                 ".jpeg",
                                 ".svg",
-                            ] and self.config.loader.get("image_captioning", False):
+                            ] and self.config.loader.image_captioning:
                                 try:
                                     # Load image from raw bytes
                                     image = Image.open(io.BytesIO(attachment["raw"]))
