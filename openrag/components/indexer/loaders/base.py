@@ -23,6 +23,7 @@ class BaseLoader(ABC):
     # Class-level compiled regex patterns (shared across all instances)
     HTTP_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((https?://[^)]+)\)")
     DATA_URI_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((data:image/[^;]+;base64,[^)]+)\)")
+    MIN_IMAGE_PIXELS = 784  # Qwen2.5-VL min_pixels threshold
 
     def __init__(self, **kwargs) -> None:
         self.page_sep = "[PAGE_SEP]"
@@ -96,6 +97,13 @@ class BaseLoader(ABC):
         Returns:
             str: Description of the image wrapped in XML tags
         """
+        # Early exit for small PIL images (below VLM min_pixels threshold)
+        if isinstance(image_data, Image.Image):
+            w, h = image_data.size
+            if w * h < self.MIN_IMAGE_PIXELS:
+                logger.debug("Skipping image below minimum size", size=f"{w}x{h}")
+                return "<image_description>\n\nImage too small for captioning\n\n</image_description>"
+
         async with get_vlm_semaphore():
             try:
                 # Determine the type of image data and create appropriate message content

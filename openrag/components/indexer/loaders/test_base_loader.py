@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 from PIL import Image
 
 from .base import BaseLoader
@@ -52,3 +53,19 @@ class TestPilImageToBase64:
         img.save.side_effect = Exception("Cannot save")
         result = self.loader._pil_image_to_base64(img)
         assert result == ""
+
+
+class TestGetImageDescription:
+    def setup_method(self):
+        self.loader = ConcreteLoader()
+
+    @pytest.mark.asyncio
+    async def test_small_image_skipped(self):
+        """Images below minimum pixel threshold should be skipped without calling VLM."""
+        small_img = Image.new("RGB", (10, 10), "red")
+        result = await self.loader.get_image_description(small_img)
+        assert "Image too small for captioning" in result
+
+    def test_min_image_pixels_threshold(self):
+        """Verify the threshold constant is set correctly."""
+        assert BaseLoader.MIN_IMAGE_PIXELS == 784
