@@ -7,17 +7,13 @@ from markitdown import MarkItDown
 from PIL import Image
 from utils.logger import get_logger
 
-from .base import BaseLoader
+from .base import BaseLoader, ensure_png_compatible_mode
 
 logger = get_logger()
 
 
 def convert_to_png_image(image: Image.Image) -> Image.Image:
-    # Convert incompatible modes to RGB/RGBA before PNG save
-    if image.mode in ("CMYK", "YCbCr", "LAB"):
-        image = image.convert("RGB")
-    elif image.mode in ("P", "LA", "PA"):
-        image = image.convert("RGBA")
+    image = ensure_png_compatible_mode(image)
     with BytesIO() as buffer:
         image.save(buffer, format="PNG")
         buffer.seek(0)

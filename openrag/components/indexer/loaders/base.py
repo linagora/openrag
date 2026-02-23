@@ -19,6 +19,15 @@ logger = get_logger()
 config = load_config()
 
 
+def ensure_png_compatible_mode(image: Image.Image) -> Image.Image:
+    """Convert incompatible PIL image modes to PNG-saveable modes."""
+    if image.mode in ("CMYK", "YCbCr", "LAB"):
+        return image.convert("RGB")
+    if image.mode in ("P", "LA", "PA"):
+        return image.convert("RGBA")
+    return image
+
+
 class BaseLoader(ABC):
     # Class-level compiled regex patterns (shared across all instances)
     HTTP_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((https?://[^)]+)\)")
@@ -61,11 +70,7 @@ class BaseLoader(ABC):
         """Convert PIL Image to base64 string."""
         buffered = BytesIO()
         try:
-            # Convert incompatible modes (CMYK, P, LA, etc.) to RGB/RGBA
-            if image.mode in ("CMYK", "YCbCr", "LAB"):
-                image = image.convert("RGB")
-            elif image.mode in ("P", "LA", "PA"):
-                image = image.convert("RGBA")
+            image = ensure_png_compatible_mode(image)
             image.save(buffered, format="PNG")
         except Exception as e:
             logger.warning("Failed to convert image to PNG", error=str(e), mode=getattr(image, "mode", "unknown"))
@@ -92,7 +97,6 @@ class BaseLoader(ABC):
                 - PIL.Image object
                 - str: HTTP/HTTPS URL
                 - str: data URI (data:image/...;base64,...)
-            semaphore: Semaphore to control access to the LLM model
 
         Returns:
             str: Description of the image wrapped in XML tags
@@ -108,10 +112,10 @@ class BaseLoader(ABC):
             try:
                 # Determine the type of image data and create appropriate message content
                 if isinstance(image_data, Image.Image):
-                    # logger.info("Processing PIL Image", img_size=str(image_data.size))
-
                     # Convert PIL Image to base64
                     img_b64 = self._pil_image_to_base64(image_data)
+                    if not img_b64:
+                        return "<image_description>\n\nFailed to convert image\n\n</image_description>"
                     image_url = f"data:image/png;base64,{img_b64}"
 
                 elif self._is_http_url(image_data):

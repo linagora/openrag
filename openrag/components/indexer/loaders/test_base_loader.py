@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from PIL import Image
 
-from .base import BaseLoader
+from .base import BaseLoader, ensure_png_compatible_mode
 
 
 class ConcreteLoader(BaseLoader):
@@ -69,3 +69,25 @@ class TestGetImageDescription:
     def test_min_image_pixels_threshold(self):
         """Verify the threshold constant is set correctly."""
         assert BaseLoader.MIN_IMAGE_PIXELS == 784
+
+
+class TestEnsurePngCompatibleMode:
+    def test_cmyk_to_rgb(self):
+        img = Image.new("CMYK", (10, 10))
+        result = ensure_png_compatible_mode(img)
+        assert result.mode == "RGB"
+
+    def test_palette_to_rgba(self):
+        img = Image.new("P", (10, 10))
+        result = ensure_png_compatible_mode(img)
+        assert result.mode == "RGBA"
+
+    def test_rgb_unchanged(self):
+        img = Image.new("RGB", (10, 10))
+        result = ensure_png_compatible_mode(img)
+        assert result.mode == "RGB"
+
+    def test_rgba_unchanged(self):
+        img = Image.new("RGBA", (10, 10))
+        result = ensure_png_compatible_mode(img)
+        assert result.mode == "RGBA"
