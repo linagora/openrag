@@ -13,7 +13,11 @@ logger = get_logger()
 
 
 def convert_to_png_image(image: Image.Image) -> Image.Image:
-    # Save the image into a BytesIO buffer in PNG format
+    # Convert incompatible modes to RGB/RGBA before PNG save
+    if image.mode in ("CMYK", "YCbCr", "LAB"):
+        image = image.convert("RGB")
+    elif image.mode in ("P", "LA", "PA"):
+        image = image.convert("RGBA")
     with BytesIO() as buffer:
         image.save(buffer, format="PNG")
         buffer.seek(0)

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .docx import DocxLoader
+from .docx import DocxLoader, convert_to_png_image
 
 
 def _create_png_bytes(width=10, height=10, color="red"):
@@ -127,3 +127,30 @@ class TestGetImagesFromZip:
         images = loader.get_images_from_zip(Path(tmp.name))
 
         assert images == []
+
+
+class TestConvertToPngImage:
+    def test_rgb_image(self):
+        img = Image.new("RGB", (50, 50), "red")
+        result = convert_to_png_image(img)
+        assert result is not None
+        assert result.mode == "RGBA"
+
+    def test_cmyk_image_converted(self):
+        """CMYK images should be converted to RGB then to PNG."""
+        cmyk_img = Image.new("CMYK", (50, 50), (0, 0, 0, 0))
+        result = convert_to_png_image(cmyk_img)
+        assert result is not None
+        assert result.mode == "RGBA"
+
+    def test_rgba_image(self):
+        img = Image.new("RGBA", (50, 50), (255, 0, 0, 128))
+        result = convert_to_png_image(img)
+        assert result is not None
+        assert result.mode == "RGBA"
+
+    def test_palette_image(self):
+        img = Image.new("P", (50, 50))
+        result = convert_to_png_image(img)
+        assert result is not None
+        assert result.mode == "RGBA"
