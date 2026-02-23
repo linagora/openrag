@@ -3,6 +3,7 @@ import copy
 import json
 import re
 import threading
+from collections import deque
 from typing import ClassVar
 
 import ray
@@ -156,8 +157,8 @@ async def stream_with_source_filtering(
 
     Yields SSE "data: ..." lines ready to forward to the client.
     """
-    accumulated_content = ""
-    content_buffer = ""
+    chunk_buffer: deque[dict] = deque()
+    buffered_content_len = 0
     last_chunk_template = None
     last_finish_reason = None
 
@@ -165,19 +166,24 @@ async def stream_with_source_filtering(
         if not line.startswith("data:"):
             continue
 
-        if "[DONE]" in line:
-            # Process buffer — strip sources block
-            clean_text, citations = extract_and_strip_sources_block(accumulated_content + content_buffer)
-            # Emit remaining clean content from buffer
-            remaining = clean_text[len(accumulated_content) :]
-            if remaining and last_chunk_template:
-                chunk = copy.deepcopy(last_chunk_template)
-                chunk["choices"][0]["delta"] = {"content": remaining}
-                chunk["choices"][0]["finish_reason"] = None
+        if line.strip() == "data: [DONE]":
+            buffered_text = "".join(
+                (c.get("choices", [{}])[0].get("delta", {}).get("content", "") or "") for c in chunk_buffer
+            )
+            clean_text, citations = extract_and_strip_sources_block(buffered_text)
+
+            remaining = clean_text
+            for chunk in chunk_buffer:
+                original_content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "") or ""
+                if not remaining:
+                    break
+                surviving = remaining[: len(original_content)]
+                remaining = remaining[len(original_content) :]
+                if surviving != original_content:
+                    chunk["choices"][0]["delta"]["content"] = surviving
                 chunk["extra"] = "{}"
                 yield f"data: {json.dumps(chunk)}\n\n"
 
-            # Emit finish chunk with filtered sources
             if last_chunk_template:
                 filtered = filter_sources_by_citations(sources, citations)
                 finish_chunk = copy.deepcopy(last_chunk_template)
@@ -186,7 +192,8 @@ async def stream_with_source_filtering(
                 finish_chunk["extra"] = json.dumps({"sources": filtered})
                 yield f"data: {json.dumps(finish_chunk)}\n\n"
 
-            yield f"{line}\n\n"
+            yield "data: [DONE]\n\n"
+
         else:
             data_str = line[len("data: ") :]
             data = json.loads(data_str)
@@ -202,18 +209,17 @@ async def stream_with_source_filtering(
                 last_finish_reason = finish_reason
                 last_chunk_template = data
             elif content:
-                # Buffer content chunks
                 last_chunk_template = data
-                content_buffer += content
+                chunk_buffer.append(data)
+                buffered_content_len += len(content)
 
-                if len(content_buffer) > buffer_size:
-                    to_emit = content_buffer[:-buffer_size]
-                    content_buffer = content_buffer[-buffer_size:]
-                    accumulated_content += to_emit
+                while buffered_content_len > buffer_size:
+                    oldest = chunk_buffer.popleft()
+                    oldest_content = oldest.get("choices", [{}])[0].get("delta", {}).get("content", "") or ""
+                    oldest["extra"] = "{}"
+                    buffered_content_len -= len(oldest_content)
+                    yield f"data: {json.dumps(oldest)}\n\n"
 
-                    data["choices"][0]["delta"]["content"] = to_emit
-                    data["extra"] = "{}"
-                    yield f"data: {json.dumps(data)}\n\n"
             else:
                 # Forward non-content, non-finish chunks immediately (e.g. role delta)
                 data["extra"] = "{}"
