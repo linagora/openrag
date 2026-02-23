@@ -21,16 +21,17 @@ class DocLoader(BaseLoader):
     async def aload_document(self, file_path, metadata, save_markdown=False):
         """Convert .doc to .docx format, then use DocxLoader to convert to markdown.
         Falls back to plain text extraction if the .docx conversion fails."""
-        document = Document()
-        document.LoadFromFile(str(file_path))
-
         temp_path = None
+        document = Document()
         try:
+            document.LoadFromFile(str(file_path))
             with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as temp_file:
                 temp_path = temp_file.name
                 document.SaveToFile(temp_path, FileFormat.Docx2016)
         except Exception as e:
-            logger.warning(f"Spire.Doc conversion to .docx failed, falling back to text extraction: {e}")
+            logger.bind(file_id=metadata.get("file_id"), partition=metadata.get("partition")).warning(
+                f"Spire.Doc conversion to .docx failed, falling back to text extraction: {e}"
+            )
             text = document.GetText()
             doc = LCDocument(page_content=text, metadata=metadata)
             if save_markdown:

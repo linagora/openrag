@@ -45,7 +45,10 @@ def _start_patches(mock_config):
 
 def _stop_patches():
     for p in _PATCHES:
-        p.stop()
+        try:
+            p.stop()
+        except RuntimeError:
+            pass
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +91,7 @@ class TestDocLoader:
         assert call_args[0][0].endswith(".docx")
 
         assert result == expected_doc
+        mock_doc_instance.GetText.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_fallback_on_spire_exception(self, mock_config, metadata):
@@ -143,8 +147,10 @@ class TestDocLoader:
         loader = self._make_loader(mock_config)
 
         mock_doc_instance = MagicMock()
+        created_temp_files = []
 
         def save_then_fail(path, fmt):
+            created_temp_files.append(path)
             # Create the file so we can verify it's cleaned up
             with open(path, "w") as f:
                 f.write("partial")
@@ -157,6 +163,8 @@ class TestDocLoader:
         result = await loader.aload_document("/fake/path.doc", metadata)
 
         assert result.page_content == "fallback text"
+        for path in created_temp_files:
+            assert not os.path.exists(path), f"Temp file was not cleaned up: {path}"
 
     @pytest.mark.asyncio
     async def test_fallback_with_save_markdown(self, mock_config, metadata, tmp_path):
