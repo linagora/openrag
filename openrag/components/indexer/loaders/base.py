@@ -59,8 +59,16 @@ class BaseLoader(ABC):
     def _pil_image_to_base64(self, image: Image.Image) -> str:
         """Convert PIL Image to base64 string."""
         buffered = BytesIO()
-        # Determine format based on image mode or use PNG as default
-        image.save(buffered, format="PNG")
+        try:
+            # Convert incompatible modes (CMYK, P, LA, etc.) to RGB/RGBA
+            if image.mode in ("CMYK", "YCbCr", "LAB"):
+                image = image.convert("RGB")
+            elif image.mode in ("P", "LA", "PA"):
+                image = image.convert("RGBA")
+            image.save(buffered, format="PNG")
+        except Exception as e:
+            logger.warning("Failed to convert image to PNG", error=str(e), mode=getattr(image, "mode", "unknown"))
+            return ""
         return base64.b64encode(buffered.getvalue()).decode()
 
     def _is_http_url(self, data: str) -> bool:
