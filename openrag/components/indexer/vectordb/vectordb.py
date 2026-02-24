@@ -95,7 +95,7 @@ class BaseVectorDB(ABC):
         pass
 
     @abstractmethod
-    async def get_file_chunks(self, file_id: str, partition: str, include_id: bool = False, limit: int = 100):
+    async def get_file_chunks(self, file_id: str, partition: str, include_id: bool = False):
         pass
 
     @abstractmethod
