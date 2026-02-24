@@ -46,7 +46,7 @@ results = client.query(
 :::info
 Temporal fields are currently stored as **strings**, not **`TIMESTAMPTZ`**. Migrating to `TIMESTAMPTZ` requires a schema and index change, and Milvus doesn't support migrations on schema and index changes: it has to be handled manually.
 
-Until a milvus schema & index migration strategy is define, filtering still works via **lexicographic string comparison** on ISO 8601 strings:
+Until a Milvus schema & index migration strategy is defined, filtering still works via **lexicographic string comparison** on ISO 8601 strings:
 ```python
 expr = "tsz != '2025-01-03T00:00:00+08:00'"  # No ISO/INTERVAL keywords
 results = client.query(
@@ -61,7 +61,7 @@ Full `TIMESTAMPTZ` support will be activated in a future release once the migrat
 
 ## Milvus version upgrade Steps
 :::danger[Before running Milvus Version Migration]
-These steps must be performed on a deployment running OpenRAG **prior to version 1.1.6** (Milvus 2.5.4) before switching to a newest version of Openrag.
+These steps must be performed on a deployment running OpenRAG **prior to version 1.1.6** (Milvus 2.5.4) before switching to the newest version of OpenRAG.
 :::
 
 > For the full official reference, see the [Milvus upgrade guide](https://milvus.io/docs/upgrade_milvus_standalone-docker.md#Upgrade-process).
@@ -83,7 +83,7 @@ Then restart the stack:
 
 ```bash
 docker compose down
-docker compose up -d
+docker compose up --build milvus -d
 ```
 
 Wait for all services to be healthy before continuing.
@@ -129,4 +129,4 @@ docker inspect milvus-standalone --format '{{ .Config.Image }}'
 # Expected: milvusdb/milvus:v2.6.11
 ```
 
-Now you can switch to the newest release of openrag and i should work fine.
+Now you can switch to the newest release of OpenRAG and it should work fine.

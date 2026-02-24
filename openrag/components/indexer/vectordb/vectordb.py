@@ -379,6 +379,7 @@ class MilvusDB(BaseVectorDB):
             entities = []
             vectors = await self.embedder.aembed_documents(chunks)
             order_metadata_l: list[dict] = _gen_chunk_order_metadata(n=len(chunks))
+
             for chunk, vector, order_metadata in zip(chunks, vectors, order_metadata_l):
                 entities.append(
                     {
@@ -452,9 +453,10 @@ class MilvusDB(BaseVectorDB):
         self,
         query: str,
         top_k: int = 5,
-        similarity_threshold: int = 0.80,
+        similarity_threshold: float = 0.80,
         partition: list[str] = None,
-        filter: dict | None = None,
+        filter: str | None = None,
+        filter_params: dict | None = None,
         with_surrounding_chunks: bool = False,
     ) -> list[Document]:
         expr_parts = []
@@ -462,11 +464,11 @@ class MilvusDB(BaseVectorDB):
             expr_parts.append(f"partition in {partition}")
 
         if filter:
-            for key, value in filter.items():
-                expr_parts.append(f"{key} == '{value}'")
+            expr_parts.append(filter)
 
         # Join all parts with " and " only if there are multiple conditions
         expr = " and ".join(expr_parts) if expr_parts else ""
+        filter_params = filter_params or {}
 
         try:
             query_vector = await self.embedder.aembed_query(query)
@@ -483,6 +485,7 @@ class MilvusDB(BaseVectorDB):
                 },
                 "limit": top_k,
                 "expr": expr,
+                "expr_params": filter_params,
             }
             if self.hybrid_search:
                 sparse_param = {
@@ -494,6 +497,7 @@ class MilvusDB(BaseVectorDB):
                     },
                     "limit": top_k,
                     "expr": expr,
+                    "expr_params": filter_params,
                 }
                 reqs = [
                     AnnSearchRequest(**vector_param),
@@ -507,10 +511,24 @@ class MilvusDB(BaseVectorDB):
                     limit=top_k,
                 )
             else:
+                vector_param = {
+                    "data": [query_vector],
+                    "anns_field": "vector",
+                    "search_params": {
+                        "metric_type": "COSINE",
+                        "params": {
+                            "ef": 64,
+                            "radius": similarity_threshold,
+                            "range_filter": 1.0,
+                        },
+                    },
+                    "limit": top_k,
+                }
                 response = await self._async_client.search(
                     collection_name=self.collection_name,
                     output_fields=["*"],
-                    limit=top_k,
+                    filter=expr,
+                    filter_params=filter_params,
                     **vector_param,
                 )
 
@@ -617,33 +635,26 @@ class MilvusDB(BaseVectorDB):
                 file_id=file_id,
             )
 
-    async def get_file_chunks(self, file_id: str, partition: str, include_id: bool = False, limit: int = 100):
+    async def get_file_chunks(self, file_id: str, partition: str, include_id: bool = False, limit: int = 5000):
         log = self.logger.bind(file_id=file_id, partition=partition)
         try:
             self._check_file_exists(file_id, partition)
-            # Adjust filter expression based on the type of value
-            filter_expression = "partition == {partition} and file_id == {file_id}"
-            filter_params = {"partition": partition, "file_id": file_id}
-
-            # Pagination parameters
-            offset = 0
-            results = []
+            filter_expr = f'partition == "{partition}" and file_id == "{file_id}"'
             excluded_keys = ["text", "vector", "_id"] if not include_id else ["text", "vector"]
 
+            results = []
+            iterator = self._client.query_iterator(
+                collection_name=self.collection_name,
+                filter=filter_expr,
+                limit=limit,
+                output_fields=["*"],
+            )
             while True:
-                response = await self._async_client.query(
-                    collection_name=self.collection_name,
-                    filter=filter_expression,
-                    filter_params=filter_params,
-                    limit=limit,
-                    offset=offset,
-                )
-
-                if not response:
-                    break  # No more results
-
-                results.extend(response)
-                offset += len(response)  # Move offset forward
+                batch = iterator.next()
+                if not batch:
+                    iterator.close()
+                    break
+                results.extend(batch)
 
             docs = [
                 Document(
