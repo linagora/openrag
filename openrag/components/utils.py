@@ -120,6 +120,38 @@ def format_context(
     return f"{sep}".join(reduced_docs), included_indices
 
 
+def format_web_context(
+    web_results: list,
+    start_index: int = 1,
+) -> tuple[str, list[int]]:
+    """Format web results as numbered [Source N] blocks.
+
+    Args:
+        web_results: Results from web search provider (list of WebResult)
+        start_index: First source number (continues numbering after RAG sources)
+
+    Returns:
+        (formatted_string, list_of_source_numbers_used)
+    """
+    if not web_results:
+        return "", []
+
+    from components.indexer.utils.text_sanitizer import sanitize_text
+
+    parts = []
+    source_numbers = []
+    for i, result in enumerate(web_results):
+        n = start_index + i
+        title = sanitize_text(result.title)
+        snippet = sanitize_text(result.snippet)
+        url = result.url
+        parts.append(f"[Source {n}]\n{title}\n{url}\n{snippet}")
+        source_numbers.append(n)
+
+    sep = "-" * 10 + "\n\n"
+    return sep.join(parts), source_numbers
+
+
 _SOURCES_NONE_RE = re.compile(r"\n?\[?Sources?\]?\s*:\s*\[?\s*none\s*\]?\s*$", re.IGNORECASE)
 _SOURCES_NUMS_RE = re.compile(r"\n?\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?[.\s]*$")
 

@@ -234,6 +234,52 @@ class TestSourceFiltering:
         assert isinstance(extra["sources"], list)
 
 
+class TestWebOnlyMode:
+    """Test web-only mode: metadata.websearch=true with no partition."""
+
+    def test_web_only_mode_no_partition(self, api_client):
+        """Web-only mode returns 200 with valid response when websearch=true and no partition."""
+        response = api_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "",  # empty string → is_direct_llm_model()=True → partition=None
+                "messages": [{"role": "user", "content": "What is the capital of France?"}],
+                "metadata": {"websearch": True},
+                "stream": False,
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "choices" in data
+        assert len(data["choices"]) > 0
+        assert data["choices"][0]["message"]["content"]  # non-empty string
+
+        # If sources present, all must be web type (no document sources in web-only mode)
+        extra = json.loads(data["extra"]) if data.get("extra") else {}
+        sources = extra.get("sources", [])
+        for source in sources:
+            assert source.get("source_type") == "web"
+
+    def test_web_only_mode_graceful_degradation(self, api_client):
+        """Web-only mode with no web results still returns 200 (plain LLM answer)."""
+        # In CI with mock VLLM and no Staan, web results will be empty.
+        # The LLM should still answer — graceful degradation, not an error.
+        response = api_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "metadata": {"websearch": True},
+                "stream": False,
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "choices" in data
+        assert len(data["choices"]) > 0
+        assert data["choices"][0]["message"]["content"]  # non-empty
+
+
 class TestChatCompletionsMultiPartition:
     """Test chat completions with multi-partition access."""
 

@@ -189,6 +189,28 @@ await vectordb.list_partition_members.remote(partition)
 - For admins with `SUPER_ADMIN_MODE=true`, `all` resolves to all system partitions
 - Model prefix is `openrag-` (legacy: `ragondin-`)
 
+### Web Search Integration
+
+Optional web search augmentation via the Staan API, allowing the LLM to combine RAG document context with live web results.
+
+**Configuration** (`.hydra_config/config.yaml` → `websearch:` block, env vars):
+- `WEBSEARCH_API_TOKEN` — provider API token; if unset, web search is silently disabled
+- `WEBSEARCH_BASE_URL` — provider endpoint (default: Staan API)
+- `WEBSEARCH_TOP_K` — number of web results (default: 5)
+- `WEBSEARCH_LANG` — search language/market (default: `fr-FR`)
+
+**How it works:**
+- Client sends `metadata: {"websearch": true}` in the chat completion request
+- **Combined mode** (partition + websearch): RAG retrieval and web search run concurrently via `asyncio.gather()`; web results are appended after document sources with continuous `[Source N]` numbering
+- **Web-only mode** (no partition + websearch): skips RAG retrieval entirely, uses web results as sole context; if no results (token unset / search fails), falls back to plain direct LLM mode
+- Source entries include `source_type: "document"` or `source_type: "web"` in the `extra.sources` response
+
+**Key files:**
+- `openrag/components/websearch/` — `WebSearchService`, `BaseWebSearchProvider`, `StaanProvider`
+- `openrag/components/utils.py` — `format_web_context()` formats web results as numbered source blocks
+- `openrag/components/pipeline.py` — `_prepare_for_web_only()`, web search logic in `_prepare_for_chat_completion()`
+- `openrag/routers/openai.py` — `__prepare_sources()` merges document and web sources
+
 ### File Quota System
 
 Per-user file quota enforcement tracked via the `file_count` and `file_quota` columns on `users`, and `created_by` on `files`.
@@ -236,7 +258,7 @@ Environment variables override config values (see `.env.example`).
 act -j api-tests -W .github/workflows/api_tests.yml --bind
 ```
 
-**Mock VLLM for CI:** `.github/workflows/api_tests/mock_vllm.py` provides fake embeddings and completions endpoints (streaming and non-streaming) for testing without a real LLM. Pydantic request models use `ConfigDict(extra="allow")` to accept vendor-specific fields like `extra_body`.
+**Mock VLLM for CI:** `tests/api_tests/api_run/mock_vllm.py` provides fake embeddings and completions endpoints (streaming and non-streaming) for testing without a real LLM. Pydantic request models use `ConfigDict(extra="allow")` to accept vendor-specific fields like `extra_body`.
 
 ## Key Patterns
 

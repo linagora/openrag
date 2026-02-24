@@ -67,6 +67,12 @@ map_reduce:
   # Enable debug logging for map & reduce
   debug: ${oc.decode:${oc.env:MAP_REDUCE_DEBUG, false}}
 
+websearch:
+  api_token: ${oc.env:WEBSEARCH_API_TOKEN, ""}
+  base_url: ${oc.env:WEBSEARCH_BASE_URL, "https://api.staan.ai/search/web"}
+  top_k: ${oc.decode:${oc.env:WEBSEARCH_TOP_K, 5}}
+  lang: ${oc.env:WEBSEARCH_LANG, fr-FR}
+
 verbose:
   level: ${oc.env:LOG_LEVEL, DEBUG}
 

@@ -4,6 +4,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import consts
+from components.indexer.utils.text_sanitizer import sanitize_text
 from components.pipeline import RagPipeline
 from components.utils import (
     extract_and_strip_sources_block,
@@ -110,7 +111,7 @@ async def list_models(
     return JSONResponse(content={"object": "list", "data": models})
 
 
-def __prepare_sources(request: Request, docs: list[Document]):
+def __prepare_sources(request: Request, docs: list[Document], web_results: list | None = None):
     links = []
     for doc in docs:
         doc_metadata = dict(doc.metadata)
@@ -119,9 +120,21 @@ def __prepare_sources(request: Request, docs: list[Document]):
         encoded_url = quote(file_url, safe=":/")
         links.append(
             {
+                "source_type": "document",
                 "file_url": encoded_url,
                 "chunk_url": str(request.url_for("get_extract", extract_id=doc_metadata["_id"])),
                 **doc_metadata,
+            }
+        )
+    for result in web_results or []:
+        links.append(
+            {
+                "source_type": "web",
+                "url": result.url,
+                "title": sanitize_text(result.title),
+                "snippet": sanitize_text(result.snippet),
+                "display_url": result.display_url,
+                "hostname": result.hostname,
             }
         )
     return links
@@ -319,10 +332,10 @@ async def openai_chat_completion(
         partitions = await get_partition_name(model_name, user_partitions, is_admin=user["is_admin"])
         log.debug(f"Using partitions: {partitions}")
 
-    llm_output, docs = await ragpipe.chat_completion(partition=partitions, payload=request.model_dump())
+    llm_output, docs, web_results = await ragpipe.chat_completion(partition=partitions, payload=request.model_dump())
     log.debug("RAG chat completion pipeline executed.")
 
-    sources = __prepare_sources(request2, docs)
+    sources = __prepare_sources(request2, docs, web_results=web_results)
 
     if request.stream:
 
