@@ -129,6 +129,8 @@ loader:
   marker_min_processes: ${oc.decode:${oc.env:MARKER_MIN_PROCESSES, 1}}
   marker_num_gpus: ${oc.decode:${oc.env:MARKER_NUM_GPUS, 0.01}} # See https://docs.ray.io/en/latest/cluster/kubernetes/user-guides/gpu.html
   marker_timeout: ${oc.decode:${oc.env:MARKER_TIMEOUT, 3600}}
+  marker_pdftext_workers: ${oc.decode:${oc.env:MARKER_PDFTEXT_WORKERS, 2}}
+  
   transcriber:
     base_url: ${oc.env:TRANSCRIBER_BASE_URL, http://transcriber:8000/v1}
     api_key: ${oc.env:TRANSCRIBER_API_KEY, EMPTY}

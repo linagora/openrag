@@ -38,6 +38,7 @@ The `MarkerLoader` is the default PDF parsing engine. It can be configured using
 | `MARKER_MAX_TASKS_PER_CHILD` | int | 10 | Number of tasks a child (PDF worker) has to process before it gets restarted to clean up memory leaks |
 | `MARKER_MIN_PROCESSES` | int | 1 | Minimum number of subprocesses available before triggering a process pool reset |
 | `MARKER_TIMEOUT` | int | 3600 | Timeout in seconds for marker processes |
+| `MARKER_PDFTEXT_WORKERS` | int | 2 | Number of PDF text extractor workers inside marker. |
 
 
 

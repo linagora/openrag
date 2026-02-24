@@ -41,8 +41,8 @@ class MarkerWorker:
             "output_format": "markdown",
             "paginate_output": True,
             "page_separator": self.page_sep,
-            "pdftext_workers": 1,
-            "disable_multiprocessing": True,
+            "pdftext_workers": self.config.loader.get("marker_pdftext_workers"),
+            "disable_multiprocessing": False,
         }
         os.environ["RAY_ADDRESS"] = "auto"
 
@@ -90,6 +90,7 @@ class MarkerWorker:
             initializer=self._worker_init,
             initargs=(self.model_dict,),
             mp_context=mp.get_context("spawn"),
+            max_tasks_per_child=self.config.loader.get("marker_max_tasks_per_child", 5),
         )
         self.logger.info("MarkerWorker initialized with ProcessPoolExecutor")
 
@@ -134,7 +135,6 @@ class MarkerWorker:
                 return result
             except FuturesTimeoutError:
                 self.logger.exception("MarkerWorker child process timed out", path=file_path)
-                future.cancel()
                 raise
             except Exception:
                 self.logger.exception("Error processing with MarkerWorker", path=file_path)
