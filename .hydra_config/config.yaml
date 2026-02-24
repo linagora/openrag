@@ -72,6 +72,15 @@ verbose:
 server:
   preferred_url_scheme: ${oc.env:PREFERRED_URL_SCHEME, null}
 
+mcp:
+  server_name: ${oc.env:OPENRAG_MCP_SERVER_NAME, OpenRAG MCP}
+  host: ${oc.env:OPENRAG_MCP_HOST, 0.0.0.0}
+  port: ${oc.decode:${oc.env:OPENRAG_MCP_PORT, 8081}}
+  path: ${oc.env:OPENRAG_MCP_PATH, /mcp}
+  default_top_k: ${oc.decode:${oc.env:OPENRAG_MCP_DEFAULT_TOP_K, 5}}
+  max_top_k: ${oc.decode:${oc.env:OPENRAG_MCP_MAX_TOP_K, 50}}
+  similarity_threshold: ${oc.decode:${oc.env:OPENRAG_MCP_SIMILARITY_THRESHOLD, 0.8}}
+
 paths:
   prompts_dir: ${oc.env:PROMPTS_DIR, ../prompts/example1}
   data_dir: ${oc.env:DATA_DIR, ../data}

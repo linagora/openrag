@@ -50,6 +50,7 @@ dependencies = [
     "ruff>=0.14.1",
     "librosa>=0.11.0",
     "cairosvg>=2.7.0",
+    "mcp>=1.11.0",
 ]
 
 [dependency-groups]
@@ -68,6 +69,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["openrag*"]
+
+[project.scripts]
+openrag-mcp = "openrag.mcp_server:main"
 
 
 

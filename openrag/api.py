@@ -1,5 +1,6 @@
 import os
 import warnings
+from contextlib import AsyncExitStack
 from enum import Enum
 from importlib.metadata import version as get_package_version
 from pathlib import Path
@@ -29,6 +30,9 @@ from routers.queue import router as queue_router
 from routers.search import router as search_router
 from routers.tools import router as tools_router
 from routers.users import router as users_router
+from mcp_server import create_mcp_http_app
+from mcp_server import path as mcp_path
+from mcp_server import server as mcp_server
 from starlette.middleware.base import BaseHTTPMiddleware
 from utils.dependencies import get_vectordb
 from utils.exceptions import OpenRAGError
@@ -180,10 +184,24 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Mcp-Session-Id"],
 )
 
 app.state.app_state = AppState(config)
 app.mount("/static", StaticFiles(directory=DATA_DIR.resolve(), check_dir=True), name="static")
+app.mount(mcp_path, create_mcp_http_app(), name="mcp")
+
+_mcp_lifespan_stack = AsyncExitStack()
+
+
+@app.on_event("startup")
+async def startup_mcp_server():
+    await _mcp_lifespan_stack.enter_async_context(mcp_server.session_manager.run())
+
+
+@app.on_event("shutdown")
+async def shutdown_mcp_server():
+    await _mcp_lifespan_stack.aclose()
 
 
 @app.get("/health_check", summary="Health check endpoint for API", dependencies=[])
