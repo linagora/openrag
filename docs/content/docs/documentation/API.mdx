@@ -400,18 +400,16 @@ OpenAI-compatible text completion endpoint.
 
 #### Extra arguments
 
-* When using the openai endpoint /v1/chat/completions, one can provide extra arguments in the request body to customize the RAG behavior:
-- `websearch`: boolean (default: false) - If true, augments the RAG context with live web search results. When used with a partition (`openrag-{partition}`), document and web results are combined. When used without a partition (direct LLM mode), web results are the sole context. Requires `WEBSEARCH_API_TOKEN` to be configured. For more information see the [web search documentation](/openrag/documentation/env_vars/#web-search-configuration).
-- `spoken_style_answer`: boolean (default: false) - If true, the model will generate a succint spoken style conversational answer based on the retrieved documents.
-- `use_map_reduce`: boolean (default: false) - If true, the model will use a map-reduce strategy to aggregate information from multiple documents. For more information see the [map-reduce documentation](/openrag/documentation/env_vars/#map--reduce-configuration).
-- `llm_override`: object (optional) - Route the request to a different LLM endpoint while still using OpenRAG's RAG pipeline (retrieval, reranking, prompt construction). Accepts the following fields:
-  - `base_url`: string - Base URL of the target LLM API (e.g. `https://api.openai.com/v1`)
-  - `api_key`: string - API key for the target LLM
-  - `model`: string - Model name to use on the target endpoint
+* When using the openai endpoint /v1/chat/completions, you can pass extra arguments **via the `metadata` field** of the request body to customize the RAG behavior:
 
-  Any field not provided falls back to the default OpenRAG LLM configuration.
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `websearch` | `bool` | `false` | Augments the RAG context with live web search results. When used with a partition (`openrag-{partition}`), document and web results are combined. When used without a partition (direct LLM mode), web results are the sole context. Requires `WEBSEARCH_API_TOKEN` to be configured. See [web search configuration](/openrag/documentation/env_vars/#web-search-configuration). |
+| `spoken_style_answer` | `bool` | `false` | Generates a succinct spoken-style conversational answer based on the retrieved documents. |
+| `use_map_reduce` | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
+| `llm_override` | `object` | `null` | Routes the request to a different LLM endpoint while still using OpenRAG's RAG pipeline (retrieval, reranking, prompt construction). Accepts: `base_url` (string), `api_key` (string), `model` (string). Any field not provided falls back to the default OpenRAG LLM configuration. |
 
-These arguments are supplied via the metadata field of the OpenAI request body. Example:
+Examples:
 
 ```bash title="Enabling conversational answer with openai chat completions endpoint"
 curl -X 'POST' 'http://localhost:8080/v1/chat/completions' \
