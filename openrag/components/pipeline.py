@@ -101,8 +101,17 @@ class RagPipeline:
                 top_k=config.websearch.get("top_k", 5),
                 lang=config.websearch.get("lang", "fr-FR"),
             )
-            self.web_search_service = WebSearchService(provider=provider)
-            logger.info("Web search enabled")
+            content_fetcher = None
+            if config.websearch.get("fetch_content", True):
+                from components.websearch.content_fetcher import ContentFetcher
+
+                content_fetcher = ContentFetcher(
+                    max_results=config.websearch.get("fetch_max_results", 3),
+                    timeout=config.websearch.get("fetch_timeout", 1.0),
+                    max_tokens_per_page=config.websearch.get("fetch_max_tokens", 500),
+                )
+            self.web_search_service = WebSearchService(provider=provider, content_fetcher=content_fetcher)
+            logger.info("Web search enabled", fetch_content=content_fetcher is not None)
         else:
             self.web_search_service = WebSearchService(provider=None)
             logger.info("Web search disabled (WEBSEARCH_API_TOKEN not set)")

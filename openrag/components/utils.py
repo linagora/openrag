@@ -126,6 +126,8 @@ def format_web_context(
 ) -> tuple[str, list[int]]:
     """Format web results as numbered [Source N] blocks.
 
+    Uses fetched page content when available, falling back to the search snippet.
+
     Args:
         web_results: Results from web search provider (list of WebResult)
         start_index: First source number (continues numbering after RAG sources)
@@ -143,9 +145,9 @@ def format_web_context(
     for i, result in enumerate(web_results):
         n = start_index + i
         title = sanitize_text(result.title)
-        snippet = sanitize_text(result.snippet)
         url = result.url
-        parts.append(f"[Source {n}]\n{title}\n{url}\n{snippet}")
+        body = sanitize_text(result.content) if result.content else sanitize_text(result.snippet)
+        parts.append(f"[Source {n}]\n{title}\n{url}\n{body}")
         source_numbers.append(n)
 
     sep = "-" * 10 + "\n\n"

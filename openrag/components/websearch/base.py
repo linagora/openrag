@@ -9,6 +9,7 @@ class WebResult:
     snippet: str
     display_url: str | None = None
     hostname: str | None = None
+    content: str | None = None
 
 
 class BaseWebSearchProvider(ABC):
