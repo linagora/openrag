@@ -109,6 +109,7 @@ class RagPipeline:
                     max_results=config.websearch.get("fetch_max_results", 3),
                     timeout=config.websearch.get("fetch_timeout", 1.0),
                     max_tokens_per_page=config.websearch.get("fetch_max_tokens", 500),
+                    verify_ssl=config.websearch.get("fetch_verify_ssl", False),
                 )
             self.web_search_service = WebSearchService(provider=provider, content_fetcher=content_fetcher)
             logger.info("Web search enabled", fetch_content=content_fetcher is not None)

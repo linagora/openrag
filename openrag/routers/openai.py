@@ -1,7 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import consts
 from components.indexer.utils.text_sanitizer import sanitize_text
@@ -127,14 +127,16 @@ def __prepare_sources(request: Request, docs: list[Document], web_results: list 
             }
         )
     for result in web_results or []:
+        display_url = sanitize_text(result.display_url or "")
+        if display_url and urlparse(display_url).scheme not in ("http", "https"):
+            display_url = ""
         links.append(
             {
                 "source_type": "web",
                 "url": result.url,
                 "title": sanitize_text(result.title),
                 "snippet": sanitize_text(result.snippet),
-                "display_url": result.display_url,
-                "hostname": result.hostname,
+                "display_url": display_url,
             }
         )
     return links

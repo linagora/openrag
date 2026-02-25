@@ -29,7 +29,6 @@ class StaanProvider(BaseWebSearchProvider):
                 url=r.get("url", ""),
                 snippet=r.get("snippet", ""),
                 display_url=r.get("display_url"),
-                hostname=r.get("hostname"),
             )
             for r in results[: self.top_k]
         ]

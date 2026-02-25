@@ -27,10 +27,12 @@ class ContentFetcher:
         max_results: int = 3,
         timeout: float = 1.0,
         max_tokens_per_page: int = 500,
+        verify_ssl: bool = False,
     ):
         self.max_results = max_results
         self.timeout = timeout
         self.max_tokens_per_page = max_tokens_per_page
+        self.verify_ssl = verify_ssl
         self._client_override: httpx.AsyncClient | None = None  # For testing
 
     def _truncate(self, text: str) -> str:
@@ -120,7 +122,9 @@ class ContentFetcher:
                 write=self.timeout,
                 pool=self.timeout,
             )
-            async with httpx.AsyncClient(timeout=timeout, verify=False, headers={"User-Agent": _USER_AGENT}) as client:
+            async with httpx.AsyncClient(
+                timeout=timeout, verify=self.verify_ssl, headers={"User-Agent": _USER_AGENT}
+            ) as client:
                 tasks = [self._fetch_single(client, r.url) for r in to_fetch]
                 contents = await asyncio.gather(*tasks)
                 for result, content in zip(to_fetch, contents):

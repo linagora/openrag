@@ -55,16 +55,19 @@ class TestFetchSingleURL:
         assert text is None
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("url", [
-        "http://localhost/secret",
-        "http://127.0.0.1/admin",
-        "http://127.0.0.42/x",
-        "http://[::1]/admin",
-        "http://10.0.0.1/internal",
-        "http://192.168.1.1/router",
-        "http://169.254.169.254/metadata",
-        "http://0.0.0.0/x",
-    ])
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost/secret",
+            "http://127.0.0.1/admin",
+            "http://127.0.0.42/x",
+            "http://[::1]/admin",
+            "http://10.0.0.1/internal",
+            "http://192.168.1.1/router",
+            "http://169.254.169.254/metadata",
+            "http://0.0.0.0/x",
+        ],
+    )
     async def test_skips_loopback_urls(self, fetcher, url):
         async def mock_handler(request):
             return httpx.Response(200, text="<html><body>secret</body></html>")

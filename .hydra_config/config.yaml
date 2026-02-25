@@ -76,6 +76,7 @@ websearch:
   fetch_max_results: ${oc.decode:${oc.env:WEBSEARCH_FETCH_MAX_RESULTS, 3}}
   fetch_timeout: ${oc.decode:${oc.env:WEBSEARCH_FETCH_TIMEOUT, 1.0}}
   fetch_max_tokens: ${oc.decode:${oc.env:WEBSEARCH_FETCH_MAX_TOKENS, 500}}
+  fetch_verify_ssl: ${oc.decode:${oc.env:WEBSEARCH_FETCH_VERIFY_SSL, false}}
 
 verbose:
   level: ${oc.env:LOG_LEVEL, DEBUG}

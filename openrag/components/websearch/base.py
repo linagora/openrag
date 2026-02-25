@@ -8,7 +8,6 @@ class WebResult:
     url: str
     snippet: str
     display_url: str | None = None
-    hostname: str | None = None
     content: str | None = None
 
 
