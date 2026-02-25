@@ -41,24 +41,6 @@ results = client.query(
 > * `PT3H` = 3 hours
 > * `P2DT6H` = 2 days and 6 hours.
 
-## Current State
-
-:::info
-Temporal fields are currently stored as **strings**, not **`TIMESTAMPTZ`**. Migrating to `TIMESTAMPTZ` requires a schema and index change, and Milvus doesn't support migrations on schema and index changes: it has to be handled manually.
-
-Until a Milvus schema & index migration strategy is defined, filtering still works via **lexicographic string comparison** on ISO 8601 strings:
-```python
-expr = "tsz != '2025-01-03T00:00:00+08:00'"  # No ISO/INTERVAL keywords
-results = client.query(
-    collection_name,
-    filter=expr,
-    output_fields=["id", "tsz"],
-    limit=10
-)
-```
-Full `TIMESTAMPTZ` support will be activated in a future release once the migration is established.
-:::
-
 ## Milvus version upgrade Steps
 :::danger[Before running Milvus Version Migration]
 These steps must be performed on a deployment running OpenRAG **prior to version 1.1.6** (Milvus 2.5.4) before switching to the newest version of OpenRAG.
@@ -130,3 +112,65 @@ docker inspect milvus-standalone --format '{{ .Config.Image }}'
 ```
 
 Now you can switch to the newest release of OpenRAG and it should work fine.
+
+## Schema Migration — Add Temporal Fields
+
+:::info
+This migration adds `TIMESTAMPTZ` fields (`datetime`, `created_at`, `updated_at`, `indexed_at`) and their `STL_SORT` indexes to an existing collection.
+
+Existing documents will have `null` for these fields; new documents will have them populated at index time.
+:::
+
+:::danger[OpenRAG must be stopped]
+Stop the OpenRAG application before running this migration.
+:::
+
+### Step 1 — Start only the Milvus container
+
+```bash
+docker compose up -d milvus
+```
+
+Wait until Milvus is healthy:
+
+```bash
+docker compose ps milvus
+```
+
+### Step 2 — Dry-run (inspect, no changes)
+
+```bash
+docker compose run --no-deps --rm --build --entrypoint "" openrag \
+    uv run python scripts/migrations/milvus/1.add_temporal_fields.py --dry-run
+```
+
+Review the output to confirm which fields and indexes are missing.
+
+### Step 3 — Apply the migration
+
+```bash
+docker compose run --no-deps --rm --build --entrypoint "" openrag \
+    uv run python scripts/migrations/milvus/1.add_temporal_fields.py
+```
+
+The script will:
+1. Add any missing `TIMESTAMPTZ` fields (nullable)
+2. Create `STL_SORT` indexes for each field
+3. Stamp the collection with `schema_version=1` so OpenRAG no longer reports a migration error on startup
+
+### Step 4 — Restart OpenRAG
+
+```bash
+docker compose up --build -d
+```
+
+### Rollback
+
+Milvus does not yet support dropping fields. The rollback only removes the indexes and resets the version stamp — the fields remain in the schema but are unused:
+
+```bash
+docker compose run --no-deps --rm --build --entrypoint "" openrag \
+    uv run python scripts/migrations/milvus/1.add_temporal_fields.py --downgrade
+```
+
+To fully remove the fields you would need to recreate the collection from scratch.

@@ -1,6 +1,7 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
+from datetime import UTC, datetime
 
 import numpy as np
 import ray
@@ -102,12 +103,8 @@ class BaseVectorDB(ABC):
     async def get_chunk_by_id(self, chunk_id: str):
         pass
 
-    # @abstractmethod
-    # def sample_chunk_ids(
-    #     self, partition: str, n_ids: int = 100, seed: int | None = None
-    # ):
-    #     pass
 
+SCHEMA_VERSION_PROPERTY_KEY = "openrag.schema_version"
 
 MAX_LENGTH = 65_535
 
@@ -140,6 +137,7 @@ class MilvusDB(BaseVectorDB):
 
             self.config = load_config()
             self.logger = get_logger()
+            self.time_fields = ["datetime", "created_at", "updated_at", "indexed_at"]
 
             # init milvus clients
             self.port = self.config.vectordb.get("port")
@@ -189,6 +187,7 @@ class MilvusDB(BaseVectorDB):
             try:
                 if self._client.has_collection(self.collection_name):
                     self.logger.warning(f"Collection `{self.collection_name}` already exists. Loading it.")
+                    self._check_schema_version()
                 else:
                     self.logger.info("Creating empty collection")
                     index_params = self._create_index()
@@ -212,6 +211,7 @@ class MilvusDB(BaseVectorDB):
                             collection_name=self.collection_name,
                             operation="create_collection",
                         )
+                    self._store_schema_version()
                 try:
                     self._client.load_collection(self.collection_name)
                     self.collection_loaded = True
@@ -283,6 +283,9 @@ class MilvusDB(BaseVectorDB):
             dim=self.embedder.embedding_dimension,
         )
 
+        for time_field in self.time_fields:
+            schema.add_field(field_name=time_field, datatype=DataType.TIMESTAMPTZ, nullable=True)
+
         if self.hybrid_search:
             # Add sparse field for BM25 - this will be auto-generated
             schema.add_field(
@@ -336,8 +339,53 @@ class MilvusDB(BaseVectorDB):
                 "bm25_b": 0.75,
             },
         )
+        # indexes for dates TIMESTAMPTZ field
+        for time_field in self.time_fields:
+            index_params.add_index(
+                field_name=time_field,
+                index_type="STL_SORT",  # Index for TIMESTAMPTZ
+                index_name=f"{time_field}_idx",
+            )
 
         return index_params
+
+    def _store_schema_version(self) -> None:
+        """Persist the configured schema_version as a collection property after collection creation."""
+        schema_version = self.config.vectordb.get("schema_version")
+        self._client.alter_collection_properties(
+            collection_name=self.collection_name,
+            properties={SCHEMA_VERSION_PROPERTY_KEY: str(schema_version)},
+        )
+        self.logger.info(f"Schema version {schema_version} stored on collection `{self.collection_name}`.")
+
+    def _check_schema_version(self) -> None:
+        """
+        Read the stored schema version from collection properties and compare it
+        against the configured schema_version.  Raises VDBSchemaMigrationRequiredError
+        if they diverge so the application fails fast instead of silently working on a
+        stale schema.
+        """
+        expected_version = self.config.vectordb.get("schema_version")
+        desc = self._client.describe_collection(self.collection_name)
+        props = desc.get("properties", {})
+        raw = props.get(SCHEMA_VERSION_PROPERTY_KEY)
+
+        try:
+            stored_version = int(raw) if raw is not None else 0
+        except (ValueError, TypeError):
+            stored_version = 0
+
+        if stored_version != expected_version:
+            raise VDBSchemaMigrationRequiredError(
+                f"Collection `{self.collection_name}` is at schema version {stored_version} "
+                f"but the application requires version {expected_version}. "
+                "Please perform the migration script.",
+                collection_name=self.collection_name,
+                stored_version=stored_version,
+                expected_version=expected_version,
+            )
+
+        self.logger.info(f"Collection `{self.collection_name}` schema version {stored_version} — OK.")
 
     async def list_collections(self) -> list[str]:
         return self._client.list_collections()
@@ -379,12 +427,14 @@ class MilvusDB(BaseVectorDB):
             entities = []
             vectors = await self.embedder.aembed_documents(chunks)
             order_metadata_l: list[dict] = _gen_chunk_order_metadata(n=len(chunks))
+            indexed_at = datetime.now(UTC).isoformat()
 
             for chunk, vector, order_metadata in zip(chunks, vectors, order_metadata_l):
                 entities.append(
                     {
                         "text": chunk.page_content,
                         "vector": vector,
+                        "indexed_at": indexed_at,
                         **order_metadata,
                         **chunk.metadata,
                     }
@@ -396,6 +446,7 @@ class MilvusDB(BaseVectorDB):
             )
 
             # insert file_id and partition into partition_file_manager
+            file_metadata.update({"indexed_at": indexed_at})
             self.partition_file_manager.add_file_to_partition(
                 file_id=file_id,
                 partition=partition,

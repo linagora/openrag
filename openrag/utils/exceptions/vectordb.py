@@ -106,6 +106,18 @@ class VDBMembershipNotFound(VDBError):
         )
 
 
+class VDBSchemaMigrationRequiredError(VDBError):
+    """Raised when the collection schema version does not match the expected version."""
+
+    def __init__(self, message: str, **kwargs):
+        super().__init__(
+            message=message,
+            code="VDB_SCHEMA_MIGRATION_REQUIRED",
+            status_code=503,
+            **kwargs,
+        )
+
+
 class UnexpectedVDBError(VDBError):
     """Raised for unexpected errors in vector database operations."""
 

@@ -100,14 +100,14 @@ class CommonSearchParams:
     - Logical: AND, OR, NOT (see https://milvus.io/docs/boolean.md)
     Examples:
     - `file_id == "abc123"`
-    - `created_at > {start_date}`
+    - `indexed_at > {start_date}`
     - `page >= 5 AND page <= 10`
     - `file_id in ["id1", "id2", "id3"]`
 
 - `filter_params`: Dictionary of parameter values for templated filters (optional)
     Use with placeholders in filter expression for better performance.
     Example:
-    - filter: `created_at > {start_date} AND created_at < {end_date}`
+    - filter: `indexed_at > {start_date} AND indexed_at < {end_date}`
     - filter_params: {"start_date": "2024-01-01", "end_date": "2024-12-31"}
 
 **Behavior:**
@@ -213,14 +213,14 @@ async def search_multiple_partitions(
     - Logical: AND, OR, NOT (see https://milvus.io/docs/boolean.md)
     Examples:
     - `file_id == "abc123"`
-    - `created_at > {start_date}`
+    - `indexed_at > {start_date}`
     - `page >= 5 AND page <= 10`
     - `file_id in ["id1", "id2", "id3"]`
 
 - `filter_params`: Dictionary of parameter values for templated filters (optional)
     Use with placeholders in filter expression for better performance.
     Example:
-    - filter: `created_at > {start_date} AND created_at < {end_date}`
+    - filter: `indexed_at > {start_date} AND indexed_at < {end_date}`
     - filter_params: {"start_date": "2024-01-01", "end_date": "2024-12-31"}
 
 **Permissions:**
@@ -305,14 +305,14 @@ async def search_one_partition(
     - Logical: AND, OR, NOT (see https://milvus.io/docs/boolean.md)
     Examples:
     - `file_id == "abc123"`
-    - `created_at > {start_date}`
+    - `indexed_at > {start_date}`
     - `page >= 5 AND page <= 10`
     - `file_id in ["id1", "id2", "id3"]`
 
 - `filter_params`: Dictionary of parameter values for templated filters (optional)
     Use with placeholders in filter expression for better performance.
     Example:
-    - filter: `created_at > {start_date} AND created_at < {end_date}`
+    - filter: `indexed_at > {start_date} AND indexed_at < {end_date}`
     - filter_params: {"start_date": "2024-01-01", "end_date": "2024-12-31"}
 
 **Permissions:**

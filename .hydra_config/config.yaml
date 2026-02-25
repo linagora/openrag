@@ -40,6 +40,7 @@ vectordb:
   collection_name: ${oc.env:VDB_COLLECTION_NAME, vdb_test}
   hybrid_search: ${oc.env:VDB_HYBRID_SEARCH, true}
   enable: true
+  schema_version: 1  # Increment when the collection schema changes and a migration is required
 
 rdb:
   host: ${oc.env:POSTGRES_HOST, rdb}
