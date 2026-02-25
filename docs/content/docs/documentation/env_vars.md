@@ -383,6 +383,25 @@ Ray Serve enables deployment of the FastAPI as a scalable service. For simple de
 | `CHAINLIT_PORT` | int | 8090 | Port for the Chainlit UI interface if ray serve is enable `ENABLE_RAY_SERVE`. If not chainlit UI is simply a subroute (`/chainlit` [see this](/openrag/getting_started/usage/#default-ports)) of the FastAPI **`base_url`**|
 
 
+### Web Search Configuration
+
+Web search allows the LLM to augment RAG document context with live web results. It is disabled by default — set `WEBSEARCH_API_TOKEN` to enable it.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `WEBSEARCH_API_TOKEN` | `str` | `""` | API token for the web search provider. If empty, web search is disabled. |
+| `WEBSEARCH_BASE_URL` | `str` | `https://api.staan.ai/search/web` | Base URL of the web search provider API. |
+| `WEBSEARCH_TOP_K` | `int` | `5` | Number of web search results to return. |
+| `WEBSEARCH_LANG` | `str` | `fr-FR` | Language/market code for web search queries. |
+| `WEBSEARCH_FETCH_CONTENT` | `bool` | `true` | When enabled, fetches actual page content from the top URLs instead of relying on short search snippets. |
+| `WEBSEARCH_FETCH_MAX_RESULTS` | `int` | `3` | Number of top URLs to fetch content from (the remaining results use their search snippet). |
+| `WEBSEARCH_FETCH_TIMEOUT` | `float` | `1.0` | Per-URL timeout in seconds for content fetching. URLs that don't respond within this time fall back to their snippet. |
+| `WEBSEARCH_FETCH_MAX_TOKENS` | `int` | `500` | Maximum approximate tokens of content to extract per page. Content is truncated at word boundaries. |
+
+:::tip[How to Enable Web Search?]
+When chatting, you can enable web search through the OpenAI-compatible API by setting `"websearch": true` in the `metadata` field of the request body. See the [API documentation](/openrag/documentation/api/#extra-arguments) for examples.
+:::
+
 ### Map & Reduce Configuration
 The map & reduce mechanism processes documents by fetching chunks (map phase), filtering out irrelevant ones and summarizing relevant content (reduce phase) with respect to the user's query. The algorithm works as follows:
 

@@ -84,6 +84,22 @@ See the section on [distributed deployment in a ray cluster](#5-distributed-depl
 
 </details>
 
+### 🌐 Web Search Augmentation
+Enhance RAG responses with live web search results. When enabled, the LLM can combine document context with up-to-date information from the web.
+
+<details>
+
+<summary>Web Search Features</summary>
+
+* **Combined mode** — RAG retrieval and web search run concurrently; web results are appended as additional sources alongside document sources
+* **Web-only mode** — Skip RAG entirely by omitting the partition; uses web results as the sole context
+* **Content fetching** — The top 3 URLs are fetched in parallel (1s timeout) and their main content is extracted, providing richer context than search snippets alone
+* **Boilerplate filtering** — Navigation, footers, headers, and other non-content HTML elements are stripped before extraction
+* **Graceful fallback** — If web search fails or returns no results, the pipeline continues with document context only (or falls back to direct LLM mode)
+* **Source attribution** — Web sources are tagged with `source_type: "web"` in the response, distinct from `source_type: "document"`
+
+</details>
+
 ### 🔍 Advanced Retrieval & Reranking
 [OpenRag](https://open-rag.ai/) Leverages state-of-the-art retrieval techniques for superior accuracy.
 
