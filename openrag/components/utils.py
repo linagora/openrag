@@ -120,24 +120,52 @@ def format_context(
     return f"{sep}".join(reduced_docs), included_indices
 
 
-def extract_and_strip_sources_block(text: str) -> tuple[str, set[int]]:
-    """Extract [Sources: N, N, ...] block from end of response. Return (clean_text, citations).
+_SOURCES_NONE_RE = re.compile(r"\n?\[?Sources?\]?\s*:\s*\[?\s*none\s*\]?\s*$", re.IGNORECASE)
+_SOURCES_NUMS_RE = re.compile(r"\n?\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?\s*$")
 
-    Handles LLM output variations: [Sources: 1, 3], Sources: [1, 3], Sources: 1, 3
+
+def extract_and_strip_sources_block(text: str) -> tuple[str, set[int] | None]:
+    """Extract [Sources: ...] block from end of response. Return (clean_text, citations).
+
+    Returns:
+        (clean_text, citations) where citations is:
+        - set of ints: LLM cited specific sources
+        - empty set:   LLM explicitly said [Sources: none]
+        - None:        LLM didn't include any sources tag
     """
-    pattern = r"\n?\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?\s*$"
-    match = re.search(pattern, text)
+    # Check for explicit "none" first
+    match_none = _SOURCES_NONE_RE.search(text)
+    if match_none:
+        clean_text = text[: match_none.start()].rstrip()
+        logger.debug("LLM explicitly reported no sources used")
+        return clean_text, set()
+
+    # Check for numbered citations
+    match = _SOURCES_NUMS_RE.search(text)
     if not match:
-        return text, set()
+        tail = text[-150:] if len(text) > 150 else text
+        logger.debug("No [Sources: ...] tag found in LLM response", tail=repr(tail))
+        return text, None
+
     citations = {int(n.strip()) for n in match.group(1).split(",") if n.strip().isdigit()}
+    logger.debug(
+        "Extracted source citations from LLM response", citations=sorted(citations), matched=repr(match.group(0))
+    )
     clean_text = text[: match.start()].rstrip()
     return clean_text, citations
 
 
-def filter_sources_by_citations(sources: list, citations: set[int]) -> list:
-    """Keep only sources whose 1-based index was cited. Fallback to all if none match."""
-    if not citations:
+def filter_sources_by_citations(sources: list, citations: set[int] | None) -> list:
+    """Keep only sources whose 1-based index was cited.
+
+    - citations is None:      LLM didn't include tag → fallback to all sources
+    - citations is empty set:  LLM said [Sources: none] → return no sources
+    - citations has values:    filter to cited sources only
+    """
+    if citations is None:
         return sources
+    if not citations:
+        return []
     filtered = [s for i, s in enumerate(sources, start=1) if i in citations]
     return filtered if filtered else sources
 
