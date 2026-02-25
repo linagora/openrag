@@ -1,4 +1,6 @@
 import asyncio
+import ipaddress
+from urllib.parse import urlparse
 
 import httpx
 import lxml.html
@@ -42,8 +44,23 @@ class ContentFetcher:
             truncated = truncated[:last_space]
         return truncated.rstrip() + " [...]"
 
+    @staticmethod
+    def _is_loopback_url(url: str) -> bool:
+        host = urlparse(url).hostname or ""
+        if host == "localhost":
+            return True
+        try:
+            return not ipaddress.ip_address(host).is_global
+        except ValueError:
+            return False  # Regular hostname, let it through
+
     async def _fetch_single(self, client: httpx.AsyncClient, url: str) -> str | None:
         """Fetch a single URL and extract text. Returns None on any failure."""
+        # Guard against SSRF: URLs come from the search provider, but a compromised
+        # or misbehaving provider could return loopback addresses targeting internal services.
+        if self._is_loopback_url(url):
+            logger.warning("Blocked loopback URL in web search results", url=url)
+            return None
         try:
             response = await asyncio.wait_for(
                 client.get(url, follow_redirects=True),

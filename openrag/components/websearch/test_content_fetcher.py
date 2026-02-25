@@ -55,6 +55,27 @@ class TestFetchSingleURL:
         assert text is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("url", [
+        "http://localhost/secret",
+        "http://127.0.0.1/admin",
+        "http://127.0.0.42/x",
+        "http://[::1]/admin",
+        "http://10.0.0.1/internal",
+        "http://192.168.1.1/router",
+        "http://169.254.169.254/metadata",
+        "http://0.0.0.0/x",
+    ])
+    async def test_skips_loopback_urls(self, fetcher, url):
+        async def mock_handler(request):
+            return httpx.Response(200, text="<html><body>secret</body></html>")
+
+        transport = httpx.MockTransport(mock_handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            text = await fetcher._fetch_single(client, url)
+
+        assert text is None
+
+    @pytest.mark.asyncio
     async def test_strips_boilerplate_html(self, fetcher):
         html = """<html><body>
             <nav><a href="/">Home</a><a href="/about">About</a></nav>
