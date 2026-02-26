@@ -1,15 +1,15 @@
 import os
 
+from components.mcp.adapters import RayIndexerSearchGateway
+from components.mcp.auth_context import get_allowed_partitions, get_user_id, reset_auth_context, set_auth_context
+from components.mcp.indexation_service import IndexationService
+from components.mcp.service import SearchToolService
 from config import load_config
 from mcp.server.fastmcp import FastMCP
-from starlette.responses import JSONResponse
+from routers.utils import current_user_or_admin_partitions_list
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-
-from components.mcp.adapters import RayIndexerSearchGateway
-from components.mcp.auth_context import get_allowed_partitions, reset_auth_context, set_auth_context
-from components.mcp.service import SearchToolService
-from routers.utils import current_user_or_admin_partitions_list
+from starlette.responses import JSONResponse
 from utils.dependencies import get_vectordb
 
 config = load_config()
@@ -30,6 +30,7 @@ search_service = SearchToolService(
     max_top_k=max_top_k,
     similarity_threshold=similarity_threshold,
 )
+indexation_service = IndexationService()
 
 
 AUTH_TOKEN: str | None = os.getenv("AUTH_TOKEN")
@@ -76,7 +77,7 @@ class MCPAuthContextMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         finally:
             reset_auth_context(tokens)
-
+            
 
 @server.tool(description="Semantic search across one or many partitions using OpenRAG search flow")
 async def search_documents(query: str, partitions: list[str] | None = None, top_k: int | None = None) -> dict:
@@ -107,6 +108,110 @@ async def search_file(query: str, partition: str, file_id: str, top_k: int | Non
         file_id=file_id,
         allowed_partitions=get_allowed_partitions(),
     )
+
+@server.tool(
+    description=(
+        "List all partitions accessible to the current user. "
+        "Returns partition names, creation timestamps, and total count."
+    )
+)
+async def list_partitions() -> dict:
+    """List the partitions the current user has access to."""
+    return await indexation_service.list_partitions(
+        allowed_partitions=get_allowed_partitions(),
+    )
+
+
+@server.tool(
+    description=(
+        "List all files indexed in a given partition. "
+        "Returns file IDs, original filenames, sizes, creation dates, and other metadata. "
+        "Use `limit` to cap the number of results."
+    )
+)
+async def list_files(partition: str, limit: int | None = None) -> dict:
+    """List indexed files in a partition."""
+    return await indexation_service.list_files(
+        partition=partition,
+        allowed_partitions=get_allowed_partitions(),
+        limit=limit,
+    )
+
+
+@server.tool(
+    description=(
+        "Get metadata and chunk count for a specific file inside a partition. "
+        "Returns file metadata (filename, size, creation date, …) and the total number of indexed chunks."
+    )
+)
+async def get_file_info(partition: str, file_id: str) -> dict:
+    """Return metadata and chunk count for a file."""
+    return await indexation_service.get_file_info(
+        partition=partition,
+        file_id=file_id,
+        allowed_partitions=get_allowed_partitions(),
+    )
+
+
+@server.tool(
+    description=(
+        "Fetch the full text content of every chunk belonging to a specific file. "
+        "Each chunk includes its chunk_id, text content, and metadata. "
+        "Useful for reading the raw indexed content of a document."
+    )
+)
+async def get_file_chunks(partition: str, file_id: str) -> dict:
+    """Return all text chunks for a file in full."""
+    return await indexation_service.get_file_chunks(
+        partition=partition,
+        file_id=file_id,
+        allowed_partitions=get_allowed_partitions(),
+    )
+
+
+@server.tool(
+    description=(
+        "Fuzzy search across file names (filename, original_filename, file_id) "
+        "using sequence-similarity matching. "
+        "Results are ranked by similarity score (0–1). "
+        "Optionally restrict the search to a single `partition`. "
+        "Use `cutoff` (default 0.4) to control minimum similarity and `limit` (default 20) to cap results."
+    )
+)
+async def fuzzy_search_files(
+    query: str,
+    partition: str | None = None,
+    cutoff: float = 0.4,
+    limit: int = 20,
+) -> dict:
+    """Fuzzy search on file names across accessible partitions."""
+    return await indexation_service.fuzzy_search_files(
+        query=query,
+        allowed_partitions=get_allowed_partitions(),
+        partition=partition,
+        cutoff=cutoff,
+        limit=limit,
+    )
+
+
+@server.tool(
+    description=(
+        "Get the current status and details of an indexation task. "
+        "Task states: QUEUED → SERIALIZING → CHUNKING → INSERTING → COMPLETED (or FAILED). "
+        "If the task failed, the error message is included in the response."
+    )
+)
+async def get_indexation_task_status(task_id: str) -> dict:
+    """Return the status of an indexation task by its task_id."""
+    return await indexation_service.get_task_status(
+        task_id=task_id,
+        user_id=get_user_id(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# App factory
+# ---------------------------------------------------------------------------
 
 
 def create_mcp_http_app():
