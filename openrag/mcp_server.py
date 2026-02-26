@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from components.mcp.adapters import RayIndexerSearchGateway
 from components.mcp.auth_context import get_allowed_partitions, get_user_id, reset_auth_context, set_auth_context
@@ -22,6 +23,8 @@ path = str(mcp_config.get("path", "/mcp"))
 default_top_k = int(mcp_config.get("default_top_k", 5))
 max_top_k = int(mcp_config.get("max_top_k", 50))
 similarity_threshold = float(mcp_config.get("similarity_threshold", 0.8))
+
+LOG_FILE = Path(config.paths.log_dir or "logs") / "app.json"
 
 server = FastMCP(server_name, stateless_http=True, json_response=True)
 search_service = SearchToolService(
@@ -77,7 +80,7 @@ class MCPAuthContextMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         finally:
             reset_auth_context(tokens)
-            
+
 
 @server.tool(description="Semantic search across one or many partitions using OpenRAG search flow")
 async def search_documents(query: str, partitions: list[str] | None = None, top_k: int | None = None) -> dict:
@@ -108,6 +111,7 @@ async def search_file(query: str, partition: str, file_id: str, top_k: int | Non
         file_id=file_id,
         allowed_partitions=get_allowed_partitions(),
     )
+
 
 @server.tool(
     description=(
@@ -206,6 +210,136 @@ async def get_indexation_task_status(task_id: str) -> dict:
     return await indexation_service.get_task_status(
         task_id=task_id,
         user_id=get_user_id(),
+    )
+
+
+@server.tool(
+    description=(
+        "List all indexation tasks belonging to the current user. "
+        "Use `task_status` to filter: 'active' (queued/in-progress), 'completed', 'failed', "
+        "or any exact state name. Omit to get all tasks."
+    )
+)
+async def list_my_tasks(task_status: str | None = None) -> dict:
+    """Return the current user's indexation tasks, optionally filtered by state."""
+    return await indexation_service.list_my_tasks(
+        user_id=get_user_id(),
+        task_status=task_status,
+    )
+
+
+@server.tool(
+    description=(
+        "Fetch chronological log lines for a specific indexation task. "
+        "Useful for diagnosing slow or stuck indexations. "
+        "Use `max_lines` to cap output (default 100)."
+    )
+)
+async def get_task_logs(task_id: str, max_lines: int = 100) -> dict:
+    """Return structured log lines for a task."""
+    return await indexation_service.get_task_logs(
+        task_id=task_id,
+        user_id=get_user_id(),
+        log_file=LOG_FILE,
+        max_lines=max_lines,
+    )
+
+
+@server.tool(
+    description=(
+        "Fetch a single indexed chunk by its ID. "
+        "Chunk IDs appear in search results and in get_file_chunks output. "
+        "Returns the full text content and all metadata for that chunk."
+    )
+)
+async def get_chunk_by_id(chunk_id: str) -> dict:
+    """Return the content and metadata of a specific chunk."""
+    return await indexation_service.get_chunk_by_id(
+        chunk_id=chunk_id,
+        allowed_partitions=get_allowed_partitions(),
+    )
+
+
+@server.tool(
+    description=(
+        "Delete a file and all its indexed chunks from a partition. "
+        "Requires editor (or owner) access to the partition. "
+        "This operation is irreversible."
+    )
+)
+async def delete_file(partition: str, file_id: str) -> dict:
+    """Delete a file from a partition."""
+    return await indexation_service.delete_file(
+        partition=partition,
+        file_id=file_id,
+        allowed_partitions=get_allowed_partitions(),
+    )
+
+
+@server.tool(
+    description=(
+        "Update metadata fields of an existing indexed file without re-uploading it. "
+        "Pass a JSON object with only the fields to change (e.g. author, title). "
+        "To move the file to another partition, include a 'partition' key — "
+        "you must have editor access to both the source and destination partitions."
+    )
+)
+async def update_file_metadata(partition: str, file_id: str, metadata: dict) -> dict:
+    """Update metadata for a file in-place."""
+    return await indexation_service.update_file_metadata(
+        partition=partition,
+        file_id=file_id,
+        metadata=metadata,
+        allowed_partitions=get_allowed_partitions(),
+    )
+
+
+@server.tool(
+    description=(
+        "Copy a file from one partition to another. "
+        "Requires read access to the source partition and editor access to the destination. "
+        "Optionally supply `extra_metadata` to override fields in the copy."
+    )
+)
+async def copy_file(
+    source_partition: str,
+    source_file_id: str,
+    dest_partition: str,
+    dest_file_id: str,
+    extra_metadata: dict | None = None,
+) -> dict:
+    """Copy a file between partitions."""
+    return await indexation_service.copy_file(
+        source_partition=source_partition,
+        source_file_id=source_file_id,
+        dest_partition=dest_partition,
+        dest_file_id=dest_file_id,
+        allowed_partitions=get_allowed_partitions(),
+        extra_metadata=extra_metadata,
+    )
+
+
+@server.tool(
+    description=(
+        "Download a document from a public HTTP/HTTPS URL and index it into a partition. "
+        "Returns a task_id that can be polled with get_indexation_task_status. "
+        "The file_id must be unique within the partition. "
+        "Optionally supply `extra_metadata` (dict) to attach custom fields."
+    )
+)
+async def index_url(
+    url: str,
+    partition: str,
+    file_id: str,
+    extra_metadata: dict | None = None,
+) -> dict:
+    """Fetch a URL and index the document into a partition."""
+    return await indexation_service.index_url(
+        url=url,
+        partition=partition,
+        file_id=file_id,
+        allowed_partitions=get_allowed_partitions(),
+        extra_metadata=extra_metadata,
     )
 
 
