@@ -127,16 +127,15 @@ def __prepare_sources(request: Request, docs: list[Document], web_results: list 
             }
         )
     for result in web_results or []:
-        display_url = sanitize_text(result.display_url or "")
-        if display_url and urlparse(display_url).scheme not in ("http", "https"):
-            display_url = ""
+        url = sanitize_text(result.url or "")
+        if not url or urlparse(url).scheme not in ("http", "https"):
+            continue
         links.append(
             {
                 "source_type": "web",
-                "url": result.url,
+                "url": url,
                 "title": sanitize_text(result.title),
                 "snippet": sanitize_text(result.snippet),
-                "display_url": display_url,
             }
         )
     return links

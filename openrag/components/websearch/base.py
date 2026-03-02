@@ -7,7 +7,6 @@ class WebResult:
     title: str
     url: str
     snippet: str
-    display_url: str | None = None
     content: str | None = None
 
 

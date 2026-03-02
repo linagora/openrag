@@ -28,7 +28,6 @@ class StaanProvider(BaseWebSearchProvider):
                 title=r.get("title", ""),
                 url=r.get("url", ""),
                 snippet=r.get("snippet", ""),
-                display_url=r.get("display_url"),
             )
             for r in results[: self.top_k]
         ]

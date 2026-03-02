@@ -157,7 +157,7 @@ class RagPipeline:
         query = await self.generate_query(messages)
         logger.debug("Prepared query for chat completion", query=query)
 
-        metadata = payload.get("metadata", {})
+        metadata = payload.get("metadata") or {}
 
         use_map_reduce = metadata.get("use_map_reduce", False)
         spoken_style_answer = metadata.get("spoken_style_answer", False)
@@ -255,7 +255,7 @@ class RagPipeline:
         return llm_output, docs
 
     async def chat_completion(self, partition: list[str] | None, payload: dict):
-        metadata = payload.get("metadata", {})
+        metadata = payload.get("metadata") or {}
         use_websearch = metadata.get("websearch", False)
 
         if partition is None and not use_websearch:
