@@ -213,7 +213,7 @@ class TestStreamWithSourceFiltering:
             _make_finish(),
             DONE_LINE,
         ]
-        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model", "{}"))
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "Here is the answer."
         assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
 
@@ -226,7 +226,7 @@ class TestStreamWithSourceFiltering:
             _make_finish(),
             DONE_LINE,
         ]
-        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model", "{}"))
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "I cannot find this in the documents."
         assert _parse_finish_sources(result) == []
 
@@ -238,6 +238,6 @@ class TestStreamWithSourceFiltering:
             _make_finish(),
             DONE_LINE,
         ]
-        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model", "{}"))
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "Answer without any sources tag."
         assert _parse_finish_sources(result) == self.SOURCES

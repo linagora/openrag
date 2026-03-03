@@ -174,7 +174,6 @@ async def stream_with_source_filtering(
     llm_stream,
     sources: list,
     model_name: str,
-    all_sources_json: str,  # noqa: ARG001 — kept for signature compat
     buffer_size: int = 100,
 ):
     """Process an LLM SSE stream, stripping the [Sources: ...] tag from content.

@@ -323,13 +323,12 @@ async def openai_chat_completion(
     log.debug("RAG chat completion pipeline executed.")
 
     sources = __prepare_sources(request2, docs)
-    all_sources_json = json.dumps({"sources": sources})
 
     if request.stream:
 
         async def stream_response():
             try:
-                async for sse_line in stream_with_source_filtering(llm_output, sources, model_name, all_sources_json):
+                async for sse_line in stream_with_source_filtering(llm_output, sources, model_name):
                     yield sse_line
             except asyncio.CancelledError:
                 log.info("Client disconnected during streaming")
