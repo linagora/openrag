@@ -121,7 +121,7 @@ def format_context(
 
 
 _SOURCES_NONE_RE = re.compile(r"\n?\[?Sources?\]?\s*:\s*\[?\s*none\s*\]?\s*$", re.IGNORECASE)
-_SOURCES_NUMS_RE = re.compile(r"\n?\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?\s*$")
+_SOURCES_NUMS_RE = re.compile(r"\n?\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?[.\s]*$")
 
 
 def extract_and_strip_sources_block(text: str) -> tuple[str, set[int] | None]:
