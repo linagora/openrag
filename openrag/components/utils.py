@@ -174,7 +174,7 @@ async def stream_with_source_filtering(
     llm_stream,
     sources: list,
     model_name: str,
-    all_sources_json: str,  # noqa: ARG001 — kept for backward compat; no longer sent to clients
+    all_sources_json: str,  # noqa: ARG001 — kept for signature compat
     buffer_size: int = 100,
 ):
     """Process an LLM SSE stream, stripping the [Sources: ...] tag from content.
@@ -199,6 +199,8 @@ async def stream_with_source_filtering(
                 (c.get("choices", [{}])[0].get("delta", {}).get("content", "") or "") for c in chunk_buffer
             )
             clean_text, citations = extract_and_strip_sources_block(buffered_text)
+            filtered = filter_sources_by_citations(sources, citations)
+            filtered_json = json.dumps({"sources": filtered})
 
             remaining = clean_text
             for chunk in chunk_buffer:
@@ -209,15 +211,17 @@ async def stream_with_source_filtering(
                 remaining = remaining[len(original_content) :]
                 if surviving != original_content:
                     chunk["choices"][0]["delta"]["content"] = surviving
-                chunk["extra"] = "{}"
+                chunk["extra"] = filtered_json
                 yield f"data: {json.dumps(chunk)}\n\n"
 
             if last_chunk_template:
-                filtered = filter_sources_by_citations(sources, citations)
+                # FIXME: race condition where clients missed sources because finish_reason
+                # were received before sources
+                await asyncio.sleep(0.05)
                 finish_chunk = copy.deepcopy(last_chunk_template)
                 finish_chunk["choices"][0]["delta"] = {}
                 finish_chunk["choices"][0]["finish_reason"] = last_finish_reason or "stop"
-                finish_chunk["extra"] = json.dumps({"sources": filtered})
+                finish_chunk["extra"] = filtered_json
                 yield f"data: {json.dumps(finish_chunk)}\n\n"
 
             yield "data: [DONE]\n\n"
