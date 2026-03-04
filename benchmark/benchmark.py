@@ -8,11 +8,14 @@ Compares two approaches for filtering search results by workspace membership:
 Usage:
   cd benchmark && docker compose up -d
   pip install -r requirements.txt
-  python benchmark.py
+  python benchmark.py                    # print to stdout
+  python benchmark.py -o results.md      # also write to file
 """
 
+import argparse
 import time
 import statistics
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 from pymilvus import (
@@ -498,28 +501,30 @@ def search_approach_b_batched(
         file_ids[i : i + BATCH_SIZE] for i in range(0, len(file_ids), BATCH_SIZE)
     ]
 
-    # Step 2: search each batch sequentially (no asyncio in this sync benchmark)
+    # Step 2: search batches in parallel using threads
     all_results = []
 
+    def _search_one_batch(batch):
+        id_list = ", ".join(f'"{fid}"' for fid in batch)
+        filter_expr = f"file_id in [{id_list}]"
+        if search_type == "dense":
+            return client.search(
+                collection_name=COLLECTION,
+                data=[query_vector],
+                anns_field="vector",
+                filter=filter_expr,
+                limit=TOP_K,
+                output_fields=["file_id"],
+                search_params=DENSE_SEARCH_PARAMS,
+            )
+        else:  # hybrid
+            return _hybrid_search(col, query_vector, query_text, filter_expr)
+
     def _search_batches():
-        for batch in batches:
-            id_list = ", ".join(f'"{fid}"' for fid in batch)
-            filter_expr = f"file_id in [{id_list}]"
-
-            if search_type == "dense":
-                res = client.search(
-                    collection_name=COLLECTION,
-                    data=[query_vector],
-                    anns_field="vector",
-                    filter=filter_expr,
-                    limit=TOP_K,
-                    output_fields=["file_id"],
-                    search_params=DENSE_SEARCH_PARAMS,
-                )
-            else:  # hybrid
-                res = _hybrid_search(col, query_vector, query_text, filter_expr)
-
-            all_results.append(res)
+        with ThreadPoolExecutor(max_workers=len(batches)) as executor:
+            futures = [executor.submit(_search_one_batch, b) for b in batches]
+            for f in as_completed(futures):
+                all_results.append(f.result())
 
     t_search, _ = timed(_search_batches)
 
@@ -656,7 +661,7 @@ def bench_write_approach_b(engine) -> list[float]:
 # ---------------------------------------------------------------------------
 # Main benchmark
 # ---------------------------------------------------------------------------
-def main():
+def main(output_file: str | None = None):
     print("=" * 70)
     print("Workspace Search Benchmark")
     print("=" * 70)
@@ -803,23 +808,8 @@ def main():
     wb = stats_ms(write_b_times)
 
     # ---------------------------------------------------------------------------
-    # Print results
+    # Format results
     # ---------------------------------------------------------------------------
-    print("\n" + "=" * 70)
-    print("SEARCH RESULTS")
-    print("=" * 70)
-    print(
-        tabulate(
-            results_table,
-            headers="keys",
-            tablefmt="github",
-            floatfmt=".2f",
-        )
-    )
-
-    print("\n" + "=" * 70)
-    print("WRITE RESULTS (add 1 file / 20 chunks to workspace)")
-    print("=" * 70)
     write_table = [
         {
             "Approach": "A (ARRAY upsert)",
@@ -838,29 +828,55 @@ def main():
             "max (ms)": wb["max"],
         },
     ]
-    print(tabulate(write_table, headers="keys", tablefmt="github", floatfmt=".2f"))
 
-    print("\n" + "=" * 70)
-    print("SUMMARY")
-    print("=" * 70)
+    summary_lines = []
     for row in results_table:
         a = row["A median (ms)"]
         b = row["B total median (ms)"]
         winner = "A" if a < b else "B"
         diff = abs(a - b)
         ratio = max(a, b) / min(a, b) if min(a, b) > 0 else float("inf")
-        print(
+        summary_lines.append(
             f"  {row['Scenario']:20s} {row['Search']:7s}: "
-            f"A={a:7.2f}ms  B={b:7.2f}ms  → {winner} wins by {diff:.2f}ms ({ratio:.1f}x)"
+            f"A={a:7.2f}ms  B={b:7.2f}ms  -> {winner} wins by {diff:.2f}ms ({ratio:.1f}x)"
         )
-
-    print(
+    write_winner = "A" if wa["median"] < wb["median"] else "B"
+    summary_lines.append(
         f"\n  Write: A={wa['median']:.2f}ms  B={wb['median']:.2f}ms"
-        f"  → {'A' if wa['median'] < wb['median'] else 'B'} wins"
+        f"  -> {write_winner} wins"
     )
 
+    # Print to stdout
+    print("\n" + "=" * 70)
+    print("SEARCH RESULTS")
+    print("=" * 70)
+    print(tabulate(results_table, headers="keys", tablefmt="github", floatfmt=".2f"))
+    print("\n" + "=" * 70)
+    print("WRITE RESULTS (add 1 file / 20 chunks to workspace)")
+    print("=" * 70)
+    print(tabulate(write_table, headers="keys", tablefmt="github", floatfmt=".2f"))
+    print("\n" + "=" * 70)
+    print("SUMMARY")
+    print("=" * 70)
+    print("\n".join(summary_lines))
     print("\nDone.")
+
+    # Write to file if requested
+    if output_file:
+        with open(output_file, "w") as f:
+            f.write("# Workspace Search Benchmark Results\n\n")
+            f.write("## Search Results\n\n")
+            f.write(tabulate(results_table, headers="keys", tablefmt="github", floatfmt=".2f"))
+            f.write("\n\n## Write Results (add 1 file / 20 chunks to workspace)\n\n")
+            f.write(tabulate(write_table, headers="keys", tablefmt="github", floatfmt=".2f"))
+            f.write("\n\n## Summary\n\n```\n")
+            f.write("\n".join(summary_lines))
+            f.write("\n```\n")
+        print(f"\nResults written to {output_file}")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Workspace search benchmark")
+    parser.add_argument("-o", "--output", help="Write results to a markdown file")
+    args = parser.parse_args()
+    main(output_file=args.output)
