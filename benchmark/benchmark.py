@@ -673,18 +673,37 @@ def main(output_file: str | None = None):
     engine = create_engine(PG_URL)
     print("  Connected to Milvus and PostgreSQL.")
 
-    # Setup
-    print("\n[2/6] Setting up schema...")
-    setup_milvus(client)
-    setup_postgres(engine)
+    # Check if data already exists
+    expected_entities = FILES * CHUNKS_PER_FILE
+    data_ready = False
+    if client.has_collection(COLLECTION):
+        stats = client.get_collection_stats(COLLECTION)
+        count = int(stats["row_count"])
+        if count == expected_entities:
+            # Also check PG
+            with engine.connect() as conn:
+                pg_count = conn.execute(
+                    text("SELECT count(*) FROM file_workspaces")
+                ).scalar()
+            if pg_count and pg_count > 0:
+                data_ready = True
+                print(f"\n[2/6] Skipping setup — data already present ({count:,} chunks, {pg_count:,} PG rows).")
 
-    # Data generation
-    print("\n[3/6] Generating and inserting data...")
-    assignments = build_workspace_assignments()
-    insert_data(client, engine, assignments)
+    if not data_ready:
+        # Setup
+        print("\n[2/6] Setting up schema...")
+        setup_milvus(client)
+        setup_postgres(engine)
 
-    # Wait for index building
-    print("  Waiting for Milvus indexes to build...")
+        # Data generation
+        print("\n[3/6] Generating and inserting data...")
+        assignments = build_workspace_assignments()
+        insert_data(client, engine, assignments)
+    else:
+        print("[3/6] Skipping data insertion (cached).")
+
+    # Wait for index building / load collection
+    print("  Loading collection...")
     client.load_collection(COLLECTION)
     print("  Collection loaded.")
 
