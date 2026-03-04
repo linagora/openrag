@@ -6,10 +6,10 @@ Compares two approaches for filtering search results by workspace membership:
   B) PostgreSQL resolution → file_id in [...] with batching for >1000 files
 
 Usage:
-  cd benchmark && docker compose up -d
+  cd benchmarks && docker compose up -d
   pip install -r requirements.txt
-  python benchmark.py                    # print to stdout
-  python benchmark.py -o results.md      # also write to file
+  python workspace.py                              # print to stdout
+  python workspace.py -o results_workspace.md      # also write to file
 """
 
 import argparse
@@ -66,11 +66,13 @@ SPARSE_ANN_PARAMS = {
 }
 
 # Scenario definitions: (scenario_name, workspace_id, num_files)
+# Sorted by file count ascending
 SCENARIOS = [
-    ("S1 (1 file)", "ws_single", 1),
-    ("S2 (5000 files)", "ws_5000", 5000),
-    ("S3 (2500 files)", "ws_2500_a", 2500),
-    ("S4 (1000 files)", "ws_1000_a", 1000),
+    ("S1 (10 files)", "ws_10", 10),
+    ("S2 (100 files)", "ws_100", 100),
+    ("S3 (1000 files)", "ws_1000", 1000),
+    ("S4 (2500 files)", "ws_2500", 2500),
+    ("S5 (5000 files)", "ws_5000", 5000),
 ]
 
 # Word pool for generating random text (BM25 needs real-ish tokens)
@@ -136,28 +138,10 @@ def stats_ms(times: list[float]) -> dict:
 def build_workspace_assignments() -> dict[str, list[str]]:
     """
     Returns {workspace_id: [file_id, ...]} mapping.
-    File IDs are f"file_{i:05d}" for i in 0..4999.
+    One workspace per scenario, using all_files[:N] slices.
     """
     all_files = [f"file_{i:05d}" for i in range(FILES)]
-    assignments = {}
-
-    # S1: 1 file
-    assignments["ws_single"] = [all_files[0]]
-
-    # S2: all 5000
-    assignments["ws_5000"] = list(all_files)
-
-    # S3: two non-overlapping 2500-file workspaces
-    assignments["ws_2500_a"] = all_files[:2500]
-    assignments["ws_2500_b"] = all_files[2500:]
-
-    # S4: five non-overlapping 1000-file workspaces
-    for j in range(5):
-        assignments[f"ws_1000_{chr(ord('a') + j)}"] = all_files[
-            j * 1000 : (j + 1) * 1000
-        ]
-
-    return assignments
+    return {ws_id: all_files[:num_files] for _, ws_id, num_files in SCENARIOS}
 
 
 def file_to_workspaces(assignments: dict[str, list[str]]) -> dict[str, list[str]]:
@@ -710,37 +694,39 @@ def main(output_file: str | None = None):
     rng = np.random.default_rng(99)
     col = Collection(COLLECTION, using="bench_hybrid")
 
-    # Warmup — exercise both approaches and both search types
-    print(f"\n[4/6] Warming up ({WARMUP_RUNS} queries per path)...")
+    # Warmup — exercise every scenario with both approaches and search types
+    print(f"\n[4/6] Warming up ({WARMUP_RUNS} queries x {len(SCENARIOS)} scenarios)...")
     for _ in range(WARMUP_RUNS):
         qv = make_query_vector(rng)
         qt = random_text(rng)
-        # Approach A dense
-        client.search(
-            collection_name=COLLECTION,
-            data=[qv],
-            anns_field="vector",
-            filter='ARRAY_CONTAINS(workspace_ids, "ws_1000_a")',
-            limit=TOP_K,
-            output_fields=["file_id"],
-            search_params=DENSE_SEARCH_PARAMS,
-        )
-        # Approach A hybrid
-        _hybrid_search(col, qv, qt, 'ARRAY_CONTAINS(workspace_ids, "ws_1000_a")')
-        # Approach B dense (file_id IN)
-        client.search(
-            collection_name=COLLECTION,
-            data=[qv],
-            anns_field="vector",
-            filter='file_id in ["file_00000", "file_00001"]',
-            limit=TOP_K,
-            output_fields=["file_id"],
-            search_params=DENSE_SEARCH_PARAMS,
-        )
-        # Approach B hybrid (file_id IN)
-        _hybrid_search(col, qv, qt, 'file_id in ["file_00000", "file_00001"]')
-        # PG warmup
-        pg_resolve_workspace(engine, "ws_1000_a")
+        for _, ws_id, _ in SCENARIOS:
+            # Approach A
+            filter_a = f'ARRAY_CONTAINS(workspace_ids, "{ws_id}")'
+            client.search(
+                collection_name=COLLECTION,
+                data=[qv],
+                anns_field="vector",
+                filter=filter_a,
+                limit=TOP_K,
+                output_fields=["file_id"],
+                search_params=DENSE_SEARCH_PARAMS,
+            )
+            _hybrid_search(col, qv, qt, filter_a)
+            # Approach B
+            _, file_ids = pg_resolve_workspace(engine, ws_id)
+            if file_ids:
+                id_list = ", ".join(f'"{fid}"' for fid in file_ids[:BATCH_SIZE])
+                filter_b = f"file_id in [{id_list}]"
+                client.search(
+                    collection_name=COLLECTION,
+                    data=[qv],
+                    anns_field="vector",
+                    filter=filter_b,
+                    limit=TOP_K,
+                    output_fields=["file_id"],
+                    search_params=DENSE_SEARCH_PARAMS,
+                )
+                _hybrid_search(col, qv, qt, filter_b)
     print("  Warmup complete.")
 
     # Search benchmarks
@@ -884,6 +870,30 @@ def main(output_file: str | None = None):
     if output_file:
         with open(output_file, "w") as f:
             f.write("# Workspace Search Benchmark Results\n\n")
+            f.write("## Approaches\n\n")
+            f.write("- **Approach A — Milvus ARRAY_CONTAINS**: Each chunk stores a "
+                    "`workspace_ids` ARRAY field. Search filters with "
+                    "`ARRAY_CONTAINS(workspace_ids, \"ws\")` using an INVERTED index. "
+                    "Writes require upserting every chunk to append a workspace ID.\n")
+            f.write("- **Approach B — PostgreSQL resolution + file_id IN**: Workspace "
+                    "membership is stored in PostgreSQL. At search time, file IDs are "
+                    "resolved via a SQL query, then passed to Milvus as "
+                    "`file_id in [...]`. For >1,000 files, searches are batched in "
+                    "parallel and results merged. Writes are a single SQL INSERT.\n\n")
+            f.write("## Setup\n\n")
+            f.write(f"- **Data**: {FILES:,} files x {CHUNKS_PER_FILE} chunks = "
+                    f"{FILES * CHUNKS_PER_FILE:,} chunks in Milvus\n")
+            f.write(f"- **Vectors**: {VECTOR_DIM}-dim float32 ({VECTOR_DIM * 4:,} bytes each)\n")
+            f.write(f"- **Search params**: top_k={TOP_K}, ef={SEARCH_EF}\n")
+            f.write(f"- **Runs**: {WARMUP_RUNS} warmup + {MEASURED_RUNS} measured\n\n")
+            f.write("## Scenarios\n\n")
+            f.write("| Scenario | Files | Description |\n")
+            f.write("|----------|-------|-------------|\n")
+            f.write("| S1 | 10 | Personal workspace |\n")
+            f.write("| S2 | 100 | Small team |\n")
+            f.write("| S3 | 1,000 | Large team (batching boundary) |\n")
+            f.write("| S4 | 2,500 | Department — 3 parallel batches |\n")
+            f.write("| S5 | 5,000 | Organization-wide — 5 parallel batches |\n\n")
             f.write("## Search Results\n\n")
             f.write(tabulate(results_table, headers="keys", tablefmt="github", floatfmt=".2f"))
             f.write("\n\n## Write Results (add 1 file / 20 chunks to workspace)\n\n")
