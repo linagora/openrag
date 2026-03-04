@@ -65,14 +65,16 @@ SPARSE_ANN_PARAMS = {
     "params": {"drop_ratio_build": 0.2},
 }
 
-# Scenario definitions: (scenario_name, workspace_id, num_files)
+# Scenario definitions: (scenario_name, workspace_id, num_files, batch_override)
+# batch_override=None means use BATCH_SIZE; a value forces that batch size.
 # Sorted by file count ascending
 SCENARIOS = [
-    ("S1 (10 files)", "ws_10", 10),
-    ("S2 (100 files)", "ws_100", 100),
-    ("S3 (1000 files)", "ws_1000", 1000),
-    ("S4 (2500 files)", "ws_2500", 2500),
-    ("S5 (5000 files)", "ws_5000", 5000),
+    ("S1 (10 files)", "ws_10", 10, None),
+    ("S2 (100 files)", "ws_100", 100, None),
+    ("S3 (1000 files)", "ws_1000", 1000, None),
+    ("S4 (2500 files)", "ws_2500", 2500, None),
+    ("S5 (5000 files)", "ws_5000", 5000, None),
+    ("S6 (5000 files, no batch)", "ws_5000", 5000, 5000),
 ]
 
 # Word pool for generating random text (BM25 needs real-ish tokens)
@@ -141,7 +143,7 @@ def build_workspace_assignments() -> dict[str, list[str]]:
     One workspace per scenario, using all_files[:N] slices.
     """
     all_files = [f"file_{i:05d}" for i in range(FILES)]
-    return {ws_id: all_files[:num_files] for _, ws_id, num_files in SCENARIOS}
+    return {ws_id: all_files[:num_files] for _, ws_id, num_files, _ in SCENARIOS}
 
 
 def file_to_workspaces(assignments: dict[str, list[str]]) -> dict[str, list[str]]:
@@ -163,7 +165,7 @@ def setup_milvus(client: MilvusClient):
 
     schema = client.create_schema(enable_dynamic_field=True)
 
-    schema.add_field("_id", DataType.INT64, is_primary=True, auto_id=True)
+    schema.add_field("_id", DataType.INT64, is_primary=True, auto_id=False)
     schema.add_field(
         "text",
         DataType.VARCHAR,
@@ -287,11 +289,13 @@ def insert_data(
     total_inserted = 0
     batch_data: list[dict] = []
 
+    chunk_id = 0
     for file_idx, fid in enumerate(all_file_ids):
         ws_ids = file_ws_map.get(fid, [])
         for chunk_idx in range(CHUNKS_PER_FILE):
             batch_data.append(
                 {
+                    "_id": chunk_id,
                     "text": random_text(rng),
                     "partition": PARTITION_NAME,
                     "file_id": fid,
@@ -299,6 +303,7 @@ def insert_data(
                     "workspace_ids": ws_ids,
                 }
             )
+            chunk_id += 1
 
             if len(batch_data) >= INSERT_BATCH:
                 client.insert(collection_name=COLLECTION, data=batch_data)
@@ -476,13 +481,14 @@ def search_approach_b_batched(
     query_vector: list[float],
     query_text: str,
     search_type: str,
+    batch_size: int = BATCH_SIZE,
 ) -> tuple[float, float]:
     """
-    Approach B step 2+3 (batched, >1000 files): multiple Milvus searches + merge.
+    Approach B step 2+3 (batched, >batch_size files): multiple Milvus searches + merge.
     Returns (search_time, merge_time) in seconds.
     """
     batches = [
-        file_ids[i : i + BATCH_SIZE] for i in range(0, len(file_ids), BATCH_SIZE)
+        file_ids[i : i + batch_size] for i in range(0, len(file_ids), batch_size)
     ]
 
     # Step 2: search batches in parallel using threads
@@ -535,30 +541,24 @@ def search_approach_b_batched(
 WRITE_FIELDS = ["_id", "text", "partition", "file_id", "vector", "workspace_ids"]
 
 
-def bench_write_approach_a(client: MilvusClient) -> list[float]:
+def bench_write_approach_a_full(client: MilvusClient) -> list[float]:
     """
-    Approach A write: add 1 file (20 chunks) to a workspace via upsert.
-    Measures: query existing chunks → append workspace_id → upsert.
-
-    Note: partial_update=True doesn't work reliably with BM25 function fields
-    in pymilvus 2.6.5 (the `text` → `sparse` function breaks on repeated upserts).
-    So we query all fields and do a full upsert instead.
+    Approach A write (full upsert): query all fields → append workspace_id → upsert.
+    This is the worst case: every field must be read back and re-written.
     """
     target_file = "file_00000"
-    new_ws = "ws_write_test_a"
+    new_ws = "ws_write_test_a_full"
     times = []
 
     for _ in range(MEASURED_RUNS):
 
         def _write():
-            # Step 1: query all fields for this file
             results = client.query(
                 collection_name=COLLECTION,
                 filter=f'file_id == "{target_file}"',
                 output_fields=WRITE_FIELDS,
                 limit=CHUNKS_PER_FILE + 10,
             )
-            # Step 2: append workspace_id and full upsert
             upsert_data = []
             for row in results:
                 ws_ids = list(row["workspace_ids"])
@@ -580,7 +580,7 @@ def bench_write_approach_a(client: MilvusClient) -> list[float]:
         t, _ = timed(_write)
         times.append(t)
 
-        # Cleanup: remove the added workspace_id for next iteration
+        # Cleanup
         results = client.query(
             collection_name=COLLECTION,
             filter=f'file_id == "{target_file}"',
@@ -602,6 +602,59 @@ def bench_write_approach_a(client: MilvusClient) -> list[float]:
             )
         if cleanup:
             client.upsert(collection_name=COLLECTION, data=cleanup)
+
+    return times
+
+
+def bench_write_approach_a_partial(client: MilvusClient) -> list[float]:
+    """
+    Approach A write (partial update): query _id + workspace_ids only → upsert
+    with partial_update=True. Only the workspace_ids field is sent back.
+    """
+    target_file = "file_00000"
+    new_ws = "ws_write_test_a_partial"
+    times = []
+
+    for _ in range(MEASURED_RUNS):
+
+        def _write():
+            results = client.query(
+                collection_name=COLLECTION,
+                filter=f'file_id == "{target_file}"',
+                output_fields=["_id", "workspace_ids"],
+                limit=CHUNKS_PER_FILE + 10,
+            )
+            upsert_data = []
+            for row in results:
+                ws_ids = list(row["workspace_ids"])
+                if new_ws not in ws_ids:
+                    ws_ids.append(new_ws)
+                upsert_data.append({"_id": row["_id"], "workspace_ids": ws_ids})
+            if upsert_data:
+                client.upsert(
+                    collection_name=COLLECTION,
+                    data=upsert_data,
+                    partial_update=True,
+                )
+
+        t, _ = timed(_write)
+        times.append(t)
+
+        # Cleanup
+        results = client.query(
+            collection_name=COLLECTION,
+            filter=f'file_id == "{target_file}"',
+            output_fields=["_id", "workspace_ids"],
+            limit=CHUNKS_PER_FILE + 10,
+        )
+        cleanup = []
+        for row in results:
+            ws_ids = [w for w in row["workspace_ids"] if w != new_ws]
+            cleanup.append({"_id": row["_id"], "workspace_ids": ws_ids})
+        if cleanup:
+            client.upsert(
+                collection_name=COLLECTION, data=cleanup, partial_update=True
+            )
 
     return times
 
@@ -699,7 +752,7 @@ def main(output_file: str | None = None):
     for _ in range(WARMUP_RUNS):
         qv = make_query_vector(rng)
         qt = random_text(rng)
-        for _, ws_id, _ in SCENARIOS:
+        for _, ws_id, _, _ in SCENARIOS:
             # Approach A
             filter_a = f'ARRAY_CONTAINS(workspace_ids, "{ws_id}")'
             client.search(
@@ -733,7 +786,8 @@ def main(output_file: str | None = None):
     print(f"\n[5/6] Running search benchmarks ({MEASURED_RUNS} runs each)...")
     results_table = []
 
-    for scenario_name, ws_id, num_files in SCENARIOS:
+    for scenario_name, ws_id, num_files, batch_override in SCENARIOS:
+        effective_batch = batch_override if batch_override is not None else BATCH_SIZE
         for search_type in ["dense", "hybrid"]:
             print(f"\n  {scenario_name} / {search_type}:")
 
@@ -756,14 +810,15 @@ def main(output_file: str | None = None):
                 t_pg, file_ids = pg_resolve_workspace(engine, ws_id)
                 times_b_pg.append(t_pg)
 
-                if len(file_ids) <= BATCH_SIZE:
+                if len(file_ids) <= effective_batch:
                     t_search = search_approach_b_single(
                         client, col, file_ids, qv, qt, search_type
                     )
                     t_merge = 0.0
                 else:
                     t_search, t_merge = search_approach_b_batched(
-                        client, col, file_ids, qv, qt, search_type
+                        client, col, file_ids, qv, qt, search_type,
+                        batch_size=effective_batch,
                     )
 
                 times_b_search.append(t_search)
@@ -784,8 +839,8 @@ def main(output_file: str | None = None):
             )
 
             batches = (
-                max(1, (num_files + BATCH_SIZE - 1) // BATCH_SIZE)
-                if num_files > BATCH_SIZE
+                max(1, (num_files + effective_batch - 1) // effective_batch)
+                if num_files > effective_batch
                 else 0
             )
             results_table.append(
@@ -806,10 +861,12 @@ def main(output_file: str | None = None):
 
     # Write benchmarks
     print(f"\n[6/6] Running write benchmarks ({MEASURED_RUNS} runs each)...")
-    write_a_times = bench_write_approach_a(client)
+    write_a_full_times = bench_write_approach_a_full(client)
+    write_a_partial_times = bench_write_approach_a_partial(client)
     write_b_times = bench_write_approach_b(engine)
 
-    wa = stats_ms(write_a_times)
+    wa_full = stats_ms(write_a_full_times)
+    wa_partial = stats_ms(write_a_partial_times)
     wb = stats_ms(write_b_times)
 
     # ---------------------------------------------------------------------------
@@ -817,12 +874,20 @@ def main(output_file: str | None = None):
     # ---------------------------------------------------------------------------
     write_table = [
         {
-            "Approach": "A (ARRAY upsert)",
-            "median (ms)": wa["median"],
-            "mean (ms)": wa["mean"],
-            "p95 (ms)": wa["p95"],
-            "min (ms)": wa["min"],
-            "max (ms)": wa["max"],
+            "Approach": "A full upsert",
+            "median (ms)": wa_full["median"],
+            "mean (ms)": wa_full["mean"],
+            "p95 (ms)": wa_full["p95"],
+            "min (ms)": wa_full["min"],
+            "max (ms)": wa_full["max"],
+        },
+        {
+            "Approach": "A partial update",
+            "median (ms)": wa_partial["median"],
+            "mean (ms)": wa_partial["mean"],
+            "p95 (ms)": wa_partial["p95"],
+            "min (ms)": wa_partial["min"],
+            "max (ms)": wa_partial["max"],
         },
         {
             "Approach": "B (PG INSERT)",
@@ -845,10 +910,10 @@ def main(output_file: str | None = None):
             f"  {row['Scenario']:20s} {row['Search']:7s}: "
             f"A={a:7.2f}ms  B={b:7.2f}ms  -> {winner} wins by {diff:.2f}ms ({ratio:.1f}x)"
         )
-    write_winner = "A" if wa["median"] < wb["median"] else "B"
     summary_lines.append(
-        f"\n  Write: A={wa['median']:.2f}ms  B={wb['median']:.2f}ms"
-        f"  -> {write_winner} wins"
+        f"\n  Write: A(full)={wa_full['median']:.2f}ms"
+        f"  A(partial)={wa_partial['median']:.2f}ms"
+        f"  B={wb['median']:.2f}ms"
     )
 
     # Print to stdout
@@ -893,7 +958,8 @@ def main(output_file: str | None = None):
             f.write("| S2 | 100 | Small team |\n")
             f.write("| S3 | 1,000 | Large team (batching boundary) |\n")
             f.write("| S4 | 2,500 | Department — 3 parallel batches |\n")
-            f.write("| S5 | 5,000 | Organization-wide — 5 parallel batches |\n\n")
+            f.write("| S5 | 5,000 | Organization-wide — 5 parallel batches |\n")
+            f.write("| S6 | 5,000 | Same as S5 but single query (no batching) |\n\n")
             f.write("## Search Results\n\n")
             f.write(tabulate(results_table, headers="keys", tablefmt="github", floatfmt=".2f"))
             f.write("\n\n## Write Results (add 1 file / 20 chunks to workspace)\n\n")

@@ -42,7 +42,7 @@ python workspace.py                              # print to stdout
 python workspace.py -o results_workspace.md      # also write to file
 ```
 
-**Scenarios**: 5 realistic workspace sizes (10 to 5,000 files) tested with both dense (HNSW COSINE) and hybrid (HNSW + BM25) search, plus a write benchmark.
+**Scenarios**: 6 scenarios — realistic workspace sizes (10 to 5,000 files) plus a no-batching variant for 5,000 files. Tested with both dense (HNSW COSINE) and hybrid (HNSW + BM25) search, plus a write benchmark.
 
 **Data**: 5,000 files x 20 chunks = 100,000 chunks. Inserted once and cached across runs.
 

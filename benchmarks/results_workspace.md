@@ -16,47 +16,53 @@
 
 | Scenario | Files | Description |
 |----------|-------|-------------|
-| S1 | 1 | Baseline minimum latency — single file workspace |
-| S2 | 10 | Matches top_k=10 — tiny workspace, no batching |
-| S3 | 1,000 | Max size without batching (batch threshold = 1,000) |
-| S4 | 2,500 | Medium batching — 3 parallel batches |
-| S5 | 5,000 | Worst case — 5 parallel batches, all files |
+| S1 | 10 | Personal workspace |
+| S2 | 100 | Small team |
+| S3 | 1,000 | Large team (batching boundary) |
+| S4 | 2,500 | Department — 3 parallel batches |
+| S5 | 5,000 | Organization-wide — 5 parallel batches |
+| S6 | 5,000 | Same as S5 but single query (no batching) |
 
 ## Search Results
 
-| Scenario        | Search   |   Files |   Batches |   A median (ms) |   A p95 (ms) |   B total median (ms) |   B total p95 (ms) |   B pg (ms) |   B search (ms) |   B merge (ms) |
-|-----------------|----------|---------|-----------|-----------------|--------------|-----------------------|--------------------|-------------|-----------------|----------------|
-| S1 (1 file)     | dense    |       1 |         0 |           11.47 |        20.91 |                 14.87 |              20.95 |        2.48 |           10.87 |           0.00 |
-| S1 (1 file)     | hybrid   |       1 |         0 |           11.29 |        18.81 |                 14.38 |              19.95 |        2.70 |           10.90 |           0.00 |
-| S2 (10 files)   | dense    |      10 |         0 |           65.68 |        80.55 |                 68.38 |              80.85 |        2.81 |           65.38 |           0.00 |
-| S2 (10 files)   | hybrid   |      10 |         0 |           71.84 |        82.18 |                 75.42 |              91.51 |        3.04 |           71.80 |           0.00 |
-| S3 (1000 files) | dense    |    1000 |         0 |           21.77 |        31.08 |                 33.08 |              40.91 |        4.78 |           27.72 |           0.00 |
-| S3 (1000 files) | hybrid   |    1000 |         0 |           22.39 |        30.25 |                 41.03 |              50.26 |        4.68 |           36.10 |           0.00 |
-| S4 (2500 files) | dense    |    2500 |         3 |           23.58 |        35.06 |                 61.54 |              85.38 |        8.80 |           53.12 |           0.12 |
-| S4 (2500 files) | hybrid   |    2500 |         3 |           25.89 |        30.47 |                 72.13 |              77.67 |        9.21 |           61.78 |           0.13 |
-| S5 (5000 files) | dense    |    5000 |         5 |           29.18 |        57.03 |                 84.55 |             106.48 |       16.30 |           65.89 |           0.19 |
-| S5 (5000 files) | hybrid   |    5000 |         5 |           30.97 |        39.31 |                 88.01 |             116.68 |       15.64 |           71.79 |           0.19 |
+| Scenario                  | Search   |   Files |   Batches |   A median (ms) |   A p95 (ms) |   B total median (ms) |   B total p95 (ms) |   B pg (ms) |   B search (ms) |   B merge (ms) |
+|---------------------------|----------|---------|-----------|-----------------|--------------|-----------------------|--------------------|-------------|-----------------|----------------|
+| S1 (10 files)             | dense    |      10 |         0 |           18.84 |        26.48 |                 21.27 |              28.61 |        4.57 |           15.20 |           0.00 |
+| S1 (10 files)             | hybrid   |      10 |         0 |           17.34 |        40.97 |                 19.33 |              63.43 |        3.45 |           15.45 |           0.00 |
+| S2 (100 files)            | dense    |     100 |         0 |           18.49 |        29.14 |                 24.46 |              37.67 |        3.97 |           17.85 |           0.00 |
+| S2 (100 files)            | hybrid   |     100 |         0 |           24.34 |        41.57 |                 37.55 |             144.35 |        9.27 |           26.78 |           0.00 |
+| S3 (1000 files)           | dense    |    1000 |         0 |           60.68 |       129.40 |                 80.42 |             133.52 |       10.45 |           68.70 |           0.00 |
+| S3 (1000 files)           | hybrid   |    1000 |         0 |           52.00 |        73.01 |                 73.41 |             133.44 |        9.04 |           65.48 |           0.00 |
+| S4 (2500 files)           | dense    |    2500 |         3 |           81.26 |       193.33 |                116.97 |             339.26 |       12.29 |           99.97 |           0.16 |
+| S4 (2500 files)           | hybrid   |    2500 |         3 |           54.44 |        87.58 |                 91.15 |             147.90 |       12.68 |           76.56 |           0.17 |
+| S5 (5000 files)           | dense    |    5000 |         5 |           22.34 |        31.47 |                 46.93 |              92.89 |       10.52 |           37.68 |           0.16 |
+| S5 (5000 files)           | hybrid   |    5000 |         5 |           13.37 |        17.19 |                 28.91 |              60.81 |        4.86 |           24.08 |           0.07 |
+| S6 (5000 files, no batch) | dense    |    5000 |         0 |           16.56 |        22.19 |                 40.96 |              56.06 |        6.37 |           33.70 |           0.00 |
+| S6 (5000 files, no batch) | hybrid   |    5000 |         0 |           11.88 |        13.70 |                 31.18 |              41.00 |        3.83 |           27.18 |           0.00 |
 
 ## Write Results (add 1 file / 20 chunks to workspace)
 
 | Approach         |   median (ms) |   mean (ms) |   p95 (ms) |   min (ms) |   max (ms) |
 |------------------|---------------|-------------|------------|------------|------------|
-| A (ARRAY upsert) |         32.52 |       36.95 |      48.56 |      23.38 |     128.74 |
-| B (PG INSERT)    |          2.40 |        2.58 |       3.66 |       2.00 |       4.57 |
+| A full upsert    |         10.06 |       10.31 |      12.69 |       8.59 |      16.51 |
+| A partial update |          9.18 |        9.66 |      12.41 |       7.83 |      15.54 |
+| B (PG INSERT)    |          0.75 |        0.94 |       1.73 |       0.62 |       1.87 |
 
 ## Summary
 
 ```
-  S1 (1 file)          dense  : A=  11.47ms  B=  14.87ms  -> A wins by 3.40ms (1.3x)
-  S1 (1 file)          hybrid : A=  11.29ms  B=  14.38ms  -> A wins by 3.09ms (1.3x)
-  S2 (10 files)        dense  : A=  65.68ms  B=  68.38ms  -> A wins by 2.70ms (1.0x)
-  S2 (10 files)        hybrid : A=  71.84ms  B=  75.42ms  -> A wins by 3.58ms (1.0x)
-  S3 (1000 files)      dense  : A=  21.77ms  B=  33.08ms  -> A wins by 11.31ms (1.5x)
-  S3 (1000 files)      hybrid : A=  22.39ms  B=  41.03ms  -> A wins by 18.64ms (1.8x)
-  S4 (2500 files)      dense  : A=  23.58ms  B=  61.54ms  -> A wins by 37.96ms (2.6x)
-  S4 (2500 files)      hybrid : A=  25.89ms  B=  72.13ms  -> A wins by 46.24ms (2.8x)
-  S5 (5000 files)      dense  : A=  29.18ms  B=  84.55ms  -> A wins by 55.37ms (2.9x)
-  S5 (5000 files)      hybrid : A=  30.97ms  B=  88.01ms  -> A wins by 57.04ms (2.8x)
+  S1 (10 files)        dense  : A=  18.84ms  B=  21.27ms  -> A wins by 2.43ms (1.1x)
+  S1 (10 files)        hybrid : A=  17.34ms  B=  19.33ms  -> A wins by 1.99ms (1.1x)
+  S2 (100 files)       dense  : A=  18.49ms  B=  24.46ms  -> A wins by 5.97ms (1.3x)
+  S2 (100 files)       hybrid : A=  24.34ms  B=  37.55ms  -> A wins by 13.21ms (1.5x)
+  S3 (1000 files)      dense  : A=  60.68ms  B=  80.42ms  -> A wins by 19.74ms (1.3x)
+  S3 (1000 files)      hybrid : A=  52.00ms  B=  73.41ms  -> A wins by 21.41ms (1.4x)
+  S4 (2500 files)      dense  : A=  81.26ms  B= 116.97ms  -> A wins by 35.71ms (1.4x)
+  S4 (2500 files)      hybrid : A=  54.44ms  B=  91.15ms  -> A wins by 36.71ms (1.7x)
+  S5 (5000 files)      dense  : A=  22.34ms  B=  46.93ms  -> A wins by 24.59ms (2.1x)
+  S5 (5000 files)      hybrid : A=  13.37ms  B=  28.91ms  -> A wins by 15.54ms (2.2x)
+  S6 (5000 files, no batch) dense  : A=  16.56ms  B=  40.96ms  -> A wins by 24.40ms (2.5x)
+  S6 (5000 files, no batch) hybrid : A=  11.88ms  B=  31.18ms  -> A wins by 19.30ms (2.6x)
 
-  Write: A=32.52ms  B=2.40ms  -> B wins
+  Write: A(full)=10.06ms  A(partial)=9.18ms  B=0.75ms
 ```
