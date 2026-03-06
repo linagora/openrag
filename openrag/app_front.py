@@ -84,8 +84,11 @@ if AUTH_TOKEN:
                 },
             )
 
+        except httpx.HTTPStatusError:
+            logger.info("Authentication failed", username=username)
+            return None
         except Exception as e:
-            logger.exception("Authentication failed", error=str(e))
+            logger.exception("Unexpected error during authentication", error=str(e))
             return None
 
 
