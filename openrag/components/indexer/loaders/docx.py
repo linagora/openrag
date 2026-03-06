@@ -2,6 +2,7 @@ import re
 import zipfile
 from io import BytesIO
 
+from docx import Document as DocxDocument
 from langchain_core.documents.base import Document
 from markitdown import MarkItDown
 from PIL import Image
@@ -28,7 +29,20 @@ class DocxLoader(BaseLoader):
         self.converter = MarkItDown()
 
     async def aload_document(self, file_path, metadata, save_markdown=False):
-        result = self.converter.convert(file_path).text_content
+        try:
+            result = self.converter.convert(file_path).text_content
+        except Exception as markitdown_err:
+            logger.warning(
+                "MarkItDown conversion failed, falling back to python-docx plain text extraction",
+                path=str(file_path),
+                error=str(markitdown_err),
+            )
+            try:
+                result = self._fallback_extract_text(file_path)
+            except Exception as docx_err:
+                raise RuntimeError(
+                    f"DOCX conversion failed with both MarkItDown ({markitdown_err}) and python-docx ({docx_err})"
+                ) from docx_err
 
         if self.image_captioning:
             # Handle embedded images (extracted from docx zip)
@@ -62,6 +76,10 @@ class DocxLoader(BaseLoader):
         if save_markdown:
             self.save_content(result, str(file_path))
         return doc
+
+    def _fallback_extract_text(self, file_path) -> str:
+        doc = DocxDocument(file_path)
+        return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
     def get_images_from_zip(self, input_file):
         try:
