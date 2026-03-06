@@ -1,7 +1,7 @@
 # Ignore environment files
 .env
 
-# generate files and folders
+# generated files and folders
 .files/
 .chainlit/
 **/*chainlit.md
@@ -11,6 +11,7 @@ vdb/volumes
 
 # other files and folders
 misc
+tmp
 
 # Ignore __pycache__ directories
 __pycache__/
@@ -72,3 +73,11 @@ charts/openrag-stack/charts/*.tgz
 .astro/
 dist/
 node_modules/
+
+# AI
+.claude
+.planning
+docs/plans
+
+# Build artifacts
+*.egg-info/
