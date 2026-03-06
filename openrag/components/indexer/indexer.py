@@ -120,8 +120,8 @@ class Indexer:
             await task_state_manager.set_state.remote(task_id, "COMPLETED")
 
         except Exception as e:
-            log.exception(f"Task {task_id} failed in add_file")
             tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            log.error(f"Task {task_id} failed in add_file\n{tb}")
             await task_state_manager.set_failed_if_not_cancelled.remote(task_id, tb)
             raise
 
@@ -157,7 +157,7 @@ class Indexer:
             log.info("Deleted file from partition.", file_id=file_id, partition=partition)
 
         except Exception as e:
-            log.exception("Error in delete_file", error=str(e))
+            log.error("Error in delete_file", error=str(e))
             raise
 
     @ray.method(concurrency_group="update")
@@ -184,7 +184,7 @@ class Indexer:
 
             log.info("Metadata updated for file.")
         except Exception as e:
-            log.exception("Error in update_file_metadata", error=str(e))
+            log.error("Error in update_file_metadata", error=str(e))
             raise
 
     @ray.method(concurrency_group="update")
@@ -198,7 +198,7 @@ class Indexer:
         log = self.logger.bind(file_id=file_id, partition=partition)
         vectordb = ray.get_actor("Vectordb", namespace="openrag")
         if not self.enable_insertion:
-            log.error("Vector database is not enabled, but update_file_metadata was called.")
+            log.error("Vector database is not enabled, but copy_file was called.")
             return
 
         try:
@@ -216,7 +216,7 @@ class Indexer:
                 new_partition=metadata.get("partition"),
             )
         except Exception as e:
-            log.exception("Error in copy_file", error=str(e))
+            log.error("Error in copy_file", error=str(e))
             raise
 
     @ray.method(concurrency_group="search")
