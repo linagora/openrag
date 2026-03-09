@@ -123,14 +123,16 @@ def format_context(
 def format_web_context(
     web_results: list,
     start_index: int = 1,
+    max_tokens: int = 2000,
 ) -> tuple[str, list[int]]:
-    """Format web results as numbered [Source N] blocks.
+    """Format web results as numbered [Source N] blocks within a token budget.
 
     Uses fetched page content when available, falling back to the search snippet.
 
     Args:
         web_results: Results from web search provider (list of WebResult)
         start_index: First source number (continues numbering after RAG sources)
+        max_tokens: Maximum token budget for all web sources combined
 
     Returns:
         (formatted_string, list_of_source_numbers_used)
@@ -140,17 +142,26 @@ def format_web_context(
 
     from components.indexer.utils.text_sanitizer import sanitize_text
 
+    _length_function = get_num_tokens()
+
     parts = []
     source_numbers = []
+    total_tokens = 0
+    sep = "-" * 10 + "\n\n"
+
     for i, result in enumerate(web_results):
         n = start_index + i
         title = sanitize_text(result.title)
-        url = result.url
         body = sanitize_text(result.content) if result.content else sanitize_text(result.snippet)
-        parts.append(f"[Source {n}]\n{title}\n{url}\n{body}")
+        block = f"[Source {n}]\n{title}\n{body}"
+        block_tokens = _length_function(block)
+        if total_tokens + block_tokens > max_tokens and parts:
+            break
+        parts.append(block)
         source_numbers.append(n)
+        total_tokens += block_tokens
 
-    sep = "-" * 10 + "\n\n"
+    logger.debug("Web context formatted", total_tokens=total_tokens, source_count=len(parts))
     return sep.join(parts), source_numbers
 
 

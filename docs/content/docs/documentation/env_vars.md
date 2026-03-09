@@ -389,14 +389,17 @@ Web search allows the LLM to augment RAG document context with live web results.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
+| `WEBSEARCH_PROVIDER` | `str` | `staan` | Web search provider to use. Currently supported: `staan`. |
 | `WEBSEARCH_API_TOKEN` | `str` | `""` | API token for the web search provider. If empty, web search is disabled. |
-| `WEBSEARCH_BASE_URL` | `str` | `https://api.staan.ai/search/web` | Base URL of the web search provider API. |
+| `WEBSEARCH_BASE_URL` | `str` | (provider default) | Base URL of the web search provider API. |
 | `WEBSEARCH_TOP_K` | `int` | `5` | Number of web search results to return. |
 | `WEBSEARCH_LANG` | `str` | `fr-FR` | Language/market code for web search queries. |
+| `WEBSEARCH_MAX_TOKENS` | `int` | `2000` | Maximum token budget for all web sources combined in the LLM context. This budget is reserved from the global context window when web results are present. |
 | `WEBSEARCH_FETCH_CONTENT` | `bool` | `true` | When enabled, fetches actual page content from the top URLs instead of relying on short search snippets. |
 | `WEBSEARCH_FETCH_MAX_RESULTS` | `int` | `3` | Number of top URLs to fetch content from (the remaining results use their search snippet). |
 | `WEBSEARCH_FETCH_TIMEOUT` | `float` | `1.0` | Per-URL timeout in seconds for content fetching. URLs that don't respond within this time fall back to their snippet. |
 | `WEBSEARCH_FETCH_MAX_TOKENS` | `int` | `500` | Maximum approximate tokens of content to extract per page. Content is truncated at word boundaries. |
+| `WEBSEARCH_FETCH_VERIFY_SSL` | `bool` | `false` | Whether to verify SSL certificates when fetching page content. |
 
 :::tip[How to Enable Web Search?]
 When chatting, you can enable web search through the OpenAI-compatible API by setting `"websearch": true` in the `metadata` field of the request body. See the [API documentation](/openrag/documentation/api/#extra-arguments) for examples.
