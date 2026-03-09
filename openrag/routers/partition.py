@@ -1,6 +1,7 @@
 from typing import Literal
 from urllib.parse import quote
 
+from components.app.service import OpenRAGApplicationService
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from utils.dependencies import get_vectordb
@@ -15,6 +16,7 @@ from .utils import (
 
 logger = get_logger()
 router = APIRouter()
+app_service = OpenRAGApplicationService()
 
 RoleType = Literal[*list(ROLE_HIERARCHY.keys())]
 
@@ -40,8 +42,9 @@ async def list_existant_partitions(
     vectordb=Depends(get_vectordb),
     partitions=Depends(partitions_with_details),
 ):
-    if len(partitions) == 1 and partitions[0]["partition"] == "all":
-        partitions = await vectordb.list_partitions.remote()
+    allowed = [p["partition"] for p in partitions]
+    result = await app_service.list_partitions(allowed_partitions=allowed)
+    partitions = result["partitions"]
     logger.debug("Returned list of existing partitions.", partition_count=len(partitions))
     return JSONResponse(status_code=status.HTTP_200_OK, content={"partitions": partitions})
 
@@ -68,7 +71,7 @@ async def delete_partition(
     vectordb=Depends(get_vectordb),
     partition_owner=Depends(require_partition_owner),
 ):
-    await vectordb.delete_partition.remote(partition)
+    await app_service.delete_partition(vectordb=vectordb, partition=partition)
     logger.debug("Partition successfully deleted.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -100,8 +103,12 @@ async def list_files(
     partition_viewer=Depends(require_partition_viewer),
 ):
     log = logger.bind(partition=partition)
-    file_obj_l = await vectordb.list_partition_files.remote(partition=partition, limit=limit)
-    file_dicts = file_obj_l.get("files", [])
+    result = await app_service.list_files(
+        partition=partition,
+        allowed_partitions=[partition],
+        limit=limit,
+    )
+    file_dicts = result.get("files", [])
     log.debug("Listed files in partition", file_count=len(file_dicts))
 
     def process_file(file_dict):
@@ -146,16 +153,22 @@ async def get_file(
     vectordb=Depends(get_vectordb),
     partition_viewer=Depends(require_partition_viewer),
 ):
-    if not await vectordb.file_exists.remote(file_id, partition):
+    try:
+        chunks_result = await app_service.get_file_chunks(
+            partition=partition,
+            file_id=file_id,
+            allowed_partitions=[partition],
+        )
+    except FileNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"'{file_id}' not found in partition '{partition}'",
         )
-    results = await vectordb.get_file_chunks.remote(partition=partition, file_id=file_id, include_id=True)
 
-    documents = [{"link": str(request.url_for("get_extract", extract_id=doc.metadata["_id"]))} for doc in results]
-
-    metadata = {k: v for k, v in results[0].metadata.items() if k != "_id"} if results else {}
+    documents = [
+        {"link": str(request.url_for("get_extract", extract_id=doc["chunk_id"]))} for doc in chunks_result["chunks"]
+    ]
+    metadata = chunks_result["chunks"][0]["metadata"] if chunks_result["chunks"] else {}
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -191,7 +204,12 @@ async def list_all_chunks(
     vectordb=Depends(get_vectordb),
     partition_viewer=Depends(require_partition_viewer),
 ):
-    chunks = await vectordb.list_all_chunk.remote(partition=partition, include_embedding=include_embedding)
+    result = await app_service.list_partition_chunks(
+        vectordb=vectordb,
+        partition=partition,
+        include_embedding=include_embedding,
+    )
+    chunks = result["chunks"]
     chunks = [
         {
             "link": str(request.url_for("get_extract", extract_id=chunk.metadata["_id"])),
@@ -229,7 +247,7 @@ async def create_partition(request: Request, partition: str, vectordb=Depends(ge
             detail=f"Partition '{partition}' already exists.",
         )
     user_id = request.state.user["id"]
-    await vectordb.create_partition.remote(partition=partition, user_id=user_id)
+    await app_service.create_partition(vectordb=vectordb, partition=partition, user_id=user_id)
     return Response(status_code=status.HTTP_201_CREATED)
 
 
@@ -265,7 +283,8 @@ async def list_partition_users(
     """
     log = logger.bind(partition=partition)
 
-    members = await vectordb.list_partition_members.remote(partition=partition)
+    result = await app_service.list_partition_users(vectordb=vectordb, partition=partition)
+    members = result["members"]
 
     log.debug("Returned list of partition members.", member_count=len(members))
     return JSONResponse(status_code=status.HTTP_200_OK, content={"members": members})
@@ -304,7 +323,7 @@ async def add_partition_user(
     """
     log = logger.bind(partition=partition, user_id=user_id)
 
-    await vectordb.add_partition_member.remote(partition=partition, user_id=user_id, role=role)
+    await app_service.add_partition_user(vectordb=vectordb, partition=partition, user_id=user_id, role=role)
 
     log.debug("User added to partition successfully")
     return Response(status_code=status.HTTP_201_CREATED)
@@ -341,7 +360,7 @@ async def remove_partition_user(
     """
     log = logger.bind(partition=partition, user_id=user_id)
 
-    await vectordb.remove_partition_member.remote(partition=partition, user_id=user_id)
+    await app_service.remove_partition_user(vectordb=vectordb, partition=partition, user_id=user_id)
 
     log.debug("User removed from partition successfully")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -380,7 +399,7 @@ async def update_partition_user_role(
     """
     log = logger.bind(partition=partition, user_id=user_id, role=role)
 
-    await vectordb.update_partition_member_role.remote(partition=partition, user_id=user_id, new_role=role)
+    await app_service.update_partition_user_role(vectordb=vectordb, partition=partition, user_id=user_id, role=role)
 
     log.debug("User role updated successfully")
     return Response(status_code=status.HTTP_200_OK)

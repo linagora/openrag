@@ -1,6 +1,6 @@
+from components.app.service import OpenRAGApplicationService
 from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import JSONResponse
-from utils.dependencies import get_indexer
 from utils.logger import get_logger
 
 from .utils import (
@@ -10,6 +10,7 @@ from .utils import (
 )
 
 logger = get_logger()
+app_service = OpenRAGApplicationService()
 
 router = APIRouter()
 
@@ -48,7 +49,6 @@ async def search_multiple_partitions(
     partitions: list[str] | None = Query(default=["all"], description="List of partitions to search"),
     text: str = Query(..., description="Text to search semantically"),
     top_k: int = Query(5, description="Number of top results to return"),
-    indexer=Depends(get_indexer),
     partition_viewer=Depends(require_partitions_viewer),
     user_partitions=Depends(current_user_or_admin_partitions_list),
 ):
@@ -58,19 +58,21 @@ async def search_multiple_partitions(
 
     log = logger.bind(partitions=partitions, query=text, top_k=top_k)
 
-    results = await indexer.asearch.remote(query=text, top_k=top_k, partition=partitions)
-    log.info(
-        "Semantic search on multiple partitions completed.",
-        result_count=len(results),
+    result = await app_service.search_documents(
+        query=text,
+        partitions=partitions,
+        top_k=top_k,
+        allowed_partitions=user_partitions,
     )
+    log.info("Semantic search on multiple partitions completed.", result_count=result["count"])
 
     documents = [
         {
-            "link": str(request.url_for("get_extract", extract_id=doc.metadata["_id"])),
-            "metadata": doc.metadata,
-            "content": doc.page_content,
+            "link": str(request.url_for("get_extract", extract_id=doc["chunk_id"])),
+            "metadata": doc["metadata"],
+            "content": doc["content"],
         }
-        for doc in results
+        for doc in result["documents"]
     ]
 
     return JSONResponse(status_code=status.HTTP_200_OK, content={"documents": documents})
@@ -105,19 +107,23 @@ async def search_one_partition(
     partition: str,
     text: str = Query(..., description="Text to search semantically"),
     top_k: int = Query(5, description="Number of top results to return"),
-    indexer=Depends(get_indexer),
     partition_viewer=Depends(require_partition_viewer),
 ):
     log = logger.bind(partition=partition, query=text, top_k=top_k)
-    results = await indexer.asearch.remote(query=text, top_k=top_k, partition=partition)
-    log.info("Semantic search on single partition completed.", result_count=len(results))
+    result = await app_service.search_partition(
+        query=text,
+        partition=partition,
+        top_k=top_k,
+        allowed_partitions=[partition],
+    )
+    log.info("Semantic search on single partition completed.", result_count=result["count"])
     documents = [
         {
-            "link": str(request.url_for("get_extract", extract_id=doc.metadata["_id"])),
-            "metadata": doc.metadata,
-            "content": doc.page_content,
+            "link": str(request.url_for("get_extract", extract_id=doc["chunk_id"])),
+            "metadata": doc["metadata"],
+            "content": doc["content"],
         }
-        for doc in results
+        for doc in result["documents"]
     ]
 
     return JSONResponse(status_code=status.HTTP_200_OK, content={"documents": documents})
@@ -154,20 +160,25 @@ async def search_file(
     file_id: str,
     text: str = Query(..., description="Text to search semantically"),
     top_k: int = Query(5, description="Number of top results to return"),
-    indexer=Depends(get_indexer),
     partition_viewer=Depends(require_partition_viewer),
 ):
     log = logger.bind(partition=partition, file_id=file_id, query=text, top_k=top_k)
-    results = await indexer.asearch.remote(query=text, top_k=top_k, partition=partition, filter={"file_id": file_id})
-    log.info("Semantic search on specific file completed.", result_count=len(results))
+    result = await app_service.search_file(
+        query=text,
+        partition=partition,
+        file_id=file_id,
+        top_k=top_k,
+        allowed_partitions=[partition],
+    )
+    log.info("Semantic search on specific file completed.", result_count=result["count"])
 
     documents = [
         {
-            "link": str(request.url_for("get_extract", extract_id=doc.metadata["_id"])),
-            "metadata": doc.metadata,
-            "content": doc.page_content,
+            "link": str(request.url_for("get_extract", extract_id=doc["chunk_id"])),
+            "metadata": doc["metadata"],
+            "content": doc["content"],
         }
-        for doc in results
+        for doc in result["documents"]
     ]
 
     return JSONResponse(status_code=status.HTTP_200_OK, content={"documents": documents})

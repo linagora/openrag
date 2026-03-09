@@ -1,9 +1,8 @@
 import json
 from pathlib import Path
 
-import ray
-from components.indexer.utils.files import save_file_to_disk, serialize_file
-from components.indexer.utils.text_sanitizer import sanitize_extracted_text
+from components.app.service import OpenRAGApplicationService
+from components.indexer.utils.files import save_file_to_disk
 from config import load_config
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
@@ -20,6 +19,7 @@ config = load_config()
 data_dir = config.paths.data_dir
 
 router = APIRouter()
+app_service = OpenRAGApplicationService()
 
 
 class ToolInfo(BaseModel):
@@ -75,7 +75,8 @@ def validate_tool(tool: str = Form(...)):
 """,
 )
 async def list_tools():
-    return AVAILABLE_TOOLS
+    payload = await app_service.list_tools(tools=AVAILABLE_TOOLS)
+    return payload["tools"]
 
 
 @router.post(
@@ -96,29 +97,27 @@ async def execute_tool(
     save_dir = Path(data_dir)
     file_path = None
     try:
-        if tool["name"] == "extractText":
-            file_path = await save_file_to_disk(file, save_dir, with_random_prefix=True)
-            metadata.update({"source": str(file_path), "filename": file.filename})
+        file_path = await save_file_to_disk(file, save_dir, with_random_prefix=True)
+        metadata.update({"source": str(file_path), "filename": file.filename})
 
-            task_id = ray.get_runtime_context().get_task_id()
+        logger.debug(f"Execute tool {tool['name']} with file {file.filename}")
+        result = await app_service.execute_tool(
+            tool_name=tool["name"],
+            file_path=file_path,
+            metadata=metadata,
+        )
+        logger.debug(f"Tool {tool['name']} done for file {file.filename}")
 
-            logger.debug(f"Execute tool extractText for task {task_id} with file {file.filename}")
-            doc = await serialize_file(task_id, path=file_path, metadata=metadata)
-            logger.debug(f"extractText done for task {task_id}")
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=result,
+        )
 
-            # Sanitize the extracted text to remove useless characters and improve quality
-            sanitized_content = sanitize_extracted_text(doc.page_content)
-
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={"message": sanitized_content},
-            )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Tool {tool['name']} not found",
-            )
-
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
     except HTTPException:
         raise
     except Exception as e:

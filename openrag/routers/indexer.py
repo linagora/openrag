@@ -1,9 +1,8 @@
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import ray
+from components.app.service import OpenRAGApplicationService
 from components.indexer.utils.files import sanitize_filename, save_file_to_disk
 from config import load_config
 from fastapi import (
@@ -33,6 +32,7 @@ from .utils import (
 
 # load logger
 logger = get_logger()
+app_service = OpenRAGApplicationService()
 
 # load config
 config = load_config()
@@ -78,9 +78,10 @@ async def get_supported_types():
         - `extensions`: List of supported file extensions.
         - `mimetypes`: List of supported MIME types.
     """
-    list_extensions = list(ACCEPTED_FILE_FORMATS)
-    list_mimetypes = list(DICT_MIMETYPES)
-    resp = {"extensions": list_extensions, "mimetypes": list_mimetypes}
+    resp = await app_service.get_supported_types(
+        accepted_formats=ACCEPTED_FILE_FORMATS,
+        dict_mimetypes=DICT_MIMETYPES,
+    )
     return JSONResponse(content=resp)
 
 
@@ -162,13 +163,17 @@ async def add_file(
     metadata["created_at"] = datetime.fromtimestamp(file_stat.st_ctime).isoformat()
     metadata["file_id"] = file_id
 
-    # Indexing the file
-    task = indexer.add_file.remote(path=file_path, metadata=metadata, partition=partition, user=user)
-    await task_state_manager.set_state.remote(task.task_id().hex(), "QUEUED")
-    await task_state_manager.set_object_ref.remote(task.task_id().hex(), {"ref": task})
+    result = await app_service.add_file(
+        file_path=file_path,
+        metadata=metadata,
+        partition=partition,
+        user=user,
+        indexer=indexer,
+        task_state_manager=task_state_manager,
+    )
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
-        content={"task_status_url": build_url(request, "get_task_status", task_id=task.task_id().hex())},
+        content={"task_status_url": build_url(request, "get_task_status", task_id=result["task_id"])},
     )
 
 
@@ -187,7 +192,6 @@ Returns 204 No Content on successful deletion.
 async def delete_file(
     partition: str,
     file_id: str,
-    indexer=Depends(get_indexer),
     vectordb=Depends(get_vectordb),
     user=Depends(require_partition_editor),
 ):
@@ -196,7 +200,11 @@ async def delete_file(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"'{file_id}' not found in partition '{partition}'",
         )
-    await indexer.delete_file.remote(file_id, partition)
+    await app_service.delete_file(
+        partition=partition,
+        file_id=file_id,
+        allowed_partitions=[partition],
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -248,9 +256,6 @@ async def put_file(
             detail=f"'{file_id}' not found in partition '{partition}'",
         )
 
-    # Delete the existing file from the vector database
-    await indexer.delete_file.remote(file_id, partition)
-
     save_dir = Path(DATA_DIR)
     try:
         original_filename = file.filename
@@ -278,14 +283,19 @@ async def put_file(
     metadata["created_at"] = datetime.fromtimestamp(file_stat.st_ctime).isoformat()
     metadata["file_id"] = file_id
 
-    # Indexing the file
-    task = indexer.add_file.remote(path=file_path, metadata=metadata, partition=partition, user=user)
-    await task_state_manager.set_state.remote(task.task_id().hex(), "QUEUED")
-    await task_state_manager.set_object_ref.remote(task.task_id().hex(), {"ref": task})
+    result = await app_service.replace_file(
+        file_id=file_id,
+        file_path=file_path,
+        metadata=metadata,
+        partition=partition,
+        user=user,
+        indexer=indexer,
+        task_state_manager=task_state_manager,
+    )
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
-        content={"task_status_url": build_url(request, "get_task_status", task_id=task.task_id().hex())},
+        content={"task_status_url": build_url(request, "get_task_status", task_id=result["task_id"])},
     )
 
 
@@ -311,7 +321,6 @@ async def patch_file(
     partition: str,
     file_id: str = Depends(validate_file_id),
     metadata: Any | None = Depends(validate_metadata),
-    indexer=Depends(get_indexer),
     user=Depends(require_partition_editor),
     user_partitions=Depends(current_user_partitions),
 ):
@@ -326,7 +335,12 @@ async def patch_file(
             required_role="editor",
         )
 
-    await indexer.update_file_metadata.remote(file_id, metadata, partition, user=user)
+    await app_service.update_file_metadata(
+        partition=partition,
+        file_id=file_id,
+        metadata=metadata,
+        allowed_partitions=[partition] if "partition" not in metadata else [partition, metadata["partition"]],
+    )
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={"message": f"Metadata for file '{file_id}' successfully updated."},
@@ -358,7 +372,6 @@ async def copy_file_between_partitions(
     metadata: Any | None = Depends(validate_metadata),
     source_partition: str = Form(...),
     source_file_id: str = Form(...),
-    indexer=Depends(get_indexer),
     user=Depends(require_partition_editor),
     user_partitions=Depends(current_user_partitions),
 ):
@@ -372,7 +385,14 @@ async def copy_file_between_partitions(
     metadata["file_id"] = file_id
     metadata["partition"] = partition
 
-    await indexer.copy_file.remote(file_id=source_file_id, metadata=metadata, partition=source_partition, user=user)
+    await app_service.copy_file(
+        source_partition=source_partition,
+        source_file_id=source_file_id,
+        dest_partition=partition,
+        dest_file_id=file_id,
+        allowed_partitions=[source_partition, partition],
+        extra_metadata={k: v for k, v in metadata.items() if k not in {"file_id", "partition"}},
+    )
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
         content={"message": "File copied successfully."},
@@ -400,8 +420,8 @@ async def get_task_status(
     task_state_manager=Depends(get_task_state_manager),
     task_details=Depends(require_task_owner),
 ):
-    # fetch task state
-    state = await task_state_manager.get_state.remote(task_id)
+    result = await app_service.get_task_status(task_id=task_id, user_id=task_details.get("user_id"))
+    state = result.get("task_state") or result.get("state")
     if state is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -409,11 +429,7 @@ async def get_task_status(
         )
 
     # format the response
-    content: dict[str, Any] = {
-        "task_id": task_id,
-        "task_state": state,
-        "details": task_details,
-    }
+    content: dict[str, Any] = {"task_id": task_id, "task_state": state, "details": task_details}
 
     if state == "FAILED":
         content["error_url"] = build_url(request, "get_task_error", task_id=task_id)
@@ -442,13 +458,13 @@ async def get_task_error(
     task_details=Depends(require_task_owner),
 ):
     try:
-        error = await task_state_manager.get_error.remote(task_id)
-        if error is None:
+        result = await app_service.get_task_error(task_state_manager=task_state_manager, task_id=task_id)
+        if not result["traceback"]:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"No error found for task '{task_id}'.",
             )
-        return {"task_id": task_id, "traceback": error.splitlines()}
+        return result
     except HTTPException:
         raise
     except Exception:
@@ -476,27 +492,15 @@ Returns task logs including:
 )
 async def get_task_logs(task_id: str, max_lines: int = 100, task_details=Depends(require_task_owner)):
     try:
-        if not LOG_FILE.exists():
-            raise HTTPException(status_code=500, detail="Log file not found.")
-
-        logs = []
-        with open(LOG_FILE, errors="replace") as f:
-            for line in reversed(list(f)):
-                try:
-                    record = json.loads(line).get("record", {})
-                    if record.get("extra", {}).get("task_id") == task_id:
-                        logs.append(
-                            f"{record['time']['repr']} - {record['level']['name']} - {record['message']} - {(record['extra'])}"
-                        )
-                        if len(logs) >= max_lines:
-                            break
-                except json.JSONDecodeError:
-                    continue
-
-        if not logs:
+        result = await app_service.get_task_logs(
+            task_id=task_id,
+            user_id=task_details.get("user_id"),
+            log_file=LOG_FILE,
+            max_lines=max_lines,
+        )
+        if not result["logs"]:
             raise HTTPException(status_code=404, detail=f"No logs found for task '{task_id}'")
-
-        return JSONResponse(content={"task_id": task_id, "logs": logs[::-1]})  # restore order
+        return JSONResponse(content={"task_id": task_id, "logs": result["logs"]})
     except HTTPException:
         raise
     except Exception as e:
@@ -526,12 +530,7 @@ async def cancel_task(
     task_details=Depends(require_task_owner),
 ):
     try:
-        obj_ref = await task_state_manager.get_object_ref.remote(task_id)
-        if obj_ref is None:
-            raise HTTPException(404, f"No ObjectRef stored for task {task_id}")
-
-        ray.cancel(obj_ref["ref"], recursive=True)
-        return {"message": f"Cancellation signal sent for task {task_id}"}
+        return await app_service.cancel_task(task_state_manager=task_state_manager, task_id=task_id)
     except Exception as e:
         logger.exception("Failed to cancel task.")
         raise HTTPException(status_code=500, detail=str(e))

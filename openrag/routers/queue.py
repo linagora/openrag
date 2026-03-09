@@ -1,5 +1,4 @@
-from collections import Counter
-
+from components.app.service import OpenRAGApplicationService
 from config import load_config
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse
@@ -12,17 +11,7 @@ config = load_config()
 
 # Create an APIRouter instance
 router = APIRouter()
-
-
-def _format_pool_info(worker_info: dict[str, int]) -> dict[str, int]:
-    """
-    Convert SerializerQueue.pool_info() output into a concise dict for the API.
-    """
-    return {
-        "total_slots": worker_info["total_capacity"],
-        "pool_size": worker_info["pool_size"],
-        "max_per_actor": worker_info["max_tasks_per_worker"],
-    }
+app_service = OpenRAGApplicationService()
 
 
 @router.get(
@@ -51,23 +40,7 @@ Monitor system load and worker utilization.
 """,
 )
 async def get_queue_info(admin=Depends(require_admin), task_state_manager=Depends(get_task_state_manager)):
-    all_states: dict = await task_state_manager.get_all_states.remote()
-    status_counts = Counter(all_states.values())
-
-    active_statuses = ["QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"]
-    active = {s: status_counts.get(s, 0) for s in active_statuses}
-
-    task_summary = {
-        "active": sum(active.values()),
-        "active_statuses": active,
-        "total_completed": status_counts.get("COMPLETED", 0),
-        "total_failed": status_counts.get("FAILED", 0),
-    }
-
-    worker_info = await task_state_manager.get_pool_info.remote()
-    workers_block = _format_pool_info(worker_info)
-
-    return {"workers": workers_block, "tasks": task_summary}
+    return await app_service.get_queue_info(task_state_manager=task_state_manager)
 
 
 @router.get(
@@ -115,36 +88,19 @@ async def list_tasks(
     - ?task_status=<exact> → exact match (case-insensitive)
     - (none)               → all tasks
     """
-    # fetch task info
-    if user.get("is_admin"):
-        all_info: dict[str, dict] = await task_state_manager.get_all_info.remote()
-    else:
-        all_info: dict[str, dict] = await task_state_manager.get_all_user_info.remote(user.get("id"))
-
-    if task_status is None:
-        filtered = all_info.items()
-    else:
-        if task_status.lower() == "active":
-            active_states = {"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"}
-            filtered = [(tid, info) for tid, info in all_info.items() if info["state"] in active_states]
-        else:
-            filtered = [(tid, info) for tid, info in all_info.items() if info["state"].lower() == task_status.lower()]
-
-    # format the response
+    payload = await app_service.list_my_tasks(
+        user_id=None if user.get("is_admin") else user.get("id"),
+        task_status=task_status,
+    )
     tasks = []
-    for task_id, info in filtered:
+    for task in payload.get("tasks", []):
         item = {
-            "task_id": task_id,
-            "state": info["state"],
-            "details": info["details"],
-            # include an error URL if applicable
-            **(
-                {"error_url": str(request.url_for("get_task_error", task_id=task_id))}
-                if info["state"] == "FAILED"
-                else {}
-            ),
-            "url": str(request.url_for("get_task_status", task_id=task_id)),
+            "task_id": task["task_id"],
+            "state": task["state"],
+            "details": task.get("details"),
+            "url": str(request.url_for("get_task_status", task_id=task["task_id"])),
         }
+        if task["state"] == "FAILED":
+            item["error_url"] = str(request.url_for("get_task_error", task_id=task["task_id"]))
         tasks.append(item)
-
     return JSONResponse(status_code=status.HTTP_200_OK, content={"tasks": tasks})

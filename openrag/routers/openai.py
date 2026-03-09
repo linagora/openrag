@@ -2,8 +2,7 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 
-import consts
-from components.pipeline import RagPipeline
+from components.app.service import OpenRAGApplicationService
 from config import load_config
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -28,7 +27,7 @@ logger = get_logger()
 config = load_config()
 router = APIRouter()
 
-ragpipe = RagPipeline(config=config)
+app_service = OpenRAGApplicationService()
 
 
 @router.get(
@@ -56,31 +55,9 @@ async def list_models(
     vectordb=Depends(get_vectordb),
     user_partitions=Depends(current_user_or_admin_partitions),
 ):
-    if [p["partition"] for p in user_partitions] == ["all"]:
-        user_partitions = await vectordb.list_partitions.remote()
-    logger.debug("Listing models", partition_count=len(user_partitions))
-
-    models = []
-    for partition in user_partitions:
-        model_id = f"{consts.PARTITION_PREFIX}{partition['partition']}"
-        models.append(
-            {
-                "id": model_id,
-                "object": "model",
-                "created": partition["created_at"],
-                "owned_by": "OpenRAG",
-            }
-        )
-
-    models.append(
-        {
-            "id": f"{consts.PARTITION_PREFIX}all",
-            "object": "model",
-            "created": 0,
-            "owned_by": "OpenRAG",
-        }
-    )
-    return JSONResponse(content={"object": "list", "data": models})
+    result = await app_service.list_models(vectordb=vectordb, user_partitions=user_partitions)
+    logger.debug("Listing models", partition_count=len(result["data"]))
+    return JSONResponse(content=result)
 
 
 def __prepare_sources(request: Request, docs: list[Document]):
@@ -174,7 +151,10 @@ async def openai_chat_completion(
         raise
 
     try:
-        llm_output, docs = await ragpipe.chat_completion(partition=partitions, payload=request.model_dump())
+        llm_output, docs = await app_service.openai_chat_completion(
+            payload=request.model_dump(),
+            partitions=partitions,
+        )
         log.debug("RAG chat completion pipeline executed.")
     except Exception as e:
         log.exception("Chat completion failed.", error=str(e))
@@ -296,7 +276,10 @@ async def openai_completion(
         raise
 
     try:
-        llm_output, docs = await ragpipe.completions(partition=partitions, payload=request.model_dump())
+        llm_output, docs = await app_service.openai_completion(
+            payload=request.model_dump(),
+            partitions=partitions,
+        )
         log.debug("RAG completion pipeline executed.")
     except Exception as e:
         log.exception("Completion request failed.", error=str(e))

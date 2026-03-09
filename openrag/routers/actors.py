@@ -1,4 +1,4 @@
-import ray
+from components.app.service import OpenRAGApplicationService
 from components.utils import get_llm_semaphore, get_vlm_semaphore
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -15,7 +15,7 @@ from utils.logger import get_logger
 from .utils import require_admin
 
 logger = get_logger()
-
+app_service = OpenRAGApplicationService()
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -62,7 +62,8 @@ async def list_ray_actors():
             }
             for a in list_actors()
         ]
-        return JSONResponse(status_code=status.HTTP_200_OK, content={"actors": actors})
+        payload = await app_service.list_ray_actors(actors=actors)
+        return JSONResponse(status_code=status.HTTP_200_OK, content=payload)
     except Exception:
         logger.exception("Error getting actor summaries")
         raise HTTPException(
@@ -102,40 +103,17 @@ Returns restart confirmation with new actor ID.
 **Warning:** Restarting actors may interrupt ongoing operations.
 """,
 )
-async def restart_actor(
-    actor_name: str,
-):
+async def restart_actor(actor_name: str):
     """Restart a specific Ray actor by name (kill + recreate)."""
-    if actor_name not in actor_creation_map:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown actor: {actor_name}")
-
     try:
-        # Kill existing actor (if alive)
-        actor = ray.get_actor(actor_name, namespace="openrag")
-        ray.kill(actor, no_restart=True)
-        logger.info(f"Killed actor: {actor_name}")
-    except ValueError:
-        logger.warning("Actor not found. Creating new instance.", actor=actor_name)
-    except Exception as e:
-        logger.exception("Failed to kill actor", actor=actor_name)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to kill actor {actor_name}: {e!s}",
+        result = await app_service.restart_actor(
+            actor_name=actor_name,
+            actor_creation_map=actor_creation_map,
         )
-
-    try:
-        new_actor = actor_creation_map[actor_name]()
-        if "Semaphore" in actor_name:
-            new_actor = new_actor._actor
         logger.info(f"Restarted actor: {actor_name}")
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "message": f"Actor {actor_name} restarted successfully.",
-                "actor_name": actor_name,
-                "actor_id": new_actor._actor_id.hex(),
-            },
-        )
+        return JSONResponse(status_code=status.HTTP_200_OK, content=result)
+    except KeyError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
         logger.exception("Failed to restart actor", actor=actor_name)
         raise HTTPException(

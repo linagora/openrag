@@ -1,3 +1,4 @@
+from components.app.service import OpenRAGApplicationService
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from utils.dependencies import get_vectordb
@@ -7,6 +8,7 @@ from .utils import require_admin
 
 logger = get_logger()
 router = APIRouter()
+app_service = OpenRAGApplicationService()
 
 
 @router.get(
@@ -28,7 +30,8 @@ Returns list of all users with:
 """,
 )
 async def list_users(vectordb=Depends(get_vectordb), admin_user=Depends(require_admin)):
-    users = await vectordb.list_users.remote()
+    result = await app_service.list_users(vectordb=vectordb)
+    users = result["users"]
     logger.debug("Returned list of users.", user_count=len(users))
     return JSONResponse(status_code=status.HTTP_200_OK, content={"users": users})
 
@@ -52,8 +55,7 @@ Returns current user details including:
 )
 async def get_current_user(request: Request):
     """Get current authenticated user info"""
-    user = request.state.user
-    return user
+    return await app_service.get_current_user(user=request.state.user)
 
 
 @router.post(
@@ -89,7 +91,8 @@ async def create_user(
     """
     Create a new user and generate a token.
     """
-    user = await vectordb.create_user.remote(
+    user = await app_service.create_user(
+        vectordb=vectordb,
         display_name=display_name,
         external_user_id=external_user_id,
         is_admin=is_admin,
@@ -123,7 +126,7 @@ async def get_user(user_id: int, vectordb=Depends(get_vectordb), admin_user=Depe
     """
     Get details of a specific user (without exposing token).
     """
-    user = await vectordb.get_user.remote(user_id)
+    user = await app_service.get_user(vectordb=vectordb, user_id=user_id)
     return JSONResponse(status_code=status.HTTP_200_OK, content=user)
 
 
@@ -157,7 +160,7 @@ async def delete_user(user_id: int, vectordb=Depends(get_vectordb), admin_user=D
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete default admin user.",
         )
-    await vectordb.delete_user.remote(user_id)
+    await app_service.delete_user_account(vectordb=vectordb, user_id=user_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -189,6 +192,6 @@ async def regenerate_user_token(user_id: int, vectordb=Depends(get_vectordb)):
     """
     Regenerate a user's token.
     """
-    user = await vectordb.regenerate_user_token.remote(user_id)
+    user = await app_service.regenerate_user_token(vectordb=vectordb, user_id=user_id)
     logger.info("Regenerated user token", user_id=user_id)
     return JSONResponse(status_code=status.HTTP_200_OK, content=user)
