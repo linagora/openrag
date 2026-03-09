@@ -29,6 +29,8 @@ class OpenAIChatCompletionRequest(BaseModel):
         {
             "use_map_reduce": False,
             "spoken_style_answer": False,
+            "websearch": False,
+            "llm_override": None,
         },
         description="Extra custom parameters. Supports 'llm_override' object with optional 'base_url', 'api_key', and 'model' to override the downstream LLM endpoint.",
     )
