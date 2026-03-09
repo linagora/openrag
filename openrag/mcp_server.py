@@ -158,17 +158,26 @@ async def get_file_info(partition: str, file_id: str) -> dict:
 
 @server.tool(
     description=(
-        "Fetch the full text content of every chunk belonging to a specific file. "
-        "Each chunk includes its chunk_id, text content, and metadata. "
-        "Useful for reading the raw indexed content of a document."
+        "Fetch text chunks belonging to a specific file, one page at a time. "
+        "Use `offset` (default 0) and `limit` (default 10) to page through the file. "
+        "The response includes `total_chunks` and `has_more` so you know whether to "
+        "call again with a higher offset. Always check `has_more` and keep paging "
+        "until it is false before drawing conclusions about the full file content."
     )
 )
-async def get_file_chunks(partition: str, file_id: str) -> dict:
-    """Return all text chunks for a file in full."""
+async def get_file_chunks(
+    partition: str,
+    file_id: str,
+    offset: int = 0,
+    limit: int = 10,
+) -> dict:
+    """Return a page of text chunks for a file."""
     return await app_service.get_file_chunks(
         partition=partition,
         file_id=file_id,
         allowed_partitions=get_allowed_partitions(),
+        offset=offset,
+        limit=limit,
     )
 
 

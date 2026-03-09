@@ -13,9 +13,7 @@ from types import ModuleType
 from unittest.mock import MagicMock
 
 import pytest
-
 from components.mcp.auth_context import set_auth_context
-
 
 # ---------------------------------------------------------------------------
 # Stub utils.dependencies BEFORE importing mcp_server
@@ -215,7 +213,7 @@ async def test_get_file_chunks_tool(patched_services, auth_ctx):
 
     assert idx.calls[-1] == (
         "get_file_chunks",
-        {"partition": "p1", "file_id": "file-1", "allowed_partitions": ["p1"]},
+        {"partition": "p1", "file_id": "file-1", "allowed_partitions": ["p1"], "offset": 0, "limit": 10},
     )
 
 

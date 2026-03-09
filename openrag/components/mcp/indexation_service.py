@@ -107,8 +107,15 @@ class IndexationService:
         partition: str,
         file_id: str,
         allowed_partitions: list[str] | None,
+        offset: int = 0,
+        limit: int = 10,
     ) -> dict[str, Any]:
-        """Return the full text content of every chunk for a specific file."""
+        """Return a page of text chunks for a specific file.
+
+        Args:
+            offset: Zero-based index of the first chunk to return.
+            limit: Maximum number of chunks to return per call.
+        """
         self._enforce_partition_access(partition, allowed_partitions)
 
         vectordb = get_vectordb()
@@ -116,19 +123,24 @@ class IndexationService:
         if not await vectordb.file_exists.remote(file_id, partition):
             raise FileNotFoundError(f"File '{file_id}' not found in partition '{partition}'")
 
-        chunks = await vectordb.get_file_chunks.remote(partition=partition, file_id=file_id, include_id=True)
+        all_chunks = await vectordb.get_file_chunks.remote(partition=partition, file_id=file_id, include_id=True)
+        total = len(all_chunks)
+        page = all_chunks[offset : offset + limit]
 
         return {
             "partition": partition,
             "file_id": file_id,
-            "chunk_count": len(chunks),
+            "total_chunks": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(page) < total,
             "chunks": [
                 {
                     "chunk_id": chunk.metadata.get("_id"),
                     "content": chunk.page_content,
                     "metadata": {k: v for k, v in chunk.metadata.items() if k != "_id"},
                 }
-                for chunk in chunks
+                for chunk in page
             ],
         }
 

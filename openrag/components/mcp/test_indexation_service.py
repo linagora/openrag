@@ -9,6 +9,7 @@ Ray is never imported: a stub module is inserted into sys.modules *before* any
 openrag import so that ``utils.dependencies`` (which calls ray.get_actor at
 module load time) never touches a real Ray cluster.
 """
+
 from __future__ import annotations
 
 import sys
@@ -85,13 +86,9 @@ class _FakeVectorDB:
                 else self._files_by_partition.get(partition, [])
             }
         )
-        self.file_exists = _SyncRemoteCall(
-            lambda file_id, partition: self._file_exists_result
-        )
+        self.file_exists = _SyncRemoteCall(lambda file_id, partition: self._file_exists_result)
         self.get_file_chunks = _SyncRemoteCall(
-            lambda partition, file_id, include_id=False: self._chunks_by_file.get(
-                (partition, file_id), []
-            )
+            lambda partition, file_id, include_id=False: self._chunks_by_file.get((partition, file_id), [])
         )
 
 
@@ -295,12 +292,32 @@ async def test_get_file_chunks_returns_all_chunks(patch_getters):
 
     assert result["partition"] == "p1"
     assert result["file_id"] == "f1"
-    assert result["chunk_count"] == 2
+    assert result["total_chunks"] == 2
+    assert result["offset"] == 0
+    assert result["has_more"] is False
     assert result["chunks"][0]["content"] == "hello world"
     assert result["chunks"][0]["chunk_id"] == 1
     # _id should not leak into the metadata dict
     assert "_id" not in result["chunks"][0]["metadata"]
     assert result["chunks"][1]["content"] == "foo bar"
+
+
+@pytest.mark.asyncio
+async def test_get_file_chunks_pagination(patch_getters):
+    """offset/limit returns the correct slice and sets has_more correctly."""
+    chunks = [_make_chunk(f"chunk {i}", "f1", "p1", chunk_id=i) for i in range(5)]
+    vdb = _FakeVectorDB(chunks_by_file={("p1", "f1"): chunks}, file_exists_result=True)
+    patch_getters(vectordb=vdb)
+    svc = IndexationService()
+
+    page1 = await svc.get_file_chunks(partition="p1", file_id="f1", allowed_partitions=["p1"], offset=0, limit=2)
+    assert len(page1["chunks"]) == 2
+    assert page1["has_more"] is True
+    assert page1["total_chunks"] == 5
+
+    page3 = await svc.get_file_chunks(partition="p1", file_id="f1", allowed_partitions=["p1"], offset=4, limit=2)
+    assert len(page3["chunks"]) == 1
+    assert page3["has_more"] is False
 
 
 @pytest.mark.asyncio
