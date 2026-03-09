@@ -90,8 +90,25 @@ class _FakeIndexationService:
 def patched_services(monkeypatch):
     search = _FakeSearchService()
     indexation = _FakeIndexationService()
-    monkeypatch.setattr(mcp_mod, "search_service", search)
-    monkeypatch.setattr(mcp_mod, "indexation_service", indexation)
+    # mcp_server now routes through `app_service`
+    composite = MagicMock()
+    composite.search_documents = search.search_documents
+    composite.list_partitions = indexation.list_partitions
+    composite.list_files = indexation.list_files
+    composite.get_file_info = indexation.get_file_info
+    composite.get_file_chunks = indexation.get_file_chunks
+    composite.fuzzy_search_files = indexation.fuzzy_search_files
+    composite.get_task_status = indexation.get_task_status
+    composite.list_my_tasks = indexation.list_my_tasks
+    composite.get_task_logs = indexation.get_task_logs
+    composite.get_chunk_by_id = indexation.get_chunk_by_id
+    composite.delete_file = indexation.delete_file
+    composite.update_file_metadata = indexation.update_file_metadata
+    composite.copy_file = indexation.copy_file
+    composite.index_url = indexation.index_url
+    monkeypatch.setattr(mcp_mod, "app_service", composite)
+    monkeypatch.setattr(mcp_mod, "search_service", composite)
+    monkeypatch.setattr(mcp_mod, "indexation_service", composite)
     return search, indexation
 
 
