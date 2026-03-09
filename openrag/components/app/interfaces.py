@@ -75,7 +75,7 @@ class OpenRAGApiInterface(ABC):
         file_id: str,
         allowed_partitions: list[str] | None,
         offset: int = 0,
-        limit: int = 10,
+        limit: int = 3,
     ) -> dict[str, Any]: ...
 
     @abstractmethod

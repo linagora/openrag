@@ -159,7 +159,9 @@ async def get_file_info(partition: str, file_id: str) -> dict:
 @server.tool(
     description=(
         "Fetch text chunks belonging to a specific file, one page at a time. "
-        "Use `offset` (default 0) and `limit` (default 10) to page through the file. "
+        "Use `offset` (default 0) and `limit` (default 3) to page through the file. "
+        "Keep `limit` small (3 or fewer) to avoid exceeding your context window — "
+        "chunks can be long. "
         "The response includes `total_chunks` and `has_more` so you know whether to "
         "call again with a higher offset. Always check `has_more` and keep paging "
         "until it is false before drawing conclusions about the full file content."
@@ -169,7 +171,7 @@ async def get_file_chunks(
     partition: str,
     file_id: str,
     offset: int = 0,
-    limit: int = 10,
+    limit: int = 3,
 ) -> dict:
     """Return a page of text chunks for a file."""
     return await app_service.get_file_chunks(

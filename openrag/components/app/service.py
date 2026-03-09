@@ -124,7 +124,7 @@ class OpenRAGApplicationService(OpenRAGApiInterface):
         file_id: str,
         allowed_partitions: list[str] | None,
         offset: int = 0,
-        limit: int = 10,
+        limit: int = 3,
     ) -> dict[str, Any]:
         return await self.indexation_service.get_file_chunks(
             partition=partition,

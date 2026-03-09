@@ -213,7 +213,7 @@ async def test_get_file_chunks_tool(patched_services, auth_ctx):
 
     assert idx.calls[-1] == (
         "get_file_chunks",
-        {"partition": "p1", "file_id": "file-1", "allowed_partitions": ["p1"], "offset": 0, "limit": 10},
+        {"partition": "p1", "file_id": "file-1", "allowed_partitions": ["p1"], "offset": 0, "limit": 3},
     )
 
 
