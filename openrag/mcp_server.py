@@ -1,10 +1,8 @@
 import os
 from pathlib import Path
 
-from components.mcp.adapters import RayIndexerSearchGateway
+from components.app.service import OpenRAGApplicationService
 from components.mcp.auth_context import get_allowed_partitions, get_user_id, reset_auth_context, set_auth_context
-from components.mcp.indexation_service import IndexationService
-from components.mcp.service import SearchToolService
 from config import load_config
 from mcp.server.fastmcp import FastMCP
 from routers.utils import current_user_or_admin_partitions_list
@@ -27,13 +25,14 @@ similarity_threshold = float(mcp_config.get("similarity_threshold", 0.8))
 LOG_FILE = Path(config.paths.log_dir or "logs") / "app.json"
 
 server = FastMCP(server_name, stateless_http=True, json_response=True)
-search_service = SearchToolService(
-    gateway=RayIndexerSearchGateway(),
+app_service = OpenRAGApplicationService(
     default_top_k=default_top_k,
     max_top_k=max_top_k,
     similarity_threshold=similarity_threshold,
 )
-indexation_service = IndexationService()
+# Backward-compatible aliases used by existing tests
+search_service = app_service
+indexation_service = app_service
 
 
 AUTH_TOKEN: str | None = os.getenv("AUTH_TOKEN")
@@ -84,7 +83,7 @@ class MCPAuthContextMiddleware(BaseHTTPMiddleware):
 
 @server.tool(description="Semantic search across one or many partitions using OpenRAG search flow")
 async def search_documents(query: str, partitions: list[str] | None = None, top_k: int | None = None) -> dict:
-    return await search_service.search_documents(
+    return await app_service.search_documents(
         query=query,
         partitions=partitions,
         top_k=top_k,
@@ -94,7 +93,7 @@ async def search_documents(query: str, partitions: list[str] | None = None, top_
 
 @server.tool(description="Semantic search restricted to one partition")
 async def search_partition(query: str, partition: str, top_k: int | None = None) -> dict:
-    return await search_service.search_documents(
+    return await app_service.search_documents(
         query=query,
         partitions=[partition],
         top_k=top_k,
@@ -104,7 +103,7 @@ async def search_partition(query: str, partition: str, top_k: int | None = None)
 
 @server.tool(description="Semantic search restricted to one file inside one partition")
 async def search_file(query: str, partition: str, file_id: str, top_k: int | None = None) -> dict:
-    return await search_service.search_documents(
+    return await app_service.search_documents(
         query=query,
         partitions=[partition],
         top_k=top_k,
@@ -121,7 +120,7 @@ async def search_file(query: str, partition: str, file_id: str, top_k: int | Non
 )
 async def list_partitions() -> dict:
     """List the partitions the current user has access to."""
-    return await indexation_service.list_partitions(
+    return await app_service.list_partitions(
         allowed_partitions=get_allowed_partitions(),
     )
 
@@ -135,7 +134,7 @@ async def list_partitions() -> dict:
 )
 async def list_files(partition: str, limit: int | None = None) -> dict:
     """List indexed files in a partition."""
-    return await indexation_service.list_files(
+    return await app_service.list_files(
         partition=partition,
         allowed_partitions=get_allowed_partitions(),
         limit=limit,
@@ -150,7 +149,7 @@ async def list_files(partition: str, limit: int | None = None) -> dict:
 )
 async def get_file_info(partition: str, file_id: str) -> dict:
     """Return metadata and chunk count for a file."""
-    return await indexation_service.get_file_info(
+    return await app_service.get_file_info(
         partition=partition,
         file_id=file_id,
         allowed_partitions=get_allowed_partitions(),
@@ -166,7 +165,7 @@ async def get_file_info(partition: str, file_id: str) -> dict:
 )
 async def get_file_chunks(partition: str, file_id: str) -> dict:
     """Return all text chunks for a file in full."""
-    return await indexation_service.get_file_chunks(
+    return await app_service.get_file_chunks(
         partition=partition,
         file_id=file_id,
         allowed_partitions=get_allowed_partitions(),
@@ -189,7 +188,7 @@ async def fuzzy_search_files(
     limit: int = 20,
 ) -> dict:
     """Fuzzy search on file names across accessible partitions."""
-    return await indexation_service.fuzzy_search_files(
+    return await app_service.fuzzy_search_files(
         query=query,
         allowed_partitions=get_allowed_partitions(),
         partition=partition,
@@ -207,7 +206,7 @@ async def fuzzy_search_files(
 )
 async def get_indexation_task_status(task_id: str) -> dict:
     """Return the status of an indexation task by its task_id."""
-    return await indexation_service.get_task_status(
+    return await app_service.get_task_status(
         task_id=task_id,
         user_id=get_user_id(),
     )
@@ -222,7 +221,7 @@ async def get_indexation_task_status(task_id: str) -> dict:
 )
 async def list_my_tasks(task_status: str | None = None) -> dict:
     """Return the current user's indexation tasks, optionally filtered by state."""
-    return await indexation_service.list_my_tasks(
+    return await app_service.list_my_tasks(
         user_id=get_user_id(),
         task_status=task_status,
     )
@@ -237,7 +236,7 @@ async def list_my_tasks(task_status: str | None = None) -> dict:
 )
 async def get_task_logs(task_id: str, max_lines: int = 100) -> dict:
     """Return structured log lines for a task."""
-    return await indexation_service.get_task_logs(
+    return await app_service.get_task_logs(
         task_id=task_id,
         user_id=get_user_id(),
         log_file=LOG_FILE,
@@ -254,7 +253,7 @@ async def get_task_logs(task_id: str, max_lines: int = 100) -> dict:
 )
 async def get_chunk_by_id(chunk_id: str) -> dict:
     """Return the content and metadata of a specific chunk."""
-    return await indexation_service.get_chunk_by_id(
+    return await app_service.get_chunk_by_id(
         chunk_id=chunk_id,
         allowed_partitions=get_allowed_partitions(),
     )
@@ -269,7 +268,7 @@ async def get_chunk_by_id(chunk_id: str) -> dict:
 )
 async def delete_file(partition: str, file_id: str) -> dict:
     """Delete a file from a partition."""
-    return await indexation_service.delete_file(
+    return await app_service.delete_file(
         partition=partition,
         file_id=file_id,
         allowed_partitions=get_allowed_partitions(),
@@ -286,7 +285,7 @@ async def delete_file(partition: str, file_id: str) -> dict:
 )
 async def update_file_metadata(partition: str, file_id: str, metadata: dict) -> dict:
     """Update metadata for a file in-place."""
-    return await indexation_service.update_file_metadata(
+    return await app_service.update_file_metadata(
         partition=partition,
         file_id=file_id,
         metadata=metadata,
@@ -309,7 +308,7 @@ async def copy_file(
     extra_metadata: dict | None = None,
 ) -> dict:
     """Copy a file between partitions."""
-    return await indexation_service.copy_file(
+    return await app_service.copy_file(
         source_partition=source_partition,
         source_file_id=source_file_id,
         dest_partition=dest_partition,
@@ -334,7 +333,7 @@ async def index_url(
     extra_metadata: dict | None = None,
 ) -> dict:
     """Fetch a URL and index the document into a partition."""
-    return await indexation_service.index_url(
+    return await app_service.index_url(
         url=url,
         partition=partition,
         file_id=file_id,
