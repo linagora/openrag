@@ -114,7 +114,7 @@ class IndexationService:
 
         Args:
             offset: Zero-based index of the first chunk to return.
-            limit: Maximum number of chunks to return per call.
+            limit: Maximum number of chunks to return per call. Use -1 for no limit.
         """
         self._enforce_partition_access(partition, allowed_partitions)
 
@@ -125,7 +125,7 @@ class IndexationService:
 
         all_chunks = await vectordb.get_file_chunks.remote(partition=partition, file_id=file_id, include_id=True)
         total = len(all_chunks)
-        page = all_chunks[offset : offset + limit]
+        page = all_chunks[offset:] if limit == -1 else all_chunks[offset : offset + limit]
 
         return {
             "partition": partition,

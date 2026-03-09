@@ -321,6 +321,23 @@ async def test_get_file_chunks_pagination(patch_getters):
 
 
 @pytest.mark.asyncio
+async def test_get_file_chunks_limit_minus_one(patch_getters):
+    """limit=-1 returns all chunks from offset with has_more=False."""
+    chunks = [_make_chunk(f"chunk {i}", "f1", "p1", chunk_id=i) for i in range(5)]
+    vdb = _FakeVectorDB(chunks_by_file={("p1", "f1"): chunks}, file_exists_result=True)
+    patch_getters(vectordb=vdb)
+    svc = IndexationService()
+
+    result = await svc.get_file_chunks(partition="p1", file_id="f1", allowed_partitions=["p1"], offset=0, limit=-1)
+    assert len(result["chunks"]) == 5
+    assert result["has_more"] is False
+
+    result_mid = await svc.get_file_chunks(partition="p1", file_id="f1", allowed_partitions=["p1"], offset=2, limit=-1)
+    assert len(result_mid["chunks"]) == 3
+    assert result_mid["has_more"] is False
+
+
+@pytest.mark.asyncio
 async def test_get_file_chunks_not_found_raises(patch_getters):
     vdb = _FakeVectorDB(file_exists_result=False)
     patch_getters(vectordb=vdb)

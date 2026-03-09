@@ -155,12 +155,12 @@ async def get_file(
 ):
     try:
         # REST route only needs chunk IDs (for link generation), not content —
-        # pass a high limit to retrieve all IDs in one call without pagination.
+        # pass limit=-1 to retrieve all chunks in one call without pagination.
         chunks_result = await app_service.get_file_chunks(
             partition=partition,
             file_id=file_id,
             allowed_partitions=[partition],
-            limit=100_000,
+            limit=-1,
         )
     except FileNotFoundError:
         raise HTTPException(
