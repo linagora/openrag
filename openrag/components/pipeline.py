@@ -68,7 +68,12 @@ class RagPipeline:
         # RAG
         self.rag_mode = config.rag["mode"]
         self.chat_history_depth = config.rag["chat_history_depth"]
-        self.max_context_tokens = config.reranker.get("top_k", 10) * config.chunker.get("chunk_size", 512)
+
+        # Reserve tokens for system prompt template and chat history overhead;
+        # the remainder is the budget for retrieved document context.
+        _llm_context_window = int(config.llm.get("context_window", 8192))
+        _prompt_overhead_tokens = 2048  # system prompt + history messages
+        self.max_context_tokens = max(0, _llm_context_window - _prompt_overhead_tokens)
 
         self.llm_client = LLM(config.llm, logger)
         self.contextualizer = AsyncOpenAI(base_url=config.llm["base_url"], api_key=config.llm["api_key"])

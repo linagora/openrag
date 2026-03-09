@@ -6,7 +6,6 @@ import ray
 from config import load_config
 from fast_langdetect import LangDetectConfig, LangDetector
 from langchain_core.documents.base import Document
-from langchain_openai import ChatOpenAI
 from utils.logger import get_logger
 
 # Global variables
@@ -81,15 +80,18 @@ def format_context(docs: list[Document], max_context_tokens: int = 4096) -> str:
     if not docs:
         return "No document found from the database"
 
-    llm = ChatOpenAI(**config.llm)
-    _length_function = llm.get_num_tokens
+    # Use a conservative character-based token estimator (~4 chars per token).
+    # This avoids instantiating a model-specific tokenizer and works across
+    # any LLM backend (GPT, Mistral, Llama, etc.) without undercounting.
+    _chars_per_token = 4
 
-    docs_with_tokens = list(map(lambda d: (_length_function(d.page_content), d), docs))  # noqa: C417
+    def _estimate_tokens(text: str) -> int:
+        return max(1, len(text) // _chars_per_token)
 
     reduced_docs = []
-
     total_tokens = 0
-    for n_tokens, doc in docs_with_tokens:
+    for doc in docs:
+        n_tokens = _estimate_tokens(doc.page_content)
         if total_tokens + n_tokens > max_context_tokens:
             break
         reduced_docs.append(doc.page_content)

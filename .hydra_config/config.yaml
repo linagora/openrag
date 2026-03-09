@@ -15,6 +15,7 @@ llm:
   base_url: ${oc.env:BASE_URL}
   model: ${oc.env:MODEL}
   api_key: ${oc.env:API_KEY}
+  context_window: ${oc.decode:${oc.env:LLM_CONTEXT_WINDOW, 8192}}
 
 vlm:
   <<: *llm_params
