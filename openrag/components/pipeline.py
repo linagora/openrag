@@ -17,7 +17,7 @@ from .llm import LLM
 from .map_reduce import RAGMapReduce
 from .reranker import Reranker
 from .retriever import BaseRetriever, RetrieverFactory
-from .utils import format_context, format_web_context
+from .utils import SOURCE_SEPARATOR, format_context, format_web_context
 
 logger = get_logger()
 config = load_config()
@@ -173,25 +173,32 @@ class RagPipeline:
         if use_map_reduce and docs:
             docs = await self.map_reduce.map(query=query, chunks=docs)
 
-        # 3. Format the retrieved docs, reserving token budget for web results
-        websearch_max_tokens = self.web_search_service.max_tokens if web_results else 0
-        rag_max_tokens = self.max_context_tokens - websearch_max_tokens if web_results else self.max_context_tokens
+        # 3. Format web results first to know actual token usage, then allocate remaining budget to RAG
+        web_formatted = ""
+        web_tokens_used = 0
+        if web_results:
+            web_formatted, _, web_tokens_used = format_web_context(
+                web_results, start_index=1, max_tokens=self.web_search_service.max_tokens
+            )
 
+        rag_max_tokens = self.max_context_tokens - web_tokens_used
         context, included_indices = format_context(docs, max_context_tokens=rag_max_tokens)
         docs = [docs[i] for i in included_indices]
 
-        # Avoid misleading "No document found" when web results will provide context
-        if not docs and web_results:
-            context = ""
-
-        # Append web results as additional sources with continuous numbering
+        # Re-number web sources after RAG sources and rebuild if needed
         if web_results:
             n_rag_sources = len(docs)
-            web_formatted, _ = format_web_context(
-                web_results, start_index=n_rag_sources + 1, max_tokens=websearch_max_tokens
-            )
-            sep = "-" * 10 + "\n\n"
-            context = f"{context}{sep}{web_formatted}" if context else web_formatted
+            if n_rag_sources > 0:
+                # Re-format with correct start_index now that we know RAG source count
+                web_formatted, _, _ = format_web_context(
+                    web_results, start_index=n_rag_sources + 1, max_tokens=self.web_search_service.max_tokens
+                )
+
+            # Avoid misleading "No document found" when web results provide context
+            if not docs:
+                context = ""
+
+            context = f"{context}{SOURCE_SEPARATOR}{web_formatted}" if context else web_formatted
 
         # 4. prepare the output
         messages: list = copy.deepcopy(messages)

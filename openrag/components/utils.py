@@ -7,11 +7,14 @@ from collections import deque
 from typing import ClassVar
 
 import ray
+from components.indexer.utils.text_sanitizer import sanitize_text
 from config import load_config
 from fast_langdetect import LangDetectConfig, LangDetector
 from langchain_core.documents.base import Document
 from langchain_openai import ChatOpenAI
 from utils.logger import get_logger
+
+SOURCE_SEPARATOR = "-" * 10 + "\n\n"
 
 # Global variables
 config = load_config()
@@ -115,16 +118,15 @@ def format_context(
         included_indices.append(i)
         total_tokens += n_tokens
 
-    sep = "-" * 10 + "\n\n"
     logger.debug("Context formatted", total_tokens=total_tokens, doc_count=len(reduced_docs))
-    return f"{sep}".join(reduced_docs), included_indices
+    return SOURCE_SEPARATOR.join(reduced_docs), included_indices
 
 
 def format_web_context(
     web_results: list,
     start_index: int = 1,
     max_tokens: int = 2000,
-) -> tuple[str, list[int]]:
+) -> tuple[str, list[int], int]:
     """Format web results as numbered [Source N] blocks within a token budget.
 
     Uses fetched page content when available, falling back to the search snippet.
@@ -135,19 +137,16 @@ def format_web_context(
         max_tokens: Maximum token budget for all web sources combined
 
     Returns:
-        (formatted_string, list_of_source_numbers_used)
+        (formatted_string, list_of_source_numbers_used, total_tokens_used)
     """
     if not web_results:
-        return "", []
-
-    from components.indexer.utils.text_sanitizer import sanitize_text
+        return "", [], 0
 
     _length_function = get_num_tokens()
 
     parts = []
     source_numbers = []
     total_tokens = 0
-    sep = "-" * 10 + "\n\n"
 
     for i, result in enumerate(web_results):
         n = start_index + i
@@ -162,7 +161,7 @@ def format_web_context(
         total_tokens += block_tokens
 
     logger.debug("Web context formatted", total_tokens=total_tokens, source_count=len(parts))
-    return sep.join(parts), source_numbers
+    return SOURCE_SEPARATOR.join(parts), source_numbers, total_tokens
 
 
 _SOURCES_NONE_RE = re.compile(r"\n?\[?Sources?\]?\s*:\s*\[?\s*none\s*\]?\s*$", re.IGNORECASE)
