@@ -3,6 +3,7 @@ defaults:
   - chunker: ${oc.env:CHUNKER, recursive_splitter} # recursive_splitter
   - retriever: ${oc.env:RETRIEVER_TYPE, single} # single # multiQuery # hyde
   - rag: ChatBotRag
+  - websearch: ${oc.env:WEBSEARCH_PROVIDER, staan}
 
 llm_params: &llm_params
   temperature: 0.1
@@ -67,16 +68,6 @@ map_reduce:
   # Enable debug logging for map & reduce
   debug: ${oc.decode:${oc.env:MAP_REDUCE_DEBUG, false}}
 
-websearch:
-  api_token: ${oc.env:WEBSEARCH_API_TOKEN, ""}
-  base_url: ${oc.env:WEBSEARCH_BASE_URL, "https://api.staan.ai/search/web"}
-  top_k: ${oc.decode:${oc.env:WEBSEARCH_TOP_K, 5}}
-  lang: ${oc.env:WEBSEARCH_LANG, fr-FR}
-  fetch_content: ${oc.decode:${oc.env:WEBSEARCH_FETCH_CONTENT, true}}
-  fetch_max_results: ${oc.decode:${oc.env:WEBSEARCH_FETCH_MAX_RESULTS, 3}}
-  fetch_timeout: ${oc.decode:${oc.env:WEBSEARCH_FETCH_TIMEOUT, 1.0}}
-  fetch_max_tokens: ${oc.decode:${oc.env:WEBSEARCH_FETCH_MAX_TOKENS, 500}}
-  fetch_verify_ssl: ${oc.decode:${oc.env:WEBSEARCH_FETCH_VERIFY_SSL, false}}
 
 verbose:
   level: ${oc.env:LOG_LEVEL, DEBUG}

@@ -1,0 +1,11 @@
+provider: ''
+api_token: ${oc.env:WEBSEARCH_API_TOKEN, ""}
+base_url: ''
+top_k: ${oc.decode:${oc.env:WEBSEARCH_TOP_K, 5}}
+lang: ${oc.env:WEBSEARCH_LANG, fr-FR}
+max_tokens: ${oc.decode:${oc.env:WEBSEARCH_MAX_TOKENS, 2000}}
+fetch_content: ${oc.decode:${oc.env:WEBSEARCH_FETCH_CONTENT, true}}
+fetch_max_results: ${oc.decode:${oc.env:WEBSEARCH_FETCH_MAX_RESULTS, 3}}
+fetch_timeout: ${oc.decode:${oc.env:WEBSEARCH_FETCH_TIMEOUT, 1.0}}
+fetch_max_tokens: ${oc.decode:${oc.env:WEBSEARCH_FETCH_MAX_TOKENS, 500}}
+fetch_verify_ssl: ${oc.decode:${oc.env:WEBSEARCH_FETCH_VERIFY_SSL, false}}

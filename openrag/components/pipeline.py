@@ -7,8 +7,7 @@ from components.prompts import (
     SPOKEN_STYLE_ANSWER_PROMPT,
     SYS_PROMPT_TMPLT,
 )
-from components.websearch import WebSearchService
-from components.websearch.providers import StaanProvider
+from components.websearch import WebSearchFactory
 from config import load_config
 from langchain_core.documents.base import Document
 from openai import AsyncOpenAI
@@ -93,28 +92,10 @@ class RagPipeline:
         self.map_reduce: RAGMapReduce = RAGMapReduce(config=config)
 
         # Web search
-        ws_token = config.websearch.get("api_token", "")
-        if ws_token:
-            provider = StaanProvider(
-                api_token=ws_token,
-                base_url=config.websearch.get("base_url", "https://api.staan.ai/search/web"),
-                top_k=config.websearch.get("top_k", 5),
-                lang=config.websearch.get("lang", "fr-FR"),
-            )
-            content_fetcher = None
-            if config.websearch.get("fetch_content", True):
-                from components.websearch.content_fetcher import ContentFetcher
-
-                content_fetcher = ContentFetcher(
-                    max_results=config.websearch.get("fetch_max_results", 3),
-                    timeout=config.websearch.get("fetch_timeout", 1.0),
-                    max_tokens_per_page=config.websearch.get("fetch_max_tokens", 500),
-                    verify_ssl=config.websearch.get("fetch_verify_ssl", False),
-                )
-            self.web_search_service = WebSearchService(provider=provider, content_fetcher=content_fetcher)
-            logger.info("Web search enabled", fetch_content=content_fetcher is not None)
+        self.web_search_service = WebSearchFactory.create_service(config)
+        if self.web_search_service.provider:
+            logger.info("Web search enabled", provider=config.websearch.get("provider"))
         else:
-            self.web_search_service = WebSearchService(provider=None)
             logger.info("Web search disabled (WEBSEARCH_API_TOKEN not set)")
 
     async def generate_query(self, messages: list[dict]) -> str:
@@ -192,8 +173,11 @@ class RagPipeline:
         if use_map_reduce and docs:
             docs = await self.map_reduce.map(query=query, chunks=docs)
 
-        # 3. Format the retrieved docs
-        context, included_indices = format_context(docs, max_context_tokens=self.max_context_tokens)
+        # 3. Format the retrieved docs, reserving token budget for web results
+        websearch_max_tokens = self.web_search_service.max_tokens if web_results else 0
+        rag_max_tokens = self.max_context_tokens - websearch_max_tokens if web_results else self.max_context_tokens
+
+        context, included_indices = format_context(docs, max_context_tokens=rag_max_tokens)
         docs = [docs[i] for i in included_indices]
 
         # Avoid misleading "No document found" when web results will provide context
@@ -203,7 +187,9 @@ class RagPipeline:
         # Append web results as additional sources with continuous numbering
         if web_results:
             n_rag_sources = len(docs)
-            web_formatted, _ = format_web_context(web_results, start_index=n_rag_sources + 1)
+            web_formatted, _ = format_web_context(
+                web_results, start_index=n_rag_sources + 1, max_tokens=websearch_max_tokens
+            )
             sep = "-" * 10 + "\n\n"
             context = f"{context}{sep}{web_formatted}" if context else web_formatted
 

@@ -1,0 +1,5 @@
+defaults:
+  - base
+
+provider: staan
+base_url: ${oc.env:WEBSEARCH_BASE_URL, "https://api.staan.ai/search/web"}

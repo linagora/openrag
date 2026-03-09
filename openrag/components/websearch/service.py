@@ -10,9 +10,11 @@ class WebSearchService:
         self,
         provider: BaseWebSearchProvider | None,
         content_fetcher: ContentFetcher | None = None,
+        max_tokens: int = 2000,
     ):
         self.provider = provider  # None when WEBSEARCH_API_TOKEN is not set
         self.content_fetcher = content_fetcher
+        self.max_tokens = max_tokens
 
     async def search(self, query: str) -> list[WebResult]:
         if self.provider is None:
