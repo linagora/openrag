@@ -28,13 +28,36 @@ BASE_CHUNK_FORMAT = "* filename: {filename}\n\n[CHUNK_START]\n\n{content}\n\n[CH
 CHUNK_FORMAT = "[CONTEXT]\n\n{chunk_context}\n\n" + BASE_CHUNK_FORMAT
 
 
+def _estimate_tokens(text: str) -> int:
+    """Conservative character-based token estimator (~4 chars/token).
+
+    Used instead of a model-specific tokenizer so the estimate is correct
+    across all backends (GPT, Mistral, Llama, etc.) and never undercounts.
+    """
+    return max(1, len(text) // 4)
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Truncate *text* so that its estimated token count does not exceed *max_tokens*."""
+    max_chars = max_tokens * 4
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
+
+
 class ChunkContextualizer:
     """Handles contextualization of document chunks."""
 
+    # Tokens reserved for: system prompt + message structure + output budget
+    _OVERHEAD_TOKENS = 1024
+    # Maximum tokens to spend on the output (contextual summary)
+    _OUTPUT_BUDGET_TOKENS = 256
+
     def __init__(self, llm_config: dict):
-        llm_config: dict = dict(llm_config)
+        llm_config = dict(llm_config)
         llm_config.update({"timeout": CONTEXTUALIZATION_TIMEOUT})
         self.context_generator = ChatOpenAI(**llm_config)
+        self._context_window: int = int(llm_config.get("context_window", 8192))
 
     async def _generate_context(
         self,
@@ -46,19 +69,39 @@ class ChunkContextualizer:
         """Generate context for a given chunk of text."""
         filename = first_chunks[0].metadata.get("source", "unknown")
 
+        # Total token budget available for user message content.
+        # Reserve overhead (system prompt + message framing) and output tokens.
+        content_budget = self._context_window - self._OVERHEAD_TOKENS - self._OUTPUT_BUDGET_TOKENS
+
+        # Allocate content budget: current chunk gets priority (half the budget),
+        # the rest is split evenly between first_chunks and prev_chunks context.
+        current_budget = content_budget // 2
+        context_budget = content_budget - current_budget
+        per_group_budget = context_budget // 2
+
+        current_text = _truncate_to_tokens(current_chunk.page_content, current_budget)
+        first_text = _truncate_to_tokens(
+            "\n--\n".join(c.page_content for c in first_chunks),
+            per_group_budget,
+        )
+        prev_text = _truncate_to_tokens(
+            "\n--\n".join(c.page_content for c in prev_chunks),
+            per_group_budget,
+        )
+
         user_msg = f"""
         Here is the context to consider for generating the context:
         - Filename: {filename}
         - First chunks:
-        {"\n--\n".join(c.page_content for c in first_chunks)}
+        {first_text}
 
         - Previous chunks:
-        {"\n--\n".join(c.page_content for c in prev_chunks)}
+        {prev_text}
 
         Here is the current chunk to contextualize strictly in this {lang} language:
         - Current chunk:
 
-        {current_chunk.page_content}
+        {current_text}
         """
         async with get_vlm_semaphore():
             try:
@@ -150,8 +193,9 @@ class BaseChunker:
         self.chunk_overlap_rate = chunk_overlap_rate
         self.chunk_overlap = int(self.chunk_size * self.chunk_overlap_rate)
 
-        self.llm = ChatOpenAI(**llm_config)
-        self._length_function = self.llm.get_num_tokens
+        # Use a conservative character-based estimator rather than tiktoken so
+        # that chunk sizes are correct regardless of the deployed LLM backend.
+        self._length_function = _estimate_tokens
 
         self.text_splitter = None
 

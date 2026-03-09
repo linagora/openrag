@@ -22,6 +22,7 @@ vlm:
   base_url: ${oc.env:VLM_BASE_URL}
   model: ${oc.env:VLM_MODEL}
   api_key: ${oc.env:VLM_API_KEY}
+  context_window: ${oc.decode:${oc.env:VLM_CONTEXT_WINDOW, 8192}}
 
 semaphore:
   llm_semaphore: ${oc.decode:${oc.env:LLM_SEMAPHORE, 10}}
