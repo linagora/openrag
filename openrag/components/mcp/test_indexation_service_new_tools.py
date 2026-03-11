@@ -69,6 +69,7 @@ class _FakeIndexer:
         self.deleted = []
         self.updated = []
         self.copied = []
+        self.add_file_calls: list[dict] = []
 
         self.delete_file = _SyncRemoteCall(lambda file_id, partition: self.deleted.append((file_id, partition)))
         self.update_file_metadata = _SyncRemoteCall(
@@ -82,7 +83,8 @@ class _FakeIndexer:
         _self = self
 
         class _AddFileRemote:
-            def remote(self, path, metadata, partition, user=None):
+            def remote(inner_self, path, metadata, partition, user=None):
+                _self.add_file_calls.append({"path": path, "metadata": metadata, "partition": partition, "user": user})
                 return SimpleNamespace(
                     task_id=lambda: SimpleNamespace(hex=lambda: "deadbeef1234"),
                 )
@@ -560,6 +562,7 @@ async def test_index_url_success(patch_getters, tmp_path, monkeypatch):
         Path(dest).write_bytes(b"%PDF fake")
 
     monkeypatch.setattr("components.mcp.indexation_service.urllib.request.urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr("components.mcp.indexation_service.get_user_id", lambda: 7)
 
     vdb = _FakeVectorDB(file_exists_result=False)
     idx = _FakeIndexer()
@@ -580,6 +583,35 @@ async def test_index_url_success(patch_getters, tmp_path, monkeypatch):
     # task state was set
     assert len(tsm._set_state_calls) == 1
     assert tsm._set_state_calls[0] == ("deadbeef1234", "QUEUED")
+    # user is forwarded so task ownership is recorded correctly
+    assert len(idx.add_file_calls) == 1
+    assert idx.add_file_calls[0]["user"] == {"id": 7}
+
+
+@pytest.mark.asyncio
+async def test_index_url_forwards_user_none_in_no_auth_mode(patch_getters, monkeypatch):
+    """When AUTH_TOKEN is not set (user_id=None), user=None is forwarded to add_file."""
+
+    def fake_urlretrieve(url, dest):
+        Path(dest).write_bytes(b"data")
+
+    monkeypatch.setattr("components.mcp.indexation_service.urllib.request.urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr("components.mcp.indexation_service.get_user_id", lambda: None)
+
+    vdb = _FakeVectorDB(file_exists_result=False)
+    idx = _FakeIndexer()
+    tsm = _FakeTaskStateManager()
+    patch_getters(vectordb=vdb, indexer=idx, task_state_manager=tsm)
+
+    await IndexationService().index_url(
+        url="https://example.com/doc.txt",
+        partition="p1",
+        file_id="f-noauth",
+        allowed_partitions=["p1"],
+        task_state_manager_ref=tsm,
+    )
+
+    assert idx.add_file_calls[0]["user"] is None
 
 
 @pytest.mark.asyncio

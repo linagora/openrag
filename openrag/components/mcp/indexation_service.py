@@ -631,7 +631,9 @@ class IndexationService:
         indexer = get_indexer()
         tsm = task_state_manager_ref if task_state_manager_ref is not None else get_task_state_manager()
 
-        task = indexer.add_file.remote(path=tmp_path, metadata=metadata, partition=partition)
+        user_id = get_user_id()
+        user = {"id": user_id} if user_id is not None else None
+        task = indexer.add_file.remote(path=tmp_path, metadata=metadata, partition=partition, user=user)
         task_id: str = task.task_id().hex()
         await tsm.set_state.remote(task_id, "QUEUED")
         await tsm.set_object_ref.remote(task_id, {"ref": task})
