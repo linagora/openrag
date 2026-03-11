@@ -610,8 +610,10 @@ async def test_index_url_already_exists_raises(patch_getters):
 
 
 @pytest.mark.asyncio
-async def test_index_url_unauthorized_raises(patch_getters):
-    patch_getters(vectordb=_FakeVectorDB(file_exists_result=False))
+async def test_index_url_unauthorized_raises(patch_getters, monkeypatch):
+    # partition exists in the DB but caller has no membership → PermissionError
+    monkeypatch.setattr("components.mcp.indexation_service.get_user_id", lambda: 1)
+    patch_getters(vectordb=_FakeVectorDBWithPartitions(file_exists_result=False, partition_exists_result=True))
 
     with pytest.raises(PermissionError):
         await IndexationService().index_url(
@@ -639,3 +641,109 @@ async def test_index_url_download_failure_raises(patch_getters, monkeypatch):
             file_id="f1",
             allowed_partitions=["p1"],
         )
+
+
+# ===========================================================================
+# _ensure_partition_exists / auto-creation
+# ===========================================================================
+
+
+class _FakeVectorDBWithPartitions(_FakeVectorDB):
+    """Extended fake that supports partition_exists and create_partition."""
+
+    def __init__(self, *, file_exists_result: bool = False, partition_exists_result: bool = False, **kwargs):
+        super().__init__(file_exists_result=file_exists_result, **kwargs)
+        self._partition_exists_result = partition_exists_result
+        self._created_partitions: list[dict] = []
+
+        self.partition_exists = _SyncRemoteCall(lambda partition: self._partition_exists_result)
+        self.create_partition = _SyncRemoteCall(
+            lambda partition, user_id: self._created_partitions.append({"partition": partition, "user_id": user_id})
+        )
+
+
+@pytest.mark.asyncio
+async def test_index_url_auto_creates_missing_partition(patch_getters, monkeypatch):
+    """When the target partition does not exist, index_url should create it."""
+
+    def fake_urlretrieve(url, dest):
+        Path(dest).write_bytes(b"%PDF fake")
+
+    monkeypatch.setattr("components.mcp.indexation_service.urllib.request.urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr("components.mcp.indexation_service.get_user_id", lambda: 42)
+
+    vdb = _FakeVectorDBWithPartitions(file_exists_result=False, partition_exists_result=False)
+    idx = _FakeIndexer()
+    tsm = _FakeTaskStateManager()
+    patch_getters(vectordb=vdb, indexer=idx, task_state_manager=tsm)
+
+    allowed = ["existing"]
+    result = await IndexationService().index_url(
+        url="https://example.com/report.pdf",
+        partition="food",
+        file_id="report-001",
+        allowed_partitions=allowed,
+        task_state_manager_ref=tsm,
+    )
+
+    # Partition was auto-created with the correct user
+    assert len(vdb._created_partitions) == 1
+    assert vdb._created_partitions[0] == {"partition": "food", "user_id": 42}
+
+    # "food" was appended to allowed_partitions so the access check passed
+    assert "food" in allowed
+
+    # Indexation was started
+    assert result["partition"] == "food"
+    assert result["file_id"] == "report-001"
+    assert "task_id" in result
+
+
+@pytest.mark.asyncio
+async def test_index_url_no_auto_create_when_partition_exists(patch_getters, monkeypatch):
+    """When the partition exists but the user has no membership, raise PermissionError (no auto-creation)."""
+
+    monkeypatch.setattr("components.mcp.indexation_service.get_user_id", lambda: 42)
+
+    # partition_exists_result=True → the partition is in the DB, caller just has no membership
+    vdb = _FakeVectorDBWithPartitions(file_exists_result=False, partition_exists_result=True)
+    patch_getters(vectordb=vdb)
+
+    with pytest.raises(PermissionError, match="Access denied for partition: secret"):
+        await IndexationService().index_url(
+            url="https://example.com/doc.pdf",
+            partition="secret",
+            file_id="f1",
+            allowed_partitions=["other"],
+        )
+
+    # No partition was created
+    assert vdb._created_partitions == []
+
+
+@pytest.mark.asyncio
+async def test_index_url_admin_skips_auto_create(patch_getters, monkeypatch):
+    """Admin users (allowed_partitions=["all"]) bypass auto-creation entirely."""
+
+    def fake_urlretrieve(url, dest):
+        Path(dest).write_bytes(b"%PDF fake")
+
+    monkeypatch.setattr("components.mcp.indexation_service.urllib.request.urlretrieve", fake_urlretrieve)
+    monkeypatch.setattr("components.mcp.indexation_service.get_user_id", lambda: 1)
+
+    vdb = _FakeVectorDBWithPartitions(file_exists_result=False, partition_exists_result=False)
+    idx = _FakeIndexer()
+    tsm = _FakeTaskStateManager()
+    patch_getters(vectordb=vdb, indexer=idx, task_state_manager=tsm)
+
+    result = await IndexationService().index_url(
+        url="https://example.com/report.pdf",
+        partition="any-partition",
+        file_id="f-admin",
+        allowed_partitions=["all"],
+        task_state_manager_ref=tsm,
+    )
+
+    # Admin: no auto-creation needed
+    assert vdb._created_partitions == []
+    assert result["partition"] == "any-partition"

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from components.mcp.auth_context import get_user_id
 from utils.dependencies import get_indexer, get_task_state_manager, get_vectordb
 
 
@@ -39,6 +40,40 @@ class IndexationService:
             return
         if partition not in allowed_partitions:
             raise PermissionError(f"Access denied for partition: {partition}")
+
+    async def _ensure_partition_exists(
+        self,
+        partition: str,
+        allowed_partitions: list[str] | None,
+    ) -> None:
+        """Auto-create *partition* if it does not exist yet.
+
+        When a partition is missing from both the database and the caller's
+        membership list, it is created with the current user as owner so that
+        the subsequent ``_enforce_partition_access`` call succeeds and the
+        caller can index documents into it immediately.
+
+        If the partition already exists but the caller has no membership, the
+        normal ``_enforce_partition_access`` path will raise ``PermissionError``
+        as expected.
+        """
+        if allowed_partitions is None:
+            return  # will be caught by _enforce_partition_access
+        if allowed_partitions == ["all"]:
+            return  # admin – no need to create
+        if partition in allowed_partitions:
+            return  # caller already has access
+
+        vectordb = get_vectordb()
+        partition_exists = await vectordb.partition_exists.remote(partition)
+        if partition_exists:
+            return  # exists but user has no membership → let access check raise
+
+        # Partition does not exist: create it and make the caller the owner.
+        user_id = get_user_id()
+        await vectordb.create_partition.remote(partition=partition, user_id=user_id)
+        # Update the in-memory list so the subsequent access check passes.
+        allowed_partitions.append(partition)
 
     # ------------------------------------------------------------------
     # Partitions
@@ -550,6 +585,7 @@ class IndexationService:
         Returns:
             ``{ partition, file_id, task_id, message }``
         """
+        await self._ensure_partition_exists(partition, allowed_partitions)
         self._enforce_partition_access(partition, allowed_partitions)
 
         # Validate URL scheme
