@@ -5,6 +5,7 @@ from typing import Any
 
 import ray
 from components.indexer.utils.files import sanitize_filename, save_file_to_disk
+from components.ray_utils import call_ray_actor_with_timeout
 from config import load_config
 from fastapi import (
     APIRouter,
@@ -41,6 +42,7 @@ DATA_DIR = config.paths.data_dir
 
 FORBIDDEN_CHARS_IN_FILE_ID = set("/")  # set('"<>#%{}|\\^`[]')
 LOG_FILE = Path(config.paths.log_dir or "logs") / "app.json"
+VECTORDB_TIMEOUT = config.ray.indexer.get("vectordb_timeout", 30)
 
 # supported file formats or mimetypes
 ACCEPTED_FILE_FORMATS = dict(config.loader["file_loaders"]).keys()
@@ -171,7 +173,11 @@ async def add_file(
                 detail="workspace_ids must be a JSON array of strings",
             )
         for ws_id in parsed_workspace_ids:
-            ws = await vectordb.get_workspace.remote(ws_id)
+            ws = await call_ray_actor_with_timeout(
+                vectordb.get_workspace.remote(ws_id),
+                timeout=VECTORDB_TIMEOUT,
+                task_description=f"get_workspace({ws_id})",
+            )
             if not ws or ws["partition_name"] != partition:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
