@@ -420,8 +420,7 @@ async def get_task_status(
     task_state_manager=Depends(get_task_state_manager),
     task_details=Depends(require_task_owner),
 ):
-    result = await app_service.get_task_status(task_id=task_id, user_id=task_details.get("user_id"))
-    state = result.get("task_state") or result.get("state")
+    state = await task_state_manager.get_state.remote(task_id)
     if state is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
