@@ -1,6 +1,6 @@
 import os
 import warnings
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from enum import Enum
 from importlib.metadata import version as get_package_version
 from pathlib import Path
@@ -86,7 +86,17 @@ try:
 except Exception:
     app_version = "unknown"
 
-app = FastAPI(version=app_version)
+_mcp_lifespan_stack = AsyncExitStack()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    await _mcp_lifespan_stack.enter_async_context(mcp_server.session_manager.run())
+    yield
+    await _mcp_lifespan_stack.aclose()
+
+
+app = FastAPI(version=app_version, lifespan=lifespan)
 
 
 def custom_openapi():
@@ -190,18 +200,6 @@ app.add_middleware(
 app.state.app_state = AppState(config)
 app.mount("/static", StaticFiles(directory=DATA_DIR.resolve(), check_dir=True), name="static")
 app.mount(mcp_path, create_mcp_http_app(), name="mcp")
-
-_mcp_lifespan_stack = AsyncExitStack()
-
-
-@app.on_event("startup")
-async def startup_mcp_server():
-    await _mcp_lifespan_stack.enter_async_context(mcp_server.session_manager.run())
-
-
-@app.on_event("shutdown")
-async def shutdown_mcp_server():
-    await _mcp_lifespan_stack.aclose()
 
 
 @app.get("/health_check", summary="Health check endpoint for API", dependencies=[])
