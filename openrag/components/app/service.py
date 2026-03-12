@@ -551,8 +551,7 @@ class OpenRAGApplicationService(OpenRAGApiInterface):
         from components.indexer.utils.text_sanitizer import sanitize_extracted_text
 
         if tool_name == "extractText":
-            task_id = ray.get_runtime_context().get_task_id()
-            doc = await serialize_file(task_id, path=file_path, metadata=metadata)
+            doc = await serialize_file(None, path=file_path, metadata=metadata)
             sanitized = sanitize_extracted_text(doc.page_content)
             return {"message": sanitized}
 
