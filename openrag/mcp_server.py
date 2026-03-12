@@ -70,13 +70,16 @@ class MCPAuthContextMiddleware(BaseHTTPMiddleware):
             await self._resolve_user_context(request)
         except PermissionError as exc:
             return JSONResponse(status_code=403, content={"detail": str(exc)})
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"detail": f"Authentication error: {exc}"})
 
         user = request.state.user
         user_id = user.get("id")
         allowed_partitions = current_user_or_admin_partitions_list(request)
         tokens = set_auth_context(user_id=user_id, partitions=allowed_partitions)
         try:
-            return await call_next(request)
+            response = await call_next(request)
+            return response
         finally:
             reset_auth_context(tokens)
 
