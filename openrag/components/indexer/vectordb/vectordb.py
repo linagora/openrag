@@ -1132,6 +1132,10 @@ class MilvusDB(BaseVectorDB):
     async def list_workspace_files(self, workspace_id: str) -> list[str]:
         return self.partition_file_manager.list_workspace_files(workspace_id)
 
+    async def get_file_workspaces(self, file_id: str, partition: str) -> list[str]:
+        """Return workspace IDs that contain the given file, scoped to the partition."""
+        return self.partition_file_manager.get_file_workspaces(file_id, partition)
+
 
 def _gen_chunk_order_metadata(n: int = 20) -> list[dict]:
     # Use base timestamp + index to ensure uniqueness

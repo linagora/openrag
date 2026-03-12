@@ -675,6 +675,18 @@ class PartitionFileManager:
             result = session.execute(select(WorkspaceFile.file_id).where(WorkspaceFile.workspace_id == workspace_id))
             return [r[0] for r in result.all()]
 
+    def get_file_workspaces(self, file_id: str, partition: str) -> list[str]:
+        """Return the workspace IDs that contain the given file, scoped to the given partition."""
+        with self.Session() as session:
+            ws_ids = select(Workspace.workspace_id).where(Workspace.partition_name == partition)
+            result = session.execute(
+                select(WorkspaceFile.workspace_id).where(
+                    WorkspaceFile.file_id == file_id,
+                    WorkspaceFile.workspace_id.in_(ws_ids),
+                )
+            )
+            return [r[0] for r in result.all()]
+
     def remove_file_from_all_workspaces(self, file_id: str, partition: str):
         """Remove file from all workspaces in the given partition — called during file deletion."""
         with self.Session() as session:

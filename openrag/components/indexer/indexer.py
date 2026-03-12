@@ -195,8 +195,18 @@ class Indexer:
             for doc in docs:
                 doc.metadata.update(metadata)
 
+            # Snapshot workspace memberships before deletion so they can be restored.
+            workspace_ids = await vectordb.get_file_workspaces.remote(file_id, partition)
+
             await self.delete_file(file_id, partition)
             await vectordb.async_add_documents.remote(docs, user=user)
+
+            # Restore workspace memberships that existed before the delete.
+            if workspace_ids:
+                await asyncio.gather(
+                    *[vectordb.add_files_to_workspace.remote(ws_id, [file_id]) for ws_id in workspace_ids]
+                )
+                log.debug("Restored workspace memberships after metadata update.", workspace_ids=workspace_ids)
 
             log.info("Metadata updated for file.")
         except Exception as e:

@@ -265,6 +265,9 @@ async def put_file(
             detail=f"'{file_id}' not found in partition '{partition}'",
         )
 
+    # Snapshot workspace memberships before deletion so they can be restored on the new version.
+    existing_workspace_ids = await vectordb.get_file_workspaces.remote(file_id, partition)
+
     # Delete the existing file from the vector database
     await indexer.delete_file.remote(file_id, partition)
 
@@ -288,8 +291,14 @@ async def put_file(
     metadata["created_at"] = datetime.fromtimestamp(file_stat.st_ctime).isoformat()
     metadata["file_id"] = file_id
 
-    # Indexing the file
-    task = indexer.add_file.remote(path=file_path, metadata=metadata, partition=partition, user=user)
+    # Indexing the file — restore pre-existing workspace memberships on the new version.
+    task = indexer.add_file.remote(
+        path=file_path,
+        metadata=metadata,
+        partition=partition,
+        user=user,
+        workspace_ids=existing_workspace_ids or None,
+    )
     await task_state_manager.set_state.remote(task.task_id().hex(), "QUEUED")
     await task_state_manager.set_object_ref.remote(task.task_id().hex(), {"ref": task})
 
