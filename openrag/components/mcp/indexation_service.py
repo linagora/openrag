@@ -28,6 +28,18 @@ from utils.dependencies import get_indexer, get_task_state_manager, get_vectordb
 class IndexationService:
     """Handles indexation / catalog operations for the MCP server."""
 
+    _FORBIDDEN_FILE_ID_CHARS: frozenset[str] = frozenset("/")
+
+    _ROLE_HIERARCHY: dict[str, int] = {"viewer": 1, "editor": 2, "owner": 3}
+
+    def _validate_file_id(self, file_id: str) -> None:
+        """Raise ValueError if *file_id* is empty or contains forbidden characters."""
+        if not file_id or not file_id.strip():
+            raise ValueError("file_id cannot be empty")
+        bad = self._FORBIDDEN_FILE_ID_CHARS & set(file_id)
+        if bad:
+            raise ValueError(f"file_id contains forbidden characters: {', '.join(sorted(bad))}")
+
     def _enforce_partition_access(
         self,
         partition: str,
@@ -41,11 +53,32 @@ class IndexationService:
         if partition not in allowed_partitions:
             raise PermissionError(f"Access denied for partition: {partition}")
 
-    async def _ensure_partition_exists(
+    async def _enforce_editor_access(
         self,
         partition: str,
         allowed_partitions: list[str] | None,
     ) -> None:
+        """Raise PermissionError if the user does not have editor (or owner) role."""
+        self._enforce_partition_access(partition, allowed_partitions)
+        if allowed_partitions == ["all"]:
+            return  # admin bypass
+        user_id = get_user_id()
+        if user_id is None:
+            return  # no-auth mode — treat as admin
+        vectordb = get_vectordb()
+        members = await vectordb.list_partition_members.remote(partition=partition)
+        membership = next((m for m in members if m.get("user_id") == user_id), None)
+        if (
+            membership is None
+            or self._ROLE_HIERARCHY.get(membership.get("role", ""), 0) < self._ROLE_HIERARCHY["editor"]
+        ):
+            raise PermissionError(f"Editor role required for partition: {partition}")
+
+    async def _ensure_partition_exists(
+        self,
+        partition: str,
+        allowed_partitions: list[str] | None,
+    ) -> list[str] | None:
         """Auto-create *partition* if it does not exist yet.
 
         When a partition is missing from both the database and the caller's
@@ -56,24 +89,28 @@ class IndexationService:
         If the partition already exists but the caller has no membership, the
         normal ``_enforce_partition_access`` path will raise ``PermissionError``
         as expected.
+
+        Returns the (possibly extended) allowed_partitions list. The original
+        list is never mutated to avoid polluting concurrent requests sharing the
+        same ContextVar reference.
         """
         if allowed_partitions is None:
-            return  # will be caught by _enforce_partition_access
+            return None  # will be caught by _enforce_partition_access
         if allowed_partitions == ["all"]:
-            return  # admin – no need to create
+            return allowed_partitions  # admin – no need to create
         if partition in allowed_partitions:
-            return  # caller already has access
+            return allowed_partitions  # caller already has access
 
         vectordb = get_vectordb()
         partition_exists = await vectordb.partition_exists.remote(partition)
         if partition_exists:
-            return  # exists but user has no membership → let access check raise
+            return allowed_partitions  # exists but user has no membership → let access check raise
 
         # Partition does not exist: create it and make the caller the owner.
         user_id = get_user_id()
         await vectordb.create_partition.remote(partition=partition, user_id=user_id)
-        # Update the in-memory list so the subsequent access check passes.
-        allowed_partitions.append(partition)
+        # Return a new list so the ContextVar's original list is never mutated.
+        return [*allowed_partitions, partition]
 
     # ------------------------------------------------------------------
     # Partitions
@@ -461,7 +498,8 @@ class IndexationService:
         Returns:
             ``{ partition, file_id, message }``
         """
-        self._enforce_partition_access(partition, allowed_partitions)
+        self._validate_file_id(file_id)
+        await self._enforce_editor_access(partition, allowed_partitions)
 
         vectordb = get_vectordb()
         indexer = get_indexer()
@@ -492,11 +530,12 @@ class IndexationService:
         Returns:
             ``{ partition, file_id, message }``
         """
-        self._enforce_partition_access(partition, allowed_partitions)
+        self._validate_file_id(file_id)
+        await self._enforce_editor_access(partition, allowed_partitions)
 
-        # If moving to another partition, check access to the destination too
+        # If moving to another partition, check editor access to the destination too
         if "partition" in metadata:
-            self._enforce_partition_access(metadata["partition"], allowed_partitions)
+            await self._enforce_editor_access(metadata["partition"], allowed_partitions)
 
         vectordb = get_vectordb()
         if not await vectordb.file_exists.remote(file_id, partition):
@@ -529,12 +568,17 @@ class IndexationService:
         Returns:
             ``{ source_partition, source_file_id, dest_partition, dest_file_id, message }``
         """
+        self._validate_file_id(source_file_id)
+        self._validate_file_id(dest_file_id)
         self._enforce_partition_access(source_partition, allowed_partitions)
-        self._enforce_partition_access(dest_partition, allowed_partitions)
+        await self._enforce_editor_access(dest_partition, allowed_partitions)
 
         vectordb = get_vectordb()
         if not await vectordb.file_exists.remote(source_file_id, source_partition):
             raise FileNotFoundError(f"File '{source_file_id}' not found in partition '{source_partition}'")
+
+        if await vectordb.file_exists.remote(dest_file_id, dest_partition):
+            raise FileExistsError(f"File '{dest_file_id}' already exists in partition '{dest_partition}'")
 
         metadata: dict[str, Any] = extra_metadata.copy() if extra_metadata else {}
         metadata["file_id"] = dest_file_id
@@ -585,8 +629,9 @@ class IndexationService:
         Returns:
             ``{ partition, file_id, task_id, message }``
         """
-        await self._ensure_partition_exists(partition, allowed_partitions)
+        allowed_partitions = await self._ensure_partition_exists(partition, allowed_partitions)
         self._enforce_partition_access(partition, allowed_partitions)
+        self._validate_file_id(file_id)
 
         # Validate URL scheme
         parsed = urlparse(url)

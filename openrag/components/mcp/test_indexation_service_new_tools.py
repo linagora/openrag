@@ -52,16 +52,26 @@ class _FakeVectorDB:
         file_exists_result: bool = True,
         chunks_by_file: dict | None = None,
         chunk_by_id: dict | None = None,
+        # Per-(file_id, partition) overrides; falls back to file_exists_result
+        file_exists_map: dict[tuple[str, str], bool] | None = None,
+        # members returned by list_partition_members (user_id, role)
+        members_by_partition: dict[str, list[dict]] | None = None,
     ):
         self._file_exists_result = file_exists_result
+        self._file_exists_map = file_exists_map or {}
         self._chunks_by_file = chunks_by_file or {}
         self._chunk_by_id = chunk_by_id or {}
+        self._members_by_partition = members_by_partition or {}
 
-        self.file_exists = _SyncRemoteCall(lambda file_id, partition: self._file_exists_result)
+        def _file_exists(file_id, partition):
+            return self._file_exists_map.get((file_id, partition), self._file_exists_result)
+
+        self.file_exists = _SyncRemoteCall(_file_exists)
         self.get_file_chunks = _SyncRemoteCall(
             lambda partition=None, file_id=None, include_id=False: self._chunks_by_file.get((partition, file_id), [])
         )
         self.get_chunk_by_id = _SyncRemoteCall(lambda chunk_id: self._chunk_by_id.get(chunk_id))
+        self.list_partition_members = _SyncRemoteCall(lambda partition: self._members_by_partition.get(partition, []))
 
 
 class _FakeIndexer:
@@ -463,7 +473,11 @@ async def test_update_file_metadata_dest_partition_unauthorized_raises(patch_get
 
 @pytest.mark.asyncio
 async def test_copy_file_success(patch_getters):
-    vdb = _FakeVectorDB(file_exists_result=True)
+    # source file exists; destination does not yet exist
+    vdb = _FakeVectorDB(
+        file_exists_result=False,
+        file_exists_map={("f1", "src"): True},
+    )
     idx = _FakeIndexer()
     patch_getters(vectordb=vdb, indexer=idx)
 
@@ -528,7 +542,7 @@ async def test_copy_file_no_dest_access_raises(patch_getters):
 
 @pytest.mark.asyncio
 async def test_copy_file_extra_metadata_merged(patch_getters):
-    vdb = _FakeVectorDB(file_exists_result=True)
+    vdb = _FakeVectorDB(file_exists_result=False, file_exists_map={("f1", "src"): True})
     idx = _FakeIndexer()
     patch_getters(vectordb=vdb, indexer=idx)
 
@@ -722,8 +736,8 @@ async def test_index_url_auto_creates_missing_partition(patch_getters, monkeypat
     assert len(vdb._created_partitions) == 1
     assert vdb._created_partitions[0] == {"partition": "food", "user_id": 42}
 
-    # "food" was appended to allowed_partitions so the access check passed
-    assert "food" in allowed
+    # The original allowed list must NOT have been mutated (fix for ContextVar pollution bug)
+    assert "food" not in allowed
 
     # Indexation was started
     assert result["partition"] == "food"
