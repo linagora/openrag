@@ -1,8 +1,11 @@
 """API integration tests for workspace endpoints."""
 
+import io
 import uuid
 
 import pytest
+
+from .conftest import wait_for_indexing
 
 pytestmark = pytest.mark.integration
 
@@ -165,3 +168,115 @@ class TestPartitionDeletionCascade:
 
         # Cleanup
         api_client.delete(f"/partition/{partition}")
+
+
+class TestFileWorkspaceMembership:
+    """Test that file workspace memberships survive file replace operations."""
+
+    def _upload_file(self, api_client, partition: str, file_id: str, content: str = "Test content"):
+        file_obj = io.BytesIO(content.encode())
+        return api_client.post(
+            f"/indexer/partition/{partition}/file/{file_id}",
+            files={"file": (f"{file_id}.txt", file_obj, "text/plain")},
+            data={"metadata": "{}"},
+        )
+
+    def _get_file_workspaces(self, api_client, partition: str, file_id: str) -> list[str]:
+        response = api_client.get(f"/partition/{partition}/files/{file_id}/workspaces")
+        assert response.status_code == 200
+        return response.json()["workspace_ids"]
+
+    def test_workspace_memberships_preserved_after_put(self, api_client, workspace_partition):
+        """After a PUT (file replace), the file's workspace memberships must be intact."""
+        file_id = f"file-{uuid.uuid4().hex[:8]}"
+        ws1 = f"ws-{uuid.uuid4().hex[:8]}"
+        ws2 = f"ws-{uuid.uuid4().hex[:8]}"
+        ws3 = f"ws-{uuid.uuid4().hex[:8]}"
+
+        # Create 3 workspaces
+        for ws in [ws1, ws2, ws3]:
+            r = api_client.post(
+                f"/partition/{workspace_partition}/workspaces",
+                json={"workspace_id": ws},
+            )
+            assert r.status_code == 201
+
+        # Upload and index the file
+        response = self._upload_file(api_client, workspace_partition, file_id)
+        assert response.status_code in [200, 201, 202]
+        wait_for_indexing(api_client, response.json())
+
+        # Add the file to ws1 and ws2 (not ws3)
+        for ws in [ws1, ws2]:
+            r = api_client.post(
+                f"/partition/{workspace_partition}/workspaces/{ws}/files",
+                json={"file_ids": [file_id]},
+            )
+            assert r.status_code == 200
+
+        # Verify initial membership
+        ws_before = self._get_file_workspaces(api_client, workspace_partition, file_id)
+        assert set(ws_before) == {ws1, ws2}
+
+        # Replace the file via PUT
+        replace_obj = io.BytesIO(b"Updated content")
+        r = api_client.put(
+            f"/indexer/partition/{workspace_partition}/file/{file_id}",
+            files={"file": (f"{file_id}.txt", replace_obj, "text/plain")},
+            data={"metadata": "{}"},
+        )
+        assert r.status_code in [200, 201, 202]
+        wait_for_indexing(api_client, r.json())
+
+        # Workspace memberships must be restored
+        ws_after = self._get_file_workspaces(api_client, workspace_partition, file_id)
+        assert set(ws_after) == {ws1, ws2}, (
+            f"Expected workspace memberships {{{ws1}, {ws2}}} after PUT, got {set(ws_after)}"
+        )
+        assert ws3 not in ws_after
+
+    def test_workspace_memberships_preserved_after_patch(self, api_client, workspace_partition):
+        """After a PATCH (metadata update), the file's workspace memberships must be intact."""
+        file_id = f"file-{uuid.uuid4().hex[:8]}"
+        ws1 = f"ws-{uuid.uuid4().hex[:8]}"
+        ws2 = f"ws-{uuid.uuid4().hex[:8]}"
+        ws3 = f"ws-{uuid.uuid4().hex[:8]}"
+
+        # Create 3 workspaces
+        for ws in [ws1, ws2, ws3]:
+            r = api_client.post(
+                f"/partition/{workspace_partition}/workspaces",
+                json={"workspace_id": ws},
+            )
+            assert r.status_code == 201
+
+        # Upload and index the file
+        response = self._upload_file(api_client, workspace_partition, file_id)
+        assert response.status_code in [200, 201, 202]
+        wait_for_indexing(api_client, response.json())
+
+        # Add the file to ws1 and ws2 (not ws3)
+        for ws in [ws1, ws2]:
+            r = api_client.post(
+                f"/partition/{workspace_partition}/workspaces/{ws}/files",
+                json={"file_ids": [file_id]},
+            )
+            assert r.status_code == 200
+
+        # Verify initial membership
+        ws_before = self._get_file_workspaces(api_client, workspace_partition, file_id)
+        assert set(ws_before) == {ws1, ws2}
+
+        # Update file metadata via PATCH
+        r = api_client.patch(
+            f"/indexer/partition/{workspace_partition}/file/{file_id}",
+            data={"metadata": '{"updated": true}'},
+        )
+        assert r.status_code == 200
+
+        # Workspace memberships must still be intact
+        ws_after = self._get_file_workspaces(api_client, workspace_partition, file_id)
+        assert set(ws_after) == {ws1, ws2}, (
+            f"Expected workspace memberships {{{ws1}, {ws2}}} after PATCH, got {set(ws_after)}"
+        )
+        assert ws3 not in ws_after

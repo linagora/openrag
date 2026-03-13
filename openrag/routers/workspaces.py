@@ -169,6 +169,19 @@ async def list_workspace_files(
     return {"file_ids": file_ids}
 
 
+@router.get(
+    "/partition/{partition}/files/{file_id}/workspaces",
+    dependencies=[Depends(require_partition_viewer)],
+)
+async def list_file_workspaces(partition: str, file_id: str, vectordb=Depends(get_vectordb)):
+    workspace_ids = await call_ray_actor_with_timeout(
+        vectordb.get_file_workspaces.remote(file_id, partition),
+        timeout=VECTORDB_TIMEOUT,
+        task_description=f"get_file_workspaces({file_id})",
+    )
+    return {"file_id": file_id, "workspace_ids": workspace_ids}
+
+
 @router.delete(
     "/partition/{partition}/workspaces/{workspace_id}/files/{file_id}",
     dependencies=[Depends(require_partition_editor)],
