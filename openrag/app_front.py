@@ -8,6 +8,7 @@ import httpx
 from chainlit.context import get_context
 from consts import PARTITION_PREFIX
 from dotenv import load_dotenv
+from fastapi import HTTPException
 from openai import AsyncOpenAI
 from utils.logger import get_logger
 
@@ -89,12 +90,12 @@ if AUTH_TOKEN:
                 },
             )
 
-        except httpx.HTTPStatusError:
+        except httpx.HTTPStatusError as e:
             logger.info("Authentication failed", username=username)
-            return None
+            raise HTTPException(status_code=e.response.status_code, detail="Invalid credentials ")
         except Exception as e:
             logger.exception("Unexpected error during authentication", error=str(e))
-            return None
+            raise HTTPException(status_code=500, detail="Authentication service unavailable ")
 
 
 def get_external_url():
