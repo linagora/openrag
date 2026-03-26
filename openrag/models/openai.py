@@ -7,6 +7,14 @@ config = load_config()
 default_max_tokens = int(config.llm_context.get("max_output_tokens", 1024))
 
 
+class Attachment(BaseModel):
+    """Represents a file attachment for RAG retrieval."""
+
+    id: str = Field(..., min_length=1, description="File ID")
+    type: Literal["file"] | None = Field(None, description="For future extensibility")
+    priority: int | None = Field(None, ge=0, description="For future ranking")
+
+
 # Classes pour la compatibilité OpenAI
 class OpenAIMessage(BaseModel):
     """Modèle représentant un message dans l'API OpenAI."""
@@ -31,8 +39,9 @@ class OpenAIChatCompletionRequest(BaseModel):
             "spoken_style_answer": False,
             "websearch": False,
             "llm_override": None,
+            "attachments": {},
         },
-        description="Extra custom parameters. Supports 'llm_override' object with optional 'base_url', 'api_key', and 'model' to override the downstream LLM endpoint.",
+        description="Extra custom parameters. Supports 'llm_override' for LLM endpoint override. 'attachments' is a list of {id: file_id} objects for file-based retrieval (bypasses semantic search).",
     )
 
 

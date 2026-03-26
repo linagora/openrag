@@ -102,6 +102,12 @@ class BaseVectorDB(ABC):
         pass
 
     @abstractmethod
+    async def get_chunks_by_file_ids(
+        self, file_ids: list[str], partition: list[str] | None, include_id: bool = True
+    ) -> list[Document]:
+        pass
+
+    @abstractmethod
     async def get_chunk_by_id(self, chunk_id: str):
         pass
 
@@ -721,6 +727,145 @@ class MilvusDB(BaseVectorDB):
                 partition=partition,
                 file_id=file_id,
             )
+
+    async def _retrieve_file_chunks(
+        self, file_id: str, partition: list[str] | None, include_id: bool = True
+    ) -> list[Document]:
+        """Helper to retrieve chunks for a single file_id across one or more partitions."""
+        if not partition:
+            self.logger.warning("No partition provided for file_id retrieval", file_id=file_id)
+            return []
+
+        log = self.logger.bind(file_id=file_id, partition=partition)
+
+        if partition != ["all"]:
+            file_found = False
+
+            # Check if file exists in any of the specified partitions
+            for partition_name in partition:
+                if self.file_exists(file_id=file_id, partition=partition_name):
+                    file_found = True
+                    break
+
+            if not file_found:
+                log.warning("File not found in specified partitions", file_id=file_id)
+                return []
+
+        # Build filter expression like async_search does
+        expr_parts = []
+        if partition != ["all"]:
+            expr_parts.append(f"partition in {partition}")
+
+        # Always filter by file_id
+        expr_parts.append(f'file_id == "{file_id}"')
+
+        # Join all parts with " and " only if there are multiple conditions
+        filter_expr = " and ".join(expr_parts) if expr_parts else ""
+
+        try:
+            excluded_keys = ["text", "vector", "_id"] if not include_id else ["text", "vector"]
+
+            results = []
+            iterator = self._client.query_iterator(
+                collection_name=self.collection_name,
+                filter=filter_expr,
+                limit=2000,
+                batch_size=min(2000, 16000),
+                output_fields=["*"],
+            )
+            try:
+                while True:
+                    batch = iterator.next()
+                    if not batch:
+                        break
+                    results.extend(batch)
+            finally:
+                iterator.close()
+
+            docs = [
+                Document(
+                    page_content=res["text"],
+                    metadata={key: value for key, value in res.items() if key not in excluded_keys},
+                )
+                for res in results
+            ]
+            log.debug(f"Retrieved {len(results)} chunks for file_id", count=len(results))
+            return docs
+
+        except MilvusException as e:
+            log.exception(f"Couldn't get file chunks for file_id {file_id}", error=str(e))
+            raise VDBSearchError(
+                f"Couldn't get file chunks for file_id {file_id}: {e!s}",
+                collection_name=self.collection_name,
+                partition=str(partition),
+                file_id=file_id,
+            )
+        except VDBError:
+            raise
+        except Exception as e:
+            log.exception("Unexpected error while getting file chunks", error=str(e))
+            raise VDBSearchError(
+                f"Unexpected error while getting file chunks {file_id}: {e!s}",
+                collection_name=self.collection_name,
+                partition=str(partition),
+                file_id=file_id,
+            )
+
+    async def get_chunks_by_file_ids(
+        self, file_ids: list[str], partition: list[str] | None, include_id: bool = True
+    ) -> list[Document]:
+        """Retrieve chunks for given file_ids in parallel, grouped and ordered by file_id.
+
+        Args:
+            file_ids: List of file IDs to retrieve chunks for
+            partition: Partition(s) to search in - can be ["all"] for admin or list of partition names
+            include_id: Whether to include file_id in chunk metadata
+
+        Returns:
+            List of chunks grouped by file_id, maintaining input order.
+            Returns empty list if no chunks found. Non-existent file_ids are silently ignored.
+
+        Raises:
+            VDBError: If vector database operation fails catastrophically
+        """
+        log = self.logger.bind(file_ids_count=len(file_ids), partition=partition)
+
+        if not file_ids:
+            log.debug("No file_ids provided, returning empty list")
+            return []
+
+        # Handle partition validation
+        if partition and len(partition) > 1:
+            log.debug(f"Searching across {len(partition)} partitions", partitions=partition)
+
+        # Parallel retrieval: create tasks for all file_ids
+        tasks = [
+            self._retrieve_file_chunks(file_id=file_id, partition=partition, include_id=include_id)
+            for file_id in file_ids
+        ]
+
+        # Execute all retrievals concurrently
+        try:
+            results = await asyncio.gather(*tasks)
+        except MilvusException as e:
+            log.error("Milvus error during parallel file retrieval", error=str(e))
+            raise VDBSearchError(
+                message="Failed to retrieve chunks for file_ids",
+                code="VDB_FILE_RETRIEVE_ERROR",
+                status_code=503,
+                collection_name=self.collection_name,
+            ) from e
+
+        # Flatten results while maintaining order
+        all_chunks = []
+        for file_id, chunks in zip(file_ids, results):
+            if chunks:
+                all_chunks.extend(chunks)
+                log.debug(f"Retrieved {len(chunks)} chunks for file_id", file_id=file_id)
+            else:
+                log.warning("No chunks found for file_id", file_id=file_id)
+
+        return all_chunks
 
     async def get_chunk_by_id(self, chunk_id: str):
         """

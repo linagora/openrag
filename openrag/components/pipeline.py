@@ -15,6 +15,7 @@ from components.websearch import WebSearchFactory
 from config import load_config
 from langchain_core.documents.base import Document
 from langchain_openai import ChatOpenAI
+from models.openai import Attachment
 from pydantic import BaseModel, Field
 from utils.logger import get_logger
 
@@ -187,11 +188,18 @@ class RagPipeline:
         messages = payload["messages"]
         messages = messages[-self.chat_history_depth :]  # limit history depth
 
-        # 1. get the query
-        queries: SearchQueries = await self.generate_query(messages)
-        logger.debug("Prepared query for chat completion", queries=str(queries))
-
         metadata = payload.get("metadata") or {}
+
+        # Extract and validate attachments from metadata
+        attachments_raw = metadata.get("attachments")
+        file_ids: list[str] = []
+        if attachments_raw:
+            try:
+                attachments = [Attachment.model_validate(att) for att in attachments_raw if isinstance(att, dict)]
+                file_ids = [att.id for att in attachments if att.id]
+            except Exception as e:
+                logger.warning("Failed to validate attachments", error=str(e))
+                file_ids = []
 
         use_map_reduce = metadata.get("use_map_reduce", False)
         spoken_style_answer = metadata.get("spoken_style_answer", False)
@@ -204,71 +212,101 @@ class RagPipeline:
             spoken_style_answer=spoken_style_answer,
             use_websearch=use_websearch,
             workspace=workspace,
+            file_ids_count=len(file_ids),
         )
 
-        # 2. get docs and/or web results concurrently
-        top_k = config.map_reduce["max_total_documents"] if use_map_reduce else None
-        if workspace:
+        # FILE_ID RETRIEVAL MODE (skip semantic search)
+        if file_ids:
+            log = logger.bind(file_ids=file_ids, mode="file_based_retrieval")
+            log.info("File-based retrieval mode enabled")
+
+            # Retrieve chunks directly by file_id (parallel retrieval)
             vectordb = ray.get_actor("Vectordb", namespace="openrag")
-            ws = await call_ray_actor_with_timeout(
-                vectordb.get_workspace.remote(workspace),
-                timeout=VECTORDB_TIMEOUT,
-                task_description=f"get_workspace({workspace})",
-            )
-            if not ws or ("all" not in partition and ws["partition_name"] not in partition):
-                logger.warning(
-                    "Workspace not found in partition(s) — ignoring workspace filter",
-                    workspace=workspace,
-                    partition=partition,
+            try:
+                docs = await call_ray_actor_with_timeout(
+                    vectordb.get_chunks_by_file_ids.remote(file_ids=file_ids, partition=partition),
+                    timeout=VECTORDB_TIMEOUT,
+                    task_description=f"get_chunks_by_file_ids({len(file_ids)} files)",
                 )
-                workspace = None
+                log.debug(f"Retrieved {len(docs)} chunks from {len(file_ids)} files")
+            except TimeoutError as e:
+                # Timeout handling - log and return empty docs
+                log.error("Timeout retrieving chunks for file_ids", timeout=VECTORDB_TIMEOUT, error=str(e))
+                docs = []
 
-        filter_params = {"workspace_id": workspace} if workspace else None
+            # Create dummy queries for logging consistency
+            queries = SearchQueries(query_list=[messages[-1]["content"]])
+            web_results = []
 
-        if partition is not None and use_websearch:
-            # Run one retrieval and one web search per sub-query, all concurrently (Option C).
-            # Web results from different sub-queries are deduplicated by URL, preserving order.
-            rag_tasks = [
-                self.retriever_pipeline.retrieve_docs(
-                    partition=partition, query=q, top_k=top_k, filter_params=filter_params
-                )
-                for q in queries.query_list
-            ]
-            web_tasks = [self.web_search_service.search(q) for q in queries.query_list]
-            all_results = await asyncio.gather(*rag_tasks, *web_tasks)
-            n = len(queries.query_list)
-            raw_doc_lists = list(all_results[:n])
-            raw_web_lists = list(all_results[n:])
-            docs = self.retriever_pipeline.reranker.rrf_reranking(doc_lists=raw_doc_lists)
-            if top_k is not None:
-                docs = docs[:top_k]
-            # Deduplicate web results by URL, preserving first-seen order
-            seen_urls: set[str] = set()
-            web_results = []
-            for result in (r for web_list in raw_web_lists for r in web_list):
-                if result.url not in seen_urls:
-                    seen_urls.add(result.url)
-                    web_results.append(result)
-        elif partition is not None:
-            docs = await self.retriever_pipeline.get_relevant_docs(
-                partition=partition, search_queries=queries, top_k=top_k, filter_params=filter_params
-            )
-            web_results = []
+        # NORMAL SEMANTIC SEARCH MODE
         else:
-            # Web-only mode (partition is None): no RAG retrieval.
-            # Run one web search per sub-query concurrently and deduplicate by URL.
-            raw_web_lists = await asyncio.gather(*[self.web_search_service.search(q) for q in queries.query_list])
-            seen_urls = set()
-            web_results = []
-            for result in (r for web_list in raw_web_lists for r in web_list):
-                if result.url not in seen_urls:
-                    seen_urls.add(result.url)
-                    web_results.append(result)
-            docs = []
+            # 1. get the query
+            queries: SearchQueries = await self.generate_query(messages)
+            logger.debug("Prepared query for chat completion", queries=str(queries))
 
-        # Web-only with no results: fall back to plain direct LLM mode
-        if not docs and not web_results and partition is None:
-            return payload, [], []
+            # 2. get docs and/or web results concurrently
+            top_k = config.map_reduce["max_total_documents"] if use_map_reduce else None
+            if workspace:
+                vectordb = ray.get_actor("Vectordb", namespace="openrag")
+                ws = await call_ray_actor_with_timeout(
+                    vectordb.get_workspace.remote(workspace),
+                    timeout=VECTORDB_TIMEOUT,
+                    task_description=f"get_workspace({workspace})",
+                )
+                if not ws or ("all" not in partition and ws["partition_name"] not in partition):
+                    logger.warning(
+                        "Workspace not found in partition(s) — ignoring workspace filter",
+                        workspace=workspace,
+                        partition=partition,
+                    )
+                    workspace = None
+
+            filter_params = {"workspace_id": workspace} if workspace else None
+
+            if partition is not None and use_websearch:
+                # Run one retrieval and one web search per sub-query, all concurrently (Option C).
+                # Web results from different sub-queries are deduplicated by URL, preserving order.
+                rag_tasks = [
+                    self.retriever_pipeline.retrieve_docs(
+                        partition=partition, query=q, top_k=top_k, filter_params=filter_params
+                    )
+                    for q in queries.query_list
+                ]
+                web_tasks = [self.web_search_service.search(q) for q in queries.query_list]
+                all_results = await asyncio.gather(*rag_tasks, *web_tasks)
+                n = len(queries.query_list)
+                raw_doc_lists = list(all_results[:n])
+                raw_web_lists = list(all_results[n:])
+                docs = self.retriever_pipeline.reranker.rrf_reranking(doc_lists=raw_doc_lists)
+                if top_k is not None:
+                    docs = docs[:top_k]
+                # Deduplicate web results by URL, preserving first-seen order
+                seen_urls: set[str] = set()
+                web_results = []
+                for result in (r for web_list in raw_web_lists for r in web_list):
+                    if result.url not in seen_urls:
+                        seen_urls.add(result.url)
+                        web_results.append(result)
+            elif partition is not None:
+                docs = await self.retriever_pipeline.get_relevant_docs(
+                    partition=partition, search_queries=queries, top_k=top_k, filter_params=filter_params
+                )
+                web_results = []
+            else:
+                # Web-only mode (partition is None): no RAG retrieval.
+                # Run one web search per sub-query concurrently and deduplicate by URL.
+                raw_web_lists = await asyncio.gather(*[self.web_search_service.search(q) for q in queries.query_list])
+                seen_urls = set()
+                web_results = []
+                for result in (r for web_list in raw_web_lists for r in web_list):
+                    if result.url not in seen_urls:
+                        seen_urls.add(result.url)
+                        web_results.append(result)
+                docs = []
+
+            # Web-only with no results: fall back to plain direct LLM mode
+            if not docs and not web_results and partition is None:
+                return payload, [], []
 
         if use_map_reduce and docs:
             docs = await self.map_reduce.map(query=" ".join(queries.query_list), chunks=docs)
