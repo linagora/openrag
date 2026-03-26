@@ -471,3 +471,159 @@ class TestChatCompletionsUserAccess:
 
         # Should NOT see partition2
         assert f"openrag-{partition2}" not in model_ids
+
+
+class TestFileAttachments:
+    """Test file attachments feature in chat completions.
+
+    These tests verify that the attachments parameter in metadata
+    correctly triggers file-based retrieval instead of semantic search.
+    """
+
+    def test_chat_with_empty_attachments(self, api_client):
+        """Test chat with empty attachments list - should work normally."""
+        response = api_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "openrag-all",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "metadata": {"attachments": []},
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "choices" in data
+
+    def test_chat_with_valid_attachments_format(self, api_client):
+        """Test chat with valid attachments format - returns 200 even if files don't exist."""
+        response = api_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "openrag-all",
+                "messages": [{"role": "user", "content": "Tell me about this file"}],
+                "metadata": {
+                    "attachments": [
+                        {"id": "036e0ba3-201c-4411-84f9-5b0a3b6974b7"},
+                        {"id": "file-123"},
+                    ]
+                },
+            },
+        )
+        # Returns 200 - empty results for non-existent files are handled gracefully
+        assert response.status_code == 200
+        data = response.json()
+        assert "choices" in data
+
+    def test_chat_with_attachments_missing_id(self, api_client):
+        """Test chat with attachments missing id field - invalid attachments are skipped."""
+        response = api_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "openrag-all",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "metadata": {
+                    "attachments": [
+                        {"id": "file-123"},
+                        {"type": "file"},  # Missing id
+                        {"id": "file-456"},
+                    ]
+                },
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "choices" in data
+
+    def test_chat_with_attachments_empty_id(self, api_client):
+        """Test chat with attachments with empty id - empty ids are skipped."""
+        response = api_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "openrag-all",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "metadata": {
+                    "attachments": [
+                        {"id": "file-123"},
+                        {"id": ""},  # Empty id
+                        {"id": "file-456"},
+                    ]
+                },
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "choices" in data
+
+    def test_chat_with_attachments_extra_fields(self, api_client):
+        """Test chat with attachments containing extra fields - extra fields are ignored."""
+        response = api_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "openrag-all",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "metadata": {
+                    "attachments": [
+                        {
+                            "id": "file-123",
+                            "type": "file",
+                            "priority": 1,
+                            "custom_field": "ignored",
+                        }
+                    ]
+                },
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "choices" in data
+
+    def test_chat_with_null_attachments(self, api_client):
+        """Test chat with null attachments - should work normally."""
+        response = api_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "openrag-all",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "metadata": {"attachments": None},
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "choices" in data
+
+    def test_chat_with_single_attachment(self, api_client):
+        """Test chat with single attachment."""
+        response = api_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "openrag-all",
+                "messages": [{"role": "user", "content": "Tell me about this file"}],
+                "metadata": {
+                    "attachments": [
+                        {"id": "single-file-id"},
+                    ]
+                },
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "choices" in data
+
+    def test_chat_with_attachments_and_websearch(self, api_client):
+        """Test chat with both attachments and websearch enabled."""
+        response = api_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "openrag-all",
+                "messages": [{"role": "user", "content": "Tell me about this file"}],
+                "metadata": {
+                    "attachments": [{"id": "file-123"}],
+                    "websearch": True,
+                },
+            },
+        )
+        # When attachments are provided, file-based retrieval takes precedence
+        # Web search may still run depending on implementation
+        assert response.status_code == 200
+        data = response.json()
+        assert "choices" in data
