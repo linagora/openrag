@@ -409,6 +409,7 @@ OpenAI-compatible text completion endpoint.
 | `websearch` | `bool` | `false` | Augments the RAG context with live web search results. When used with a partition (`openrag-{partition}`), document and web results are combined. When used without a partition (direct LLM mode), web results are the sole context. Requires `WEBSEARCH_API_TOKEN` to be configured. See [web search configuration](/openrag/documentation/env_vars/#web-search-configuration). |
 | `spoken_style_answer` | `bool` | `false` | Generates a succinct spoken-style conversational answer based on the retrieved documents. |
 | `use_map_reduce` | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
+| `attachments` | `list[{id: string}]` | `null` | Pins specific files by ID for retrieval, bypassing semantic search entirely. Each file's chunks are compressed by the file reducer before being sent to the LLM. See [file reducer configuration](/openrag/documentation/env_vars/#file-reducer-configuration). |
 | `llm_override` | `object` | `null` | Routes the request to a different LLM endpoint while still using OpenRAG's RAG pipeline (retrieval, reranking, prompt construction). Accepts: `base_url` (string), `api_key` (string), `model` (string). Any field not provided falls back to the default OpenRAG LLM configuration. |
 
 Examples:

@@ -257,6 +257,7 @@ The RAG pipeline comes with preconfigured prompts **`./prompts/example1`**. Here
 | `image_captioning_tmpl.txt` | Template for generating image descriptions using the VLM |
 | `hyde.txt` | Hypothetical Document Embeddings (HyDE) query expansion template |
 | `multi_query_pmpt_tmpl.txt` | Template for generating multiple query variations |
+| `file_reducer_tmpl.txt` | System prompt for the file reducer's chunk compression LLM calls |
 
 To customize prompt:
 1. **Duplicate the example folder**: Copy the `example1` folder from `./prompts/`
@@ -454,6 +455,21 @@ curl -X 'POST' 'http://localhost:8080/v1/chat/completions' \
 }'
 ```
 :::
+
+### File Reducer Configuration
+
+The file reducer compresses a file's chunks down to a size that fits within the LLM context window. It works iteratively: chunks are grouped, each group is summarized by the LLM, and the process repeats until the total content fits. Two safety mechanisms prevent it from running indefinitely:
+
+- **`max_rounds`** — hard cap on the number of compression iterations.
+- **`min_shrink_ratio`** — if a round shrinks the content by less than this fraction, the LLM is not compressing meaningfully and the loop stops early.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `FILE_REDUCER_TARGET_SIZE_TOKENS` | `int` | 1024 | Token budget for the final output. Compression rounds continue until the total content fits within this limit |
+| `FILE_REDUCER_MAX_GROUP_TOKENS` | `int` | 4096 | Maximum tokens per group fed to the LLM in a single summarization call |
+| `FILE_REDUCER_MIN_GROUP_TOKENS` | `int` | 2048 | Groups smaller than this threshold are passed through without calling the LLM |
+| `FILE_REDUCER_MAX_ROUNDS` | `int` | 3 | Maximum number of compression rounds before stopping regardless of output size |
+| `FILE_REDUCER_MIN_SHRINK_RATIO` | `float` | 0.1 | Minimum fraction of tokens that must be removed in a round to continue iterating (e.g. `0.1` = at least 10% reduction required) |
 
 ### FastAPI & Access Control
 :::info

@@ -104,7 +104,7 @@ class BaseVectorDB(ABC):
     @abstractmethod
     async def get_chunks_by_file_ids(
         self, file_ids: list[str], partition: list[str] | None, include_id: bool = True
-    ) -> list[Document]:
+    ) -> list[list[Document]]:
         pass
 
     @abstractmethod
@@ -813,7 +813,7 @@ class MilvusDB(BaseVectorDB):
 
     async def get_chunks_by_file_ids(
         self, file_ids: list[str], partition: list[str] | None, include_id: bool = True
-    ) -> list[Document]:
+    ) -> list[list[Document]]:
         """Retrieve chunks for given file_ids in parallel, grouped and ordered by file_id.
 
         Args:
@@ -822,8 +822,8 @@ class MilvusDB(BaseVectorDB):
             include_id: Whether to include file_id in chunk metadata
 
         Returns:
-            List of chunks grouped by file_id, maintaining input order.
-            Returns empty list if no chunks found. Non-existent file_ids are silently ignored.
+            List of chunk lists, one per file_id, maintaining input order.
+            Empty lists are excluded. Non-existent file_ids are silently ignored.
 
         Raises:
             VDBError: If vector database operation fails catastrophically
@@ -856,16 +856,15 @@ class MilvusDB(BaseVectorDB):
                 collection_name=self.collection_name,
             ) from e
 
-        # Flatten results while maintaining order
-        all_chunks = []
+        chunks_by_file = []
         for file_id, chunks in zip(file_ids, results):
             if chunks:
-                all_chunks.extend(chunks)
+                chunks_by_file.append(chunks)
                 log.debug(f"Retrieved {len(chunks)} chunks for file_id", file_id=file_id)
             else:
                 log.warning("No chunks found for file_id", file_id=file_id)
 
-        return all_chunks
+        return chunks_by_file
 
     async def get_chunk_by_id(self, chunk_id: str):
         """

@@ -1,4 +1,4 @@
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal
 
 from config import load_config
 from pydantic import BaseModel, Field
@@ -11,21 +11,8 @@ class Attachment(BaseModel):
     """Represents a file attachment for RAG retrieval."""
 
     id: str = Field(..., min_length=1, description="File ID")
-    type: Literal["file"] | None = Field(None, description="For future extensibility")
-    priority: int | None = Field(None, ge=0, description="For future ranking")
 
 
-class MetadataDict(TypedDict, total=False):
-    """TypedDict for metadata field with known keys."""
-
-    use_map_reduce: bool
-    spoken_style_answer: bool
-    websearch: bool
-    llm_override: dict[str, Any] | None
-    attachments: list[dict[str, Any]] | None
-
-
-# Classes pour la compatibilité OpenAI
 class OpenAIMessage(BaseModel):
     """Modèle représentant un message dans l'API OpenAI."""
 
@@ -43,15 +30,15 @@ class OpenAIChatCompletionRequest(BaseModel):
     stream: bool | None = Field(False)
     max_tokens: int | None = Field(default_max_tokens)
     logprobs: int | None = Field(None)
-    metadata: MetadataDict | None = Field(
-        default_factory=lambda: {
+    metadata: dict[str, Any] | None = Field(
+        {
             "use_map_reduce": False,
             "spoken_style_answer": False,
             "websearch": False,
             "llm_override": None,
             "attachments": None,
         },
-        description="Extra custom parameters. Supports 'llm_override' for LLM endpoint override. 'attachments' is a list of {id: file_id} objects for file-based retrieval (bypasses semantic search).",
+        description="Extra custom parameters. Supports 'attachments' for file-based retrieval with automatic file reduction, 'use_map_reduce' for semantic search summarization.",
     )
 
 

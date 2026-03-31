@@ -55,6 +55,13 @@ reranker:
   top_k: ${oc.decode:${oc.env:RERANKER_TOP_K, 10}} # Number of documents to return after reranking. Upgrade for better results if your llm has a wider context window.
   base_url: ${oc.env:RERANKER_BASE_URL, http://reranker:${oc.env:RERANKER_PORT, 7997}}
 
+file_reducer:
+  max_group_tokens: ${oc.decode:${oc.env:FILE_REDUCER_MAX_GROUP_TOKENS, 4096}}
+  min_group_tokens: ${oc.decode:${oc.env:FILE_REDUCER_MIN_GROUP_TOKENS, 2048}}
+  target_size_tokens: ${oc.decode:${oc.env:FILE_REDUCER_TARGET_SIZE_TOKENS, 1024}}
+  max_rounds: ${oc.decode:${oc.env:FILE_REDUCER_MAX_ROUNDS, 3}}
+  min_shrink_ratio: ${oc.decode:${oc.env:FILE_REDUCER_MIN_SHRINK_RATIO, 0.1}}
+
 map_reduce:
   # Number of documents to process in the initial mapping phase
   initial_batch_size: ${oc.decode:${oc.env:MAP_REDUCE_INITIAL_BATCH_SIZE, 10}}
@@ -91,6 +98,7 @@ prompts:
   chunk_contextualizer: chunk_contextualizer_tmpl.txt
   image_describer: image_captioning_tmpl.txt
   spoken_style_answer: spoken_style_answer_tmpl.txt
+  file_reducer: file_reducer_tmpl.txt
 
   # query templates for different retriever types
   hyde: hyde.txt

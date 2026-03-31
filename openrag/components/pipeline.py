@@ -19,6 +19,7 @@ from models.openai import Attachment
 from pydantic import BaseModel, Field
 from utils.logger import get_logger
 
+from .file_summarizer import FileReducer
 from .llm import LLM
 from .map_reduce import RAGMapReduce
 from .reranker import Reranker
@@ -138,6 +139,9 @@ class RagPipeline:
         # map reduce
         self.map_reduce: RAGMapReduce = RAGMapReduce(config=config)
 
+        # file reducer
+        self.file_reducer = FileReducer(config)
+
         # Web search
         self.web_search_service = WebSearchFactory.create_service(config)
         if self.web_search_service.provider:
@@ -223,20 +227,26 @@ class RagPipeline:
             # Retrieve chunks directly by file_id (parallel retrieval)
             vectordb = ray.get_actor("Vectordb", namespace="openrag")
             try:
-                docs = await call_ray_actor_with_timeout(
+                docs_by_file: list[list[Document]] = await call_ray_actor_with_timeout(
                     vectordb.get_chunks_by_file_ids.remote(file_ids=file_ids, partition=partition),
                     timeout=VECTORDB_TIMEOUT,
                     task_description=f"get_chunks_by_file_ids({len(file_ids)} files)",
                 )
-                log.debug(f"Retrieved {len(docs)} chunks from {len(file_ids)} files")
+                log.debug(f"Retrieved {sum(len(d) for d in docs_by_file)} chunks from {len(file_ids)} files")
             except TimeoutError as e:
                 # Timeout handling - log and return empty docs
                 log.error("Timeout retrieving chunks for file_ids", timeout=VECTORDB_TIMEOUT, error=str(e))
-                docs = []
+                docs_by_file = []
 
             # Create dummy queries for logging consistency
             queries = SearchQueries(query_list=[messages[-1]["content"]])
             web_results = []
+
+            # Apply file reduction per file, then flatten
+            if docs_by_file:
+                docs = await self.file_reducer.reduce_all(query=queries.query_list[0], docs_l=docs_by_file)
+            else:
+                docs = []
 
         # NORMAL SEMANTIC SEARCH MODE
         else:
@@ -308,7 +318,7 @@ class RagPipeline:
             if not docs and not web_results and partition is None:
                 return payload, [], []
 
-        if use_map_reduce and docs:
+        if not file_ids and use_map_reduce and docs:
             docs = await self.map_reduce.map(query=" ".join(queries.query_list), chunks=docs)
 
         # 3. Format web results first to know actual token usage, then allocate remaining budget to RAG
