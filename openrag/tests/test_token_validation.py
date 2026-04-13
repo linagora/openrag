@@ -19,10 +19,10 @@ import ray  # noqa: E402
 if not ray.is_initialized():
     ray.init(runtime_env={"working_dir": None}, ignore_reinit_error=True)
 
-if "components.pipeline" not in sys.modules:
-    _stub = ModuleType("components.pipeline")
+if "services.orchestrators.pipeline" not in sys.modules:
+    _stub = ModuleType("services.orchestrators.pipeline")
     _stub.RagPipeline = MagicMock()
-    sys.modules["components.pipeline"] = _stub
+    sys.modules["services.orchestrators.pipeline"] = _stub
 
 from api.schemas.openai import OpenAIChatCompletionRequest, OpenAICompletionRequest  # noqa: E402
 from api.routers.openai import validate_tokens_limit  # noqa: E402
@@ -35,7 +35,7 @@ def fake_length_function(text: str) -> int:
 
 @pytest.fixture(autouse=True)
 def _mock_get_num_tokens():
-    with patch("routers.openai.get_num_tokens", return_value=fake_length_function):
+    with patch("api.routers.openai.get_num_tokens", return_value=fake_length_function):
         yield
 
 
@@ -130,7 +130,7 @@ class TestValidateTokensLimit:
 
     def test_graceful_on_exception(self):
         """When get_num_tokens raises, validation returns True (graceful skip)."""
-        with patch("routers.openai.get_num_tokens", side_effect=RuntimeError("boom")):
+        with patch("api.routers.openai.get_num_tokens", side_effect=RuntimeError("boom")):
             req = _chat_request("hello", max_tokens=999999)
             is_valid, msg = validate_tokens_limit(req, max_tokens_allowed=1)
             assert is_valid is True

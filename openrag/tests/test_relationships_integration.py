@@ -339,7 +339,7 @@ class TestRelationshipAwareRetrieverIntegration:
         except Exception:
             pytest.skip("Requires config to be available")
 
-        with patch("components.retriever.get_vectordb") as mock_get_db:
+        with patch("services.orchestrators.retriever.get_vectordb") as mock_get_db:
             mock_db = MagicMock()
             mock_db.async_search = MagicMock()
             mock_db.async_search.remote = AsyncMock(
@@ -364,7 +364,7 @@ class TestRelationshipAwareRetrieverIntegration:
         except Exception:
             pytest.skip("Requires config to be available")
 
-        with patch("components.retriever.get_vectordb") as mock_get_db:
+        with patch("services.orchestrators.retriever.get_vectordb") as mock_get_db:
             mock_db = MagicMock()
 
             # Base search returns main document
@@ -396,7 +396,7 @@ class TestRelationshipAwareRetrieverIntegration:
         except Exception:
             pytest.skip("Requires config to be available")
 
-        with patch("components.retriever.get_vectordb") as mock_get_db:
+        with patch("services.orchestrators.retriever.get_vectordb") as mock_get_db:
             mock_db = MagicMock()
 
             # Base search returns main document

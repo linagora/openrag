@@ -297,4 +297,4 @@ if __name__ == "__main__":
             serve.run(OpenRagAPI.bind(), route_prefix="/", blocking=True)
 
     else:
-        uvicorn.run("api:app", host="0.0.0.0", port=8080, reload=True, proxy_headers=True)
+        uvicorn.run("api.main:app", host="0.0.0.0", port=8080, reload=True, proxy_headers=True)
