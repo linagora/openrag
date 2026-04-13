@@ -7,7 +7,6 @@ from collections import deque
 from typing import ClassVar
 
 import ray
-from services.workers.indexer_utils.text_sanitizer import sanitize_text
 from config import load_config
 from fast_langdetect import LangDetectConfig, LangDetector
 from langchain_core.documents.base import Document
@@ -150,6 +149,8 @@ def format_web_context(
 
     for i, result in enumerate(web_results):
         n = start_index + i
+        from services.workers.indexer_utils.text_sanitizer import sanitize_text
+
         title = sanitize_text(result.title)
         body = sanitize_text(result.content) if result.content else sanitize_text(result.snippet)
         block = f"[Source {n}]\n{title}\n{body}"
