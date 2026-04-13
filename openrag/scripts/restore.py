@@ -6,8 +6,8 @@ import time
 from typing import IO, Any
 
 import ray
-from components.indexer.vectordb import MilvusDB
-from components.indexer.vectordb.utils import PartitionFileManager
+from services.storage.vectordb import MilvusDB
+from services.storage.vectordb.utils import PartitionFileManager
 from pymilvus import MilvusClient
 from utils.logger import get_logger
 

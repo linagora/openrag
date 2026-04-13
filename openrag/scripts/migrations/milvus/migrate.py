@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-from components.indexer.vectordb.vectordb import SCHEMA_VERSION_PROPERTY_KEY
+from services.storage.vectordb.vectordb import SCHEMA_VERSION_PROPERTY_KEY
 from config import load_config
 from pymilvus import MilvusClient
 from utils.logger import get_logger

@@ -32,7 +32,7 @@ Or run this script directly:
 import argparse
 import sys
 
-from components.indexer.vectordb.vectordb import SCHEMA_VERSION_PROPERTY_KEY
+from services.storage.vectordb.vectordb import SCHEMA_VERSION_PROPERTY_KEY
 from config import load_config
 from pymilvus import DataType, MilvusClient
 from utils.logger import get_logger
