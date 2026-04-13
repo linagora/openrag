@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 # Add parent dirs so we can import the models
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from components.indexer.vectordb.utils import File, User
+from services.storage.vectordb.utils import File, User
 
 
 def build_database_url(args):

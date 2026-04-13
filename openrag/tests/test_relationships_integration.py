@@ -335,7 +335,7 @@ class TestRelationshipAwareRetrieverIntegration:
     async def test_retriever_without_expansion_returns_base_results(self):
         """Test that retriever without expansion returns only base search results."""
         try:
-            from components.retriever import RelationshipAwareRetriever
+            from services.orchestrators.retriever import RelationshipAwareRetriever
         except Exception:
             pytest.skip("Requires config to be available")
 
@@ -360,7 +360,7 @@ class TestRelationshipAwareRetrieverIntegration:
     async def test_retriever_with_include_related_expands_results(self, mock_documents):
         """Test that retriever with include_related expands with related docs."""
         try:
-            from components.retriever import RelationshipAwareRetriever
+            from services.orchestrators.retriever import RelationshipAwareRetriever
         except Exception:
             pytest.skip("Requires config to be available")
 
@@ -392,7 +392,7 @@ class TestRelationshipAwareRetrieverIntegration:
     async def test_retriever_deduplicates_results(self, mock_documents):
         """Test that retriever properly deduplicates expanded results."""
         try:
-            from components.retriever import RelationshipAwareRetriever
+            from services.orchestrators.retriever import RelationshipAwareRetriever
         except Exception:
             pytest.skip("Requires config to be available")
 

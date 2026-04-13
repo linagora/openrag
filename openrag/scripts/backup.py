@@ -5,7 +5,7 @@ import os
 import sys
 from typing import IO, Any
 
-from components.indexer.vectordb.utils import PartitionFileManager
+from services.storage.vectordb.utils import PartitionFileManager
 from pymilvus import Collection, connections
 from utils.logger import get_logger
 

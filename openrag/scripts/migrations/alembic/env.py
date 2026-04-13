@@ -1,7 +1,7 @@
 from logging.config import fileConfig
 
 from alembic import context
-from components.indexer.vectordb.models import Base
+from services.storage.vectordb.models import Base
 from config import load_config
 from sqlalchemy import URL, engine_from_config, pool
 
