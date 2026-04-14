@@ -93,7 +93,7 @@ Scale your RAG pipeline across multiple machines and GPUs.
 * **Resource management** - intelligent allocation of compute resources
 * **Monitoring dashboard** - real-time cluster health and performance metrics
 
-See the section on [distributed deployment in a ray cluster](#5-distributed-deployment-in-a-ray-cluster) for more details
+See the section on [distributed deployment in a ray cluster](#6-distributed-deployment-in-a-ray-cluster) for more details
 
 </details>
 
@@ -210,7 +210,38 @@ Once the app is up and running, visit `http://localhost:APP_PORT` or `http:X.X.X
 
 3. `http://localhost:INDEXERUI_PORT` to access the indexer ui for easy document ingestion, indexing, and management
 
-#### 5. Distributed deployment in a Ray cluster
+#### 5. Production vs. development: auto-restart on reboot
+
+By default, all services are configured with `restart: unless-stopped` so the stack comes back automatically after a host reboot. A `Makefile` wraps the common `docker compose` invocations:
+
+```bash
+# Prod (default) — services auto-restart after reboot
+make run               # GPU
+make run-cpu           # CPU
+make run-build         # GPU, rebuild images first
+make run-cpu-build     # CPU, rebuild images first
+
+# Dev — services do NOT auto-restart (layers docker-compose.dev.yaml on top)
+make run-dev           # GPU
+make run-dev-cpu       # CPU
+make run-dev-build     # GPU, rebuild images first
+make run-dev-cpu-build # CPU, rebuild images first
+
+# Other helpers
+make down              # stop the stack
+make logs              # tail logs
+make ps                # list services
+```
+
+On a production host, also make sure the Docker daemon itself starts at boot:
+
+```bash
+sudo systemctl enable --now docker
+```
+
+The dev override file is `docker-compose.dev.yaml`. It is **not** auto-loaded (the name is intentionally not `docker-compose.override.yaml`) — you must opt in via `make run-dev` or by passing `-f docker-compose.dev.yaml` explicitly. This makes prod behavior the safe default: a plain `docker compose up -d` will still auto-restart services after a reboot.
+
+#### 6. Distributed deployment in a Ray cluster
 
 To scale **OpenRag** in a distributed environment using **Ray**, follow the dedicated guide:
 ➡ [Deploy OpenRag in a Ray cluster](docs/deploy_ray_cluster.md)

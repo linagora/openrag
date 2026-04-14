@@ -3,11 +3,11 @@ x-vllm-env: &vllm_env
   VLLM_SLEEP_WHEN_IDLE: 1  # Avoid 100% CPU usage when idle
 
 x-reranker: &reranker_template
+  restart: unless-stopped
   networks:
     default:
       aliases:
         - reranker
-  # restart: on-failure
   environment:
     - HUGGING_FACE_HUB_TOKEN
     - VLLM_SLEEP_WHEN_IDLE=1  # Avoid 100% CPU usage when idle

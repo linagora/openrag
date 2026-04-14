@@ -9,11 +9,12 @@ x-openrag: &openrag_template
   build:
     context: .
     dockerfile: Dockerfile
+  restart: unless-stopped
   volumes:
     - ${DATA_VOLUME:-./data}:/app/data
     - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
     - ./openrag:/app/openrag # For dev mode
-    - /$SHARED_ENV:/ray_mount/.env # Shared environment variables
+    - ${SHARED_ENV:-./.env}:/ray_mount/.env # Shared environment variables
     - ./logs:/app/logs # For dev mode
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
@@ -36,7 +37,7 @@ x-vllm: &vllm_template
     default:
       aliases:
         - vllm
-  restart: on-failure
+  restart: unless-stopped
   environment:
     <<: *vllm_env
   ipc: "host"
@@ -113,6 +114,7 @@ services:
 
   rdb:
     image: postgres:15
+    restart: unless-stopped
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-root_password}
       - POSTGRES_USER=${POSTGRES_USER:-root}

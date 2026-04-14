@@ -1,0 +1,18 @@
+# Dev override — disables auto-restart.
+# NOT auto-loaded by docker compose (intentional: name is .dev.yaml, not .override.yaml).
+# Opt in with: docker compose -f docker-compose.yaml -f docker-compose.dev.yaml up -d
+# Or via the Makefile: `make run-dev` / `make run-dev-cpu`.
+services:
+  indexer-ui:   { restart: "no" }
+  openrag:      { restart: "no" }
+  openrag-cpu:  { restart: "no" }
+  rdb:          { restart: "no" }
+  vllm-gpu:     { restart: "no" }
+  vllm-cpu:     { restart: "no" }
+  etcd:         { restart: "no" }
+  minio:        { restart: "no" }
+  milvus:       { restart: "no" }
+  # Reranker services are not listed here because their names depend on
+  # RERANKER_PROVIDER (infinity: reranker/reranker-cpu, openai: reranker-gpu/reranker-cpu)
+  # and compose errors if an override references a service that isn't in the merged config.
+  # Reranker will auto-restart in dev too — set RERANKER_ENABLED=false to skip it entirely.
