@@ -154,6 +154,11 @@ loader:
     whisper_n_workers: 3
     whisper_num_gpus: 0.01
     whisper_concurrency_per_worker: 2
+    # Whisper failures are often deterministic (corrupt audio); 1 retry
+    # covers transient GPU OOM without wasting time on bad inputs.
+    whisper_timeout: 1800
+    whisper_max_task_retry: 1
+    whisper_retry_base_delay: 2.0
 
   # Env: PDFLoader, AUDIOLOADER (per-extension overrides)
   file_loaders:
@@ -188,11 +193,18 @@ loader:
   # Split large PDFs into chunks of this many pages for parallel processing across workers.
   # 0 = no chunking (process entire PDF in one worker).
   marker_chunk_size: 10
+  # Retry a failed chunk up to marker_max_task_retry times with exponential backoff
+  # (delay = marker_retry_base_delay * 2**attempt).
+  marker_max_task_retry: 3
+  marker_retry_base_delay: 2.0
 
   # Env: DOCLING_NUM_GPUS, DOCLING_POOL_SIZE, DOCLING_MAX_TASKS_PER_WORKER
   docling_num_gpus: 0.01
   docling_pool_size: 1
   docling_max_tasks_per_worker: 2
+  docling_timeout: 3600
+  docling_max_task_retry: 3
+  docling_retry_base_delay: 2.0
 
   # Env: TRANSCRIBER_BASE_URL, TRANSCRIBER_API_KEY, TRANSCRIBER_MODEL,
   #      TRANSCRIBER_TIMEOUT, TRANSCRIBER_MAX_CONCURRENT_CHUNKS, USE_WHISPER_LANG_DETECTOR

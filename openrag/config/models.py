@@ -247,6 +247,9 @@ class LocalWhisperConfig(ConfigMixin):
     whisper_n_workers: int = 3
     whisper_num_gpus: float = 0.01
     whisper_concurrency_per_worker: int = 2
+    whisper_timeout: int = 1800
+    whisper_max_task_retry: int = 1
+    whisper_retry_base_delay: float = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -338,9 +341,14 @@ class LoaderConfig(ConfigMixin):
     marker_timeout: int = 3600
     marker_pdftext_workers: int = 2
     marker_chunk_size: int = 10
+    marker_max_task_retry: int = 3
+    marker_retry_base_delay: float = 2.0
     docling_num_gpus: float = Field(default=0.01, ge=0)
     docling_pool_size: int = Field(default=1, ge=1)
     docling_max_tasks_per_worker: int = Field(default=2, ge=1)
+    docling_timeout: int = 3600
+    docling_max_task_retry: int = 3
+    docling_retry_base_delay: float = 2.0
     transcriber: TranscriberConfig = Field(default_factory=TranscriberConfig)
     openai: OpenAILoaderConfig = Field(default_factory=OpenAILoaderConfig)
 

@@ -86,12 +86,27 @@ class DoclingPool:
         )
 
     async def process_pdf(self, file_path: str) -> ConversionResult:
-        actor: DoclingWorker = await self._queue.get()
-        try:
-            result = await actor.convert.remote(file_path)
-            return result
-        finally:
-            await self._queue.put(actor)
+        from services.workers.ray_utils import call_ray_actor_with_timeout, retry_with_backoff
+
+        timeout = self.config.loader.docling_timeout
+
+        async def attempt(i: int):
+            actor: DoclingWorker = await self._queue.get()
+            try:
+                return await call_ray_actor_with_timeout(
+                    actor.convert.remote(file_path),
+                    timeout=timeout,
+                    task_description=f"DoclingPool PDF ({file_path})",
+                )
+            finally:
+                await self._queue.put(actor)
+
+        return await retry_with_backoff(
+            attempt,
+            max_retries=self.config.loader.docling_max_task_retry,
+            base_delay=self.config.loader.docling_retry_base_delay,
+            task_description=f"DoclingPool PDF ({file_path})",
+        )
 
 
 class DoclingLoader2(BaseLoader):

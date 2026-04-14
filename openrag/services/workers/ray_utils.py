@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
 import ray
@@ -55,3 +56,36 @@ async def call_ray_actor_with_timeout(
 
     except RayTaskError as e:
         raise RuntimeError(f"{task_description} failed") from e
+
+
+async def retry_with_backoff(
+    attempt_fn: Callable[[int], Any],
+    max_retries: int,
+    base_delay: float,
+    task_description: str = "task",
+) -> Any:
+    """
+    Run `attempt_fn(attempt_index)` (an async callable) with exponential-backoff
+    retries. The callable owns its own resource acquire/release per attempt.
+
+    Backoff: base_delay * 2**attempt seconds. CancelledError is never retried.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await attempt_fn(attempt)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            last_exc = e
+            if attempt >= max_retries:
+                logger.error(f"{task_description} failed after {attempt + 1} attempts: {e}")
+                raise
+            delay = base_delay * (2**attempt)
+            logger.warning(
+                f"{task_description} failed (attempt {attempt + 1}/{max_retries + 1}): "
+                f"{e}. Retrying in {delay:.1f}s..."
+            )
+            await asyncio.sleep(delay)
+
+    raise last_exc  # unreachable

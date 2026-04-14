@@ -80,12 +80,28 @@ class WhisperPool:
         self._pending = [0] * n_workers
 
     async def transcribe(self, path):
-        idx = min(range(len(self._pending)), key=lambda i: self._pending[i])
-        self._pending[idx] += 1
-        try:
-            return await self.workers[idx].transcribe.remote(path)
-        finally:
-            self._pending[idx] -= 1
+        from services.workers.ray_utils import call_ray_actor_with_timeout, retry_with_backoff
+
+        timeout = config.loader.local_whisper.whisper_timeout
+
+        async def attempt(i: int):
+            idx = min(range(len(self._pending)), key=lambda j: self._pending[j])
+            self._pending[idx] += 1
+            try:
+                return await call_ray_actor_with_timeout(
+                    self.workers[idx].transcribe.remote(path),
+                    timeout=timeout,
+                    task_description=f"WhisperPool transcribe ({path})",
+                )
+            finally:
+                self._pending[idx] -= 1
+
+        return await retry_with_backoff(
+            attempt,
+            max_retries=config.loader.local_whisper.whisper_max_task_retry,
+            base_delay=config.loader.local_whisper.whisper_retry_base_delay,
+            task_description=f"WhisperPool transcribe ({path})",
+        )
 
 
 class LocalWhisperLoader(BaseLoader):

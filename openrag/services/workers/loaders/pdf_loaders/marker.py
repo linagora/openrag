@@ -224,23 +224,37 @@ class MarkerPool:
             )
 
     async def _process_chunk(self, file_path: str, page_range: list[int] | None, label: str):
-        """Acquire a worker slot, process a PDF chunk, and release the slot."""
-        from services.workers.ray_utils import call_ray_actor_with_timeout
+        """Acquire a worker slot, process a PDF chunk, and release the slot.
 
-        worker = await self._queue.get()
-        try:
-            self.logger.info(f"MarkerWorker allocated for {label}")
-            await self.ensure_worker_pool_healthy(worker)
-            timeout = self.config.loader.marker_timeout
-            future = worker.process_pdf.remote(file_path, page_range=page_range)
-            return await call_ray_actor_with_timeout(
-                future,
-                timeout=timeout,
-                task_description=f"MarkerPool PDF {label} ({file_path})",
-            )
-        finally:
-            await self._queue.put(worker)
-            self.logger.debug(f"MarkerWorker returned to pool for {label}")
+        Retries on failure with exponential backoff up to marker_max_task_retry times.
+        A fresh worker is acquired per attempt so a flaky worker can be sidestepped
+        and ensure_worker_pool_healthy re-runs each time.
+        """
+        from services.workers.ray_utils import call_ray_actor_with_timeout, retry_with_backoff
+
+        timeout = self.config.loader.marker_timeout
+
+        async def attempt(i: int):
+            worker = await self._queue.get()
+            try:
+                self.logger.info(f"MarkerWorker allocated for {label} (attempt {i + 1})")
+                await self.ensure_worker_pool_healthy(worker)
+                future = worker.process_pdf.remote(file_path, page_range=page_range)
+                return await call_ray_actor_with_timeout(
+                    future,
+                    timeout=timeout,
+                    task_description=f"MarkerPool PDF {label} ({file_path})",
+                )
+            finally:
+                await self._queue.put(worker)
+                self.logger.debug(f"MarkerWorker returned to pool for {label}")
+
+        return await retry_with_backoff(
+            attempt,
+            max_retries=self.config.loader.marker_max_task_retry,
+            base_delay=self.config.loader.marker_retry_base_delay,
+            task_description=f"MarkerPool PDF {label} ({file_path})",
+        )
 
     async def process_pdf(self, file_path: str):
         chunk_size = self.config.loader.marker_chunk_size
