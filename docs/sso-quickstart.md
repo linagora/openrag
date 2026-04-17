@@ -15,10 +15,9 @@ Give them the following information (replace `<openrag-host>` with the public UR
 | **Client type**               | `confidential` (server-to-server token exchange)           |
 | **Grant type**                | `authorization_code`                                       |
 | **Response type**             | `code`                                                     |
-| **PKCE**                      | `S256` required                                            |
 | **Valid redirect URIs**       | `<openrag-host>/auth/callback`                             |
 | **Back-channel logout URI**   | `<openrag-host>/auth/backchannel-logout`                   |
-| **Post-logout redirect URIs** | `<openrag-host>/`                                          |
+| **Post-logout redirect URIs** | an optional URL **outside** OpenRag (see §Step 4 below)    |
 | **Allowed scopes**            | `openid`, `email`, `profile`, `offline_access`             |
 | **Include `sid` in tokens**   | ✅ enabled (required for back-channel logout)              |
 | **Send refresh token**        | ✅ enabled (so the session doesn't drop every few minutes) |
@@ -87,7 +86,17 @@ OIDC_TOKEN_ENCRYPTION_KEY=XFlT-ZfXkdqf0v-5Z8kVt9xhU6c7Z4z0ZY8Z4Z4Z4=
 # OIDC_SCOPES="openid email profile offline_access"   # default
 # OIDC_CLAIM_SOURCE=id_token                          # default ; alternative: userinfo
 # OIDC_CLAIM_MAPPING=                                 # default: empty (no sync of display_name/email from IdP)
-# OIDC_POST_LOGOUT_REDIRECT_URI=/                     # default
+
+# ⚠ Where the IdP sends the user AFTER logging out.
+#   A ("/") lands on the OpenRag root, which immediately re-triggers
+#   OIDC login — if the IdP session is still alive you appear to be
+#   re-logged-in instantly (no apparent "logout" effect); if it was killed
+#   you land back on the IdP form in a loop. Prefer a URL OUTSIDE OpenRag
+#   or nothing to let SSO doing its job:
+#     - your corporate intranet / landing page
+#     - a static "you are logged out" page you control
+#     - the IdP's own post-logout URL (e.g. https://sso.mycorp.com/)
+# OIDC_POST_LOGOUT_REDIRECT_URI=https://intranet.mycorp.com/
 ```
 
 > **Tip — values with spaces (like `OIDC_SCOPES`)**: quote them to stay safe across dotenv parsers:

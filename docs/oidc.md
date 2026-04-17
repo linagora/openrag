@@ -110,7 +110,7 @@ All variables must be set when `AUTH_MODE=oidc`. If any required variable is mis
 | `OIDC_CLAIM_SOURCE` | No | `id_token` | Where to read claims for [Claim Mapping](#claim-mapping-optional): `id_token` (verified JWT) or `userinfo` (`/userinfo` endpoint) |
 | `OIDC_CLAIM_MAPPING` | No | — | Optional CSV of `db_field:claim` pairs to copy claims into user fields on every login (e.g., `display_name:name,email:email`). See [Claim Mapping](#claim-mapping-optional). |
 | `OIDC_SCOPES` | No | `openid email profile offline_access` | Space-separated OIDC scopes; include `offline_access` for refresh tokens |
-| `OIDC_POST_LOGOUT_REDIRECT_URI` | No | `/` | URL to redirect to after RP-initiated logout |
+| `OIDC_POST_LOGOUT_REDIRECT_URI` | No | — | URL the IdP sends the user to after RP-initiated logout. **No default**: if unset AND the IdP doesn't have an `end_session_endpoint`, `/auth/logout` returns a plain 200 confirming the logout. Avoid pointing this to an OpenRag URL (triggers re-auth — silent SSO loop). |
 
 \* Required when `AUTH_MODE=oidc`
 

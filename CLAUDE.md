@@ -358,7 +358,7 @@ OpenRag supports two authentication modes, controlled by the `AUTH_MODE` environ
 | `OIDC_CLAIM_SOURCE` | `id_token` | Where to read claims for claim mapping: `id_token` (verified JWT) or `userinfo` (`/userinfo` endpoint) |
 | `OIDC_CLAIM_MAPPING` | (none) | CSV of `db_field:claim` pairs to sync IdP claims into the users row on every login (whitelist: `display_name`, `email`). Unset = no post-login update. |
 | `OIDC_SCOPES` | `openid email profile offline_access` | Space-separated scope list (include `offline_access` for refresh tokens) |
-| `OIDC_POST_LOGOUT_REDIRECT_URI` | `/` | URL to redirect after RP-initiated logout |
+| `OIDC_POST_LOGOUT_REDIRECT_URI` | — | URL the IdP sends the user to after RP-initiated logout. No default (an OpenRag URL would re-trigger OIDC login) |
 
 **User Matching & Provisioning**:
 

@@ -100,7 +100,7 @@ OIDC_CLAIM_SOURCE: str = os.getenv("OIDC_CLAIM_SOURCE", "id_token").strip().lowe
 OIDC_CLAIM_MAPPING: str = os.getenv("OIDC_CLAIM_MAPPING", "").strip()
 OIDC_SCOPES: str = os.getenv("OIDC_SCOPES", "openid email profile offline_access")
 OIDC_TOKEN_ENCRYPTION_KEY: str | None = os.getenv("OIDC_TOKEN_ENCRYPTION_KEY")
-OIDC_POST_LOGOUT_REDIRECT_URI: str = os.getenv("OIDC_POST_LOGOUT_REDIRECT_URI", "/")
+OIDC_POST_LOGOUT_REDIRECT_URI: str | None = os.getenv("OIDC_POST_LOGOUT_REDIRECT_URI")
 
 # Whitelist of writable DB fields populated by OIDC claim mapping.
 # Never allow is_admin / external_user_id / file_quota / token here —

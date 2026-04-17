@@ -91,8 +91,16 @@ def _claim_mapping() -> dict[str, str]:
     return mapping
 
 
-def _post_logout_redirect_uri() -> str:
-    return os.getenv("OIDC_POST_LOGOUT_REDIRECT_URI", "/")
+def _post_logout_redirect_uri() -> str | None:
+    """Return the configured post-logout redirect URI, or None if unset.
+
+    No default is provided: a default of "/" would land the user back on
+    OpenRag's root which immediately re-triggers OIDC login (silent re-auth
+    if the IdP session is still alive, or a loop on the IdP form if not).
+    Operators deliberately choose a URL outside OpenRag (corporate intranet,
+    a static 'you are logged out' page, the IdP's own post-logout page).
+    """
+    return os.getenv("OIDC_POST_LOGOUT_REDIRECT_URI")
 
 
 def _oidc_client_id() -> str:
@@ -463,24 +471,31 @@ async def logout(request: Request):
             except Exception as e:
                 logger.warning(f"Failed to revoke oidc_session during logout: {e}")
 
-    # Build redirect target: IdP end_session if discovery provides one, else local.
+    # Build redirect target: IdP end_session if discovery provides one,
+    # otherwise the configured post-logout URL. If neither is available
+    # we return a plain 200 with the cookie deleted — better than a 302
+    # loop through the root.
     local_target = _post_logout_redirect_uri()
-    redirect_target = local_target
+    redirect_target: str | None = local_target
     try:
         meta = await client.discover()
         end_session = meta.get("end_session_endpoint")
         if end_session:
-            params = {
-                "client_id": _oidc_client_id(),
-                "post_logout_redirect_uri": local_target,
-            }
+            params: dict[str, str] = {"client_id": _oidc_client_id()}
+            if local_target:
+                params["post_logout_redirect_uri"] = local_target
             if id_token_hint:
                 params["id_token_hint"] = id_token_hint
             redirect_target = f"{end_session}?{urlencode(params)}"
     except Exception as e:
-        logger.warning(f"OIDC discovery failed during logout, redirecting locally: {e}")
+        logger.warning(f"OIDC discovery failed during logout, skipping IdP redirect: {e}")
 
-    response = RedirectResponse(url=redirect_target, status_code=302)
+    if redirect_target:
+        response = RedirectResponse(url=redirect_target, status_code=302)
+    else:
+        # No IdP end_session and no local post-logout URL → just confirm the
+        # logout in-place. The cookie deletion below still takes effect.
+        response = JSONResponse(status_code=200, content={"detail": "Logged out"})
     response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
     return response
 
