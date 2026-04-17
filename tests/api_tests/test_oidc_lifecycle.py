@@ -26,12 +26,13 @@ pytest.importorskip("fastapi")
 pytest.importorskip("itsdangerous")
 pytest.importorskip("cryptography")
 
-import httpx  # noqa: E402
 import importlib  # noqa: E402
+
+import httpx  # noqa: E402
 import respx  # noqa: E402
 from authlib.jose import JsonWebKey, JsonWebToken  # noqa: E402
 from cryptography.fernet import Fernet  # noqa: E402
-from fastapi import FastAPI, Request  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 # ---------------------------------------------------------------------------

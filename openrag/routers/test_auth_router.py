@@ -72,7 +72,8 @@ JWKS_RESPONSE = {"keys": [_RSA_PUBLIC_JWK]}
 
 def _sign_jwt(payload: dict) -> str:
     header = {"alg": "RS256", "kid": "test-key-1"}
-    jwt = JsonWebToken()
+    # Authlib >=1.0 requires the allowed-algorithms list on JsonWebToken.
+    jwt = JsonWebToken(["RS256"])
     token = jwt.encode(header, payload, _RSA_PRIVATE)
     return token.decode() if isinstance(token, bytes) else token
 
@@ -319,8 +320,10 @@ def client(env_oidc, fresh_stub_vectordb):
     app.include_router(auth_router)
 
     # Replace the OIDCClient's internal httpx client with one backed by respx.
-    transport = respx.MockTransport(assert_all_called=False)
-    http = httpx.AsyncClient(transport=transport)
+    # respx >= 0.22 removed the top-level MockTransport; use MockRouter +
+    # httpx.MockTransport(router.handler) instead.
+    router = respx.MockRouter(assert_all_called=False)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(router.handler))
 
     # Force singleton creation using our mocked http client.
     _auth_deps.reset_oidc_client()
@@ -334,18 +337,18 @@ def client(env_oidc, fresh_stub_vectordb):
     )
 
     c = TestClient(app)
-    c.oidc_transport = transport  # type: ignore[attr-defined]
+    c.oidc_router = router  # type: ignore[attr-defined]
     yield c
 
 
-def _setup_discovery(transport):
-    transport.router.get(f"{ISSUER}/.well-known/openid-configuration").mock(
+def _setup_discovery(router):
+    router.get(f"{ISSUER}/.well-known/openid-configuration").mock(
         return_value=httpx.Response(200, json=DISCOVERY_DOC)
     )
 
 
-def _setup_jwks(transport):
-    transport.router.get(f"{ISSUER}/protocol/openid-connect/certs").mock(
+def _setup_jwks(router):
+    router.get(f"{ISSUER}/protocol/openid-connect/certs").mock(
         return_value=httpx.Response(200, json=JWKS_RESPONSE)
     )
 

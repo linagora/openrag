@@ -52,7 +52,8 @@ def _sign_jwt(payload: dict) -> str:
     from authlib.jose import JsonWebToken
 
     header = {"alg": "RS256", "kid": "test-key-1"}
-    jwt = JsonWebToken()
+    # Authlib >=1.0 requires the allowed-algorithms list on JsonWebToken.
+    jwt = JsonWebToken(["RS256"])
     token = jwt.encode(header, payload, _RSA_PRIVATE)
     # authlib returns bytes
     if isinstance(token, bytes):
