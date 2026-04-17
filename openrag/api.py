@@ -13,7 +13,7 @@ from dotenv import dotenv_values
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 ray.init(dashboard_host="0.0.0.0")
@@ -253,6 +253,23 @@ app.add_middleware(
 
 app.state.app_state = AppState(config)
 app.mount("/static", StaticFiles(directory=DATA_DIR.resolve(), check_dir=True), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def root_redirect():
+    """Root handler — sends authenticated users to the indexer-ui (if
+    configured on a separate host) or the chainlit chat mounted on this
+    app. Prevents a bare ``http://localhost:APP_PORT/`` from returning 404
+    after an OIDC login that used ``next=/``.
+    """
+    # INDEXERUI_URL always has a default (localhost:INDEXERUI_PORT); only
+    # redirect there when it points to a different host/port than us —
+    # otherwise we'd loop.
+    if INDEXERUI_URL and f":{os.getenv('APP_PORT', '8080')}" not in INDEXERUI_URL:
+        return RedirectResponse(url=INDEXERUI_URL, status_code=302)
+    if WITH_CHAINLIT_UI:
+        return RedirectResponse(url="/chainlit/", status_code=302)
+    return JSONResponse({"status": "ok", "app": "openrag", "version": app.version})
 
 
 @app.get("/health_check", summary="Health check endpoint for API", dependencies=[])
