@@ -16,6 +16,7 @@ logger = get_logger()
 
 PERSISTENCY = os.environ.get("CHAINLIT_DATALAYER_COMPOSE", "") != ""
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
+AUTH_MODE = os.environ.get("AUTH_MODE", "token").strip().lower()
 
 # Chainlit authentication
 CHAINLIT_AUTH_SECRET = os.environ.get("CHAINLIT_AUTH_SECRET")
@@ -54,6 +55,19 @@ def get_headers(api_key):
     return headers
 
 
+def _extract_cookie(cookie_header: str, name: str) -> str | None:
+    """Parse a single cookie value from a Cookie header. No dependency on http.cookies for simplicity."""
+    if not cookie_header:
+        return None
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if "=" in part:
+            k, _, v = part.partition("=")
+            if k.strip() == name:
+                return v.strip()
+    return None
+
+
 if PERSISTENCY:
 
     @cl.on_chat_resume
@@ -61,7 +75,7 @@ if PERSISTENCY:
         pass
 
 
-if AUTH_TOKEN:
+if AUTH_TOKEN and AUTH_MODE != "oidc":
     if not CHAINLIT_AUTH_SECRET:
         # logger.warning(
         #     "`CHAINLIT_AUTH_SECRET` is not set a default value will be used. Not recommended for production."
@@ -95,6 +109,44 @@ if AUTH_TOKEN:
         except Exception as e:
             logger.exception("Unexpected error during authentication", error=str(e))
             return None
+
+elif AUTH_MODE == "oidc":
+    if not CHAINLIT_AUTH_SECRET:
+        os.environ["CHAINLIT_AUTH_SECRET"] = "default_secret_for_openrag_ui"
+
+    @cl.header_auth_callback
+    async def header_auth_callback(headers: dict) -> cl.User | None:
+        """Authenticate Chainlit users via the openrag_session cookie posted by /auth/callback."""
+        cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
+        session_token = _extract_cookie(cookie_header, "openrag_session")
+        if not session_token:
+            logger.info("No openrag_session cookie in Chainlit request")
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+                response = await client.get(
+                    url=f"{INTERNAL_BASE_URL}/users/info",
+                    headers=get_headers(session_token),
+                )
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as e:
+            logger.info("Session cookie rejected by /users/info", status=e.response.status_code)
+            return None
+        except Exception as e:
+            logger.exception("Chainlit header_auth_callback failure", error=str(e))
+            return None
+
+        return cl.User(
+            identifier=data.get("display_name", "user"),
+            metadata={
+                "role": "admin" if data.pop("is_admin", False) else "user",
+                "provider": "oidc",
+                "api_key": session_token,  # opaque cookie value — used as Bearer for internal calls
+                "extra": data,
+            },
+        )
 
 
 def get_external_url():

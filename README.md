@@ -208,6 +208,17 @@ Once the app is up and running, visit `http://localhost:APP_PORT` or `http:X.X.X
 >[!NOTE]
 > Chainlit UI has no authentication by default. To enable it, follow the [dedicated guide](./docs/setup_chainlit_ui_auth.md). The same goes for chat data persistancy, enable it with this [guide](docs/chainlit_data_persistency.md)
 
+#### Authentication Modes
+
+OpenRag supports two authentication modes:
+
+- **Token Mode** (`AUTH_MODE=token`, default): Bearer token authentication via `Authorization: Bearer <AUTH_TOKEN>` header. Suitable for development and programmatic access.
+- **OIDC Mode** (`AUTH_MODE=oidc`): OpenID Connect flow with an external identity provider (Keycloak, LemonLDAP::NG, etc.). Users authenticate via browser redirect to the IdP.
+
+To enable OIDC, set `AUTH_MODE=oidc` and configure the required OIDC variables (see [`.env.example`](./.env.example) for the full list).
+
+For comprehensive OIDC setup and configuration, see the [OIDC Authentication Guide](./docs/oidc.md).
+
 3. `http://localhost:INDEXERUI_PORT` to access the indexer ui for easy document ingestion, indexing, and management
 
 #### 5. Distributed deployment in a Ray cluster

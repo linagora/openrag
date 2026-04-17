@@ -323,3 +323,94 @@ from config import load_config
 # Avoid relative imports across packages
 # from .ray_utils import ...  # Only within same package
 ```
+
+### OIDC Authentication (OpenID Connect)
+
+OpenRag supports two authentication modes, controlled by the `AUTH_MODE` environment variable:
+
+**Token Mode** (`AUTH_MODE=token`, default):
+- Bearer token authentication via `Authorization: Bearer <AUTH_TOKEN>` header
+- Existing behavior unchanged
+- Suitable for programmatic access, CI/CD, and testing
+- Admin user (id=1) created with `AUTH_TOKEN` env var or random token on bootstrap
+
+**OIDC Mode** (`AUTH_MODE=oidc`):
+- OpenID Connect Authorization Code + PKCE flow
+- Users authenticate via an external IdP (Keycloak, LemonLDAP::NG, etc.)
+- Browser UI (Chainlit, Indexer) redirects to IdP login
+- Opaque session tokens stored in `openrag_session` httpOnly cookie
+- Bearer `users.token` still accepted for programmatic access
+
+**Env Variables** (required when `AUTH_MODE=oidc`):
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `OIDC_ENDPOINT` | Issuer URL for auto-discovery | `https://idp.example.com/realms/openrag` |
+| `OIDC_CLIENT_ID` | Client registered at IdP | `openrag` |
+| `OIDC_CLIENT_SECRET` | Client secret | (provided by IdP) |
+| `OIDC_REDIRECT_URI` | Callback URL (must match IdP config) | `https://openrag.example.com/auth/callback` |
+| `OIDC_TOKEN_ENCRYPTION_KEY` | Fernet key for token encryption | (generate via: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`) |
+
+**Optional Env Variables**:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `OIDC_EMAIL_SOURCE` | `id_token` | Claim source: `id_token` or `userinfo` |
+| `OIDC_SCOPES` | `openid email profile offline_access` | Space-separated scope list (include `offline_access` for refresh tokens) |
+| `OIDC_POST_LOGOUT_REDIRECT_URI` | `/` | URL to redirect after RP-initiated logout |
+| `OIDC_ALLOWED_EMAIL_DOMAINS` | (none) | CSV whitelist of email domains (e.g., `example.com,partner.org`) |
+
+**User Matching & Provisioning**:
+
+When a user logs in via OIDC:
+1. Lookup by `users.external_user_id = sub` (OIDC claim, stable identifier)
+2. Fallback: lookup by `users.email = email` claim
+3. On email match, backfill `external_user_id = sub` (first login only)
+4. If neither matches: reject with 403 (no auto-provisioning)
+
+**Admin Pre-provisioning**: Admins must create users in the database with matching email (and optionally `external_user_id` if known). Example:
+```bash
+curl -X POST http://localhost:8080/users/ \
+  -H "Authorization: Bearer <AUTH_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"display_name": "Alice", "email": "alice@example.com", "is_admin": false}'
+```
+
+**Database Schema**:
+
+New columns on `users` table:
+- `email` (String, unique, nullable): Email matching the `email` OIDC claim
+
+New table `oidc_sessions`:
+- `session_token_hash` (unique): SHA-256 of the opaque session token
+- `user_id` (FK): User this session belongs to
+- `sid` (nullable): OIDC session identifier (used for back-channel logout)
+- `sub` (required): OIDC `sub` claim (stable user identifier)
+- `id_token_encrypted`, `access_token_encrypted`, `refresh_token_encrypted`: Fernet-encrypted IdP tokens
+- `access_token_expires_at`, `session_expires_at`: Token expiry times
+- `revoked_at` (nullable): Set on back-channel logout or manual revocation
+
+**Auth Endpoints** (all bypass the normal middleware):
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/auth/login` | Start Authorization Code + PKCE flow; redirects to IdP |
+| GET | `/auth/callback` | IdP callback; creates session, sets cookie; redirects to `next_url` |
+| POST | `/auth/backchannel-logout` | IdP-driven logout (OIDC spec); revokes sessions by `sid` |
+| GET | `/auth/logout` | RP-initiated logout; invalidates session + redirects to IdP |
+| GET | `/auth/me` | (debug) Returns current user and session expiry |
+
+**Session Management**:
+
+- Session token: 32-byte hex opaque token, hashed (SHA-256) before storage
+- Cookie: `openrag_session` (httpOnly, Secure if HTTPS, SameSite=Lax, Path=/, no Domain=)
+- TTL: Aligned with `access_token_expires_at`; auto-refresh if `refresh_token` available (<60s before expiry)
+- Revocation: Via back-channel logout or manual invalidation
+
+**Middleware Behavior**:
+
+- UI paths (`/`, `/chainlit`, `/static`) without auth → 302 redirect to `/auth/login?next=...`
+- API paths (`/v1`, `/indexer`, `/search`, etc.) without auth → 401 JSON response
+- Programmtic access: Bearer `users.token` accepted in both modes
+
+**See Also**: Full configuration and troubleshooting guide at `docs/oidc.md`.

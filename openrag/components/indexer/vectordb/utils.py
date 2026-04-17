@@ -1,10 +1,11 @@
 import hashlib
 import os
 import secrets
+from datetime import datetime, timedelta
 
 from config import load_config
 from models.user import UserCreate, UserUpdate
-from sqlalchemy import create_engine, delete, func, select, text
+from sqlalchemy import create_engine, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy_utils import (
@@ -14,7 +15,16 @@ from sqlalchemy_utils import (
 from utils.exceptions.vectordb import *
 from utils.logger import get_logger
 
-from .models import Base, File, Partition, PartitionMembership, User, Workspace, WorkspaceFile
+from .models import (
+    Base,
+    File,
+    OIDCSession,
+    Partition,
+    PartitionMembership,
+    User,
+    Workspace,
+    WorkspaceFile,
+)
 
 logger = get_logger()
 config = load_config()
@@ -319,6 +329,7 @@ class PartitionFileManager:
             user = User(
                 display_name=body.display_name,
                 external_user_id=body.external_user_id,
+                email=(body.email.strip().lower() if body.email else None),
                 token=hashed_token,
                 is_admin=body.is_admin,
                 file_quota=file_quota,
@@ -331,6 +342,7 @@ class PartitionFileManager:
                 "id": user.id,
                 "display_name": user.display_name,
                 "external_user_id": user.external_user_id,
+                "email": user.email,
                 "token": token,
                 "is_admin": user.is_admin,
                 "file_quota": user.file_quota,
@@ -824,3 +836,276 @@ class PartitionFileManager:
                 )
             )
             session.commit()
+
+    # ------------------------------------------------------------------
+    # OIDC — users lookup / external_user_id backfill
+    # ------------------------------------------------------------------
+
+    def _user_to_dict(self, user: User) -> dict:
+        """Serialize a User ORM object to the dict shape used elsewhere."""
+        memberships = [
+            {
+                "partition": m.partition_name,
+                "role": m.role,
+                "added_at": m.added_at.isoformat(),
+            }
+            for m in user.memberships
+        ]
+        return {
+            "id": user.id,
+            "display_name": user.display_name,
+            "email": user.email,
+            "external_user_id": user.external_user_id,
+            "is_admin": user.is_admin,
+            "file_quota": user.file_quota,
+            "file_count": user.file_count,
+            "memberships": memberships,
+        }
+
+    def get_user_by_external_id(self, external_user_id: str) -> dict | None:
+        """Return the user (as dict) whose ``external_user_id`` matches, or None.
+
+        ``external_user_id`` stores the stable OIDC ``sub`` claim in OIDC mode.
+        """
+        with self.Session() as s:
+            user = s.query(User).filter(User.external_user_id == external_user_id).first()
+            if not user:
+                return None
+            return self._user_to_dict(user)
+
+    def get_user_by_email(self, email: str) -> dict | None:
+        """Return the user (as dict) whose ``email`` matches exactly, or None.
+
+        NOTE: comparison is **case-sensitive**. OIDC email claims are typically
+        lowercased by the IdP, but this is not guaranteed by the spec
+        (RFC 7519 §4.1 treats it as arbitrary string). Callers doing lookups
+        against user-provided input should normalize upstream if needed.
+        """
+        with self.Session() as s:
+            user = s.query(User).filter(User.email == email).first()
+            if not user:
+                return None
+            return self._user_to_dict(user)
+
+    def set_user_external_id(self, user_id: int, external_user_id: str) -> None:
+        """Backfill ``users.external_user_id`` on first successful OIDC login.
+
+        Behaviour:
+        - if currently NULL → set to ``external_user_id`` (backfill).
+        - if already equal to ``external_user_id`` → no-op.
+        - if set to a *different* value → raise ValueError (identity conflict;
+          caller must handle by logging and returning 403 — see AC6d).
+        """
+        with self.Session() as s:
+            user = s.query(User).filter(User.id == user_id).first()
+            if user is None:
+                raise ValueError(f"user_id={user_id} does not exist")
+            if user.external_user_id is None:
+                user.external_user_id = external_user_id
+                s.commit()
+                self.logger.info(
+                    f"Backfilled external_user_id for user_id={user_id}"
+                )
+                return
+            if user.external_user_id == external_user_id:
+                return  # idempotent no-op
+            raise ValueError(
+                "external_user_id mismatch for user_id="
+                f"{user_id}: stored={user.external_user_id!r}, "
+                f"incoming={external_user_id!r}"
+            )
+
+    # ------------------------------------------------------------------
+    # OIDC — sessions
+    # ------------------------------------------------------------------
+
+    def _oidc_session_to_dict(self, session_row: OIDCSession) -> dict:
+        """Serialize an OIDCSession ORM row to a dict. Encrypted blobs are
+        passed through untouched — the caller (middleware) decrypts them."""
+        return {
+            "id": session_row.id,
+            "user_id": session_row.user_id,
+            "sub": session_row.sub,
+            "sid": session_row.sid,
+            "id_token_encrypted": session_row.id_token_encrypted,
+            "access_token_encrypted": session_row.access_token_encrypted,
+            "refresh_token_encrypted": session_row.refresh_token_encrypted,
+            "access_token_expires_at": session_row.access_token_expires_at,
+            "session_expires_at": session_row.session_expires_at,
+            "created_at": session_row.created_at,
+            "last_refresh_at": session_row.last_refresh_at,
+            "revoked_at": session_row.revoked_at,
+        }
+
+    def create_oidc_session(
+        self,
+        *,
+        user_id: int,
+        sub: str,
+        sid: str | None,
+        session_token_plain: str,
+        id_token_encrypted: bytes | None,
+        access_token_encrypted: bytes | None,
+        refresh_token_encrypted: bytes | None,
+        access_token_expires_at: datetime,
+        session_expires_at: datetime,
+    ) -> dict:
+        """Insert a new OIDC session row. ``session_token_plain`` is hashed
+        (SHA-256) before storage — the plaintext is never persisted.
+
+        Returns the row as a dict. Caller is responsible for setting the
+        ``openrag_session`` cookie with ``session_token_plain``.
+        """
+        session_token_hash = self.hash_token(session_token_plain)
+        with self.Session() as s:
+            row = OIDCSession(
+                session_token_hash=session_token_hash,
+                user_id=user_id,
+                sub=sub,
+                sid=sid,
+                id_token_encrypted=id_token_encrypted,
+                access_token_encrypted=access_token_encrypted,
+                refresh_token_encrypted=refresh_token_encrypted,
+                access_token_expires_at=access_token_expires_at,
+                session_expires_at=session_expires_at,
+            )
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            self.logger.bind(user_id=user_id, sid=sid).info("Created OIDC session")
+            return self._oidc_session_to_dict(row)
+
+    def get_oidc_session_by_token(self, session_token_plain: str) -> dict | None:
+        """Look up an OIDC session by its plaintext cookie token.
+
+        Returns None if:
+        - no row with matching ``session_token_hash``
+        - the row is revoked (``revoked_at IS NOT NULL``)
+        - the session has expired (``session_expires_at < now()``)
+        """
+        session_token_hash = self.hash_token(session_token_plain)
+        now = datetime.now()
+        with self.Session() as s:
+            row = (
+                s.query(OIDCSession)
+                .filter(OIDCSession.session_token_hash == session_token_hash)
+                .first()
+            )
+            if row is None:
+                return None
+            if row.revoked_at is not None:
+                return None
+            if row.session_expires_at < now:
+                return None
+            return self._oidc_session_to_dict(row)
+
+    def get_oidc_session_by_id(self, session_id: int) -> dict | None:
+        """Look up an OIDC session by primary key.
+
+        Used by the refresh-token stampede guard in
+        ``components.auth.refresh.refresh_session_if_needed``: when a concurrent
+        request may have already rotated the tokens, the helper re-reads the row
+        to see whether it can reuse the fresh tokens instead of calling the IdP
+        with the (now-invalidated) old refresh_token.
+
+        Returns the row as a dict, or ``None`` if the row does not exist, is
+        revoked, or the hard session cap has elapsed.
+        """
+        now = datetime.now()
+        with self.Session() as s:
+            row = s.query(OIDCSession).filter(OIDCSession.id == session_id).first()
+            if row is None:
+                return None
+            if row.revoked_at is not None:
+                return None
+            if row.session_expires_at < now:
+                return None
+            return self._oidc_session_to_dict(row)
+
+    def update_oidc_session_tokens(
+        self,
+        *,
+        session_id: int,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes | None,
+        access_token_expires_at: datetime,
+    ) -> None:
+        """Persist refreshed tokens after a successful refresh_token exchange.
+
+        Also bumps ``last_refresh_at`` to ``now()``. Does NOT extend
+        ``session_expires_at`` — the hard session cap is set at creation time
+        and is unaffected by access-token rotation.
+
+        The row is locked with ``SELECT ... FOR UPDATE`` so that concurrent
+        refresh calls on the same session serialize at the DB level (Postgres).
+        SQLite silently ignores the lock hint, which is fine for tests — the
+        ``last_refresh_at`` short-circuit in :mod:`components.auth.refresh`
+        already handles the common stampede case without needing a real lock.
+        """
+        with self.Session() as s:
+            row = (
+                s.query(OIDCSession)
+                .filter(OIDCSession.id == session_id)
+                .with_for_update()
+                .first()
+            )
+            if row is None:
+                raise ValueError(f"oidc_session id={session_id} does not exist")
+            row.access_token_encrypted = access_token_encrypted
+            if refresh_token_encrypted is not None:
+                row.refresh_token_encrypted = refresh_token_encrypted
+            row.access_token_expires_at = access_token_expires_at
+            row.last_refresh_at = datetime.now()
+            s.commit()
+
+    def revoke_oidc_sessions_by_sid(self, sid: str) -> int:
+        """Revoke all non-revoked sessions matching the given OIDC ``sid``.
+
+        Used by the OIDC Back-Channel Logout flow — the IdP POSTs a signed
+        logout_token with a ``sid`` claim; we mark every session with that
+        sid as revoked. Returns the count affected.
+        """
+        now = datetime.now()
+        with self.Session() as s:
+            stmt = (
+                update(OIDCSession)
+                .where(OIDCSession.sid == sid)
+                .where(OIDCSession.revoked_at.is_(None))
+                .values(revoked_at=now)
+            )
+            result = s.execute(stmt)
+            s.commit()
+            count = result.rowcount or 0
+            self.logger.bind(sid=sid, count=count).info(
+                "Revoked OIDC sessions by sid"
+            )
+            return count
+
+    def revoke_oidc_session_by_id(self, session_id: int) -> None:
+        """Revoke a single session by primary key. Used by RP-initiated logout."""
+        now = datetime.now()
+        with self.Session() as s:
+            row = s.query(OIDCSession).filter(OIDCSession.id == session_id).first()
+            if row is None:
+                return
+            if row.revoked_at is None:
+                row.revoked_at = now
+                s.commit()
+                self.logger.bind(session_id=session_id).info("Revoked OIDC session")
+
+    def cleanup_expired_oidc_sessions(self) -> int:
+        """Delete rows whose ``session_expires_at`` is older than 7 days.
+
+        A retention window after expiry helps post-mortem debugging while
+        keeping the table bounded. Intended to be called by a future cron.
+        Returns the number of rows deleted.
+        """
+        cutoff = datetime.now() - timedelta(days=7)
+        with self.Session() as s:
+            stmt = delete(OIDCSession).where(OIDCSession.session_expires_at < cutoff)
+            result = s.execute(stmt)
+            s.commit()
+            count = result.rowcount or 0
+            if count:
+                self.logger.info(f"Cleaned up {count} expired OIDC sessions")
+            return count

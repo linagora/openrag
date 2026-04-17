@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     UniqueConstraint,
 )
@@ -102,12 +103,41 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     external_user_id = Column(String, unique=True, nullable=True, index=True)
     display_name = Column(String, nullable=True)
+    email = Column(String, unique=True, nullable=True, index=True)
     token = Column(String, unique=True, nullable=True, index=True)
     is_admin = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     file_quota = Column(Integer, nullable=True, default=None)
     file_count = Column(Integer, nullable=False, default=0)
     memberships = relationship("PartitionMembership", back_populates="user", cascade="all, delete-orphan")
+    oidc_sessions = relationship("OIDCSession", back_populates="user", cascade="all, delete-orphan")
+
+
+class OIDCSession(Base):
+    __tablename__ = "oidc_sessions"
+
+    id = Column(Integer, primary_key=True)
+    session_token_hash = Column(String(64), unique=True, nullable=False, index=True)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    sid = Column(String, nullable=True, index=True)  # OIDC session id claim (for back-channel logout)
+    sub = Column(String, nullable=False)  # OIDC subject claim
+    id_token_encrypted = Column(LargeBinary, nullable=True)
+    access_token_encrypted = Column(LargeBinary, nullable=True)
+    refresh_token_encrypted = Column(LargeBinary, nullable=True)
+    access_token_expires_at = Column(DateTime, nullable=False)
+    session_expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+    last_refresh_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+
+    user = relationship("User", back_populates="oidc_sessions")
+
+    __table_args__ = (Index("ix_oidc_sessions_user_sub", "user_id", "sub"),)
 
 
 class PartitionMembership(Base):

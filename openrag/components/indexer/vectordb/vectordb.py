@@ -1229,6 +1229,76 @@ class MilvusDB(BaseVectorDB):
         self._check_user_exists(user_id)
         return self.partition_file_manager.list_user_partitions(user_id)
 
+    # ------------------------------------------------------------------
+    # OIDC — exposed on the Ray actor (thin delegations)
+    # ------------------------------------------------------------------
+
+    async def get_user_by_external_id(self, external_user_id: str):
+        return self.partition_file_manager.get_user_by_external_id(external_user_id)
+
+    async def get_user_by_email(self, email: str):
+        return self.partition_file_manager.get_user_by_email(email)
+
+    async def set_user_external_id(self, user_id: int, external_user_id: str):
+        self._check_user_exists(user_id)
+        return self.partition_file_manager.set_user_external_id(user_id, external_user_id)
+
+    async def create_oidc_session(
+        self,
+        *,
+        user_id: int,
+        sub: str,
+        sid: str | None,
+        session_token_plain: str,
+        id_token_encrypted: bytes | None,
+        access_token_encrypted: bytes | None,
+        refresh_token_encrypted: bytes | None,
+        access_token_expires_at,
+        session_expires_at,
+    ):
+        self._check_user_exists(user_id)
+        return self.partition_file_manager.create_oidc_session(
+            user_id=user_id,
+            sub=sub,
+            sid=sid,
+            session_token_plain=session_token_plain,
+            id_token_encrypted=id_token_encrypted,
+            access_token_encrypted=access_token_encrypted,
+            refresh_token_encrypted=refresh_token_encrypted,
+            access_token_expires_at=access_token_expires_at,
+            session_expires_at=session_expires_at,
+        )
+
+    async def get_oidc_session_by_token(self, session_token_plain: str):
+        return self.partition_file_manager.get_oidc_session_by_token(session_token_plain)
+
+    async def get_oidc_session_by_id(self, session_id: int):
+        return self.partition_file_manager.get_oidc_session_by_id(session_id)
+
+    async def update_oidc_session_tokens(
+        self,
+        *,
+        session_id: int,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes | None,
+        access_token_expires_at,
+    ):
+        return self.partition_file_manager.update_oidc_session_tokens(
+            session_id=session_id,
+            access_token_encrypted=access_token_encrypted,
+            refresh_token_encrypted=refresh_token_encrypted,
+            access_token_expires_at=access_token_expires_at,
+        )
+
+    async def revoke_oidc_sessions_by_sid(self, sid: str) -> int:
+        return self.partition_file_manager.revoke_oidc_sessions_by_sid(sid)
+
+    async def revoke_oidc_session_by_id(self, session_id: int) -> None:
+        return self.partition_file_manager.revoke_oidc_session_by_id(session_id)
+
+    async def cleanup_expired_oidc_sessions(self) -> int:
+        return self.partition_file_manager.cleanup_expired_oidc_sessions()
+
     async def list_partition_members(self, partition: str) -> list[dict]:
         self._check_partition_exists(partition)
         return self.partition_file_manager.list_partition_members(partition)
