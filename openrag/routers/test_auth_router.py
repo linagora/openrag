@@ -64,8 +64,8 @@ def _make_rsa_key_pair():
 _RSA_PRIVATE, _RSA_PRIVATE_JWK, _RSA_PUBLIC_JWK = _make_rsa_key_pair()
 _RSA_PUBLIC_JWK["use"] = "sig"
 _RSA_PUBLIC_JWK["alg"] = "RS256"
-_RSA_PUBLIC_JWK.setdefault("kid", "test-key-1")
-_RSA_PRIVATE_JWK.setdefault("kid", "test-key-1")
+_RSA_PUBLIC_JWK["kid"] = "test-key-1"
+_RSA_PRIVATE_JWK["kid"] = "test-key-1"
 
 JWKS_RESPONSE = {"keys": [_RSA_PUBLIC_JWK]}
 

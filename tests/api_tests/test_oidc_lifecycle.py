@@ -62,11 +62,11 @@ _FERNET_KEY = Fernet.generate_key().decode()
 
 _RSA_PRIVATE = JsonWebKey.generate_key("RSA", 2048, is_private=True)
 _RSA_PRIVATE_JWK = _RSA_PRIVATE.as_dict(is_private=True)
-_RSA_PRIVATE_JWK.setdefault("kid", "test-key-1")
+_RSA_PRIVATE_JWK["kid"] = "test-key-1"
 _RSA_PUBLIC_JWK = _RSA_PRIVATE.as_dict()
 _RSA_PUBLIC_JWK["use"] = "sig"
 _RSA_PUBLIC_JWK["alg"] = "RS256"
-_RSA_PUBLIC_JWK.setdefault("kid", "test-key-1")
+_RSA_PUBLIC_JWK["kid"] = "test-key-1"
 JWKS_RESPONSE = {"keys": [_RSA_PUBLIC_JWK]}
 
 
