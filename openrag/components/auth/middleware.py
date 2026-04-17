@@ -133,8 +133,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         user = None
         session = None
 
-        # --- 1) Cookie session (OIDC UI flow).
-        cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
+        # --- 1) Cookie session (OIDC UI flow). Gated on oidc mode so the
+        #        legacy token-mode contract remains strictly Bearer-only —
+        #        a stray openrag_session cookie must not authenticate a
+        #        request when AUTH_MODE=token.
+        cookie_token = request.cookies.get(SESSION_COOKIE_NAME) if auth_mode == "oidc" else None
         if cookie_token:
             session = await vectordb.get_oidc_session_by_token.remote(cookie_token)
             if session is not None:

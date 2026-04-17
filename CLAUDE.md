@@ -401,7 +401,7 @@ New table `oidc_sessions`:
 
 **Session Management**:
 
-- Session token: 32-byte hex opaque token, hashed (SHA-256) before storage
+- Session token: URL-safe opaque token (`secrets.token_urlsafe(32)` — ~43 chars from 32 bytes of randomness), hashed (SHA-256) before storage
 - Cookie: `openrag_session` (httpOnly, Secure if HTTPS, SameSite=Lax, Path=/, no Domain=)
 - TTL: Aligned with `access_token_expires_at`; auto-refresh if `refresh_token` available (<60s before expiry)
 - Revocation: Via back-channel logout or manual invalidation

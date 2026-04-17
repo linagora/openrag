@@ -4,8 +4,9 @@ These tests mount the middleware on a minimal FastAPI app with a ``MagicMock``
 ``vectordb`` — no Ray, no Postgres, no Milvus. They exercise the decision tree
 documented in ``.omc/plans/oidc-auth/plan.md`` §6.1.
 
-Timezone policy: Phase 2 stores session timestamps as naive UTC (``datetime.now()``),
-so the refresh helper compares naive datetimes. These tests follow suit.
+Timezone policy: Phase 2 stores session timestamps as naive local time
+(``datetime.now()``), so the refresh helper compares naive datetimes. These
+tests follow suit.
 """
 
 from __future__ import annotations

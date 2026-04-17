@@ -10,10 +10,14 @@ x-openrag: &openrag_template
     context: .
     dockerfile: Dockerfile
   extra_hosts:
-    # Let containers resolve hostnames defined in the host's /etc/hosts
-    # (e.g. auth.example.com for a local OIDC provider running on the host).
+    # Let containers reach services running on the Docker host via
+    # ``host.docker.internal`` (Linux Docker >= 20.10). Useful when an OIDC
+    # provider runs on the host in AUTH_MODE=oidc. If the IdP is behind a
+    # custom hostname resolved only in the host's /etc/hosts, add your own
+    # mapping via a ``docker-compose.override.yaml`` rather than editing this
+    # list — otherwise real external domains with the same name would be
+    # shadowed for other users.
     - "host.docker.internal:host-gateway"
-    - "auth.example.com:host-gateway"
   volumes:
     - ${DATA_VOLUME:-./data}:/app/data
     - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
@@ -100,8 +104,8 @@ services:
         condition: service_started
       milvus:
         condition: service_healthy
-      #vllm-gpu:
-      #  condition: service_healthy
+      vllm-gpu:
+        condition: service_healthy
 
   # No GPU
   openrag-cpu:
@@ -114,8 +118,8 @@ services:
         condition: service_started
       milvus:
         condition: service_healthy
-      #vllm-cpu:
-      #  condition: service_healthy
+      vllm-cpu:
+        condition: service_healthy
 
   rdb:
     image: postgres:15
@@ -127,48 +131,48 @@ services:
     expose:
       - 5432
 
-  #vllm-gpu:
-  #  <<: *vllm_template
-  #  image: vllm/vllm-openai:v0.9.2
-  #  environment:
-  #    <<: *vllm_env
-  #    NVIDIA_VISIBLE_DEVICES: all
-  #    NVIDIA_DRIVER_CAPABILITIES: compute,utility
-  #  runtime: nvidia
-  #  deploy:
-  #    resources:
-  #      reservations:
-  #        devices:
-  #          - driver: nvidia
-  #            count: all
-  #            capabilities: [gpu]
-  #  profiles:
-  #    - "" # Empty string gives default behavior (but does not run when cpu requested)
+  vllm-gpu:
+    <<: *vllm_template
+    image: vllm/vllm-openai:v0.9.2
+    environment:
+      <<: *vllm_env
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles:
+      - "" # Empty string gives default behavior (but does not run when cpu requested)
 
-  #vllm-cpu:
-  #  <<: *vllm_template
-  #  build:
-  #    context: extern/vllm
-  #    dockerfile: Dockerfile.cpu
-  #    target: vllm-openai
-  #  image: openrag-vllm-openai-cpu
-  #  deploy: {}
-  #  environment:
-  #    <<: *vllm_env
-  #    VLLM_CPU_KVCACHE_SPACE: 8
-  #  # Default value isn't sufficient for full context length
-  #  command: >
-  #    --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
-  #    --trust-remote-code
-  #    --dtype float32
-  #    --max-model-len ${MAX_MODEL_LEN:-8192}
-  #  #  --max-num-batched-tokens 32768
-  #  # dtype is required for aarch64 (https://github.com/vllm-project/vllm/issues/11327) and improves speed on amd64.
-  #  # max-num-batched-tokens is required for aarch64 because chunked prefill isn't supported by V1 vllm backend
-  #  # for aarch64 yet. On aarch64 max-num-batched-tokens must be equal max-model-len for now (without chunked prefill).
-  #  # For details see https://github.com/vllm-project/vllm/issues/21179
-  #  profiles:
-  #    - "cpu"
+  vllm-cpu:
+    <<: *vllm_template
+    build:
+      context: extern/vllm
+      dockerfile: Dockerfile.cpu
+      target: vllm-openai
+    image: openrag-vllm-openai-cpu
+    deploy: {}
+    environment:
+      <<: *vllm_env
+      VLLM_CPU_KVCACHE_SPACE: 8
+    # Default value isn't sufficient for full context length
+    command: >
+      --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
+      --trust-remote-code
+      --dtype float32
+      --max-model-len ${MAX_MODEL_LEN:-8192}
+    #  --max-num-batched-tokens 32768
+    # dtype is required for aarch64 (https://github.com/vllm-project/vllm/issues/11327) and improves speed on amd64.
+    # max-num-batched-tokens is required for aarch64 because chunked prefill isn't supported by V1 vllm backend
+    # for aarch64 yet. On aarch64 max-num-batched-tokens must be equal max-model-len for now (without chunked prefill).
+    # For details see https://github.com/vllm-project/vllm/issues/21179
+    profiles:
+      - "cpu"
 
 networks:
   default:

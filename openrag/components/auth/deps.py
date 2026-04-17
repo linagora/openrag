@@ -55,7 +55,29 @@ def get_oidc_client() -> OIDCClient:
 
 
 def reset_oidc_client() -> None:
-    """Test hook — drops the cached client so the next call rebuilds from env."""
+    """Test hook — drops the cached client so the next call rebuilds from env.
+
+    Best-effort closes the underlying httpx.AsyncClient to avoid "Unclosed
+    client session" warnings and leaking connections when tests repeatedly
+    reset the singleton. If no event loop is running we skip the close call
+    — the GC will eventually reclaim the socket.
+    """
     global _client
     with _lock:
+        old = _client
         _client = None
+    if old is None:
+        return
+    try:
+        import asyncio
+
+        loop = asyncio.get_event_loop_policy().get_event_loop()
+        if loop.is_running():
+            # Schedule close on the running loop without awaiting — caller
+            # doesn't need to be async.
+            loop.create_task(old.aclose())
+        else:
+            loop.run_until_complete(old.aclose())
+    except Exception:
+        # Closing is best-effort; never let a reset blow up the caller.
+        pass

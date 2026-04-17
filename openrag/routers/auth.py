@@ -269,11 +269,13 @@ async def callback(request: Request, code: str | None = None, state: str | None 
             code_verifier=payload.code_verifier,
             expected_nonce=payload.nonce,
         )
-    except Exception as e:
-        logger.warning(f"OIDC code exchange failed: {e}")
+    except Exception:
+        # Log full exception for operators; return a generic message so IdP
+        # URLs / stack-adjacent internals don't leak via the HTTP response.
+        logger.exception("OIDC code exchange failed")
         return _json_error(
             status.HTTP_400_BAD_REQUEST,
-            f"OIDC code exchange failed: {e}",
+            "OIDC code exchange failed",
             delete_state_cookie=True,
         )
 

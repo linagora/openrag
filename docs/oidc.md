@@ -721,7 +721,7 @@ Server logs record the attempted `sub` at `WARNING` level so admins can copy it 
 ### CSRF Mitigation
 
 - Authorization requests use a server-generated `state` parameter
-- The `state` is stored in a temporary, signed cookie (`idp_state`, 5-minute TTL)
+- The `state` is stored in a temporary, itsdangerous-signed cookie (`openrag_oidc_state`, 10-minute TTL)
 - The callback validates that the returned `state` matches the cookie
 - Prevents CSRF attacks on the callback endpoint
 

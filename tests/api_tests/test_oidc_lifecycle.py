@@ -72,7 +72,8 @@ JWKS_RESPONSE = {"keys": [_RSA_PUBLIC_JWK]}
 
 def _sign_jwt(payload: dict) -> str:
     header = {"alg": "RS256", "kid": "test-key-1"}
-    jwt = JsonWebToken()
+    # Authlib >=1.0 requires the allowed-algorithms list.
+    jwt = JsonWebToken(["RS256"])
     token = jwt.encode(header, payload, _RSA_PRIVATE)
     return token.decode() if isinstance(token, bytes) else token
 
@@ -270,9 +271,10 @@ _users_router_mod = importlib.import_module("routers.users")
 # ---------------------------------------------------------------------------
 
 
-def _make_app(transport) -> tuple[FastAPI, TestClient]:
+def _make_app(router) -> tuple[FastAPI, TestClient]:
     """Build a minimal FastAPI app combining auth + users routers, with a
-    mocked IdP transport injected into the OIDCClient singleton."""
+    respx MockRouter injected into the OIDCClient singleton. respx >= 0.22
+    exposes MockRouter + httpx.MockTransport(router.handler)."""
     app = FastAPI()
 
     # Install the AuthMiddleware (from components.auth.middleware)
@@ -283,7 +285,7 @@ def _make_app(transport) -> tuple[FastAPI, TestClient]:
     app.include_router(_auth_router_mod.router)
     app.include_router(_users_router_mod.router, prefix="/users")
 
-    # Override OIDCClient singleton with our mocked transport
+    # Override OIDCClient singleton with our mocked http transport.
     _auth_deps.reset_oidc_client()
     _auth_deps._client = _auth_router_mod.OIDCClient(
         issuer=ISSUER,
@@ -291,7 +293,7 @@ def _make_app(transport) -> tuple[FastAPI, TestClient]:
         client_secret=CLIENT_SECRET,
         redirect_uri=REDIRECT_URI,
         scopes=SCOPES,
-        http_client=httpx.AsyncClient(transport=transport),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(router.handler)),
     )
 
     client = TestClient(app, raise_server_exceptions=True)
@@ -333,15 +335,15 @@ def test_full_oidc_lifecycle(monkeypatch):
     )
 
     # ── Build app with mocked transport ──────────────────────────────────────
-    transport = respx.MockTransport(assert_all_called=False)
-    transport.router.get(f"{ISSUER}/.well-known/openid-configuration").mock(
+    router = respx.MockRouter(assert_all_called=False)
+    router.get(f"{ISSUER}/.well-known/openid-configuration").mock(
         return_value=httpx.Response(200, json=DISCOVERY_DOC)
     )
-    transport.router.get(f"{ISSUER}/protocol/openid-connect/certs").mock(
+    router.get(f"{ISSUER}/protocol/openid-connect/certs").mock(
         return_value=httpx.Response(200, json=JWKS_RESPONSE)
     )
 
-    _, client = _make_app(transport)
+    _, client = _make_app(router)
 
     # ── Step 1: GET /auth/login → 302 to IdP ─────────────────────────────────
     r1 = client.get("/auth/login", follow_redirects=False)
@@ -364,7 +366,7 @@ def test_full_oidc_lifecycle(monkeypatch):
     ALICE_SID = "sess-123"
     id_tok = _id_token(nonce, sub=ALICE_SUB, email="alice@example.com", sid=ALICE_SID)
 
-    transport.router.post(f"{ISSUER}/protocol/openid-connect/token").mock(
+    router.post(f"{ISSUER}/protocol/openid-connect/token").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -431,8 +433,6 @@ def test_full_oidc_lifecycle(monkeypatch):
         cookies={"openrag_session": session_cookie},
         follow_redirects=False,
     )
-    # /users/info is an API path → 401, not 302 (per plan §6.1 decision)
-    assert r5.status_code in (401, 302), (
-        f"Revoked session must be rejected, got {r5.status_code}: {r5.text}"
-    )
-    assert r5.status_code != 200, "Revoked session must NOT return 200"
+    # /users/info is an API path → strict 401 JSON (per plan §6.1 decision:
+    # API paths never 302-redirect to /auth/login — that's for UI paths only).
+    assert r5.status_code == 401, f"Revoked API session must return 401, got {r5.status_code}: {r5.text}"

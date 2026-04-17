@@ -342,15 +342,11 @@ def client(env_oidc, fresh_stub_vectordb):
 
 
 def _setup_discovery(router):
-    router.get(f"{ISSUER}/.well-known/openid-configuration").mock(
-        return_value=httpx.Response(200, json=DISCOVERY_DOC)
-    )
+    router.get(f"{ISSUER}/.well-known/openid-configuration").mock(return_value=httpx.Response(200, json=DISCOVERY_DOC))
 
 
 def _setup_jwks(router):
-    router.get(f"{ISSUER}/protocol/openid-connect/certs").mock(
-        return_value=httpx.Response(200, json=JWKS_RESPONSE)
-    )
+    router.get(f"{ISSUER}/protocol/openid-connect/certs").mock(return_value=httpx.Response(200, json=JWKS_RESPONSE))
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +363,7 @@ def test_login_rejected_in_token_mode(env_token, fresh_stub_vectordb):
 
 
 def test_login_redirects_to_idp_with_pkce(client):
-    _setup_discovery(client.oidc_transport)
+    _setup_discovery(client.oidc_router)
     r = client.get("/auth/login", follow_redirects=False)
     assert r.status_code == 302
     loc = r.headers["location"]
@@ -400,7 +396,7 @@ def test_callback_missing_state_cookie(client):
 
 
 def test_callback_state_mismatch(client):
-    _setup_discovery(client.oidc_transport)
+    _setup_discovery(client.oidc_router)
     # First, obtain a legitimate state cookie via /auth/login.
     login_resp = client.get("/auth/login", follow_redirects=False)
     assert login_resp.status_code == 302
@@ -421,7 +417,7 @@ def test_callback_state_mismatch(client):
 
 def _begin_login_and_extract_state(client) -> tuple[str, str]:
     """Call /auth/login and return (state, nonce) values from the redirect query."""
-    _setup_discovery(client.oidc_transport)
+    _setup_discovery(client.oidc_router)
     r = client.get("/auth/login", follow_redirects=False)
     assert r.status_code == 302
     loc = r.headers["location"]
@@ -431,7 +427,7 @@ def _begin_login_and_extract_state(client) -> tuple[str, str]:
     return qs["state"][0], qs["nonce"][0]
 
 
-def _mock_token_endpoint(transport, id_token: str, *, refresh_token: str | None = "rt-1"):
+def _mock_token_endpoint(router, id_token: str, *, refresh_token: str | None = "rt-1"):
     payload = {
         "id_token": id_token,
         "access_token": "at-1",
@@ -440,17 +436,15 @@ def _mock_token_endpoint(transport, id_token: str, *, refresh_token: str | None 
     }
     if refresh_token is not None:
         payload["refresh_token"] = refresh_token
-    transport.router.post(f"{ISSUER}/protocol/openid-connect/token").mock(
-        return_value=httpx.Response(200, json=payload)
-    )
+    router.post(f"{ISSUER}/protocol/openid-connect/token").mock(return_value=httpx.Response(200, json=payload))
 
 
 def test_callback_success_by_external_id(client, fresh_stub_vectordb):
     fresh_stub_vectordb.add_user(user_id=42, email="user@example.com", external_user_id="sub-abc")
-    _setup_jwks(client.oidc_transport)
+    _setup_jwks(client.oidc_router)
     state, nonce = _begin_login_and_extract_state(client)
     id_token = _sign_jwt(_id_token_payload(nonce, sub="sub-abc"))
-    _mock_token_endpoint(client.oidc_transport, id_token)
+    _mock_token_endpoint(client.oidc_router, id_token)
 
     r = client.get(
         f"/auth/callback?code=authcode&state={state}",
@@ -465,10 +459,10 @@ def test_callback_success_by_external_id(client, fresh_stub_vectordb):
 
 def test_callback_user_not_registered(client, fresh_stub_vectordb):
     """Unknown sub → 403 (no email fallback, no auto-provisioning)."""
-    _setup_jwks(client.oidc_transport)
+    _setup_jwks(client.oidc_router)
     state, nonce = _begin_login_and_extract_state(client)
     id_token = _sign_jwt(_id_token_payload(nonce, sub="sub-unknown", email="ghost@example.com"))
-    _mock_token_endpoint(client.oidc_transport, id_token)
+    _mock_token_endpoint(client.oidc_router, id_token)
 
     r = client.get(
         f"/auth/callback?code=c&state={state}",
@@ -488,7 +482,7 @@ def test_callback_applies_claim_mapping_from_id_token(client, fresh_stub_vectord
         external_user_id="sub-abc",
         display_name="Old Name",
     )
-    _setup_jwks(client.oidc_transport)
+    _setup_jwks(client.oidc_router)
     state, nonce = _begin_login_and_extract_state(client)
     id_token = _sign_jwt(
         _id_token_payload(
@@ -498,7 +492,7 @@ def test_callback_applies_claim_mapping_from_id_token(client, fresh_stub_vectord
             extra={"name": "Doctor Who"},
         )
     )
-    _mock_token_endpoint(client.oidc_transport, id_token)
+    _mock_token_endpoint(client.oidc_router, id_token)
 
     r = client.get(
         f"/auth/callback?code=c&state={state}",
@@ -523,12 +517,12 @@ def test_callback_applies_claim_mapping_from_userinfo(client, fresh_stub_vectord
         external_user_id="sub-ui",
         display_name="legacy",
     )
-    _setup_jwks(client.oidc_transport)
+    _setup_jwks(client.oidc_router)
     state, nonce = _begin_login_and_extract_state(client)
     # ID token carries no name/email — the router must pull them from /userinfo.
     id_token = _sign_jwt(_id_token_payload(nonce, sub="sub-ui", email=None))
-    _mock_token_endpoint(client.oidc_transport, id_token)
-    userinfo_route = client.oidc_transport.router.get(f"{ISSUER}/protocol/openid-connect/userinfo").mock(
+    _mock_token_endpoint(client.oidc_router, id_token)
+    userinfo_route = client.oidc_router.get(f"{ISSUER}/protocol/openid-connect/userinfo").mock(
         return_value=httpx.Response(
             200,
             json={"sub": "sub-ui", "name": "UI User", "email": "ui@example.com"},
@@ -555,7 +549,7 @@ def test_callback_skips_mapping_when_unset(client, fresh_stub_vectordb, monkeypa
         external_user_id="sub-plain",
         display_name="Initial",
     )
-    _setup_jwks(client.oidc_transport)
+    _setup_jwks(client.oidc_router)
     state, nonce = _begin_login_and_extract_state(client)
     id_token = _sign_jwt(
         _id_token_payload(
@@ -565,7 +559,7 @@ def test_callback_skips_mapping_when_unset(client, fresh_stub_vectordb, monkeypa
             extra={"name": "Should Be Ignored"},
         )
     )
-    _mock_token_endpoint(client.oidc_transport, id_token)
+    _mock_token_endpoint(client.oidc_router, id_token)
 
     r = client.get(
         f"/auth/callback?code=c&state={state}",
@@ -586,8 +580,8 @@ def test_callback_skips_mapping_when_unset(client, fresh_stub_vectordb, monkeypa
 
 
 def test_backchannel_logout_rejects_invalid_token(client):
-    _setup_discovery(client.oidc_transport)
-    _setup_jwks(client.oidc_transport)
+    _setup_discovery(client.oidc_router)
+    _setup_jwks(client.oidc_router)
     r = client.post(
         "/auth/backchannel-logout",
         data={"logout_token": "not-a-jwt"},
@@ -596,8 +590,8 @@ def test_backchannel_logout_rejects_invalid_token(client):
 
 
 def test_backchannel_logout_revokes_by_sid(client, fresh_stub_vectordb):
-    _setup_jwks(client.oidc_transport)
-    _setup_discovery(client.oidc_transport)
+    _setup_jwks(client.oidc_router)
+    _setup_discovery(client.oidc_router)
 
     # Seed a session to be revoked
     fresh_stub_vectordb._sessions[1] = {
@@ -621,7 +615,7 @@ def test_backchannel_logout_revokes_by_sid(client, fresh_stub_vectordb):
 
 
 def test_logout_revokes_session_and_deletes_cookie(client, fresh_stub_vectordb):
-    _setup_discovery(client.oidc_transport)
+    _setup_discovery(client.oidc_router)
     # Seed a session & cookie
     session_token = "sess-logout-tok"
     fresh_stub_vectordb._sessions[1] = {
@@ -693,10 +687,10 @@ def test_callback_session_not_prematurely_expired_under_nonutc_tz(client, fresh_
         # Teach the stub to back get_oidc_session_by_token with the same dict we
         # created in create_oidc_session (the default stub already does).
         fresh_stub_vectordb.add_user(user_id=77, email="tz@example.com", external_user_id="sub-tz")
-        _setup_jwks(client.oidc_transport)
+        _setup_jwks(client.oidc_router)
         state, nonce = _begin_login_and_extract_state(client)
         id_token = _sign_jwt(_id_token_payload(nonce, sub="sub-tz", email="tz@example.com"))
-        _mock_token_endpoint(client.oidc_transport, id_token)
+        _mock_token_endpoint(client.oidc_router, id_token)
 
         r = client.get(
             f"/auth/callback?code=c&state={state}",
