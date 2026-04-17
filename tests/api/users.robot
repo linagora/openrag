@@ -31,6 +31,22 @@ Get Created User
     Should Be Equal As Strings    ${json}[id]    ${USER_ID}
     Dictionary Should Not Contain Key    ${json}    token
 
+Non-Admin Can Regenerate Own Token
+    Skip If Auth Disabled
+    &{user_headers}=    Create Dictionary    Authorization=Bearer ${USER_TOKEN}
+    ${response}=    POST    ${USERS_ENDPOINT}/${USER_ID}/regenerate_token    headers=${user_headers}    expected_status=200
+    ${json}=    Set Variable    ${response.json()}
+    Dictionary Should Contain Key    ${json}    token
+    Should Not Be Equal As Strings    ${json}[token]    ${USER_TOKEN}
+    Set Suite Variable    ${USER_TOKEN}    ${json}[token]
+
+Non-Admin Cannot Regenerate Other User Token
+    Skip If Auth Disabled
+    &{user_headers}=    Create Dictionary    Authorization=Bearer ${USER_TOKEN}
+    ${response}=    POST    ${USERS_ENDPOINT}/1/regenerate_token    headers=${user_headers}    expected_status=403
+    ${json}=    Set Variable    ${response.json()}
+    Should Contain    ${json}[detail]    You can only regenerate your own token
+
 Regenerate Token
     ${response}=    POST    ${USERS_ENDPOINT}/${USER_ID}/regenerate_token    headers=${HEADERS}    expected_status=200
     ${json}=    Set Variable    ${response.json()}

@@ -223,10 +223,19 @@ Returns user details including the new token:
 **Note:** Store the new token securely - the old token is now invalid.
 """,
 )
-async def regenerate_user_token(user_id: int, vectordb=Depends(get_vectordb)):
+async def regenerate_user_token(
+    user_id: int,
+    current=Depends(current_user),
+    vectordb=Depends(get_vectordb),
+):
     """
-    Regenerate a user's token.
+    Regenerate a user's token. Caller must be admin or the target user themselves.
     """
+    if not current.get("is_admin") and current.get("id") != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only regenerate your own token",
+        )
     user = await vectordb.regenerate_user_token.remote(user_id)
     logger.info("Regenerated user token", user_id=user_id)
     return JSONResponse(status_code=status.HTTP_200_OK, content=user)
