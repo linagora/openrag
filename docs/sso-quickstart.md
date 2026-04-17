@@ -68,6 +68,7 @@ Store this in your secrets manager — **losing it invalidates every stored sess
 Copy this block at the end of your `.env` and fill in your values:
 
 ```env
+# Switch OpenRag from the legacy Bearer-token login to OIDC. REQUIRED.
 AUTH_MODE=oidc
 
 # Issuer URL — EXACT match with the curl|jq output from Step 2.
