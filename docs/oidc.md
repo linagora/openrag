@@ -60,8 +60,9 @@ Browser              OpenRag           IdP (Keycloak)
    |-- GET /auth/callback->|                   |
    |                    |---token exchange --->|
    |                    |<-- id_token, access_token, refresh_token --|
-   |                    | [verify signature, nonce, claims;
-   |                    |  extract email; match user;
+   |                    | [verify signature, nonce, iss, aud;
+   |                    |  match user by external_user_id=sub;
+   |                    |  (optional) apply OIDC_CLAIM_MAPPING;
    |                    |  create oidc_sessions row;
    |                    |  set openrag_session cookie]
    |<--302 next_url-----|                   |
@@ -88,7 +89,7 @@ Browser              OpenRag           IdP (Keycloak)
 
 **Database:**
 - New `oidc_sessions` table: stores encrypted IdP tokens, session metadata, revocation status
-- New `email` column on `users` table: unique index for matching users by email claim
+- `email` column on `users` table: optional metadata, NOT used for matching (matching is exclusively by `external_user_id == sub`)
 
 ---
 
@@ -106,10 +107,10 @@ All variables must be set when `AUTH_MODE=oidc`. If any required variable is mis
 | `OIDC_CLIENT_SECRET` | Yes* | — | Client secret (confidential clients only) |
 | `OIDC_REDIRECT_URI` | Yes* | — | Callback URL, must match IdP configuration (e.g., `https://openrag.example.com/auth/callback`) |
 | `OIDC_TOKEN_ENCRYPTION_KEY` | Yes* | — | Fernet key for encrypting tokens at rest (see [Generating the Fernet Key](#generating-the-fernet-key)) |
-| `OIDC_EMAIL_SOURCE` | No | `id_token` | Where to extract the `email` claim: `id_token` (from JWT) or `userinfo` (from `/userinfo` endpoint) |
+| `OIDC_CLAIM_SOURCE` | No | `id_token` | Where to read claims for [Claim Mapping](#claim-mapping-optional): `id_token` (verified JWT) or `userinfo` (`/userinfo` endpoint) |
+| `OIDC_CLAIM_MAPPING` | No | — | Optional CSV of `db_field:claim` pairs to copy claims into user fields on every login (e.g., `display_name:name,email:email`). See [Claim Mapping](#claim-mapping-optional). |
 | `OIDC_SCOPES` | No | `openid email profile offline_access` | Space-separated OIDC scopes; include `offline_access` for refresh tokens |
 | `OIDC_POST_LOGOUT_REDIRECT_URI` | No | `/` | URL to redirect to after RP-initiated logout |
-| `OIDC_ALLOWED_EMAIL_DOMAINS` | No | — | Optional CSV list of email domain whitelist (e.g., `example.com,partner.org`) |
 
 \* Required when `AUTH_MODE=oidc`
 
@@ -146,23 +147,22 @@ OIDC_CLIENT_ID=openrag
 OIDC_CLIENT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxx
 OIDC_REDIRECT_URI=https://openrag.example.com/auth/callback
 OIDC_TOKEN_ENCRYPTION_KEY=XFlT-ZfXkdqf0v-5Z8kVt9xhU6c7Z4z0ZY8Z4Z4Z4=
-OIDC_EMAIL_SOURCE=id_token
 OIDC_SCOPES=openid email profile offline_access
 OIDC_POST_LOGOUT_REDIRECT_URI=/
-# OIDC_ALLOWED_EMAIL_DOMAINS=example.com,partner.org
+# Optional — sync display name and email from IdP on every login:
+# OIDC_CLAIM_SOURCE=id_token      # or 'userinfo'
+# OIDC_CLAIM_MAPPING=display_name:name,email:email
 ```
 
 ---
 
 ## User Pre-provisioning
 
-OIDC requires users to be pre-provisioned in OpenRag's database. There is **no automatic user creation** on login.
+OIDC requires users to be pre-provisioned in OpenRag's database. There is **no automatic user creation** on login. User matching is performed **exclusively** by `external_user_id == sub`: the admin MUST set each user's `external_user_id` to the exact OIDC `sub` claim the IdP will emit for that user.
 
 ### Admin Pre-provisioning
 
-Admins must create users with email matching the OIDC `email` claim **before** users attempt to log in.
-
-**Create a user via API:**
+**Create a user with `external_user_id`:**
 
 ```bash
 curl -X POST http://localhost:8080/users/ \
@@ -170,59 +170,44 @@ curl -X POST http://localhost:8080/users/ \
   -H "Content-Type: application/json" \
   -d '{
     "display_name": "Alice Cooper",
-    "email": "alice@example.com",
-    "is_admin": false
-  }'
-```
-
-**Response** (returns the token once):
-```json
-{
-  "id": 42,
-  "display_name": "Alice Cooper",
-  "email": "alice@example.com",
-  "external_user_id": null,
-  "is_admin": false,
-  "token": "or-xxxxxxxxxxxxxxxxxxxxxxxx"
-}
-```
-
-**Pre-fill `external_user_id` (optional):**
-
-If you know the user's OIDC `sub` claim in advance (e.g., from a Keycloak export or LDAP directory), you can set `external_user_id` directly:
-
-```bash
-curl -X POST http://localhost:8080/users/ \
-  -H "Authorization: Bearer ${AUTH_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "display_name": "Bob Smith",
-    "email": "bob@example.com",
     "external_user_id": "550e8400-e29b-41d4-a716-446655440000",
     "is_admin": false
   }'
 ```
 
-This skips the email-matching step on first login; the OIDC `sub` claim is checked directly.
+**Response** (returns the API token once):
+```json
+{
+  "id": 42,
+  "display_name": "Alice Cooper",
+  "external_user_id": "550e8400-e29b-41d4-a716-446655440000",
+  "email": null,
+  "is_admin": false,
+  "token": "or-xxxxxxxxxxxxxxxxxxxxxxxx"
+}
+```
+
+**Where does `external_user_id` come from?** It is whatever string the IdP puts in the `sub` claim for that user — an opaque stable identifier. Look it up in the IdP admin console (Keycloak: **Users** → open a user → copy the `ID` field) or via the IdP's own API.
+
+**`email` is OPTIONAL metadata.** It is not used for matching. You may set it at creation time for human-readable admin listings, or let it be populated automatically via [Claim Mapping](#claim-mapping-optional).
 
 ### Bulk User Provisioning
 
-For bulk imports, write a script that calls `/users/` in a loop:
+For bulk imports, write a script that calls `/users/` with the users' `external_user_id` values from your IdP export:
 
 ```python
 import requests
-import json
 
 auth_token = "sk-your-token"
 headers = {
     "Authorization": f"Bearer {auth_token}",
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
 }
 
 users = [
-    {"display_name": "Alice", "email": "alice@example.com"},
-    {"display_name": "Bob", "email": "bob@example.com"},
-    {"display_name": "Charlie", "email": "charlie@example.com"},
+    {"display_name": "Alice", "external_user_id": "kc-uuid-alice"},
+    {"display_name": "Bob", "external_user_id": "kc-uuid-bob"},
+    {"display_name": "Charlie", "external_user_id": "kc-uuid-charlie"},
 ]
 
 base_url = "http://localhost:8080"
@@ -231,6 +216,65 @@ for user in users:
     response = requests.post(f"{base_url}/users/", headers=headers, json=user)
     print(f"Created {user['display_name']}: {response.json()}")
 ```
+
+---
+
+## Claim Mapping (optional)
+
+By default, the callback only verifies the user's `sub` claim and issues a session — nothing else is read from the IdP. If you want OpenRag to keep selected columns on the `users` table in sync with IdP claims (display name, email, …) **on every login**, set `OIDC_CLAIM_MAPPING`.
+
+### When to Use It
+
+- You want `users.display_name` to reflect the IdP's current value (e.g., user renamed themselves).
+- You're migrating from an email-based matching scheme and want to populate `users.email` automatically without a manual script.
+- Your LDAP directory is the source of truth for user attributes.
+
+### Configuration
+
+Format: comma-separated pairs `db_field:claim`.
+
+```bash
+OIDC_CLAIM_MAPPING=display_name:name,email:email
+```
+
+Each pair means *"copy the value of the OIDC claim `claim` into `users.db_field`".* Spaces around the separator are tolerated.
+
+**Where the claim is read from** is controlled by `OIDC_CLAIM_SOURCE`:
+
+| Value | Source |
+|-------|--------|
+| `id_token` (default) | Verified ID-token claims |
+| `userinfo` | `/userinfo` endpoint fetched with the user's access token |
+
+### Writable Fields Whitelist
+
+Only these columns may appear on the left-hand side of a mapping:
+
+| DB field | Purpose |
+|----------|---------|
+| `display_name` | Human-readable name |
+| `email` | Email metadata (NOT used for matching) |
+
+Any other field (`is_admin`, `external_user_id`, `file_quota`, `token`, …) is rejected at startup — this is a hard security boundary, preventing an IdP that returns an `is_admin: true` claim from privilege-escalating existing users.
+
+### Behavior
+
+- If `OIDC_CLAIM_MAPPING` is empty or unset: no user field is updated on login.
+- If a mapped claim is missing from the source, that field is skipped (but the login still succeeds).
+- If the claim value matches what's already stored, no DB write happens (no-op).
+- If `OIDC_CLAIM_SOURCE=userinfo` and the `/userinfo` fetch fails, the login fails with `400 "Failed to fetch userinfo from IdP"`.
+- Email values are normalized (trimmed + lowercased) before being written.
+
+### Example
+
+With `OIDC_CLAIM_MAPPING=display_name:name,email:email` and `OIDC_CLAIM_SOURCE=id_token`:
+
+| ID token claim | `users` column updated to |
+|----------------|---------------------------|
+| `name: "Alice Cooper"` | `display_name = "Alice Cooper"` |
+| `email: "alice@example.com"` | `email = "alice@example.com"` |
+| `sub: "kc-alice-uuid"` | (used for matching only, never written) |
+| `is_admin: true` | ignored (not in whitelist) |
 
 ---
 
@@ -294,7 +338,6 @@ OIDC_CLIENT_ID=openrag
 OIDC_CLIENT_SECRET=<paste-secret-from-step-4>
 OIDC_REDIRECT_URI=https://openrag.example.com/auth/callback
 OIDC_TOKEN_ENCRYPTION_KEY=<generate-via-python-script>
-OIDC_EMAIL_SOURCE=id_token
 OIDC_SCOPES=openid email profile offline_access
 ```
 
@@ -307,10 +350,13 @@ OIDC_SCOPES=openid email profile offline_access
 5. **First name**: `Test`
 6. **Last name**: `User`
 7. Click **Create**
-8. Go to **Credentials** tab, set a password for testing
-9. Ensure **Temporary** is OFF (so user can log in immediately)
+8. Copy the user's `ID` from the detail view — this is the `sub` claim the IdP will emit
+9. Go to **Credentials** tab, set a password for testing
+10. Ensure **Temporary** is OFF (so user can log in immediately)
 
 ### Step 7: Pre-provision User in OpenRag
+
+Use the Keycloak user ID from the previous step as `external_user_id`:
 
 ```bash
 curl -X POST http://localhost:8080/users/ \
@@ -318,7 +364,7 @@ curl -X POST http://localhost:8080/users/ \
   -H "Content-Type: application/json" \
   -d '{
     "display_name": "Test User",
-    "email": "testuser@example.com",
+    "external_user_id": "<paste-keycloak-user-id>",
     "is_admin": false
   }'
 ```
@@ -376,11 +422,10 @@ OIDC_CLIENT_ID=openrag
 OIDC_CLIENT_SECRET=<secret-from-llng>
 OIDC_REDIRECT_URI=https://openrag.example.com/auth/callback
 OIDC_TOKEN_ENCRYPTION_KEY=<generate-via-python>
-OIDC_EMAIL_SOURCE=id_token
 OIDC_SCOPES=openid email profile offline_access
 ```
 
-3. **Pre-provision users** (via `/users/` API, same as Keycloak)
+3. **Pre-provision users** via `/users/` API, same as Keycloak — set `external_user_id` to whatever value LLNG emits as the `sub` claim (typically the uid).
 
 4. **Test**: Navigate to OpenRag, should redirect to LLNG login
 
@@ -590,47 +635,37 @@ OpenRag builds the discovery URL by stripping any trailing slash internally, so 
 - Example: `https://openrag.example.com/auth/callback` (NOT `https://openrag.example.com/auth/callback/`)
 - Keycloak: **Clients** → **Valid redirect URIs**
 
-### 4. "email claim not found"
+### 4. "User not registered" (403 at callback)
 
-**Error**: User logs in successfully, but OpenRag responds with 403 "email not found in claims".
+**Error**: After a successful IdP login, OpenRag responds with `403 {"detail": "User not registered"}` at `/auth/callback`.
 
-**Solution**:
-- Set `OIDC_EMAIL_SOURCE=userinfo` if `email` is not in the ID token
-- Or, ask IdP admin to include `email` scope in the token
-- Verify the IdP is returning `email` claim via OIDC `/userinfo` endpoint:
+**Cause**: User matching is now performed **exclusively** by `users.external_user_id == sub`. There is no email fallback and no auto-provisioning. The user either doesn't exist yet, or their `external_user_id` column is not set (or does not match the IdP's `sub`).
+
+**Solution**: The admin must pre-provision the user with the *exact* `sub` the IdP emits. Discover the IdP's `sub` for the user (e.g., Keycloak: **Users** → open the user → copy the `ID` field; or decode an ID token for that user with <https://jwt.io> and read the `sub` claim).
+
+Create the user:
 ```bash
-curl -H "Authorization: Bearer <access_token>" \
-  https://idp.example.com/realms/openrag/protocol/openid-connect/userinfo
+curl -X POST http://localhost:8080/users/ \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "display_name": "Alice Cooper",
+    "external_user_id": "<paste-the-sub-value-here>",
+    "is_admin": false
+  }'
 ```
 
-### 5. "external_user_id mismatch"
-
-**Error**: User with `external_user_id=A` tries to log in, but OIDC `sub=B`.
-
-**Cause**: The user's `external_user_id` was set to one value, but the IdP's `sub` claim changed (e.g., user was re-imported or IdP was reconfigured).
-
-**Solution**:
-- If intentional (user switched IdPs), clear the old `external_user_id`:
+Or, if the user already exists with a wrong `external_user_id`:
 ```bash
 curl -X PATCH http://localhost:8080/users/42 \
   -H "Authorization: Bearer ${AUTH_TOKEN}" \
   -H "Content-Type: application/json" \
-  -d '{"external_user_id": null}'
+  -d '{"external_user_id": "<new-sub-value>"}'
 ```
-- Then log in again; the new `sub` will be backfilled
 
-### 6. "email domain not whitelisted"
+Server logs record the attempted `sub` at `WARNING` level so admins can copy it over without having to decode the token themselves.
 
-**Error**: User logs in, but OpenRag responds with 403 "email domain not whitelisted".
-
-**Solution**:
-- Set `OIDC_ALLOWED_EMAIL_DOMAINS` to allow the user's domain:
-```bash
-export OIDC_ALLOWED_EMAIL_DOMAINS=example.com,partner.org
-```
-- Or, empty it to allow any domain
-
-### 6. "session not found" or "session expired"
+### 5. "session not found" or "session expired"
 
 **Error**: User can log in once, but subsequent requests show "unauthenticated".
 
@@ -641,7 +676,7 @@ export OIDC_ALLOWED_EMAIL_DOMAINS=example.com,partner.org
 - Check `openrag_session` cookie exists and is not marked `revoked_at` in DB
 - Increase `access_token_expires_at` via OIDC scopes (`offline_access` + longer TTL in IdP)
 
-### 7. "clock skew" or "token not yet valid"
+### 6. "clock skew" or "token not yet valid"
 
 **Error**: "iat claim is in the future" or "exp claim is in the past".
 
@@ -649,7 +684,7 @@ export OIDC_ALLOWED_EMAIL_DOMAINS=example.com,partner.org
 - Sync system clocks between OpenRag and IdP servers
 - Check NTP is running: `ntpq -p`
 
-### 8. "invalid scope: offline_access"
+### 7. "invalid scope: offline_access"
 
 **Error**: OIDC client redirect fails with "Invalid scope requested: offline_access".
 

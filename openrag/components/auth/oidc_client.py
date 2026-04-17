@@ -35,8 +35,8 @@ class TokenBundle:
     id_token: str
     access_token: str
     refresh_token: str | None
-    expires_in: int         # seconds
-    token_type: str         # usually "Bearer"
+    expires_in: int  # seconds
+    token_type: str  # usually "Bearer"
     claims: dict[str, Any]  # verified claims from id_token
 
 
@@ -59,7 +59,7 @@ class OIDCClient:
     """
 
     _DISCOVERY_TTL = 3600  # 1 hour
-    _JWKS_TTL = 3600       # 1 hour
+    _JWKS_TTL = 3600  # 1 hour
 
     def __init__(
         self,
@@ -105,9 +105,7 @@ class OIDCClient:
         self._metadata = resp.json()
         self._metadata_fetched_at = time.time()
         if self._metadata.get("issuer") != self.issuer:
-            raise ValueError(
-                f"Issuer mismatch: configured {self.issuer!r}, got {self._metadata.get('issuer')!r}"
-            )
+            raise ValueError(f"Issuer mismatch: configured {self.issuer!r}, got {self._metadata.get('issuer')!r}")
         return self._metadata
 
     # ------------------------------------------------------------------
@@ -150,9 +148,7 @@ class OIDCClient:
     # Authorization URL
     # ------------------------------------------------------------------
 
-    async def build_authorization_url(
-        self, *, state: str, nonce: str, code_challenge: str
-    ) -> str:
+    async def build_authorization_url(self, *, state: str, nonce: str, code_challenge: str) -> str:
         """Build the full authorization URL to redirect the browser to."""
         meta = await self.discover()
         params = {
@@ -171,9 +167,7 @@ class OIDCClient:
     # Code exchange
     # ------------------------------------------------------------------
 
-    async def exchange_code(
-        self, *, code: str, code_verifier: str, expected_nonce: str
-    ) -> TokenBundle:
+    async def exchange_code(self, *, code: str, code_verifier: str, expected_nonce: str) -> TokenBundle:
         """Exchange an authorization code for tokens.
 
         Verifies the returned id_token (signature, iss, aud, exp, nonce).
@@ -195,9 +189,7 @@ class OIDCClient:
             "client_secret": self.client_secret,
             "code_verifier": code_verifier,
         }
-        resp = await self._http.post(
-            meta["token_endpoint"], data=data, headers={"Accept": "application/json"}
-        )
+        resp = await self._http.post(meta["token_endpoint"], data=data, headers={"Accept": "application/json"})
         resp.raise_for_status()
         payload = resp.json()
         id_token = payload["id_token"]
@@ -233,9 +225,7 @@ class OIDCClient:
             "client_id": self.client_id,
             "client_secret": self.client_secret,
         }
-        resp = await self._http.post(
-            meta["token_endpoint"], data=data, headers={"Accept": "application/json"}
-        )
+        resp = await self._http.post(meta["token_endpoint"], data=data, headers={"Accept": "application/json"})
         resp.raise_for_status()
         payload = resp.json()
         new_id_token = payload.get("id_token")
@@ -270,9 +260,7 @@ class OIDCClient:
     # ID token verification
     # ------------------------------------------------------------------
 
-    async def _verify_id_token(
-        self, token: str, *, expected_nonce: str | None
-    ) -> dict[str, Any]:
+    async def _verify_id_token(self, token: str, *, expected_nonce: str | None) -> dict[str, Any]:
         """Verify an ID token's signature and standard claims.
 
         Retries with a fresh JWKS fetch on kid-miss (covers IdP key rotation).

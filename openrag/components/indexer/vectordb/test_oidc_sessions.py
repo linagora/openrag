@@ -16,11 +16,10 @@ which does the same ``Base.metadata.create_all`` call against Postgres).
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
 from components.indexer.vectordb.models import Base, User
 from components.indexer.vectordb.utils import PartitionFileManager
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 from utils.logger import get_logger
 
 
@@ -68,27 +67,8 @@ def _make_user(
 
 
 # ---------------------------------------------------------------------------
-# user lookup by email / external_user_id
+# user lookup by external_user_id
 # ---------------------------------------------------------------------------
-
-
-def test_get_user_by_email_returns_user(pfm):
-    user_id = _make_user(pfm, email="alice@example.com")
-    found = pfm.get_user_by_email("alice@example.com")
-    assert found is not None
-    assert found["id"] == user_id
-    assert found["email"] == "alice@example.com"
-
-
-def test_get_user_by_email_returns_none_for_unknown(pfm):
-    _make_user(pfm, email="alice@example.com")
-    assert pfm.get_user_by_email("bob@example.com") is None
-
-
-def test_get_user_by_email_is_case_sensitive(pfm):
-    """Documented behaviour — matching is exact. Callers must normalise."""
-    _make_user(pfm, email="alice@example.com")
-    assert pfm.get_user_by_email("ALICE@example.com") is None
 
 
 def test_get_user_by_external_id_returns_user(pfm):
@@ -105,36 +85,63 @@ def test_get_user_by_external_id_returns_none_for_unknown(pfm):
 
 
 # ---------------------------------------------------------------------------
-# set_user_external_id — backfill semantics
+# update_user_fields — OIDC claim-mapping write path
 # ---------------------------------------------------------------------------
 
 
-def test_set_user_external_id_backfills_when_null(pfm):
-    user_id = _make_user(pfm, email="alice@example.com", external_user_id=None)
-    pfm.set_user_external_id(user_id, "sub-abc-123")
-    # confirm it was persisted
-    refreshed = pfm.get_user_by_external_id("sub-abc-123")
-    assert refreshed is not None
-    assert refreshed["id"] == user_id
+def test_update_user_fields_updates_display_name_and_lowercases_email(pfm):
+    user_id = _make_user(pfm, display_name="Old", email="old@example.com")
+    pfm.update_user_fields(user_id, {"display_name": "New Name", "email": "NEW@Example.COM"})
+    refreshed = pfm.get_user_by_external_id("sub-missing")  # None lookup, use session
+    # Re-read via direct ORM since the user has no external_user_id set.
+    with pfm.Session() as s:
+        row = s.query(User).filter_by(id=user_id).first()
+        assert row.display_name == "New Name"
+        assert row.email == "new@example.com"  # normalised
+    # `refreshed` is unrelated to the assertions — silences unused warning.
+    assert refreshed is None
 
 
-def test_set_user_external_id_noop_when_equal(pfm):
-    """Calling twice with the same value must not raise (idempotent)."""
-    user_id = _make_user(pfm, external_user_id="sub-abc-123")
-    pfm.set_user_external_id(user_id, "sub-abc-123")  # must not raise
+def test_update_user_fields_raises_on_non_whitelisted_field(pfm):
+    user_id = _make_user(pfm)
+    with pytest.raises(ValueError, match="non-whitelisted"):
+        pfm.update_user_fields(user_id, {"is_admin": True})
 
 
-def test_set_user_external_id_raises_on_conflict(pfm):
-    """If the user already has a *different* external_user_id, callers need
-    to be alerted (AC6d — identity conflict must produce a 403)."""
-    user_id = _make_user(pfm, external_user_id="sub-original")
-    with pytest.raises(ValueError, match="mismatch"):
-        pfm.set_user_external_id(user_id, "sub-different")
+def test_update_user_fields_raises_for_unknown_user(pfm):
+    with pytest.raises(ValueError, match="not found"):
+        pfm.update_user_fields(999999, {"display_name": "Ghost"})
 
 
-def test_set_user_external_id_raises_for_unknown_user(pfm):
-    with pytest.raises(ValueError, match="does not exist"):
-        pfm.set_user_external_id(999999, "sub-whatever")
+def test_update_user_fields_drops_none_values(pfm):
+    user_id = _make_user(pfm, display_name="Keep", email="keep@example.com")
+    # None values are silently dropped — here every value is None so nothing
+    # should be written and the row must remain intact.
+    pfm.update_user_fields(user_id, {"display_name": None, "email": None})
+    with pfm.Session() as s:
+        row = s.query(User).filter_by(id=user_id).first()
+        assert row.display_name == "Keep"
+        assert row.email == "keep@example.com"
+
+
+def test_update_user_fields_empty_dict_is_noop(pfm):
+    """Empty dict must short-circuit before opening a DB session."""
+    user_id = _make_user(pfm, display_name="Stable")
+    # Monkey-patch Session to detect unexpected opens.
+    original_session = pfm.Session
+    opened = {"count": 0}
+
+    class _SpySession:
+        def __call__(self, *a, **kw):
+            opened["count"] += 1
+            return original_session(*a, **kw)
+
+    pfm.Session = _SpySession()
+    try:
+        pfm.update_user_fields(user_id, {})
+        assert opened["count"] == 0, "update_user_fields({}) must short-circuit before touching the DB"
+    finally:
+        pfm.Session = original_session
 
 
 # ---------------------------------------------------------------------------
@@ -144,17 +151,17 @@ def test_set_user_external_id_raises_for_unknown_user(pfm):
 
 def _session_kwargs(user_id, *, sid="sid-xyz", session_token_plain="plain-token-aaaa"):
     now = datetime.now()
-    return dict(
-        user_id=user_id,
-        sub="sub-abc-123",
-        sid=sid,
-        session_token_plain=session_token_plain,
-        id_token_encrypted=b"\x01\x02\x03",
-        access_token_encrypted=b"\xaa\xbb\xcc",
-        refresh_token_encrypted=b"\xdd\xee\xff",
-        access_token_expires_at=now + timedelta(minutes=5),
-        session_expires_at=now + timedelta(hours=8),
-    )
+    return {
+        "user_id": user_id,
+        "sub": "sub-abc-123",
+        "sid": sid,
+        "session_token_plain": session_token_plain,
+        "id_token_encrypted": b"\x01\x02\x03",
+        "access_token_encrypted": b"\xaa\xbb\xcc",
+        "refresh_token_encrypted": b"\xdd\xee\xff",
+        "access_token_expires_at": now + timedelta(minutes=5),
+        "session_expires_at": now + timedelta(hours=8),
+    }
 
 
 def test_create_and_get_oidc_session_round_trip(pfm):
@@ -188,9 +195,7 @@ def test_get_oidc_session_by_token_returns_none_for_unknown(pfm):
 
 def test_get_oidc_session_returns_none_when_revoked(pfm):
     user_id = _make_user(pfm)
-    created = pfm.create_oidc_session(
-        **_session_kwargs(user_id, session_token_plain="tok-revoke")
-    )
+    created = pfm.create_oidc_session(**_session_kwargs(user_id, session_token_plain="tok-revoke"))
     pfm.revoke_oidc_session_by_id(created["id"])
     assert pfm.get_oidc_session_by_token("tok-revoke") is None
 
@@ -215,15 +220,9 @@ def test_get_oidc_session_returns_none_when_session_expired(pfm):
 def test_revoke_oidc_sessions_by_sid_revokes_all_matching(pfm):
     user_id = _make_user(pfm)
     # Two sessions sharing one sid, one with a different sid.
-    pfm.create_oidc_session(
-        **_session_kwargs(user_id, sid="sid-shared", session_token_plain="tok-1")
-    )
-    pfm.create_oidc_session(
-        **_session_kwargs(user_id, sid="sid-shared", session_token_plain="tok-2")
-    )
-    pfm.create_oidc_session(
-        **_session_kwargs(user_id, sid="sid-other", session_token_plain="tok-3")
-    )
+    pfm.create_oidc_session(**_session_kwargs(user_id, sid="sid-shared", session_token_plain="tok-1"))
+    pfm.create_oidc_session(**_session_kwargs(user_id, sid="sid-shared", session_token_plain="tok-2"))
+    pfm.create_oidc_session(**_session_kwargs(user_id, sid="sid-other", session_token_plain="tok-3"))
 
     count = pfm.revoke_oidc_sessions_by_sid("sid-shared")
     assert count == 2
@@ -238,9 +237,7 @@ def test_revoke_oidc_sessions_by_sid_revokes_all_matching(pfm):
 def test_revoke_oidc_sessions_by_sid_idempotent(pfm):
     """Calling twice with the same sid must only revoke non-revoked rows."""
     user_id = _make_user(pfm)
-    pfm.create_oidc_session(
-        **_session_kwargs(user_id, sid="sid-X", session_token_plain="tok-X")
-    )
+    pfm.create_oidc_session(**_session_kwargs(user_id, sid="sid-X", session_token_plain="tok-X"))
     first = pfm.revoke_oidc_sessions_by_sid("sid-X")
     second = pfm.revoke_oidc_sessions_by_sid("sid-X")
     assert first == 1
@@ -254,9 +251,7 @@ def test_revoke_oidc_sessions_by_sid_idempotent(pfm):
 
 def test_update_oidc_session_tokens_updates_fields_and_last_refresh(pfm):
     user_id = _make_user(pfm)
-    created = pfm.create_oidc_session(
-        **_session_kwargs(user_id, session_token_plain="tok-refresh")
-    )
+    created = pfm.create_oidc_session(**_session_kwargs(user_id, session_token_plain="tok-refresh"))
     original_session_expiry = created["session_expires_at"]
     new_expiry = datetime.now() + timedelta(minutes=10)
 
@@ -282,9 +277,7 @@ def test_update_oidc_session_tokens_accepts_none_refresh(pfm):
     """Some IdPs don't rotate refresh_token on refresh (omit refresh_token
     in the response). We must keep the old encrypted value."""
     user_id = _make_user(pfm)
-    created = pfm.create_oidc_session(
-        **_session_kwargs(user_id, session_token_plain="tok-nrr")
-    )
+    created = pfm.create_oidc_session(**_session_kwargs(user_id, session_token_plain="tok-nrr"))
     new_expiry = datetime.now() + timedelta(minutes=10)
     pfm.update_oidc_session_tokens(
         session_id=created["id"],

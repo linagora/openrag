@@ -1236,12 +1236,9 @@ class MilvusDB(BaseVectorDB):
     async def get_user_by_external_id(self, external_user_id: str):
         return self.partition_file_manager.get_user_by_external_id(external_user_id)
 
-    async def get_user_by_email(self, email: str):
-        return self.partition_file_manager.get_user_by_email(email)
-
-    async def set_user_external_id(self, user_id: int, external_user_id: str):
+    async def update_user_fields(self, user_id: int, fields: dict):
         self._check_user_exists(user_id)
-        return self.partition_file_manager.set_user_external_id(user_id, external_user_id)
+        return self.partition_file_manager.update_user_fields(user_id, fields)
 
     async def create_oidc_session(
         self,

@@ -14,11 +14,9 @@ from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from components.auth.middleware import AuthMiddleware, is_ui_path
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
-
-from components.auth.middleware import AuthMiddleware, is_ui_path
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -423,9 +421,7 @@ class TestRefreshHelper:
             side_effect=AssertionError("IdP must not be called during stampede short-circuit")
         )
         with patch.object(refresh_mod, "get_oidc_client", return_value=fake_client):
-            out = await refresh_session_if_needed(
-                session=stale_session, enc_key="k", vectordb=vdb
-            )
+            out = await refresh_session_if_needed(session=stale_session, enc_key="k", vectordb=vdb)
 
         assert out is fresh_row
         fake_client.refresh_access_token.assert_not_awaited()
@@ -459,16 +455,12 @@ class TestRefreshHelper:
         vdb.get_oidc_session_by_id.remote = AsyncMock(return_value=fresh_row)
 
         fake_client = MagicMock()
-        fake_client.refresh_access_token = AsyncMock(
-            side_effect=RuntimeError("invalid_grant")
-        )
+        fake_client.refresh_access_token = AsyncMock(side_effect=RuntimeError("invalid_grant"))
         with (
             patch.object(refresh_mod, "get_oidc_client", return_value=fake_client),
             patch.object(refresh_mod, "decrypt_token", return_value="old-refresh-plain"),
         ):
-            out = await refresh_session_if_needed(
-                session=stale_session, enc_key="k", vectordb=vdb
-            )
+            out = await refresh_session_if_needed(session=stale_session, enc_key="k", vectordb=vdb)
 
         assert out is fresh_row
         fake_client.refresh_access_token.assert_awaited_once()
@@ -495,15 +487,11 @@ class TestRefreshHelper:
         vdb.get_oidc_session_by_id.remote = AsyncMock(return_value=stale_row_from_db)
 
         fake_client = MagicMock()
-        fake_client.refresh_access_token = AsyncMock(
-            side_effect=RuntimeError("invalid_grant")
-        )
+        fake_client.refresh_access_token = AsyncMock(side_effect=RuntimeError("invalid_grant"))
         with (
             patch.object(refresh_mod, "get_oidc_client", return_value=fake_client),
             patch.object(refresh_mod, "decrypt_token", return_value="old-refresh-plain"),
         ):
-            out = await refresh_session_if_needed(
-                session=stale_session, enc_key="k", vectordb=vdb
-            )
+            out = await refresh_session_if_needed(session=stale_session, enc_key="k", vectordb=vdb)
 
         assert out is None

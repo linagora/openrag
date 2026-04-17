@@ -36,7 +36,6 @@ from cryptography.fernet import Fernet  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Constants — align with the existing auth unit tests
 # ---------------------------------------------------------------------------
@@ -139,7 +138,6 @@ class _StubVectorDB:
     def __init__(self):
         self.calls: list[tuple[str, tuple, dict]] = []
         self._users_by_sub: dict[str, dict] = {}
-        self._users_by_email: dict[str, dict] = {}
         self._users_by_id: dict[int, dict] = {}
         self._sessions: dict[int, dict] = {}
         self._sessions_by_token: dict[str, int] = {}
@@ -148,15 +146,8 @@ class _StubVectorDB:
         self.get_user_by_external_id = _RayMethodStub(
             "get_user_by_external_id", self._impl_get_user_by_external_id, self.calls
         )
-        self.get_user_by_email = _RayMethodStub(
-            "get_user_by_email", self._impl_get_user_by_email, self.calls
-        )
-        self.set_user_external_id = _RayMethodStub(
-            "set_user_external_id", self._impl_set_user_external_id, self.calls
-        )
-        self.create_oidc_session = _RayMethodStub(
-            "create_oidc_session", self._impl_create_oidc_session, self.calls
-        )
+        self.update_user_fields = _RayMethodStub("update_user_fields", self._impl_update_user_fields, self.calls)
+        self.create_oidc_session = _RayMethodStub("create_oidc_session", self._impl_create_oidc_session, self.calls)
         self.get_oidc_session_by_token = _RayMethodStub(
             "get_oidc_session_by_token", self._impl_get_oidc_session_by_token, self.calls
         )
@@ -170,17 +161,21 @@ class _StubVectorDB:
     # Test-only helpers -----------------------------------------------------
 
     def add_user(
-        self, *, user_id: int, email: str, external_user_id: str | None = None
+        self,
+        *,
+        user_id: int,
+        email: str | None = None,
+        external_user_id: str | None = None,
+        display_name: str | None = None,
     ) -> dict:
         user = {
             "id": user_id,
             "email": email,
             "external_user_id": external_user_id,
             "is_admin": False,
-            "display_name": f"user-{user_id}",
+            "display_name": display_name or f"user-{user_id}",
         }
         self._users_by_id[user_id] = user
-        self._users_by_email[email] = user
         if external_user_id:
             self._users_by_sub[external_user_id] = user
         return user
@@ -190,20 +185,20 @@ class _StubVectorDB:
     def _impl_get_user_by_external_id(self, external_user_id: str):
         return self._users_by_sub.get(external_user_id)
 
-    def _impl_get_user_by_email(self, email: str):
-        return self._users_by_email.get(email)
-
-    def _impl_set_user_external_id(self, user_id: int, external_user_id: str):
+    def _impl_update_user_fields(self, user_id: int, fields: dict):
         user = self._users_by_id.get(user_id)
         if user is None:
-            raise ValueError(f"user_id={user_id} does not exist")
-        if user["external_user_id"] is None:
-            user["external_user_id"] = external_user_id
-            self._users_by_sub[external_user_id] = user
-            return
-        if user["external_user_id"] == external_user_id:
-            return
-        raise ValueError("external_user_id mismatch")
+            raise ValueError(f"User {user_id} not found")
+        _ALLOWED = {"display_name", "email"}
+        bad = set(fields) - _ALLOWED
+        if bad:
+            raise ValueError(f"Cannot update non-whitelisted user fields: {sorted(bad)}")
+        for k, v in fields.items():
+            if v is None:
+                continue
+            if k == "email" and isinstance(v, str):
+                v = v.strip().lower()
+            user[k] = v
 
     def _impl_create_oidc_session(self, **kwargs):
         sid = self._next_session_id
@@ -212,11 +207,7 @@ class _StubVectorDB:
             "id": sid,
             "session_expires_at": kwargs["session_expires_at"],
             "id_token_encrypted": kwargs["id_token_encrypted"],
-            **{
-                k: v
-                for k, v in kwargs.items()
-                if k != "session_token_plain"
-            },
+            **{k: v for k, v in kwargs.items() if k != "session_token_plain"},
         }
         self._sessions[sid] = row
         self._sessions_by_token[kwargs["session_token_plain"]] = sid
@@ -297,9 +288,9 @@ def env_oidc(monkeypatch):
     monkeypatch.setenv("OIDC_REDIRECT_URI", REDIRECT_URI)
     monkeypatch.setenv("OIDC_SCOPES", SCOPES)
     monkeypatch.setenv("OIDC_TOKEN_ENCRYPTION_KEY", _FERNET_KEY)
-    monkeypatch.setenv("OIDC_EMAIL_SOURCE", "id_token")
+    monkeypatch.setenv("OIDC_CLAIM_SOURCE", "id_token")
     monkeypatch.setenv("OIDC_POST_LOGOUT_REDIRECT_URI", "/")
-    monkeypatch.delenv("OIDC_ALLOWED_EMAIL_DOMAINS", raising=False)
+    monkeypatch.delenv("OIDC_CLAIM_MAPPING", raising=False)
     _auth_deps.reset_oidc_client()
 
 
@@ -452,9 +443,7 @@ def _mock_token_endpoint(transport, id_token: str, *, refresh_token: str | None 
 
 
 def test_callback_success_by_external_id(client, fresh_stub_vectordb):
-    fresh_stub_vectordb.add_user(
-        user_id=42, email="user@example.com", external_user_id="sub-abc"
-    )
+    fresh_stub_vectordb.add_user(user_id=42, email="user@example.com", external_user_id="sub-abc")
     _setup_jwks(client.oidc_transport)
     state, nonce = _begin_login_and_extract_state(client)
     id_token = _sign_jwt(_id_token_payload(nonce, sub="sub-abc"))
@@ -471,33 +460,11 @@ def test_callback_success_by_external_id(client, fresh_stub_vectordb):
     assert any(c[0] == "create_oidc_session" for c in fresh_stub_vectordb.calls)
 
 
-def test_callback_backfills_external_user_id(client, fresh_stub_vectordb):
-    fresh_stub_vectordb.add_user(
-        user_id=7, email="alice@example.com", external_user_id=None
-    )
-    _setup_jwks(client.oidc_transport)
-    state, nonce = _begin_login_and_extract_state(client)
-    id_token = _sign_jwt(
-        _id_token_payload(nonce, sub="sub-new", email="alice@example.com")
-    )
-    _mock_token_endpoint(client.oidc_transport, id_token)
-
-    r = client.get(
-        f"/auth/callback?code=c&state={state}",
-        follow_redirects=False,
-    )
-    assert r.status_code == 302, r.text
-    # The user row should now have external_user_id filled.
-    user = fresh_stub_vectordb._users_by_id[7]
-    assert user["external_user_id"] == "sub-new"
-
-
 def test_callback_user_not_registered(client, fresh_stub_vectordb):
+    """Unknown sub → 403 (no email fallback, no auto-provisioning)."""
     _setup_jwks(client.oidc_transport)
     state, nonce = _begin_login_and_extract_state(client)
-    id_token = _sign_jwt(
-        _id_token_payload(nonce, sub="sub-unknown", email="ghost@example.com")
-    )
+    id_token = _sign_jwt(_id_token_payload(nonce, sub="sub-unknown", email="ghost@example.com"))
     _mock_token_endpoint(client.oidc_transport, id_token)
 
     r = client.get(
@@ -508,14 +475,25 @@ def test_callback_user_not_registered(client, fresh_stub_vectordb):
     assert "not registered" in r.json()["detail"].lower()
 
 
-def test_callback_external_id_mismatch(client, fresh_stub_vectordb):
+def test_callback_applies_claim_mapping_from_id_token(client, fresh_stub_vectordb, monkeypatch):
+    """With OIDC_CLAIM_MAPPING set, claims from the ID token update the user row."""
+    monkeypatch.setenv("OIDC_CLAIM_MAPPING", "display_name:name,email:email")
+    monkeypatch.setenv("OIDC_CLAIM_SOURCE", "id_token")
     fresh_stub_vectordb.add_user(
-        user_id=11, email="bob@example.com", external_user_id="sub-stored"
+        user_id=42,
+        email="old@example.com",
+        external_user_id="sub-abc",
+        display_name="Old Name",
     )
     _setup_jwks(client.oidc_transport)
     state, nonce = _begin_login_and_extract_state(client)
     id_token = _sign_jwt(
-        _id_token_payload(nonce, sub="sub-different", email="bob@example.com")
+        _id_token_payload(
+            nonce,
+            sub="sub-abc",
+            email="dwho@badwolf.org",
+            extra={"name": "Doctor Who"},
+        )
     )
     _mock_token_endpoint(client.oidc_transport, id_token)
 
@@ -523,47 +501,36 @@ def test_callback_external_id_mismatch(client, fresh_stub_vectordb):
         f"/auth/callback?code=c&state={state}",
         follow_redirects=False,
     )
-    # Lookup by sub=sub-different returns None → fallback to email → user has
-    # external_user_id=sub-stored != sub-different → 403.
-    assert r.status_code == 403
-    assert "mismatch" in r.json()["detail"].lower()
+    assert r.status_code == 302, r.text
+    user = fresh_stub_vectordb._users_by_id[42]
+    assert user["display_name"] == "Doctor Who"
+    # email lowercased by update_user_fields stub
+    assert user["email"] == "dwho@badwolf.org"
+    # update_user_fields was called exactly once
+    assert sum(1 for c in fresh_stub_vectordb.calls if c[0] == "update_user_fields") == 1
 
 
-def test_callback_email_domain_not_whitelisted(
-    client, fresh_stub_vectordb, monkeypatch
-):
-    monkeypatch.setenv("OIDC_ALLOWED_EMAIL_DOMAINS", "corp.example.com, ok.example.com")
+def test_callback_applies_claim_mapping_from_userinfo(client, fresh_stub_vectordb, monkeypatch):
+    """With OIDC_CLAIM_SOURCE=userinfo the claim fetch goes to /userinfo."""
+    monkeypatch.setenv("OIDC_CLAIM_MAPPING", "display_name:name,email:email")
+    monkeypatch.setenv("OIDC_CLAIM_SOURCE", "userinfo")
     fresh_stub_vectordb.add_user(
-        user_id=1, email="x@other.example.com", external_user_id="sub-x"
+        user_id=55,
+        email=None,
+        external_user_id="sub-ui",
+        display_name="legacy",
     )
     _setup_jwks(client.oidc_transport)
     state, nonce = _begin_login_and_extract_state(client)
-    id_token = _sign_jwt(
-        _id_token_payload(nonce, sub="sub-x", email="x@other.example.com")
-    )
-    _mock_token_endpoint(client.oidc_transport, id_token)
-
-    r = client.get(
-        f"/auth/callback?code=c&state={state}",
-        follow_redirects=False,
-    )
-    assert r.status_code == 403
-    assert "domain" in r.json()["detail"].lower()
-
-
-def test_callback_userinfo_source(client, fresh_stub_vectordb, monkeypatch):
-    monkeypatch.setenv("OIDC_EMAIL_SOURCE", "userinfo")
-    fresh_stub_vectordb.add_user(
-        user_id=55, email="ui@example.com", external_user_id="sub-ui"
-    )
-    _setup_jwks(client.oidc_transport)
-    state, nonce = _begin_login_and_extract_state(client)
-    # ID token has NO email claim — must come from userinfo.
+    # ID token carries no name/email — the router must pull them from /userinfo.
     id_token = _sign_jwt(_id_token_payload(nonce, sub="sub-ui", email=None))
     _mock_token_endpoint(client.oidc_transport, id_token)
-    userinfo_route = client.oidc_transport.router.get(
-        f"{ISSUER}/protocol/openid-connect/userinfo"
-    ).mock(return_value=httpx.Response(200, json={"sub": "sub-ui", "email": "ui@example.com"}))
+    userinfo_route = client.oidc_transport.router.get(f"{ISSUER}/protocol/openid-connect/userinfo").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sub": "sub-ui", "name": "UI User", "email": "ui@example.com"},
+        )
+    )
 
     r = client.get(
         f"/auth/callback?code=c&state={state}",
@@ -571,6 +538,43 @@ def test_callback_userinfo_source(client, fresh_stub_vectordb, monkeypatch):
     )
     assert r.status_code == 302, r.text
     assert userinfo_route.called
+    user = fresh_stub_vectordb._users_by_id[55]
+    assert user["display_name"] == "UI User"
+    assert user["email"] == "ui@example.com"
+
+
+def test_callback_skips_mapping_when_unset(client, fresh_stub_vectordb, monkeypatch):
+    """Without OIDC_CLAIM_MAPPING the user row is not touched."""
+    monkeypatch.delenv("OIDC_CLAIM_MAPPING", raising=False)
+    fresh_stub_vectordb.add_user(
+        user_id=77,
+        email="tester@example.com",
+        external_user_id="sub-plain",
+        display_name="Initial",
+    )
+    _setup_jwks(client.oidc_transport)
+    state, nonce = _begin_login_and_extract_state(client)
+    id_token = _sign_jwt(
+        _id_token_payload(
+            nonce,
+            sub="sub-plain",
+            email="different@example.com",
+            extra={"name": "Should Be Ignored"},
+        )
+    )
+    _mock_token_endpoint(client.oidc_transport, id_token)
+
+    r = client.get(
+        f"/auth/callback?code=c&state={state}",
+        follow_redirects=False,
+    )
+    assert r.status_code == 302, r.text
+    user = fresh_stub_vectordb._users_by_id[77]
+    # Untouched by the callback when OIDC_CLAIM_MAPPING is empty
+    assert user["display_name"] == "Initial"
+    assert user["email"] == "tester@example.com"
+    # update_user_fields was never called
+    assert not any(c[0] == "update_user_fields" for c in fresh_stub_vectordb.calls)
 
 
 # ---------------------------------------------------------------------------
@@ -636,10 +640,7 @@ def test_logout_revokes_session_and_deletes_cookie(client, fresh_stub_vectordb):
     assert fresh_stub_vectordb._sessions[1]["revoked_at"] is not None
     # Cookie cleared in response (max-age=0 or Expires=past)
     set_cookie_headers = r.headers.get_list("set-cookie")
-    assert any(
-        "openrag_session=" in h and ("Max-Age=0" in h or "expires=" in h.lower())
-        for h in set_cookie_headers
-    )
+    assert any("openrag_session=" in h and ("Max-Age=0" in h or "expires=" in h.lower()) for h in set_cookie_headers)
 
 
 def test_logout_rejected_in_token_mode(env_token, fresh_stub_vectordb):
@@ -672,9 +673,7 @@ def test_me_returns_user_info_with_valid_cookie():
 # ---------------------------------------------------------------------------
 
 
-def test_callback_session_not_prematurely_expired_under_nonutc_tz(
-    client, fresh_stub_vectordb, monkeypatch
-):
+def test_callback_session_not_prematurely_expired_under_nonutc_tz(client, fresh_stub_vectordb, monkeypatch):
     """Callback in a non-UTC timezone must produce an immediately usable session."""
     import os as _os
 
@@ -690,14 +689,10 @@ def test_callback_session_not_prematurely_expired_under_nonutc_tz(
     try:
         # Teach the stub to back get_oidc_session_by_token with the same dict we
         # created in create_oidc_session (the default stub already does).
-        fresh_stub_vectordb.add_user(
-            user_id=77, email="tz@example.com", external_user_id="sub-tz"
-        )
+        fresh_stub_vectordb.add_user(user_id=77, email="tz@example.com", external_user_id="sub-tz")
         _setup_jwks(client.oidc_transport)
         state, nonce = _begin_login_and_extract_state(client)
-        id_token = _sign_jwt(
-            _id_token_payload(nonce, sub="sub-tz", email="tz@example.com")
-        )
+        id_token = _sign_jwt(_id_token_payload(nonce, sub="sub-tz", email="tz@example.com"))
         _mock_token_endpoint(client.oidc_transport, id_token)
 
         r = client.get(
@@ -713,18 +708,14 @@ def test_callback_session_not_prematurely_expired_under_nonutc_tz(
         assert session_cookie, "callback did not set openrag_session cookie"
 
         fetched = fresh_stub_vectordb._impl_get_oidc_session_by_token(session_cookie)
-        assert fetched is not None, (
-            "Session appeared expired IMMEDIATELY after creation — tz bug (M2)"
-        )
+        assert fetched is not None, "Session appeared expired IMMEDIATELY after creation — tz bug (M2)"
 
         # Additional sanity: session_expires_at must be strictly in the future
         # from the perspective of datetime.now() (the read-site clock).
         from datetime import datetime as _dt
 
         session_exp = fetched["session_expires_at"]
-        assert session_exp > _dt.now(), (
-            f"session_expires_at={session_exp} is not in the future vs datetime.now()"
-        )
+        assert session_exp > _dt.now(), f"session_expires_at={session_exp} is not in the future vs datetime.now()"
     finally:
         if original_tz is None:
             _os.environ.pop("TZ", None)

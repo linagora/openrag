@@ -20,9 +20,6 @@ from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
-from fastapi import APIRouter, Form, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse, RedirectResponse
-
 from components.auth import (
     OIDCClient,
     StateCookiePayload,
@@ -32,8 +29,14 @@ from components.auth import (
     get_oidc_client,
     issue_session_token,
 )
+from fastapi import APIRouter, Form, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse, RedirectResponse
 from utils.dependencies import get_vectordb
 from utils.logger import get_logger
+
+# Whitelist mirrors ``api._OIDC_CLAIM_MAPPING_ALLOWED_FIELDS`` — kept in sync
+# at the DB layer too (``PartitionFileManager.update_user_fields``).
+_OIDC_CLAIM_MAPPING_ALLOWED_FIELDS = {"display_name", "email"}
 
 logger = get_logger()
 router = APIRouter()
@@ -46,6 +49,7 @@ SESSION_COOKIE_NAME = "openrag_session"
 # Env helpers — read lazily so tests can monkeypatch os.environ
 # ---------------------------------------------------------------------------
 
+
 def _auth_mode() -> str:
     return os.getenv("AUTH_MODE", "token").strip().lower()
 
@@ -57,15 +61,34 @@ def _token_encryption_key() -> str:
     return key
 
 
-def _email_source() -> str:
-    return os.getenv("OIDC_EMAIL_SOURCE", "id_token").strip().lower()
+def _claim_source() -> str:
+    return os.getenv("OIDC_CLAIM_SOURCE", "id_token").strip().lower()
 
 
-def _allowed_email_domains() -> list[str]:
-    raw = os.getenv("OIDC_ALLOWED_EMAIL_DOMAINS", "").strip()
+def _claim_mapping() -> dict[str, str]:
+    """Parse ``OIDC_CLAIM_MAPPING`` at request time so tests can monkeypatch it.
+
+    Shares the validation rules with ``api._parse_oidc_claim_mapping``: entries
+    whose ``db_field`` is not whitelisted are silently dropped here because the
+    hard-failure path belongs to the startup validator in ``api.py`` — at login
+    time we prefer to log and continue rather than break the flow on a
+    misconfiguration the operator has already been warned about.
+    """
+    raw = os.getenv("OIDC_CLAIM_MAPPING", "").strip()
     if not raw:
-        return []
-    return [d.strip().lower() for d in raw.split(",") if d.strip()]
+        return {}
+    mapping: dict[str, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair or ":" not in pair:
+            continue
+        db_field, claim = pair.split(":", 1)
+        db_field = db_field.strip()
+        claim = claim.strip()
+        if db_field not in _OIDC_CLAIM_MAPPING_ALLOWED_FIELDS or not claim:
+            continue
+        mapping[db_field] = claim
+    return mapping
 
 
 def _post_logout_redirect_uri() -> str:
@@ -144,9 +167,7 @@ def _delete_state_cookie(response: Response) -> None:
     )
 
 
-def _json_error(
-    status_code: int, detail: str, *, delete_state_cookie: bool = False
-) -> JSONResponse:
+def _json_error(status_code: int, detail: str, *, delete_state_cookie: bool = False) -> JSONResponse:
     r = JSONResponse(status_code=status_code, content={"detail": detail})
     if delete_state_cookie:
         _delete_state_cookie(r)
@@ -157,6 +178,7 @@ def _json_error(
 # GET /auth/login
 # ---------------------------------------------------------------------------
 
+
 @router.get("/auth/login", include_in_schema=False)
 async def login(request: Request, next: str | None = None):
     _require_oidc_mode()
@@ -166,9 +188,7 @@ async def login(request: Request, next: str | None = None):
     code_verifier, code_challenge = OIDCClient.generate_pkce_pair()
 
     try:
-        auth_url = await client.build_authorization_url(
-            state=state, nonce=nonce, code_challenge=code_challenge
-        )
+        auth_url = await client.build_authorization_url(state=state, nonce=nonce, code_challenge=code_challenge)
     except Exception as e:
         logger.error(f"Failed to build OIDC authorization URL: {e}")
         raise HTTPException(
@@ -200,6 +220,7 @@ async def login(request: Request, next: str | None = None):
 # ---------------------------------------------------------------------------
 # GET /auth/callback
 # ---------------------------------------------------------------------------
+
 
 @router.get("/auth/callback", include_in_schema=False)
 async def callback(request: Request, code: str | None = None, state: str | None = None):
@@ -256,7 +277,7 @@ async def callback(request: Request, code: str | None = None, state: str | None 
             delete_state_cookie=True,
         )
 
-    # --- 4. Extract claims -----------------------------------------------------
+    # --- 4. Extract sub and match user ----------------------------------------
     sub = bundle.claims.get("sub")
     if not sub:
         return _json_error(
@@ -265,106 +286,54 @@ async def callback(request: Request, code: str | None = None, state: str | None 
             delete_state_cookie=True,
         )
 
-    email: str | None
-    if _email_source() == "id_token":
-        email = bundle.claims.get("email")
-    else:
-        # userinfo
-        try:
-            userinfo = await client.fetch_userinfo(bundle.access_token)
-        except Exception as e:
-            logger.warning(f"OIDC userinfo fetch failed: {e}")
-            return _json_error(
-                status.HTTP_400_BAD_REQUEST,
-                "Failed to fetch userinfo from IdP.",
-                delete_state_cookie=True,
-            )
-        email = userinfo.get("email")
-
-    if not email:
+    vdb = get_vectordb()
+    user: dict[str, Any] | None = await vdb.get_user_by_external_id.remote(sub)
+    if user is None:
+        logger.warning(f"OIDC login rejected — user not registered (sub={sub!r})")
         return _json_error(
-            status.HTTP_400_BAD_REQUEST,
-            "IdP did not return an email address.",
+            status.HTTP_403_FORBIDDEN,
+            "User not registered",
             delete_state_cookie=True,
         )
 
-    email = email.strip().lower()
-
-    # --- 5. Optional email-domain whitelist ------------------------------------
-    allowed = _allowed_email_domains()
-    if allowed:
-        try:
-            domain = email.split("@", 1)[1].lower()
-        except IndexError:
-            return _json_error(
-                status.HTTP_400_BAD_REQUEST,
-                "Invalid email address format.",
-                delete_state_cookie=True,
-            )
-        if domain not in allowed:
-            logger.warning(
-                f"OIDC login rejected — email domain {domain!r} not in whitelist"
-            )
-            return _json_error(
-                status.HTTP_403_FORBIDDEN,
-                f"Email domain {domain!r} is not allowed.",
-                delete_state_cookie=True,
-            )
-
-    # --- 6. User matching ------------------------------------------------------
-    vdb = get_vectordb()
-
-    user: dict[str, Any] | None = await vdb.get_user_by_external_id.remote(sub)
-    if user is None:
-        user = await vdb.get_user_by_email.remote(email)
-        if user is None:
-            logger.warning(
-                f"OIDC login rejected — user not registered (email={email!r}, sub={sub!r})"
-            )
-            return _json_error(
-                status.HTTP_403_FORBIDDEN,
-                "User not registered",
-                delete_state_cookie=True,
-            )
-
-        stored_ext = user.get("external_user_id")
-        if stored_ext is None:
-            # Backfill external_user_id = sub.
+    # --- 5. Optional claim-mapping update --------------------------------------
+    mapping = _claim_mapping()
+    if mapping:
+        if _claim_source() == "userinfo":
             try:
-                await vdb.set_user_external_id.remote(user["id"], sub)
-                logger.info(
-                    f"Backfilled external_user_id for user_id={user['id']} (sub={sub!r})"
-                )
+                claims_for_mapping: dict[str, Any] = await client.fetch_userinfo(bundle.access_token)
             except Exception as e:
-                logger.warning(
-                    f"set_user_external_id failed for user_id={user['id']}: {e}"
-                )
-            # Re-fetch via sub — this proves the backfill actually won the race.
-            user = await vdb.get_user_by_external_id.remote(sub)
-            if user is None:
+                logger.warning(f"OIDC userinfo fetch failed: {e}")
                 return _json_error(
-                    status.HTTP_403_FORBIDDEN,
-                    "External user ID mismatch",
+                    status.HTTP_400_BAD_REQUEST,
+                    "Failed to fetch userinfo from IdP.",
                     delete_state_cookie=True,
                 )
-        elif stored_ext != sub:
-            logger.warning(
-                "OIDC login rejected — external_user_id mismatch: "
-                f"user_id={user['id']}, stored={stored_ext!r}, claim_sub={sub!r}"
-            )
-            return _json_error(
-                status.HTTP_403_FORBIDDEN,
-                "External user ID mismatch",
-                delete_state_cookie=True,
-            )
+        else:
+            claims_for_mapping = bundle.claims
 
-    # Defensive sanity check (should be impossible after the lookup-by-sub path).
-    assert user.get("external_user_id") in (None, sub), (
-        f"OIDC invariant violated: external_user_id={user.get('external_user_id')!r} "
-        f"but matching sub={sub!r}"
-    )
+        updates: dict[str, Any] = {}
+        for db_field, claim in mapping.items():
+            value = claims_for_mapping.get(claim)
+            if value is None:
+                continue
+            # No-op filter: skip fields already matching, so we don't churn the DB.
+            if user.get(db_field) == value:
+                continue
+            updates[db_field] = value
 
-    # --- 7. Timestamps ---------------------------------------------------------
+        if updates:
+            try:
+                await vdb.update_user_fields.remote(user["id"], updates)
+            except Exception as e:
+                logger.warning(f"update_user_fields failed for user_id={user['id']}: {e}")
+            else:
+                # Refresh the user dict so anything downstream sees the new values.
+                refreshed = await vdb.get_user_by_external_id.remote(sub)
+                if refreshed is not None:
+                    user = refreshed
+
+    # --- 6. Timestamps ---------------------------------------------------------
     now = _utcnow()
     expires_in = max(int(bundle.expires_in or 0), 60)
     access_token_expires_at = now + timedelta(seconds=expires_in)
@@ -373,7 +342,7 @@ async def callback(request: Request, code: str | None = None, state: str | None 
     else:
         session_expires_at = access_token_expires_at
 
-    # --- 8. Issue session & encrypt ------------------------------------------
+    # --- 7. Issue session & encrypt ------------------------------------------
     plain, _hashed = issue_session_token()
     key = _token_encryption_key()
     id_token_encrypted = encrypt_token(bundle.id_token, key=key)
@@ -393,7 +362,7 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         session_expires_at=session_expires_at,
     )
 
-    # --- 9. Build redirect: clear state cookie, set session cookie -----------
+    # --- 8. Build redirect: clear state cookie, set session cookie -----------
     next_url = _sanitize_next_url(payload.next_url)
     redirect = RedirectResponse(url=next_url, status_code=302)
     _delete_state_cookie(redirect)
@@ -409,15 +378,14 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         path="/",
     )
 
-    logger.info(
-        f"OIDC login success — user_id={user['id']}, sid={sid!r}, next={next_url!r}"
-    )
+    logger.info(f"OIDC login success — user_id={user['id']}, sid={sid!r}, next={next_url!r}")
     return redirect
 
 
 # ---------------------------------------------------------------------------
 # POST /auth/backchannel-logout
 # ---------------------------------------------------------------------------
+
 
 @router.post("/auth/backchannel-logout", include_in_schema=False)
 async def backchannel_logout(logout_token: str = Form(...)):
@@ -449,9 +417,7 @@ async def backchannel_logout(logout_token: str = Form(...)):
     if claims.sid:
         vdb = get_vectordb()
         count = await vdb.revoke_oidc_sessions_by_sid.remote(claims.sid)
-        logger.info(
-            f"Back-channel logout revoked sessions — sid={claims.sid!r}, count={count}"
-        )
+        logger.info(f"Back-channel logout revoked sessions — sid={claims.sid!r}, count={count}")
     else:
         # Plan §2 #10 limits back-channel logout scope to sid only.
         # Still return 200 to keep the IdP happy.
@@ -469,6 +435,7 @@ async def backchannel_logout(logout_token: str = Form(...)):
 # ---------------------------------------------------------------------------
 # GET /auth/logout
 # ---------------------------------------------------------------------------
+
 
 @router.get("/auth/logout", include_in_schema=False)
 async def logout(request: Request):
@@ -519,6 +486,7 @@ async def logout(request: Request):
 # ---------------------------------------------------------------------------
 # GET /auth/me  — standard AuthMiddleware applies (route NOT in bypass list)
 # ---------------------------------------------------------------------------
+
 
 @router.get("/auth/me")
 async def me(request: Request):

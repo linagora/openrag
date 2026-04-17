@@ -1,14 +1,13 @@
 """Unit tests for session_tokens.py."""
 
 import pytest
-from cryptography.fernet import Fernet
-
 from components.auth.session_tokens import (
     decrypt_token,
     encrypt_token,
     hash_session_token,
     issue_session_token,
 )
+from cryptography.fernet import Fernet
 
 
 def _valid_key() -> str:

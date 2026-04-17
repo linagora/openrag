@@ -1,14 +1,12 @@
 """Unit tests for oidc_client.py — uses respx to mock httpx calls."""
 
-import json
 import time
 
 import httpx
 import pytest
 import pytest_asyncio
 import respx
-from authlib.jose import JsonWebKey, OctKey
-
+from authlib.jose import JsonWebKey
 from components.auth.oidc_client import LogoutTokenClaims, OIDCClient, TokenBundle
 
 # ---------------------------------------------------------------------------
@@ -78,16 +76,16 @@ def _id_token_payload(nonce: str, *, extra: dict | None = None) -> dict:
     return payload
 
 
-def _logout_token_payload(*, sub: str | None = "user-sub-001", sid: str | None = None, extra: dict | None = None) -> dict:
+def _logout_token_payload(
+    *, sub: str | None = "user-sub-001", sid: str | None = None, extra: dict | None = None
+) -> dict:
     now = int(time.time())
     payload = {
         "iss": ISSUER,
         "aud": CLIENT_ID,
         "iat": now,
         "jti": "logout-jti-001",
-        "events": {
-            "http://schemas.openid.net/event/backchannel-logout": {}
-        },
+        "events": {"http://schemas.openid.net/event/backchannel-logout": {}},
     }
     if sub is not None:
         payload["sub"] = sub
@@ -102,17 +100,16 @@ def _logout_token_payload(*, sub: str | None = "user-sub-001", sid: str | None =
 # Fixture — OIDCClient with mocked httpx transport
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def mock_transport():
-    """Return a respx mock transport; caller activates with `with respx.mock(transport=...)`."""
-    return respx.MockTransport()
-
 
 @pytest_asyncio.fixture
 async def client():
-    """OIDCClient backed by a real httpx.AsyncClient using respx mock transport."""
-    transport = respx.MockTransport(assert_all_called=False)
-    http = httpx.AsyncClient(transport=transport)
+    """OIDCClient backed by a real httpx.AsyncClient wired to a respx MockRouter.
+
+    respx >= 0.22 removed the top-level ``MockTransport``; use ``MockRouter``
+    plus ``httpx.MockTransport(router.handler)`` instead.
+    """
+    router = respx.MockRouter(assert_all_called=False)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(router.handler))
     oc = OIDCClient(
         issuer=ISSUER,
         client_id=CLIENT_ID,
@@ -121,27 +118,24 @@ async def client():
         scopes=SCOPES,
         http_client=http,
     )
-    # Pre-register common mock routes on the transport's router
-    oc._mock_transport = transport
+    # Expose the router so individual tests can register additional routes.
+    oc._mock_router = router
     yield oc
     await oc.aclose()
 
 
-def _setup_discovery(transport: respx.MockTransport):
-    transport.router.get(f"{ISSUER}/.well-known/openid-configuration").mock(
-        return_value=httpx.Response(200, json=DISCOVERY_DOC)
-    )
+def _setup_discovery(router: respx.MockRouter):
+    router.get(f"{ISSUER}/.well-known/openid-configuration").mock(return_value=httpx.Response(200, json=DISCOVERY_DOC))
 
 
-def _setup_jwks(transport: respx.MockTransport):
-    transport.router.get(f"{ISSUER}/protocol/openid-connect/certs").mock(
-        return_value=httpx.Response(200, json=JWKS_RESPONSE)
-    )
+def _setup_jwks(router: respx.MockRouter):
+    router.get(f"{ISSUER}/protocol/openid-connect/certs").mock(return_value=httpx.Response(200, json=JWKS_RESPONSE))
 
 
 # ---------------------------------------------------------------------------
 # PKCE generation tests (pure, no HTTP)
 # ---------------------------------------------------------------------------
+
 
 class TestPKCE:
     def test_verifier_length(self):
@@ -153,11 +147,7 @@ class TestPKCE:
         import hashlib
 
         verifier, challenge = OIDCClient.generate_pkce_pair()
-        expected = (
-            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-            .rstrip(b"=")
-            .decode()
-        )
+        expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
         assert challenge == expected
 
     def test_unique_pairs(self):
@@ -173,13 +163,12 @@ class TestPKCE:
 # Authorization URL
 # ---------------------------------------------------------------------------
 
+
 class TestBuildAuthorizationUrl:
     @pytest.mark.asyncio
     async def test_required_params(self, client):
-        _setup_discovery(client._mock_transport)
-        url = await client.build_authorization_url(
-            state="mystate", nonce="mynonce", code_challenge="mychallenge"
-        )
+        _setup_discovery(client._mock_router)
+        url = await client.build_authorization_url(state="mystate", nonce="mynonce", code_challenge="mychallenge")
         assert "response_type=code" in url
         assert "client_id=openrag-client" in url
         assert "state=mystate" in url
@@ -193,19 +182,20 @@ class TestBuildAuthorizationUrl:
 # Discovery
 # ---------------------------------------------------------------------------
 
+
 class TestDiscover:
     @pytest.mark.asyncio
     async def test_issuer_mismatch_raises(self, client):
         bad_doc = dict(DISCOVERY_DOC, issuer="https://evil.example.com")
-        client._mock_transport.router.get(
-            f"{ISSUER}/.well-known/openid-configuration"
-        ).mock(return_value=httpx.Response(200, json=bad_doc))
+        client._mock_router.get(f"{ISSUER}/.well-known/openid-configuration").mock(
+            return_value=httpx.Response(200, json=bad_doc)
+        )
         with pytest.raises(ValueError, match="Issuer mismatch"):
             await client.discover()
 
     @pytest.mark.asyncio
     async def test_caching(self, client):
-        _setup_discovery(client._mock_transport)
+        _setup_discovery(client._mock_router)
         doc1 = await client.discover()
         doc2 = await client.discover()
         # Same object from cache
@@ -216,11 +206,12 @@ class TestDiscover:
 # Code exchange
 # ---------------------------------------------------------------------------
 
+
 class TestExchangeCode:
     @pytest.mark.asyncio
     async def test_success(self, client):
-        _setup_discovery(client._mock_transport)
-        _setup_jwks(client._mock_transport)
+        _setup_discovery(client._mock_router)
+        _setup_jwks(client._mock_router)
 
         nonce = "test-nonce-abc"
         id_token = _sign_jwt(_id_token_payload(nonce))
@@ -231,13 +222,11 @@ class TestExchangeCode:
             "expires_in": 300,
             "token_type": "Bearer",
         }
-        client._mock_transport.router.post(
-            f"{ISSUER}/protocol/openid-connect/token"
-        ).mock(return_value=httpx.Response(200, json=token_response))
-
-        bundle = await client.exchange_code(
-            code="auth-code", code_verifier="verifier", expected_nonce=nonce
+        client._mock_router.post(f"{ISSUER}/protocol/openid-connect/token").mock(
+            return_value=httpx.Response(200, json=token_response)
         )
+
+        bundle = await client.exchange_code(code="auth-code", code_verifier="verifier", expected_nonce=nonce)
         assert isinstance(bundle, TokenBundle)
         assert bundle.access_token == "at-123"
         assert bundle.refresh_token == "rt-456"
@@ -246,8 +235,8 @@ class TestExchangeCode:
 
     @pytest.mark.asyncio
     async def test_nonce_mismatch_raises(self, client):
-        _setup_discovery(client._mock_transport)
-        _setup_jwks(client._mock_transport)
+        _setup_discovery(client._mock_router)
+        _setup_jwks(client._mock_router)
 
         id_token = _sign_jwt(_id_token_payload("correct-nonce"))
         token_response = {
@@ -256,25 +245,24 @@ class TestExchangeCode:
             "expires_in": 300,
             "token_type": "Bearer",
         }
-        client._mock_transport.router.post(
-            f"{ISSUER}/protocol/openid-connect/token"
-        ).mock(return_value=httpx.Response(200, json=token_response))
+        client._mock_router.post(f"{ISSUER}/protocol/openid-connect/token").mock(
+            return_value=httpx.Response(200, json=token_response)
+        )
 
         with pytest.raises(ValueError, match="nonce"):
-            await client.exchange_code(
-                code="code", code_verifier="v", expected_nonce="wrong-nonce"
-            )
+            await client.exchange_code(code="code", code_verifier="v", expected_nonce="wrong-nonce")
 
 
 # ---------------------------------------------------------------------------
 # Token refresh
 # ---------------------------------------------------------------------------
 
+
 class TestRefreshAccessToken:
     @pytest.mark.asyncio
     async def test_keeps_old_refresh_token_when_omitted(self, client):
-        _setup_discovery(client._mock_transport)
-        _setup_jwks(client._mock_transport)
+        _setup_discovery(client._mock_router)
+        _setup_jwks(client._mock_router)
 
         # IdP returns no refresh_token in the response
         token_response = {
@@ -283,9 +271,9 @@ class TestRefreshAccessToken:
             "token_type": "Bearer",
             # no refresh_token
         }
-        client._mock_transport.router.post(
-            f"{ISSUER}/protocol/openid-connect/token"
-        ).mock(return_value=httpx.Response(200, json=token_response))
+        client._mock_router.post(f"{ISSUER}/protocol/openid-connect/token").mock(
+            return_value=httpx.Response(200, json=token_response)
+        )
 
         bundle = await client.refresh_access_token("old-rt")
         assert bundle.refresh_token == "old-rt"
@@ -293,8 +281,8 @@ class TestRefreshAccessToken:
 
     @pytest.mark.asyncio
     async def test_uses_new_refresh_token_when_provided(self, client):
-        _setup_discovery(client._mock_transport)
-        _setup_jwks(client._mock_transport)
+        _setup_discovery(client._mock_router)
+        _setup_jwks(client._mock_router)
 
         token_response = {
             "access_token": "new-at",
@@ -302,9 +290,9 @@ class TestRefreshAccessToken:
             "expires_in": 300,
             "token_type": "Bearer",
         }
-        client._mock_transport.router.post(
-            f"{ISSUER}/protocol/openid-connect/token"
-        ).mock(return_value=httpx.Response(200, json=token_response))
+        client._mock_router.post(f"{ISSUER}/protocol/openid-connect/token").mock(
+            return_value=httpx.Response(200, json=token_response)
+        )
 
         bundle = await client.refresh_access_token("old-rt")
         assert bundle.refresh_token == "new-rt"
@@ -314,15 +302,16 @@ class TestRefreshAccessToken:
 # Userinfo
 # ---------------------------------------------------------------------------
 
+
 class TestFetchUserinfo:
     @pytest.mark.asyncio
     async def test_returns_userinfo(self, client):
-        _setup_discovery(client._mock_transport)
+        _setup_discovery(client._mock_router)
 
         userinfo = {"sub": "user-sub-001", "email": "user@example.com"}
-        client._mock_transport.router.get(
-            f"{ISSUER}/protocol/openid-connect/userinfo"
-        ).mock(return_value=httpx.Response(200, json=userinfo))
+        client._mock_router.get(f"{ISSUER}/protocol/openid-connect/userinfo").mock(
+            return_value=httpx.Response(200, json=userinfo)
+        )
 
         result = await client.fetch_userinfo("at-123")
         assert result["email"] == "user@example.com"
@@ -332,11 +321,12 @@ class TestFetchUserinfo:
 # Logout token verification
 # ---------------------------------------------------------------------------
 
+
 class TestVerifyLogoutToken:
     @pytest.mark.asyncio
     async def test_valid_logout_token_with_sub(self, client):
-        _setup_discovery(client._mock_transport)
-        _setup_jwks(client._mock_transport)
+        _setup_discovery(client._mock_router)
+        _setup_jwks(client._mock_router)
 
         token = _sign_jwt(_logout_token_payload(sub="user-sub-001"))
         claims = await client.verify_logout_token(token)
@@ -345,8 +335,8 @@ class TestVerifyLogoutToken:
 
     @pytest.mark.asyncio
     async def test_valid_logout_token_with_sid(self, client):
-        _setup_discovery(client._mock_transport)
-        _setup_jwks(client._mock_transport)
+        _setup_discovery(client._mock_router)
+        _setup_jwks(client._mock_router)
 
         token = _sign_jwt(_logout_token_payload(sub=None, sid="session-abc"))
         claims = await client.verify_logout_token(token)
@@ -355,8 +345,8 @@ class TestVerifyLogoutToken:
 
     @pytest.mark.asyncio
     async def test_missing_events_claim_raises(self, client):
-        _setup_discovery(client._mock_transport)
-        _setup_jwks(client._mock_transport)
+        _setup_discovery(client._mock_router)
+        _setup_jwks(client._mock_router)
 
         payload = _logout_token_payload()
         del payload["events"]
@@ -366,8 +356,8 @@ class TestVerifyLogoutToken:
 
     @pytest.mark.asyncio
     async def test_wrong_events_key_raises(self, client):
-        _setup_discovery(client._mock_transport)
-        _setup_jwks(client._mock_transport)
+        _setup_discovery(client._mock_router)
+        _setup_jwks(client._mock_router)
 
         payload = _logout_token_payload()
         payload["events"] = {"http://schemas.openid.net/event/OTHER": {}}
@@ -377,8 +367,8 @@ class TestVerifyLogoutToken:
 
     @pytest.mark.asyncio
     async def test_nonce_present_raises(self, client):
-        _setup_discovery(client._mock_transport)
-        _setup_jwks(client._mock_transport)
+        _setup_discovery(client._mock_router)
+        _setup_jwks(client._mock_router)
 
         payload = _logout_token_payload()
         payload["nonce"] = "forbidden"
@@ -388,8 +378,8 @@ class TestVerifyLogoutToken:
 
     @pytest.mark.asyncio
     async def test_missing_sub_and_sid_raises(self, client):
-        _setup_discovery(client._mock_transport)
-        _setup_jwks(client._mock_transport)
+        _setup_discovery(client._mock_router)
+        _setup_jwks(client._mock_router)
 
         token = _sign_jwt(_logout_token_payload(sub=None, sid=None))
         with pytest.raises(ValueError, match="sub or sid"):

@@ -104,10 +104,7 @@ async def refresh_session_if_needed(
             last_refresh_at_dt = _to_dt(last_refresh_at)
         except TypeError:
             last_refresh_at_dt = None
-        if (
-            last_refresh_at_dt is not None
-            and (now - last_refresh_at_dt) < _STAMPEDE_WINDOW
-        ):
+        if last_refresh_at_dt is not None and (now - last_refresh_at_dt) < _STAMPEDE_WINDOW:
             try:
                 fresh = await vectordb.get_oidc_session_by_id.remote(session["id"])
             except Exception as e:
@@ -155,11 +152,7 @@ async def refresh_session_if_needed(
 
     new_access_exp = now + timedelta(seconds=max(int(bundle.expires_in or 0), 60))
     new_access_enc = encrypt_token(bundle.access_token, enc_key)
-    new_refresh_enc = (
-        encrypt_token(bundle.refresh_token, enc_key)
-        if bundle.refresh_token
-        else refresh_enc
-    )
+    new_refresh_enc = encrypt_token(bundle.refresh_token, enc_key) if bundle.refresh_token else refresh_enc
 
     try:
         await vectordb.update_oidc_session_tokens.remote(

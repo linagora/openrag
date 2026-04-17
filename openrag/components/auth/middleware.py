@@ -26,14 +26,13 @@ not at import time, so tests can monkeypatch ``os.environ``.
 from __future__ import annotations
 
 import os
-from typing import Callable
+from collections.abc import Callable
 from urllib.parse import quote
 
+from components.auth.refresh import refresh_session_if_needed
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-
-from components.auth.refresh import refresh_session_if_needed
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -149,9 +148,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     try:
                         await vectordb.revoke_oidc_session_by_id.remote(session["id"])
                     except Exception as e:
-                        logger.bind(error=str(e)).warning(
-                            "Failed to revoke invalid OIDC session"
-                        )
+                        logger.bind(error=str(e)).warning("Failed to revoke invalid OIDC session")
                     session = None
                 else:
                     session = refreshed
@@ -183,13 +180,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         )
                         if refreshed is None:
                             try:
-                                await vectordb.revoke_oidc_session_by_id.remote(
-                                    session["id"]
-                                )
+                                await vectordb.revoke_oidc_session_by_id.remote(session["id"])
                             except Exception as e:
-                                logger.bind(error=str(e)).warning(
-                                    "Failed to revoke invalid OIDC session (bearer path)"
-                                )
+                                logger.bind(error=str(e)).warning("Failed to revoke invalid OIDC session (bearer path)")
                             session = None
                         else:
                             session = refreshed
@@ -202,14 +195,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     user = await vectordb.get_user_by_token.remote(token)
                     if not user and auth_mode == "token":
                         # Legacy test contract: robot suite asserts 403 + "Invalid token".
-                        return JSONResponse(
-                            status_code=403, content={"detail": "Invalid token"}
-                        )
+                        return JSONResponse(status_code=403, content={"detail": "Invalid token"})
             elif auth_mode == "token":
                 # Token mode: no cookie + no bearer → legacy 403 "Missing token".
-                return JSONResponse(
-                    status_code=403, content={"detail": "Missing token"}
-                )
+                return JSONResponse(status_code=403, content={"detail": "Missing token"})
 
         # --- 3) Unauthenticated: redirect UI in oidc mode, else 401 JSON.
         if user is None:
@@ -221,14 +210,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     url=f"/auth/login?next={quote(next_path, safe='')}",
                     status_code=302,
                 )
-            return JSONResponse(
-                status_code=401, content={"detail": "Unauthenticated"}
-            )
+            return JSONResponse(status_code=401, content={"detail": "Unauthenticated"})
 
         # --- Happy path: user resolved.
         request.state.user = user
-        request.state.user_partitions = await vectordb.list_user_partitions.remote(
-            user["id"]
-        )
+        request.state.user_partitions = await vectordb.list_user_partitions.remote(user["id"])
         request.state.oidc_session = session  # None when authenticated via Bearer
         return await call_next(request)

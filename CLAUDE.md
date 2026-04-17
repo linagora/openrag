@@ -355,31 +355,30 @@ OpenRag supports two authentication modes, controlled by the `AUTH_MODE` environ
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `OIDC_EMAIL_SOURCE` | `id_token` | Claim source: `id_token` or `userinfo` |
+| `OIDC_CLAIM_SOURCE` | `id_token` | Where to read claims for claim mapping: `id_token` (verified JWT) or `userinfo` (`/userinfo` endpoint) |
+| `OIDC_CLAIM_MAPPING` | (none) | CSV of `db_field:claim` pairs to sync IdP claims into the users row on every login (whitelist: `display_name`, `email`). Unset = no post-login update. |
 | `OIDC_SCOPES` | `openid email profile offline_access` | Space-separated scope list (include `offline_access` for refresh tokens) |
 | `OIDC_POST_LOGOUT_REDIRECT_URI` | `/` | URL to redirect after RP-initiated logout |
-| `OIDC_ALLOWED_EMAIL_DOMAINS` | (none) | CSV whitelist of email domains (e.g., `example.com,partner.org`) |
 
 **User Matching & Provisioning**:
 
-When a user logs in via OIDC:
-1. Lookup by `users.external_user_id = sub` (OIDC claim, stable identifier)
-2. Fallback: lookup by `users.email = email` claim
-3. On email match, backfill `external_user_id = sub` (first login only)
-4. If neither matches: reject with 403 (no auto-provisioning)
+When a user logs in via OIDC, matching is **exclusively** by `users.external_user_id == sub` (the stable OIDC claim). There is no email fallback and no auto-provisioning: if the `sub` is unknown, the callback returns `403 "User not registered"`. Admins MUST pre-create every user with the expected `external_user_id`.
 
-**Admin Pre-provisioning**: Admins must create users in the database with matching email (and optionally `external_user_id` if known). Example:
+Optionally, if `OIDC_CLAIM_MAPPING` is set, after a successful match the callback reads the configured claims (from the ID token or `/userinfo`, per `OIDC_CLAIM_SOURCE`) and updates the user row. The writable whitelist is strict — only `display_name` and `email` are allowed; `is_admin`, `external_user_id`, `file_quota`, `token` are never writable via claim mapping.
+
+**Admin Pre-provisioning**: Admins create users with the `external_user_id` matching the IdP's `sub` claim for that user. Example:
 ```bash
 curl -X POST http://localhost:8080/users/ \
   -H "Authorization: Bearer <AUTH_TOKEN>" \
   -H "Content-Type: application/json" \
-  -d '{"display_name": "Alice", "email": "alice@example.com", "is_admin": false}'
+  -d '{"display_name": "Alice", "external_user_id": "kc-alice-uuid", "is_admin": false}'
 ```
 
 **Database Schema**:
 
-New columns on `users` table:
-- `email` (String, unique, nullable): Email matching the `email` OIDC claim
+Columns on `users` table relevant to OIDC:
+- `external_user_id` (String, unique, nullable): Must equal the IdP's `sub` for OIDC matching
+- `email` (String, unique, nullable): Pure metadata; populated manually or via claim mapping. Not used for matching.
 
 New table `oidc_sessions`:
 - `session_token_hash` (unique): SHA-256 of the opaque session token

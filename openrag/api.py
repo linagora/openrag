@@ -89,20 +89,55 @@ WITH_OPENAI_API: bool = os.getenv("WITH_OPENAI_API", "true").lower() == "true"
 
 AUTH_MODE: str = os.getenv("AUTH_MODE", "token").strip().lower()
 if AUTH_MODE not in ("token", "oidc"):
-    raise RuntimeError(
-        f"Invalid AUTH_MODE={AUTH_MODE!r}. Expected 'token' or 'oidc'."
-    )
+    raise RuntimeError(f"Invalid AUTH_MODE={AUTH_MODE!r}. Expected 'token' or 'oidc'.")
 
 # OIDC configuration (only required when AUTH_MODE=oidc)
 OIDC_ENDPOINT: str | None = os.getenv("OIDC_ENDPOINT")
 OIDC_CLIENT_ID: str | None = os.getenv("OIDC_CLIENT_ID")
 OIDC_CLIENT_SECRET: str | None = os.getenv("OIDC_CLIENT_SECRET")
 OIDC_REDIRECT_URI: str | None = os.getenv("OIDC_REDIRECT_URI")
-OIDC_EMAIL_SOURCE: str = os.getenv("OIDC_EMAIL_SOURCE", "id_token").strip().lower()
+OIDC_CLAIM_SOURCE: str = os.getenv("OIDC_CLAIM_SOURCE", "id_token").strip().lower()
+OIDC_CLAIM_MAPPING: str = os.getenv("OIDC_CLAIM_MAPPING", "").strip()
 OIDC_SCOPES: str = os.getenv("OIDC_SCOPES", "openid email profile offline_access")
 OIDC_TOKEN_ENCRYPTION_KEY: str | None = os.getenv("OIDC_TOKEN_ENCRYPTION_KEY")
 OIDC_POST_LOGOUT_REDIRECT_URI: str = os.getenv("OIDC_POST_LOGOUT_REDIRECT_URI", "/")
-OIDC_ALLOWED_EMAIL_DOMAINS: str = os.getenv("OIDC_ALLOWED_EMAIL_DOMAINS", "")
+
+# Whitelist of writable DB fields populated by OIDC claim mapping.
+# Never allow is_admin / external_user_id / file_quota / token here —
+# those are either identity-defining or privilege-escalation vectors.
+_OIDC_CLAIM_MAPPING_ALLOWED_FIELDS = {"display_name", "email"}
+
+
+def _parse_oidc_claim_mapping(raw: str) -> dict[str, str]:
+    """Parse the ``OIDC_CLAIM_MAPPING`` env var (CSV of ``db_field:claim`` pairs).
+
+    Validates each pair against the whitelist and enforces non-empty values so
+    misconfiguration fails fast at startup rather than silently at login time.
+    """
+    if not raw:
+        return {}
+    mapping: dict[str, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if ":" not in pair:
+            raise RuntimeError(f"Invalid OIDC_CLAIM_MAPPING entry {pair!r}: expected 'db_field:claim'")
+        db_field, claim = pair.split(":", 1)
+        db_field = db_field.strip()
+        claim = claim.strip()
+        if db_field not in _OIDC_CLAIM_MAPPING_ALLOWED_FIELDS:
+            raise RuntimeError(
+                f"OIDC_CLAIM_MAPPING db_field {db_field!r} is not writable "
+                f"(allowed: {sorted(_OIDC_CLAIM_MAPPING_ALLOWED_FIELDS)})"
+            )
+        if not claim:
+            raise RuntimeError(f"OIDC_CLAIM_MAPPING entry for {db_field!r} has empty claim name")
+        mapping[db_field] = claim
+    return mapping
+
+
+OIDC_CLAIM_MAPPING_PARSED: dict[str, str] = _parse_oidc_claim_mapping(OIDC_CLAIM_MAPPING)
 
 if AUTH_MODE == "oidc":
     _missing = [
@@ -117,18 +152,14 @@ if AUTH_MODE == "oidc":
         if not val
     ]
     if _missing:
-        raise RuntimeError(
-            "AUTH_MODE=oidc but the following env vars are missing or empty: "
-            + ", ".join(_missing)
-        )
-    if OIDC_EMAIL_SOURCE not in ("id_token", "userinfo"):
-        raise RuntimeError(
-            f"Invalid OIDC_EMAIL_SOURCE={OIDC_EMAIL_SOURCE!r}. Expected 'id_token' or 'userinfo'."
-        )
+        raise RuntimeError("AUTH_MODE=oidc but the following env vars are missing or empty: " + ", ".join(_missing))
+    if OIDC_CLAIM_SOURCE not in ("id_token", "userinfo"):
+        raise RuntimeError(f"Invalid OIDC_CLAIM_SOURCE={OIDC_CLAIM_SOURCE!r}. Expected 'id_token' or 'userinfo'.")
     logger.info(
         "OIDC authentication mode enabled",
         issuer=OIDC_ENDPOINT,
-        email_source=OIDC_EMAIL_SOURCE,
+        claim_source=OIDC_CLAIM_SOURCE,
+        claim_mapping_fields=sorted(OIDC_CLAIM_MAPPING_PARSED.keys()),
     )
 
 

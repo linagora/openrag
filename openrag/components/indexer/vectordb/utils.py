@@ -838,8 +838,15 @@ class PartitionFileManager:
             session.commit()
 
     # ------------------------------------------------------------------
-    # OIDC — users lookup / external_user_id backfill
+    # OIDC — user lookup by sub + optional claim-mapping update
     # ------------------------------------------------------------------
+
+    # Whitelist mirrored in ``api._OIDC_CLAIM_MAPPING_ALLOWED_FIELDS`` and in
+    # ``routers/auth.py`` — three locations on purpose: the startup validator
+    # and request-time parser both filter their own inputs, and the DB method
+    # refuses writes outside this set as a last line of defence against a
+    # caller bypassing the upstream checks.
+    _OIDC_WRITABLE_USER_FIELDS = {"display_name", "email"}
 
     def _user_to_dict(self, user: User) -> dict:
         """Serialize a User ORM object to the dict shape used elsewhere."""
@@ -873,47 +880,33 @@ class PartitionFileManager:
                 return None
             return self._user_to_dict(user)
 
-    def get_user_by_email(self, email: str) -> dict | None:
-        """Return the user (as dict) whose ``email`` matches exactly, or None.
+    def update_user_fields(self, user_id: int, fields: dict[str, object]) -> None:
+        """Update whitelisted scalar fields on the users table.
 
-        NOTE: comparison is **case-sensitive**. OIDC email claims are typically
-        lowercased by the IdP, but this is not guaranteed by the spec
-        (RFC 7519 §4.1 treats it as arbitrary string). Callers doing lookups
-        against user-provided input should normalize upstream if needed.
+        Enforces the same whitelist as the OIDC claim-mapping parser
+        (``display_name``, ``email``) — writing to any other field raises
+        ``ValueError``. ``None`` values are silently dropped (defensive: the
+        claim was missing upstream). Empty mapping is a no-op and does not
+        open a DB session.
         """
+        if not fields:
+            return
+        bad = set(fields) - self._OIDC_WRITABLE_USER_FIELDS
+        if bad:
+            raise ValueError(f"Cannot update non-whitelisted user fields: {sorted(bad)}")
+        cleaned = {k: v for k, v in fields.items() if v is not None}
+        if not cleaned:
+            return
+        # Normalize email to lowercase if present (consistent with create_user).
+        if "email" in cleaned and isinstance(cleaned["email"], str):
+            cleaned["email"] = cleaned["email"].strip().lower()
         with self.Session() as s:
-            user = s.query(User).filter(User.email == email).first()
-            if not user:
-                return None
-            return self._user_to_dict(user)
-
-    def set_user_external_id(self, user_id: int, external_user_id: str) -> None:
-        """Backfill ``users.external_user_id`` on first successful OIDC login.
-
-        Behaviour:
-        - if currently NULL → set to ``external_user_id`` (backfill).
-        - if already equal to ``external_user_id`` → no-op.
-        - if set to a *different* value → raise ValueError (identity conflict;
-          caller must handle by logging and returning 403 — see AC6d).
-        """
-        with self.Session() as s:
-            user = s.query(User).filter(User.id == user_id).first()
+            user = s.query(User).filter_by(id=user_id).first()
             if user is None:
-                raise ValueError(f"user_id={user_id} does not exist")
-            if user.external_user_id is None:
-                user.external_user_id = external_user_id
-                s.commit()
-                self.logger.info(
-                    f"Backfilled external_user_id for user_id={user_id}"
-                )
-                return
-            if user.external_user_id == external_user_id:
-                return  # idempotent no-op
-            raise ValueError(
-                "external_user_id mismatch for user_id="
-                f"{user_id}: stored={user.external_user_id!r}, "
-                f"incoming={external_user_id!r}"
-            )
+                raise ValueError(f"User {user_id} not found")
+            for k, v in cleaned.items():
+                setattr(user, k, v)
+            s.commit()
 
     # ------------------------------------------------------------------
     # OIDC — sessions
@@ -986,11 +979,7 @@ class PartitionFileManager:
         session_token_hash = self.hash_token(session_token_plain)
         now = datetime.now()
         with self.Session() as s:
-            row = (
-                s.query(OIDCSession)
-                .filter(OIDCSession.session_token_hash == session_token_hash)
-                .first()
-            )
+            row = s.query(OIDCSession).filter(OIDCSession.session_token_hash == session_token_hash).first()
             if row is None:
                 return None
             if row.revoked_at is not None:
@@ -1043,12 +1032,7 @@ class PartitionFileManager:
         already handles the common stampede case without needing a real lock.
         """
         with self.Session() as s:
-            row = (
-                s.query(OIDCSession)
-                .filter(OIDCSession.id == session_id)
-                .with_for_update()
-                .first()
-            )
+            row = s.query(OIDCSession).filter(OIDCSession.id == session_id).with_for_update().first()
             if row is None:
                 raise ValueError(f"oidc_session id={session_id} does not exist")
             row.access_token_encrypted = access_token_encrypted
@@ -1076,9 +1060,7 @@ class PartitionFileManager:
             result = s.execute(stmt)
             s.commit()
             count = result.rowcount or 0
-            self.logger.bind(sid=sid, count=count).info(
-                "Revoked OIDC sessions by sid"
-            )
+            self.logger.bind(sid=sid, count=count).info("Revoked OIDC sessions by sid")
             return count
 
     def revoke_oidc_session_by_id(self, session_id: int) -> None:

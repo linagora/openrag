@@ -3,9 +3,7 @@
 import time
 
 import pytest
-
 from components.auth.state_cookie import StateCookiePayload, StateCookieSerializer
-
 
 SECRET = "test-secret-key-for-state-cookie"
 

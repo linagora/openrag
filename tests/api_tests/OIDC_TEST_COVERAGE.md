@@ -10,10 +10,7 @@ test(s) that cover it.
 | AC3 | `AUTH_MODE=oidc` — API path without cookie/Bearer → 401 JSON | `openrag/components/auth/test_middleware.py::TestOIDCMode::test_no_creds_api_path_returns_401`, `::test_no_creds_v1_chat_returns_401` |
 | AC4 | `GET /auth/login` → 302 with `state`, `nonce`, `code_challenge` (PKCE S256), `scope openid email` | `openrag/routers/test_auth_router.py::test_login_redirects_to_idp_with_pkce`, `tests/api_tests/test_oidc_lifecycle.py::test_full_oidc_lifecycle` (step 1) |
 | AC5 | `GET /auth/callback` with valid code+state → sets `openrag_session` cookie + 302 to `next_url` | `openrag/routers/test_auth_router.py::test_callback_success_by_external_id`, `tests/api_tests/test_oidc_lifecycle.py::test_full_oidc_lifecycle` (step 3) |
-| AC6 | Callback with unknown email AND unknown sub → 403, no session created | `openrag/routers/test_auth_router.py::test_callback_user_not_registered` |
-| AC6b | Callback: match by sub directly (user already linked), no email fallback | `openrag/routers/test_auth_router.py::test_callback_success_by_external_id` |
-| AC6c | Callback: match by email, backfill `external_user_id=sub`, session created | `openrag/routers/test_auth_router.py::test_callback_backfills_external_user_id`, `tests/api_tests/test_oidc_lifecycle.py::test_full_oidc_lifecycle` (steps 3–4) |
-| AC6d | Callback: `external_user_id` already set to different sub → 403 conflict | `openrag/routers/test_auth_router.py::test_callback_external_id_mismatch` |
+| AC6 | Callback with unknown `sub` → 403, no session created (no email fallback) | `openrag/routers/test_auth_router.py::test_callback_user_not_registered` |
 | AC7 | Callback with invalid/mismatched `state` → 400 | `openrag/routers/test_auth_router.py::test_callback_state_mismatch`, `::test_callback_missing_state_cookie` |
 | AC8 | Callback with nonce mismatch in ID token → 400 | `openrag/components/auth/test_oidc_client.py` (exchange_code nonce validation tests) |
 | AC9 | Request with valid session cookie → `request.state.user` populated, normal flow | `openrag/components/auth/test_middleware.py::TestOIDCMode::test_cookie_valid_and_access_token_fresh_no_refresh`, `tests/api_tests/test_oidc_lifecycle.py::test_full_oidc_lifecycle` (step 5) |
@@ -26,3 +23,6 @@ test(s) that cover it.
 | AC16 | `access_token` and `refresh_token` stored encrypted (Fernet), unreadable without key | `openrag/components/auth/test_session_tokens.py::TestEncryptDecrypt::test_round_trip`, `::test_wrong_key_raises_value_error` |
 | AC17 | Alembic migration upgrade/downgrade idempotent | Manual: `alembic upgrade head && alembic downgrade -1 && alembic upgrade head` |
 | AC18 | `OIDC_TOKEN_ENCRYPTION_KEY` missing in oidc mode → clear startup error | `openrag/components/auth/test_oidc_client.py` (startup/config validation tests) |
+| AC19 | `OIDC_CLAIM_MAPPING` unset → callback does NOT update user row | `openrag/routers/test_auth_router.py::test_callback_skips_mapping_when_unset` |
+| AC20 | `OIDC_CLAIM_MAPPING` set + `OIDC_CLAIM_SOURCE=id_token` → user row updated from ID token claims | `openrag/routers/test_auth_router.py::test_callback_applies_claim_mapping_from_id_token` |
+| AC21 | `OIDC_CLAIM_MAPPING` set + `OIDC_CLAIM_SOURCE=userinfo` → `/userinfo` fetched, user row updated | `openrag/routers/test_auth_router.py::test_callback_applies_claim_mapping_from_userinfo` |

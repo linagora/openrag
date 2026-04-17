@@ -126,7 +126,6 @@ class _StubVectorDB:
     def __init__(self):
         self.calls: list[tuple[str, tuple, dict]] = []
         self._users_by_sub: dict[str, dict] = {}
-        self._users_by_email: dict[str, dict] = {}
         self._users_by_id: dict[int, dict] = {}
         self._sessions: dict[int, dict] = {}
         self._sessions_by_token: dict[str, int] = {}
@@ -135,11 +134,8 @@ class _StubVectorDB:
         self.get_user_by_external_id = _RayMethodStub(
             "get_user_by_external_id", self._impl_get_user_by_external_id, self.calls
         )
-        self.get_user_by_email = _RayMethodStub(
-            "get_user_by_email", self._impl_get_user_by_email, self.calls
-        )
-        self.set_user_external_id = _RayMethodStub(
-            "set_user_external_id", self._impl_set_user_external_id, self.calls
+        self.update_user_fields = _RayMethodStub(
+            "update_user_fields", self._impl_update_user_fields, self.calls
         )
         self.create_oidc_session = _RayMethodStub(
             "create_oidc_session", self._impl_create_oidc_session, self.calls
@@ -165,7 +161,13 @@ class _StubVectorDB:
             "update_oidc_session_tokens", lambda *a, **kw: None, self.calls
         )
 
-    def add_user(self, *, user_id: int, email: str, external_user_id: str | None = None) -> dict:
+    def add_user(
+        self,
+        *,
+        user_id: int,
+        email: str | None = None,
+        external_user_id: str | None = None,
+    ) -> dict:
         user = {
             "id": user_id,
             "email": email,
@@ -174,7 +176,6 @@ class _StubVectorDB:
             "display_name": f"user-{user_id}",
         }
         self._users_by_id[user_id] = user
-        self._users_by_email[email] = user
         if external_user_id:
             self._users_by_sub[external_user_id] = user
         return user
@@ -182,20 +183,20 @@ class _StubVectorDB:
     def _impl_get_user_by_external_id(self, external_user_id: str):
         return self._users_by_sub.get(external_user_id)
 
-    def _impl_get_user_by_email(self, email: str):
-        return self._users_by_email.get(email)
-
-    def _impl_set_user_external_id(self, user_id: int, external_user_id: str):
+    def _impl_update_user_fields(self, user_id: int, fields: dict):
         user = self._users_by_id.get(user_id)
         if user is None:
-            raise ValueError(f"user_id={user_id} does not exist")
-        if user["external_user_id"] is None:
-            user["external_user_id"] = external_user_id
-            self._users_by_sub[external_user_id] = user
-            return
-        if user["external_user_id"] == external_user_id:
-            return
-        raise ValueError("external_user_id mismatch")
+            raise ValueError(f"User {user_id} not found")
+        _ALLOWED = {"display_name", "email"}
+        bad = set(fields) - _ALLOWED
+        if bad:
+            raise ValueError(f"Cannot update non-whitelisted user fields: {sorted(bad)}")
+        for k, v in fields.items():
+            if v is None:
+                continue
+            if k == "email" and isinstance(v, str):
+                v = v.strip().lower()
+            user[k] = v
 
     def _impl_create_oidc_session(self, **kwargs):
         sid_key = self._next_session_id
@@ -305,7 +306,9 @@ def test_full_oidc_lifecycle(monkeypatch):
     """Single end-to-end flow: login → callback → /users/info → backchannel
     logout → revoked cookie check.
 
-    Covers AC4, AC5, AC6c, AC9, AC12, AC14 with live component wiring.
+    Covers AC4, AC5, AC9, AC12, AC14 with live component wiring.
+    Pre-provisions alice with ``external_user_id`` matching the mocked IdP's
+    ``sub`` — email is pure metadata in the simplified flow.
     """
     # ── Env ──────────────────────────────────────────────────────────────────
     monkeypatch.setenv("AUTH_MODE", "oidc")
@@ -315,15 +318,18 @@ def test_full_oidc_lifecycle(monkeypatch):
     monkeypatch.setenv("OIDC_REDIRECT_URI", REDIRECT_URI)
     monkeypatch.setenv("OIDC_SCOPES", SCOPES)
     monkeypatch.setenv("OIDC_TOKEN_ENCRYPTION_KEY", _FERNET_KEY)
-    monkeypatch.setenv("OIDC_EMAIL_SOURCE", "id_token")
+    monkeypatch.setenv("OIDC_CLAIM_SOURCE", "id_token")
     monkeypatch.setenv("OIDC_POST_LOGOUT_REDIRECT_URI", "/")
-    monkeypatch.delenv("OIDC_ALLOWED_EMAIL_DOMAINS", raising=False)
+    monkeypatch.delenv("OIDC_CLAIM_MAPPING", raising=False)
     monkeypatch.delenv("AUTH_TOKEN", raising=False)
     _auth_deps.reset_oidc_client()
 
-    # ── Pre-seed alice ────────────────────────────────────────────────────────
+    # ── Pre-seed alice with the exact sub that the IdP mock will return ────────
+    ALICE_SUB = "alice-sub"
     _stub_vdb.__init__()  # reset state
-    _stub_vdb.add_user(user_id=99, email="alice@example.com", external_user_id=None)
+    _stub_vdb.add_user(
+        user_id=99, email="alice@example.com", external_user_id=ALICE_SUB
+    )
 
     # ── Build app with mocked transport ──────────────────────────────────────
     transport = respx.MockTransport(assert_all_called=False)
@@ -354,7 +360,6 @@ def test_full_oidc_lifecycle(monkeypatch):
     assert "openrag_oidc_state" in r1.cookies
 
     # ── Step 2: Simulate IdP token response ──────────────────────────────────
-    ALICE_SUB = "alice-sub"
     ALICE_SID = "sess-123"
     id_tok = _id_token(nonce, sub=ALICE_SUB, email="alice@example.com", sid=ALICE_SID)
 
@@ -382,7 +387,8 @@ def test_full_oidc_lifecycle(monkeypatch):
     session_cookie = r2.cookies["openrag_session"]
 
     # ── Step 4: Assert DB state ───────────────────────────────────────────────
-    # external_user_id backfilled
+    # User pre-provisioning is the admin's responsibility — the flow must not
+    # mutate external_user_id at all (no backfill anymore).
     alice = _stub_vdb._users_by_id[99]
     assert alice["external_user_id"] == ALICE_SUB, (
         f"Expected external_user_id='{ALICE_SUB}', got '{alice['external_user_id']}'"
