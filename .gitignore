@@ -84,3 +84,7 @@ docs/plans/
 
 # Build artifacts
 *.egg-info/
+
+# Local developer overrides (not committed)
+docker-compose.override.yaml
+docker-compose.override.yml

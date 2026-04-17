@@ -136,12 +136,8 @@ class _StubVectorDB:
         self.get_user_by_external_id = _RayMethodStub(
             "get_user_by_external_id", self._impl_get_user_by_external_id, self.calls
         )
-        self.update_user_fields = _RayMethodStub(
-            "update_user_fields", self._impl_update_user_fields, self.calls
-        )
-        self.create_oidc_session = _RayMethodStub(
-            "create_oidc_session", self._impl_create_oidc_session, self.calls
-        )
+        self.update_user_fields = _RayMethodStub("update_user_fields", self._impl_update_user_fields, self.calls)
+        self.create_oidc_session = _RayMethodStub("create_oidc_session", self._impl_create_oidc_session, self.calls)
         self.get_oidc_session_by_token = _RayMethodStub(
             "get_oidc_session_by_token", self._impl_get_oidc_session_by_token, self.calls
         )
@@ -153,12 +149,8 @@ class _StubVectorDB:
         )
         # The middleware also calls these two
         self.get_user = _RayMethodStub("get_user", self._impl_get_user, self.calls)
-        self.list_user_partitions = _RayMethodStub(
-            "list_user_partitions", lambda *a, **kw: [], self.calls
-        )
-        self.get_user_by_token = _RayMethodStub(
-            "get_user_by_token", lambda *a, **kw: None, self.calls
-        )
+        self.list_user_partitions = _RayMethodStub("list_user_partitions", lambda *a, **kw: [], self.calls)
+        self.get_user_by_token = _RayMethodStub("get_user_by_token", lambda *a, **kw: None, self.calls)
         self.update_oidc_session_tokens = _RayMethodStub(
             "update_oidc_session_tokens", lambda *a, **kw: None, self.calls
         )
@@ -330,18 +322,12 @@ def test_full_oidc_lifecycle(monkeypatch):
     # ── Pre-seed alice with the exact sub that the IdP mock will return ────────
     ALICE_SUB = "alice-sub"
     _stub_vdb.__init__()  # reset state
-    _stub_vdb.add_user(
-        user_id=99, email="alice@example.com", external_user_id=ALICE_SUB
-    )
+    _stub_vdb.add_user(user_id=99, email="alice@example.com", external_user_id=ALICE_SUB)
 
     # ── Build app with mocked transport ──────────────────────────────────────
     router = respx.MockRouter(assert_all_called=False)
-    router.get(f"{ISSUER}/.well-known/openid-configuration").mock(
-        return_value=httpx.Response(200, json=DISCOVERY_DOC)
-    )
-    router.get(f"{ISSUER}/protocol/openid-connect/certs").mock(
-        return_value=httpx.Response(200, json=JWKS_RESPONSE)
-    )
+    router.get(f"{ISSUER}/.well-known/openid-configuration").mock(return_value=httpx.Response(200, json=DISCOVERY_DOC))
+    router.get(f"{ISSUER}/protocol/openid-connect/certs").mock(return_value=httpx.Response(200, json=JWKS_RESPONSE))
 
     _, client = _make_app(router)
 
@@ -400,9 +386,7 @@ def test_full_oidc_lifecycle(monkeypatch):
     # oidc_sessions row created with correct sid
     assert len(_stub_vdb._sessions) == 1, "Expected exactly one oidc_sessions row"
     session_row = next(iter(_stub_vdb._sessions.values()))
-    assert session_row.get("sid") == ALICE_SID, (
-        f"Expected sid='{ALICE_SID}', got '{session_row.get('sid')}'"
-    )
+    assert session_row.get("sid") == ALICE_SID, f"Expected sid='{ALICE_SID}', got '{session_row.get('sid')}'"
     assert session_row.get("revoked_at") is None, "Session must not be revoked yet"
 
     # ── Step 5: GET /users/info with session cookie → 200 alice profile ───────
@@ -410,9 +394,7 @@ def test_full_oidc_lifecycle(monkeypatch):
     # The users router depends on task_state_manager for file counts; since we
     # stub it as None the endpoint may 500 on full wiring — we accept 200 or
     # verify the middleware resolved alice (status != 401/302).
-    assert r3.status_code not in (401, 302), (
-        f"Middleware should resolve alice, got {r3.status_code}: {r3.text}"
-    )
+    assert r3.status_code not in (401, 302), f"Middleware should resolve alice, got {r3.status_code}: {r3.text}"
 
     # ── Step 6: POST /auth/backchannel-logout → 200, session revoked ──────────
     logout_tok = _logout_token(sid=ALICE_SID, sub=ALICE_SUB)
@@ -423,9 +405,7 @@ def test_full_oidc_lifecycle(monkeypatch):
     assert r4.status_code == 200, f"Expected 200, got {r4.status_code}: {r4.text}"
 
     # oidc_sessions row now has revoked_at set
-    assert session_row.get("revoked_at") is not None, (
-        "Session row must have revoked_at after backchannel-logout"
-    )
+    assert session_row.get("revoked_at") is not None, "Session row must have revoked_at after backchannel-logout"
 
     # ── Step 7: GET /users/info with same cookie → 302 /auth/login ───────────
     r5 = client.get(
