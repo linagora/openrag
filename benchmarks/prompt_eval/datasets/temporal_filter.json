@@ -1,0 +1,296 @@
+[
+  {
+    "id": 1,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Show me design specs authored today."}
+    ]
+  },
+  {
+    "id": 2,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Which incident reports were filed yesterday?"}
+    ]
+  },
+  {
+    "id": 3,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Pull up the code reviews posted this week."}
+    ]
+  },
+  {
+    "id": 4,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "I'm reviewing our quarterly filings."},
+      {"role": "assistant", "content": "Sure — they're organized by submission date in the regulatory portal."},
+      {"role": "user", "content": "Show me the ones filed last week."}
+    ]
+  },
+  {
+    "id": 5,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Contracts drafted last month."}
+    ]
+  },
+  {
+    "id": 6,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "What court decisions were issued last year?"}
+    ]
+  },
+  {
+    "id": 7,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Lab results from the past 7 days."}
+    ]
+  },
+  {
+    "id": 8,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Patient records updated in the past 30 days."}
+    ]
+  },
+  {
+    "id": 9,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Show me recent SRE incident reports."}
+    ]
+  },
+  {
+    "id": 10,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Legal briefs submitted since January 1, 2026."}
+    ]
+  },
+  {
+    "id": 11,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Invoices issued before March 2026."}
+    ]
+  },
+  {
+    "id": 12,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Audit logs recorded in 2024."}
+    ]
+  },
+  {
+    "id": 13,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Slide decks produced in February."}
+    ]
+  },
+  {
+    "id": 14,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Show me audit logs from last year except March."}
+    ]
+  },
+  {
+    "id": 15,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Design specs authored on January 15, 2026."}
+    ]
+  },
+  {
+    "id": 16,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Hi, I'm on SRE triage rotation this morning."},
+      {"role": "assistant", "content": "Sure — I can help. Which service are you looking into?"},
+      {"role": "user", "content": "Checkout has been flaky in production."},
+      {"role": "assistant", "content": "Got it. I can pull relevant incident reports for you."},
+      {"role": "user", "content": "Show me the ones filed yesterday."}
+    ]
+  },
+  {
+    "id": 17,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Emails written last month from the Paris and Berlin offices."}
+    ]
+  },
+  {
+    "id": 18,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Commits pushed since last Monday."}
+    ]
+  },
+  {
+    "id": 19,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "I'm reviewing our Q1 financial filings."},
+      {"role": "assistant", "content": "Sure — those are from our Q1 2026 reporting cycle."},
+      {"role": "user", "content": "Are they all in the portal?"},
+      {"role": "assistant", "content": "Yes, every Q1 filing has been uploaded."},
+      {"role": "user", "content": "Show me only the ones submitted last week."}
+    ]
+  },
+  {
+    "id": 20,
+    "query_with_temporal_filter": true,
+    "messages": [
+      {"role": "user", "content": "Latest safety bulletins."}
+    ]
+  },
+  {
+    "id": 21,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "Give me the Q3 2024 revenue report."}
+    ]
+  },
+  {
+    "id": 22,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "What is the 2025 strategic roadmap?"}
+    ]
+  },
+  {
+    "id": 23,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "What is the standard onboarding procedure for new engineers?"}
+    ]
+  },
+  {
+    "id": 24,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "Hello!"}
+    ]
+  },
+  {
+    "id": 25,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "Thanks, that's very helpful."}
+    ]
+  },
+  {
+    "id": 26,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "Can you help me understand the 2008 financial crisis?"},
+      {"role": "assistant", "content": "Sure — which aspect interests you?"},
+      {"role": "user", "content": "The role of subprime mortgages."},
+      {"role": "assistant", "content": "Subprime mortgages were high-risk loans that were packaged and resold as securities, which amplified losses when borrowers defaulted."},
+      {"role": "user", "content": "Thanks. And what about the 2020 economic downturn?"}
+    ]
+  },
+  {
+    "id": 27,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "What was the carbon tax rate in France in 2024?"}
+    ]
+  },
+  {
+    "id": 28,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "Summarize trends in AI research from 2020 to 2025."}
+    ]
+  },
+  {
+    "id": 29,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "What are the key clauses in the 2023 French labor reform?"}
+    ]
+  },
+  {
+    "id": 30,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "What were the findings in the 2024 annual sustainability report?"}
+    ]
+  },
+  {
+    "id": 31,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "What's the current minimum wage in Germany?"}
+    ]
+  },
+  {
+    "id": 32,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "Explain how OAuth 2.0 works."}
+    ]
+  },
+  {
+    "id": 33,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "Give me a summary of the Paris Olympics 2024."}
+    ]
+  },
+  {
+    "id": 34,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "What are the effects of climate change on Arctic sea ice between 2010 and 2020?"}
+    ]
+  },
+  {
+    "id": 35,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "What happened in the 2016 US presidential election?"}
+    ]
+  },
+  {
+    "id": 36,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "What are the side effects of ibuprofen?"}
+    ]
+  },
+  {
+    "id": 37,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "Compare the main feature differences between Python 3.11 and 3.12."}
+    ]
+  },
+  {
+    "id": 38,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "What was the outcome of the Nuremberg trials?"}
+    ]
+  },
+  {
+    "id": 39,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "How do I reset my password on the corporate VPN?"}
+    ]
+  },
+  {
+    "id": 40,
+    "query_with_temporal_filter": false,
+    "messages": [
+      {"role": "user", "content": "What are best practices for REST API versioning?"}
+    ]
+  }
+]

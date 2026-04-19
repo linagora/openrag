@@ -1,0 +1,3205 @@
+{
+  "dataset": "datasets/temporal_filter.json",
+  "judge_model": "Qwen3-VL-8B-Instruct-FP8",
+  "current_date": "Sunday, April 19, 2026",
+  "prompts": [
+    {
+      "prompt": "prompts/query_contextualizer_tmpl_v0.txt",
+      "models": [
+        {
+          "model_name": "Mistral-Small-3.1-24B-Instruct-2503",
+          "timestamp": "2026-04-19T17:01:56.142226",
+          "prompt_path": "prompts/query_contextualizer_tmpl_v0.txt",
+          "dataset_path": "datasets/temporal_filter.json",
+          "judge_model": "Qwen3-VL-8B-Instruct-FP8",
+          "total": 40,
+          "errors": 0,
+          "tp": 10,
+          "fp": 0,
+          "fn": 10,
+          "tn": 20,
+          "filter_detection_accuracy": 0.75,
+          "filter_detection_precision": 1.0,
+          "filter_detection_recall": 0.5,
+          "filter_detection_f1": 0.6666666666666666,
+          "judge_total": 10,
+          "judge_correct": 8,
+          "filter_correctness": 0.8,
+          "cases": [
+            {
+              "id": 24,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Ciao!",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 20,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Latest safety bulletins.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 9,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Recent SRE incident reports",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 25,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Thanks, that's very helpful.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 32,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Explain how OAuth 2.0 works.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 13,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Slide decks produced in February 2026",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 21,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Q3 2024 revenue report",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 5,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Contracts drafted in March 2026",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 33,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Summary of the Paris Olympics 2024",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 23,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What is the standard onboarding procedure for new engineers?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 31,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What is the current minimum wage in Germany?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 38,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What was the outcome of the Nuremberg trials?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 6,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What court decisions were issued in 2025?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 40,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are best practices for REST API versioning?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 22,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What is the 2025 strategic roadmap?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 36,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are the side effects of ibuprofen?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 39,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "How do I reset my password on the corporate VPN?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 27,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What was the carbon tax rate in France in 2024?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 35,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What happened in the 2016 US presidential election?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 3,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Code reviews posted since April 13, 2026",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 1,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Show design specs authored on April 19, 2026",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 29,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are the key clauses in the 2023 French labor reform?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 30,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What were the findings in the 2024 annual sustainability report?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 15,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Design specs authored on January 15, 2026.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 37,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are the main feature differences between Python 3.11 and Python 3.12?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 16,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "incident reports for the Checkout service filed on April 18, 2026",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 34,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are the effects of climate change on Arctic sea ice between 2010 and 2020?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 17,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Emails written from the Paris office in March 2026",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Emails written from the Berlin office in March 2026",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 26,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What was the role of subprime mortgages in the 2008 financial crisis?",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "What caused the 2020 economic downturn?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 11,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Invoices issued before March 2026",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-03-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 8,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Patient records updated in the past 30 days",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-03-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 28,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Trends in AI research from 2020 to 2021",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Trends in AI research from 2022 to 2023",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Trends in AI research from 2024 to 2025",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 18,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Commits pushed since April 13, 2026",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-13T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 10,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Legal briefs submitted since January 1, 2026",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-01-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 2,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are the incident reports filed on April 18, 2026?",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": "==",
+                      "value": "2026-04-18T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 19,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Show me the Q1 2026 financial filings submitted last week",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-12T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 12,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Audit logs recorded in 2024",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2024-01-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2025-01-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 7,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Lab results from April 12, 2026 to April 19, 2026",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-12T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<=",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 4,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": false,
+              "judge_reasoning": "The temporal filter uses a fixed date range from April 12 to April 19, 2024, which is not 'last week' relative to the current date (April 19, 2026). It should cover the week ending April 19, 2026, i.e., April 12\u201318, 2026.",
+              "generated_queries": [
+                {
+                  "query": "Show the quarterly filings submitted last week in the regulatory portal",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2024-04-12T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<=",
+                      "value": "2024-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 14,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": false,
+              "judge_reasoning": "The filters incorrectly exclude March by using a gap between March 1 and April 1, but the intended exclusion is March 2025 entirely. The correct approach would be two separate filters: one for January 1 to February 28/29, 2025, and another for April 1 to December 31, 2025.",
+              "generated_queries": [
+                {
+                  "query": "Show audit logs from last year except March",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2025-04-19T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2025-03-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2025-04-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            }
+          ]
+        },
+        {
+          "model_name": "Qwen3-VL-8B-Instruct-FP8",
+          "timestamp": "2026-04-19T17:02:00.606957",
+          "prompt_path": "prompts/query_contextualizer_tmpl_v0.txt",
+          "dataset_path": "datasets/temporal_filter.json",
+          "judge_model": "Qwen3-VL-8B-Instruct-FP8",
+          "total": 40,
+          "errors": 0,
+          "tp": 3,
+          "fp": 0,
+          "fn": 17,
+          "tn": 20,
+          "filter_detection_accuracy": 0.575,
+          "filter_detection_precision": 1.0,
+          "filter_detection_recall": 0.15,
+          "filter_detection_f1": 0.2608695652173913,
+          "judge_total": 3,
+          "judge_correct": 2,
+          "filter_correctness": 0.6666666666666666,
+          "cases": [
+            {
+              "id": 9,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Recent SRE incident reports",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 4,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Show me the quarterly filings filed last week.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 1,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Show me design specs authored today.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 23,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What is the standard onboarding procedure for new engineers?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 6,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What court decisions were issued last year?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 22,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What is the 2025 strategic roadmap?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 11,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Invoices issued before March 2026",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 27,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What was the carbon tax rate in France in 2024?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 15,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Design specs authored on January 15, 2026.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 38,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What were the key outcomes and historical significance of the Nuremberg trials?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 37,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are the main feature differences between Python 3.11 and Python 3.12?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 25,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [],
+              "error": null
+            },
+            {
+              "id": 10,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What legal briefs have been submitted since January 1, 2026?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 35,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What were the key events and outcomes of the 2016 US presidential election?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 20,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Latest safety bulletins",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 2,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What incident reports were filed yesterday?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 13,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Slide decks produced in February",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 39,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "How to reset password for corporate VPN",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 36,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are the common and serious side effects of ibuprofen?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 32,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "How does OAuth 2.0 work?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 7,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Lab results from the past 7 days",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 5,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What were the key terms and conditions included in the contracts drafted last month?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 33,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Summary of the Paris Olympics 2024",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 19,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Show me the Q1 2026 financial filings submitted last week.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 40,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are the best practices for versioning REST APIs?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 16,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Show me the incident reports filed for the Checkout service in production that were filed yesterday.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 21,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What were the revenue figures for Q3 2024?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 26,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What were the key causes and economic impacts of the 2020 economic downturn?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 8,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What patient records were updated in the past 30 days?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 12,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What were the audit logs recorded in 2024?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 30,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What were the key findings in the 2024 annual sustainability report?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 29,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are the key clauses in the 2023 French labor reform?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 24,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are the must-see historical monuments and local cuisine restaurants in Italy?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 34,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are the effects of climate change on Arctic sea ice between 2010 and 2020?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 28,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Summarize key trends in AI research from 2020 to 2025.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 31,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What is the current minimum wage in Germany as of April 19, 2026?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 18,
+              "expected_filter": true,
+              "generated_filter": false,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "List all commits pushed to the repository since last Monday, April 14, 2026.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 3,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Code reviews posted this week",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-12T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 14,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": false,
+              "judge_reasoning": "The filter incorrectly captures the entire year 2025, including March, instead of excluding March as required. The exclusion of March should be represented by two separate sub-queries with disjoint time intervals.",
+              "generated_queries": [
+                {
+                  "query": "Show audit logs from last year except March",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2025-04-19T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 17,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Emails written last month from the Paris office",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-03-15T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-15T00:00:00+00:00"
+                    }
+                  ]
+                },
+                {
+                  "query": "Emails written last month from the Berlin office",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-03-15T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-15T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "prompt": "prompts/query_contextualizer_tmpl_v1.txt",
+      "models": [
+        {
+          "model_name": "Mistral-Small-3.1-24B-Instruct-2503",
+          "timestamp": "2026-04-19T17:02:12.717954",
+          "prompt_path": "prompts/query_contextualizer_tmpl_v1.txt",
+          "dataset_path": "datasets/temporal_filter.json",
+          "judge_model": "Qwen3-VL-8B-Instruct-FP8",
+          "total": 40,
+          "errors": 0,
+          "tp": 20,
+          "fp": 0,
+          "fn": 0,
+          "tn": 20,
+          "filter_detection_accuracy": 1.0,
+          "filter_detection_precision": 1.0,
+          "filter_detection_recall": 1.0,
+          "filter_detection_f1": 1.0,
+          "judge_total": 20,
+          "judge_correct": 18,
+          "filter_correctness": 0.9,
+          "cases": [
+            {
+              "id": 24,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Hello!",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 22,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "2025 strategic roadmap",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 31,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Current minimum wage in Germany",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 23,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Standard onboarding procedure for new engineers",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 38,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Outcome of the Nuremberg trials",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 39,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "How to reset password on corporate VPN",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 40,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Best practices for REST API versioning",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 36,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Side effects of ibuprofen",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 25,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Thanks, that's very helpful.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 32,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Explain how OAuth 2.0 works",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 21,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Q3 2024 revenue report",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 27,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Carbon tax rate in France in 2024",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 33,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Summary of the Paris Olympics 2024",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 30,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Findings in the 2024 annual sustainability report",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 29,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Key clauses in the 2023 French labor reform",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 35,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Events that occurred in the 2016 US presidential election",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 37,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Main feature differences between Python 3.11 and 3.12",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 26,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Role of subprime mortgages in the 2008 financial crisis",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "2020 economic downturn",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 11,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Invoices issued before March 2026",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-03-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 15,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Design specs authored on January 15, 2026",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": "==",
+                      "value": "2026-01-15T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 10,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Legal briefs submitted since January 1, 2026",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-01-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 1,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Design specifications authored today",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-20T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 2,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Incident reports filed yesterday",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-18T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 9,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Recent SRE incident reports",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2025-07-22T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 3,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Code reviews posted this week",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-14T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-21T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 4,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Quarterly filings submitted last week",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-13T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 13,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Slide decks produced in February",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-02-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-03-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 6,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Court decisions issued in the past year",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2025-04-19T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 7,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Lab results from the past 7 days",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-12T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 16,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Incident reports filed for the Checkout service yesterday",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-18T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 12,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Audit logs recorded in 2024",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2024-01-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2025-01-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 5,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Contracts drafted in March 2026",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-03-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 8,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Patient records updated in the past 30 days",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-03-19T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 19,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Q1 2026 financial filings submitted last week",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-13T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 20,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": false,
+              "judge_reasoning": "The filter incorrectly uses a fixed end date of July 20, 2026, which is not relevant to 'latest' safety bulletins. 'Latest' implies a recency constraint without an upper bound, so only a lower bound (>=) should be used.",
+              "generated_queries": [
+                {
+                  "query": "Latest safety bulletins",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2025-07-20T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-07-20T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 18,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": false,
+              "judge_reasoning": "The filter incorrectly excludes commits created on the current date (April 19, 2026), which should be included since the user asked for commits 'since last Monday' (April 14). The upper bound should be omitted for open-ended recency.",
+              "generated_queries": [
+                {
+                  "query": "Commits pushed since last Monday",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-14T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 28,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Trends in AI research in 2020",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Trends in AI research in 2021",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Trends in AI research in 2022",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Trends in AI research in 2023",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Trends in AI research in 2024",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Trends in AI research in 2025",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 17,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Emails written last month from the Paris office",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-03-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-01T00:00:00+00:00"
+                    }
+                  ]
+                },
+                {
+                  "query": "Emails written last month from the Berlin office",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-03-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 14,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Audit logs from January or February 2025",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2025-01-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2025-03-01T00:00:00+00:00"
+                    }
+                  ]
+                },
+                {
+                  "query": "Audit logs from April to December 2025",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2025-04-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-01-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 34,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Effects of climate change on Arctic sea ice in 2010",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Effects of climate change on Arctic sea ice in 2011",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Effects of climate change on Arctic sea ice in 2012",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Effects of climate change on Arctic sea ice in 2013",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Effects of climate change on Arctic sea ice in 2014",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Effects of climate change on Arctic sea ice in 2015",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Effects of climate change on Arctic sea ice in 2016",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Effects of climate change on Arctic sea ice in 2017",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Effects of climate change on Arctic sea ice in 2018",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Effects of climate change on Arctic sea ice in 2019",
+                  "temporal_filters": null
+                },
+                {
+                  "query": "Effects of climate change on Arctic sea ice in 2020",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            }
+          ]
+        },
+        {
+          "model_name": "Qwen3-VL-8B-Instruct-FP8",
+          "timestamp": "2026-04-19T17:02:26.170737",
+          "prompt_path": "prompts/query_contextualizer_tmpl_v1.txt",
+          "dataset_path": "datasets/temporal_filter.json",
+          "judge_model": "Qwen3-VL-8B-Instruct-FP8",
+          "total": 40,
+          "errors": 1,
+          "tp": 19,
+          "fp": 2,
+          "fn": 0,
+          "tn": 18,
+          "filter_detection_accuracy": 0.9487179487179487,
+          "filter_detection_precision": 0.9047619047619048,
+          "filter_detection_recall": 1.0,
+          "filter_detection_f1": 0.9500000000000001,
+          "judge_total": 19,
+          "judge_correct": 17,
+          "filter_correctness": 0.8947368421052632,
+          "cases": [
+            {
+              "id": 22,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "2025 strategic roadmap",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 24,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Hello!",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 38,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Outcome of the Nuremberg trials",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 27,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Carbon tax rate in France in 2024",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 25,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Thanks, that's very helpful.",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 32,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Explanation of how OAuth 2.0 works",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 31,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Current minimum wage in Germany",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 40,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Best practices for REST API versioning",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 36,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What are the side effects of ibuprofen?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 33,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Summary of the Paris Olympics 2024",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 37,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Compare the main feature differences between Python 3.11 and Python 3.12",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 26,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Overview of the 2020 economic downturn",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 23,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Standard onboarding procedure for new engineers",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 21,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Q3 2024 revenue report",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 35,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "What happened in the 2016 US presidential election?",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 11,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Invoices issued before March 2026",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-03-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 29,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Key clauses in the 2023 French labor reform",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 39,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "How to reset password for corporate VPN",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 28,
+              "expected_filter": false,
+              "generated_filter": false,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Trends in AI research from 2020 to 2025",
+                  "temporal_filters": null
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 5,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Contracts drafted last month",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-03-15T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-16T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 4,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Quarterly filings filed last week",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-12T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 1,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Design specs authored today",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-20T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 30,
+              "expected_filter": false,
+              "generated_filter": true,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Findings in the 2024 annual sustainability report",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2024-01-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2025-01-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 34,
+              "expected_filter": false,
+              "generated_filter": true,
+              "detection_correct": false,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Effects of climate change on Arctic sea ice between 2010 and 2020",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2010-01-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2021-01-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 20,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Latest safety bulletins",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-18T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 10,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Legal briefs submitted since January 1, 2026",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-01-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 6,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Court decisions issued last year",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2025-01-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-01-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 13,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Slide decks produced in February",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-02-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-03-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 19,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Q1 2026 financial filings submitted last week",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-09T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-16T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 3,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Code reviews posted this week",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-13T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-20T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 12,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Audit logs recorded in 2024",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2024-01-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2025-01-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 2,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Incident reports filed yesterday",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-18T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 7,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Lab results from the past 7 days",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-12T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 15,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Design specs authored on January 15, 2026",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-01-15T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-01-16T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 18,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": false,
+              "judge_reasoning": "The filter incorrectly includes an upper bound for 'since last Monday', which implies a closed interval. 'Since last Monday' should only have a lower bound (>=) to capture all commits from last Monday onward, without an upper limit.",
+              "generated_queries": [
+                {
+                  "query": "Commits pushed since last Monday",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-13T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-20T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 9,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": false,
+              "judge_reasoning": "The filter incorrectly defines 'recent' as the last 10 days (April 9 to April 19), but 'recent' typically implies a shorter, more immediate timeframe (e.g., last 7 days). The filter should reflect a more recent window, such as from April 12 to April 19, or a rolling 7-day window ending today.",
+              "generated_queries": [
+                {
+                  "query": "Recent SRE incident reports",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-09T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 16,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Incident reports filed for Checkout service yesterday",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-18T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 17,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Emails written last month from the Paris office",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-03-15T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-16T00:00:00+00:00"
+                    }
+                  ]
+                },
+                {
+                  "query": "Emails written last month from the Berlin office",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-03-15T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-16T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 14,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": true,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Audit logs from January or February last year",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2025-01-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2025-03-01T00:00:00+00:00"
+                    }
+                  ]
+                },
+                {
+                  "query": "Audit logs from April to December last year",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2025-04-01T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-01-01T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": null
+            },
+            {
+              "id": 8,
+              "expected_filter": true,
+              "generated_filter": true,
+              "detection_correct": true,
+              "judge_verdict": null,
+              "judge_reasoning": null,
+              "generated_queries": [
+                {
+                  "query": "Patient records updated in the past 30 days",
+                  "temporal_filters": [
+                    {
+                      "field": "created_at",
+                      "operator": ">=",
+                      "value": "2026-04-00T00:00:00+00:00"
+                    },
+                    {
+                      "field": "created_at",
+                      "operator": "<",
+                      "value": "2026-04-19T00:00:00+00:00"
+                    }
+                  ]
+                }
+              ],
+              "error": "judge: 'NoneType' object has no attribute 'correct'"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
