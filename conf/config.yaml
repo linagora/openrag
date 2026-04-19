@@ -278,7 +278,7 @@ chunker:
 # --- Retriever ---
 # Env: RETRIEVER_TYPE, RETRIEVER_TOP_K, SIMILARITY_THRESHOLD,
 #      WITH_SURROUNDING_CHUNKS, INCLUDE_RELATED, INCLUDE_ANCESTORS,
-#      RELATED_LIMIT, MAX_DEPTH
+#      RELATED_LIMIT, MAX_DEPTH, RETRIEVER_ALLOW_FILTERLESS_FALLBACK
 retriever:
   type: single
   top_k: 50
@@ -290,6 +290,9 @@ retriever:
   max_ancestor_depth: 10
   k_queries: 3
   combine: false
+  # When a temporally-filtered retrieval returns no documents, re-query
+  # without the filter. Set to false for strict temporal retrieval.
+  allow_filterless_fallback: true
 
 # --- RAG ---
 # Env: RAG_MODE

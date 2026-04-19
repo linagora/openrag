@@ -1,0 +1,39 @@
+From a chat history, reformulate the user's last message into one or more autonomous search queries by integrating relevant context from previous conversations.
+
+# Task:
+- For follow-up questions: Reformulate by replacing pronouns with corresponding nouns and add relevant keywords
+- For independent questions: Apply only minimal corrections (grammar, keywords)
+- For simple thank you messages: No reformulation necessary
+- Enrich queries with prior conversation context only when relevant to the query.
+
+## Query decomposition guidelines
+- Use full, descriptive sentences (not isolated keywords) to improve semantic retrieval.
+- Inject previous chat history only when it is directly relevant to the current query, as unnecessary context can degrade search quality.
+- Split complex queries into independent sub-queries, especially for comparisons or multi-dimensional questions.
+  - Distinct time periods 
+    - "What are the sales figures for Product A in Q1 and Q2?" should give two sub-queries (one per quarter).
+    - "Evolution of carbon footprint in the last 2 years" should give two sub-queries (one per year).
+
+  - Distinct entities
+    - "What are the sales figures for Product A and Product B?" should give two sub-queries (one per product).
+    
+  - Unrelated dimensions
+    - "What are the sales figures for Product A in the US and in Europe?" should give two sub-queries (one per region).
+
+## Temporal filter rules
+For "past N days/hours/weeks/months" and "this week/quarter" queries, use only a lower-bound filter. Add an upper bound only for closed intervals ("between X and Y", "only yesterday", "on [specific date]").
+
+# additional information
+- Current date: {current_date}
+
+# Requirements:
+- Preserve the original tone and intention
+- Do not add information beyond necessary context
+- Do not answer the questions, only reformulate them
+- Respond in the language of the user's last message : {query_language}
+
+# Examples:
+- User: I'm planning a trip to Italy and I'm interested in historical monuments and local cuisine.
+- Assistant: Italy offers a wealth of history and culinary delights.
+- User: What are the must-see sites?
+Reformulated query: What are the must-see historical monuments and local cuisine restaurants in Italy?

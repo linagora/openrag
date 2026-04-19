@@ -224,6 +224,46 @@ async def stream_chat_completion(request: ChatCompletionRequest):
     yield "data: [DONE]\n\n"
 
 
+def _resolve_ref(schema: dict, root: dict) -> dict:
+    """Dereference a $ref against the root schema document."""
+    if "$ref" not in schema:
+        return schema
+    parts = schema["$ref"].lstrip("#/").split("/")
+    node = root
+    for part in parts:
+        node = node.get(part, {})
+    return node
+
+
+def _mock_value(schema: dict, root: dict, user_text: str):
+    """Recursively build a mock value that satisfies the given JSON Schema node."""
+    schema = _resolve_ref(schema, root)
+    # anyOf / oneOf — nullable fields (union with null) return None to avoid invalid mock values
+    for combiner in ("anyOf", "oneOf"):
+        if combiner in schema:
+            branches = schema[combiner]
+            has_null = any(s.get("type") == "null" for s in branches)
+            if has_null:
+                return None
+            non_null = [s for s in branches if s.get("type") != "null"]
+            if non_null:
+                return _mock_value(non_null[0], root, user_text)
+            return None
+    t = schema.get("type")
+    if t == "object" or "properties" in schema:
+        return {k: _mock_value(v, root, user_text) for k, v in schema.get("properties", {}).items()}
+    if t == "array":
+        items = _resolve_ref(schema.get("items", {}), root)
+        return [_mock_value(items, root, user_text)]
+    if t == "string":
+        return user_text
+    if t in ("integer", "number"):
+        return 0
+    if t == "boolean":
+        return False
+    return None
+
+
 def generate_tool_call_response(request: ChatCompletionRequest) -> dict:
     """Generate a mock tool_calls response for structured output requests."""
     tool = request.tools[0]
@@ -236,14 +276,9 @@ def generate_tool_call_response(request: ChatCompletionRequest) -> dict:
     last_user_msg = next((m for m in reversed(request.messages) if m.role == "user"), None)
     user_text = str(last_user_msg.content)[:100] if last_user_msg else "mock query"
 
-    mock_args: dict = {}
-    for prop_name, prop_schema in properties.items():
-        if prop_schema.get("type") == "array":
-            mock_args[prop_name] = [user_text]
-        elif prop_schema.get("type") == "string":
-            mock_args[prop_name] = user_text
-        else:
-            mock_args[prop_name] = None
+    mock_args: dict = {
+        prop_name: _mock_value(prop_schema, parameters, user_text) for prop_name, prop_schema in properties.items()
+    }
 
     prompt_tokens = sum(count_tokens(str(msg.content)) for msg in request.messages)
     args_json = json.dumps(mock_args)

@@ -419,6 +419,7 @@ class _BaseRetrieverConfig(ConfigMixin):
     include_ancestors: bool = True
     related_limit: int = 10
     max_ancestor_depth: int = 10
+    allow_filterless_fallback: bool = True
 
 
 class SingleRetrieverConfig(_BaseRetrieverConfig):

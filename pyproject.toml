@@ -115,3 +115,6 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["openrag"]
+
+[tool.uv.workspace]
+exclude = ["benchmarks/prompt_eval"]

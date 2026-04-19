@@ -1,0 +1,13 @@
+[project]
+name = "prompt-eval"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain-openai>=1.1.12",
+    "openai>=2.31.0",
+    "langdetect>=1.0.9",
+    "tqdm>=4.66",
+    "python-dotenv>=1.2.2",
+]
