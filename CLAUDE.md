@@ -2,6 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Active refactoring — MANDATORY
+
+A large hexagonal refactoring is in progress. Whenever the work touches `openrag/core/`, `openrag/services/`, `openrag/api/`, `openrag/di/`, the legacy paths `openrag/components/`, `openrag/routers/`, `openrag/models/`, `openrag/config/`, `openrag/utils/` during the refacto window, the `refactor/hexagonal` branch, or a question references the refacto / phases / Strangler Fig / ServiceContainer / `Registry[T]` / CatalogStore / forward-port:
+
+1. Invoke the `openrag-refacto` skill (auto-discovered from `.claude/skills/openrag-refacto/SKILL.md`) before proposing or writing anything.
+2. If the Skill tool is unavailable for any reason, read `.claude/skills/openrag-refacto/SKILL.md` directly and follow it.
+
+Authoritative specs live alongside the skill at `.claude/skills/openrag-refacto/`:
+- `Refactoring OpenRAG for Enterprise.md`
+- `REFACTORING_STRATEGY_v1.md`
+- `REFACTORING_DEV_WORKFLOW.md`
+
+The skill and these three docs override the "Architecture" / "Key Patterns" sections below for any new code on `refactor/hexagonal` — those sections describe the pre-refacto codebase and remain valid for legacy code being patched.
+
 ## Project Overview
 
 OpenRag is a modular Retrieval-Augmented Generation (RAG) framework built with FastAPI, Ray for distributed computing, and Milvus as the vector database. It provides document ingestion, chunking, embedding, and retrieval capabilities with an OpenAI-compatible API.

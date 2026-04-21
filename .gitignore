@@ -78,7 +78,10 @@ dist/
 node_modules/
 
 # AI
-.claude
+# Ignore .claude contents by default, but commit the shared skills directory.
+# (Using ".claude/*" instead of ".claude" so negation rules can reach subdirs.)
+.claude/*
+!.claude/skills/
 .planning
 docs/plans/
 
