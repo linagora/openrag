@@ -57,6 +57,23 @@ match reality, then record the reasoning here.
 
 ## Template for future entries
 
+## Phase 1 — Registry + Exceptions (2026-04-21)
+
+**1. Exceptions keep HTTP status_code on the class (OpenRAG style), not in
+a separate error handler mapping (mandragora style).**
+- Why: Existing code reads `exc.status_code` in multiple places. Switching
+  to a pure domain exception + API-layer mapping dict would require changing
+  every consumer now, which is unnecessary churn in Phase 1.
+- Alternative considered: mandragora's pattern (bare exceptions in core/,
+  status code mapping in api/error_handlers.py). Cleaner for hexagonal
+  purity but rejected for backward compatibility.
+- Follow-up: strip status codes from core exceptions in Phase 10 when
+  api/error_handlers.py is built. The error handler will own the mapping.
+
+---
+
+## Template for future entries
+
 ```
 ## Phase N — [short title] ([YYYY-MM-DD])
 
