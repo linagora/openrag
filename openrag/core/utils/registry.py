@@ -49,9 +49,7 @@ class Registry[T]:
         cls = self._registry.get(name)
         if cls is None:
             available = ", ".join(sorted(self._registry))
-            raise RegistryError(
-                f"{self._kind} '{name}' not found. Available: [{available}]"
-            )
+            raise RegistryError(f"{self._kind} '{name}' not found. Available: [{available}]")
         return cls(**kwargs)
 
     def get_class(self, name: str) -> type[T]:
@@ -59,9 +57,7 @@ class Registry[T]:
         cls = self._registry.get(name)
         if cls is None:
             available = ", ".join(sorted(self._registry))
-            raise RegistryError(
-                f"{self._kind} '{name}' not found. Available: [{available}]"
-            )
+            raise RegistryError(f"{self._kind} '{name}' not found. Available: [{available}]")
         return cls
 
     def list_registered(self) -> list[str]:
