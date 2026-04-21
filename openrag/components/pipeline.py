@@ -4,6 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
+import openai
 import ray
 from components.prompts import (
     QUERY_CONTEXTUALIZER_PROMPT,
@@ -185,12 +186,20 @@ class RagPipeline:
         self.max_context_tokens = config.reranker.top_k * config.chunker.chunk_size
 
         self.llm_client = LLM(config.llm, logger)
-        self.query_generator = ChatOpenAI(
+
+        llm = ChatOpenAI(
             base_url=config.llm.base_url,
             api_key=config.llm.api_key,
             model=config.llm.model,
             temperature=config.llm.temperature,
-        ).with_structured_output(SearchQueries, method="function_calling", strict=True)
+        )
+
+        primary = llm.with_structured_output(SearchQueries, method="json_schema", strict=True)
+        fallback = llm.with_structured_output(SearchQueries, method="function_calling", strict=False)
+        self.query_generator = primary.with_fallbacks(
+            [fallback],
+            exceptions_to_handle=(openai.BadRequestError,),
+        )
 
         self.max_contextualized_query_len = config.rag.max_contextualized_query_len
 
