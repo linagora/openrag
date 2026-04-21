@@ -59,9 +59,9 @@ volumes/*
 !volumes/.gitkeep # Keep the placeholder
 
 # services
-services/
-services/*
-!services/.gitkeep # Keep the placeholder
+/services/
+/services/*
+!/services/.gitkeep # Keep the placeholder
 
 *.csv
 *.pkl
