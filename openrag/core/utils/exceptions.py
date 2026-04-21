@@ -51,6 +51,7 @@ from __future__ import annotations
 # Root
 # ---------------------------------------------------------------------------
 
+
 class OpenRAGError(Exception):
     """Base class for all OpenRAG exceptions.
 
@@ -81,6 +82,7 @@ class OpenRAGError(Exception):
 # Config & registry
 # ---------------------------------------------------------------------------
 
+
 class ConfigError(OpenRAGError):
     """Configuration-related errors."""
 
@@ -106,6 +108,7 @@ class PipelineError(OpenRAGError):
 # Auth
 # ---------------------------------------------------------------------------
 
+
 class AuthError(OpenRAGError):
     """Authentication / authorization errors."""
 
@@ -126,6 +129,7 @@ class AuthenticationError(AuthError):
 # Validation
 # ---------------------------------------------------------------------------
 
+
 class ValidationError(OpenRAGError):
     """Input validation or business rule violation. Maps to HTTP 422."""
 
@@ -136,6 +140,7 @@ class ValidationError(OpenRAGError):
 # ---------------------------------------------------------------------------
 # Not found
 # ---------------------------------------------------------------------------
+
 
 class NotFoundError(OpenRAGError):
     """Requested resource not found. Maps to HTTP 404."""
@@ -163,6 +168,7 @@ class UserNotFoundError(NotFoundError):
 # Quota
 # ---------------------------------------------------------------------------
 
+
 class QuotaExceededError(OpenRAGError):
     """File quota exceeded. Maps to HTTP 429."""
 
@@ -173,6 +179,7 @@ class QuotaExceededError(OpenRAGError):
 # ---------------------------------------------------------------------------
 # Infrastructure — service availability
 # ---------------------------------------------------------------------------
+
 
 class ServiceUnavailableError(OpenRAGError):
     """External service unavailable after retry exhaustion. Maps to HTTP 503."""
@@ -196,6 +203,7 @@ class CircuitBreakerOpenError(ServiceUnavailableError):
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
+
 
 class InferenceError(OpenRAGError):
     """Base for all inference service failures. Maps to HTTP 503."""
@@ -239,6 +247,7 @@ class InferenceConnectionError(InferenceError):
 # Storage
 # ---------------------------------------------------------------------------
 
+
 class StorageError(OpenRAGError):
     """Base for storage failures. Maps to HTTP 500."""
 
@@ -265,6 +274,7 @@ class PostgresError(StorageError):
 # ---------------------------------------------------------------------------
 # Embedding (preserves existing OpenRAG exception classes)
 # ---------------------------------------------------------------------------
+
 
 class EmbeddingError(OpenRAGError):
     """Base exception for all embedding-related errors."""
@@ -297,6 +307,7 @@ class UnexpectedEmbeddingError(EmbeddingError):
 # ---------------------------------------------------------------------------
 # Vector database (preserves existing OpenRAG exception classes)
 # ---------------------------------------------------------------------------
+
 
 class VDBError(OpenRAGError):
     """Base exception for all vector database-related errors."""
