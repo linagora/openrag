@@ -1,3 +1,5 @@
+# Re-export from canonical location for backward compatibility.
+# New code should import from openrag.core.config directly.
 """OpenRAG configuration package.
 
 Public API:
@@ -8,13 +10,13 @@ Public API:
 
 from functools import lru_cache
 
-from .models import Settings
+from openrag.core.config.root import Settings  # noqa: F401
 
 
 @lru_cache
 def get_settings() -> Settings:
     """Cached singleton — one Settings instance per process."""
-    from .loader import load_config as _load
+    from openrag.core.config.loader import load_config as _load
 
     return _load()
 
@@ -28,7 +30,7 @@ def load_config(config_path=None, overrides=None) -> Settings:
     The ``overrides`` parameter bypasses the cache (useful for tests).
     """
     if overrides or config_path:
-        from .loader import load_config as _load
+        from openrag.core.config.loader import load_config as _load
 
         return _load(conf_dir=config_path, overrides=overrides)
     return get_settings()
