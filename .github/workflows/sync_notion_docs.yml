@@ -1,0 +1,62 @@
+name: Sync refacto docs from Notion
+
+# Manual-only. Pulls the three refacto spec pages from Notion, writes them to
+# .claude/skills/openrag-refacto/, and commits the result back to
+# refactor/hexagonal if anything changed.
+#
+# Required repo secret:
+#   NOTION_API_KEY         (mapped to NOTION_TOKEN below, which is what notion2md reads)
+#
+# Required repo variables (Settings > Secrets and variables > Actions > Variables):
+#   NOTION_PAGE_STRATEGY   — page ID for REFACTORING_STRATEGY_v1.md
+#   NOTION_PAGE_WORKFLOW   — page ID for REFACTORING_DEV_WORKFLOW.md
+#   NOTION_PAGE_GUIDE      — page ID for "Refactoring OpenRAG for Enterprise.md"
+#
+# The Notion integration must be shared on each page (Share > Invite > select
+# the integration) or it returns 404.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-notion-docs
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refactor/hexagonal
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install sync deps
+        run: pip install 'notion2md==2.9.0'
+
+      - name: Sync pages
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_API_KEY }}
+          NOTION_PAGE_STRATEGY: ${{ vars.NOTION_PAGE_STRATEGY }}
+          NOTION_PAGE_WORKFLOW: ${{ vars.NOTION_PAGE_WORKFLOW }}
+          NOTION_PAGE_GUIDE: ${{ vars.NOTION_PAGE_GUIDE }}
+        run: python scripts/sync_notion_docs.py
+
+      - name: Commit and push if changed
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "no changes to commit"
+            exit 0
+          fi
+          git config user.name "openrag-notion-sync"
+          git config user.email "openrag-notion-sync@users.noreply.github.com"
+          git add .claude/skills/openrag-refacto/
+          git commit -m "sync refacto docs from notion"
+          git push origin HEAD:refactor/hexagonal
