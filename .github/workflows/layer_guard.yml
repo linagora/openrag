@@ -1,0 +1,21 @@
+name: Layer guard
+
+on:
+  push:
+    branches:
+      - "refactor/hexagonal"
+      - "refactor/phase-**"
+  pull_request:
+    branches:
+      - "refactor/hexagonal"
+
+jobs:
+  layer-import-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run layer guard
+        run: python scripts/check_layer_imports.py
