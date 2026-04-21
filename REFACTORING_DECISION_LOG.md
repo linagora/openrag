@@ -1,15 +1,13 @@
 # Refactoring Decision Log
 
-Running log of **judgment calls that aren't prescribed by the refactor docs**.
-If a decision is grounded in STRATEGY / WORKFLOW / SKILL / GUIDE, it does NOT
-belong here — just follow the doc. This file exists so future readers can see
-what had to be decided outside the written plan, and why.
+Records **why** decisions were made that deviate from or extend the refactoring
+docs. When a decision changes the plan, update the strategy/workflow docs to
+reflect the new reality — then log the reasoning here so future readers know
+why the docs changed.
 
 Source abbreviations:
-- STRATEGY = `.claude/skills/openrag-refacto/REFACTORING_STRATEGY_v1.md`
-- WORKFLOW = `.claude/skills/openrag-refacto/REFACTORING_DEV_WORKFLOW.md`
-- SKILL    = `.claude/skills/openrag-refacto/SKILL.md`
-- GUIDE    = `.claude/skills/openrag-refacto/Refactoring OpenRAG for Enterprise.md`
+- STRATEGY = `docs/refactoring/REFACTORING_STRATEGY_v1.md`
+- WORKFLOW = `docs/refactoring/REFACTORING_DEV_WORKFLOW.md`
 
 ---
 
@@ -40,7 +38,7 @@ WORKFLOW's CI example is a single file with three jobs (`unit-tests`,
   all in one file.
 
 **3. `docker-build` CI check NOT wired in Phase 0.**
-The skill lists it as a required check.
+WORKFLOW lists it as a required check.
 - Why: Existing `build.yml` and `build_dev.yml` workflows push images to ghcr,
   which isn't what we want on every refactor push. A lightweight "docker build
   only, don't push" check needs a new job. Deferred to keep Phase 0 scope
@@ -49,20 +47,11 @@ The skill lists it as a required check.
   Follow-up: add a `docker-build` job in a separate PR, modelled on the
   WORKFLOW CI example.
 
-**4. Introduced this decision log as a required artifact, with a rule that
-only non-doc-grounded calls get logged.**
-The log file lives here. The governing "Decision log — you MUST write to it"
-section in SKILL.md that defines the rule and the staleness policy lands via
-the skill PR (#325), not this one.
-- Why: The three source docs mention `REFACTORING_DECISION_LOG.md` in passing
-  (SKILL "Discovering current state" says it "SHOULD exist") but never define
-  what goes in it or who maintains it. Without an explicit rule, judgment
-  calls leak into PR descriptions and commit messages that are hard to find
-  later. Restricting the log to non-doc-grounded calls keeps it short and
-  signal-heavy.
-- Alternative considered: log everything (grounded + judgment). Rejected —
-  grounded decisions are already captured by the docs, so re-stating them in
-  the log is noise.
+**4. Decision log policy: log reasoning, update docs.**
+When a decision deviates from the strategy/workflow docs, update the docs to
+match reality, then record the reasoning here.
+- Why: The docs should always reflect the current plan. The log captures
+  why the plan changed, not what the plan is.
 
 ---
 
