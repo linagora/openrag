@@ -15,18 +15,14 @@ Usage:
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Generic, Type, TypeVar
-
-T = TypeVar("T")
+from typing import Any
 
 
 class RegistryError(Exception):
     """Raised when a registry lookup fails."""
 
-    pass
 
-
-class Registry(Generic[T]):
+class Registry[T]:
     """Generic type-safe registry mapping string names to component classes.
 
     Each component domain (embedder, reranker, llm, vlm, chunking, parser)
@@ -37,12 +33,12 @@ class Registry(Generic[T]):
 
     def __init__(self, kind: str) -> None:
         self._kind = kind
-        self._registry: dict[str, Type[T]] = {}
+        self._registry: dict[str, type[T]] = {}
 
-    def register(self, name: str) -> Callable[[Type[T]], Type[T]]:
+    def register(self, name: str) -> Callable[[type[T]], type[T]]:
         """Decorator to register a class under *name*."""
 
-        def decorator(cls: Type[T]) -> Type[T]:
+        def decorator(cls: type[T]) -> type[T]:
             self._registry[name] = cls
             return cls
 
@@ -58,7 +54,7 @@ class Registry(Generic[T]):
             )
         return cls(**kwargs)
 
-    def get_class(self, name: str) -> Type[T]:
+    def get_class(self, name: str) -> type[T]:
         """Return the registered class without instantiating."""
         cls = self._registry.get(name)
         if cls is None:
