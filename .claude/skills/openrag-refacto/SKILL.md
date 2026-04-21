@@ -54,6 +54,45 @@ The skill cannot assume what mode/phase is active. To find out:
 
 Phase ↔ Mode mapping: **Mode 1 = Phases 0-4, Mode 2 = Phases 5-9, Mode 3 = Phases 10-12**. Phases 13-15 are post-cutover normal dev.
 
+## Decision log — you MUST write to it
+
+`REFACTORING_DECISION_LOG.md` at repo root records **design and scope decisions that shape future refacto work and aren't prescribed by the three source docs**. Keep it short and high-signal — a reader should be able to re-read the whole log for a phase in under a minute.
+
+**The test before adding an entry:**
+
+> *Would a reasonable engineer, reading this in a year, want to know why we went this way rather than the obvious alternative? Or would they just accept it and move on?*
+
+If they'd just accept it, don't log it. Most things belong in commit messages, not here.
+
+**Log it when:**
+- You chose one architectural path over another real alternative — where something lives, how a boundary is drawn, what's coupled vs decoupled.
+- You deferred something the docs said should be in scope, or pulled something in earlier than the docs suggested.
+- You picked one of two docs/sections over the other where they disagreed.
+- You introduced a new process rule or artifact that the next reader needs to know about.
+
+**Don't log:**
+- Mechanical fixes to unblock the work (gitignore tweaks, config corrections, dependency pinning, typo fixes). Commit message is enough.
+- Implementation choices inside a single file (AST vs regex, stdlib vs library, loop vs comprehension). The code speaks for itself.
+- CI / lint / formatter additions that are just "more coverage" without a trade-off.
+- Anything you can justify by citing a STRATEGY / WORKFLOW / SKILL / GUIDE section.
+- Anything obvious from reading the code or config itself.
+
+**Format** — one entry per decision:
+- The decision in one line (bold).
+- A short **Why:** (what forced the call, what the docs didn't cover).
+- A short **Alternative considered:** — if there wasn't a real alternative, the entry probably fails the test above.
+
+Group decisions under a single phase heading. There's a template at the bottom of the log file. Don't open a PR without updating the log if any decision passes the test.
+
+**Prune stale entries every time you touch the log.** Before adding a new entry, re-read every existing entry and ask for each: *is this still relevant?* Remove it when:
+
+- The deferred follow-up has been done (e.g. `docker-build` gets wired → the "docker-build deferred" entry is stale).
+- The rule it describes has been codified into STRATEGY / WORKFLOW / SKILL / GUIDE (the doc is now authoritative; the log entry is duplicated).
+- The decision has been revisited and a different path was taken (replace, don't stack).
+- The situation it describes no longer exists (e.g. a legacy path has been fully migrated).
+
+Deleting stale entries is part of maintaining the log, not rewriting history. The commit that removes the entry should say why.
+
 ## Where does this belong? — quick layer decision
 
 | If the code… | Layer | Example |
