@@ -16,6 +16,7 @@ from .entity_repo import EntityRepository
 from .idempotency_repo import IdempotencyRepository
 from .job_repo import JobRepository
 from .model_endpoint_repo import ModelEndpointRepository
+from .oidc_session_repo import OIDCSessionRepository
 from .partition_repo import PartitionRepository
 from .preset_repo import PresetRepository
 from .prompt_repo import PromptRepository
@@ -86,3 +87,7 @@ class CatalogStore(ABC):
     @property
     @abstractmethod
     def idempotency_repo(self) -> IdempotencyRepository: ...
+
+    @property
+    @abstractmethod
+    def oidc_session_repo(self) -> OIDCSessionRepository: ...
