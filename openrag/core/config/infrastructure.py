@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import Field
 
-from openrag.core.config.base import ConfigMixin
+from .base import ConfigMixin
 
 # ---------------------------------------------------------------------------
 # VectorDB (Milvus)

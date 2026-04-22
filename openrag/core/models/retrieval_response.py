@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from openrag.core.models.retrieval_result import RetrievalResult
+from .retrieval_result import RetrievalResult
 
 
 class RetrievalResponse(BaseModel):

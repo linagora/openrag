@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from openrag.core.models.user import User, UserPartition
+from openrag.core.models.user import PartitionRole, User, UserPartition
 
 
 class UserRepository(ABC):
@@ -47,4 +47,4 @@ class UserRepository(ABC):
     async def list_partition_users(self, partition: str) -> list[UserPartition]: ...
 
     @abstractmethod
-    async def update_partition_role(self, user_id: int, partition: str, role: str) -> bool: ...
+    async def update_partition_role(self, user_id: int, partition: str, role: PartitionRole) -> bool: ...

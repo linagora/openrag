@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from openrag.core.config.root import Settings
+from .root import Settings
 
 logger = logging.getLogger(__name__)
 
