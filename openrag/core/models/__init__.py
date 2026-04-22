@@ -9,9 +9,10 @@ from .prompt import Prompt, PromptType
 from .query import RetrievalQuery
 from .retrieval_response import RetrievalResponse
 from .retrieval_result import RetrievalResult, ScoredChunk
-from .user import OIDCSession, PartitionRole, User, UserPartition
+from .user import ApiKey, OIDCSession, PartitionRole, TokenPayload, User, UserPartition
 
 __all__ = [
+    "ApiKey",
     "Chunk",
     "ChunkType",
     "ContextualizedQuery",
@@ -34,6 +35,7 @@ __all__ = [
     "RetrievalResult",
     "ScoredChunk",
     "TextBlock",
+    "TokenPayload",
     "User",
     "UserPartition",
 ]
