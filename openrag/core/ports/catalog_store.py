@@ -8,19 +8,19 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from openrag.core.ports.audit_log_repo import AuditLogRepository
-from openrag.core.ports.chunk_repo import ChunkRepository
-from openrag.core.ports.conversation_repo import ConversationRepository
-from openrag.core.ports.document_repo import DocumentRepository
-from openrag.core.ports.entity_repo import EntityRepository
-from openrag.core.ports.idempotency_repo import IdempotencyRepository
-from openrag.core.ports.job_repo import JobRepository
-from openrag.core.ports.model_endpoint_repo import ModelEndpointRepository
-from openrag.core.ports.partition_repo import PartitionRepository
-from openrag.core.ports.preset_repo import PresetRepository
-from openrag.core.ports.prompt_repo import PromptRepository
-from openrag.core.ports.topic_tag_repo import TopicTagRepository
-from openrag.core.ports.user_repo import UserRepository
+from .audit_log_repo import AuditLogRepository
+from .chunk_repo import ChunkRepository
+from .conversation_repo import ConversationRepository
+from .document_repo import DocumentRepository
+from .entity_repo import EntityRepository
+from .idempotency_repo import IdempotencyRepository
+from .job_repo import JobRepository
+from .model_endpoint_repo import ModelEndpointRepository
+from .partition_repo import PartitionRepository
+from .preset_repo import PresetRepository
+from .prompt_repo import PromptRepository
+from .topic_tag_repo import TopicTagRepository
+from .user_repo import UserRepository
 
 
 class CatalogStore(ABC):

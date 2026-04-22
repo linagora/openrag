@@ -1,7 +1,7 @@
 """Generic registry pattern for pluggable components.
 
 Usage:
-    from openrag.core.utils.registry import Registry
+    from .registry import Registry
 
     embedder_registry: Registry[Embedder] = Registry("embedder")
 

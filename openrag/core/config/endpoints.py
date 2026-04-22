@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from openrag.core.config.base import ConfigMixin
+from .base import ConfigMixin
 
 
 class LLMParamsConfig(ConfigMixin):

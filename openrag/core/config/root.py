@@ -4,17 +4,17 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from openrag.core.config.base import ConfigMixin
-from openrag.core.config.chunking import ChunkerConfig
-from openrag.core.config.endpoints import (
+from .base import ConfigMixin
+from .chunking import ChunkerConfig
+from .endpoints import (
     EmbedderConfig,
     LLMConfig,
     LLMContextConfig,
     SemaphoreConfig,
     VLMConfig,
 )
-from openrag.core.config.indexation import LoaderConfig
-from openrag.core.config.infrastructure import (
+from .indexation import LoaderConfig
+from .infrastructure import (
     PathsConfig,
     PromptsConfig,
     RayConfig,
@@ -23,7 +23,7 @@ from openrag.core.config.infrastructure import (
     VectorDBConfig,
     VerboseConfig,
 )
-from openrag.core.config.retrieval import (
+from .retrieval import (
     MapReduceConfig,
     RAGConfig,
     RerankerConfig,
