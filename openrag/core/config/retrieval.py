@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from openrag.core.config.base import ConfigMixin
+from .base import ConfigMixin
 
 # ---------------------------------------------------------------------------
 # Reranker

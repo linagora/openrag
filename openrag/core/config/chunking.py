@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from openrag.core.config.base import ConfigMixin
+from .base import ConfigMixin
 
 
 class ChunkerConfig(ConfigMixin):
