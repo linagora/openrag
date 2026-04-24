@@ -3,7 +3,6 @@ import copy
 import json
 import re
 import threading
-from collections import deque
 from typing import ClassVar
 
 import ray
@@ -164,39 +163,51 @@ def format_web_context(
     return SOURCE_SEPARATOR.join(parts), source_numbers, total_tokens
 
 
-_SOURCES_NONE_RE = re.compile(r"\n?\[?Sources?\]?\s*:\s*\[?\s*none\s*\]?\s*$", re.IGNORECASE)
-_SOURCES_NUMS_RE = re.compile(r"\n?\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?[.\s]*$")
+# Line-terminal anchor `(?=\n|$)` — matches only when the tag sits flush against
+# a newline or end-of-string. Safe: in-prose tags like "use [Sources: 1, 3] at end"
+# are followed by text, so they stay. The LLM always places misplaced tags at the
+# end of a sentence/bullet/line, which is exactly what this catches.
+_SOURCES_NONE_RE = re.compile(
+    r"\n?[ \t]*\[?Sources?\]?\s*:\s*\[?\s*none\s*\]?[.\s]*?(?=\n|$)",
+    re.IGNORECASE,
+)
+_SOURCES_NUMS_RE = re.compile(r"\n?[ \t]*\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?[.\s]*?(?=\n|$)")
+
+
+def _strip_sources_tags(text: str) -> tuple[str, set[int], bool]:
+    """Strip every line-terminal [Sources: ...] tag. Return (cleaned, cited_nums, saw_none)."""
+    cited: set[int] = set()
+    for m in _SOURCES_NUMS_RE.finditer(text):
+        cited.update(int(n.strip()) for n in m.group(1).split(",") if n.strip().isdigit())
+    saw_none = bool(_SOURCES_NONE_RE.search(text))
+    cleaned = _SOURCES_NUMS_RE.sub("", text)
+    cleaned = _SOURCES_NONE_RE.sub("", cleaned)
+    return cleaned, cited, saw_none
 
 
 def extract_and_strip_sources_block(text: str) -> tuple[str, set[int] | None]:
-    """Extract [Sources: ...] block from end of response. Return (clean_text, citations).
+    """Strip every line-terminal [Sources: ...] tag and return merged citations.
 
     Returns:
         (clean_text, citations) where citations is:
-        - set of ints: LLM cited specific sources
-        - empty set:   LLM explicitly said [Sources: none]
-        - None:        LLM didn't include any sources tag
+        - set of ints: union of all cited source numbers across every tag occurrence
+        - empty set:   LLM said [Sources: none] and no numeric citations elsewhere
+        - None:        no sources tag found — text returned unchanged
     """
-    # Check for explicit "none" first
-    match_none = _SOURCES_NONE_RE.search(text)
-    if match_none:
-        clean_text = text[: match_none.start()].rstrip()
-        logger.debug("LLM explicitly reported no sources used")
-        return clean_text, set()
+    cleaned, citations, saw_none = _strip_sources_tags(text)
 
-    # Check for numbered citations
-    match = _SOURCES_NUMS_RE.search(text)
-    if not match:
+    if not citations and not saw_none:
         tail = text[-150:] if len(text) > 150 else text
         logger.debug("No [Sources: ...] tag found in LLM response", tail=repr(tail))
         return text, None
 
-    citations = {int(n.strip()) for n in match.group(1).split(",") if n.strip().isdigit()}
-    logger.debug(
-        "Extracted source citations from LLM response", citations=sorted(citations), matched=repr(match.group(0))
-    )
-    clean_text = text[: match.start()].rstrip()
-    return clean_text, citations
+    cleaned = cleaned.rstrip()
+    if citations:
+        logger.debug("Extracted source citations from LLM response", citations=sorted(citations))
+        return cleaned, citations
+
+    logger.debug("LLM explicitly reported no sources used")
+    return cleaned, set()
 
 
 def filter_sources_by_citations(sources: list, citations: set[int] | None) -> list:
@@ -214,23 +225,32 @@ def filter_sources_by_citations(sources: list, citations: set[int] | None) -> li
     return filtered if filtered else sources
 
 
+# Look-ahead window: chars held back at the tail of `pending` so an in-flight
+# [Sources: ...] tag can never straddle the emit boundary. Sized for the longest
+# plausible tag (~60 chars) plus margin for spacing variations.
+_STREAM_LOOKAHEAD = 80
+
+
 async def stream_with_source_filtering(
     llm_stream,
     sources: list,
     model_name: str,
-    buffer_size: int = 100,
 ):
-    """Process an LLM SSE stream, stripping the [Sources: ...] tag from content.
+    """Process an LLM SSE stream, stripping every line-terminal [Sources: ...] tag.
 
-    Buffers the last `buffer_size` chars of content to intercept the sources tag
-    before it reaches the client. On stream end, strips the tag and emits a finish
-    chunk with filtered source metadata.
+    Look-ahead window: keep the last `_STREAM_LOOKAHEAD` chars of `pending`
+    buffered and emit everything before that. The held-back tail guarantees no
+    in-flight tag can straddle the emit boundary, so streaming flows in
+    real-time (constant ~80-char content lag) regardless of newline cadence.
+    On stream end, flush the tail (EOS-anchored regex catches a final tag
+    without a trailing \n) and emit a finish chunk carrying the filtered
+    source metadata.
 
     Yields SSE "data: ..." lines ready to forward to the client.
     """
-    chunk_buffer: deque[dict] = deque()
-    buffered_content_len = 0
-    last_chunk_template = None
+    pending = ""
+    emitted_len = 0
+    chunk_template = None
     last_finish_reason = None
 
     async for line in llm_stream:
@@ -238,67 +258,72 @@ async def stream_with_source_filtering(
             continue
 
         if line.strip() == "data: [DONE]":
-            buffered_text = "".join(
-                (c.get("choices", [{}])[0].get("delta", {}).get("content", "") or "") for c in chunk_buffer
-            )
-            clean_text, citations = extract_and_strip_sources_block(buffered_text)
+            final_clean, citations = extract_and_strip_sources_block(pending)
+            final_clean = final_clean.rstrip()
+
             filtered = filter_sources_by_citations(sources, citations)
             filtered_json = json.dumps({"sources": filtered})
 
-            remaining = clean_text
-            for chunk in chunk_buffer:
-                original_content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "") or ""
-                if not remaining:
-                    break
-                surviving = remaining[: len(original_content)]
-                remaining = remaining[len(original_content) :]
-                if surviving != original_content:
-                    chunk["choices"][0]["delta"]["content"] = surviving
-                chunk["extra"] = filtered_json
-                yield f"data: {json.dumps(chunk)}\n\n"
+            if chunk_template and len(final_clean) > emitted_len:
+                tail_chunk = copy.deepcopy(chunk_template)
+                tail_chunk["choices"][0]["delta"] = {"content": final_clean[emitted_len:]}
+                tail_chunk["extra"] = filtered_json
+                yield f"data: {json.dumps(tail_chunk)}\n\n"
 
-            if last_chunk_template:
-                # FIXME: race condition where clients missed sources because finish_reason
-                # were received before sources
+            if chunk_template:
+                # FIXME: race condition where clients miss sources because finish_reason
+                # arrives before the sources metadata
                 await asyncio.sleep(0.05)
-                finish_chunk = copy.deepcopy(last_chunk_template)
+                finish_chunk = copy.deepcopy(chunk_template)
                 finish_chunk["choices"][0]["delta"] = {}
                 finish_chunk["choices"][0]["finish_reason"] = last_finish_reason or "stop"
                 finish_chunk["extra"] = filtered_json
                 yield f"data: {json.dumps(finish_chunk)}\n\n"
 
             yield "data: [DONE]\n\n"
+            continue
 
+        data = json.loads(line[len("data: ") :])
+        data["model"] = model_name
+
+        choice = data.get("choices", [{}])[0]
+        delta = choice.get("delta", {})
+        content = delta.get("content", "") or ""
+        finish_reason = choice.get("finish_reason")
+
+        if finish_reason:
+            # Save finish_reason, don't forward — we emit it at the end
+            last_finish_reason = finish_reason
+            chunk_template = data
+        elif content:
+            chunk_template = data
+            pending += content
+
+            if len(pending) <= _STREAM_LOOKAHEAD:
+                continue
+
+            # Strip tags from the whole pending; emit the prefix that lies safely
+            # outside the look-ahead window. Tags inside the window stay buffered
+            # until they're either confirmed (anchored by \n) or completed at DONE.
+            cleaned, _, _ = _strip_sources_tags(pending)
+            safe_end = max(0, len(cleaned) - _STREAM_LOOKAHEAD)
+            if safe_end > emitted_len:
+                # Shallow rebuild: data is fresh from json.loads (no aliasing),
+                # so we only need to avoid mutating shared inner dicts.
+                choice = data["choices"][0]
+                out = {
+                    **data,
+                    "choices": [
+                        {**choice, "delta": {**choice.get("delta", {}), "content": cleaned[emitted_len:safe_end]}}
+                    ],
+                    "extra": "{}",
+                }
+                yield f"data: {json.dumps(out)}\n\n"
+                emitted_len = safe_end
         else:
-            data_str = line[len("data: ") :]
-            data = json.loads(data_str)
-            data["model"] = model_name
-
-            choice = data.get("choices", [{}])[0]
-            delta = choice.get("delta", {})
-            content = delta.get("content", "") or ""
-            finish_reason = choice.get("finish_reason")
-
-            if finish_reason:
-                # Save finish_reason, don't forward — we emit it at the end
-                last_finish_reason = finish_reason
-                last_chunk_template = data
-            elif content:
-                last_chunk_template = data
-                chunk_buffer.append(data)
-                buffered_content_len += len(content)
-
-                while buffered_content_len > buffer_size:
-                    oldest = chunk_buffer.popleft()
-                    oldest_content = oldest.get("choices", [{}])[0].get("delta", {}).get("content", "") or ""
-                    oldest["extra"] = "{}"
-                    buffered_content_len -= len(oldest_content)
-                    yield f"data: {json.dumps(oldest)}\n\n"
-
-            else:
-                # Forward non-content, non-finish chunks immediately (e.g. role delta)
-                data["extra"] = "{}"
-                yield f"data: {json.dumps(data)}\n\n"
+            # Forward non-content, non-finish chunks immediately (e.g. role delta)
+            data["extra"] = "{}"
+            yield f"data: {json.dumps(data)}\n\n"
 
 
 # Initialize language detector
