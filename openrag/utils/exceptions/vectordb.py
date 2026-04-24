@@ -5,6 +5,7 @@ from openrag.core.utils.exceptions import (  # noqa: F401
     VDBConnectionError,
     VDBCreateOrLoadCollectionError,
     VDBDeleteError,
+    VDBError,
     VDBFileIDAlreadyExistsError,
     VDBFileNotFoundError,
     VDBInsertError,
