@@ -266,11 +266,12 @@ def format_sources_as_markdown(sources: list) -> str:
         except (TypeError, ValueError):
             return float("-inf")
 
-    # Dedup on (file_url|filename) — OpenRAG can return several chunks of the
-    # same file with different scores; show each file once with its best chunk.
+    # Dedup on best available identifier. Web sources use "url"; document
+    # sources use "file_url" or "filename". Show each source once at its
+    # best-scoring chunk.
     seen: dict[str, dict] = {}
     for s in sources:
-        key = s.get("file_url") or s.get("filename") or s.get("source") or ""
+        key = s.get("file_url") or s.get("url") or s.get("filename") or s.get("source") or ""
         if not key:
             continue
         if _score(s) < min_score:
@@ -291,8 +292,8 @@ def format_sources_as_markdown(sources: list) -> str:
 
     lines = ["", "---", "**Sources :**", ""]
     for i, s in enumerate(ranked, start=1):
-        url = s.get("file_url") or s.get("chunk_url") or ""
-        label = _label(s).replace("|", "\\|")
+        url = s.get("file_url") or s.get("url") or s.get("chunk_url") or ""
+        label = _label(s).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]").replace("|", "\\|")
         score = _score(s)
         score_suffix = f" — score {score:.2f}" if score != float("-inf") else ""
         if url:

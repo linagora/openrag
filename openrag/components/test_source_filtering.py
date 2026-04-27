@@ -296,6 +296,29 @@ class TestFormatSourcesAsMarkdown:
         assert "Doc A" in result
         assert "Doc B" not in result  # capped at 1
 
+    def test_web_sources_included(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        sources = [
+            {
+                "source_type": "web",
+                "url": "https://example.com/page",
+                "title": "Web Result",
+                "snippet": "...",
+                "relevance_score": 0.8,
+            },
+            {"source_type": "document", "file_url": "https://x/doc.pdf", "title": "Doc", "relevance_score": 0.7},
+        ]
+        result = format_sources_as_markdown(sources)
+        assert "Web Result" in result
+        assert "[Web Result](https://example.com/page)" in result
+        assert "Doc" in result
+
+    def test_label_special_chars_escaped(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        sources = [{"file_url": "https://x/a", "title": "Report [draft] Q1|Q2", "relevance_score": 0.9}]
+        result = format_sources_as_markdown(sources)
+        assert "[Report \\[draft\\] Q1\\|Q2](https://x/a)" in result
+
 
 class TestStreamWithInlineSources:
     """When INLINE_SOURCES_IN_CONTENT=true, the stream emits an extra delta
