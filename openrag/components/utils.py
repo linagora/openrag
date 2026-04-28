@@ -8,7 +8,6 @@ from collections import deque
 from typing import ClassVar
 
 import ray
-from components.indexer.utils.text_sanitizer import sanitize_text
 from config import load_config
 from fast_langdetect import LangDetectConfig, LangDetector
 from langchain_core.documents.base import Document
@@ -142,6 +141,8 @@ def format_web_context(
     """
     if not web_results:
         return "", [], 0
+
+    from components.indexer.utils.text_sanitizer import sanitize_text
 
     _length_function = get_num_tokens()
 
