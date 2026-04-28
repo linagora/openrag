@@ -275,8 +275,8 @@ class TestFormatSourcesAsMarkdown:
         assert "score 0.50" not in result
         # Ranked: Doc A (0.9) before Doc B (0.7)
         assert result.find("Doc A") < result.find("Doc B")
-        # URL is rendered as markdown link
-        assert "[Doc A](https://x/a)" in result
+        # URL is rendered as markdown link (angle-bracket form)
+        assert "[Doc A](<https://x/a>)" in result
 
     def test_empty_sources(self, monkeypatch):
         monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
@@ -310,14 +310,35 @@ class TestFormatSourcesAsMarkdown:
         ]
         result = format_sources_as_markdown(sources)
         assert "Web Result" in result
-        assert "[Web Result](https://example.com/page)" in result
+        assert "[Web Result](<https://example.com/page>)" in result
         assert "Doc" in result
 
     def test_label_special_chars_escaped(self, monkeypatch):
         monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
         sources = [{"file_url": "https://x/a", "title": "Report [draft] Q1|Q2", "relevance_score": 0.9}]
         result = format_sources_as_markdown(sources)
-        assert "[Report \\[draft\\] Q1\\|Q2](https://x/a)" in result
+        assert "[Report \\[draft\\] Q1\\|Q2](<https://x/a>)" in result
+
+    def test_url_with_parens_and_spaces_uses_angle_brackets(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        sources = [
+            {
+                "file_url": "https://en.wikipedia.org/wiki/Foo_(bar) baz",
+                "title": "Wiki",
+                "relevance_score": 0.9,
+            }
+        ]
+        result = format_sources_as_markdown(sources)
+        # Bare-URL form would break on "(", ")", and " ". Angle-bracket form
+        # tolerates all three, so the destination must be wrapped.
+        assert "[Wiki](<https://en.wikipedia.org/wiki/Foo_(bar) baz>)" in result
+
+    def test_url_with_angle_brackets_percent_encoded(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        sources = [{"file_url": "https://x/a<b>c", "title": "T", "relevance_score": 0.9}]
+        result = format_sources_as_markdown(sources)
+        # "<" / ">" close the angle-bracket destination prematurely; encode them.
+        assert "[T](<https://x/a%3Cb%3Ec>)" in result
 
 
 class TestStreamWithInlineSources:
@@ -345,7 +366,7 @@ class TestStreamWithInlineSources:
         full_content = _collect_content(result)
         assert "The answer." in full_content
         assert "**Sources :**" in full_content
-        assert "[Doc A](https://x/a)" in full_content
+        assert "[Doc A](<https://x/a>)" in full_content
         assert "[Sources: 1]" not in full_content
         # The structured `extra` field still reaches the finish chunk.
         assert _parse_finish_sources(result) == self.SOURCES

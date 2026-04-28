@@ -298,7 +298,11 @@ def format_sources_as_markdown(sources: list) -> str:
         score = _score(s)
         score_suffix = f" — score {score:.2f}" if score != float("-inf") else ""
         if url:
-            lines.append(f"{i}. [{label}]({url}){score_suffix}")
+            # Angle-bracket destination tolerates spaces, "(", ")" — characters
+            # that break the bare-URL form. Percent-encode the only two chars
+            # that could close the destination prematurely.
+            url_safe = url.replace("<", "%3C").replace(">", "%3E")
+            lines.append(f"{i}. [{label}](<{url_safe}>){score_suffix}")
         else:
             lines.append(f"{i}. {label}{score_suffix}")
     return "\n".join(lines)
