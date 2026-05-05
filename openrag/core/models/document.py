@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import tempfile
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -34,13 +40,55 @@ class TextBlock(BaseModel):
 
 
 class ImageBlock(BaseModel):
-    """An image extracted from a document."""
+    """An image extracted from a document.
 
-    image_bytes: bytes = Field(exclude=True, repr=False)
+    Parser→caption contract:
+    - Parsers emit ``ImageBlock`` with ``caption=None``. A downstream
+      caption stage fills it in via a VLM.
+    - When the source text contains a placeholder for the image
+      (``![alt](data:image/...)``, ``![](pptx-image-3)``, ``![](marker-key-7)``,
+      …), the parser stores the exact placeholder string in
+      ``metadata["markdown_ref"]``. The caption stage substitutes the
+      wrapped caption back into the corresponding ``TextBlock`` via
+      ``str.replace`` on that ref.
+    - When there is no in-text placeholder (standalone image uploads,
+      EML image attachments), ``metadata["markdown_ref"]`` is omitted;
+      the caption stage produces a free-standing captioned ``TextBlock``
+      instead.
+
+    Bytes vs. URL:
+    - Locally-extracted images set ``image_bytes`` (raw PNG / JPEG bytes)
+      and leave ``source_url`` as ``None``.
+    - Remote images parsed from a markdown ``![](http://…)`` ref leave
+      ``image_bytes`` empty and set ``source_url`` to the URL. A
+      downstream fetch stage may populate ``image_bytes`` later.
+    - The :attr:`image_url` property is the unified VLM-friendly form:
+      a ``data:`` URI built from the bytes when present, otherwise the
+      ``source_url`` as-is.
+    """
+
+    image_bytes: bytes = Field(default=b"", exclude=True, repr=False)
+    source_url: str | None = None
     page_number: int | None = None
     caption: str | None = None
     mime_type: str = "image/png"
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def image_url(self) -> str:
+        """A VLM-friendly URL for this image.
+
+        - Bytes present → ``data:{mime_type};base64,{...}`` URI.
+        - Otherwise → ``source_url`` if set, else empty string.
+        - On any encoding failure → falls back to ``source_url`` (or "").
+        """
+        if self.image_bytes:
+            try:
+                b64 = base64.b64encode(self.image_bytes).decode()
+                return f"data:{self.mime_type};base64,{b64}"
+            except Exception:
+                pass
+        return self.source_url or ""
 
 
 class Document(BaseModel):
@@ -100,6 +148,53 @@ class Document(BaseModel):
             "partition": self.partition,
         }
         return LCDocument(page_content=self.text or "", metadata=metadata)
+
+    @asynccontextmanager
+    async def as_temporary_file(self, *, suffix: str | None = None) -> AsyncIterator[Path]:
+        """Materialize ``raw_bytes`` to a temporary file and yield its ``Path``.
+
+        Parsers wrapping a sync library that requires a path on disk
+        (Marker, Whisper, MarkItDown, python-pptx, Spire.Doc, …) use this
+        helper instead of rolling their own ``NamedTemporaryFile`` dance.
+        The file is removed on context exit even if the body raises.
+
+        ``suffix`` defaults to ``filename``'s extension, falling back to
+        a content-type-appropriate default.
+        """
+        if self.raw_bytes is None:
+            raise ValueError("Document.as_temporary_file requires raw_bytes")
+
+        if suffix is None:
+            suffix = Path(self.filename).suffix or _DEFAULT_TEMPFILE_SUFFIX.get(self.content_type, "")
+
+        raw = self.raw_bytes
+
+        def _open() -> Any:
+            tf = tempfile.NamedTemporaryFile(suffix=suffix, delete=True)
+            tf.write(raw)
+            tf.flush()
+            return tf
+
+        tf = await asyncio.to_thread(_open)
+        try:
+            yield Path(tf.name)
+        finally:
+            await asyncio.to_thread(tf.close)
+
+
+_DEFAULT_TEMPFILE_SUFFIX: dict[DocumentType, str] = {
+    DocumentType.PDF: ".pdf",
+    DocumentType.DOCX: ".docx",
+    DocumentType.PPTX: ".pptx",
+    DocumentType.DOC: ".doc",
+    DocumentType.AUDIO: ".wav",
+    DocumentType.VIDEO: ".mp4",
+    DocumentType.EML: ".eml",
+    DocumentType.IMAGE: ".png",
+    DocumentType.HTML: ".html",
+    DocumentType.MARKDOWN: ".md",
+    DocumentType.TEXT: ".txt",
+}
 
 
 class ProcessedDocument(BaseModel):
