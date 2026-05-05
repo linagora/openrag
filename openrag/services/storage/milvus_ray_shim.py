@@ -50,7 +50,7 @@ class MilvusRayShim(RetrievalSearcher):
     async def _call(self, future: Any, task_description: str) -> Any:
         # Deferred import: keeps this module importable without `ray` installed
         # (legacy `components.ray_utils` pulls in ray at import time).
-        from components.ray_utils import call_ray_actor_with_timeout
+        from openrag.components.ray_utils import call_ray_actor_with_timeout
 
         return await call_ray_actor_with_timeout(
             future=future,
