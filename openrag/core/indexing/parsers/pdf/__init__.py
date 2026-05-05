@@ -5,6 +5,7 @@ Docling, DotsOCR, …) are only imported when the backend is actually
 instantiated.
 """
 
+from .client_based import ClientPdfParser
 from .pymupdf import PyMuPDFParser
 
-__all__ = ["PyMuPDFParser"]
+__all__ = ["ClientPdfParser", "PyMuPDFParser"]
