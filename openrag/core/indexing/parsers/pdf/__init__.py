@@ -6,6 +6,7 @@ instantiated.
 """
 
 from .client_based import ClientPdfParser
+from .marker import MarkerParser
 from .pymupdf import PyMuPDFParser
 
-__all__ = ["ClientPdfParser", "PyMuPDFParser"]
+__all__ = ["ClientPdfParser", "MarkerParser", "PyMuPDFParser"]
