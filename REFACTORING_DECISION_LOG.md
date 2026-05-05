@@ -137,6 +137,58 @@ The follow-up sweep (2026-05-05) replaced six legacy files with shims:
   instead of the previous raw `image`. No legacy reader filters on this
   value, so the change is invisible to consumers.
 
+**5. `core/chunking/recursive.py` keeps `langchain.text_splitter.RecursiveCharacterTextSplitter` as a dependency.**
+STRATEGY §3 lists core as "stdlib + pydantic + pure libs" and §4.7 limits
+LangChain in core to boundary converters (`from_langchain` / `to_langchain`
+on domain models). The chunker imports `RecursiveCharacterTextSplitter`
+directly, which is neither stdlib nor a boundary converter.
+- Why: `RecursiveCharacterTextSplitter` is a self-contained recursive
+  separator-based string splitter — no IO, no LLM client, no Document
+  semantics. Reimplementing it in core/ would be a meaningful chunk of
+  pure code with no behavior change, and the legacy chunker has been
+  using it for two years with stable output. Keeping it in for Phase 5
+  preserves byte-for-byte chunk equivalence, which the strangler-fig
+  shim relies on for behavior parity. The import is also deferred
+  (inside the constructor / `split_text`) so importing the module
+  without LangChain installed doesn't fail.
+- Alternative considered: write a stdlib-only recursive splitter as part
+  of Phase 5. Rejected as scope creep — would couple a behaviorally
+  risky rewrite (chunk boundaries shift, downstream embedding output
+  changes) to the additive Phase 5 cut, breaking the parity guarantee
+  the legacy shims rely on. Tracked as a Phase 12 / post-cutover
+  follow-up: replace the splitter with a stdlib implementation behind
+  the same `Callable[[str], int]` length-function injection point.
+- Scope: limited to `RecursiveCharacterTextSplitter`. No other LangChain
+  symbol leaks into core; `langchain_core.documents.Document` only
+  appears inside `Chunk.from_langchain` / `Chunk.to_langchain` /
+  `Document.from_langchain` / `Document.to_langchain`, all with deferred
+  imports, exactly as §4.7 prescribes.
+
+**6. Two file-layout deviations from STRATEGY §3 / §5A / §5B.**
+- `core/chunking/markdown_section.py` (§5B, line 1038; §3, line 387)
+  → renamed to `core/chunking/markdown_utils.py`. The contents are pure
+  parsing helpers — `MDElement`, `split_md_elements`, `chunk_table`,
+  `parse_markdown_table`, `get_chunk_page_number` — not a
+  section-aware chunker strategy. The name `markdown_utils.py` matches
+  the module's role (utilities consumed by `RecursiveSplitter`); the
+  separate `markdown_section.py` / `markdown_layout.py` *strategies*
+  listed in §3's tree aren't built in Phase 5 and remain available
+  filenames if/when those strategies land.
+- `core/retrieval/hydration.py` (§5A, line 1027) → kept as private
+  `_expand_with_related_chunks` in `retriever.py`. The function is
+  ~60 LOC, only invoked by `BaseRetriever.expand_search_results`, and
+  splitting it would add an import + test fixture surface without any
+  reuse benefit. If a second consumer ever appears (Phase 8 likely),
+  promoting it to a module-level public function in `hydration.py` is
+  a one-commit move.
+- Why: both deviations make the module names track the actual contents
+  rather than the strategy doc's pre-write naming guess. Recording so
+  future readers don't grep for files that aren't there.
+- Alternative considered: rename to match the strategy doc verbatim.
+  Rejected — the strategy filenames anticipated different content
+  (a section/layout chunker, a standalone hydration entry point) than
+  what Phase 5 actually produced.
+
 ---
 
 ## Phase 1 — Registry + Exceptions (2026-04-21)
