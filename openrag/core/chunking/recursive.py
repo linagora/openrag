@@ -192,6 +192,11 @@ class BaseChunker(ChunkingStrategy):
 
         chunks: list[dict[str, Any]] = []
 
+        # Reserved per-chunk keys must win over arbitrary `metadata` values —
+        # a stray "chunk_type" / "page" / "page_content" in the document's
+        # metadata would otherwise clobber the resolved value (and crash
+        # `chunk()` when ChunkType(...) is fed an out-of-enum string). Same
+        # defensive pattern as `_chunk_metadata_base`.
         for element in tables_and_images:
             if element.type == "table" and self.length_function(element.content) > self.chunk_size:
                 subtables = chunk_table(
@@ -201,10 +206,10 @@ class BaseChunker(ChunkingStrategy):
                 )
                 chunks.extend(
                     {
+                        **metadata,
                         "page_content": subtable.content.strip(),
                         "page": subtable.page_number,
                         "chunk_type": "table",
-                        **metadata,
                     }
                     for subtable in subtables
                 )
@@ -214,10 +219,10 @@ class BaseChunker(ChunkingStrategy):
                 ct = "image_caption" if element.type == "image" else element.type
                 chunks.append(
                     {
+                        **metadata,
                         "page_content": element.content.strip(),
                         "page": element.page_number,
                         "chunk_type": ct,
-                        **metadata,
                     }
                 )
 
@@ -227,10 +232,10 @@ class BaseChunker(ChunkingStrategy):
             prev_page = page_info["end_page"]
             chunks.append(
                 {
+                    **metadata,
                     "page_content": c.strip(),
                     "page": page_info["start_page"],
                     "chunk_type": "text",
-                    **metadata,
                 }
             )
 

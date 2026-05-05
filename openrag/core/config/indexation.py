@@ -2,13 +2,29 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+from typing import Any
+
+from pydantic import Field, field_validator
 
 from .base import ConfigMixin
 
 # ---------------------------------------------------------------------------
 # Transcriber (nested under loader)
 # ---------------------------------------------------------------------------
+
+# Audio formats the transcription endpoint accepts as-is — uploads of these
+# extensions skip the WAV-conversion pre-step. Configurable via env var
+# `TRANSCRIBER_DIRECT_UPLOAD_SUFFIXES` (pipe-delimited string).
+_DEFAULT_DIRECT_UPLOAD_SUFFIXES = frozenset(
+    {".wav", ".flac", ".ogg", ".mp3", ".mp4", ".m4a", ".webm", ".mpeg", ".mpga"}
+)
+
+
+def _normalize_suffix(s: str) -> str:
+    s = s.strip().lower()
+    if not s:
+        return ""
+    return s if s.startswith(".") else f".{s}"
 
 
 class TranscriberConfig(ConfigMixin):
@@ -18,6 +34,14 @@ class TranscriberConfig(ConfigMixin):
     timeout: int = 3600
     max_concurrent_chunks: int = 20
     use_whisper_lang_detector: bool = True
+    direct_upload_suffixes: set[str] = Field(default_factory=lambda: set(_DEFAULT_DIRECT_UPLOAD_SUFFIXES))
+
+    @field_validator("direct_upload_suffixes", mode="before")
+    @classmethod
+    def _split_suffixes(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return {n for raw in v.split("|") if (n := _normalize_suffix(raw))}
+        return v
 
 
 # ---------------------------------------------------------------------------

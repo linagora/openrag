@@ -104,6 +104,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("TRANSCRIBER_MODEL", "loader.transcriber.model_name", str),
     ("TRANSCRIBER_TIMEOUT", "loader.transcriber.timeout", int),
     ("TRANSCRIBER_MAX_CONCURRENT_CHUNKS", "loader.transcriber.max_concurrent_chunks", int),
+    ("TRANSCRIBER_DIRECT_UPLOAD_SUFFIXES", "loader.transcriber.direct_upload_suffixes", str),
     ("USE_WHISPER_LANG_DETECTOR", "loader.transcriber.use_whisper_lang_detector", bool),
     ("OPENAI_LOADER_BASE_URL", "loader.openai.base_url", str),
     ("OPENAI_LOADER_API_KEY", "loader.openai.api_key", str),

@@ -189,6 +189,32 @@ def test_document_metadata_cannot_override_file_id_or_partition():
         assert c.metadata.get("source") == "ok.md"
 
 
+def test_document_metadata_cannot_override_chunk_type_or_page():
+    """Per-chunk reserved keys (chunk_type, page, page_content) must win
+    over `document.metadata`. A poison `chunk_type` value would otherwise
+    crash `chunk()` when ChunkType(...) is constructed (ultrareview)."""
+    splitter = RecursiveSplitter(chunk_size=20, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="alpha beta gamma delta epsilon", page_number=2)],
+        metadata={
+            "chunk_type": "POISON",
+            "page": 999,
+            "page_content": "REPLACED",
+            "tag": "v1",
+        },
+    )
+    # Must not raise ValueError("'POISON' is not a valid ChunkType").
+    chunks = splitter.chunk(doc, partition="p1")
+    assert chunks
+    for c in chunks:
+        assert c.chunk_type == ChunkType.TEXT
+        assert c.page_number != 999
+        assert c.text != "REPLACED"
+        # Other metadata keys still flow through.
+        assert c.metadata.get("tag") == "v1"
+
+
 def test_recursive_splitter_first_block_on_page_three_resolves_correctly():
     """When the first block already starts on page>1, every chunk used to be
     tagged page 1. Now it should land on the actual block page (CodeRabbit #2)."""
