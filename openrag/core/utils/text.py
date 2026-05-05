@@ -9,6 +9,31 @@ Moved from: components/indexer/utils/text_sanitizer.py
 import re
 import unicodedata
 
+DEFAULT_FALLBACK_ENCODING = "utf-8"
+
+
+def decode_bytes(raw: bytes, encoding: str | None = None) -> str:
+    """Decode ``raw`` to ``str`` with a UTF-8-first detection strategy.
+
+    chardet alone misclassifies short ASCII-heavy UTF-8 as Latin-1, which
+    produces mojibake on common short inputs. Trying strict UTF-8 first
+    catches the common case; chardet handles genuinely non-UTF-8 inputs.
+    Falls back to UTF-8 with ``errors="replace"`` so this never raises.
+    """
+    if encoding:
+        return raw.decode(encoding, errors="replace")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        import chardet
+    except ImportError:
+        return raw.decode(DEFAULT_FALLBACK_ENCODING, errors="replace")
+    guess = chardet.detect(raw)
+    detected = guess.get("encoding") or DEFAULT_FALLBACK_ENCODING
+    return raw.decode(detected, errors="replace")
+
 
 def sanitize_text(
     text: str,

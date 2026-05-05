@@ -131,10 +131,15 @@ class AuthenticationError(AuthError):
 
 
 class ValidationError(OpenRAGError):
-    """Input validation or business rule violation. Maps to HTTP 422."""
+    """Input validation or business rule violation. Maps to HTTP 422 by default.
 
-    def __init__(self, message: str, **kwargs):
-        super().__init__(message, code="VALIDATION_ERROR", status_code=422, **kwargs)
+    Accepts a custom ``status_code`` so callers can preserve more specific
+    semantics (e.g. 400 Bad Request for malformed input, 415 Unsupported
+    Media Type for rejected file formats).
+    """
+
+    def __init__(self, message: str, *, status_code: int = 422, code: str = "VALIDATION_ERROR", **kwargs):
+        super().__init__(message, code=code, status_code=status_code, **kwargs)
 
 
 # ---------------------------------------------------------------------------
