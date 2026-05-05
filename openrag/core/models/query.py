@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 class RetrievalQuery(BaseModel):
@@ -72,6 +75,12 @@ class Query(BaseModel):
             try:
                 datetime.fromisoformat(p.value)
             except (TypeError, ValueError):
+                logger.warning(
+                    "Dropping temporal predicate with non-ISO value: field=%s operator=%s value=%r",
+                    p.field,
+                    p.operator,
+                    p.value,
+                )
                 continue
             parts.append(f'{p.field} {p.operator} ISO "{p.value}"')
         if not parts:

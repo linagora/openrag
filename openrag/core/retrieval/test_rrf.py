@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from openrag.core.retrieval.rrf import rrf_reranking
 
 
@@ -41,3 +43,8 @@ def test_rrf_smaller_k_emphasizes_top_ranks():
     # k=1: top-rank in any list dominates; with two top-1s for different items,
     # both score the same — order is stable across implementations though
     assert {item["id"] for item in fused} == {"a", "b"}
+
+
+def test_rrf_rejects_negative_k():
+    with pytest.raises(ValueError, match="non-negative"):
+        rrf_reranking([[{"id": "a"}], [{"id": "b"}]], key_fn=lambda x: x["id"], k=-1)

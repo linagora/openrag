@@ -116,7 +116,7 @@ class RetrieverPipeline:
             chunks = await _rerank_chunks(self.reranker, query.query, chunks)
 
         if self.expansion_enabled:
-            limit = max(self.reranker_top_k, top_k) if top_k else self.reranker_top_k
+            limit = self.reranker_top_k if top_k is None else max(self.reranker_top_k, top_k)
             head = copy.deepcopy(chunks[:limit])
             expanded = await self.retriever.expand_search_results(results=head)
             if len(expanded) > len(head):
@@ -124,6 +124,8 @@ class RetrieverPipeline:
                 if self.reranker_enabled:
                     chunks = await _rerank_chunks(self.reranker, query.query, chunks)
 
+        if top_k is not None:
+            chunks = chunks[:top_k]
         return chunks
 
     async def get_relevant_docs(

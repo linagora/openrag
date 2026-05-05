@@ -186,3 +186,90 @@ async def test_expansion_swallows_per_call_errors():
     initial = [Chunk(id="1", text="x", partition="p1", metadata={"relationship_id": "r1"})]
     out = await r.expand_search_results(initial)
     assert [c.id for c in out] == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_expansion_swallows_ancestor_errors():
+    class BoomSearcher(FakeSearcher):
+        async def get_ancestor_chunks(self, **kwargs):
+            raise RuntimeError("ancestor exploded")
+
+    s = BoomSearcher()
+    r = SingleRetriever(searcher=s, include_ancestors=True)
+    initial = [Chunk(id="1", text="x", partition="p1", document_id="f1")]
+    out = await r.expand_search_results(initial)
+    assert [c.id for c in out] == ["1"]
+
+
+def test_multi_query_retriever_rejects_missing_llm():
+    s = FakeSearcher()
+    with pytest.raises(ValueError, match="llm must be provided"):
+        MultiQueryRetriever(searcher=s, llm=None, multi_query_template="{query} {k_queries}")
+
+
+def test_hyde_retriever_rejects_missing_llm():
+    s = FakeSearcher()
+    with pytest.raises(ValueError, match="llm must be provided"):
+        HyDeRetriever(searcher=s, llm=None, hyde_template="{question}")
+
+
+@pytest.mark.asyncio
+async def test_multi_query_retriever_caps_response_to_k_queries():
+    """A non-compliant LLM that returns more variants than requested must
+    not fan out additional searches."""
+    s = FakeSearcher()
+    llm = FakeLLM(response="Q1[SEP]Q2[SEP]Q3[SEP]Q4[SEP]Q5")
+    r = MultiQueryRetriever(
+        searcher=s,
+        llm=llm,
+        multi_query_template="{query} {k_queries}",
+        k_queries=2,
+    )
+    await r.retrieve(partition=["p1"], query="seed")
+    assert s.multi_calls[0]["queries"] == ["Q1", "Q2"]
+
+
+@pytest.mark.asyncio
+async def test_hyde_retriever_falls_back_to_seed_on_blank_generation():
+    s = FakeSearcher()
+    llm = FakeLLM(response="   \n\t  ")
+    r = HyDeRetriever(searcher=s, llm=llm, hyde_template="{question}")
+    await r.retrieve(partition=["p1"], query="seed")
+    assert s.multi_calls[0]["queries"] == ["seed"]
+
+
+@pytest.mark.asyncio
+async def test_hyde_retriever_falls_back_to_seed_when_combine_and_blank():
+    """Combine mode should also fall back to just [seed] on blank generation,
+    not [blank, seed]."""
+    s = FakeSearcher()
+    llm = FakeLLM(response="")
+    r = HyDeRetriever(searcher=s, llm=llm, hyde_template="{question}", combine=True)
+    await r.retrieve(partition=["p1"], query="seed")
+    assert s.multi_calls[0]["queries"] == ["seed"]
+
+
+@pytest.mark.asyncio
+async def test_expansion_dedupes_ancestor_fetches_per_file():
+    """Two chunks from the same (partition, document_id) must enqueue a
+    single ancestor fetch, not two."""
+
+    class CountingSearcher(FakeSearcher):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ancestor_call_count = 0
+
+        async def get_ancestor_chunks(self, **kwargs):
+            self.ancestor_call_count += 1
+            return list(self.ancestor_result)
+
+    s = CountingSearcher()
+    s.ancestor_result = [_chunk("99", document_id="f1")]
+    r = SingleRetriever(searcher=s, include_ancestors=True)
+    initial = [
+        Chunk(id="1", text="x", partition="p1", document_id="f1"),
+        Chunk(id="2", text="y", partition="p1", document_id="f1"),
+        Chunk(id="3", text="z", partition="p1", document_id="f1"),
+    ]
+    await r.expand_search_results(initial)
+    assert s.ancestor_call_count == 1

@@ -92,31 +92,48 @@ class BaseChunker(ChunkingStrategy):
     def _content_from(document: ProcessedDocument) -> str:
         """Reconstruct chunkable markdown from a ProcessedDocument.
 
-        Parsers that already produce a single text block containing the full
-        markdown (with ``[PAGE_N]`` markers) flow through unchanged.
-        Multi-block documents are joined with blank lines and synthetic page
-        markers based on each block's ``page_number``.
+        Single-block documents on page 1 (or with no page metadata) flow
+        through unchanged. Anything else gets synthetic ``[PAGE_N]`` markers
+        injected so downstream chunk-page resolution works correctly.
+
+        Marker semantics: a ``[PAGE_N]`` marker means "everything BEFORE this
+        marker was on page N" (see ``markdown_utils.get_page_number``). So we
+        emit the marker for the *outgoing* page just before content from a
+        new page begins, and we also prepend a marker for the first block if
+        it doesn't start on page 1.
         """
         if not document.text_blocks:
             return ""
-        if len(document.text_blocks) == 1:
+        if len(document.text_blocks) == 1 and document.text_blocks[0].page_number in (None, 1):
             return document.text_blocks[0].text
 
         parts: list[str] = []
         last_page: int | None = None
-        for block in document.text_blocks:
-            if block.page_number is not None and last_page is not None and block.page_number != last_page:
-                parts.append(f"[PAGE_{last_page}]")
+        for index, block in enumerate(document.text_blocks):
+            if block.page_number is not None:
+                # Emit `[PAGE_{block.page_number - 1}]` immediately *before*
+                # this block's text so downstream resolution lands on
+                # block.page_number. Using `block.page_number - 1` (rather
+                # than `last_page`) handles non-sequential pages (1 -> 5)
+                # and a first block already on page > 1.
+                needs_marker = (index == 0 and block.page_number > 1) or (
+                    last_page is not None and block.page_number != last_page
+                )
+                if needs_marker:
+                    parts.append(f"[PAGE_{block.page_number - 1}]")
             parts.append(block.text)
             last_page = block.page_number
         return "\n\n".join(parts)
 
     @staticmethod
     def _chunk_metadata_base(document: ProcessedDocument, partition: str) -> dict[str, Any]:
+        # Reserved identity fields must win — `chunk()` later reads
+        # metadata["file_id"] to set Chunk.document_id, so a stray key in
+        # `document.metadata` would silently reassign chunks to the wrong doc.
         return {
+            **document.metadata,
             "file_id": document.document_id,
             "partition": partition,
-            **document.metadata,
         }
 
     def split_text(self, text: str) -> list[str]:
@@ -192,11 +209,14 @@ class BaseChunker(ChunkingStrategy):
                     for subtable in subtables
                 )
             else:
+                # MDElement.type is the source-markdown literal ("image"/"table");
+                # ChunkType uses "image_caption" for image blocks.
+                ct = "image_caption" if element.type == "image" else element.type
                 chunks.append(
                     {
                         "page_content": element.content.strip(),
                         "page": element.page_number,
-                        "chunk_type": element.type,
+                        "chunk_type": ct,
                         **metadata,
                     }
                 )

@@ -41,7 +41,13 @@ def rrf_reranking(
     Returns:
         A single ranked list, best first. Empty input -> empty list.
         Single input list is returned as-is.
+
+    Raises:
+        ValueError: if ``k < 0`` (would produce a zero or negative
+        denominator at rank 1 or below and crash with ZeroDivisionError).
     """
+    if k < 0:
+        raise ValueError(f"RRF k must be non-negative, got {k}")
     if not ranked_lists:
         return []
     if len(ranked_lists) == 1:

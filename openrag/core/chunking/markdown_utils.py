@@ -196,24 +196,29 @@ def chunk_table(
     groups_ntoks = [length_function(g) for g in group_texts]
 
     subtables: list[str] = []
-    current_rows: list[str] = [header_text]
-    current_size = header_ntoks
+    body_rows: list[str] = []  # rows under the current chunk, header excluded
+    body_size = 0
     prev_last_row: str | None = None
 
     for group_txt, g_ntoks in zip(group_texts, groups_ntoks, strict=True):
-        if current_size + g_ntoks > chunk_size:
-            subtables.append("\n".join(current_rows))
-            current_rows = [header_text]
+        # Only flush when we actually have body content to flush — otherwise an
+        # oversized first group would emit a header-only chunk.
+        if body_rows and header_ntoks + body_size + g_ntoks > chunk_size:
+            subtables.append("\n".join([header_text, *body_rows]))
+            body_rows = []
+            body_size = 0
+            # Replay only the last row of the previous chunk as overlap
+            # (matches the docstring contract; prev_last_row is the trailing
+            # line of the last admitted group).
             if prev_last_row:
-                current_rows.append(prev_last_row)
-            current_rows.append(group_txt)
-            current_size = header_ntoks + (length_function(prev_last_row) if prev_last_row else 0) + g_ntoks
-        else:
-            current_rows.append(group_txt)
-            current_size += g_ntoks
-        prev_last_row = group_txt
+                body_rows.append(prev_last_row)
+                body_size += length_function(prev_last_row)
+        body_rows.append(group_txt)
+        body_size += g_ntoks
+        # The "last row" is the trailing line of this group, not the whole group.
+        prev_last_row = group_txt.rsplit("\n", 1)[-1]
 
-    if current_rows:
-        subtables.append("\n".join(current_rows))
+    if body_rows:
+        subtables.append("\n".join([header_text, *body_rows]))
 
     return [MDElement(type="table", content=subtable, page_number=table_element.page_number) for subtable in subtables]

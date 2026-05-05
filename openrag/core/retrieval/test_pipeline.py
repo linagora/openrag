@@ -132,6 +132,7 @@ async def test_get_relevant_docs_runs_one_call_per_subquery_and_fuses():
     p = RetrieverPipeline(retriever=r)
     sq = SearchQueries(query_list=[Query(query="q1"), Query(query="q2")])
     out = await p.get_relevant_docs(partition=["p1"], search_queries=sq)
+    assert len(r.calls) == 2
     assert {c.id for c in out} == {"a", "b", "c"}
     # 'b' appears in both lists -> highest fused score
     assert out[0].id == "b"
@@ -145,3 +146,61 @@ async def test_get_relevant_docs_applies_top_k_cap():
     sq = SearchQueries(query_list=[Query(query="q1")])
     out = await p.get_relevant_docs(partition=["p1"], search_queries=sq, top_k=2)
     assert len(out) == 2
+
+
+@pytest.mark.asyncio
+async def test_retrieve_docs_expansion_no_new_chunks_skips_second_rerank():
+    r = FakeRetriever(expansion_enabled=True)
+    r.results_queue = [_chunks("a", "b")]
+    r.expand_result = _chunks("a", "b")  # expansion returns same set
+    rer = FakeReranker()
+    p = RetrieverPipeline(retriever=r, reranker=rer, reranker_top_k=2)
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"))
+    # Only the pre-expansion rerank fired.
+    assert len(rer.calls) == 1
+    assert {c.id for c in out} == {"a", "b"}
+
+
+@pytest.mark.asyncio
+async def test_rerank_chunks_short_circuits_on_empty_input():
+    """Direct cover of the early-return guard inside _rerank_chunks."""
+    from openrag.core.retrieval.pipeline import _rerank_chunks
+
+    rer = FakeReranker()
+    out = await _rerank_chunks(rer, "q", [])
+    assert out == []
+    assert rer.calls == []
+
+
+def test_pipeline_expansion_enabled_false_for_non_base_retriever():
+    """Retrievers without an expansion_enabled attr (e.g. custom impls) are
+    treated as non-expanding via getattr default."""
+
+    class MinimalRetriever(Retriever):
+        async def retrieve(self, partition, query, filter=None, filter_params=None):
+            return []
+
+        async def expand_search_results(self, results):
+            return results
+
+    p = RetrieverPipeline(retriever=MinimalRetriever())
+    assert p.expansion_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_retrieve_docs_caps_to_top_k():
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c", "d")]
+    p = RetrieverPipeline(retriever=r)
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"), top_k=2)
+    assert [c.id for c in out] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_docs_top_k_zero_returns_empty():
+    """top_k=0 must mean "zero results", not "treated as None" (the legacy bug)."""
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b")]
+    p = RetrieverPipeline(retriever=r)
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"), top_k=0)
+    assert out == []

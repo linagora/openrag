@@ -18,7 +18,7 @@ Your task:
 Guidelines:
 - Present information clearly and concisely without unnecessary rephrasing or commentary
 - Focus on precision: include what matters, exclude what doesn't.
-- If a document does have any relevant content with respect to a query, classify it irrelevant such without providing a `synthesis`.
+- If a document does not have any relevant content with respect to the query, classify it as irrelevant without providing a `synthesis`.
 """
 
 USER_PROMPT_TEMPLATE = """

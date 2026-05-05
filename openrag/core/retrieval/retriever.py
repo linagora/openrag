@@ -130,7 +130,9 @@ class MultiQueryRetriever(BaseRetriever):
     async def _generate_queries(self, query: str) -> list[str]:
         prompt = build_multi_query_prompt(self.multi_query_template, query, self.k_queries)
         response = await self.llm.chat([{"role": "user", "content": prompt}])
-        queries = split_multi_query_response(response)
+        # Cap to k_queries — a non-compliant LLM response can otherwise fan
+        # out far more searches than configured.
+        queries = split_multi_query_response(response)[: self.k_queries]
         return queries or [query]
 
     async def retrieve(
@@ -185,8 +187,11 @@ class HyDeRetriever(BaseRetriever):
         filter: str | None = None,
         filter_params: dict | None = None,
     ) -> list[Chunk]:
-        hyde = await self.get_hyde(query)
-        queries = [hyde, query] if self.combine else [hyde]
+        hyde = (await self.get_hyde(query)).strip()
+        if not hyde:
+            queries = [query]
+        else:
+            queries = [hyde, query] if self.combine else [hyde]
         return await self.searcher.multi_query_search(
             queries=queries,
             partition=partition,
@@ -219,7 +224,7 @@ async def _expand_with_related_chunks(
     expanded: list[Chunk] = list(results)
 
     relationship_ids: set[tuple[str, str]] = set()
-    file_infos: list[tuple[str, str]] = []
+    file_infos: set[tuple[str, str]] = set()
 
     for c in results:
         if include_related:
@@ -227,7 +232,7 @@ async def _expand_with_related_chunks(
             if rel_id and c.partition:
                 relationship_ids.add((c.partition, rel_id))
         if include_ancestors and c.partition and c.document_id:
-            file_infos.append((c.partition, c.document_id))
+            file_infos.add((c.partition, c.document_id))
 
     async def _safe_related(part: str, rel_id: str) -> list[Chunk]:
         try:
