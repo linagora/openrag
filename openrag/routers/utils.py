@@ -1,4 +1,3 @@
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -6,6 +5,7 @@ from typing import Any
 import consts
 import openai
 from config import load_config
+from core.indexing import validators as core_validators
 from fastapi import Depends, Form, HTTPException, Request, UploadFile, status
 from openai import AsyncOpenAI
 from utils.dependencies import get_task_state_manager, get_vectordb
@@ -272,48 +272,24 @@ async def check_user_file_quota(
     return user
 
 
-def is_file_id_valid(file_id: str) -> bool:
-    return not any(c in file_id for c in FORBIDDEN_CHARS_IN_FILE_ID)
-
-
 async def validate_file_id(file_id: str):
-    if not is_file_id_valid(file_id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File ID contains forbidden characters: {', '.join(FORBIDDEN_CHARS_IN_FILE_ID)}",
-        )
-    if not file_id.strip():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File ID cannot be empty.")
-    return file_id
+    return core_validators.validate_file_id(file_id, FORBIDDEN_CHARS_IN_FILE_ID)
 
 
 async def validate_metadata(metadata: Any | None = Form(None)):
-    try:
-        processed_metadata = metadata or "{}"
-        processed_metadata = json.loads(processed_metadata)
-        return processed_metadata
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON in metadata")
+    return core_validators.parse_metadata(metadata)
 
 
 async def validate_file_format(
     file: UploadFile,
     metadata: dict = Depends(validate_metadata),
 ):
-    file_extension = file.filename.split(".")[-1].lower() if "." in file.filename else ""
-    mimetype = metadata.get("mimetype", None)
-
-    if file_extension not in ACCEPTED_FILE_FORMATS and mimetype not in DICT_MIMETYPES.keys():
-        details = (
-            f"Unsupported file format: {file_extension} or file mimetype.\n"
-            f"Supported formats: {', '.join(ACCEPTED_FILE_FORMATS)}\n"
-            f"Supported mimetypes: {', '.join(DICT_MIMETYPES.keys())}"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=details,
-        )
-
+    core_validators.validate_file_format(
+        filename=file.filename,
+        accepted_formats=ACCEPTED_FILE_FORMATS,
+        accepted_mimetypes=DICT_MIMETYPES.keys(),
+        mimetype=metadata.get("mimetype"),
+    )
     return file
 
 
