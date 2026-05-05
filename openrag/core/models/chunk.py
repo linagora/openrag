@@ -30,10 +30,9 @@ def _coerce_chunk_type(value: Any) -> ChunkType:
         return _CHUNK_TYPE_LEGACY_ALIASES[value]
     try:
         return ChunkType(value)
-    except ValueError:
+    except (ValueError, TypeError):
         # Unknown value from upstream/legacy data — fall back to TEXT rather
-        # than crash the retrieval call. Logged via repr so it shows up in
-        # tracing without becoming a runtime error.
+        # than crash the retrieval call.
         return ChunkType.TEXT
 
 
