@@ -65,8 +65,14 @@ class Chunk(BaseModel):
         Import is deferred to method body so core/ stays pure at import time.
         """
         metadata = dict(doc.metadata) if doc.metadata else {}
+        # Milvus assigns the primary key `_id` as INT64 (auto_id), so the value
+        # comes back as a Python int. Chunk.id is typed `str`, so coerce here
+        # rather than loosen the model — keeps the domain type strict while the
+        # store-specific shape is contained in the conversion boundary.
+        raw_id = metadata.pop("_id", None)
+        chunk_id = str(raw_id) if raw_id is not None else str(uuid.uuid4())
         return cls(
-            id=metadata.pop("_id", str(uuid.uuid4())),
+            id=chunk_id,
             document_id=metadata.pop("file_id", ""),
             text=doc.page_content,
             partition=metadata.pop("partition", "default"),

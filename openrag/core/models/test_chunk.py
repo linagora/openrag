@@ -37,3 +37,14 @@ def test_from_langchain_accepts_canonical_values():
 
 def test_coerce_chunk_type_passthrough_for_enum_input():
     assert _coerce_chunk_type(ChunkType.TABLE) == ChunkType.TABLE
+
+
+def test_from_langchain_coerces_int_milvus_id_to_string():
+    """Milvus' `_id` primary key is INT64 (auto_id), so the value comes back
+    from the Ray actor as a Python int. Chunk.id is typed `str`; the
+    conversion boundary must coerce to avoid a ValidationError on every
+    retrieval call (CI api-tests regression)."""
+    doc = Document(page_content="hello", metadata={"_id": 466085833598567840, "file_id": "f1"})
+    chunk = Chunk.from_langchain(doc)
+    assert chunk.id == "466085833598567840"
+    assert isinstance(chunk.id, str)
