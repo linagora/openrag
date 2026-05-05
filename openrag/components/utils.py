@@ -7,7 +7,6 @@ from collections import deque
 from typing import ClassVar
 
 import ray
-from components.indexer.utils.text_sanitizer import sanitize_text
 from config import load_config
 from fast_langdetect import LangDetectConfig, LangDetector
 from langchain_core.documents.base import Document
@@ -98,28 +97,24 @@ def get_num_tokens():
 def format_context(
     docs: list[Document], max_context_tokens: int = 4096, number_sources: bool = True
 ) -> tuple[str, list[int]]:
-    if not docs:
-        return "No document found from the database", []
+    """Backward-compat shim — delegates to `core.prompts.chat_prompt_builder.format_context`.
 
-    _length_function = get_num_tokens()
+    The legacy signature took LangChain Documents and resolved a tokenizer
+    internally; the core version takes raw strings + an injected
+    length_function. We adapt by extracting page_content and threading
+    the cached tokenizer through.
+    """
+    from openrag.core.prompts.chat_prompt_builder import format_context as _core_format_context
 
-    reduced_docs = []
-    included_indices = []
-    total_tokens = 0
-
-    for i, doc in enumerate(docs):
-        prefix = f"[Source {len(reduced_docs) + 1}]\n" if number_sources else ""
-        n_tokens = _length_function(doc.page_content)
-        if prefix:
-            n_tokens += _length_function(prefix)
-        if total_tokens + n_tokens > max_context_tokens:
-            break
-        reduced_docs.append(f"{prefix}{doc.page_content}")
-        included_indices.append(i)
-        total_tokens += n_tokens
-
-    logger.debug("Context formatted", total_tokens=total_tokens, doc_count=len(reduced_docs))
-    return SOURCE_SEPARATOR.join(reduced_docs), included_indices
+    texts = [doc.page_content for doc in docs]
+    text, included = _core_format_context(
+        texts,
+        max_context_tokens=max_context_tokens,
+        length_function=get_num_tokens(),
+        number_sources=number_sources,
+    )
+    logger.debug("Context formatted", doc_count=len(included))
+    return text, included
 
 
 def format_web_context(
@@ -127,41 +122,21 @@ def format_web_context(
     start_index: int = 1,
     max_tokens: int = 2000,
 ) -> tuple[str, list[int], int]:
-    """Format web results as numbered [Source N] blocks within a token budget.
+    """Backward-compat shim — delegates to `core.prompts.chat_prompt_builder.format_web_context`.
 
-    Uses fetched page content when available, falling back to the search snippet.
-
-    Args:
-        web_results: Results from web search provider (list of WebResult)
-        start_index: First source number (continues numbering after RAG sources)
-        max_tokens: Maximum token budget for all web sources combined
-
-    Returns:
-        (formatted_string, list_of_source_numbers_used, total_tokens_used)
+    Same adaptation pattern as `format_context`: legacy resolved the
+    tokenizer internally, core takes it as a parameter.
     """
-    if not web_results:
-        return "", [], 0
+    from openrag.core.prompts.chat_prompt_builder import format_web_context as _core_format_web_context
 
-    _length_function = get_num_tokens()
-
-    parts = []
-    source_numbers = []
-    total_tokens = 0
-
-    for i, result in enumerate(web_results):
-        n = start_index + i
-        title = sanitize_text(result.title)
-        body = sanitize_text(result.content) if result.content else sanitize_text(result.snippet)
-        block = f"[Source {n}]\n{title}\n{body}"
-        block_tokens = _length_function(block)
-        if total_tokens + block_tokens > max_tokens and parts:
-            break
-        parts.append(block)
-        source_numbers.append(n)
-        total_tokens += block_tokens
-
-    logger.debug("Web context formatted", total_tokens=total_tokens, source_count=len(parts))
-    return SOURCE_SEPARATOR.join(parts), source_numbers, total_tokens
+    text, source_numbers, total_tokens = _core_format_web_context(
+        web_results,
+        length_function=get_num_tokens(),
+        start_index=start_index,
+        max_tokens=max_tokens,
+    )
+    logger.debug("Web context formatted", total_tokens=total_tokens, source_count=len(source_numbers))
+    return text, source_numbers, total_tokens
 
 
 _SOURCES_NONE_RE = re.compile(r"\n?\[?Sources?\]?\s*:\s*\[?\s*none\s*\]?\s*$", re.IGNORECASE)

@@ -101,6 +101,42 @@ internals.
   describe a query in the abstract; the orchestrator (Phase 8) and the API
   layer will both use them, not just retrieval.
 
+**4. Phase 5.15 (re-export shims) deferred to follow-up — then completed.**
+The first Phase 5 commits (5A/5B/5C, 2026-04-29) created the new core/
+modules but left the legacy `components/` files intact. STRATEGY §4.1
+mandates a three-step move — create new file, update old file to
+re-export from new, update consumers — and Phase 5 step 5.15 says
+"Update old files to re-export from core/". We skipped that.
+The follow-up sweep (2026-05-05) replaced six legacy files with shims:
+
+| Legacy file | Shim strategy |
+|---|---|
+| `components/indexer/chunker/utils.py` | Plain re-export from `core.chunking.markdown_utils` |
+| `components/prompts/prompts.py` | `load_prompt(key)` adapter calling `core.prompts.template_loader.load_template_by_key` |
+| `components/utils.py:format_context` + `format_web_context` | Adapters into `core.prompts.chat_prompt_builder` (rest of utils stays — Phase 6+ scope) |
+| `components/indexer/chunker/chunker.py` | `BaseChunker` / `RecursiveSplitter` delegate to `core.chunking.RecursiveSplitter` via Document↔ProcessedDocument↔Chunk conversion. `ChunkContextualizer` + `ChunkerFactory` retained (5D + Phase 8). |
+| `components/retriever.py` | `Single`/`MultiQuery`/`HyDe` retrievers wrap `core.retrieval.retriever` strategies. Ray actor → `MilvusRayShim`; `ChatOpenAI` → `_LangChainLLMAdapter`. `RetrieverFactory` retained. |
+| `components/pipeline.py` | `Query`/`SearchQueries`/`TemporalPredicate` re-exported from `core.models.query`. `RetrieverPipeline` delegates to `core.retrieval.pipeline.RetrieverPipeline` via a `_LegacyRerankerAdapter` bridging the legacy reranker (Document-in / Document-out) to the core ABC (str-in / `(idx, score)`-out). `RagPipeline` + `RAGMODE` retained (Phase 8). |
+
+- Why: STRATEGY §4.1 is explicit ("Update old file to re-export from new
+  location"); leaving the duplication in place would let the codepaths
+  drift. Three CodeRabbit fixes from PR #352 (image_caption ChunkType,
+  page-marker semantics, chunk_table header-only flush) had to be applied
+  twice or only fixed in core — exactly the failure mode 5.15 prevents.
+  The shim pattern matches the prior-art shims for config (1329cc18) and
+  exceptions (a0f3d9f2).
+- Alternative considered: leave the copies until Phase 8 cutover. Rejected
+  — the doc explicitly puts 5.15 *inside* Phase 5, and one round of
+  drift already happened.
+- Side effect: a noqa side-effect import in `chunker.py` keeps the legacy
+  `components.utils` ↔ `components.indexer.utils.files` circular-import
+  resolving in the right order. Removed once `components.utils` is split
+  in Phase 6+.
+- Behavioral note: image elements in the legacy chunker now stamp
+  `chunk_type=image_caption` (matching `core.models.chunk.ChunkType`)
+  instead of the previous raw `image`. No legacy reader filters on this
+  value, so the change is invisible to consumers.
+
 ---
 
 ## Phase 1 — Registry + Exceptions (2026-04-21)

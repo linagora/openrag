@@ -1,7 +1,28 @@
+"""Backward-compatibility shim — chunking primitives delegate to `openrag.core.chunking`.
+
+Phase 5B/5.15 status:
+
+* `BaseChunker._get_chunks` / `_prepare_md_elements` / `split_text` →
+  delegated to a held `core.chunking.recursive.RecursiveSplitter` instance
+  via a `Document` ↔ `ProcessedDocument` ↔ `Chunk` adapter.
+* `ChunkContextualizer` and the `split_document()` orchestration sit
+  outside Phase 5B (they belong to 5D / Phase 8). They stay here until
+  Phase 5D ships `core/indexing/contextualize.py`.
+* `ChunkerFactory` is config-driven; the new code uses
+  `chunking_registry`. Both coexist until Phase 8 cutover.
+
+Scheduled for removal in Phase 12.
+"""
+
 from typing import Literal
 
 import openai
-from components.indexer.utils.text_sanitizer import sanitize_text
+
+# Side-effect import: pre-loads the indexer-utils submodule so the legacy
+# circular import between `components.utils` and `components.indexer.utils.files`
+# resolves in the correct order. Removing this line breaks chunker collection.
+# Slated to disappear when `components.utils` is split (Phase 6+).
+from components.indexer.utils import text_sanitizer as _text_sanitizer  # noqa: F401
 from components.prompts import CHUNK_CONTEXTUALIZER_PROMPT
 from components.utils import detect_language, get_vlm_semaphore, load_config
 from langchain_core.documents.base import Document
@@ -10,17 +31,15 @@ from langchain_openai import ChatOpenAI
 from tqdm.asyncio import tqdm
 from utils.logger import get_logger
 
-from openrag.consts import IMAGE_PLACEHOLDER
+from openrag.core.chunking.recursive import RecursiveSplitter as _CoreRecursiveSplitter
+from openrag.core.models.document import ProcessedDocument, TextBlock
 
 from ..embeddings import BaseEmbedding
-from .utils import MDElement, chunk_table, get_chunk_page_number, split_md_elements
 
 logger = get_logger()
 config = load_config()
 
-# Timeout for individual chunk contextualization LLM calls (in seconds)
 CONTEXTUALIZATION_TIMEOUT = config.chunker.contextualization_timeout
-# Maximum concurrent contextualization tasks to prevent system overload
 MAX_CONCURRENT_CONTEXTUALIZATION = config.chunker.max_concurrent_contextualization
 
 BASE_CHUNK_FORMAT = "* filename: {filename}\n\n[CHUNK_START]\n\n{content}\n\n[CHUNK_END]"
@@ -28,7 +47,12 @@ CHUNK_FORMAT = "[CONTEXT]\n\n{chunk_context}\n\n" + BASE_CHUNK_FORMAT
 
 
 class ChunkContextualizer:
-    """Handles contextualization of document chunks."""
+    """Handles contextualization of document chunks.
+
+    Stays in `components/` until Phase 5D moves the orchestration into
+    `core/indexing/contextualize.py`. The pure prompt-builders for the
+    LLM call already live at `core.prompts.contextualization_builder`.
+    """
 
     def __init__(self, llm_config: dict):
         llm_config: dict = dict(llm_config)
@@ -97,7 +121,6 @@ class ChunkContextualizer:
             contexts = []
             batch_size = MAX_CONCURRENT_CONTEXTUALIZATION
 
-            # Process chunks in batches to limit concurrent LLM calls
             for batch_start in range(0, len(chunks), batch_size):
                 batch_end = min(batch_start + batch_size, len(chunks))
                 batch_tasks = [
@@ -134,8 +157,36 @@ class ChunkContextualizer:
             return chunks
 
 
+def _chunks_to_documents(chunks: list, base_metadata: dict) -> list[Document]:
+    """Convert a list of core domain Chunks into legacy LangChain Documents.
+
+    Reproduces the legacy metadata shape: `page`, `chunk_type`, plus the
+    document/partition keys the legacy code stamps onto every chunk.
+    """
+    out: list[Document] = []
+    for c in chunks:
+        meta = dict(c.metadata)
+        meta.update(
+            {
+                "file_id": c.document_id,
+                "partition": c.partition,
+                "page": c.page_number,
+                "chunk_type": c.chunk_type.value,
+            }
+        )
+        # Preserve legacy keys that weren't lifted into core fields.
+        for k, v in base_metadata.items():
+            meta.setdefault(k, v)
+        out.append(Document(page_content=c.text, metadata=meta))
+    return out
+
+
 class BaseChunker:
-    """Base class for document chunkers with built-in contextualization capability."""
+    """Legacy chunker shell — markdown-aware splitting delegated to core.
+
+    Subclasses configure ``self._core_splitter`` (a
+    `core.chunking.recursive.RecursiveSplitter`) in their `__init__`.
+    """
 
     def __init__(
         self,
@@ -152,11 +203,9 @@ class BaseChunker:
         self.llm = ChatOpenAI(**llm_config)
         self._length_function = self.llm.get_num_tokens
 
-        self.text_splitter = None
+        self._core_splitter: _CoreRecursiveSplitter | None = None
 
         self.contextual_retrieval = contextual_retrieval
-
-        # Initialize contextualizer only if needed
         self.contextualizer = ChunkContextualizer(llm_config) if contextual_retrieval else None
 
     async def _apply_contextualization(
@@ -177,112 +226,21 @@ class BaseChunker:
 
         return await self.contextualizer.contextualize_chunks(chunks, lang=lang, filename=filename)
 
-    def _prepare_md_elements(self, content: str) -> tuple[list[MDElement], list[MDElement]]:
-        """Prepare and combine markdown elements from raw content."""
-        md_elements: list[MDElement] = split_md_elements(content)
-
-        tables_and_images, texts = [], []
-
-        for e in md_elements:
-            if e.type in ("table", "image"):
-                if e.type == "image" and IMAGE_PLACEHOLDER.lower() in e.content.lower():  # skip placeholder images
-                    continue
-
-                if self._length_function(e.content) <= 100:  # do not isolate small tables/images
-                    texts.append(e)
-                else:
-                    tables_and_images.append(e)
-            else:
-                texts.append(e)
-
-        return texts, tables_and_images
-
-    def split_text(self, text: str) -> list[str]:
-        """Split text into chunks using the text splitter."""
-        if not self.text_splitter:
-            logger.warning("Text splitter not initialized. Initializing with default RecursiveCharacterTextSplitter.")
-            from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-            self.text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=self.chunk_size,
-                chunk_overlap=self.chunk_overlap,
-                length_function=self._length_function,
-            )
-
-        return self.text_splitter.split_text(text)
-
     def _get_chunks(self, content: str, metadata: dict | None = None, log=None) -> list[Document]:
         log = log or logger
-        texts, tables_and_images = self._prepare_md_elements(content=content)
-        combined_texts = "\n".join([e.content for e in texts])
+        metadata = metadata or {}
+        partition = metadata.get("partition", "default")
 
-        # Sanitize the combined text before chunking to remove excessive whitespace
-        # and useless characters, which saves tokens and improves quality
-        sanitized_texts = sanitize_text(
-            combined_texts,
-            normalize_whitespace=True,
-            remove_control_chars=True,
-            remove_zero_width_chars=True,
-            max_consecutive_newlines=2,
-            normalize_unicode=True,
+        doc = ProcessedDocument(
+            document_id=metadata.get("file_id", ""),
+            text_blocks=[TextBlock(text=content)],
+            metadata=metadata,
         )
-
-        text_chunks = self.split_text(sanitized_texts)
-
-        # Manage tables and images as separate chunks
-        chunks = []
-        for e in tables_and_images:
-            if e.type == "table" and self._length_function(e.content) > self.chunk_size:
-                # Chunk large tables separately
-                subtables = chunk_table(
-                    table_element=e,
-                    chunk_size=self.chunk_size,
-                    length_function=self._length_function,
-                )
-
-                s = [
-                    Document(
-                        page_content=subtable.content.strip(),
-                        metadata={
-                            **metadata,
-                            "page": subtable.page_number,
-                            "chunk_type": "table",
-                        },
-                    )
-                    for subtable in subtables
-                ]
-
-            else:
-                s = [
-                    Document(
-                        page_content=e.content.strip(),
-                        metadata={
-                            **metadata,
-                            "page": e.page_number,
-                            "chunk_type": e.type,
-                        },
-                    )
-                ]
-            chunks.extend(s)
-
-        prev_page_num = 1
-        for c in text_chunks:
-            page_info = get_chunk_page_number(chunk_str=c, previous_chunk_ending_page=prev_page_num)
-            start_page = page_info["start_page"]
-            prev_page_num = page_info["end_page"]
-            chunks.append(
-                Document(
-                    page_content=c.strip(),
-                    metadata={**metadata, "page": start_page, "chunk_type": "text"},
-                )
-            )
-
-        if chunks:
-            chunks.sort(key=lambda d: d.metadata.get("page"))
-            return chunks
-        else:
+        chunks = self._core_splitter.chunk(doc, partition=partition)
+        if not chunks:
             log.warning("No chunks created. Content is empty or image is not informative.")
             return []
+        return _chunks_to_documents(chunks, base_metadata=metadata)
 
     async def split_document(self, doc: Document, task_id: str | None = None) -> list[Document]:
         """Split document into chunks with optional contextualization."""
@@ -297,11 +255,9 @@ class BaseChunker:
 
         detected_lang = detect_language(text=doc.page_content)
 
-        # Process document through pipeline
         chunks = self._get_chunks(doc.page_content.strip(), metadata, log=log)
 
         if chunks:
-            # Apply contextualization if enabled
             log.info(
                 "Contextualizing chunks",
                 apply_contextualization=self.contextual_retrieval,
@@ -323,15 +279,10 @@ class RecursiveSplitter(BaseChunker):
         **kwargs,
     ):
         super().__init__(chunk_size, chunk_overlap_rate, llm_config, contextual_retrieval, **kwargs)
-
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-        self.text_splitter = RecursiveCharacterTextSplitter(
+        self._core_splitter = _CoreRecursiveSplitter(
             chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
+            chunk_overlap_rate=self.chunk_overlap_rate,
             length_function=self._length_function,
-            is_separator_regex=True,
-            separators=["\n", r"(?<=[\.\?\!])"],
         )
 
 
@@ -345,11 +296,9 @@ class ChunkerFactory:
         config,
         embedder: BaseEmbedding | None = None,
     ) -> BaseChunker:
-        # Extract parameters
         chunker_params = config.chunker.model_dump()
         name = chunker_params.pop("name")
 
-        # Initialize and return the chunker
         chunker_cls: BaseChunker = ChunkerFactory.CHUNKERS.get(name)
 
         if not chunker_cls:

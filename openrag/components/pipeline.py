@@ -2,7 +2,6 @@ import asyncio
 import copy
 from datetime import datetime
 from enum import Enum
-from typing import Literal
 
 import openai
 import ray
@@ -18,8 +17,15 @@ from config import load_config
 from langchain_core.documents.base import Document
 from langchain_core.exceptions import OutputParserException
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 from utils.logger import get_logger
+
+# Phase 5/5.15: domain query model + RetrieverPipeline live in core/. This file
+# re-exports them and shims the legacy RetrieverPipeline as an adapter.
+from openrag.core.models.chunk import Chunk
+from openrag.core.models.query import Query, SearchQueries, TemporalPredicate
+from openrag.core.rerankers.reranker import Reranker as _CoreReranker
+from openrag.core.retrieval.pipeline import RetrieverPipeline as _CoreRetrieverPipeline
 
 from .llm import LLM
 from .map_reduce import RAGMapReduce
@@ -31,92 +37,76 @@ logger = get_logger()
 config = load_config()
 VECTORDB_TIMEOUT = config.ray.indexer.vectordb_timeout
 
+__all__ = [
+    "Query",
+    "RAGMODE",
+    "RagPipeline",
+    "RetrieverPipeline",
+    "SearchQueries",
+    "TemporalPredicate",
+]
+
 
 class RAGMODE(Enum):
     SIMPLERAG = "SimpleRag"
     CHATBOTRAG = "ChatBotRag"
 
 
-class TemporalPredicate(BaseModel):
-    """A single constraint on a document's creation date.
+class _LegacyRerankerAdapter(_CoreReranker):
+    """Wraps a legacy ``BaseReranker`` (Document-in / Document-out) so it
+    satisfies the core ``Reranker`` ABC (str-in / (idx, score)-out).
 
-    Multiple predicates on the same `Query` are combined with logical AND.
-    Use two predicates to express a closed range (e.g. last month):
-      [{op: ">=", value: "2026-03-01..."}, {op: "<=", value: "2026-03-31..."}]
+    The legacy reranker only returns reordered documents; we tag each
+    incoming text with its original index via the wrapping Document's
+    metadata, then read it back to produce ``(idx, rank-score)`` tuples.
+    Score values are synthetic (``1 / (rank+1)``) — only the order is
+    consumed by the core pipeline.
     """
 
-    field: Literal["created_at"] = Field(
-        default="created_at",
-        description="Document metadata field to filter on. Always `created_at` for now.",
-    )
-    operator: Literal[">", "<", ">=", "<="] = Field(
-        description="Comparison operator applied to the date field.",
-    )
-    value: str = Field(
-        description='ISO 8601 datetime with timezone, e.g. "2026-03-15T00:00:00+00:00".',
-    )
+    def __init__(self, legacy: BaseReranker) -> None:
+        self._legacy = legacy
+
+    async def rerank(self, query: str, documents: list[str], top_k: int | None = None) -> list[tuple[int, float]]:
+        tagged = [Document(page_content=t, metadata={"_legacy_rerank_idx": i}) for i, t in enumerate(documents)]
+        reordered = await self._legacy.rerank(query=query, documents=tagged, top_k=top_k)
+        return [(d.metadata["_legacy_rerank_idx"], 1.0 / (rank + 1)) for rank, d in enumerate(reordered)]
 
 
-class Query(BaseModel):
-    """A single vector database search query with optional temporal filters on document creation date.
-
-    Predicates in `temporal_filters` are AND-combined. To express an exclusion
-    (e.g. "last year except March"), emit TWO `Query` objects, each with its own
-    AND-combined predicates covering one side of the gap.
-    """
-
-    query: str = Field(description="A semantically enriched, descriptive query for vector similarity search.")
-    temporal_filters: list[TemporalPredicate] | None = Field(
-        default=None,
-        description="Date predicates on `created_at`, AND-combined. Null when no temporal reference in the query.",
-    )
-
-    def to_milvus_filter(self) -> str | None:
-        """The temporal_filters attributes are already checked through the Pydantic types, except for date value that is kept as string,
-        as LLM sometimes give correct but not entirely complete date
-        """
-
-        if not self.temporal_filters:
-            return None
-        parts = []
-        for p in self.temporal_filters:
-            try:
-                datetime.fromisoformat(p.value)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "Dropping temporal predicate with non-ISO value",
-                    field=p.field,
-                    operator=p.operator,
-                    value=p.value,
-                )
-                continue
-            parts.append(f'{p.field} {p.operator} ISO "{p.value}"')
-        if not parts:
-            return None
-        return " and ".join(parts)
-
-    def __str__(self) -> str:
-        return f"Query: {self.query}, Filter: {self.to_milvus_filter()}"
-
-
-class SearchQueries(BaseModel):
-    query_list: list[Query] = Field(..., description="Search sub-queries to retrieve relevant documents.")
-
-    def __str__(self) -> str:
-        return " --- ".join(str(q) for q in self.query_list)
+def _to_documents(chunks: list[Chunk]) -> list[Document]:
+    return [c.to_langchain() for c in chunks]
 
 
 class RetrieverPipeline:
+    """Backward-compat adapter — delegates to ``core.retrieval.pipeline.RetrieverPipeline``.
+
+    The legacy retriever shim already provides a core ``Retriever``; we
+    wrap the legacy reranker in ``_LegacyRerankerAdapter`` and hand both
+    to the core pipeline. Outputs are converted ``Chunk → Document`` so
+    legacy callers (``RagPipeline``) keep working unchanged.
+    """
+
     def __init__(self) -> None:
-        # retriever
         self.retriever: BaseRetriever = RetrieverFactory.create_retriever(config=config)
         self.allow_filterless_fallback = config.retriever.allow_filterless_fallback
 
-        # reranker
         self.reranker_enabled = config.reranker.enabled
         self.reranker: BaseReranker = RerankerFactory.get_reranker(config)
         logger.debug("Reranker", enabled=self.reranker_enabled, provider=config.reranker.provider)
         self.reranker_top_k = config.reranker.top_k
+
+        self._core_pipeline: _CoreRetrieverPipeline | None = None
+
+    def _ensure_core_pipeline(self) -> _CoreRetrieverPipeline:
+        # Built lazily so the underlying Ray actor only needs to exist at
+        # first request time, not at module import / pipeline construction.
+        if self._core_pipeline is None:
+            self._core_pipeline = _CoreRetrieverPipeline(
+                retriever=self.retriever._build_core_retriever(),
+                reranker=_LegacyRerankerAdapter(self.reranker) if self.reranker_enabled else None,
+                reranker_top_k=self.reranker_top_k,
+                allow_filterless_fallback=self.allow_filterless_fallback,
+            )
+        return self._core_pipeline
 
     async def retrieve_docs(
         self,
@@ -125,54 +115,11 @@ class RetrieverPipeline:
         top_k: int | None = None,
         filter_params: dict | None = None,
     ) -> list[Document]:
-        milvus_filter = query.to_milvus_filter()
-        docs = await self.retriever.retrieve(
-            partition=partition, query=query.query, filter=milvus_filter, filter_params=filter_params
+        chunks = await self._ensure_core_pipeline().retrieve_docs(
+            partition=partition, query=query, top_k=top_k, filter_params=filter_params
         )
-
-        # Fallback: drop temporal filter if it wiped out all candidates.
-        # Gated by `retriever.allow_filterless_fallback` so deployments that
-        # prefer strict temporal retrieval can opt out (returns no docs
-        # rather than temporally-incorrect ones).
-        if not docs and milvus_filter and self.allow_filterless_fallback:
-            logger.warning(
-                "Temporal filter dropped: no documents matched, retrying without filter",
-                query=str(query.query),
-                filter=milvus_filter,
-                partition=partition,
-            )
-            docs = await self.retriever.retrieve(
-                partition=partition, query=query.query, filter=None, filter_params=filter_params
-            )
-
-        logger.debug("Documents retreived", document_count=len(docs))
-
-        if docs:
-            # 1. rerank all the docs
-            if self.reranker_enabled:
-                docs = await self.reranker.rerank(query=query.query, documents=docs, top_k=None)
-                logger.debug("Documents reranked", document_count=len(docs))
-
-            # 2. expand the docs with related documents
-            if self.retriever.expansion_enabled:
-                # Limit the number of docs to expand
-                top_k = max(self.reranker_top_k, top_k) if top_k else self.reranker_top_k
-                docs2expand = copy.deepcopy(docs[:top_k])
-
-                logger.debug("Documents to expand", document_count=len(docs2expand))
-                expanded_docs = await self.retriever.expand_search_results(results=docs2expand)
-                if len(docs2expand) == len(expanded_docs):  # no expansion found, keep the original docs
-                    return docs
-
-                logger.debug("Documents expanded", document_count=len(expanded_docs))
-                docs = expanded_docs
-
-                # rerank again after expansion if reranker is enabled
-                if self.reranker_enabled:
-                    docs = await self.reranker.rerank(query=query.query, documents=docs, top_k=None)
-                    logger.debug("Documents after expansion and reranking", document_count=len(docs))
-
-        return docs
+        logger.debug("Documents retrieved", document_count=len(chunks))
+        return _to_documents(chunks)
 
     async def get_relevant_docs(
         self,
@@ -181,16 +128,11 @@ class RetrieverPipeline:
         top_k: int | None = None,
         filter_params: dict | None = None,
     ) -> list[Document]:
-        tasks = [
-            self.retrieve_docs(partition=partition, query=q, top_k=top_k, filter_params=filter_params)
-            for q in search_queries.query_list
-        ]
-        results = await asyncio.gather(*tasks)
-        results = self.reranker.rrf_reranking(doc_lists=results)
-        if top_k is not None:
-            results = results[:top_k]
-        logger.debug("Final relevant documents after RRF reranking", document_count=len(results))
-        return results
+        chunks = await self._ensure_core_pipeline().get_relevant_docs(
+            partition=partition, search_queries=search_queries, top_k=top_k, filter_params=filter_params
+        )
+        logger.debug("Final relevant documents after RRF reranking", document_count=len(chunks))
+        return _to_documents(chunks)
 
 
 class RagPipeline:
