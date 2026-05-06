@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 # Suffixes the transcription backend can ingest as-is, avoiding the ~10x
 # size inflation from WAV conversion (Scaleway cap: 100 MB; OpenAI: 25 MB).
-_DEFAULT_DIRECT_UPLOAD_SUFFIXES: tuple[str, ...] = (".mp3", ".m4a", ".ogg", ".webm")
+_DEFAULT_DIRECT_UPLOAD_SUFFIXES: tuple[str, ...] = (".mp3", ".m4a", ".ogg", ".webm", ".wav")
 
 LanguageDetector = Callable[[Path], Awaitable[str | None]]
 

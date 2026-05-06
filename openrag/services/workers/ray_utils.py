@@ -156,7 +156,7 @@ async def retry_with_backoff(
     for attempt in range(max_retries + 1):
         try:
             return await attempt_fn(attempt)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, TaskCancelledError):
             raise
         except Exception as e:
             last_exc = e

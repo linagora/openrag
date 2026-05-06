@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
@@ -169,17 +170,30 @@ class Document(BaseModel):
 
         raw = self.raw_bytes
 
-        def _open() -> Any:
-            tf = tempfile.NamedTemporaryFile(suffix=suffix, delete=True)
-            tf.write(raw)
-            tf.flush()
-            return tf
+        def _write_temp() -> str:
+            # Close before yielding so sync callers (Marker/Whisper/MarkItDown/
+            # python-pptx/Spire.Doc) can reopen the path on Windows, where
+            # NamedTemporaryFile(delete=True) holds an exclusive handle.
+            tf = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+            try:
+                tf.write(raw)
+            finally:
+                tf.close()
+            return tf.name
 
-        tf = await asyncio.to_thread(_open)
+        path = await asyncio.to_thread(_write_temp)
         try:
-            yield Path(tf.name)
+            yield Path(path)
         finally:
-            await asyncio.to_thread(tf.close)
+            await asyncio.to_thread(_safe_unlink, path)
+
+
+def _safe_unlink(path: str) -> None:
+    """``os.unlink`` that swallows missing-file errors (sync callers may have already removed it)."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
 
 
 _DEFAULT_TEMPFILE_SUFFIX: dict[DocumentType, str] = {

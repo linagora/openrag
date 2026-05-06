@@ -14,7 +14,7 @@ from core.models.document import (
 from faster_whisper import WhisperModel
 from utils.logger import get_logger
 
-from ..ray_utils import with_retry, with_timeout
+from ..ray_utils import call_ray_actor_with_timeout, with_retry, with_timeout
 
 logger = get_logger()
 config = load_config()
@@ -134,7 +134,11 @@ class LocalWhisperLoader(BasePooledParser):
 
         async with document.as_temporary_file() as path:
             try:
-                text = await self.whisper_actor.transcribe.remote(str(path))
+                text = await call_ray_actor_with_timeout(
+                    self.whisper_actor.transcribe.remote(str(path)),
+                    timeout=config.loader.local_whisper.whisper_timeout,
+                    task_description=f"WhisperPool transcribe ({path})",
+                )
             except Exception as e:
                 logger.error("Error transcribing audio", error=str(e))
                 raise

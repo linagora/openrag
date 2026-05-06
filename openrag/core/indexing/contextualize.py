@@ -53,6 +53,7 @@ class ChunkContextualizer:
         self._llm = llm
         self._system_prompt = system_prompt
         self._timeout = timeout_seconds
+        self._batch_size = max(1, max_concurrent)
         self._semaphore = semaphore or asyncio.Semaphore(max_concurrent)
 
     async def _generate_context(
@@ -110,17 +111,22 @@ class ChunkContextualizer:
 
         try:
             first_chunks = chunks[:2]
-            tasks = [
-                self._generate_context(
-                    first_chunks=first_chunks,
-                    prev_chunks=chunks[max(0, i - 2) : i] if i > 0 else [],
-                    current_chunk=chunks[i],
-                    filename=filename,
-                    lang=lang,
-                )
-                for i in range(len(chunks))
-            ]
-            contexts = await asyncio.gather(*tasks)
+            contexts: list[str] = []
+            # Schedule one batch at a time so prompt strings + coroutine
+            # objects don't all sit in memory upfront on large documents.
+            for start in range(0, len(chunks), self._batch_size):
+                end = min(start + self._batch_size, len(chunks))
+                batch = [
+                    self._generate_context(
+                        first_chunks=first_chunks,
+                        prev_chunks=chunks[max(0, i - 2) : i] if i > 0 else [],
+                        current_chunk=chunks[i],
+                        filename=filename,
+                        lang=lang,
+                    )
+                    for i in range(start, end)
+                ]
+                contexts.extend(await asyncio.gather(*batch))
 
             return [
                 chunk.model_copy(

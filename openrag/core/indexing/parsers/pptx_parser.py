@@ -52,33 +52,32 @@ class PptxParser(DocumentParser):
             )
 
         async with document.as_temporary_file() as path:
-            slides, images = await asyncio.to_thread(self._convert, str(path))
+            slide_count, slides, images = await asyncio.to_thread(self._convert, str(path))
 
         text_blocks = [TextBlock(text=text, page_number=slide_num) for slide_num, text in slides]
-        page_count = slides[-1][0] if slides else 0
         return ProcessedDocument(
             document_id=document.id,
             text_blocks=text_blocks,
             images=images,
             metadata=dict(document.metadata),
-            page_count=page_count,
+            page_count=slide_count,
         )
 
     # ----- conversion -----
 
-    def _convert(self, path: str) -> tuple[list[tuple[int, str]], list[ImageBlock]]:
+    def _convert(self, path: str) -> tuple[int, list[tuple[int, str]], list[ImageBlock]]:
         try:
             import pptx
             from PIL import Image
         except ImportError:
             logger.warning("python-pptx or PIL not available; cannot parse PPTX")
-            return "", []
+            return 0, [], []
 
         try:
             presentation = pptx.Presentation(path)
         except Exception as exc:
             logger.warning("Failed to open PPTX: %s", exc)
-            return "", []
+            return 0, [], []
 
         slides: list[tuple[int, str]] = []
         images: list[ImageBlock] = []
@@ -125,7 +124,7 @@ class PptxParser(DocumentParser):
             if md:
                 slides.append((slide_num, md))
 
-        return slides, images
+        return len(presentation.slides), slides, images
 
     @staticmethod
     def _is_picture(shape: Any) -> bool:

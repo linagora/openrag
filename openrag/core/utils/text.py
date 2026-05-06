@@ -21,7 +21,11 @@ def decode_bytes(raw: bytes, encoding: str | None = None) -> str:
     Falls back to UTF-8 with ``errors="replace"`` so this never raises.
     """
     if encoding:
-        return raw.decode(encoding, errors="replace")
+        try:
+            return raw.decode(encoding, errors="replace")
+        except LookupError:
+            # Invalid codec name — fall through to detection.
+            pass
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -32,7 +36,10 @@ def decode_bytes(raw: bytes, encoding: str | None = None) -> str:
         return raw.decode(DEFAULT_FALLBACK_ENCODING, errors="replace")
     guess = chardet.detect(raw)
     detected = guess.get("encoding") or DEFAULT_FALLBACK_ENCODING
-    return raw.decode(detected, errors="replace")
+    try:
+        return raw.decode(detected, errors="replace")
+    except LookupError:
+        return raw.decode(DEFAULT_FALLBACK_ENCODING, errors="replace")
 
 
 def sanitize_text(

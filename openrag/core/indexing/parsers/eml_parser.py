@@ -29,6 +29,7 @@ from __future__ import annotations
 import email
 import logging
 from collections.abc import Mapping
+from email import policy
 from email.utils import parsedate_to_datetime
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
@@ -59,7 +60,7 @@ class EmlParser(DocumentParser):
             )
 
         try:
-            msg = email.message_from_bytes(document.raw_bytes)
+            msg = email.message_from_bytes(document.raw_bytes, policy=policy.default)
         except Exception as exc:
             logger.warning("Failed to parse EML: %s", exc)
             return ProcessedDocument(
@@ -103,12 +104,15 @@ class EmlParser(DocumentParser):
 
     @staticmethod
     def _extract_headers(msg: email.message.Message) -> dict[str, str]:
+        # Under policy.default, msg.get(...) returns Header-like objects whose
+        # str() is the RFC 2047-decoded value; cast eagerly so the metadata is
+        # plain strings.
         headers = {
-            "subject": msg.get("subject", "") or "",
-            "from": msg.get("from", "") or "",
-            "to": msg.get("to", "") or "",
-            "date": msg.get("date", "") or "",
-            "message-id": msg.get("message-id", "") or "",
+            "subject": str(msg.get("subject", "") or ""),
+            "from": str(msg.get("from", "") or ""),
+            "to": str(msg.get("to", "") or ""),
+            "date": str(msg.get("date", "") or ""),
+            "message-id": str(msg.get("message-id", "") or ""),
         }
         if headers["date"]:
             try:

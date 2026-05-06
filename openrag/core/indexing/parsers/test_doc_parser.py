@@ -107,7 +107,12 @@ class TestParse:
         instance.Close.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_missing_spire_returns_empty(self):
-        # No fake_spire fixture: import inside _convert raises ImportError.
+    async def test_missing_spire_returns_empty(self, monkeypatch):
+        # spire-doc is in the runtime deps, so just omitting fake_spire would
+        # actually drive a real Spire instance against malformed bytes.
+        # Pin the import to None so ``_convert``'s ``import spire.doc`` raises
+        # ImportError deterministically.
+        monkeypatch.setitem(sys.modules, "spire", None)
+        monkeypatch.setitem(sys.modules, "spire.doc", None)
         result = await DocParser().parse(_doc_document())
         assert result.text_blocks == [] and result.page_count == 0

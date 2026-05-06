@@ -18,6 +18,7 @@ on a single bad image.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument
@@ -45,7 +46,7 @@ class ImageParser(DocumentParser):
                 metadata=dict(document.metadata),
             )
 
-        png_bytes = self._normalize_to_png(document)
+        png_bytes = await asyncio.to_thread(self._normalize_to_png, document)
         if png_bytes is None:
             logger.warning("ImageParser: failed to decode image (id=%s)", document.id)
             return ProcessedDocument(
@@ -53,7 +54,7 @@ class ImageParser(DocumentParser):
                 metadata=dict(document.metadata),
             )
 
-        if self._below_min_pixels(png_bytes):
+        if await asyncio.to_thread(self._below_min_pixels, png_bytes):
             logger.warning("ImageParser: image below min_pixels threshold (id=%s)", document.id)
             return ProcessedDocument(
                 document_id=document.id,

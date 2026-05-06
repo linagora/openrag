@@ -426,17 +426,17 @@ class MarkerLoader(BasePooledParser):
         strip ``<br>``, then split on each ``{N}[PAGE_SEP]`` marker —
         the captured ``N`` is the 1-indexed page that just ended.
 
-        Empty pages are dropped. Trailing text after the last marker
-        (rare) is assigned to ``last_page + 1``. Markdown with no
-        markers collapses to a single page-1 entry.
+        Blank pages are preserved (text=``""``) so ``page_number`` and
+        ``page_count`` reflect the source document, not just the
+        non-empty subset. Trailing text after the last marker (rare) is
+        assigned to ``last_page + 1``. Markdown with no markers collapses
+        to a single page-1 entry.
         """
-        if not markdown:
+        if markdown is None:
             return []
         if cls.PAGE_SEP in markdown:
             markdown = markdown.split(cls.PAGE_SEP, 1)[1]
-        markdown = markdown.replace("<br>", "").strip()
-        if not markdown:
-            return []
+        markdown = markdown.replace("<br>", "")
 
         pairs: list[tuple[int, str]] = []
         cursor = 0
@@ -444,11 +444,12 @@ class MarkerLoader(BasePooledParser):
         for match in cls._PAGE_MARKER_RE.finditer(markdown):
             page = int(match.group(1))
             text = markdown[cursor : match.start()].strip()
-            if text:
-                pairs.append((page, text))
+            pairs.append((page, text))
             cursor = match.end()
             last_page = page
         tail = markdown[cursor:].strip()
         if tail:
             pairs.append((last_page + 1, tail))
+        elif not pairs and markdown.strip():
+            pairs.append((1, markdown.strip()))
         return pairs
