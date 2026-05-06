@@ -57,6 +57,10 @@ class DocxLoader(BaseLoader):
 
         if not self.image_captioning:
             logger.info("Image captioning disabled. Ignoring images.")
+            for block in processed.images:
+                ref = (block.metadata or {}).get("markdown_ref")
+                if ref:
+                    result = result.replace(ref, "")
         else:
             pil_images: list[Image.Image] = []
             for block in processed.images:
@@ -75,7 +79,7 @@ class DocxLoader(BaseLoader):
                 desc="Captioning linked images",
             )
 
-        doc = Document(page_content=result, metadata=metadata)
+        doc = Document(page_content=result, metadata=dict(metadata) if metadata else {})
         if save_markdown:
             self.save_content(result, str(file_path))
         return doc

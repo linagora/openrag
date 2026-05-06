@@ -52,17 +52,18 @@ class DocLoader(BaseLoader):
 
         if not self.image_captioning:
             logger.info("Image captioning disabled. Ignoring images.")
-        elif processed.images:
-            pil_images: list[Image.Image] = []
-            for block in processed.images:
-                img = Image.open(BytesIO(block.image_bytes))
-                img.load()
-                pil_images.append(img)
-            captions = await self.caption_images(pil_images, desc="Captioning embedded images")
-            for block, caption in zip(processed.images, captions):
-                ref = (block.metadata or {}).get("markdown_ref")
-                if ref:
-                    result = result.replace(ref, caption.replace("\\", "/"))
+        else:
+            if processed.images:
+                pil_images: list[Image.Image] = []
+                for block in processed.images:
+                    img = Image.open(BytesIO(block.image_bytes))
+                    img.load()
+                    pil_images.append(img)
+                captions = await self.caption_images(pil_images, desc="Captioning embedded images")
+                for block, caption in zip(processed.images, captions):
+                    ref = (block.metadata or {}).get("markdown_ref")
+                    if ref:
+                        result = result.replace(ref, caption.replace("\\", "/"))
 
             result = await self.replace_markdown_images_with_captions(
                 result,
@@ -70,7 +71,7 @@ class DocLoader(BaseLoader):
                 desc="Captioning linked images",
             )
 
-        doc = LCDocument(page_content=result, metadata=metadata)
+        doc = LCDocument(page_content=result, metadata=dict(metadata) if metadata else {})
         if save_markdown:
             self.save_content(result, str(file_path))
         return doc

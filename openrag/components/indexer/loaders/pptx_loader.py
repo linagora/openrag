@@ -32,6 +32,7 @@ class PPTXLoader(BaseLoader):
         self._parser = PptxParser()
 
     async def aload_document(self, file_path, metadata=None, save_markdown=False):
+        metadata = {} if metadata is None else dict(metadata)
         path = Path(file_path)
         raw_bytes = await asyncio.to_thread(path.read_bytes)
         core_doc = CoreDocument(

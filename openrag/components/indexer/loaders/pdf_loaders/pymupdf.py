@@ -45,12 +45,13 @@ class PyMuPDFLoader(BaseLoader):
         self._parser = PyMuPDFParser(mode="text")
 
     async def aload_document(self, file_path, metadata: dict = None, save_markdown=False):
+        metadata = {} if metadata is None else dict(metadata)
         path, raw_bytes = await _read_pdf_bytes(file_path)
         core_doc = CoreDocument(
             filename=path.name,
             content_type=DocumentType.PDF,
             raw_bytes=raw_bytes,
-            metadata=dict(metadata) if metadata else {},
+            metadata=metadata,
         )
         processed = await self._parser.parse(core_doc)
         s = _join_pages_with_anchors(processed.text_blocks)
@@ -69,12 +70,13 @@ class PyMuPDF4LLMLoader(BaseLoader):
         self._parser = PyMuPDFParser(mode="markdown")
 
     async def aload_document(self, file_path, metadata: dict = None, save_markdown=False):
+        metadata = {} if metadata is None else dict(metadata)
         path, raw_bytes = await _read_pdf_bytes(file_path)
         core_doc = CoreDocument(
             filename=path.name,
             content_type=DocumentType.PDF,
             raw_bytes=raw_bytes,
-            metadata=dict(metadata) if metadata else {},
+            metadata=metadata,
         )
         processed = await self._parser.parse(core_doc)
         s = _join_pages_with_anchors(processed.text_blocks)

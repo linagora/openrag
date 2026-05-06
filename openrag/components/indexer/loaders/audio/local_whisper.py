@@ -23,7 +23,6 @@ from pathlib import Path
 
 from core.indexing.parsers.audio.local_whisper import LocalWhisperParser
 from core.models.document import Document as CoreDocument
-from core.models.document import DocumentType
 from langchain_core.documents.base import Document
 from services.workers.parsers.whisper_workers import (  # noqa: F401  (re-exported for legacy import paths)
     LocalWhisperLoader as _ServicesWhisperPool,
@@ -51,7 +50,7 @@ class LocalWhisperLoader(BaseLoader):
         raw_bytes = await asyncio.to_thread(path.read_bytes)
         core_doc = CoreDocument(
             filename=path.name,
-            content_type=DocumentType.AUDIO,
+            content_type=CoreDocument.detect_content_type(path.name),
             raw_bytes=raw_bytes,
             metadata=dict(metadata) if metadata else {},
         )
@@ -62,7 +61,7 @@ class LocalWhisperLoader(BaseLoader):
             raise
 
         content = "".join(b.text for b in processed.text_blocks)
-        doc = Document(page_content=content, metadata=metadata)
+        doc = Document(page_content=content, metadata=dict(metadata) if metadata else {})
         if save_markdown:
             self.save_content(content, str(file_path))
         return doc

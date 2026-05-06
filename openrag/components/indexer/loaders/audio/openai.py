@@ -16,7 +16,6 @@ legacy loader-discovery path alive until consumers migrate.
 import asyncio
 from pathlib import Path
 
-import ray
 from core.indexing.parsers.audio.client_based import ClientAudioParser
 from core.models.document import Document as CoreDocument
 from core.models.document import DocumentType
@@ -35,11 +34,8 @@ LANG_DETECT_SAMPLE_MS = 30_000  # 30 s
 
 
 def _get_whisper_actor():
-    actor_name = "WhisperActor"
     try:
-        return ray.get_actor(actor_name, namespace="openrag")
-    except ValueError:
-        return WhisperActor.options(name=actor_name, namespace="openrag").remote()
+        return WhisperActor.options(name="WhisperActor", namespace="openrag", get_if_exists=True).remote()
     except Exception as e:
         logger.error("Error getting WhisperActor", error=str(e))
         raise
