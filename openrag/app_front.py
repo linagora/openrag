@@ -220,7 +220,8 @@ async def on_chat_start():
                 headers=get_headers(api_key),
             )
             print(response.text)
-        await cl.context.emitter.set_commands(t("commands"))
+        commands = t("commands")
+        await cl.context.emitter.set_commands(commands if isinstance(commands, list) else [])
     except Exception as e:
         logger.exception("An error occured while checking the API health", error=str(e))
         await cl.Message(content=t("error_health").format(e)).send()
