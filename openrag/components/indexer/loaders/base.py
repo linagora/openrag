@@ -2,11 +2,23 @@ import asyncio
 import base64
 import re
 from abc import ABC, abstractmethod
-from io import BytesIO
 from pathlib import Path
 
 from components.prompts import IMAGE_DESCRIBER
 from components.utils import get_vlm_semaphore, load_config
+from core.indexing.image_preprocessor import (
+    DATA_URI_IMAGE_PATTERN as _CORE_DATA_URI_IMAGE_PATTERN,
+)
+from core.indexing.image_preprocessor import (
+    HTTP_IMAGE_PATTERN as _CORE_HTTP_IMAGE_PATTERN,
+)
+from core.indexing.image_preprocessor import (
+    MIN_IMAGE_PIXELS as _CORE_MIN_IMAGE_PIXELS,
+)
+from core.indexing.image_preprocessor import (
+    ensure_png_compatible_mode,  # noqa: F401  (re-exported for legacy import path)
+    pil_to_png_bytes,
+)
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from openai import BadRequestError
@@ -19,20 +31,13 @@ logger = get_logger()
 config = load_config()
 
 
-def ensure_png_compatible_mode(image: Image.Image) -> Image.Image:
-    """Convert incompatible PIL image modes to PNG-saveable modes."""
-    if image.mode in ("CMYK", "YCbCr", "LAB"):
-        return image.convert("RGB")
-    if image.mode in ("P", "LA", "PA"):
-        return image.convert("RGBA")
-    return image
-
-
 class BaseLoader(ABC):
-    # Class-level compiled regex patterns (shared across all instances)
-    HTTP_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((https?://[^)]+)\)")
-    DATA_URI_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((data:image/[^;]+;base64,[^)]+)\)")
-    MIN_IMAGE_PIXELS = 784  # Qwen2.5-VL min_pixels threshold
+    # Class-level compiled regex patterns and constants — single source of truth
+    # lives in ``core.indexing.image_preprocessor``; pinned here as class attrs so
+    # subclasses keep working via ``self.X``.
+    HTTP_IMAGE_PATTERN = _CORE_HTTP_IMAGE_PATTERN
+    DATA_URI_IMAGE_PATTERN = _CORE_DATA_URI_IMAGE_PATTERN
+    MIN_IMAGE_PIXELS = _CORE_MIN_IMAGE_PIXELS
 
     def __init__(self, **kwargs) -> None:
         self.page_sep = "[PAGE_SEP]"
@@ -68,14 +73,12 @@ class BaseLoader(ABC):
 
     def _pil_image_to_base64(self, image: Image.Image) -> str:
         """Convert PIL Image to base64 string."""
-        buffered = BytesIO()
         try:
-            image = ensure_png_compatible_mode(image)
-            image.save(buffered, format="PNG")
+            png_bytes = pil_to_png_bytes(image)
         except Exception as e:
             logger.warning("Failed to convert image to PNG", error=str(e), mode=getattr(image, "mode", "unknown"))
             return ""
-        return base64.b64encode(buffered.getvalue()).decode()
+        return base64.b64encode(png_bytes).decode()
 
     def _is_http_url(self, data: str) -> bool:
         """Check if string is an HTTP/HTTPS URL."""

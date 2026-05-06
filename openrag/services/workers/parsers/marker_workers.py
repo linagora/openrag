@@ -371,7 +371,7 @@ class MarkerLoader(BasePooledParser):
 
     @with_timeout(
         seconds=config.loader.marker_timeout,
-        description=lambda self, file_path: f"MarkerLoader PDF loading ({file_path})",
+        description="MarkerLoader PDF loading ({file_path})",
     )
     async def _convert_pdf(self, file_path: str):
         return self.worker.process_pdf.remote(file_path)

@@ -11,7 +11,7 @@ parser type.
 
 from __future__ import annotations
 
-from ....models.document import Document, DocumentType, ProcessedDocument
+from ....models.document import Document, ProcessedDocument
 from ..document_parser import BaseClientParser, DocumentParser
 from ..registry import parser_registry
 
@@ -26,7 +26,7 @@ class ClientAudioParser(DocumentParser):
         self._client = client
 
     def supported_types(self) -> list[str]:
-        return [DocumentType.AUDIO.value, DocumentType.VIDEO.value]
+        return self._client.supported_types()
 
     async def parse(self, document: Document) -> ProcessedDocument:
         return await self._client.parse(document)
