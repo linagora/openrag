@@ -9,11 +9,11 @@ from __future__ import annotations
 import pytest
 
 from openrag.core.models.chunk import Chunk
+from openrag.core.retrieval.registry import retriever_registry
 from openrag.core.retrieval.retriever import (
     HyDeRetriever,
     MultiQueryRetriever,
     SingleRetriever,
-    retriever_registry,
 )
 from openrag.core.retrieval.searcher import RetrievalSearcher
 

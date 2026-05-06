@@ -9,9 +9,11 @@ Rewritten from ``components/retriever.py``. Differences from the legacy:
     from disk via ``core/prompts/template_loader``.
   * Returns are domain ``Chunk`` objects, not LangChain ``Document``.
 
-A ``retriever_registry`` is exposed so the composition root can pick a
-strategy by name (``single`` / ``multiQuery`` / ``hyde``) per the
-strategy doc's "every factory becomes a Registry" rule.
+Concrete strategies register themselves with ``retriever_registry``
+(declared in :mod:`openrag.core.retrieval.registry`) via decorator at
+class-definition time, so the composition root can pick one by name
+(``single`` / ``multiQuery`` / ``hyde``) per the strategy doc's
+"every factory becomes a Registry" rule.
 """
 
 from __future__ import annotations
@@ -28,8 +30,8 @@ from openrag.core.prompts.query_rewriter import (
     build_multi_query_prompt,
     split_multi_query_response,
 )
+from openrag.core.retrieval.registry import retriever_registry
 from openrag.core.retrieval.searcher import RetrievalSearcher
-from openrag.core.utils.registry import Registry
 
 
 class Retriever(ABC):
@@ -105,10 +107,12 @@ class BaseRetriever(Retriever):
         )
 
 
+@retriever_registry.register("single")
 class SingleRetriever(BaseRetriever):
     """Default strategy — issues exactly one similarity search per query."""
 
 
+@retriever_registry.register("multiQuery")
 class MultiQueryRetriever(BaseRetriever):
     """Generates K query variants via the LLM and unions their results."""
 
@@ -154,6 +158,7 @@ class MultiQueryRetriever(BaseRetriever):
         )
 
 
+@retriever_registry.register("hyde")
 class HyDeRetriever(BaseRetriever):
     """Generates a hypothetical answer document and searches with it.
 
@@ -267,12 +272,3 @@ async def _expand_with_related_chunks(
             expanded.append(chunk)
 
     return expanded
-
-
-# ---------------------------------------------------------------------------
-# Registry — config-driven factory replacement
-# ---------------------------------------------------------------------------
-retriever_registry: Registry[Retriever] = Registry("retriever")
-retriever_registry.register("single")(SingleRetriever)
-retriever_registry.register("multiQuery")(MultiQueryRetriever)
-retriever_registry.register("hyde")(HyDeRetriever)
