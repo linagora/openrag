@@ -33,6 +33,7 @@ from email.utils import parsedate_to_datetime
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from .document_parser import DocumentParser
+from .registry import parser_registry
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ logger = logging.getLogger(__name__)
 _IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"}
 
 
+@parser_registry.register("eml")
 class EmlParser(DocumentParser):
     """Parse ``.eml`` into a single text block plus ImageBlocks; dispatch attachments via DI."""
 

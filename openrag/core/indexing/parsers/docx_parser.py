@@ -36,6 +36,7 @@ from io import BytesIO
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from ..image_preprocessor import ensure_png_compatible_mode, pil_to_png_bytes
 from .document_parser import DocumentParser
+from .registry import parser_registry
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ def _image_ref(index: int) -> str:
     return f"![](docx-image-{index})"
 
 
+@parser_registry.register("docx")
 class DocxParser(DocumentParser):
     """Parse DOCX into a Markdown TextBlock + one ImageBlock per embedded image."""
 

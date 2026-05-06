@@ -23,6 +23,7 @@ import pymupdf4llm
 from ....models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from ...image_preprocessor import extract_data_uri_image_blocks
 from ..document_parser import DocumentParser
+from ..registry import parser_registry
 
 ParseMode = Literal["markdown", "text"]
 
@@ -59,6 +60,7 @@ def _extract_markdown(raw: bytes) -> tuple[list[str], list[ImageBlock]]:
     return pages, images
 
 
+@parser_registry.register("pymupdf")
 class PyMuPDFParser(DocumentParser):
     """Extract text from a PDF as one ``TextBlock`` per page (+ ImageBlocks in markdown mode).
 

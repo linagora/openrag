@@ -15,8 +15,10 @@ from __future__ import annotations
 
 from ....models.document import Document, DocumentType, ProcessedDocument
 from ..document_parser import BasePooledParser, DocumentParser
+from ..registry import parser_registry
 
 
+@parser_registry.register("local_whisper")
 class LocalWhisperParser(DocumentParser):
     """Public audio parser facade backed by a local-Whisper worker pool."""
 

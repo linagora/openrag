@@ -23,10 +23,12 @@ import logging
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument
 from ..image_preprocessor import MIN_IMAGE_PIXELS, ensure_png_compatible_mode
 from .document_parser import DocumentParser
+from .registry import parser_registry
 
 logger = logging.getLogger(__name__)
 
 
+@parser_registry.register("image")
 class ImageParser(DocumentParser):
     """Decode an image and emit it as a single ``ImageBlock``."""
 

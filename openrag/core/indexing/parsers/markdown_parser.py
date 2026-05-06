@@ -20,8 +20,10 @@ from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocu
 from ..image_preprocessor import HTTP_IMAGE_PATTERN, extract_data_uri_image_blocks
 from ..text_preprocessor import decode_bytes
 from .document_parser import DocumentParser
+from .registry import parser_registry
 
 
+@parser_registry.register("markdown")
 class MarkdownParser(DocumentParser):
     """Parse Markdown documents and emit ImageBlocks for every image ref."""
 

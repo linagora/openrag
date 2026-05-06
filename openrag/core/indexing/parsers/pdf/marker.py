@@ -15,8 +15,10 @@ from __future__ import annotations
 
 from ....models.document import Document, ProcessedDocument
 from ..document_parser import BasePooledParser, DocumentParser
+from ..registry import parser_registry
 
 
+@parser_registry.register("marker")
 class MarkerParser(DocumentParser):
     """Public PDF parser facade backed by a Marker worker pool."""
 

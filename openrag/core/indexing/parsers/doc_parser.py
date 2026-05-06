@@ -20,12 +20,14 @@ from pathlib import Path
 from ...models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from .document_parser import DocumentParser
 from .docx_parser import DocxParser
+from .registry import parser_registry
 
 logger = logging.getLogger(__name__)
 
 os.environ.setdefault("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1")
 
 
+@parser_registry.register("doc")
 class DocParser(DocumentParser):
     """Parse legacy ``.doc`` files via .docx conversion + DocxParser."""
 

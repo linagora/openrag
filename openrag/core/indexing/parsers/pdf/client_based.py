@@ -14,8 +14,10 @@ from __future__ import annotations
 
 from ....models.document import Document, ProcessedDocument
 from ..document_parser import BaseClientParser, DocumentParser
+from ..registry import parser_registry
 
 
+@parser_registry.register("pdf_client")
 class ClientPdfParser(DocumentParser):
     """Public PDF parser facade backed by an OpenAI-compatible VLM client."""
 

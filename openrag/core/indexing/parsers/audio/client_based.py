@@ -13,8 +13,10 @@ from __future__ import annotations
 
 from ....models.document import Document, DocumentType, ProcessedDocument
 from ..document_parser import BaseClientParser, DocumentParser
+from ..registry import parser_registry
 
 
+@parser_registry.register("audio_client")
 class ClientAudioParser(DocumentParser):
     """Public audio parser facade backed by an OpenAI-compatible transcription client."""
 

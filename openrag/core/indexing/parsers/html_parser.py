@@ -13,8 +13,10 @@ import asyncio
 from ...models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from ..text_preprocessor import decode_bytes
 from .document_parser import DocumentParser
+from .registry import parser_registry
 
 
+@parser_registry.register("html")
 class HtmlParser(DocumentParser):
     """Parse HTML documents into a single Markdown text block."""
 

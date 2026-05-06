@@ -15,8 +15,10 @@ import asyncio
 from ...models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from ..text_preprocessor import decode_bytes
 from .document_parser import DocumentParser
+from .registry import parser_registry
 
 
+@parser_registry.register("text")
 class TextParser(DocumentParser):
     """Parse plain-text documents into a single text block."""
 

@@ -27,6 +27,7 @@ from typing import Any
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from ..image_preprocessor import ensure_png_compatible_mode, pil_to_png_bytes
 from .document_parser import DocumentParser
+from .registry import parser_registry
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ def _image_ref(index: int) -> str:
     return f"![](pptx-image-{index})"
 
 
+@parser_registry.register("pptx")
 class PptxParser(DocumentParser):
     """Parse PPTX into one TextBlock per slide plus one ImageBlock per picture."""
 
