@@ -390,8 +390,8 @@ class TestRefreshHelper:
     async def test_refresh_short_circuit_when_last_refresh_recent(self):
         """If another request refreshed <5s ago, reuse the fresh row; do NOT
         hit the IdP again with a refresh_token that has already been rotated."""
-        from components.auth import refresh as refresh_mod
-        from components.auth.refresh import refresh_session_if_needed
+        from services.auth import refresh as refresh_mod
+        from services.auth.refresh import refresh_session_if_needed
 
         now = datetime.now()
         fresh_exp = now + timedelta(minutes=30)
@@ -432,8 +432,8 @@ class TestRefreshHelper:
     async def test_refresh_recovers_when_idp_rejects_stale_refresh_token(self):
         """IdP rejects our refresh_token (sibling already rotated it); the helper
         re-reads the session and returns the sibling's fresh tokens."""
-        from components.auth import refresh as refresh_mod
-        from components.auth.refresh import refresh_session_if_needed
+        from services.auth import refresh as refresh_mod
+        from services.auth.refresh import refresh_session_if_needed
 
         now = datetime.now()
         stale_session = {
@@ -470,8 +470,8 @@ class TestRefreshHelper:
     @pytest.mark.asyncio
     async def test_refresh_returns_none_when_idp_rejects_and_no_concurrent_refresh(self):
         """IdP rejects us and no sibling rotated the tokens → invalidate session."""
-        from components.auth import refresh as refresh_mod
-        from components.auth.refresh import refresh_session_if_needed
+        from services.auth import refresh as refresh_mod
+        from services.auth.refresh import refresh_session_if_needed
 
         now = datetime.now()
         stale_session = {
