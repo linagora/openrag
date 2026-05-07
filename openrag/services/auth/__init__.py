@@ -1,4 +1,3 @@
-# Adapter shim -- canonical exports moved to services.auth (Phase 6F).
 from services.auth.deps import get_oidc_client, reset_oidc_client
 from services.auth.oidc_client import LogoutTokenClaims, OIDCClient, TokenBundle
 from services.auth.session_tokens import decrypt_token, encrypt_token, hash_session_token, issue_session_token

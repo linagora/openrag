@@ -7,7 +7,7 @@ import pytest
 import pytest_asyncio
 import respx
 from authlib.jose import JsonWebKey
-from components.auth.oidc_client import LogoutTokenClaims, OIDCClient, TokenBundle
+from services.auth.oidc_client import LogoutTokenClaims, OIDCClient, TokenBundle
 
 # ---------------------------------------------------------------------------
 # Helpers — RSA test key + JWT factory

@@ -1,7 +1,7 @@
 """Unit tests for session_tokens.py."""
 
 import pytest
-from components.auth.session_tokens import (
+from services.auth.session_tokens import (
     decrypt_token,
     encrypt_token,
     hash_session_token,
