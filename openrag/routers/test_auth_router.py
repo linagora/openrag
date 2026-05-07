@@ -293,7 +293,7 @@ _install_dependencies_stub()
 import importlib  # noqa: E402
 
 # Reset the OIDC client singleton between tests — important when env changes.
-from components.auth import deps as _auth_deps  # noqa: E402
+from services.auth import deps as _auth_deps  # noqa: E402
 
 # Import the router module, forcing a fresh import.
 sys.modules.pop("routers.auth", None)

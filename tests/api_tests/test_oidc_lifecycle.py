@@ -251,7 +251,7 @@ def _install_stubs():
 _install_stubs()
 
 # Reload auth deps + routers after stub installation
-from components.auth import deps as _auth_deps  # noqa: E402
+from services.auth import deps as _auth_deps  # noqa: E402
 
 sys.modules.pop("routers.auth", None)
 sys.modules.pop("routers.users", None)
