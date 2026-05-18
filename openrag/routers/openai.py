@@ -9,6 +9,7 @@ from components.pipeline import RagPipeline
 from components.utils import (
     extract_and_strip_sources_block,
     filter_sources_by_citations,
+    format_sources_as_markdown,
     get_num_tokens,
     stream_with_source_filtering,
 )
@@ -360,9 +361,14 @@ async def openai_chat_completion(
 
         content = chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
         clean_content, citations = extract_and_strip_sources_block(content)
-        chunk["choices"][0]["message"]["content"] = clean_content
 
         filtered = filter_sources_by_citations(sources, citations)
+        # When INLINE_SOURCES_IN_CONTENT=true, append a markdown source block to
+        # the visible content for clients that ignore the non-standard `extra`
+        # field (Open WebUI, LibreChat, Continue, …). No-op otherwise.
+        clean_content += format_sources_as_markdown(filtered)
+        chunk["choices"][0]["message"]["content"] = clean_content
+
         chunk["extra"] = json.dumps({"sources": filtered})
         log.debug("Returning non-streaming completion chunk.")
         return JSONResponse(content=chunk)
@@ -435,9 +441,12 @@ async def openai_completion(
 
     text = complete_response.get("choices", [{}])[0].get("text", "") or ""
     clean_text, citations = extract_and_strip_sources_block(text)
-    complete_response["choices"][0]["text"] = clean_text
 
     filtered = filter_sources_by_citations(sources, citations)
+    # See note on /chat/completions about INLINE_SOURCES_IN_CONTENT.
+    clean_text += format_sources_as_markdown(filtered)
+    complete_response["choices"][0]["text"] = clean_text
+
     complete_response["extra"] = json.dumps({"sources": filtered})
     log.debug("Returning completion response.")
     return JSONResponse(content=complete_response)

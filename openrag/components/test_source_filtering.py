@@ -6,6 +6,7 @@ import pytest
 from components.utils import (
     extract_and_strip_sources_block,
     filter_sources_by_citations,
+    format_sources_as_markdown,
     stream_with_source_filtering,
 )
 
@@ -241,3 +242,145 @@ class TestStreamWithSourceFiltering:
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "Answer without any sources tag."
         assert _parse_finish_sources(result) == self.SOURCES
+
+
+class TestFormatSourcesAsMarkdown:
+    """Behavior of the markdown source block injected into content when
+    INLINE_SOURCES_IN_CONTENT=true.
+    """
+
+    SOURCES = [
+        {"filename": "a.pdf", "title": "Doc A", "file_url": "https://x/a", "relevance_score": 0.9},
+        {"filename": "b.pdf", "title": "Doc B", "file_url": "https://x/b", "relevance_score": 0.7},
+        {"filename": "a.pdf", "title": "Doc A", "file_url": "https://x/a", "relevance_score": 0.5},
+    ]
+
+    def test_disabled_by_default(self, monkeypatch):
+        monkeypatch.delenv("INLINE_SOURCES_IN_CONTENT", raising=False)
+        assert format_sources_as_markdown(self.SOURCES) == ""
+
+    def test_disabled_explicit(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "false")
+        assert format_sources_as_markdown(self.SOURCES) == ""
+
+    def test_enabled_basic(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        result = format_sources_as_markdown(self.SOURCES)
+        assert "**Sources :**" in result
+        # Dedup on file_url: a.pdf appears twice in input, once in output (best score)
+        assert result.count("Doc A") == 1
+        assert result.count("Doc B") == 1
+        # Best score wins
+        assert "score 0.90" in result
+        assert "score 0.50" not in result
+        # Ranked: Doc A (0.9) before Doc B (0.7)
+        assert result.find("Doc A") < result.find("Doc B")
+        # URL is rendered as markdown link (angle-bracket form)
+        assert "[Doc A](<https://x/a>)" in result
+
+    def test_empty_sources(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        assert format_sources_as_markdown([]) == ""
+
+    def test_min_score_filter(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        monkeypatch.setenv("INLINE_SOURCES_MIN_SCORE", "0.8")
+        result = format_sources_as_markdown(self.SOURCES)
+        assert "Doc A" in result  # score 0.9 ≥ 0.8
+        assert "Doc B" not in result  # score 0.7 < 0.8
+
+    def test_top_k_limit(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        monkeypatch.setenv("INLINE_SOURCES_TOP_K", "1")
+        result = format_sources_as_markdown(self.SOURCES)
+        assert "Doc A" in result
+        assert "Doc B" not in result  # capped at 1
+
+    def test_web_sources_included(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        sources = [
+            {
+                "source_type": "web",
+                "url": "https://example.com/page",
+                "title": "Web Result",
+                "snippet": "...",
+                "relevance_score": 0.8,
+            },
+            {"source_type": "document", "file_url": "https://x/doc.pdf", "title": "Doc", "relevance_score": 0.7},
+        ]
+        result = format_sources_as_markdown(sources)
+        assert "Web Result" in result
+        assert "[Web Result](<https://example.com/page>)" in result
+        assert "Doc" in result
+
+    def test_label_special_chars_escaped(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        sources = [{"file_url": "https://x/a", "title": "Report [draft] Q1|Q2", "relevance_score": 0.9}]
+        result = format_sources_as_markdown(sources)
+        assert "[Report \\[draft\\] Q1\\|Q2](<https://x/a>)" in result
+
+    def test_url_with_parens_and_spaces_uses_angle_brackets(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        sources = [
+            {
+                "file_url": "https://en.wikipedia.org/wiki/Foo_(bar) baz",
+                "title": "Wiki",
+                "relevance_score": 0.9,
+            }
+        ]
+        result = format_sources_as_markdown(sources)
+        # Bare-URL form would break on "(", ")", and " ". Angle-bracket form
+        # tolerates all three, so the destination must be wrapped.
+        assert "[Wiki](<https://en.wikipedia.org/wiki/Foo_(bar) baz>)" in result
+
+    def test_url_with_angle_brackets_percent_encoded(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        sources = [{"file_url": "https://x/a<b>c", "title": "T", "relevance_score": 0.9}]
+        result = format_sources_as_markdown(sources)
+        # "<" / ">" close the angle-bracket destination prematurely; encode them.
+        assert "[T](<https://x/a%3Cb%3Ec>)" in result
+
+
+class TestStreamWithInlineSources:
+    """When INLINE_SOURCES_IN_CONTENT=true, the stream emits an extra delta
+    chunk carrying the markdown source block before the finish_reason chunk.
+    Pre-existing tests verify the off-default behavior remains intact.
+    """
+
+    SOURCES = [
+        {"filename": "a.pdf", "title": "Doc A", "file_url": "https://x/a", "relevance_score": 0.9},
+    ]
+
+    @pytest.mark.asyncio
+    async def test_inline_sources_appended_to_stream(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "true")
+        lines = [
+            _make_chunk("The answer."),
+            _make_chunk("\n[Sources: 1]"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        # Concatenated content should include the original answer + the
+        # markdown source block (no [Sources: 1] tag — stripped as before).
+        full_content = _collect_content(result)
+        assert "The answer." in full_content
+        assert "**Sources :**" in full_content
+        assert "[Doc A](<https://x/a>)" in full_content
+        assert "[Sources: 1]" not in full_content
+        # The structured `extra` field still reaches the finish chunk.
+        assert _parse_finish_sources(result) == self.SOURCES
+
+    @pytest.mark.asyncio
+    async def test_no_inline_when_disabled(self, monkeypatch):
+        monkeypatch.setenv("INLINE_SOURCES_IN_CONTENT", "false")
+        lines = [
+            _make_chunk("The answer."),
+            _make_chunk("\n[Sources: 1]"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        full_content = _collect_content(result)
+        assert full_content == "The answer."
+        assert "**Sources :**" not in full_content

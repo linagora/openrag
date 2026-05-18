@@ -1,13 +1,13 @@
 import asyncio
 import copy
 import json
+import os
 import re
 import threading
 from collections import deque
 from typing import ClassVar
 
 import ray
-from components.indexer.utils.text_sanitizer import sanitize_text
 from config import load_config
 from fast_langdetect import LangDetectConfig, LangDetector
 from langchain_core.documents.base import Document
@@ -142,6 +142,8 @@ def format_web_context(
     if not web_results:
         return "", [], 0
 
+    from components.indexer.utils.text_sanitizer import sanitize_text
+
     _length_function = get_num_tokens()
 
     parts = []
@@ -214,6 +216,98 @@ def filter_sources_by_citations(sources: list, citations: set[int] | None) -> li
     return filtered if filtered else sources
 
 
+def inline_sources_enabled() -> bool:
+    """``INLINE_SOURCES_IN_CONTENT=true`` opts in to writing the source list
+    directly into the assistant message ``content`` as a markdown block,
+    in addition to the structured ``extra.sources`` field.
+
+    The default is ``false`` because it changes the visible content of the
+    response — opt-in keeps the existing OpenAI-compat contract intact for
+    clients that already consume ``extra``.
+    """
+    return os.getenv("INLINE_SOURCES_IN_CONTENT", "false").strip().lower() == "true"
+
+
+def _inline_sources_max_items() -> int:
+    try:
+        return max(0, int(os.getenv("INLINE_SOURCES_TOP_K", "5")))
+    except ValueError:
+        return 5
+
+
+def _inline_sources_min_score() -> float:
+    try:
+        return float(os.getenv("INLINE_SOURCES_MIN_SCORE", "-inf"))
+    except ValueError:
+        return float("-inf")
+
+
+def format_sources_as_markdown(sources: list) -> str:
+    """Render a deduplicated, ranked source list as a markdown block.
+
+    Returns ``""`` when ``INLINE_SOURCES_IN_CONTENT`` is not enabled or no
+    source survives the filters — callers can append unconditionally.
+
+    Why a flat ``Sources:`` list rather than inline ``[^N]`` footnote markers:
+    the LLM's content was generated without any awareness of the markers, so
+    inserting them after-the-fact would never match the actual claims in the
+    text. A trailing block is honest about that and renders cleanly in every
+    markdown client.
+    """
+    if not inline_sources_enabled() or not sources:
+        return ""
+
+    max_items = _inline_sources_max_items()
+    min_score = _inline_sources_min_score()
+
+    def _score(s: dict) -> float:
+        v = s.get("relevance_score")
+        try:
+            return float(v) if v is not None else float("-inf")
+        except (TypeError, ValueError):
+            return float("-inf")
+
+    # Dedup on best available identifier. Web sources use "url"; document
+    # sources use "file_url" or "filename". Show each source once at its
+    # best-scoring chunk.
+    seen: dict[str, dict] = {}
+    for s in sources:
+        key = s.get("file_url") or s.get("url") or s.get("filename") or s.get("source") or ""
+        if not key:
+            continue
+        if _score(s) < min_score:
+            continue
+        if key not in seen or _score(s) > _score(seen[key]):
+            seen[key] = s
+
+    ranked = sorted(seen.values(), key=_score, reverse=True)[:max_items]
+    if not ranked:
+        return ""
+
+    def _label(s: dict) -> str:
+        title = s.get("title") or s.get("filename") or s.get("file_id") or "source"
+        page = s.get("page")
+        if page and str(page) not in {"0", "1"}:
+            return f"{title} (p. {page})"
+        return str(title)
+
+    lines = ["", "---", "**Sources :**", ""]
+    for i, s in enumerate(ranked, start=1):
+        url = s.get("file_url") or s.get("url") or s.get("chunk_url") or ""
+        label = _label(s).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]").replace("|", "\\|")
+        score = _score(s)
+        score_suffix = f" — score {score:.2f}" if score != float("-inf") else ""
+        if url:
+            # Angle-bracket destination tolerates spaces, "(", ")" — characters
+            # that break the bare-URL form. Percent-encode the only two chars
+            # that could close the destination prematurely.
+            url_safe = url.replace("<", "%3C").replace(">", "%3E")
+            lines.append(f"{i}. [{label}](<{url_safe}>){score_suffix}")
+        else:
+            lines.append(f"{i}. {label}{score_suffix}")
+    return "\n".join(lines)
+
+
 async def stream_with_source_filtering(
     llm_stream,
     sources: list,
@@ -256,6 +350,17 @@ async def stream_with_source_filtering(
                     chunk["choices"][0]["delta"]["content"] = surviving
                 chunk["extra"] = filtered_json
                 yield f"data: {json.dumps(chunk)}\n\n"
+
+            # When INLINE_SOURCES_IN_CONTENT=true, emit one extra delta with
+            # the markdown source block. Sent before finish_reason so clients
+            # that buffer until finish (most do) see it as part of the content.
+            sources_md = format_sources_as_markdown(filtered)
+            if sources_md and last_chunk_template:
+                inline_chunk = copy.deepcopy(last_chunk_template)
+                inline_chunk["choices"][0]["delta"] = {"content": sources_md}
+                inline_chunk["choices"][0].pop("finish_reason", None)
+                inline_chunk["extra"] = filtered_json
+                yield f"data: {json.dumps(inline_chunk)}\n\n"
 
             if last_chunk_template:
                 # FIXME: race condition where clients missed sources because finish_reason
