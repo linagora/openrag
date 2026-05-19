@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS "Thread" (
 CREATE TABLE IF NOT EXISTS "Step" (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
     "threadId" uuid REFERENCES "Thread"(id) ON DELETE CASCADE,
-    "parentId" uuid,
+    "parentId" uuid REFERENCES "Step"(id) ON DELETE SET NULL,
     input jsonb DEFAULT '{}'::jsonb,
     metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
     name text,
