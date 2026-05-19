@@ -136,6 +136,7 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-root}
     volumes:
       - ${DB_VOLUME:-./db}:/var/lib/postgresql/data
+      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
     expose:
       - 5432
 
@@ -181,4 +182,3 @@ services:
     # For details see https://github.com/vllm-project/vllm/issues/21179
     profiles:
       - "cpu"
-
