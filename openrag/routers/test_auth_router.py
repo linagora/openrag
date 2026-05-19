@@ -285,6 +285,21 @@ def _install_dependencies_stub():
     stub.get_marker_pool = lambda: None
     sys.modules["utils.dependencies"] = stub
 
+    def _logger():
+        logger = types.SimpleNamespace(
+            debug=lambda *args, **kwargs: None,
+            info=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+            exception=lambda *args, **kwargs: None,
+        )
+        logger.bind = lambda *args, **kwargs: logger
+        return logger
+
+    logger_stub = types.ModuleType("utils.logger")
+    logger_stub.get_logger = _logger
+    sys.modules["utils.logger"] = logger_stub
+
 
 _install_dependencies_stub()
 

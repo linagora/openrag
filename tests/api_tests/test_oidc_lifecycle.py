@@ -236,16 +236,40 @@ class _StubVectorDB:
 # ---------------------------------------------------------------------------
 
 _stub_vdb = _StubVectorDB()
+_stub_task_state_manager = types.SimpleNamespace(
+    get_user_pending_task_count=_RayMethodStub("get_user_pending_task_count", lambda *a, **kw: 0, [])
+)
 
 
 def _install_stubs():
     stub = types.ModuleType("utils.dependencies")
     stub.get_vectordb = lambda: _stub_vdb
-    stub.get_task_state_manager = lambda: None
+    stub.get_task_state_manager = lambda: _stub_task_state_manager
     stub.get_serializer = lambda: None
     stub.get_indexer = lambda: None
     stub.get_marker_pool = lambda: None
     sys.modules["utils.dependencies"] = stub
+
+    def _logger():
+        logger = types.SimpleNamespace(
+            debug=lambda *args, **kwargs: None,
+            info=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+            exception=lambda *args, **kwargs: None,
+        )
+        logger.bind = lambda *args, **kwargs: logger
+        return logger
+
+    logger_stub = types.ModuleType("utils.logger")
+    logger_stub.get_logger = _logger
+    sys.modules["utils.logger"] = logger_stub
+    openai_stub = types.ModuleType("openai")
+    openai_stub.AsyncOpenAI = object
+    openai_stub.APITimeoutError = TimeoutError
+    openai_stub.APIConnectionError = ConnectionError
+    openai_stub.APIError = Exception
+    sys.modules.setdefault("openai", openai_stub)
 
 
 _install_stubs()
