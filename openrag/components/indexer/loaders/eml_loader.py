@@ -141,10 +141,7 @@ class EmlLoader(BaseLoader):
                             # Stop the recursion before we descend into another
                             # .eml — past MAX_EML_RECURSION_DEPTH we annotate
                             # the chain and skip the load.
-                            if (
-                                loader_cls is EmlLoader
-                                and _eml_recursion_depth + 1 >= self.MAX_EML_RECURSION_DEPTH
-                            ):
+                            if loader_cls is EmlLoader and _eml_recursion_depth + 1 >= self.MAX_EML_RECURSION_DEPTH:
                                 attachments_text += (
                                     f"Skipped nested .eml attachment '{filename}': "
                                     f"recursion depth limit ({self.MAX_EML_RECURSION_DEPTH}) reached.\n"
