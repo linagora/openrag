@@ -385,24 +385,25 @@ class TestUserQuotaEnforcement:
         return response.json()
 
     def _create_partition(self, api_client, partition_name: str, user_token: str):
-        """Helper to create a partition and grant the test user editor access.
+        """Helper to create a partition and promote the test user to owner.
 
         POST /partition/{name} requires admin since the RBAC tightening; the
         api_client fixture already carries the admin token. After creating the
-        partition we add the per-test user as an editor so subsequent upload
-        / delete calls authorized with their token still hit a partition they
-        can write to.
+        partition we promote the per-test user to owner so subsequent test
+        operations (member management, partition delete) authorized with the
+        user's own token keep the same capabilities they had before the
+        admin-only partition gate.
         """
         # Create as admin (api_client default headers carry AUTH_TOKEN).
         response = api_client.post(f"/partition/{partition_name}")
         assert response.status_code in [200, 201], f"Failed to create partition: {response.text}"
-        # Look up the user behind user_token and grant them editor on the partition.
+        # Look up the user behind user_token and promote them to owner.
         info = api_client.get("/users/info", headers={"Authorization": f"Bearer {user_token}"})
         assert info.status_code == 200, f"Failed to resolve user: {info.text}"
         user_id = info.json()["id"]
         grant = api_client.post(
             f"/partition/{partition_name}/users",
-            data={"user_id": user_id, "role": "editor"},
+            data={"user_id": user_id, "role": "owner"},
         )
         assert grant.status_code in [200, 201, 204], f"Failed to grant access: {grant.text}"
 
