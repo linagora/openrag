@@ -4,7 +4,7 @@ parent_id chains that would otherwise loop until the DB aborts.
 """
 
 import pytest
-from components.indexer.vectordb.models import Base, File, Partition
+from components.indexer.vectordb.models import Base, Partition
 from components.indexer.vectordb.utils import PartitionFileManager
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
