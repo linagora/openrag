@@ -41,7 +41,7 @@ def test_uvicorn_run_passes_forwarded_allow_ips():
 
     assert found_any_run, "No uvicorn.run(...) call found in main.py"
     assert found_with_kwarg, (
-        "uvicorn.run(\"main:app\", ...) must pass forwarded_allow_ips so that "
+        'uvicorn.run("main:app", ...) must pass forwarded_allow_ips so that '
         "X-Forwarded-Proto from a reverse proxy is honored."
     )
 
