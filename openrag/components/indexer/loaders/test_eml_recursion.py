@@ -41,13 +41,7 @@ def _make_eml_with_attached_eml(inner_bytes: bytes, subject: str = "outer") -> b
 
 
 def _make_leaf_eml() -> bytes:
-    return (
-        b"Subject: leaf\r\n"
-        b"From: a@example.com\r\n"
-        b"To: b@example.com\r\n"
-        b"\r\n"
-        b"leaf body\r\n"
-    )
+    return b"Subject: leaf\r\nFrom: a@example.com\r\nTo: b@example.com\r\n\r\nleaf body\r\n"
 
 
 @pytest.mark.asyncio
