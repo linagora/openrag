@@ -385,13 +385,26 @@ class TestUserQuotaEnforcement:
         return response.json()
 
     def _create_partition(self, api_client, partition_name: str, user_token: str):
-        """Helper to create a partition for user user given its token."""
-        # Create partition as the user
-        response = api_client.post(
-            f"/partition/{partition_name}",
-            headers={"Authorization": f"Bearer {user_token}"},
-        )
+        """Helper to create a partition and grant the test user editor access.
+
+        POST /partition/{name} requires admin since the RBAC tightening; the
+        api_client fixture already carries the admin token. After creating the
+        partition we add the per-test user as an editor so subsequent upload
+        / delete calls authorized with their token still hit a partition they
+        can write to.
+        """
+        # Create as admin (api_client default headers carry AUTH_TOKEN).
+        response = api_client.post(f"/partition/{partition_name}")
         assert response.status_code in [200, 201], f"Failed to create partition: {response.text}"
+        # Look up the user behind user_token and grant them editor on the partition.
+        info = api_client.get("/users/info", headers={"Authorization": f"Bearer {user_token}"})
+        assert info.status_code == 200, f"Failed to resolve user: {info.text}"
+        user_id = info.json()["id"]
+        grant = api_client.post(
+            f"/partition/{partition_name}/users",
+            data={"user_id": user_id, "role": "editor"},
+        )
+        assert grant.status_code in [200, 201, 204], f"Failed to grant access: {grant.text}"
 
     def _upload_file(self, api_client, partition: str, file_id: str, user_token: str, content: str = "Test content"):
         """Helper to upload a file as a specific user."""
