@@ -241,3 +241,51 @@ class TestStreamWithSourceFiltering:
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "Answer without any sources tag."
         assert _parse_finish_sources(result) == self.SOURCES
+
+
+# ---------------------------------------------------------------------------
+# Regression for #390 — buffer size scales with number of sources so the
+# [Sources: 1, 2, …, N] tag isn't evicted from the buffer before it can match.
+# ---------------------------------------------------------------------------
+
+
+def test_min_sources_tag_buffer_size_fits_many_sources():
+    from components.utils import _min_sources_tag_buffer_size
+
+    # The helper bound must cover the full max-length tag at this N.
+    for n in (1, 10, 60, 100):
+        tag = "\n[Sources: " + ", ".join(str(i) for i in range(1, n + 1)) + "]"
+        assert _min_sources_tag_buffer_size(n) >= len(tag), n
+    # The caller in stream_with_source_filtering tops this off with
+    # max(100, _min_sources_tag_buffer_size(...)) so the small-list case is
+    # not the helper's responsibility.
+    assert _min_sources_tag_buffer_size(0) >= 1
+
+
+class TestStreamWithManySources:
+    """Repro the #390 scenario: 60 sources cited at the end of the stream."""
+
+    @pytest.mark.asyncio
+    async def test_60_source_citation_survives_buffer_eviction(self):
+        sources = [{"file": f"src-{i}.pdf"} for i in range(60)]
+        # Build a long answer body, then a [Sources: 1, …, 60] tag whose total
+        # length exceeds the old hardcoded 100-char buffer.
+        body = "This is the answer body. " * 30
+        cited = ", ".join(str(i) for i in range(1, 61))
+        tag = f"\n[Sources: {cited}]"
+        # Stream the body in many small chunks plus the tag at the end.
+        lines = [_make_chunk(p) for p in [body[i : i + 5] for i in range(0, len(body), 5)]]
+        lines.append(_make_chunk(tag))
+        lines.append(_make_finish())
+        lines.append(DONE_LINE)
+
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), sources, "test-model"))
+
+        # The raw tag must not leak into the user-visible content
+        content = _collect_content(result)
+        assert "[Sources:" not in content
+        assert content.startswith("This is the answer body.")
+        assert content.endswith("This is the answer body.")
+        # All 60 sources should be reflected in the finish chunk
+        finished = _parse_finish_sources(result)
+        assert finished == sources
