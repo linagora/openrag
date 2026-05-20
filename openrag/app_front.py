@@ -102,10 +102,13 @@ if PERSISTENCY:
 
 if AUTH_TOKEN and AUTH_MODE != "oidc":
     if not CHAINLIT_AUTH_SECRET:
-        # logger.warning(
-        #     "`CHAINLIT_AUTH_SECRET` is not set a default value will be used. Not recommended for production."
-        # )
-        os.environ["CHAINLIT_AUTH_SECRET"] = "default_secret_for_openrag_ui"  # Set default value
+        raise RuntimeError(
+            "CHAINLIT_AUTH_SECRET is required when authentication is enabled. "
+            "Generate one with `python -c \"import secrets; print(secrets.token_urlsafe(32))\"` "
+            "and set it in your environment. The previously shipped default "
+            "(`default_secret_for_openrag_ui`) is source-published and lets "
+            "anyone forge a valid session for any user."
+        )
 
     @cl.password_auth_callback
     async def auth_callback(username: str, password: str):
@@ -137,7 +140,13 @@ if AUTH_TOKEN and AUTH_MODE != "oidc":
 
 elif AUTH_MODE == "oidc":
     if not CHAINLIT_AUTH_SECRET:
-        os.environ["CHAINLIT_AUTH_SECRET"] = "default_secret_for_openrag_ui"
+        raise RuntimeError(
+            "CHAINLIT_AUTH_SECRET is required when AUTH_MODE=oidc. "
+            "Generate one with `python -c \"import secrets; print(secrets.token_urlsafe(32))\"` "
+            "and set it in your environment. The previously shipped default "
+            "(`default_secret_for_openrag_ui`) is source-published and lets "
+            "anyone forge a valid session for any user."
+        )
 
     @cl.header_auth_callback
     async def header_auth_callback(headers: dict) -> cl.User | None:
