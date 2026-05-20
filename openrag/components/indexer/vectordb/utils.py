@@ -135,9 +135,7 @@ class PartitionFileManager:
                     # only surfaces as an IntegrityError at commit time and
                     # leaves the partition row half-created.
                     if user_id is None:
-                        raise ValueError(
-                            f"Cannot create partition '{partition}' without a user_id for the owner row."
-                        )
+                        raise ValueError(f"Cannot create partition '{partition}' without a user_id for the owner row.")
                     partition_obj = Partition(partition=partition)
                     session.add(partition_obj)
                     log.info("Created new partition")
