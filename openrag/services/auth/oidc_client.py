@@ -291,9 +291,7 @@ class OIDCClient:
             if len(aud) > 1:
                 azp = decoded.get("azp")
                 if azp != self.client_id:
-                    raise ValueError(
-                        f"ID token has multi-aud {aud!r} but azp {azp!r} != client_id {self.client_id!r}"
-                    )
+                    raise ValueError(f"ID token has multi-aud {aud!r} but azp {azp!r} != client_id {self.client_id!r}")
         elif aud != self.client_id:
             raise ValueError(f"ID token aud {aud!r} != client_id {self.client_id!r}")
 
