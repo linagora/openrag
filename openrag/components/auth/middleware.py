@@ -93,7 +93,7 @@ def is_ui_path(path: str) -> bool:
 
 
 def is_bypass_path(path: str) -> bool:
-    return path in _BYPASS_PATHS or path.startswith("/chainlit")
+    return path in _BYPASS_PATHS or path == "/chainlit" or path.startswith("/chainlit/")
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
