@@ -163,3 +163,21 @@ class TestEnrichResults:
             enriched = await fetcher.enrich(results)
 
         assert enriched[0].content is None
+
+
+# ---------------------------------------------------------------------------
+# fetch_verify_ssl default — regression for #382
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_verify_ssl_default_is_true():
+    """TLS verification must be enabled by default for any web-search fetch.
+
+    The previous default was ``False`` which made every server-side fetch
+    of a web-search result skip TLS verification, exposing citation
+    contents to silent MITM tampering. The default must be ``True``.
+    """
+    from config.models import StaanWebSearchConfig
+
+    cfg = StaanWebSearchConfig()
+    assert cfg.fetch_verify_ssl is True
