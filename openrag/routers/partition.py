@@ -22,6 +22,7 @@ from utils.logger import get_logger
 from .utils import (
     ROLE_HIERARCHY,
     partitions_with_details,
+    require_admin,
     require_partition_owner,
     require_partition_viewer,
 )
@@ -234,6 +235,7 @@ Returns 409 Conflict if partition already exists.
 async def create_partition(
     request: Request,
     partition: str,
+    _=Depends(require_admin),
     service: PartitionService = Depends(get_partition_service),
 ):
     if await service.partition_exists(partition):
