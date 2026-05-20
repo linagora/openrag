@@ -171,7 +171,7 @@ async def test_login_sanitizes_open_redirect():
 @pytest.mark.parametrize(
     "evil",
     [
-        "/\\evil.com/phish",      # Chrome/Edge treat /\evil as netloc=evil.com
+        "/\\evil.com/phish",  # Chrome/Edge treat /\evil as netloc=evil.com
         "/\\\\evil.com",
         "/path\r\nLocation: http://evil",  # CRLF response splitting
         "/path\n\nSet-Cookie: stolen=1",
