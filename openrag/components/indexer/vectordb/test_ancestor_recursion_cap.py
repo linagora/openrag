@@ -25,8 +25,13 @@ def pfm():
     engine.dispose()
 
 
-def test_hard_cap_constant_is_defined_and_positive():
-    assert PartitionFileManager._ANCESTOR_RECURSION_HARD_CAP >= 100
+def test_hard_cap_lives_in_retriever_config():
+    """The cap value must come from the retriever config (operator-tunable),
+    not be hardcoded inside the data-access layer."""
+    from config import load_config
+
+    cap = int(load_config().retriever.max_ancestor_depth_cap)
+    assert cap >= 100
 
 
 def test_none_max_depth_is_clamped(pfm):
@@ -47,7 +52,9 @@ def test_explicit_depth_above_cap_is_clamped(pfm):
     be silently clamped — a misconfigured caller cannot bypass the
     safety net.
     """
-    cap = PartitionFileManager._ANCESTOR_RECURSION_HARD_CAP
+    from config import load_config
+
+    cap = int(load_config().retriever.max_ancestor_depth_cap)
     with pfm.Session() as s:
         s.add(Partition(partition="p"))
         s.commit()

@@ -602,12 +602,6 @@ class PartitionFileManager:
             )
             return [r[0] for r in results]
 
-    # Hard ceiling applied regardless of the caller-supplied depth — a
-    # self-referential or cyclic parent_id chain (A→B→A) would otherwise
-    # loop until Postgres aborts the query, hanging the request and tying
-    # up a backend.
-    _ANCESTOR_RECURSION_HARD_CAP = 1000
-
     def get_file_ancestors(self, partition: str, file_id: str, max_ancestor_depth: int | None = None) -> list[dict]:
         """Get all ancestors of a file using recursive CTE.
 
@@ -617,18 +611,20 @@ class PartitionFileManager:
             partition: Partition name
             file_id: The file identifier to find ancestors for
             max_ancestor_depth: Maximum depth to traverse. ``None`` falls back
-                to ``_ANCESTOR_RECURSION_HARD_CAP``; explicit values are
-                additionally capped at the same constant so cyclic
-                ``parent_id`` chains can't loop indefinitely.
+                to ``retriever.max_ancestor_depth_cap``; explicit values are
+                additionally clamped at the same cap so a self-referential
+                or cyclic ``parent_id`` chain can't loop indefinitely and
+                hang a Postgres backend.
 
         Returns:
             List of file dictionaries ordered from root to the specified file
         """
 
         with self.Session() as session:
-            effective_cap = self._ANCESTOR_RECURSION_HARD_CAP
+            hard_cap = int(config.retriever.max_ancestor_depth_cap)
+            effective_cap = hard_cap
             if max_ancestor_depth is not None:
-                effective_cap = min(max_ancestor_depth, self._ANCESTOR_RECURSION_HARD_CAP)
+                effective_cap = min(max_ancestor_depth, hard_cap)
             # Recursive CTE for ancestor traversal — always capped at
             # _ANCESTOR_RECURSION_HARD_CAP, even if the caller passed None
             # or a larger value.

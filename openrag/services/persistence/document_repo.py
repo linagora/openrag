@@ -457,12 +457,6 @@ class PgDocumentRepository(DocumentRepository):
         )
         return [r["file_id"] for r in rows]
 
-    # Hard ceiling applied regardless of the caller-supplied depth — a
-    # self-referential or cyclic parent_id chain (A→B→A) would otherwise
-    # loop until Postgres aborts the query, hanging the request and tying
-    # up a backend.
-    _ANCESTOR_RECURSION_HARD_CAP = 1000
-
     async def get_file_ancestors(
         self,
         partition: str,
@@ -473,14 +467,17 @@ class PgDocumentRepository(DocumentRepository):
 
         Returns a list ordered from root → self (depth DESC). When
         ``max_ancestor_depth`` is given, the recursion stops once the
-        accumulated depth meets the cap. A hard ceiling of
-        ``_ANCESTOR_RECURSION_HARD_CAP`` is always applied to defend
-        against accidental cycles, even if the caller passes ``None`` or
-        a larger explicit value.
+        accumulated depth meets the cap. The cap is additionally clamped
+        at ``retriever.max_ancestor_depth_cap`` (operator-tunable, default
+        1000) so a self-referential or cyclic ``parent_id`` chain can't
+        loop indefinitely.
         """
-        effective_cap = self._ANCESTOR_RECURSION_HARD_CAP
+        from config import load_config
+
+        hard_cap = int(load_config().retriever.max_ancestor_depth_cap)
+        effective_cap = hard_cap
         if max_ancestor_depth is not None:
-            effective_cap = min(max_ancestor_depth, self._ANCESTOR_RECURSION_HARD_CAP)
+            effective_cap = min(max_ancestor_depth, hard_cap)
         params: list[Any] = [file_id, partition, effective_cap]
         depth_filter = f"AND a.depth < ${len(params)}"
         rows = await self.pool.fetch(
