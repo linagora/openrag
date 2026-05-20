@@ -104,7 +104,8 @@ def __prepare_sources(request: Request, docs: list, web_results: list | None = N
     links = []
     for doc in docs:
         doc_metadata = dict(doc.metadata)
-        filename = Path(doc_metadata.get("source")).name
+        source = doc_metadata.get("source") or ""
+        filename = Path(source).name
         file_url = str(request.url_for("static", path=filename))
         encoded_url = quote(file_url, safe=":/")
         links.append(
