@@ -46,7 +46,7 @@ def _make_leaf_eml() -> bytes:
 
 @pytest.mark.asyncio
 async def test_eml_recursion_caps_at_max_depth(tmp_path):
-    from openrag.components.indexer.loaders.eml_loader import EmlLoader
+    from components.indexer.loaders.eml_loader import EmlLoader
 
     # A single outer .eml whose attachment is another .eml. We seed the
     # call at depth = MAX_EML_RECURSION_DEPTH - 1, so processing the
@@ -70,7 +70,7 @@ async def test_eml_recursion_caps_at_max_depth(tmp_path):
 @pytest.mark.asyncio
 async def test_eml_below_cap_does_not_skip(tmp_path):
     """At depth 0 the guard does not fire — attachments are still attempted."""
-    from openrag.components.indexer.loaders.eml_loader import EmlLoader
+    from components.indexer.loaders.eml_loader import EmlLoader
 
     eml_path = tmp_path / "nested.eml"
     eml_path.write_bytes(_make_eml_with_attached_eml(_make_leaf_eml()))
