@@ -72,6 +72,11 @@ class PgUserRepository(UserRepository):
         exist yet — when password auth lands we'll add the column and
         wire it here. ``token`` / ``token_hash`` should be set out-of-band
         via :meth:`set_user_token`; this method does NOT generate one.
+
+        ``external_user_id`` is normalized: an empty string is coerced to
+        ``NULL`` so the UNIQUE constraint allows multiple users with no
+        external id, instead of raising a UniqueViolation on the second
+        insert.
         """
         row = await self.pool.fetchrow(
             """
@@ -81,7 +86,7 @@ class PgUserRepository(UserRepository):
             RETURNING *
             """,
             user.display_name,
-            user.external_user_id,
+            (user.external_user_id.strip() or None) if user.external_user_id else None,
             (user.email.strip().lower() if user.email else None),
             user.is_admin,
             user.file_quota,
@@ -231,7 +236,7 @@ class PgUserRepository(UserRepository):
             RETURNING *
             """,
             display_name,
-            external_user_id,
+            (external_user_id.strip() or None) if external_user_id else None,
             (email.strip().lower() if email else None),
             token_hash,
             is_admin,
