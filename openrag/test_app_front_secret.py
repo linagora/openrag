@@ -6,12 +6,10 @@ session JWTs with the source-published default secret
 
 import os
 import sys
-import textwrap
 
 import pytest
 
-
-_FIX_SOURCE = (os.path.dirname(__file__) + "/app_front.py")
+_FIX_SOURCE = os.path.dirname(__file__) + "/app_front.py"
 
 
 def test_no_hardcoded_default_secret_assignment_in_source():
@@ -24,10 +22,9 @@ def test_no_hardcoded_default_secret_assignment_in_source():
     """
     with open(_FIX_SOURCE) as f:
         content = f.read()
-    assert (
-        'os.environ["CHAINLIT_AUTH_SECRET"] = "default_secret_for_openrag_ui"'
-        not in content
-    ), "The hardcoded chainlit-auth secret assignment must not be reintroduced"
+    assert 'os.environ["CHAINLIT_AUTH_SECRET"] = "default_secret_for_openrag_ui"' not in content, (
+        "The hardcoded chainlit-auth secret assignment must not be reintroduced"
+    )
 
 
 def test_app_front_raises_when_secret_missing(monkeypatch):
