@@ -67,3 +67,15 @@ class TestValidateFileFormat:
         with pytest.raises(ValidationError) as exc:
             validate_file_format("img.exe", self.formats, self.mimetypes, mimetype="application/x-msdownload")
         assert exc.value.status_code == 415
+
+    # Regression for #368 — UploadFile.filename is str | None; a None or empty
+    # value must surface as a clean 422 instead of TypeError → 500.
+    def test_none_filename_raises_422(self):
+        with pytest.raises(ValidationError) as exc:
+            validate_file_format(None, self.formats, self.mimetypes, mimetype="application/pdf")
+        assert exc.value.status_code == 422
+
+    def test_empty_filename_raises_422(self):
+        with pytest.raises(ValidationError) as exc:
+            validate_file_format("", self.formats, self.mimetypes, mimetype="application/pdf")
+        assert exc.value.status_code == 422
