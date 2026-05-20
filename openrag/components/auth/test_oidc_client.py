@@ -284,9 +284,7 @@ class TestExchangeCode:
         _setup_jwks(client._mock_router)
 
         nonce = "n-azp-ok"
-        id_token = _sign_jwt(
-            _id_token_payload(nonce, extra={"aud": [CLIENT_ID, "other-client"], "azp": CLIENT_ID})
-        )
+        id_token = _sign_jwt(_id_token_payload(nonce, extra={"aud": [CLIENT_ID, "other-client"], "azp": CLIENT_ID}))
         token_response = {
             "id_token": id_token,
             "access_token": "at",
