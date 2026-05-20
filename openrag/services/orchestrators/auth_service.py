@@ -573,6 +573,14 @@ class AuthService:
             except Exception as e:
                 logger.warning(f"OIDC userinfo fetch failed: {e}")
                 raise OIDCFlowError("Failed to fetch userinfo from IdP.") from e
+            # OIDC Core 1.0 §5.3.2: verify userinfo.sub matches id_token.sub
+            # before trusting any userinfo claim, to defend against userinfo
+            # response substitution.
+            id_token_sub = bundle.claims.get("sub") if isinstance(bundle.claims, dict) else None
+            userinfo_sub = claims_for_mapping.get("sub") if isinstance(claims_for_mapping, dict) else None
+            if not userinfo_sub or userinfo_sub != id_token_sub:
+                logger.warning("OIDC userinfo sub mismatch — refusing claim mapping")
+                raise OIDCFlowError("Userinfo sub does not match ID token sub.")
         else:
             claims_for_mapping = bundle.claims
 
