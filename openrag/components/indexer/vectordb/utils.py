@@ -471,9 +471,7 @@ class PartitionFileManager:
                 # leave every endpoint guarded by require_partition_owner
                 # permanently inaccessible to non-admins.
                 if role != "owner":
-                    raise ValueError(
-                        f"Partition '{partition}' does not exist; first member must have role='owner'."
-                    )
+                    raise ValueError(f"Partition '{partition}' does not exist; first member must have role='owner'.")
                 s.add(Partition(partition=partition))
             m = s.query(PartitionMembership).filter_by(partition_name=partition, user_id=user_id).first()
             if m:
