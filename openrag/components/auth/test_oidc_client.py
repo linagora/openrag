@@ -253,6 +253,54 @@ class TestExchangeCode:
         with pytest.raises(ValueError, match="nonce"):
             await client.exchange_code(code="code", code_verifier="v", expected_nonce="wrong-nonce")
 
+    # OIDC Core 1.0 §3.1.3.7: when aud lists multiple audiences, azp MUST
+    # be present and equal to client_id. Regression for #385.
+    @pytest.mark.asyncio
+    async def test_multi_aud_requires_matching_azp(self, client):
+        _setup_discovery(client._mock_router)
+        _setup_jwks(client._mock_router)
+
+        nonce = "n-azp"
+        # Multi-aud token with the wrong (or missing) azp must be rejected
+        id_token = _sign_jwt(
+            _id_token_payload(nonce, extra={"aud": [CLIENT_ID, "other-client"], "azp": "other-client"})
+        )
+        token_response = {
+            "id_token": id_token,
+            "access_token": "at",
+            "expires_in": 300,
+            "token_type": "Bearer",
+        }
+        client._mock_router.post(f"{ISSUER}/protocol/openid-connect/token").mock(
+            return_value=httpx.Response(200, json=token_response)
+        )
+
+        with pytest.raises(ValueError, match="multi-aud"):
+            await client.exchange_code(code="code", code_verifier="v", expected_nonce=nonce)
+
+    @pytest.mark.asyncio
+    async def test_multi_aud_with_correct_azp_passes(self, client):
+        _setup_discovery(client._mock_router)
+        _setup_jwks(client._mock_router)
+
+        nonce = "n-azp-ok"
+        id_token = _sign_jwt(
+            _id_token_payload(nonce, extra={"aud": [CLIENT_ID, "other-client"], "azp": CLIENT_ID})
+        )
+        token_response = {
+            "id_token": id_token,
+            "access_token": "at",
+            "expires_in": 300,
+            "token_type": "Bearer",
+        }
+        client._mock_router.post(f"{ISSUER}/protocol/openid-connect/token").mock(
+            return_value=httpx.Response(200, json=token_response)
+        )
+
+        bundle = await client.exchange_code(code="code", code_verifier="v", expected_nonce=nonce)
+        assert bundle.claims["aud"] == [CLIENT_ID, "other-client"]
+        assert bundle.claims["azp"] == CLIENT_ID
+
 
 # ---------------------------------------------------------------------------
 # Token refresh
