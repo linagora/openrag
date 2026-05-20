@@ -496,3 +496,24 @@ class TestRefreshHelper:
             out = await refresh_session_if_needed(session=stale_session, enc_key="k", vectordb=vdb)
 
         assert out is None
+
+
+# ---------------------------------------------------------------------------
+# is_bypass_path — regression for #359 (chainlit prefix bypass tightening)
+# ---------------------------------------------------------------------------
+
+
+def test_is_bypass_path_chainlit_subtree_only():
+    """Only the actual /chainlit subtree may bypass auth — not /chainlitevil."""
+    from components.auth.middleware import is_bypass_path
+
+    # Legitimate Chainlit paths still bypass
+    assert is_bypass_path("/chainlit") is True
+    assert is_bypass_path("/chainlit/") is True
+    assert is_bypass_path("/chainlit/login") is True
+    assert is_bypass_path("/chainlit/anything/deep") is True
+
+    # The bug from #359: any prefix-shared path used to bypass auth
+    assert is_bypass_path("/chainlitevil") is False
+    assert is_bypass_path("/chainlit-spoof") is False
+    assert is_bypass_path("/chainlitX") is False
