@@ -602,6 +602,12 @@ class PartitionFileManager:
             )
             return [r[0] for r in results]
 
+    # Hard ceiling applied regardless of the caller-supplied depth — a
+    # self-referential or cyclic parent_id chain (A→B→A) would otherwise
+    # loop until Postgres aborts the query, hanging the request and tying
+    # up a backend.
+    _ANCESTOR_RECURSION_HARD_CAP = 1000
+
     def get_file_ancestors(self, partition: str, file_id: str, max_ancestor_depth: int | None = None) -> list[dict]:
         """Get all ancestors of a file using recursive CTE.
 
@@ -610,15 +616,23 @@ class PartitionFileManager:
         Args:
             partition: Partition name
             file_id: The file identifier to find ancestors for
-            max_ancestor_depth: Maximum depth to traverse (None = unlimited)
+            max_ancestor_depth: Maximum depth to traverse. ``None`` falls back
+                to ``_ANCESTOR_RECURSION_HARD_CAP``; explicit values are
+                additionally capped at the same constant so cyclic
+                ``parent_id`` chains can't loop indefinitely.
 
         Returns:
             List of file dictionaries ordered from root to the specified file
         """
 
         with self.Session() as session:
-            # Recursive CTE for ancestor traversal with optional max depth
-            depth_condition = "WHERE a.depth < :max_ancestor_depth" if max_ancestor_depth is not None else ""
+            effective_cap = self._ANCESTOR_RECURSION_HARD_CAP
+            if max_ancestor_depth is not None:
+                effective_cap = min(max_ancestor_depth, self._ANCESTOR_RECURSION_HARD_CAP)
+            # Recursive CTE for ancestor traversal — always capped at
+            # _ANCESTOR_RECURSION_HARD_CAP, even if the caller passed None
+            # or a larger value.
+            depth_condition = "WHERE a.depth < :max_ancestor_depth"
             query = text(f"""
                 WITH RECURSIVE ancestors AS (
                     -- Base case: start with the target file
@@ -642,9 +656,11 @@ class PartitionFileManager:
                 SELECT * FROM ancestors ORDER BY depth DESC
             """)
 
-            params = {"file_id": file_id, "partition": partition}
-            if max_ancestor_depth is not None:
-                params["max_ancestor_depth"] = max_ancestor_depth
+            params = {
+                "file_id": file_id,
+                "partition": partition,
+                "max_ancestor_depth": effective_cap,
+            }
 
             result = session.execute(query, params)
 
