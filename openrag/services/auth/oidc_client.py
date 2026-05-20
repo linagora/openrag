@@ -286,6 +286,14 @@ class OIDCClient:
         if isinstance(aud, list):
             if self.client_id not in aud:
                 raise ValueError(f"ID token aud {aud!r} does not contain client_id {self.client_id!r}")
+            # OIDC Core 1.0 §3.1.3.7: when aud lists multiple audiences, azp
+            # MUST be present and equal to client_id.
+            if len(aud) > 1:
+                azp = decoded.get("azp")
+                if azp != self.client_id:
+                    raise ValueError(
+                        f"ID token has multi-aud {aud!r} but azp {azp!r} != client_id {self.client_id!r}"
+                    )
         elif aud != self.client_id:
             raise ValueError(f"ID token aud {aud!r} != client_id {self.client_id!r}")
 
