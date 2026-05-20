@@ -13,7 +13,7 @@ from langchain_core.documents.base import Document as LCDocument
 
 @pytest.mark.asyncio
 async def test_customdocloader_accumulates_all_pages(tmp_path):
-    from openrag.components.indexer.loaders.CustomDocLoader import CustomDocLoader
+    from components.indexer.loaders.CustomDocLoader import CustomDocLoader
 
     fake_pages = [
         LCDocument(page_content="page-one"),
