@@ -20,6 +20,12 @@ def json_serial(obj):
 
 
 class EmlLoader(BaseLoader):
+    # Cap how deeply nested .eml attachments may be processed. A maliciously
+    # or accidentally nested chain of .eml-in-.eml otherwise causes stack
+    # overflow and file-descriptor exhaustion long after the indexer has
+    # consumed significant resources.
+    MAX_EML_RECURSION_DEPTH = 5
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # Store all kwargs for passing to sub-loaders
@@ -27,7 +33,13 @@ class EmlLoader(BaseLoader):
         # Get available loaders for processing attachments
         self.loader_classes = get_loader_classes(config=self.config)
 
-    async def aload_document(self, file_path, metadata: dict | None = None, save_markdown: bool = False):
+    async def aload_document(
+        self,
+        file_path,
+        metadata: dict | None = None,
+        save_markdown: bool = False,
+        _eml_recursion_depth: int = 0,
+    ):
         try:
             with open(file_path, "rb") as fhdl:
                 raw_email = fhdl.read()
@@ -126,6 +138,20 @@ class EmlLoader(BaseLoader):
                             # Check if we have a loader for this file type
                             loader_cls = self.loader_classes.get(file_ext)
 
+                            # Stop the recursion before we descend into another
+                            # .eml — past MAX_EML_RECURSION_DEPTH we annotate
+                            # the chain and skip the load.
+                            if (
+                                loader_cls is EmlLoader
+                                and _eml_recursion_depth + 1 >= self.MAX_EML_RECURSION_DEPTH
+                            ):
+                                attachments_text += (
+                                    f"Skipped nested .eml attachment '{filename}': "
+                                    f"recursion depth limit ({self.MAX_EML_RECURSION_DEPTH}) reached.\n"
+                                )
+                                attachments_text += "---\n"
+                                continue
+
                             if loader_cls:
                                 # Save attachment to temporary file
                                 with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_file:
@@ -135,9 +161,13 @@ class EmlLoader(BaseLoader):
                                 try:
                                     # Use appropriate loader to process attachment
                                     loader = loader_cls(**self.kwargs)
+                                    sub_kwargs: dict = {}
+                                    if loader_cls is EmlLoader:
+                                        sub_kwargs["_eml_recursion_depth"] = _eml_recursion_depth + 1
                                     attachment_doc = await loader.aload_document(
                                         temp_file_path,
                                         metadata={"source": f"attachment:{filename}"},
+                                        **sub_kwargs,
                                     )
                                     attachments_text += f"Content:\n{attachment_doc.page_content}\n"
                                 except Exception as e:
