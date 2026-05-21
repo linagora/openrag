@@ -1,5 +1,5 @@
 import asyncio
-import time
+import secrets
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from typing import Any
@@ -1277,9 +1277,17 @@ class MilvusDB(BaseVectorDB):
 
 
 def _gen_chunk_order_metadata(n: int = 20) -> list[dict]:
-    # Use base timestamp + index to ensure uniqueness
-    base_ts = int(time.time_ns())
-    ids: list[int] = [base_ts + i for i in range(n)]
+    # Two concurrent ingestions starting within the same nanosecond would
+    # otherwise produce overlapping integer ranges (base_ts + i collides
+    # across tasks), corrupting prev_section_id / next_section_id
+    # navigation by stitching together chunks from different documents.
+    # A cryptographically random 60-bit base makes the per-call ranges
+    # disjoint with overwhelming probability while staying well under the
+    # int64 ceiling Milvus uses for the section_id field. The
+    # prev/next_section_id navigation only needs ordering *within* a single
+    # call, so the lost wall-clock monotonicity across calls is fine.
+    base = secrets.randbits(60)
+    ids: list[int] = [base + i for i in range(n)]
     L = []
     for i in range(n):
         prev_chunk_id = ids[i - 1] if i > 0 else None
