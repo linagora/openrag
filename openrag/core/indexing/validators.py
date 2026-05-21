@@ -55,7 +55,7 @@ def validate_file_id(
 
 
 def validate_file_format(
-    filename: str,
+    filename: str | None,
     accepted_formats: Iterable[str],
     accepted_mimetypes: Iterable[str],
     mimetype: str | None = None,
@@ -63,8 +63,15 @@ def validate_file_format(
     """Validate the file by extension or mimetype.
 
     Returns the lowercased file extension (without the leading dot, possibly
-    empty). Raises ``ValidationError`` (HTTP 415) on rejection.
+    empty). Raises ``ValidationError`` (HTTP 415) on rejection, or
+    ``ValidationError`` (HTTP 422) when the filename is missing from the
+    multipart upload.
     """
+    if not filename:
+        raise ValidationError(
+            "Uploaded file part has no filename.",
+            status_code=422,
+        )
     file_extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     formats = set(accepted_formats)
     mimetypes = set(accepted_mimetypes)
