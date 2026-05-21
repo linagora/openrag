@@ -36,4 +36,5 @@ async def test_customdocloader_accumulates_all_pages(tmp_path):
     assert "page-two" in result.page_content
     assert "page-three" in result.page_content
     assert "[PAGE_1]" in result.page_content
+    assert "[PAGE_2]" in result.page_content
     assert "[PAGE_3]" in result.page_content
