@@ -396,7 +396,7 @@ class TestUserQuotaEnforcement:
         """
         # Create as admin (api_client default headers carry AUTH_TOKEN).
         response = api_client.post(f"/partition/{partition_name}")
-        assert response.status_code in [200, 201], f"Failed to create partition: {response.text}"
+        assert response.status_code == 201, f"Failed to create partition: {response.text}"
         # Look up the user behind user_token and promote them to owner.
         info = api_client.get("/users/info", headers={"Authorization": f"Bearer {user_token}"})
         assert info.status_code == 200, f"Failed to resolve user: {info.text}"
@@ -405,7 +405,7 @@ class TestUserQuotaEnforcement:
             f"/partition/{partition_name}/users",
             data={"user_id": user_id, "role": "owner"},
         )
-        assert grant.status_code in [200, 201, 204], f"Failed to grant access: {grant.text}"
+        assert grant.status_code == 201, f"Failed to grant access: {grant.text}"
 
     def _upload_file(self, api_client, partition: str, file_id: str, user_token: str, content: str = "Test content"):
         """Helper to upload a file as a specific user."""
