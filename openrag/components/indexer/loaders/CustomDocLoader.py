@@ -34,6 +34,6 @@ class CustomDocLoader(BaseLoader):
 
         s = ""
         for page_num, p in enumerate(pages, start=1):
-            s = p.page_content.strip() + f"\n[PAGE_{page_num}]\n"
+            s += p.page_content.strip() + f"\n[PAGE_{page_num}]\n"
 
         return Document(page_content=s, metadata=metadata)
