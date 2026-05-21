@@ -470,7 +470,14 @@ class PartitionFileManager:
 
     def add_partition_member(self, partition: str, user_id: int, role: str) -> bool:
         with self.Session() as s:
-            if not s.query(Partition).filter(Partition.partition == partition).first():
+            partition_row = s.query(Partition).filter(Partition.partition == partition).first()
+            if not partition_row:
+                # Only bootstrap a brand-new partition when the first member is
+                # being made owner. Auto-creating an ownerless partition would
+                # leave every endpoint guarded by require_partition_owner
+                # permanently inaccessible to non-admins.
+                if role != "owner":
+                    raise ValueError(f"Partition '{partition}' does not exist; first member must have role='owner'.")
                 s.add(Partition(partition=partition))
             m = s.query(PartitionMembership).filter_by(partition_name=partition, user_id=user_id).first()
             if m:
