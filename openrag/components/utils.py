@@ -158,20 +158,39 @@ def filter_sources_by_citations(sources: list, citations: set[int] | None) -> li
     return filtered if filtered else sources
 
 
+def _min_sources_tag_buffer_size(n_sources: int) -> int:
+    """Pessimistic upper bound on the length of a ``[Sources: 1, 2, …, N]`` tag.
+
+    Worst case: every source cited, plus the wrapping characters and a small
+    margin for whitespace / leading newline variations the prompt allows.
+    """
+    if n_sources <= 0:
+        return 100
+    digits_total = sum(len(str(i)) for i in range(1, n_sources + 1))
+    separators = max(0, n_sources - 1) * 2  # ", "
+    wrapping = len("\n[Sources: ") + len("]") + 8  # margin for whitespace / trailing chars
+    return digits_total + separators + wrapping
+
+
 async def stream_with_source_filtering(
     llm_stream,
     sources: list,
     model_name: str,
-    buffer_size: int = 100,
+    buffer_size: int | None = None,
 ):
     """Process an LLM SSE stream, stripping the [Sources: ...] tag from content.
 
-    Buffers the last `buffer_size` chars of content to intercept the sources tag
+    Buffers the last ``buffer_size`` chars of content to intercept the sources tag
     before it reaches the client. On stream end, strips the tag and emits a finish
     chunk with filtered source metadata.
 
+    ``buffer_size`` defaults to the minimum size that can hold a tag citing
+    *every* available source. Callers can override it explicitly (e.g. tests).
+
     Yields SSE "data: ..." lines ready to forward to the client.
     """
+    if buffer_size is None:
+        buffer_size = max(100, _min_sources_tag_buffer_size(len(sources)))
     chunk_buffer: deque[dict] = deque()
     buffered_content_len = 0
     last_chunk_template = None
