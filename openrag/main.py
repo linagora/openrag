@@ -401,4 +401,21 @@ if __name__ == "__main__":
             serve.run(OpenRagAPI.bind(), route_prefix="/", blocking=True)
 
     else:
-        uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True, proxy_headers=True)
+        # When fronted by a reverse proxy, proxy_headers alone is not enough:
+        # uvicorn only honors X-Forwarded-Proto / -For from peers listed in
+        # forwarded_allow_ips (default: 127.0.0.1). Without this set, a proxy
+        # outside loopback (the usual docker-compose / k8s case) is ignored,
+        # request.url.scheme stays 'http', _is_request_secure returns False,
+        # and the OIDC openrag_session and state cookies ship with
+        # Secure=False even on HTTPS deployments. UVICORN_FORWARDED_ALLOW_IPS
+        # accepts a comma-separated list of CIDRs / IPs or '*' to trust all.
+        forwarded_allow_ips = os.environ.get("UVICORN_FORWARDED_ALLOW_IPS", "127.0.0.1")
+        logger.info("Trusting proxy headers from forwarded_allow_ips=%s", forwarded_allow_ips)
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",
+            port=8080,
+            reload=True,
+            proxy_headers=True,
+            forwarded_allow_ips=forwarded_allow_ips,
+        )
