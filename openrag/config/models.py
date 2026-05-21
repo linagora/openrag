@@ -371,6 +371,9 @@ class LoaderConfig(ConfigMixin):
     docling_retry_base_delay: float = 2.0
     transcriber: TranscriberConfig = Field(default_factory=TranscriberConfig)
     openai: OpenAILoaderConfig = Field(default_factory=OpenAILoaderConfig)
+    # Max depth of nested .eml-in-.eml attachments the EmlLoader will descend
+    # into. Bounds recursion when .eml files are nested inside one another.
+    eml_max_recursion_depth: int = 5
 
 
 # ---------------------------------------------------------------------------
