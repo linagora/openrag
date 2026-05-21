@@ -1,67 +1,61 @@
-"""Regression test for #370 — Path(None) guard in chunk-source rendering.
+"""Regression test for #370 — document source-link building.
 
-We mirror the relevant logic from ``routers/openai.py::__prepare_sources``
-rather than importing the router (which pulls in Ray, langchain_openai,
-and the real ``openai`` package — and the file being named ``openai.py``
-creates a circular-import hazard when imported from a test).
+These tests exercise the real ``build_document_source_link`` helper used by
+``routers/openai.py::__prepare_sources``. The helper lives in the
+import-light ``routers/source_links`` module so it can be tested without
+importing ``routers/openai.py`` (which pulls in Ray, the audio loaders, and
+the OpenAI SDK).
 
-The bug: ``Path(doc_metadata.get(\"source\")).name`` raises TypeError when
-the ``source`` key is missing. The fix coerces a missing value to ``\"\"``
-before constructing the Path.
+Covered:
+- ``Path(source)`` must not crash when ``source`` is missing/None (the #370 bug).
+- ``file_url`` must be omitted when there is no filename, and present and
+  URL-encoded when there is.
 """
 
-from pathlib import Path
-
-import pytest
+from routers.source_links import build_document_source_link
 
 
-def _prepare_sources_filename(doc_metadata: dict) -> str:
-    """Mirror of the fixed logic in routers/openai.py::__prepare_sources."""
-    source = doc_metadata.get("source") or ""
-    return Path(source).name
+def _static(filename: str) -> str:
+    return f"https://host/static/{filename}"
 
 
-def _emits_file_url(doc_metadata: dict) -> bool:
-    """Mirror of the file_url inclusion decision in __prepare_sources.
-
-    ``file_url`` is only emitted when there is an actual filename, so an
-    empty/missing source never produces a static URL with an empty path.
-    """
-    source = doc_metadata.get("source") or ""
-    return bool(Path(source).name)
+def _chunk(extract_id) -> str:
+    return f"https://host/extract/{extract_id}"
 
 
-def test_filename_handles_missing_source_key():
-    assert _prepare_sources_filename({}) == ""
-    assert _prepare_sources_filename({"_id": "x"}) == ""
+def _build(doc_metadata: dict) -> dict:
+    return build_document_source_link(doc_metadata, _static, _chunk)
 
 
-def test_filename_handles_none_source_value():
-    assert _prepare_sources_filename({"source": None}) == ""
+def test_missing_source_key_does_not_crash_and_omits_file_url():
+    link = _build({"_id": "x"})
+    assert link["source_type"] == "document"
+    assert "file_url" not in link
+    assert link["chunk_url"] == "https://host/extract/x"
 
 
-def test_filename_handles_empty_source_value():
-    assert _prepare_sources_filename({"source": ""}) == ""
+def test_none_source_value_omits_file_url():
+    link = _build({"_id": "x", "source": None})
+    assert "file_url" not in link
 
 
-def test_filename_extracts_basename_when_present():
-    assert _prepare_sources_filename({"source": "/srv/data/doc.pdf"}) == "doc.pdf"
-    assert _prepare_sources_filename({"source": "doc.pdf"}) == "doc.pdf"
+def test_empty_source_value_omits_file_url():
+    link = _build({"_id": "x", "source": ""})
+    assert "file_url" not in link
 
 
-def test_file_url_omitted_when_source_missing_or_empty():
-    assert _emits_file_url({}) is False
-    assert _emits_file_url({"source": None}) is False
-    assert _emits_file_url({"source": ""}) is False
+def test_file_url_emitted_and_encoded_when_source_present():
+    link = _build({"_id": "x", "source": "/srv/data/my doc.pdf"})
+    # basename only, with spaces percent-encoded by quote()
+    assert link["file_url"] == "https://host/static/my%20doc.pdf"
 
 
-def test_file_url_emitted_when_source_present():
-    assert _emits_file_url({"source": "/srv/data/doc.pdf"}) is True
+def test_basename_extracted_from_path():
+    link = _build({"_id": "x", "source": "/srv/data/doc.pdf"})
+    assert link["file_url"] == "https://host/static/doc.pdf"
 
 
-def test_buggy_form_used_to_raise():
-    """Sanity check that the *old* code path would indeed crash —
-    this documents what the fix protected against.
-    """
-    with pytest.raises(TypeError):
-        Path(None).name  # noqa: B018  — invocation has the side effect we test
+def test_metadata_is_passed_through():
+    link = _build({"_id": "x", "source": "doc.pdf", "author": "alice"})
+    assert link["author"] == "alice"
+    assert link["chunk_url"] == "https://host/extract/x"

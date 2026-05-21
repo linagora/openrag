@@ -13,8 +13,7 @@ handed to the service as a callable), and ``StreamingResponse`` /
 
 import asyncio
 import json
-from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 import consts
 from components.indexer.utils.text_sanitizer import sanitize_text
@@ -29,6 +28,7 @@ from services.orchestrators.query_service import QueryService
 from utils.exceptions.base import OpenRAGError
 from utils.logger import get_logger
 
+from .source_links import build_document_source_link
 from .utils import (
     check_llm_model_availability,
     current_user,
@@ -101,23 +101,16 @@ async def list_models(
 
 
 def __prepare_sources(request: Request, docs: list, web_results: list | None = None):
+    def static_url(filename: str) -> str:
+        return str(request.url_for("static", path=filename))
+
+    def chunk_url(extract_id) -> str:
+        return str(request.url_for("get_extract", extract_id=extract_id))
+
     links = []
     for doc in docs:
         doc_metadata = dict(doc.metadata)
-        source = doc_metadata.get("source") or ""
-        filename = Path(source).name
-        encoded_url = None
-        if filename:
-            file_url = str(request.url_for("static", path=filename))
-            encoded_url = quote(file_url, safe=":/")
-        links.append(
-            {
-                "source_type": "document",
-                **({"file_url": encoded_url} if encoded_url else {}),
-                "chunk_url": str(request.url_for("get_extract", extract_id=doc_metadata["_id"])),
-                **doc_metadata,
-            }
-        )
+        links.append(build_document_source_link(doc_metadata, static_url, chunk_url))
     for result in web_results or []:
         url = sanitize_text(result.url or "")
         if not url or urlparse(url).scheme not in ("http", "https"):
