@@ -6,9 +6,35 @@ parent_id chains that would otherwise loop until the DB aborts.
 import pytest
 from components.indexer.vectordb.models import Base, Partition
 from components.indexer.vectordb.utils import PartitionFileManager
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from utils.logger import get_logger
+
+
+def _insert_cyclic_chain(pfm, partition: str):
+    """Insert two files whose parent_id pointers loop back to each other.
+
+    ``a.parent_id == "b"`` and ``b.parent_id == "a"`` — traversing this with
+    no depth guard would recurse forever. We write the rows with raw SQL so
+    ``file_metadata`` stays SQL ``NULL`` (the ORM column defaults to ``{}``,
+    which SQLite would surface to the raw CTE query as the string ``"{}"``
+    and break the row-flattening ``**(row.file_metadata or {})``).
+    """
+    with pfm.Session() as s:
+        s.add(Partition(partition=partition))
+        s.commit()
+        s.execute(
+            text(
+                "INSERT INTO files "
+                "(file_id, partition_name, relationship_id, parent_id, file_metadata) "
+                "VALUES (:fid, :p, :rid, :pid, NULL)"
+            ),
+            [
+                {"fid": "a", "p": partition, "rid": "rel", "pid": "b"},
+                {"fid": "b", "p": partition, "rid": "rel", "pid": "a"},
+            ],
+        )
+        s.commit()
 
 
 @pytest.fixture()
@@ -27,11 +53,16 @@ def pfm():
 
 def test_hard_cap_lives_in_retriever_config():
     """The cap value must come from the retriever config (operator-tunable),
-    not be hardcoded inside the data-access layer."""
+    not be hardcoded inside the data-access layer.
+
+    We assert the contract — the cap is a positive integer — rather than a
+    specific magnitude, so legitimate operator configurations don't fail.
+    """
     from config import load_config
 
-    cap = int(load_config().retriever.max_ancestor_depth_cap)
-    assert cap >= 100
+    cap = load_config().retriever.max_ancestor_depth_cap
+    assert isinstance(cap, int)
+    assert cap > 0
 
 
 def test_none_max_depth_is_clamped(pfm):
@@ -64,8 +95,30 @@ def test_explicit_depth_above_cap_is_clamped(pfm):
     assert out == []
 
 
-# NB: a full ancestor-walk test would require Postgres because the raw-SQL
-# CTE in get_file_ancestors returns file_metadata as a JSON column —
-# SQLite's plain-TEXT column surfaces it as a str, which the row-flattening
-# code can't unpack. The three tests above are sufficient to verify the
-# depth-cap behavior the fix introduced.
+def test_cyclic_chain_is_bounded_by_explicit_depth(pfm):
+    """An actual a→b→a cycle must terminate at the (clamped) depth instead
+    of recursing forever. With an explicit depth below the hard cap, the
+    walk stops at exactly that many levels."""
+    _insert_cyclic_chain(pfm, partition="p")
+    depth = 5
+    out = pfm.get_file_ancestors(partition="p", file_id="a", max_ancestor_depth=depth)
+    # Base row (depth 0) plus one row per recursion step while depth < cap.
+    assert len(out) == depth + 1
+    assert max(row["depth"] for row in out) == depth
+
+
+def test_cyclic_chain_is_bounded_by_hard_cap(pfm):
+    """With ``max_ancestor_depth=None`` a cyclic chain must still terminate,
+    bounded by the configured hard cap rather than looping indefinitely."""
+    from config import load_config
+
+    cap = int(load_config().retriever.max_ancestor_depth_cap)
+    _insert_cyclic_chain(pfm, partition="p")
+    out = pfm.get_file_ancestors(partition="p", file_id="a", max_ancestor_depth=None)
+    assert len(out) == cap + 1
+
+
+# NB: these tests run against SQLite, which supports WITH RECURSIVE. The rows
+# above carry NULL file_metadata on purpose — a non-null JSON value would be
+# surfaced by SQLite to the raw-SQL CTE as a str and break row flattening, so
+# exercising the *metadata* unpacking path still requires Postgres.
