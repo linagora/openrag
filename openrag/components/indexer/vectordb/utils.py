@@ -54,25 +54,36 @@ class PartitionFileManager:
             )
 
     def _ensure_admin_user(self, admin_token: str):
-        if not admin_token:
-            admin_token = f"or-{secrets.token_hex(16)}"
-        hashed_token = self.hash_token(admin_token)
         with self.Session() as s:
             admin = s.query(User).filter_by(id=1).first()
             if not admin:
+                # Brand-new bootstrap: use AUTH_TOKEN if provided, else
+                # generate a one-shot token. Either way, persist it.
+                token = admin_token or f"or-{secrets.token_hex(16)}"
                 admin = User(
                     display_name="Admin",
-                    token=hashed_token,
+                    token=self.hash_token(token),
                     is_admin=True,
                 )
                 s.add(admin)
                 s.commit()
                 self.logger.info("Created admin user")
-            else:
+            elif admin_token:
+                # Operator-provided AUTH_TOKEN is authoritative: keep DB in sync.
                 admin.is_admin = True
-                admin.token = hashed_token
+                admin.token = self.hash_token(admin_token)
                 s.commit()
-                self.logger.info("Upgraded existing user to admin")
+                self.logger.info("Synced admin user with AUTH_TOKEN")
+            else:
+                # No AUTH_TOKEN: leave the persisted token untouched so admin
+                # clients and regenerated tokens survive container restarts.
+                if not admin.is_admin:
+                    admin.is_admin = True
+                    s.commit()
+                self.logger.warning(
+                    "AUTH_TOKEN unset; keeping previously stored admin token. "
+                    "Set AUTH_TOKEN to pin a static admin token across restarts."
+                )
 
     def list_partition_files(self, partition: str, limit: int | None = None):
         """List files in a partition with optional limit - Optimized by querying File table directly"""

@@ -385,30 +385,36 @@ class PgUserRepository(UserRepository):
         token hash matching ``admin_token``. Generates a token if none
         is supplied. Returns whichever plaintext token is now valid.
         """
-        plaintext = admin_token or f"or-{secrets.token_hex(16)}"
-        token_hash = _hash_token(plaintext)
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                existing = await conn.fetchrow("SELECT id FROM users WHERE id = 1")
+                existing = await conn.fetchrow("SELECT id, token FROM users WHERE id = 1")
                 if existing is None:
+                    plaintext = admin_token or f"or-{secrets.token_hex(16)}"
                     await conn.execute(
                         """
                         INSERT INTO users (id, display_name, token, is_admin, file_count, created_at)
                         VALUES (1, 'Admin', $1, TRUE, 0, NOW())
                         """,
-                        token_hash,
+                        _hash_token(plaintext),
                     )
                     # Keep the sequence ahead of the explicit id=1 insert so
                     # subsequent `INSERT INTO users` calls don't collide.
                     await conn.execute(
                         "SELECT setval(pg_get_serial_sequence('users','id'), GREATEST(1, (SELECT MAX(id) FROM users)))"
                     )
-                else:
+                    return plaintext
+                if admin_token:
+                    # Operator-provided AUTH_TOKEN is authoritative: keep DB in sync.
                     await conn.execute(
                         "UPDATE users SET is_admin = TRUE, token = $1 WHERE id = 1",
-                        token_hash,
+                        _hash_token(admin_token),
                     )
-        return plaintext
+                    return admin_token
+                # AUTH_TOKEN unset: preserve the previously stored token (and
+                # any /users/{id}/regenerate_token rotation) instead of
+                # silently invalidating every admin client on each restart.
+                await conn.execute("UPDATE users SET is_admin = TRUE WHERE id = 1")
+                return ""
 
     # ── Helpers ──────────────────────────────────────────────────────
 
