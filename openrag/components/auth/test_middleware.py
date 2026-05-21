@@ -513,7 +513,7 @@ def test_is_bypass_path_chainlit_subtree_only():
     assert is_bypass_path("/chainlit/login") is True
     assert is_bypass_path("/chainlit/anything/deep") is True
 
-    # The bug from #359: any prefix-shared path used to bypass auth
+    # Paths that merely share the /chainlit prefix must not bypass auth
     assert is_bypass_path("/chainlitevil") is False
     assert is_bypass_path("/chainlit-spoof") is False
     assert is_bypass_path("/chainlitX") is False
