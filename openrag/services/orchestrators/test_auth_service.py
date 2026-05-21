@@ -167,6 +167,35 @@ async def test_login_sanitizes_open_redirect():
     assert payload.next_url == "/"
 
 
+# Regression for #360 — backslash-host and CRLF/NUL injection in next_url.
+@pytest.mark.parametrize(
+    "evil",
+    [
+        "/\\evil.com/phish",  # Chrome/Edge treat /\evil as netloc=evil.com
+        "/\\\\evil.com",
+        "/path\r\nLocation: http://evil",  # CRLF response splitting
+        "/path\n\nSet-Cookie: stolen=1",
+        "/path\x00admin",
+        "//evil.com",
+        "http://evil.com",
+    ],
+)
+@pytest.mark.asyncio
+async def test_login_blocks_backslash_and_crlf_in_next_url(evil):
+    svc = _service(client=FakeOIDCClient())
+    result = await svc.start_oidc_login(evil)
+    payload = StateCookieSerializer(secret_key=KEY).loads(result.state_cookie_value)
+    assert payload.next_url == "/", f"unsafe next_url leaked through: {payload.next_url!r}"
+
+
+@pytest.mark.asyncio
+async def test_login_preserves_safe_relative_path():
+    svc = _service(client=FakeOIDCClient())
+    result = await svc.start_oidc_login("/dashboard?foo=bar")
+    payload = StateCookieSerializer(secret_key=KEY).loads(result.state_cookie_value)
+    assert payload.next_url == "/dashboard?foo=bar"
+
+
 @pytest.mark.asyncio
 async def test_login_without_client_raises():
     svc = _service(client=None)

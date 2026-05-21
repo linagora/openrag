@@ -414,15 +414,31 @@ class AuthService:
             )
 
     def sanitize_next_url(self, next_url: str | None) -> str:
-        """Block open redirects.
+        """Block open redirects, header injection, and protocol-relative paths.
 
-        Accept a same-origin relative path (``/...`` but not ``//...``) or
-        an absolute URL whose origin is explicitly whitelisted; fall back
-        to ``/`` otherwise.
+        Accept a same-origin relative path (``/...`` but not ``//...`` and
+        not ``/\\...``) or an absolute URL whose origin is explicitly
+        whitelisted; fall back to ``/`` otherwise.
+
+        Defenses applied beyond the basic prefix check:
+          * any CR / LF / NUL byte triggers fallback (HTTP response splitting
+            and header injection via ``Location: ...``).
+          * a path-relative value whose second character is ``/`` or ``\\``
+            is rejected because Chrome / Edge parse ``/\\evil.com`` as a
+            host-relative URL whose host is ``evil.com``.
+          * any apparent path is re-parsed and only accepted when
+            ``urlsplit`` confirms an empty ``scheme`` and ``netloc``.
         """
         if not next_url:
             return "/"
-        if next_url.startswith("/") and not next_url.startswith("//"):
+        if any(ch in next_url for ch in ("\r", "\n", "\x00")):
+            return "/"
+        if next_url.startswith("/"):
+            if len(next_url) > 1 and next_url[1] in ("/", "\\"):
+                return "/"
+            parsed = urlparse(next_url)
+            if parsed.scheme or parsed.netloc:
+                return "/"
             return next_url
         parsed = urlparse(next_url)
         if parsed.scheme in ("http", "https") and parsed.netloc:
