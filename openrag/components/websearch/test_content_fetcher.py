@@ -173,9 +173,8 @@ class TestEnrichResults:
 def test_fetch_verify_ssl_default_is_true():
     """TLS verification must be enabled by default for any web-search fetch.
 
-    The previous default was ``False`` which made every server-side fetch
-    of a web-search result skip TLS verification, exposing citation
-    contents to silent MITM tampering. The default must be ``True``.
+    ``fetch_verify_ssl`` defaults to ``True`` so server-side fetches of
+    web-search results verify TLS unless an operator opts out.
     """
     from config.models import StaanWebSearchConfig
 
