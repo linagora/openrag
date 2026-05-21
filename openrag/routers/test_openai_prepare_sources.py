@@ -21,6 +21,16 @@ def _prepare_sources_filename(doc_metadata: dict) -> str:
     return Path(source).name
 
 
+def _emits_file_url(doc_metadata: dict) -> bool:
+    """Mirror of the file_url inclusion decision in __prepare_sources.
+
+    ``file_url`` is only emitted when there is an actual filename, so an
+    empty/missing source never produces a static URL with an empty path.
+    """
+    source = doc_metadata.get("source") or ""
+    return bool(Path(source).name)
+
+
 def test_filename_handles_missing_source_key():
     assert _prepare_sources_filename({}) == ""
     assert _prepare_sources_filename({"_id": "x"}) == ""
@@ -37,6 +47,16 @@ def test_filename_handles_empty_source_value():
 def test_filename_extracts_basename_when_present():
     assert _prepare_sources_filename({"source": "/srv/data/doc.pdf"}) == "doc.pdf"
     assert _prepare_sources_filename({"source": "doc.pdf"}) == "doc.pdf"
+
+
+def test_file_url_omitted_when_source_missing_or_empty():
+    assert _emits_file_url({}) is False
+    assert _emits_file_url({"source": None}) is False
+    assert _emits_file_url({"source": ""}) is False
+
+
+def test_file_url_emitted_when_source_present():
+    assert _emits_file_url({"source": "/srv/data/doc.pdf"}) is True
 
 
 def test_buggy_form_used_to_raise():

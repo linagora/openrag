@@ -106,12 +106,14 @@ def __prepare_sources(request: Request, docs: list, web_results: list | None = N
         doc_metadata = dict(doc.metadata)
         source = doc_metadata.get("source") or ""
         filename = Path(source).name
-        file_url = str(request.url_for("static", path=filename))
-        encoded_url = quote(file_url, safe=":/")
+        encoded_url = None
+        if filename:
+            file_url = str(request.url_for("static", path=filename))
+            encoded_url = quote(file_url, safe=":/")
         links.append(
             {
                 "source_type": "document",
-                "file_url": encoded_url,
+                **({"file_url": encoded_url} if encoded_url else {}),
                 "chunk_url": str(request.url_for("get_extract", extract_id=doc_metadata["_id"])),
                 **doc_metadata,
             }
