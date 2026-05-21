@@ -610,15 +610,25 @@ class PartitionFileManager:
         Args:
             partition: Partition name
             file_id: The file identifier to find ancestors for
-            max_ancestor_depth: Maximum depth to traverse (None = unlimited)
+            max_ancestor_depth: Maximum depth to traverse. ``None`` falls back
+                to ``retriever.max_ancestor_depth_cap``; explicit values are
+                additionally clamped at the same cap so a self-referential
+                or cyclic ``parent_id`` chain can't loop indefinitely and
+                hang a Postgres backend.
 
         Returns:
             List of file dictionaries ordered from root to the specified file
         """
 
         with self.Session() as session:
-            # Recursive CTE for ancestor traversal with optional max depth
-            depth_condition = "WHERE a.depth < :max_ancestor_depth" if max_ancestor_depth is not None else ""
+            hard_cap = int(config.retriever.max_ancestor_depth_cap)
+            effective_cap = hard_cap
+            if max_ancestor_depth is not None:
+                effective_cap = min(max_ancestor_depth, hard_cap)
+            # Recursive CTE for ancestor traversal — always capped at
+            # _ANCESTOR_RECURSION_HARD_CAP, even if the caller passed None
+            # or a larger value.
+            depth_condition = "WHERE a.depth < :max_ancestor_depth"
             query = text(f"""
                 WITH RECURSIVE ancestors AS (
                     -- Base case: start with the target file
@@ -642,9 +652,11 @@ class PartitionFileManager:
                 SELECT * FROM ancestors ORDER BY depth DESC
             """)
 
-            params = {"file_id": file_id, "partition": partition}
-            if max_ancestor_depth is not None:
-                params["max_ancestor_depth"] = max_ancestor_depth
+            params = {
+                "file_id": file_id,
+                "partition": partition,
+                "max_ancestor_depth": effective_cap,
+            }
 
             result = session.execute(query, params)
 

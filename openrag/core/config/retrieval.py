@@ -55,6 +55,12 @@ class _BaseRetrieverConfig(ConfigMixin):
     include_ancestors: bool = True
     related_limit: int = 10
     max_ancestor_depth: int = 10
+    # Absolute upper bound on ancestor-CTE recursion regardless of caller-
+    # supplied depth — defends against cyclic parent_id chains that would
+    # otherwise loop until the DB aborts the query. Operators can tune via
+    # the retriever config; the default is well above realistic deep
+    # document hierarchies.
+    max_ancestor_depth_cap: int = 1000
     allow_filterless_fallback: bool = True
 
 
