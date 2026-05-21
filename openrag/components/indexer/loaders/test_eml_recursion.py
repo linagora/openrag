@@ -1,11 +1,9 @@
 """Regression test for #364 — EmlLoader nested .eml recursion is capped.
 
-The loader's attachment processing path resolved each attachment's
-extension via ``self.loader_classes`` and recursed via ``aload_document``
-with no depth counter. A maliciously or accidentally nested chain of
-.eml-in-.eml caused stack overflow / FD exhaustion. The fix threads a
-``_eml_recursion_depth`` keyword and stops descending once
-``MAX_EML_RECURSION_DEPTH`` is reached.
+The loader recursed into .eml attachments via ``aload_document`` with no
+depth counter, so .eml files nested inside one another recursed without
+bound. The fix threads a ``_eml_recursion_depth`` keyword and stops
+descending once ``MAX_EML_RECURSION_DEPTH`` is reached.
 """
 
 import base64

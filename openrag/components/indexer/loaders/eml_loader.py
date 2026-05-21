@@ -20,10 +20,8 @@ def json_serial(obj):
 
 
 class EmlLoader(BaseLoader):
-    # Cap how deeply nested .eml attachments may be processed. A maliciously
-    # or accidentally nested chain of .eml-in-.eml otherwise causes stack
-    # overflow and file-descriptor exhaustion long after the indexer has
-    # consumed significant resources.
+    # Cap how deeply nested .eml attachments may be processed; bounds the
+    # recursion when .eml files are nested inside one another.
     MAX_EML_RECURSION_DEPTH = 5
 
     def __init__(self, **kwargs):
