@@ -105,9 +105,7 @@ if AUTH_TOKEN and AUTH_MODE != "oidc":
         raise RuntimeError(
             "CHAINLIT_AUTH_SECRET is required when authentication is enabled. "
             'Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"` '
-            "and set it in your environment. The previously shipped default "
-            "(`default_secret_for_openrag_ui`) is source-published and lets "
-            "anyone forge a valid session for any user."
+            "and set it in your environment."
         )
 
     @cl.password_auth_callback
@@ -143,9 +141,7 @@ elif AUTH_MODE == "oidc":
         raise RuntimeError(
             "CHAINLIT_AUTH_SECRET is required when AUTH_MODE=oidc. "
             'Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"` '
-            "and set it in your environment. The previously shipped default "
-            "(`default_secret_for_openrag_ui`) is source-published and lets "
-            "anyone forge a valid session for any user."
+            "and set it in your environment."
         )
 
     @cl.header_auth_callback

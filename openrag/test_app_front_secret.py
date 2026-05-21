@@ -1,7 +1,6 @@
 """Regression test for #380 — app_front.py must raise on startup when
-CHAINLIT_AUTH_SECRET is unset, instead of silently signing Chainlit
-session JWTs with the source-published default secret
-``default_secret_for_openrag_ui``.
+CHAINLIT_AUTH_SECRET is unset, instead of falling back to a hardcoded
+default secret.
 """
 
 import os
@@ -15,10 +14,8 @@ _FIX_SOURCE = os.path.dirname(__file__) + "/app_front.py"
 def test_no_hardcoded_default_secret_assignment_in_source():
     """The fall-through to a literal default secret must be gone.
 
-    The bug was the assignment that quietly substituted a known-bad value
-    when the env var was unset. The string itself may still appear in
-    error messages (telling operators *not* to use it) — so we look for
-    the assignment pattern, not just the literal.
+    The bug was an assignment that substituted a hardcoded value when the
+    env var was unset. We assert that assignment is not present in source.
     """
     with open(_FIX_SOURCE) as f:
         content = f.read()
