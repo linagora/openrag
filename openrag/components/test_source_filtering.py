@@ -268,8 +268,8 @@ class TestStreamWithManySources:
     @pytest.mark.asyncio
     async def test_60_source_citation_survives_buffer_eviction(self):
         sources = [{"file": f"src-{i}.pdf"} for i in range(60)]
-        # Build a long answer body, then a [Sources: 1, …, 60] tag whose total
-        # length exceeds the old hardcoded 100-char buffer.
+        # Build a long answer body, then a [Sources: 1, …, 60] tag long enough
+        # that the source-filter buffer must size to the full tag to catch it.
         body = "This is the answer body. " * 30
         cited = ", ".join(str(i) for i in range(1, 61))
         tag = f"\n[Sources: {cited}]"
