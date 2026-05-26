@@ -187,9 +187,5 @@ class PptxParser(DocumentParser):
             rows = ["| " + " | ".join(map(str, r)) + " |" for r in data]
             separator = "|" + "|".join(["---"] * len(data[0])) + "|"
             return md + "\n".join([rows[0], separator] + rows[1:])
-        except ValueError as exc:
-            if "unsupported plot type" in str(exc):
-                return "\n\n[unsupported chart]\n\n"
-            return "\n\n[unsupported chart]\n\n"
         except Exception:
             return "\n\n[unsupported chart]\n\n"
