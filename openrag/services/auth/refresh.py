@@ -37,18 +37,15 @@ We mitigate that with two cooperating mechanisms:
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta
 from typing import Any
 
 from services.auth.deps import get_oidc_client
 from services.auth.session_tokens import decrypt_token, encrypt_token
-from services.workers.ray_utils import call_ray_actor_with_timeout
 from utils.logger import get_logger
 
 _REFRESH_BUFFER = timedelta(seconds=60)
 _STAMPEDE_WINDOW = timedelta(seconds=5)
-_VECTORDB_TIMEOUT = float(os.getenv("VECTORDB_TIMEOUT", "30"))
 
 logger = get_logger()
 
@@ -70,7 +67,7 @@ async def refresh_session_if_needed(
     *,
     session: dict[str, Any],
     enc_key: str,
-    vectordb: Any,
+    auth_service: Any,
 ) -> dict[str, Any] | None:
     """Refresh the IdP access_token if it is within ``_REFRESH_BUFFER`` of expiry.
 
@@ -109,11 +106,7 @@ async def refresh_session_if_needed(
             last_refresh_at_dt = None
         if last_refresh_at_dt is not None and (now - last_refresh_at_dt) < _STAMPEDE_WINDOW:
             try:
-                fresh = await call_ray_actor_with_timeout(
-                    vectordb.get_oidc_session_by_id.remote(session["id"]),
-                    timeout=_VECTORDB_TIMEOUT,
-                    task_description="Re-read OIDC session after recent refresh",
-                )
+                fresh = await auth_service.get_oidc_session_by_id_for_request(session["id"])
             except Exception as e:
                 logger.bind(session_id=session.get("id"), error=str(e)).warning(
                     "Stampede-guard re-read failed; falling through to refresh"
@@ -145,11 +138,7 @@ async def refresh_session_if_needed(
             "OIDC refresh_token exchange failed — re-reading session for stampede recovery"
         )
         try:
-            fresh = await call_ray_actor_with_timeout(
-                vectordb.get_oidc_session_by_id.remote(session["id"]),
-                timeout=_VECTORDB_TIMEOUT,
-                task_description="Re-read OIDC session for stampede recovery",
-            )
+            fresh = await auth_service.get_oidc_session_by_id_for_request(session["id"])
         except Exception as re:
             logger.bind(session_id=session.get("id"), error=str(re)).error(
                 "Post-failure re-read of OIDC session failed — invalidating"
@@ -166,15 +155,11 @@ async def refresh_session_if_needed(
     new_refresh_enc = encrypt_token(bundle.refresh_token, enc_key) if bundle.refresh_token else refresh_enc
 
     try:
-        await call_ray_actor_with_timeout(
-            vectordb.update_oidc_session_tokens.remote(
-                session_id=session["id"],
-                access_token_encrypted=new_access_enc,
-                refresh_token_encrypted=new_refresh_enc,
-                access_token_expires_at=new_access_exp,
-            ),
-            timeout=_VECTORDB_TIMEOUT,
-            task_description="Persist refreshed OIDC session tokens",
+        await auth_service.update_oidc_session_tokens_for_request(
+            session_id=session["id"],
+            access_token_encrypted=new_access_enc,
+            refresh_token_encrypted=new_refresh_enc,
+            access_token_expires_at=new_access_exp,
         )
     except Exception as e:
         logger.bind(session_id=session.get("id"), error=str(e)).error(

@@ -108,6 +108,19 @@ class PgOIDCSessionRepository(OIDCSessionRepository):
         )
         return self._row_to_session(row) if row else None
 
+    async def get_by_id(self, session_id: int) -> OIDCSession | None:
+        """Lookup by primary key, filtering out revoked / expired rows."""
+        row = await self.pool.fetchrow(
+            """
+            SELECT * FROM oidc_sessions
+            WHERE id = $1
+              AND revoked_at IS NULL
+              AND session_expires_at >= NOW()
+            """,
+            session_id,
+        )
+        return self._row_to_session(row) if row else None
+
     async def get_by_sid(self, sid: str) -> list[OIDCSession]:
         rows = await self.pool.fetch(
             "SELECT * FROM oidc_sessions WHERE sid = $1 ORDER BY created_at",

@@ -154,6 +154,12 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
         """TODO(phase-9): remove. Creates the partition row on first use."""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM partitions WHERE partition = $1",
+                    partition,
+                )
+                if not exists and role != "owner":
+                    raise ValueError("The first member must have role='owner'")
                 await conn.execute(
                     """
                     INSERT INTO partitions (partition, created_at)

@@ -5,12 +5,10 @@ import argparse
 import os
 import sys
 
-from sqlalchemy import create_engine, func
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, func, select, update
 
-# Add parent dirs so we can import the models
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from components.indexer.vectordb.utils import File, User
+from services.persistence.schema import files, users
 
 
 def build_database_url(args):
@@ -25,29 +23,27 @@ def build_database_url(args):
 
 def check_file_counts(database_url, fix=False):
     engine = create_engine(database_url)
-    Session = sessionmaker(bind=engine)
 
-    with Session() as session:
-        # Actual file counts per user from the files table
+    with engine.connect() as conn:
         actual_counts = dict(
-            session.query(File.created_by, func.count(File.id))
-            .filter(File.created_by.isnot(None))
-            .group_by(File.created_by)
-            .all()
+            conn.execute(
+                select(files.c.created_by, func.count(files.c.id))
+                .where(files.c.created_by.isnot(None))
+                .group_by(files.c.created_by)
+            ).all()
         )
 
-        users = session.query(User).order_by(User.id).all()
+        users_rows = conn.execute(select(users).order_by(users.c.id)).all()
 
         rows = []
         has_mismatch = False
-        for u in users:
+        for u in users_rows:
             actual = actual_counts.get(u.id, 0)
             ok = u.file_count == actual
             if not ok:
                 has_mismatch = True
             rows.append((u.id, u.display_name or "", u.file_count, actual, ok))
 
-        # Print table
         green = "\033[92m"
         red = "\033[91m"
         bold = "\033[1m"
@@ -58,10 +54,7 @@ def check_file_counts(database_url, fix=False):
         print("-" * len(header.expandtabs()))
 
         for uid, name, stored, actual, ok in rows:
-            if ok:
-                status = f"{green}OK{reset}"
-            else:
-                status = f"{red}MISMATCH{reset}"
+            status = f"{green}OK{reset}" if ok else f"{red}MISMATCH{reset}"
             print(f"{uid:>4}  {name:<30}  {stored:>8}  {actual:>8}  {status}")
 
         print()
@@ -73,9 +66,9 @@ def check_file_counts(database_url, fix=False):
             if fix:
                 for uid, _, stored, actual, ok in rows:
                     if not ok:
-                        session.query(User).filter(User.id == uid).update({User.file_count: actual})
+                        conn.execute(update(users).where(users.c.id == uid).values(file_count=actual))
                         print(f"  Fixed user {uid}: {stored} -> {actual}")
-                session.commit()
+                conn.commit()
                 print(f"{green}All counts have been fixed.{reset}")
             else:
                 print(f"Run with {bold}--fix{reset} to correct the values.")
@@ -93,8 +86,7 @@ def main():
     parser.add_argument("--fix", action="store_true", help="Fix mismatched counts in the database")
     args = parser.parse_args()
 
-    database_url = build_database_url(args)
-    sys.exit(check_file_counts(database_url, fix=args.fix))
+    sys.exit(check_file_counts(build_database_url(args), fix=args.fix))
 
 
 if __name__ == "__main__":

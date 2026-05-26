@@ -224,8 +224,7 @@ For comprehensive OIDC setup and configuration, see the [OIDC Authentication Gui
 #### 5. Distributed deployment in a Ray cluster
 
 To scale **OpenRag** in a distributed environment using **Ray**, follow the dedicated guide:
-➡ [Deploy OpenRag in a Ray cluster](docs/deploy_ray_cluster.md)
-
+➡ [Deploy OpenRag in a Ray cluster](docs/content/docs/documentation/deploy_ray_cluster.md)
 
 ## Tests
 

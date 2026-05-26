@@ -243,6 +243,23 @@ class TestChunkOrderMetadata:
         # Section IDs are monotonically increasing within a batch.
         assert out[0]["section_id"] < out[1]["section_id"] < out[2]["section_id"]
 
+    def test_two_concurrent_calls_have_disjoint_ranges(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import services.storage.milvus_store as store_mod
+
+        monkeypatch.setattr(store_mod.time, "time_ns", lambda: 123456789)
+
+        a = MilvusVectorStore._gen_chunk_order_metadata(200)
+        b = MilvusVectorStore._gen_chunk_order_metadata(200)
+        ids_a = {row["section_id"] for row in a}
+        ids_b = {row["section_id"] for row in b}
+        assert ids_a.isdisjoint(ids_b)
+
+    def test_ids_fit_in_int64(self) -> None:
+        rows = MilvusVectorStore._gen_chunk_order_metadata(10_000)
+        int64_max = 2**63 - 1
+        for row in rows:
+            assert 0 <= row["section_id"] < int64_max
+
 
 # ---------------------------------------------------------------------------
 # _chunk_to_entity

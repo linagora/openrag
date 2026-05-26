@@ -8,7 +8,7 @@ implementation now live in
 ``WhisperActor`` and ``WhisperPool`` for legacy import paths
 (``components.indexer.loaders.audio.local_whisper.WhisperActor`` is
 still used by the OpenAI audio loader for language detection, and by
-``utils/dependencies.py`` for the actor bootstrap).
+``services/workers/bootstrap.py`` for the actor bootstrap).
 
 ``LocalWhisperLoader`` is now a thin :class:`BaseLoader` adapter that
 delegates to

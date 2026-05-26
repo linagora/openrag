@@ -6,7 +6,7 @@ The Ray actor + pool that drive Marker (``MarkerWorker``,
 implementation now live in
 ``services/workers/parsers/marker_workers.py``; this module re-exports
 ``MarkerWorker`` and ``MarkerPool`` for legacy import paths
-(``utils.dependencies`` constructs the named ``MarkerPool`` actor at
+(``services.workers.bootstrap`` constructs the named ``MarkerPool`` actor at
 startup via ``get_or_create_actor``).
 
 ``MarkerLoader`` is now a thin :class:`BaseLoader` adapter that

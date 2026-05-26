@@ -1,17 +1,35 @@
+"""Ray-actor bootstrap for the worker pool.
+
+Imported at startup (explicitly by ``main.py``) to create the long-lived
+detached actors the request path looks up by name:
+
+* TaskStateManager  — shared task-state actor
+* DocSerializer     — loader dispatcher
+* MarkerPool / DoclingPool / WhisperPool / WhisperActor — GPU parsers
+* llmSemaphore / vlmSemaphore / audioSemaphore — cluster-wide rate limiters
+
+This is the **only** non-startup module outside ``services/workers/`` that
+imports Ray — the phase-9 plan permits Ray in ``services/workers/`` plus
+the ``main.py`` startup sequence. Before phase 9 the same logic lived in
+``utils/dependencies.py``; that location violated the "Ray only in
+workers + startup" rule, so the bootstrap moved here.
+
+``actor_creation_map`` is read by ``routers/actors.py`` to restart a
+named actor on-demand from the admin endpoint.
+"""
+
 from functools import wraps
 
 import ray
-from components.indexer.indexer import Indexer, TaskStateManager
 from components.indexer.loaders.audio import WhisperActor, WhisperPool
 from components.indexer.loaders.pdf_loaders.docling2 import DoclingPool
 from components.indexer.loaders.pdf_loaders.marker import MarkerPool
 from components.indexer.loaders.serializer import DocSerializer
-from components.indexer.vectordb import ConnectorFactory
 from config import load_config
 from services.inference.distributed_semaphore import DistributedSemaphoreActor
+from services.workers.task_state import TaskStateManager
 from utils.logger import get_logger
 
-# load config
 config = load_config()
 logger = get_logger()
 
@@ -52,31 +70,6 @@ def get_marker_pool():
             return get_or_create_actor("DoclingPool", DoclingPool, lifetime="detached")
         case "MarkerLoader":
             return get_or_create_actor("MarkerPool", MarkerPool, lifetime="detached")
-
-
-def get_indexer():
-    return get_or_create_actor("Indexer", Indexer, lifetime="detached")
-
-
-def get_vectordb():
-    vectordb_cls = ConnectorFactory().get_vectordb_cls()
-    actor = get_or_create_actor("Vectordb", vectordb_cls, lifetime="detached")
-    # Open the asyncpg pool + materialise the Milvus collection inside the
-    # actor's own asyncio loop. ray.get() blocks here but the work runs
-    # remotely, so the pool is bound to the actor's loop (not a one-shot
-    # init loop). Both stores guard with internal "_loaded" flags, so
-    # re-running this on a hot actor is a no-op.
-    ray.get(actor.initialize.remote())
-
-    # Override the restart-endpoint hook (see routers/actors.py) so a
-    # restarted Vectordb actor goes through the same initialize step.
-    def _recreate_and_init():
-        new_actor = get_or_create_actor("Vectordb", vectordb_cls, lifetime="detached")
-        ray.get(new_actor.initialize.remote())
-        return new_actor
-
-    actor_creation_map["Vectordb"] = _recreate_and_init
-    return actor
 
 
 def init_audio_actor():
@@ -126,5 +119,3 @@ get_marker_pool()
 
 task_state_manager = get_task_state_manager()
 serializer = get_serializer()
-vectordb = get_vectordb()
-indexer = get_indexer()

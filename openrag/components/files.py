@@ -1,4 +1,3 @@
-import asyncio
 import secrets
 import time
 from pathlib import Path
@@ -42,27 +41,3 @@ async def save_file_to_disk(
             await buffer.write(chunk)
 
     return file_path
-
-
-async def serialize_file(task_id: str, path: str, metadata: dict | None = {}):
-    import ray
-    from ray.exceptions import TaskCancelledError
-
-    serializer_queue = ray.get_actor("SerializerQueue", namespace="openrag")
-    # Kick off the remote task
-    future = serializer_queue.submit_document.remote(task_id, path, metadata=metadata)
-
-    # Wait for it to complete, with timeout
-    ready, _ = await asyncio.to_thread(ray.wait, [future])
-
-    if ready:
-        try:
-            doc = await ready[0]
-            return doc
-        except TaskCancelledError:
-            raise
-        except Exception:
-            raise
-    else:
-        ray.cancel(future, recursive=True)
-        raise TimeoutError(f"Serialization task {task_id} timed out after seconds")

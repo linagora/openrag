@@ -276,3 +276,31 @@ class TestAudioChunking:
         # Chunks should be contiguous
         for i in range(len(chunks) - 1):
             assert chunks[i][1] == chunks[i + 1][0]
+
+
+class TestTranscribeFinallyCleanup:
+    @staticmethod
+    def _buggy_transcribe():
+        try:
+            raise RuntimeError("audio decode failed")
+            tmp_wav = None  # noqa: F841  (unreachable, matches old code)
+        finally:
+            if tmp_wav:  # noqa: F821  (deliberately exercises the bug)
+                pass
+
+    @staticmethod
+    def _fixed_transcribe():
+        tmp_wav = None
+        try:
+            raise RuntimeError("audio decode failed")
+        finally:
+            if tmp_wav:
+                pass
+
+    def test_buggy_pattern_masks_original_error(self):
+        with pytest.raises(UnboundLocalError):
+            self._buggy_transcribe()
+
+    def test_fixed_pattern_propagates_original_error(self):
+        with pytest.raises(RuntimeError, match="audio decode failed"):
+            self._fixed_transcribe()

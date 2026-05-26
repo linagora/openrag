@@ -24,45 +24,36 @@ from fastapi.testclient import TestClient
 # ---------------------------------------------------------------------------
 
 
-def _make_vectordb_mock(
+def _make_auth_service_mock(
     *,
     user=None,
     user_by_token=None,
     session=None,
     partitions=None,
 ):
-    """Return a MagicMock exposing the Ray-actor surface used by the middleware.
-
-    Every ``.remote(...)`` call returns a *coroutine* since the middleware
-    awaits it.
-    """
+    """Return a MagicMock exposing the auth-service surface used by the middleware."""
     mock = MagicMock()
 
-    mock.get_user = MagicMock()
-    mock.get_user.remote = AsyncMock(return_value=user or {"id": 1, "display_name": "Admin"})
+    mock.get_user_for_request = AsyncMock(return_value=user or {"id": 1, "display_name": "Admin"})
 
-    mock.get_user_by_token = MagicMock()
-    mock.get_user_by_token.remote = AsyncMock(return_value=user_by_token)
+    mock.get_user_by_token_for_request = AsyncMock(return_value=user_by_token)
 
-    mock.get_oidc_session_by_token = MagicMock()
-    mock.get_oidc_session_by_token.remote = AsyncMock(return_value=session)
+    mock.get_oidc_session_by_token_for_request = AsyncMock(return_value=session)
+    mock.get_oidc_session_by_id_for_request = AsyncMock(return_value=session)
 
-    mock.list_user_partitions = MagicMock()
-    mock.list_user_partitions.remote = AsyncMock(return_value=partitions or [])
+    mock.list_user_partitions_for_request = AsyncMock(return_value=partitions or [])
 
-    mock.revoke_oidc_session_by_id = MagicMock()
-    mock.revoke_oidc_session_by_id.remote = AsyncMock(return_value=None)
+    mock.revoke_oidc_session_by_id_for_request = AsyncMock(return_value=None)
 
-    mock.update_oidc_session_tokens = MagicMock()
-    mock.update_oidc_session_tokens.remote = AsyncMock(return_value=None)
+    mock.update_oidc_session_tokens_for_request = AsyncMock(return_value=None)
 
     return mock
 
 
-def _build_app(vectordb_mock) -> FastAPI:
+def _build_app(auth_service_mock) -> FastAPI:
     """Construct a FastAPI app with the middleware under test."""
     app = FastAPI()
-    app.add_middleware(AuthMiddleware, get_vectordb=lambda: vectordb_mock)
+    app.add_middleware(AuthMiddleware, get_auth_service=lambda _request: auth_service_mock)
 
     @app.get("/")
     async def root(request: Request):
@@ -133,7 +124,7 @@ class TestTokenModeLegacy:
         monkeypatch.setenv("AUTH_TOKEN", "configured-admin-token")
 
     def test_bearer_valid_returns_200(self):
-        vdb = _make_vectordb_mock(user_by_token={"id": 7, "display_name": "U"})
+        vdb = _make_auth_service_mock(user_by_token={"id": 7, "display_name": "U"})
         app = _build_app(vdb)
         with TestClient(app) as client:
             r = client.get(
@@ -144,7 +135,7 @@ class TestTokenModeLegacy:
         assert r.json() == {"user": 7}
 
     def test_bearer_invalid_returns_403(self):
-        vdb = _make_vectordb_mock(user_by_token=None)
+        vdb = _make_auth_service_mock(user_by_token=None)
         app = _build_app(vdb)
         with TestClient(app) as client:
             r = client.get(
@@ -155,7 +146,7 @@ class TestTokenModeLegacy:
         assert r.json() == {"detail": "Invalid token"}
 
     def test_missing_token_returns_403(self):
-        vdb = _make_vectordb_mock()
+        vdb = _make_auth_service_mock()
         app = _build_app(vdb)
         with TestClient(app) as client:
             r = client.get("/v1/chat/completions")
@@ -163,7 +154,7 @@ class TestTokenModeLegacy:
         assert r.json() == {"detail": "Missing token"}
 
     def test_bypass_path_open(self):
-        vdb = _make_vectordb_mock()
+        vdb = _make_auth_service_mock()
         app = _build_app(vdb)
         with TestClient(app) as client:
             r = client.get("/health_check")
@@ -176,13 +167,13 @@ class TestTokenModeDevBypass:
     def test_no_token_resolves_user_1(self, monkeypatch):
         monkeypatch.setenv("AUTH_MODE", "token")
         monkeypatch.delenv("AUTH_TOKEN", raising=False)
-        vdb = _make_vectordb_mock(user={"id": 1, "display_name": "Admin"})
+        vdb = _make_auth_service_mock(user={"id": 1, "display_name": "Admin"})
         app = _build_app(vdb)
         with TestClient(app) as client:
             r = client.get("/v1/chat/completions")
         assert r.status_code == 200
         assert r.json() == {"user": 1}
-        vdb.get_user.remote.assert_awaited_with(1)
+        vdb.get_user_for_request.assert_awaited_with(1)
 
 
 # ---------------------------------------------------------------------------
@@ -219,15 +210,15 @@ class TestOIDCMode:
     def test_cookie_valid_and_access_token_fresh_no_refresh(self):
         session = self._fresh_session(user_id=42)
         user = {"id": 42, "display_name": "Alice"}
-        vdb = _make_vectordb_mock(user=user, session=session)
+        vdb = _make_auth_service_mock(user=user, session=session)
         app = _build_app(vdb)
         with TestClient(app) as client:
             client.cookies.set("openrag_session", "plain-cookie")
             r = client.get("/v1/chat/completions")
         assert r.status_code == 200
         assert r.json() == {"user": 42}
-        vdb.update_oidc_session_tokens.remote.assert_not_awaited()
-        vdb.revoke_oidc_session_by_id.remote.assert_not_awaited()
+        vdb.update_oidc_session_tokens_for_request.assert_not_awaited()
+        vdb.revoke_oidc_session_by_id_for_request.assert_not_awaited()
 
     def test_cookie_near_expiry_triggers_refresh(self, monkeypatch):
         """access_token within 60s of expiry AND refresh_token present → refresh."""
@@ -235,13 +226,13 @@ class TestOIDCMode:
         # Force the refresh helper to "see" the token as near-expiry.
         session["access_token_expires_at"] = datetime.now() + timedelta(seconds=5)
         user = {"id": 42}
-        vdb = _make_vectordb_mock(user=user, session=session)
+        vdb = _make_auth_service_mock(user=user, session=session)
 
         # Patch the helper at its import site inside the middleware module
         # to avoid any dependency on a real OIDC client.
-        async def fake_refresh(*, session, enc_key, vectordb):
+        async def fake_refresh(*, session, enc_key, auth_service):
             new_exp = datetime.now() + timedelta(minutes=30)
-            await vectordb.update_oidc_session_tokens.remote(
+            await auth_service.update_oidc_session_tokens_for_request(
                 session_id=session["id"],
                 access_token_encrypted=b"new-enc-access",
                 refresh_token_encrypted=b"new-enc-refresh",
@@ -264,15 +255,15 @@ class TestOIDCMode:
                 r = client.get("/v1/chat/completions")
 
         assert r.status_code == 200
-        vdb.update_oidc_session_tokens.remote.assert_awaited()
+        vdb.update_oidc_session_tokens_for_request.assert_awaited()
 
     def test_cookie_refresh_fails_session_revoked_and_302(self):
         """access_token expired + refresh fails → session revoked, UI request → 302."""
         session = self._fresh_session(user_id=42)
         session["access_token_expires_at"] = datetime.now() - timedelta(minutes=1)
-        vdb = _make_vectordb_mock(user=None, session=session)
+        vdb = _make_auth_service_mock(user=None, session=session)
 
-        async def fake_refresh(*, session, enc_key, vectordb):
+        async def fake_refresh(*, session, enc_key, auth_service):
             return None  # refresh failed → invalid session
 
         with patch(
@@ -286,13 +277,13 @@ class TestOIDCMode:
 
         assert r.status_code == 302
         assert r.headers["location"].startswith("/auth/login?next=")
-        vdb.revoke_oidc_session_by_id.remote.assert_awaited_with(1)
+        vdb.revoke_oidc_session_by_id_for_request.assert_awaited_with(1)
 
     # -- bearer fallback ----------------------------------------------------
 
     def test_bearer_fallback_accepted_in_oidc_mode(self):
         """Programmatic clients keep using ``users.token`` in oidc mode."""
-        vdb = _make_vectordb_mock(user_by_token={"id": 9, "display_name": "bot"})
+        vdb = _make_auth_service_mock(user_by_token={"id": 9, "display_name": "bot"})
         app = _build_app(vdb)
         with TestClient(app) as client:
             r = client.get(
@@ -305,7 +296,7 @@ class TestOIDCMode:
     # -- unauthenticated branching ------------------------------------------
 
     def test_no_creds_api_path_returns_401(self):
-        vdb = _make_vectordb_mock()
+        vdb = _make_auth_service_mock()
         app = _build_app(vdb)
         with TestClient(app) as client:
             r = client.get("/indexer/foo")
@@ -313,7 +304,7 @@ class TestOIDCMode:
         assert r.json() == {"detail": "Unauthenticated"}
 
     def test_no_creds_root_path_returns_302(self):
-        vdb = _make_vectordb_mock()
+        vdb = _make_auth_service_mock()
         app = _build_app(vdb)
         with TestClient(app) as client:
             r = client.get("/", follow_redirects=False)
@@ -322,7 +313,7 @@ class TestOIDCMode:
         assert r.headers["location"] == "/auth/login?next=%2F"
 
     def test_no_creds_root_with_query_preserves_next(self):
-        vdb = _make_vectordb_mock()
+        vdb = _make_auth_service_mock()
         app = _build_app(vdb)
         with TestClient(app) as client:
             r = client.get("/?foo=bar", follow_redirects=False)
@@ -332,14 +323,14 @@ class TestOIDCMode:
         assert "%2F" in r.headers["location"]
 
     def test_no_creds_static_path_returns_302(self):
-        vdb = _make_vectordb_mock()
+        vdb = _make_auth_service_mock()
         app = _build_app(vdb)
         with TestClient(app) as client:
             r = client.get("/static/foo.pdf", follow_redirects=False)
         assert r.status_code == 302
 
     def test_no_creds_v1_chat_returns_401(self):
-        vdb = _make_vectordb_mock()
+        vdb = _make_auth_service_mock()
         app = _build_app(vdb)
         with TestClient(app) as client:
             r = client.get("/v1/chat/completions")
@@ -362,12 +353,12 @@ class TestRefreshHelper:
             "refresh_token_encrypted": b"foo",
         }
         vdb = MagicMock()
-        vdb.update_oidc_session_tokens = MagicMock()
-        vdb.update_oidc_session_tokens.remote = AsyncMock()
+        vdb.update_oidc_session_tokens_for_request = MagicMock()
+        vdb.update_oidc_session_tokens_for_request = AsyncMock()
 
-        out = await refresh_session_if_needed(session=session, enc_key="k", vectordb=vdb)
+        out = await refresh_session_if_needed(session=session, enc_key="k", auth_service=vdb)
         assert out is session
-        vdb.update_oidc_session_tokens.remote.assert_not_awaited()
+        vdb.update_oidc_session_tokens_for_request.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_expired_no_refresh_token_returns_none(self):
@@ -379,7 +370,7 @@ class TestRefreshHelper:
             "refresh_token_encrypted": None,
         }
         vdb = MagicMock()
-        out = await refresh_session_if_needed(session=session, enc_key="k", vectordb=vdb)
+        out = await refresh_session_if_needed(session=session, enc_key="k", auth_service=vdb)
         assert out is None
 
     # ------------------------------------------------------------------
@@ -411,10 +402,10 @@ class TestRefreshHelper:
         }
 
         vdb = MagicMock()
-        vdb.get_oidc_session_by_id = MagicMock()
-        vdb.get_oidc_session_by_id.remote = AsyncMock(return_value=fresh_row)
-        vdb.update_oidc_session_tokens = MagicMock()
-        vdb.update_oidc_session_tokens.remote = AsyncMock()
+        vdb.get_oidc_session_by_id_for_request = MagicMock()
+        vdb.get_oidc_session_by_id_for_request = AsyncMock(return_value=fresh_row)
+        vdb.update_oidc_session_tokens_for_request = MagicMock()
+        vdb.update_oidc_session_tokens_for_request = AsyncMock()
 
         # Sentinel: the IdP client must NOT be contacted.
         fake_client = MagicMock()
@@ -422,11 +413,11 @@ class TestRefreshHelper:
             side_effect=AssertionError("IdP must not be called during stampede short-circuit")
         )
         with patch.object(refresh_mod, "get_oidc_client", return_value=fake_client):
-            out = await refresh_session_if_needed(session=stale_session, enc_key="k", vectordb=vdb)
+            out = await refresh_session_if_needed(session=stale_session, enc_key="k", auth_service=vdb)
 
         assert out is fresh_row
         fake_client.refresh_access_token.assert_not_awaited()
-        vdb.update_oidc_session_tokens.remote.assert_not_awaited()
+        vdb.update_oidc_session_tokens_for_request.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_refresh_recovers_when_idp_rejects_stale_refresh_token(self):
@@ -452,8 +443,8 @@ class TestRefreshHelper:
         }
 
         vdb = MagicMock()
-        vdb.get_oidc_session_by_id = MagicMock()
-        vdb.get_oidc_session_by_id.remote = AsyncMock(return_value=fresh_row)
+        vdb.get_oidc_session_by_id_for_request = MagicMock()
+        vdb.get_oidc_session_by_id_for_request = AsyncMock(return_value=fresh_row)
 
         fake_client = MagicMock()
         fake_client.refresh_access_token = AsyncMock(side_effect=RuntimeError("invalid_grant"))
@@ -461,11 +452,11 @@ class TestRefreshHelper:
             patch.object(refresh_mod, "get_oidc_client", return_value=fake_client),
             patch.object(refresh_mod, "decrypt_token", return_value="old-refresh-plain"),
         ):
-            out = await refresh_session_if_needed(session=stale_session, enc_key="k", vectordb=vdb)
+            out = await refresh_session_if_needed(session=stale_session, enc_key="k", auth_service=vdb)
 
         assert out is fresh_row
         fake_client.refresh_access_token.assert_awaited_once()
-        vdb.get_oidc_session_by_id.remote.assert_awaited_once_with(1)
+        vdb.get_oidc_session_by_id_for_request.assert_awaited_once_with(1)
 
     @pytest.mark.asyncio
     async def test_refresh_returns_none_when_idp_rejects_and_no_concurrent_refresh(self):
@@ -484,8 +475,8 @@ class TestRefreshHelper:
         stale_row_from_db = dict(stale_session)
 
         vdb = MagicMock()
-        vdb.get_oidc_session_by_id = MagicMock()
-        vdb.get_oidc_session_by_id.remote = AsyncMock(return_value=stale_row_from_db)
+        vdb.get_oidc_session_by_id_for_request = MagicMock()
+        vdb.get_oidc_session_by_id_for_request = AsyncMock(return_value=stale_row_from_db)
 
         fake_client = MagicMock()
         fake_client.refresh_access_token = AsyncMock(side_effect=RuntimeError("invalid_grant"))
@@ -493,7 +484,7 @@ class TestRefreshHelper:
             patch.object(refresh_mod, "get_oidc_client", return_value=fake_client),
             patch.object(refresh_mod, "decrypt_token", return_value="old-refresh-plain"),
         ):
-            out = await refresh_session_if_needed(session=stale_session, enc_key="k", vectordb=vdb)
+            out = await refresh_session_if_needed(session=stale_session, enc_key="k", auth_service=vdb)
 
         assert out is None
 

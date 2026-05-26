@@ -1,150 +1,84 @@
-import asyncio
+"""Docling-backed PDF loader.
 
-import ray
-import torch
-from config import load_config
-from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.document import ConversionResult
-from docling.datamodel.pipeline_options import (
-    AcceleratorDevice,
-    AcceleratorOptions,
-    PdfPipelineOptions,
-    TableFormerMode,
-    TableStructureOptions,
-)
-from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling_core.types.doc.document import PictureItem
+The Ray actor + pool (``DoclingWorker``, ``DoclingPool``) and the
+services-side :class:`BasePooledParser` implementation now live in
+``services/workers/parsers/docling_workers.py``; this module re-exports
+them for legacy import paths (``services.workers.bootstrap`` constructs the
+named ``DoclingPool`` actor at startup via ``get_or_create_actor``).
+
+``DoclingLoader2`` is a thin :class:`BaseLoader` adapter that delegates
+to :class:`core.indexing.parsers.pdf.docling.DoclingParser`, which
+wraps the services-side pool.  New code should call the core parser
+directly; this shim keeps the legacy loader-discovery path alive until
+consumers migrate.
+"""
+
+from __future__ import annotations
+
 from langchain_core.documents.base import Document
-from tqdm.asyncio import tqdm
+from services.workers.parsers.docling_workers import (  # noqa: F401  (re-exported for legacy paths)
+    DoclingLoader,
+    DoclingPool,
+    DoclingWorker,
+)
 from utils.logger import get_logger
 
 from ..base import BaseLoader
 
 logger = get_logger()
-config = load_config()
-
-
-if torch.cuda.is_available():
-    DOCLING_NUM_GPUS = config.loader.docling_num_gpus
-else:  # On CPU
-    DOCLING_NUM_GPUS = 0
-
-DOCLING_MAX_TASKS_PER_WORKER = config.loader.docling_max_tasks_per_worker
-
-
-@ray.remote(num_gpus=DOCLING_NUM_GPUS)
-class DoclingWorker:
-    def __init__(self):
-        img_scale = 2
-        pipeline_options = PdfPipelineOptions(
-            do_ocr=True,
-            do_table_structure=True,
-            generate_picture_images=True,
-            images_scale=img_scale,
-            # generate_table_images=True,
-            # generate_page_images=True
-        )
-        pipeline_options.table_structure_options = TableStructureOptions(
-            do_cell_matching=True, mode=TableFormerMode.ACCURATE
-        )
-
-        pipeline_options.accelerator_options = AcceleratorOptions(device=AcceleratorDevice.AUTO)
-        self.converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options, backend=PyPdfiumDocumentBackend)
-            }
-        )
-
-    async def convert(self, file_path) -> ConversionResult:
-        with torch.no_grad():
-            o = await asyncio.to_thread(self.converter.convert, str(file_path))
-            return o
-
-
-@ray.remote
-class DoclingPool:
-    def __init__(self):
-        from config import load_config
-        from utils.logger import get_logger
-
-        self.logger = get_logger()
-        self.config = load_config()
-        self.pool_size = self.config.loader.docling_pool_size
-
-        self.actors = [DoclingWorker.remote() for _ in range(self.pool_size)]
-        self._queue: asyncio.Queue[ray.actor.ActorHandle] = asyncio.Queue()
-
-        for _ in range(DOCLING_MAX_TASKS_PER_WORKER):
-            for actor in self.actors:
-                self._queue.put_nowait(actor)
-
-        total_slots = self.pool_size * DOCLING_MAX_TASKS_PER_WORKER
-        self.logger.info(
-            f"Docling pool: {self.pool_size} actors × {DOCLING_MAX_TASKS_PER_WORKER} slots = "
-            f"{total_slots} PDF concurrency"
-        )
-
-    async def process_pdf(self, file_path: str) -> ConversionResult:
-        from components.ray_utils import call_ray_actor_with_timeout, retry_with_backoff
-
-        timeout = self.config.loader.docling_timeout
-
-        async def attempt(i: int):
-            actor: DoclingWorker = await self._queue.get()
-            try:
-                return await call_ray_actor_with_timeout(
-                    actor.convert.remote(file_path),
-                    timeout=timeout,
-                    task_description=f"DoclingPool PDF ({file_path})",
-                )
-            finally:
-                await self._queue.put(actor)
-
-        return await retry_with_backoff(
-            attempt,
-            max_retries=self.config.loader.docling_max_task_retry,
-            base_delay=self.config.loader.docling_retry_base_delay,
-            task_description=f"DoclingPool PDF ({file_path})",
-        )
 
 
 class DoclingLoader2(BaseLoader):
+    """Adapter shim — delegates to ``DoclingParser`` via the services-side pool."""
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.docling_actor: DoclingPool = ray.get_actor("DoclingPool", namespace="openrag")
+        from core.indexing.parsers.pdf.docling import DoclingParser
+        from services.workers.parsers.docling_workers import DoclingLoader as _DoclingLoader
+
+        self._parser = DoclingParser(pool=_DoclingLoader())
 
     async def aload_document(self, file_path, metadata, save_markdown=False):
-        result: ConversionResult = await self.docling_actor.process_pdf.remote(file_path)
-        n_pages = len(result.pages)
+        import asyncio
+        from pathlib import Path
 
-        s = ""
-        for i in range(1, n_pages + 1):
-            s += result.document.export_to_markdown(page_no=i)
-            s += f"\n[PAGE_{i}]\n"
+        from core.models.document import Document as CoreDocument
+        from core.models.document import DocumentType
 
-        enriched_content = s
-        if self.image_captioning:
-            pictures = result.document.pictures
-            descriptions = await self.get_captions(pictures)
-            for description in descriptions:
-                enriched_content = enriched_content.replace("<!-- image -->", description, 1)
+        path = Path(file_path)
+        raw_bytes = await asyncio.to_thread(path.read_bytes)
+        core_doc = CoreDocument(
+            filename=path.name,
+            content_type=DocumentType.PDF,
+            raw_bytes=raw_bytes,
+            metadata=dict(metadata or {}),
+        )
+        processed = await self._parser.parse(core_doc)
+
+        markdown = ""
+        for block in processed.text_blocks:
+            markdown += block.text + f"\n[PAGE_{block.page_number}]\n"
+
+        if self.image_captioning and processed.images:
+            import io
+
+            from PIL import Image
+
+            pil_images = []
+            for img_block in processed.images:
+                if img_block.image_bytes:
+                    pil_images.append(Image.open(io.BytesIO(img_block.image_bytes)))
+
+            if pil_images:
+                captions = await self.caption_images(pil_images)
+                for img_block, caption in zip(processed.images, captions):
+                    ref = (img_block.metadata or {}).get("markdown_ref")
+                    if ref:
+                        markdown = markdown.replace("<!-- image -->", caption, 1)
         else:
             logger.debug("Image captioning disabled. Ignoring images.")
 
-        doc = Document(page_content=enriched_content, metadata=metadata)
+        doc = Document(page_content=markdown, metadata=metadata)
         if save_markdown:
-            self.save_document(Document(page_content=enriched_content), str(file_path))
+            self.save_document(Document(page_content=markdown), str(file_path))
         return doc
-
-    async def get_captions(self, pictures: list[PictureItem]):
-        tasks = []
-        for picture in pictures:
-            tasks.append(self.get_image_description(picture.image.pil_image))
-        try:
-            results = await tqdm.gather(*tasks, desc="Captioning imgs")
-        except asyncio.CancelledError:
-            for task in tasks:
-                task.cancel()
-            raise
-        return results

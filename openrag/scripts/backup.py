@@ -5,14 +5,38 @@ import os
 import sys
 from typing import IO, Any
 
-from components.indexer.vectordb.utils import PartitionFileManager
 from pymilvus import Collection, connections
+from services.persistence.schema import files as files_table
+from services.persistence.schema import partitions as partitions_table
+from sqlalchemy import create_engine, select
 from utils.logger import get_logger
+
+
+def _list_partitions(conn) -> list[dict]:
+    rows = conn.execute(select(partitions_table)).all()
+    return [{"partition": r.partition, "created_at": r.created_at.isoformat()} for r in rows]
+
+
+def _list_partition_files(conn, partition_name: str, limit: int | None = None) -> dict:
+    q = select(files_table).where(files_table.c.partition_name == partition_name)
+    if limit is not None:
+        q = q.limit(limit)
+    rows = conn.execute(q).all()
+    file_list = []
+    for r in rows:
+        entry = {"file_id": r.file_id, "partition": r.partition_name}
+        if r.relationship_id is not None:
+            entry["relationship_id"] = r.relationship_id
+        if r.parent_id is not None:
+            entry["parent_id"] = r.parent_id
+        entry.update(r.file_metadata or {})
+        file_list.append(entry)
+    return {"files": file_list}
 
 
 def dump_rdb_part(
     out_fh: IO[str],
-    pfm: PartitionFileManager,
+    conn,
     partitions: dict[str, dict[str, Any]],
     logger: Any,
     verbose: bool = False,
@@ -49,7 +73,7 @@ def dump_rdb_part(
         )
 
         try:
-            files = pfm.list_partition_files(part_name)
+            files = _list_partition_files(conn, part_name)
         except Exception as e:
             logger.error(f"Failed while requesting the list of files in partition '{part_name}'\n{e}")
             raise
@@ -223,15 +247,15 @@ def main():
         logger.info(f"rdb @ {rdb.host}:{rdb.port} | vdb @ {vdb.host}:{vdb.port} | collection: {vdb.collection_name}")
 
     # List existing partitions
+    database_url = (
+        f"postgresql://{rdb.user}:{rdb.password}@{rdb.host}:{rdb.port}/partitions_for_collection_{vdb.collection_name}"
+    )
     try:
-        pfm = PartitionFileManager(
-            database_url=f"postgresql://{rdb.user}:{rdb.password}@{rdb.host}:{rdb.port}/partitions_for_collection_{vdb.collection_name}",
-            logger=logger,
-        )
-
-        existing_partitions = {item["partition"]: item for item in pfm.list_partitions()}
+        engine = create_engine(database_url)
+        with engine.connect() as conn:
+            existing_partitions = {item["partition"]: item for item in _list_partitions(conn)}
     except Exception as e:
-        logger.error(f"Failed while accessing PartitionFileManager at {rdb.host}:{rdb.port}\n{e}")
+        logger.error(f"Failed while accessing catalog database at {rdb.host}:{rdb.port}\n{e}")
         raise
 
     if args.include_only:
@@ -268,8 +292,9 @@ def main():
 
     try:
         with open_output_file(args.output, logger) as out_fh:
-            # Dump data from RDB (one line per document)
-            dump_rdb_part(out_fh, pfm, partitions, logger, args.verbose)
+            with create_engine(database_url).connect() as conn:
+                # Dump data from RDB (one line per document)
+                dump_rdb_part(out_fh, conn, partitions, logger, args.verbose)
 
             # Dump data from VDB (one line per chunk)
             dump_vdb_part(

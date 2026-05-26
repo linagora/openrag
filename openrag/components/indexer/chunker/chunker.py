@@ -6,7 +6,7 @@ coexist until Phase 8 cutover.
 Scheduled for removal in Phase 12.
 """
 
-from typing import Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 # Side-effect import: pre-loads the indexer-utils submodule so the legacy
 # circular import between `components.utils` and `components.indexer.utils.files`
@@ -23,10 +23,11 @@ from core.models.document import ProcessedDocument, TextBlock
 from core.prompts.contextualization_builder import wrap_chunk_with_context
 from langchain_core.documents.base import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from utils.logger import get_logger
 
-from ..embeddings import BaseEmbedding
+if TYPE_CHECKING:
+    from components.indexer.embeddings import BaseEmbedding
+    from langchain_openai import ChatOpenAI
 
 logger = get_logger()
 config = load_config()
@@ -40,7 +41,7 @@ class _LangChainLLMAdapter(_CoreLLM):
 
     _ROLE_MAP: ClassVar[dict] = {"user": HumanMessage, "system": SystemMessage, "assistant": AIMessage}
 
-    def __init__(self, lc_llm: ChatOpenAI) -> None:
+    def __init__(self, lc_llm: "ChatOpenAI") -> None:
         self._llm = lc_llm
 
     async def generate(self, prompt: str, **kwargs) -> str:
@@ -95,6 +96,8 @@ class BaseChunker:
         contextual_retrieval: bool = False,
         **kwargs,
     ):
+        from langchain_openai import ChatOpenAI
+
         self.chunk_size = chunk_size
         self.chunk_overlap_rate = chunk_overlap_rate
         self.chunk_overlap = int(self.chunk_size * self.chunk_overlap_rate)
@@ -205,7 +208,7 @@ class ChunkerFactory:
     @staticmethod
     def create_chunker(
         config,
-        embedder: BaseEmbedding | None = None,
+        embedder: "BaseEmbedding | None" = None,
     ) -> BaseChunker:
         chunker_params = config.chunker.model_dump()
         name = chunker_params.pop("name")

@@ -5,24 +5,16 @@ named ``routers/test_*.py`` would shadow the ``openai`` package during
 import resolution, causing a circular import.
 """
 
-import sys
-from types import ModuleType
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 # Prevent Ray from scanning the working directory (which may contain
-# permission-restricted folders like db/) and stub RagPipeline to
-# avoid heavy initialization during test collection.
+# permission-restricted folders like db/).
 import ray  # noqa: E402
 
 if not ray.is_initialized():
     ray.init(runtime_env={"working_dir": None}, ignore_reinit_error=True)
-
-if "components.pipeline" not in sys.modules:
-    _stub = ModuleType("components.pipeline")
-    _stub.RagPipeline = MagicMock()
-    sys.modules["components.pipeline"] = _stub
 
 from models.openai import OpenAIChatCompletionRequest, OpenAICompletionRequest  # noqa: E402
 from routers.openai import validate_tokens_limit  # noqa: E402

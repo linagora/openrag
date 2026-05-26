@@ -34,6 +34,7 @@ Hybrid BM25:
 from __future__ import annotations
 
 import asyncio
+import secrets
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -560,12 +561,16 @@ class MilvusVectorStore(VectorStore):
     def _gen_chunk_order_metadata(n: int) -> list[dict[str, int | None]]:
         """Generate prev/section/next IDs for a batch of ``n`` chunks.
 
-        Uses a monotonic nanosecond base so IDs are unique across batches.
+        Uses a randomised base so IDs are unique across rapid batches.
         Preserves the legacy MilvusDB ordering so existing
         surrounding-chunk hydration keeps working.
         """
-        base_ts = int(time.time_ns())
-        ids = [base_ts + i for i in range(n)]
+        if n <= 0:
+            return []
+        int64_max = 2**63 - 1
+        random_offset = secrets.randbits(32)
+        base = (time.time_ns() + random_offset) % (int64_max - n)
+        ids = [base + i for i in range(n)]
         return [
             {
                 "prev_section_id": ids[i - 1] if i > 0 else None,
@@ -872,6 +877,59 @@ class MilvusVectorStore(VectorStore):
             ) from e
 
         return int(result.get("delete_count", 0)) if isinstance(result, dict) else 0
+
+    async def upsert_entities(self, entities: list[dict[str, Any]], collection: str = "default") -> int:
+        """Upsert raw Milvus entities that already include vector data.
+
+        This is intentionally narrower than the VectorStore port: it supports
+        file metadata patch/copy paths where re-embedding would be wrong and
+        the existing Milvus rows already carry the vectors to preserve.
+        """
+        self._resolve_collection(collection)
+        if not entities:
+            return 0
+
+        try:
+            result = await self._async_client.upsert(
+                collection_name=self._collection_name,
+                data=entities,
+            )
+        except MilvusException as e:
+            raise VDBInsertError(
+                f"Milvus raw entity upsert failed: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+        except Exception as e:
+            raise UnexpectedVDBError(
+                f"Unexpected error during Milvus raw entity upsert: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+
+        return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
+
+    async def insert_entities(self, entities: list[dict[str, Any]], collection: str = "default") -> int:
+        """Insert raw Milvus entities that already include vector data."""
+        self._resolve_collection(collection)
+        if not entities:
+            return 0
+
+        try:
+            result = await self._async_client.insert(
+                collection_name=self._collection_name,
+                data=entities,
+            )
+        except MilvusException as e:
+            raise VDBInsertError(
+                f"Milvus raw entity insert failed: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+        except Exception as e:
+            raise UnexpectedVDBError(
+                f"Unexpected error during Milvus raw entity insert: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+
+        return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
 
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
         """Public entry point for materialising the backing collection.

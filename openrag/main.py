@@ -23,6 +23,10 @@ ray.init(dashboard_host="0.0.0.0")
 # flake8: noqa: E402
 
 
+# Bootstrap the long-lived worker actors (TaskStateManager, DocSerializer,
+# parser pools, semaphores). Imported for side effects; the routes look the
+# actors up by name via ray.get_actor.
+import services.workers.bootstrap  # noqa: F401, E402
 from components.auth.middleware import AuthMiddleware
 from routers.actors import router as actors_router
 from routers.auth import router as auth_router
@@ -39,7 +43,6 @@ from routers.users import router as users_router
 from routers.utils import require_admin
 from routers.workspaces import router as workspaces_router
 from starlette.middleware.base import BaseHTTPMiddleware
-from utils.dependencies import get_vectordb
 from utils.exceptions import OpenRAGError
 from utils.logger import get_logger
 
@@ -214,7 +217,10 @@ class TokenRedactingMiddleware(BaseHTTPMiddleware):
 
 
 # Register middlewares (order matters - last added runs first)
-app.add_middleware(AuthMiddleware, get_vectordb=get_vectordb)
+app.add_middleware(
+    AuthMiddleware,
+    get_auth_service=lambda request: request.app.state.container.auth_service,
+)
 app.add_middleware(TokenRedactingMiddleware)
 app.add_middleware(MonitoringMiddleware)
 

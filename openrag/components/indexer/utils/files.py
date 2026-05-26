@@ -6,11 +6,7 @@ from pathlib import Path
 
 import aiofiles
 import consts
-from components.utils import load_config
 from fastapi import HTTPException, UploadFile, status
-
-config = load_config()
-SERIALIZE_TIMEOUT = config.ray.indexer.serialize_timeout
 
 
 def sanitize_filename(filename: str) -> str:
@@ -69,22 +65,6 @@ async def save_file_to_disk(
             await buffer.write(chunk)
 
     return file_path
-
-
-async def serialize_file(task_id: str, path: str, metadata: dict | None = None):
-    import ray
-    from components.ray_utils import call_ray_actor_with_timeout
-
-    metadata = metadata or {}
-
-    serializer = ray.get_actor("DocSerializer", namespace="openrag")
-    future = serializer.serialize_document.remote(task_id, path, metadata=metadata)
-
-    return await call_ray_actor_with_timeout(
-        future,
-        timeout=SERIALIZE_TIMEOUT,
-        task_description=f"Serialization task {task_id}",
-    )
 
 
 def extract_temporal_fields(metadata: dict, temporal_fields: list) -> dict:

@@ -293,6 +293,8 @@ class PgDocumentRepository(DocumentRepository):
                     """,
                     partition,
                 )
+                if created and user_id is None:
+                    raise ValueError("Cannot auto-create a partition without a user_id")
                 if created and user_id is not None:
                     await conn.execute(
                         """

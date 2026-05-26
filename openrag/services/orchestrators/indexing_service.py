@@ -1,27 +1,14 @@
-"""IndexingService — file ingest orchestration (Phase 8D.1).
+"""IndexingService — file ingest orchestration.
 
-Business logic extracted from ``routers/indexer.py``: metadata
-assembly, existence/workspace checks and task dispatch. The heavy work
-(serialize → chunk → embed → insert) still runs in the ``Indexer`` Ray
-actor and task bookkeeping in ``TaskStateManager``; both sit behind the
-:class:`~core.indexing.dispatcher.IndexingDispatcher` port so this
-service stays Ray-free (8H). Phase 9 swaps the shim for a direct
-pipeline call.
+Business logic extracted from ``routers/indexer.py``: metadata assembly,
+existence/workspace checks, and task dispatch. Indexing jobs are routed
+through :class:`~core.indexing.dispatcher.IndexingDispatcher` so this
+service stays Ray-free.
 
 The thin router keeps HTTP transport only: file save to disk (IO),
 ``request.url_for`` link building, the shared ``Depends`` auth wrappers,
-and the guards whose exact non-bracketed ``{"detail": ...}`` body the
-legacy endpoints returned via ``HTTPException`` (409 already-exists,
-404 not-found, 400 bad workspace_ids, 404 unknown workspace, 404 no
-object ref for cancel).
-
-Constructor note: deviates from the plan's
-``(document_repo, workspace_repo, vector_store, config)``. ``vector_store``
-and ``config`` are dropped — the file delete is routed through the
-Indexer worker (which owns the Milvus delete) and the only config the
-legacy router needed (data dir, vectordb timeout) is a transport / shim
-concern. ``dispatcher`` is added: the Ray-free seam the container fills
-with the ``IndexerRayShim`` during the shim period.
+and the guards whose exact ``{"detail": ...}`` body the legacy endpoints
+returned via ``HTTPException``.
 """
 
 from __future__ import annotations

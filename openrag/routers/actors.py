@@ -2,7 +2,7 @@ import ray
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from ray.util.state import list_actors
-from utils.dependencies import (
+from services.workers.bootstrap import (
     actor_creation_map,
 )
 from utils.logger import get_logger
@@ -64,8 +64,6 @@ async def list_ray_actors():
 - `TaskStateManager`: Manages task states
 - `MarkerPool`: PDF processing actor pool
 - `SerializerQueue`: Document serialization queue
-- `Indexer`: Document indexing coordinator
-- `Vectordb`: Vector database interface
 - `llmSemaphore`: LLM request semaphore
 - `vlmSemaphore`: Vision LM request semaphore
 

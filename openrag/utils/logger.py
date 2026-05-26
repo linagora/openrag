@@ -11,6 +11,22 @@ def escape_markup(s: str) -> str:
     return s.replace("\\", "\\\\").replace("<", "\\<").replace(">", "\\>")
 
 
+def mask_email(email: str | None) -> str:
+    """Mask an email address for logging — keep the first local character and
+    the domain, e.g. ``alice@example.com`` -> ``a***@example.com``.
+
+    The domain is retained so an operator can still tell which tenant/IdP an
+    entry relates to; the local part (the personal identifier) is redacted.
+    Non-string or malformed input returns ``"***"`` so a raw address can never
+    reach the logs by accident.
+    """
+    if not isinstance(email, str) or "@" not in email:
+        return "***"
+    local, _, domain = email.partition("@")
+    masked_local = f"{local[0]}***" if local else "***"
+    return f"{masked_local}@{domain}"
+
+
 def get_logger():
     def formatter(record):
         level = record["level"].name

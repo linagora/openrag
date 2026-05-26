@@ -6,15 +6,18 @@ import consts
 import openai
 from config import load_config
 from core.indexing import validators as core_validators
+from core.utils.exceptions import OpenRAGError
+from di.providers import get_auth_service, get_job_service, get_partition_service
 from fastapi import Depends, Form, HTTPException, Request, UploadFile, status
 from openai import AsyncOpenAI
-from utils.dependencies import get_task_state_manager, get_vectordb
+from services.orchestrators.auth_service import AuthService
+from services.orchestrators.job_service import JobService
+from services.orchestrators.partition_service import PartitionService
 from utils.logger import get_logger
 
 # load config
 config = load_config()
 logger = get_logger()
-task_state_manager = get_task_state_manager()
 
 SUPER_ADMIN_MODE = os.getenv("SUPER_ADMIN_MODE", "false").lower() == "true"
 DATA_DIR = config.paths.data_dir
@@ -25,12 +28,6 @@ LOG_FILE = Path(config.paths.log_dir or "logs") / "app.json"
 # supported file formats or mimetypes
 ACCEPTED_FILE_FORMATS = config.loader.file_loaders.model_dump().keys()
 DICT_MIMETYPES = config.loader.mimetypes.to_dict()
-
-ROLE_HIERARCHY = {
-    "viewer": 1,
-    "editor": 2,
-    "owner": 3,
-}
 
 # File quota per user
 DEFAULT_FILE_QUOTA = config.rdb.default_file_quota
@@ -84,33 +81,36 @@ async def ensure_partition_role(
     user,
     user_partitions,
     required_role: str,
+    *,
+    auth_service: AuthService,
+    partition_service: PartitionService,
 ):
     """Ensure the user has at least `required_role` for the partition."""
-    # Super-admin bypass
-    vectordb = get_vectordb()
     if SUPER_ADMIN_MODE and user.get("is_admin"):
         return True
 
-    # Find membership
     membership = next((p for p in user_partitions if p["partition"] == partition), None)
-
     if not membership:
-        # Partition exists but no membership
-        partition_exists = await vectordb.partition_exists.remote(partition)
-        if partition_exists:
+        if await partition_service.partition_exists(partition):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Access to partition '{partition}' forbidden",
             )
-        else:
-            return True
+        return True
 
-    user_role = membership.get("role")
-    if ROLE_HIERARCHY[user_role] < ROLE_HIERARCHY[required_role]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"{required_role.capitalize()} role required for partition '{partition}'",
+    try:
+        auth_service.check_partition_access(
+            user=user,
+            partition=partition,
+            user_partitions=user_partitions,
+            required_role=required_role,
+            super_admin_mode=SUPER_ADMIN_MODE,
         )
+    except OpenRAGError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
 
     return True
 
@@ -119,8 +119,17 @@ async def require_partition_viewer(
     partition=Depends(request_partition),
     user=Depends(current_user),
     user_partitions=Depends(current_user_partitions),
+    auth_service: AuthService = Depends(get_auth_service),
+    partition_service: PartitionService = Depends(get_partition_service),
 ):
-    await ensure_partition_role(partition, user, user_partitions, "viewer")
+    await ensure_partition_role(
+        partition,
+        user,
+        user_partitions,
+        "viewer",
+        auth_service=auth_service,
+        partition_service=partition_service,
+    )
     return user
 
 
@@ -128,8 +137,17 @@ async def require_partition_editor(
     partition=Depends(request_partition),
     user=Depends(current_user),
     user_partitions=Depends(current_user_partitions),
+    auth_service: AuthService = Depends(get_auth_service),
+    partition_service: PartitionService = Depends(get_partition_service),
 ):
-    await ensure_partition_role(partition, user, user_partitions, "editor")
+    await ensure_partition_role(
+        partition,
+        user,
+        user_partitions,
+        "editor",
+        auth_service=auth_service,
+        partition_service=partition_service,
+    )
     return user
 
 
@@ -137,8 +155,17 @@ async def require_partition_owner(
     partition=Depends(request_partition),
     user=Depends(current_user),
     user_partitions=Depends(current_user_partitions),
+    auth_service: AuthService = Depends(get_auth_service),
+    partition_service: PartitionService = Depends(get_partition_service),
 ):
-    await ensure_partition_role(partition, user, user_partitions, "owner")
+    await ensure_partition_role(
+        partition,
+        user,
+        user_partitions,
+        "owner",
+        auth_service=auth_service,
+        partition_service=partition_service,
+    )
     return user
 
 
@@ -146,19 +173,32 @@ async def require_partitions_viewer(
     partitions=Depends(request_partitions),
     user=Depends(current_user),
     user_partitions=Depends(current_user_partitions),
+    auth_service: AuthService = Depends(get_auth_service),
+    partition_service: PartitionService = Depends(get_partition_service),
 ):
     if SUPER_ADMIN_MODE and user.get("is_admin"):
         return user
     if isinstance(partitions, list) and len(partitions) == 1 and partitions[0] == "all":
         return user
     for partition in partitions:
-        await ensure_partition_role(partition, user, user_partitions, "viewer")
+        await ensure_partition_role(
+            partition,
+            user,
+            user_partitions,
+            "viewer",
+            auth_service=auth_service,
+            partition_service=partition_service,
+        )
         logger.info(f"User has viewer access to partition '{partition}'")
     return user
 
 
-async def require_task_owner(task_id=Depends(request_task_id), user=Depends(current_user)):
-    task_details = await task_state_manager.get_details.remote(task_id)
+async def require_task_owner(
+    task_id=Depends(request_task_id),
+    user=Depends(current_user),
+    job_service: JobService = Depends(get_job_service),
+):
+    task_details = await job_service.get_task_details(task_id)
     if not task_details:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -215,6 +255,8 @@ def require_admin_or_self(
 
 async def check_user_file_quota(
     user=Depends(current_user),
+    auth_service: AuthService = Depends(get_auth_service),
+    job_service: JobService = Depends(get_job_service),
 ):
     """
     Check if user has reached their file quota.
@@ -228,46 +270,34 @@ async def check_user_file_quota(
     - user.file_quota >= 0 → specific limit
     """
 
-    # Admins have unlimited quota
-    if user.get("is_admin"):
+    if user.get("is_admin", False):
         return user
-
-    if DEFAULT_FILE_QUOTA < 0:  # disabled quota checking
+    if DEFAULT_FILE_QUOTA < 0:
         return user
-
-    # Determine quota
     user_quota = user.get("file_quota")
-
-    if user_quota is None:
-        # Use global quota
-        user_quota = DEFAULT_FILE_QUOTA
-
-    if user_quota < 0:  # unlimited quota
+    if user_quota is not None and user_quota < 0:
         return user
-
-    # Now user_quota >= 0
 
     user_id = user.get("id")
-    indexed_count = user.get("file_count", 0)  # Get indexed file count from user info
-    pending_count = await task_state_manager.get_user_pending_task_count.remote(
-        user_id
-    )  # Get pending task count from task manager
-
-    total = indexed_count + pending_count
+    pending_count = await job_service.get_user_pending_task_count(user_id)
 
     logger.debug(
         "User file quota check",
         user_id=user_id,
-        indexed_count=indexed_count,
         pending_count=pending_count,
-        user_quota=user_quota,
     )
 
-    if total >= user_quota:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"File quota exceeded. You have {indexed_count} indexed files and {pending_count} pending tasks. Limit: {user_quota}",
+    try:
+        auth_service.validate_file_quota(
+            user,
+            pending_task_count=pending_count,
+            default_quota=DEFAULT_FILE_QUOTA,
         )
+    except OpenRAGError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
 
     return user
 
@@ -370,9 +400,13 @@ async def check_llm_model_availability(request: Request):
         )
 
 
-async def get_partition_name(model_name, user_partitions, is_admin=False):
-    vectordb = get_vectordb()
-
+async def get_partition_name(
+    model_name,
+    user_partitions,
+    *,
+    partition_service: PartitionService,
+    is_admin=False,
+):
     partition_prefix = consts.PARTITION_PREFIX
     if model_name.startswith(consts.LEGACY_PARTITION_PREFIX):
         # XXX - This is for backward compatibility, but should eventually be removed
@@ -384,7 +418,7 @@ async def get_partition_name(model_name, user_partitions, is_admin=False):
             detail=f"Model not found. Model should respect this format: {consts.PARTITION_PREFIX}partition_name",
         )
     partition = model_name.split(partition_prefix)[1]
-    if partition != "all" and not await vectordb.partition_exists.remote(partition):
+    if partition != "all" and not await partition_service.partition_exists(partition):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Partition `{partition}` not found for given model `{model_name}`",

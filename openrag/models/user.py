@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class UserBase(BaseModel):
     display_name: str | None = None
     external_user_id: str | None = None
-    email: str | None = None
+    email: str | None = Field(default=None, examples=[None])
     is_admin: bool = False
     file_quota: int | None = Field(default=10)
 

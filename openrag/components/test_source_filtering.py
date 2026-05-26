@@ -100,6 +100,27 @@ class TestExtractAndStripSourcesBlock:
         assert clean == "Answer text"
         assert citations == set()
 
+    def test_multiple_line_terminal_tags_stripped(self):
+        """Bullet-leak case: LLM emits [Sources: X] per bullet item instead of once at end."""
+        text = "- Claim one about the codebase.\n[Sources: 1]\n- Claim two about APEX.\n[Sources: 1, 5]\n"
+        clean, citations = extract_and_strip_sources_block(text)
+        assert "[Sources:" not in clean
+        assert citations == {1, 5}
+
+    def test_tag_at_end_of_sentence_followed_by_more_lines(self):
+        """Tag terminating a sentence (not the response) is stripped; following content preserved."""
+        text = "The project uses Ray. [Sources: 2, 3]\nAnother paragraph here."
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == "The project uses Ray.\nAnother paragraph here."
+        assert citations == {2, 3}
+
+    def test_tag_inline_in_prose_preserved(self):
+        """Meta-discussion: the tag appears inside a sentence and must NOT be stripped."""
+        text = "Use the format [Sources: 1, 3] at the very end of your response."
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == text
+        assert citations is None
+
 
 class TestFilterSourcesByCitations:
     def test_basic_filtering(self):
@@ -242,38 +263,79 @@ class TestStreamWithSourceFiltering:
         assert _collect_content(result) == "Answer without any sources tag."
         assert _parse_finish_sources(result) == self.SOURCES
 
+    @pytest.mark.asyncio
+    async def test_multiple_inline_tags_stripped_from_stream(self):
+        """Bullet-leak: LLM emits [Sources: X] per bullet. All inline tags must be stripped."""
+        lines = [
+            _make_chunk("- Claim one about Claude Code.\n"),
+            _make_chunk("[Sources: 1]\n"),
+            _make_chunk("- Claim two about APEX.\n"),
+            _make_chunk("[Sources: 1, 3]\n"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        content = _collect_content(result)
+        assert "[Sources:" not in content
+        assert "Claim one about Claude Code." in content
+        assert "Claim two about APEX." in content
+        assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
+
+    @pytest.mark.asyncio
+    async def test_inline_prose_tag_preserved_in_stream(self):
+        """Meta-discussion: a [Sources: 1, 3] inside a sentence must NOT be stripped."""
+        lines = [
+            _make_chunk("Use the format [Sources: 1, 3]"),
+            _make_chunk(" at the very end of your response."),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        content = _collect_content(result)
+        assert content == "Use the format [Sources: 1, 3] at the very end of your response."
+        # No line-terminal tag → fallback to all sources
+        assert _parse_finish_sources(result) == self.SOURCES
+
+    @pytest.mark.asyncio
+    async def test_mid_response_tag_stripped_plus_trailing_tag(self):
+        """Tag at end of a line mid-response + the final terminal tag both stripped."""
+        lines = [
+            _make_chunk("Paragraph one ending in a tag. [Sources: 2]\n"),
+            _make_chunk("Paragraph two ends the response.\n"),
+            _make_chunk("[Sources: 2, 3]"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        content = _collect_content(result)
+        assert "[Sources:" not in content
+        assert "Paragraph one ending in a tag." in content
+        assert "Paragraph two ends the response." in content
+        assert _parse_finish_sources(result) == [{"file": "b.pdf"}, {"file": "c.pdf"}]
+
 
 # ---------------------------------------------------------------------------
 # Regression for #390 — buffer size scales with number of sources so the
-# [Sources: 1, 2, …, N] tag isn't evicted from the buffer before it can match.
+# [Sources: 1, 2, ..., N] tag isn't evicted from the buffer before it can match.
 # ---------------------------------------------------------------------------
 
 
 def test_min_sources_tag_buffer_size_fits_many_sources():
     from components.utils import _min_sources_tag_buffer_size
 
-    # The helper bound must cover the full max-length tag at this N.
     for n in (1, 10, 60, 100):
         tag = "\n[Sources: " + ", ".join(str(i) for i in range(1, n + 1)) + "]"
         assert _min_sources_tag_buffer_size(n) >= len(tag), n
-    # The caller in stream_with_source_filtering tops this off with
-    # max(100, _min_sources_tag_buffer_size(...)) so the small-list case is
-    # not the helper's responsibility.
     assert _min_sources_tag_buffer_size(0) >= 1
 
 
 class TestStreamWithManySources:
-    """Repro the #390 scenario: 60 sources cited at the end of the stream."""
-
     @pytest.mark.asyncio
     async def test_60_source_citation_survives_buffer_eviction(self):
         sources = [{"file": f"src-{i}.pdf"} for i in range(60)]
-        # Build a long answer body, then a [Sources: 1, …, 60] tag long enough
-        # that the source-filter buffer must size to the full tag to catch it.
         body = "This is the answer body. " * 30
         cited = ", ".join(str(i) for i in range(1, 61))
         tag = f"\n[Sources: {cited}]"
-        # Stream the body in many small chunks plus the tag at the end.
         lines = [_make_chunk(p) for p in [body[i : i + 5] for i in range(0, len(body), 5)]]
         lines.append(_make_chunk(tag))
         lines.append(_make_finish())
@@ -281,11 +343,8 @@ class TestStreamWithManySources:
 
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), sources, "test-model"))
 
-        # The raw tag must not leak into the user-visible content
         content = _collect_content(result)
         assert "[Sources:" not in content
         assert content.startswith("This is the answer body.")
         assert content.endswith("This is the answer body.")
-        # All 60 sources should be reflected in the finish chunk
-        finished = _parse_finish_sources(result)
-        assert finished == sources
+        assert _parse_finish_sources(result) == sources

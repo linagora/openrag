@@ -105,6 +105,8 @@ class ConnectionManager:
         if self._pool is not None:
             return
 
+        await asyncio.to_thread(self._ensure_database_exists)
+
         last_exc: Exception | None = None
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
             try:
@@ -134,6 +136,23 @@ class ConnectionManager:
         raise RuntimeError(
             f"Failed to connect to Postgres at {self._dsn_log} after {_RETRY_ATTEMPTS} attempts: {last_exc}",
         ) from last_exc
+
+    def _ensure_database_exists(self) -> None:
+        """Create the configured database before opening the asyncpg pool."""
+        from sqlalchemy import URL
+        from sqlalchemy_utils import create_database, database_exists
+
+        url = URL.create(
+            drivername="postgresql",
+            username=self._conn_kwargs["user"],
+            password=self._conn_kwargs["password"],
+            host=self._conn_kwargs["host"],
+            port=self._conn_kwargs["port"],
+            database=self._conn_kwargs["database"],
+        )
+        if not database_exists(url):
+            create_database(url)
+            logger.info(f"Created Postgres database `{self._conn_kwargs['database']}`.")
 
     async def shutdown(self) -> None:
         if self._pool is None:

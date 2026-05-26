@@ -40,3 +40,11 @@ class DocumentRepository(ABC):
 
     @abstractmethod
     async def file_exists_in_partition(self, file_id: str, partition: str) -> bool: ...
+
+    @abstractmethod
+    async def get_file_ids_by_relationship(self, partition: str, relationship_id: str) -> list[str]: ...
+
+    @abstractmethod
+    async def get_ancestor_file_ids(
+        self, partition: str, file_id: str, max_ancestor_depth: int | None = None
+    ) -> list[str]: ...

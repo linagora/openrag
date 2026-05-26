@@ -5,16 +5,62 @@ import sys
 import time
 from typing import IO, Any
 
-import ray
-from components.indexer.vectordb import MilvusDB
-from components.indexer.vectordb.utils import PartitionFileManager
 from pymilvus import MilvusClient
+from services.persistence.schema import files as files_table
+from services.persistence.schema import partition_memberships
+from services.persistence.schema import partitions as partitions_table
+from services.persistence.schema import users as users_table
+from sqlalchemy import create_engine, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from utils.logger import get_logger
+
+
+def _list_partitions(conn) -> list[dict]:
+    rows = conn.execute(select(partitions_table)).all()
+    return [{"partition": r.partition, "created_at": r.created_at.isoformat()} for r in rows]
+
+
+def _add_file_to_partition(conn, file_id: str, partition: str, file_metadata: dict, user_id: int) -> bool:
+    existing = conn.execute(
+        select(files_table.c.id).where(
+            files_table.c.file_id == file_id,
+            files_table.c.partition_name == partition,
+        )
+    ).first()
+    if existing:
+        return False
+
+    partition_exists = conn.execute(
+        select(partitions_table.c.id).where(partitions_table.c.partition == partition)
+    ).first()
+    if not partition_exists:
+        conn.execute(partitions_table.insert().values(partition=partition))
+        conn.execute(
+            pg_insert(partition_memberships)
+            .values(partition_name=partition, user_id=user_id, role="owner")
+            .on_conflict_do_nothing()
+        )
+
+    conn.execute(
+        files_table.insert().values(
+            file_id=file_id,
+            partition_name=partition,
+            file_metadata=file_metadata,
+            created_by=user_id,
+            relationship_id=file_metadata.get("relationship_id"),
+            parent_id=file_metadata.get("parent_id"),
+        )
+    )
+    conn.execute(
+        users_table.update().where(users_table.c.id == user_id).values(file_count=users_table.c.file_count + 1)
+    )
+    conn.commit()
+    return True
 
 
 def read_rdb_section(
     fh: IO[str],
-    pfm: PartitionFileManager,
+    conn,
     include_only: list[str] | None,
     added_documents: dict[str, set[str]],
     existing_partitions: dict[str, Any],
@@ -67,10 +113,10 @@ def read_rdb_section(
 
         if not dry_run:
             try:
-                res = pfm.add_file_to_partition(doc["file_id"], part["name"], doc, user_id)
+                res = _add_file_to_partition(conn, doc["file_id"], part["name"], doc, user_id)
             except Exception as e:
                 logger.exception(
-                    f"{type(e)} in add_file_to_partition({doc['file_id']}, {part['name']}, ...)\n" + str(e)
+                    f"{type(e)} in _add_file_to_partition({doc['file_id']}, {part['name']}, ...)\n" + str(e)
                 )
                 raise
         else:
@@ -252,33 +298,22 @@ def main():
 
     logger = get_logger()
 
-    try:
-        # It will create a the Milvus collection if it doesn't exist
-        vdb_tmp = MilvusDB.options(name="Vectordb", namespace="openrag", lifetime="detached").remote()
-
-        ray.get(
-            vdb_tmp.__ray_ready__.remote()
-        )  # ensure the actor is fully initialized and ready: collection and all created if nont existing
-        print("VectorDB (Milvus) actor fully initialized")
-    except Exception as e:
-        logger.exception(f"Failed while trying to create Milvus collection: {e}")
-        # TODO: stop execution here
-
     rdb, vdb = load_openrag_config(logger)
 
     if args.verbose:
         logger.info(f"rdb @ {rdb.host}:{rdb.port} | vdb @ {vdb.host}:{vdb.port} | collection: {vdb.collection_name}")
 
+    database_url = (
+        f"postgresql://{rdb.user}:{rdb.password}@{rdb.host}:{rdb.port}/partitions_for_collection_{vdb.collection_name}"
+    )
+
     # List existing partitions
     try:
-        pfm = PartitionFileManager(
-            database_url=f"postgresql://{rdb.user}:{rdb.password}@{rdb.host}:{rdb.port}/partitions_for_collection_{vdb.collection_name}",
-            logger=logger,
-        )
-
-        existing_partitions = {item["partition"]: item for item in pfm.list_partitions()}
+        engine = create_engine(database_url)
+        with engine.connect() as conn:
+            existing_partitions = {item["partition"]: item for item in _list_partitions(conn)}
     except Exception as e:
-        logger.error(f"Failed while accessing PartitionFileManager at {rdb.host}:{rdb.port}\n{e}")
+        logger.error(f"Failed while accessing catalog database at {rdb.host}:{rdb.port}\n{e}")
         raise
 
     if args.include_only:
@@ -290,7 +325,7 @@ def main():
     client = MilvusClient(uri=f"http://{vdb.host}:{vdb.port}")
 
     try:
-        with open_backup_file(args.input, logger) as fh:
+        with open_backup_file(args.input, logger) as fh, create_engine(database_url).connect() as conn:
             added_documents = {}
 
             for line in fh:
@@ -299,7 +334,7 @@ def main():
                 if line in ["rdb"]:
                     read_rdb_section(
                         fh,
-                        pfm,
+                        conn,
                         args.include_only,
                         added_documents,
                         existing_partitions,

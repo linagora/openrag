@@ -36,7 +36,7 @@ from components.auth import (
 )
 from core.models.user import OIDCSession, User
 from core.utils.exceptions import AuthError, OpenRAGError
-from utils.logger import get_logger
+from utils.logger import get_logger, mask_email
 
 if TYPE_CHECKING:
     from core.config.auth import OIDCConfig
@@ -312,6 +312,59 @@ class AuthService:
         return redirect_target
 
     # ------------------------------------------------------------------
+    # Request authentication helpers
+    # ------------------------------------------------------------------
+
+    async def get_user_for_request(self, user_id: int) -> dict[str, Any] | None:
+        user = await self._user_repo.get_user(user_id)
+        return self._user_to_request_dict(user) if user else None
+
+    async def get_user_by_token_for_request(self, token: str) -> dict[str, Any] | None:
+        user = await self._user_repo.get_user_by_token(hash_session_token(token))
+        return self._user_to_request_dict(user) if user else None
+
+    async def list_user_partitions_for_request(self, user_id: int) -> list[dict[str, Any]]:
+        memberships = await self._membership_repo.list_user_partitions(user_id)
+        return [
+            {
+                "partition": membership.partition,
+                "role": membership.role.value,
+                "created_at": membership.added_at.isoformat() if membership.added_at else None,
+            }
+            for membership in memberships
+        ]
+
+    async def get_oidc_session_by_token_for_request(self, token: str) -> dict[str, Any] | None:
+        session = await self._oidc_session_repo.get_by_token_hash(hash_session_token(token))
+        return self._oidc_session_to_request_dict(session) if session else None
+
+    async def get_oidc_session_by_id_for_request(self, session_id: int) -> dict[str, Any] | None:
+        session = await self._oidc_session_repo.get_by_id(session_id)
+        return self._oidc_session_to_request_dict(session) if session else None
+
+    async def update_oidc_session_tokens_for_request(
+        self,
+        *,
+        session_id: int,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes | None,
+        access_token_expires_at: datetime,
+    ) -> None:
+        updates: dict[str, Any] = {
+            "access_token_encrypted": access_token_encrypted,
+            "access_token_expires_at": access_token_expires_at,
+            "last_refresh_at": _utcnow(),
+        }
+        if refresh_token_encrypted is not None:
+            updates["refresh_token_encrypted"] = refresh_token_encrypted
+        session = await self._oidc_session_repo.update_session(session_id, **updates)
+        if session is None:
+            raise ValueError(f"oidc_session id={session_id} does not exist")
+
+    async def revoke_oidc_session_by_id_for_request(self, session_id: int) -> None:
+        await self._oidc_session_repo.revoke_session(session_id)
+
+    # ------------------------------------------------------------------
     # Auth policy — pure helpers (no I/O)
     # ------------------------------------------------------------------
 
@@ -326,6 +379,43 @@ class AuthService:
         if isinstance(user, dict):
             return user.get(key, default)
         return getattr(user, key, default)
+
+    @staticmethod
+    def _user_to_request_dict(user: User) -> dict[str, Any]:
+        return {
+            "id": user.id,
+            "display_name": user.display_name,
+            "external_user_id": user.external_user_id,
+            "email": user.email,
+            "is_admin": user.is_admin,
+            "file_quota": user.file_quota,
+            "file_count": user.file_count,
+            "memberships": [
+                {
+                    "partition": membership.partition,
+                    "role": membership.role.value,
+                    "added_at": membership.added_at.isoformat() if membership.added_at else None,
+                }
+                for membership in user.partitions
+            ],
+        }
+
+    @staticmethod
+    def _oidc_session_to_request_dict(session: OIDCSession) -> dict[str, Any]:
+        return {
+            "id": session.id,
+            "user_id": session.user_id,
+            "sub": session.sub,
+            "sid": session.sid,
+            "id_token_encrypted": session.id_token_encrypted,
+            "access_token_encrypted": session.access_token_encrypted,
+            "refresh_token_encrypted": session.refresh_token_encrypted,
+            "access_token_expires_at": session.access_token_expires_at,
+            "session_expires_at": session.session_expires_at,
+            "created_at": session.created_at,
+            "last_refresh_at": session.last_refresh_at,
+            "revoked_at": session.revoked_at,
+        }
 
     @classmethod
     def require_admin(cls, user: Any) -> Any:
@@ -533,14 +623,28 @@ class AuthService:
                 )
             )
         except Exception as e:
-            # Concurrent first-login race or DB failure — re-read; if still
-            # missing, surface a 500 so the operator notices.
+            # Concurrent first-login race or DB failure. Re-read by sub first;
+            # if an email collision caused the insert failure, return an
+            # actionable conflict instead of an opaque 500.
             logger.exception(f"OIDC auto-provisioning failed for sub={sub!r}: {e}")
             user = await self._user_repo.get_user_by_external_id(sub)
             if user is None:
+                if isinstance(email, str) and email.strip():
+                    existing = await self._user_repo.get_user_by_email(email)
+                    if existing is not None:
+                        logger.error(
+                            f"OIDC auto-provisioning blocked for sub={sub!r}: an account with email "
+                            f"{mask_email(email)} already exists under a different identity. Set that "
+                            f"user's external_user_id to this sub to allow login."
+                        )
+                        raise OIDCFlowError(
+                            "An account with this email already exists. Ask your administrator to "
+                            "link it to your identity provider login.",
+                            status_code=409,
+                        ) from e
                 raise OIDCFlowError("Failed to provision user", status_code=500) from e
         else:
-            logger.info(f"OIDC user auto-provisioned (id={user.id}, sub={sub!r}, display_name={display_name!r})")
+            logger.info(f"OIDC user auto-provisioned (id={user.id}, sub={sub!r})")
         return user
 
     async def _sync_auto_provisioned(

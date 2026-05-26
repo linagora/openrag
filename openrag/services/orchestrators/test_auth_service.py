@@ -27,6 +27,11 @@ KEY = Fernet.generate_key().decode()
 class FakeUserRepo:
     def __init__(self, users: dict[str, User] | None = None):
         self._by_ext = users or {}
+        self._by_email = {
+            user.email.strip().lower(): user
+            for user in self._by_ext.values()
+            if isinstance(user.email, str) and user.email.strip()
+        }
         self.created: list[User] = []
         self.updated: list[tuple[int, dict]] = []
         self._next_id = 100
@@ -34,12 +39,21 @@ class FakeUserRepo:
     async def get_user_by_external_id(self, external_id: str) -> User | None:
         return self._by_ext.get(external_id)
 
+    async def get_user_by_email(self, email: str) -> User | None:
+        return self._by_email.get(email.strip().lower())
+
     async def create_user(self, user: User) -> User:
+        normalized_email = user.email.strip().lower() if user.email else None
+        if normalized_email and normalized_email in self._by_email:
+            raise ValueError("duplicate key value violates unique constraint")
         self._next_id += 1
         user.id = self._next_id
+        user.email = normalized_email
         self.created.append(user)
         if user.external_user_id:
             self._by_ext[user.external_user_id] = user
+        if user.email:
+            self._by_email[user.email] = user
         return user
 
     async def update_user(self, user_id: int, **fields):
@@ -47,7 +61,11 @@ class FakeUserRepo:
         for u in self._by_ext.values():
             if u.id == user_id:
                 for k, v in fields.items():
+                    if k == "email" and isinstance(v, str):
+                        v = v.strip().lower()
                     setattr(u, k, v)
+                if u.email:
+                    self._by_email[u.email] = u
                 return u
         return None
 
@@ -281,6 +299,25 @@ async def test_callback_auto_provisions_when_enabled():
     assert created.display_name == "Bob"
     assert created.is_admin is False
     assert result.next_url == "/home"
+
+
+@pytest.mark.asyncio
+async def test_callback_auto_provision_email_collision_returns_conflict():
+    existing = User(id=7, display_name="Existing", external_user_id="kc-old", email="alice@example.com")
+    urepo = FakeUserRepo({"kc-old": existing})
+    svc = _service(
+        user_repo=urepo,
+        client=FakeOIDCClient(bundle=_bundle(claims={"sub": "kc-new", "email": "alice@example.com"})),
+        cfg=_cfg(auto_provision_login=True),
+    )
+
+    state, cookie = await _login_and_get_state(svc)
+    with pytest.raises(OIDCFlowError) as ei:
+        await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+
+    assert ei.value.status_code == 409
+    assert "already exists" in ei.value.message
+    assert not urepo.created
 
 
 @pytest.mark.asyncio

@@ -131,6 +131,38 @@ class WhisperPool:
             self._pending[idx] -= 1
 
 
+async def detect_language_via_actor(
+    file_path: str | Path,
+    *,
+    fallback_language: str = "en",
+    timeout: float | None = None,
+) -> str | None:
+    """Detect the spoken language of ``file_path`` via the singleton WhisperActor.
+
+    Wraps the ``.remote()`` call so non-worker code (the OpenAI audio
+    loader's optional language detector) can stay Ray-free. Returns
+    ``None`` on failure so callers can fall back to a default behaviour.
+    """
+    from ..ray_utils import call_ray_actor_with_timeout
+
+    try:
+        actor = WhisperActor.options(name="WhisperActor", namespace="openrag", get_if_exists=True).remote()
+    except Exception:
+        logger.exception("Error getting WhisperActor")
+        return None
+
+    effective_timeout = timeout if timeout is not None else config.loader.local_whisper.whisper_timeout
+    try:
+        return await call_ray_actor_with_timeout(
+            actor.detect_language.remote(file_path, fallback_language),
+            timeout=effective_timeout,
+            task_description=f"WhisperActor detect_language ({Path(file_path).name})",
+        )
+    except Exception:
+        logger.exception("Language detection failed", file_path=str(file_path))
+        return None
+
+
 class LocalWhisperLoader(BasePooledParser):
     """Public ``BasePooledParser`` facade for the local-Whisper Ray pool.
 

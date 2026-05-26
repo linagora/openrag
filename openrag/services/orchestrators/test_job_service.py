@@ -2,8 +2,21 @@
 
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 from services.orchestrators.job_service import JobService
+
+
+@pytest.fixture(autouse=True)
+def _stub_ray_utils(monkeypatch):
+    async def _call_ray_actor_with_timeout(*, future, timeout, task_description):
+        return await future
+
+    ray_utils = types.ModuleType("services.workers.ray_utils")
+    ray_utils.call_ray_actor_with_timeout = _call_ray_actor_with_timeout
+    monkeypatch.setitem(sys.modules, "services.workers.ray_utils", ray_utils)
 
 
 class _Remote:
@@ -28,6 +41,10 @@ class FakeTSM:
         self.get_pool_info = _Remote(lambda: dict(self._pool))
         self.get_all_info = _Remote(lambda: dict(self._info))
         self.get_all_user_info = _Remote(lambda uid: {k: v for k, v in self._info.items() if v.get("user") == uid})
+        self.get_details = _Remote(lambda task_id: self._info.get(task_id, {}).get("details"))
+        self.get_user_pending_task_count = _Remote(
+            lambda user_id: sum(1 for info in self._info.values() if info.get("user_id") == user_id)
+        )
 
 
 @pytest.mark.asyncio
@@ -92,3 +109,25 @@ async def test_list_tasks_exact_status_case_insensitive():
     }
     rows = await JobService(FakeTSM(info=info)).list_tasks(is_admin=True, user_id=1, task_status="failed")
     assert [r["task_id"] for r in rows] == ["t1"]
+
+
+@pytest.mark.asyncio
+async def test_get_task_details_uses_task_state_manager():
+    info = {"t1": {"details": {"user_id": 7, "filename": "a.pdf"}}}
+
+    details = await JobService(FakeTSM(info=info)).get_task_details("t1")
+
+    assert details == {"user_id": 7, "filename": "a.pdf"}
+
+
+@pytest.mark.asyncio
+async def test_get_user_pending_task_count_uses_task_state_manager():
+    info = {
+        "t1": {"user_id": 7},
+        "t2": {"user_id": 8},
+        "t3": {"user_id": 7},
+    }
+
+    pending = await JobService(FakeTSM(info=info)).get_user_pending_task_count(7)
+
+    assert pending == 2

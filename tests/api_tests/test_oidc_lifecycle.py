@@ -265,6 +265,11 @@ def _install_stubs():
 
     logger_stub = types.ModuleType("utils.logger")
     logger_stub.escape_markup = lambda s: s.replace("\\", "\\\\").replace("<", "\\<").replace(">", "\\>")
+    logger_stub.mask_email = (
+        lambda email: f"{email.partition('@')[0][0]}***@{email.partition('@')[2]}"
+        if isinstance(email, str) and "@" in email and email.partition("@")[0]
+        else "***"
+    )
     logger_stub.get_logger = _logger
     sys.modules["utils.logger"] = logger_stub
     openai_stub = types.ModuleType("openai")
@@ -388,6 +393,11 @@ class _StubOIDCSessionRepo:
         return self._vdb._impl_revoke_oidc_sessions_by_sid(sid)
 
 
+class _StubMembershipRepo:
+    async def list_user_partitions(self, user_id: int) -> list:
+        return []
+
+
 class _StubJobService:
     async def get_user_pending_task_count(self, user_id) -> int:
         return 0
@@ -411,7 +421,7 @@ def _make_app(router) -> tuple[FastAPI, TestClient]:
     # Install the AuthMiddleware (from components.auth.middleware)
     from components.auth.middleware import AuthMiddleware  # noqa: E402
 
-    app.add_middleware(AuthMiddleware, get_vectordb=lambda: _stub_vdb)
+    app.add_middleware(AuthMiddleware, get_auth_service=lambda _request: auth_service)
 
     app.include_router(_auth_router_mod.router)
     app.include_router(_users_router_mod.router, prefix="/users")
@@ -438,10 +448,11 @@ def _make_app(router) -> tuple[FastAPI, TestClient]:
         auto_provision_login=False,
     )
     user_repo = _StubUserRepo(_stub_vdb)
+    membership_repo = _StubMembershipRepo()
     auth_service = AuthService(
         user_repo=user_repo,
         oidc_session_repo=_StubOIDCSessionRepo(_stub_vdb),
-        membership_repo=object(),
+        membership_repo=membership_repo,
         oidc_client=oidc_client,
         config=cfg,
     )
@@ -450,7 +461,7 @@ def _make_app(router) -> tuple[FastAPI, TestClient]:
         auth_service=auth_service,
         default_file_quota=10,
         partition_service=object(),
-        membership_repo=object(),
+        membership_repo=membership_repo,
         job_service=_StubJobService(),
     )
     app.dependency_overrides[get_auth_service] = lambda: auth_service

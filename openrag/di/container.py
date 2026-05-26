@@ -136,6 +136,7 @@ class ServiceContainer:
         """Open the storage adapters (asyncpg pool + Alembic migrations)."""
         if self._catalog_store is not None:
             await self._catalog_store.initialize()
+            await self.user_repo.ensure_admin_user(os.getenv("AUTH_TOKEN"))
 
     async def shutdown(self) -> None:
         """Close the storage adapters cleanly."""
@@ -316,18 +317,26 @@ class ServiceContainer:
 
     @property
     def retrieval_service(self) -> RetrievalService:
-        """RetrievalService — lazily built, cached for the container's lifetime.
-
-        The ``RetrievalSearcher`` is the Ray-backed ``MilvusRayShim``
-        during the Phase-8 shim period (Ray cleanup is Phase 9); it is
-        resolved lazily so the ``Vectordb`` actor only needs to exist at
-        first request, not at container construction.
-        """
+        """RetrievalService — lazily built, cached for the container's lifetime."""
         if self._retrieval_service is None:
             from services.orchestrators.retrieval_service import RetrievalService
-            from services.storage.milvus_ray_shim import from_ray_namespace
+            from services.storage.vector_store_searcher import VectorStoreSearcher
 
             settings = self._require_settings()
+            embed_cfg = settings.embedder
+            embedder = self.create_embedder(
+                "vllm",
+                endpoint=embed_cfg.base_url,
+                model_name=embed_cfg.model_name,
+                api_key=embed_cfg.api_key,
+                max_model_len=embed_cfg.max_model_len,
+            )
+            searcher = VectorStoreSearcher(
+                vector_store=self.vector_store,
+                embedder=embedder,
+                document_repo=self.document_repo,
+                collection=settings.vectordb.collection_name,
+            )
             llm_cfg = settings.llm.model_dump()
             llm = self.create_llm(
                 "vllm",
@@ -347,7 +356,7 @@ class ServiceContainer:
                     timeout=rcfg.timeout,
                 )
             self._retrieval_service = RetrievalService(
-                searcher=from_ray_namespace(),
+                searcher=searcher,
                 reranker=reranker,
                 llm=llm,
                 config=settings,
@@ -389,19 +398,23 @@ class ServiceContainer:
     def indexing_service(self) -> IndexingService:
         """IndexingService — lazily built, cached for the container's lifetime.
 
-        The dispatcher is the Ray-backed ``IndexerRayShim`` during the
-        Phase-8 shim period (Ray cleanup is Phase 9); it is resolved
-        lazily so the ``Indexer`` / ``TaskStateManager`` actors only need
-        to exist at first request, not at container construction.
+        Phase 9B routes new indexing jobs through the thin ``IndexerPool``
+        actor while delete/update/copy remain on the legacy actor path.
         """
         if self._indexing_service is None:
             from services.orchestrators.indexing_service import IndexingService
-            from services.storage.indexer_ray_shim import from_ray_namespace
+            from services.workers.dispatcher import from_ray_namespace
 
+            settings = self._require_settings()
             self._indexing_service = IndexingService(
                 document_repo=self.document_repo,
                 workspace_repo=self.workspace_repo,
-                dispatcher=from_ray_namespace(),
+                dispatcher=from_ray_namespace(
+                    vector_store=self.vector_store,
+                    document_repo=self.document_repo,
+                    workspace_repo=self.workspace_repo,
+                    collection=settings.vectordb.collection_name,
+                ),
             )
         return self._indexing_service
 
@@ -415,7 +428,7 @@ class ServiceContainer:
         """
         if self._job_service is None:
             from services.orchestrators.job_service import JobService
-            from utils.dependencies import get_task_state_manager
+            from services.workers.bootstrap import get_task_state_manager
 
             self._job_service = JobService(task_state_manager=get_task_state_manager())
         return self._job_service
@@ -430,7 +443,7 @@ class ServiceContainer:
         """
         if self._conversion_service is None:
             from services.orchestrators.conversion_service import ConversionService
-            from services.storage.serializer_ray_shim import from_ray_namespace
+            from services.workers.parsers.doc_serializer_adapter import from_ray_namespace
 
             settings = self._require_settings()
             self._conversion_service = ConversionService(

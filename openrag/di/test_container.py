@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from core.config.infrastructure import RDBConfig, VectorDBConfig
 from core.config.root import Settings
@@ -133,6 +135,27 @@ class TestCatalogStoreWiring:
         # Container shortcuts must be the same object exposed by the store —
         # otherwise orchestrator injection drifts from store state.
         assert repo is getattr(c.catalog_store, name)
+
+    @pytest.mark.asyncio
+    async def test_initialize_seeds_admin_token(self, monkeypatch):
+        calls = []
+
+        async def ensure_admin_user(token):
+            calls.append(token)
+
+        class FakeCatalogStore:
+            user_repo = SimpleNamespace(ensure_admin_user=ensure_admin_user)
+
+            async def initialize(self):
+                calls.append("initialize")
+
+        monkeypatch.setenv("AUTH_TOKEN", "admin-token")
+        c = ServiceContainer(_settings())
+        c._catalog_store = FakeCatalogStore()
+
+        await c.initialize()
+
+        assert calls == ["initialize", "admin-token"]
 
 
 class TestVectorStoreWiring:

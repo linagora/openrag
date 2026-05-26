@@ -17,6 +17,9 @@ class OIDCSessionRepository(ABC):
     async def get_by_token_hash(self, token_hash: str) -> OIDCSession | None: ...
 
     @abstractmethod
+    async def get_by_id(self, session_id: int) -> OIDCSession | None: ...
+
+    @abstractmethod
     async def get_by_sid(self, sid: str) -> list[OIDCSession]: ...
 
     @abstractmethod

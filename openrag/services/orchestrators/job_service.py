@@ -110,5 +110,12 @@ class JobService:
             f"get_user_pending_task_count({user_id})",
         )
 
+    async def get_task_details(self, task_id: str) -> dict | None:
+        """Return task details for ownership checks and status routes."""
+        return await self._call(
+            self._tsm.get_details.remote(task_id),
+            f"get_details({task_id})",
+        )
+
 
 __all__ = ["JobService"]

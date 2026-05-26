@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from typing import Any
 from urllib.parse import quote
 
 from components.auth.refresh import refresh_session_if_needed
@@ -99,14 +100,13 @@ def is_bypass_path(path: str) -> bool:
 class AuthMiddleware(BaseHTTPMiddleware):
     """FastAPI middleware enforcing authentication for both token and oidc modes.
 
-    Constructor takes a ``get_vectordb`` callable returning the Ray actor
-    handle — this indirection keeps the middleware decoupled from
-    ``utils.dependencies`` so tests can inject a ``MagicMock``.
+    Constructor takes a ``get_auth_service`` callable so tests can inject a
+    fake service and the live app can resolve the request-time container.
     """
 
-    def __init__(self, app, *, get_vectordb: Callable[[], object]):
+    def __init__(self, app, *, get_auth_service: Callable[[Request], Any]):
         super().__init__(app)
-        self._get_vectordb = get_vectordb
+        self._get_auth_service = get_auth_service
 
     async def dispatch(self, request: Request, call_next):
         # Read env lazily so tests can flip AUTH_MODE per-test.
@@ -114,12 +114,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         auth_token = os.getenv("AUTH_TOKEN")
         enc_key = os.getenv("OIDC_TOKEN_ENCRYPTION_KEY") or ""
 
-        vectordb = self._get_vectordb()
-
         # --- Dev mode: AUTH_MODE=token + AUTH_TOKEN unset → user 1 bypass.
         if auth_mode == "token" and auth_token is None:
-            user = await vectordb.get_user.remote(1)
-            user_partitions = await vectordb.list_user_partitions.remote(1)
+            auth_service = self._get_auth_service(request)
+            user = await auth_service.get_user_for_request(1)
+            user_partitions = await auth_service.list_user_partitions_for_request(1)
             request.state.user = user
             request.state.user_partitions = user_partitions
             request.state.oidc_session = None
@@ -144,7 +143,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
                 session_valid = False
                 if cookie_token:
-                    session = await vectordb.get_oidc_session_by_token.remote(cookie_token)
+                    auth_service = self._get_auth_service(request)
+                    session = await auth_service.get_oidc_session_by_token_for_request(cookie_token)
                     session_valid = session is not None
                 if not session_valid:
                     next_path = path
@@ -158,6 +158,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         user = None
         session = None
+        auth_service = self._get_auth_service(request)
 
         # --- 1) Cookie session (OIDC UI flow). Gated on oidc mode so the
         #        legacy token-mode contract remains strictly Bearer-only —
@@ -165,23 +166,23 @@ class AuthMiddleware(BaseHTTPMiddleware):
         #        request when AUTH_MODE=token.
         cookie_token = request.cookies.get(SESSION_COOKIE_NAME) if auth_mode == "oidc" else None
         if cookie_token:
-            session = await vectordb.get_oidc_session_by_token.remote(cookie_token)
+            session = await auth_service.get_oidc_session_by_token_for_request(cookie_token)
             if session is not None:
                 refreshed = await refresh_session_if_needed(
                     session=session,
                     enc_key=enc_key,
-                    vectordb=vectordb,
+                    auth_service=auth_service,
                 )
                 if refreshed is None:
                     # Refresh failed or session unusable → revoke and fall through.
                     try:
-                        await vectordb.revoke_oidc_session_by_id.remote(session["id"])
+                        await auth_service.revoke_oidc_session_by_id_for_request(session["id"])
                     except Exception as e:
                         logger.bind(error=str(e)).warning("Failed to revoke invalid OIDC session")
                     session = None
                 else:
                     session = refreshed
-                    user = await vectordb.get_user.remote(session["user_id"])
+                    user = await auth_service.get_user_for_request(session["user_id"])
 
         # --- 2) Fallback: Bearer / ?token= (programmatic clients + internal
         #        callers like Chainlit's header_auth_callback which forwards
@@ -200,28 +201,28 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 # a ``users.token`` hash). Try the session lookup first with
                 # the same lazy-refresh semantics as the cookie branch above.
                 if auth_mode == "oidc":
-                    session = await vectordb.get_oidc_session_by_token.remote(token)
+                    session = await auth_service.get_oidc_session_by_token_for_request(token)
                     if session is not None:
                         refreshed = await refresh_session_if_needed(
                             session=session,
                             enc_key=enc_key,
-                            vectordb=vectordb,
+                            auth_service=auth_service,
                         )
                         if refreshed is None:
                             try:
-                                await vectordb.revoke_oidc_session_by_id.remote(session["id"])
+                                await auth_service.revoke_oidc_session_by_id_for_request(session["id"])
                             except Exception as e:
                                 logger.bind(error=str(e)).warning("Failed to revoke invalid OIDC session (bearer path)")
                             session = None
                         else:
                             session = refreshed
-                            user = await vectordb.get_user.remote(session["user_id"])
+                            user = await auth_service.get_user_for_request(session["user_id"])
 
                 if user is None:
                     # Either token mode, or oidc mode with no matching session
                     # — fall back to the long-lived ``users.token`` used by
                     # programmatic clients (CI, scripts, service agents).
-                    user = await vectordb.get_user_by_token.remote(token)
+                    user = await auth_service.get_user_by_token_for_request(token)
                     if not user and auth_mode == "token":
                         # Legacy test contract: robot suite asserts 403 + "Invalid token".
                         return JSONResponse(status_code=403, content={"detail": "Invalid token"})
@@ -243,6 +244,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # --- Happy path: user resolved.
         request.state.user = user
-        request.state.user_partitions = await vectordb.list_user_partitions.remote(user["id"])
+        request.state.user_partitions = await auth_service.list_user_partitions_for_request(user["id"])
         request.state.oidc_session = session  # None when authenticated via Bearer
         return await call_next(request)

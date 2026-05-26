@@ -20,7 +20,6 @@ from services.orchestrators.partition_service import PartitionService
 from utils.logger import get_logger
 
 from .utils import (
-    ROLE_HIERARCHY,
     partitions_with_details,
     require_partition_owner,
     require_partition_viewer,
@@ -29,7 +28,7 @@ from .utils import (
 logger = get_logger()
 router = APIRouter()
 
-RoleType = Literal[*list(ROLE_HIERARCHY.keys())]
+RoleType = Literal["viewer", "editor", "owner"]
 
 
 def _quote_param_value(s: str) -> str:

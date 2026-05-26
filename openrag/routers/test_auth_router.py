@@ -11,8 +11,8 @@ gate, delegation to the injected service, cookie set/clear, and the
 ``OIDCFlowError`` → HTTP-response mapping. The service is stubbed via
 ``dependency_overrides`` so no container / Ray / IdP is needed.
 
-The router transitively imports ``utils.dependencies`` (Ray actors at
-import time) through its dependency graph, so we stub that module in
+The router transitively imports ``services.workers.bootstrap`` (Ray actors
+at import time) through its dependency graph, so we stub that module in
 ``sys.modules`` before importing the router.
 """
 
@@ -34,14 +34,18 @@ from fastapi.testclient import TestClient  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def _install_dependencies_stub() -> None:
-    stub = types.ModuleType("utils.dependencies")
-    stub.get_vectordb = lambda: None
+_STUBBED_MODULES = ("utils", "utils.logger", "services.workers.bootstrap")
+
+
+def _install_dependencies_stub() -> dict[str, types.ModuleType | None]:
+    previous_modules = {name: sys.modules.get(name) for name in _STUBBED_MODULES}
+
+    stub = types.ModuleType("services.workers.bootstrap")
+    stub.actor_creation_map = {}
     stub.get_task_state_manager = lambda: None
     stub.get_serializer = lambda: None
-    stub.get_indexer = lambda: None
     stub.get_marker_pool = lambda: None
-    sys.modules["utils.dependencies"] = stub
+    sys.modules["services.workers.bootstrap"] = stub
 
     def _logger():
         logger = types.SimpleNamespace(
@@ -56,11 +60,25 @@ def _install_dependencies_stub() -> None:
 
     logger_stub = types.ModuleType("utils.logger")
     logger_stub.escape_markup = lambda s: s.replace("\\", "\\\\").replace("<", "\\<").replace(">", "\\>")
+    logger_stub.mask_email = (
+        lambda email: f"{email.partition('@')[0][0]}***@{email.partition('@')[2]}"
+        if isinstance(email, str) and "@" in email and email.partition("@")[0]
+        else "***"
+    )
     logger_stub.get_logger = _logger
     sys.modules["utils.logger"] = logger_stub
+    return previous_modules
 
 
-_install_dependencies_stub()
+def _restore_dependencies_stub(previous_modules: dict[str, types.ModuleType | None]) -> None:
+    for name, previous_module in previous_modules.items():
+        if previous_module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous_module
+
+
+_PREVIOUS_MODULES = _install_dependencies_stub()
 
 from di.providers import get_auth_service  # noqa: E402
 from routers.auth import router as auth_router  # noqa: E402
@@ -70,6 +88,8 @@ from services.orchestrators.auth_service import (  # noqa: E402
     LoginRedirect,
     OIDCFlowError,
 )
+
+_restore_dependencies_stub(_PREVIOUS_MODULES)
 
 STATE_COOKIE_NAME = "openrag_oidc_state"
 
