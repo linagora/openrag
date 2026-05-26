@@ -5,9 +5,7 @@ message contained "unsupported plot type"; any other ValueError fell through
 and the function returned None implicitly, causing TypeError in the caller.
 """
 
-import pytest
-
-from .pptx_parser import PptxParser
+from core.indexing.parsers.pptx_parser import PptxParser
 
 
 class _RaisingCategories:
@@ -69,3 +67,83 @@ class TestChartToMarkdown:
         for msg in ["unsupported plot type", "something else", "", "re.error: group ref"]:
             result = PptxParser._chart_to_markdown(_Chart(msg))
             assert result is not None, f"Got None for error message: {msg!r}"
+
+
+# ---------------------------------------------------------------------------
+# Caller-path regression — _convert must not raise TypeError from md += ...
+# ---------------------------------------------------------------------------
+
+
+class _MockShapes(list):
+    """List subclass that also carries a `title` attribute (as slide.shapes does)."""
+
+    def __init__(self, shapes):
+        super().__init__(shapes)
+        self.title = None
+
+
+def _text_shape(text: str):
+    """Minimal shape that looks like a text-only shape to _convert."""
+    from unittest.mock import MagicMock
+
+    shape = MagicMock()
+    shape.has_chart = False
+    shape.has_text_frame = True
+    # _is_picture and _is_table both call shape.shape_type; raise NotImplementedError
+    # so those branches fall through harmlessly.
+    type(shape).shape_type = property(lambda self: (_ for _ in ()).throw(NotImplementedError()))
+    shape.text = text
+    return shape
+
+
+def _chart_shape():
+    """Minimal shape with a failing chart (simulates the #388 scenario)."""
+    from unittest.mock import MagicMock
+
+    shape = MagicMock()
+    shape.has_chart = True
+    shape.chart = _Chart("unsupported plot type")
+    type(shape).shape_type = property(lambda self: (_ for _ in ()).throw(NotImplementedError()))
+    shape.has_text_frame = False
+    return shape
+
+
+class TestPptxParserConvertPath:
+    """Regression for #388: _convert must not raise TypeError when a chart shape
+    is present.  The bug was that _chart_to_markdown returned None implicitly,
+    causing ``md += None`` to raise TypeError."""
+
+    def test_convert_with_failing_chart_does_not_raise(self, monkeypatch):
+        """Three slides (text / failing-chart / text) complete without TypeError."""
+        from unittest.mock import MagicMock
+
+        # Slide 1 — plain text
+        slide1 = MagicMock()
+        slide1.shapes = _MockShapes([_text_shape("Slide one text")])
+        slide1.has_notes_slide = False
+
+        # Slide 2 — chart that raises ValueError("unsupported plot type")
+        slide2 = MagicMock()
+        slide2.shapes = _MockShapes([_chart_shape()])
+        slide2.has_notes_slide = False
+
+        # Slide 3 — plain text
+        slide3 = MagicMock()
+        slide3.shapes = _MockShapes([_text_shape("Slide three text")])
+        slide3.has_notes_slide = False
+
+        mock_prs = MagicMock()
+        mock_prs.slides = [slide1, slide2, slide3]
+
+        import pptx as _pptx_module
+
+        monkeypatch.setattr(_pptx_module, "Presentation", lambda path: mock_prs)
+
+        parser = PptxParser()
+        # Must not raise TypeError
+        slide_count, slides, images = parser._convert("fake.pptx")
+
+        assert slide_count == 3
+        texts = [text for _, text in slides]
+        assert any("Slide one text" in t for t in texts)
+        assert any("Slide three text" in t for t in texts)
