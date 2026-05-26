@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import pytest
 from components.websearch.base import WebResult
-from components.websearch.content_fetcher import ContentFetcher
+from components.websearch.content_fetcher import ContentFetcher, _is_safe_url
 
 
 @pytest.fixture
@@ -13,6 +13,63 @@ def fetcher():
 
 def _make_result(url="https://example.com", snippet="short snippet"):
     return WebResult(title="Test", url=url, snippet=snippet)
+
+
+# ---------------------------------------------------------------------------
+# _is_safe_url — unit tests (no network, no client)
+# ---------------------------------------------------------------------------
+
+
+class TestIsSafeUrl:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost/secret",
+            "http://127.0.0.1/admin",
+            "http://127.0.0.42/x",
+            "http://[::1]/admin",
+            "http://10.0.0.1/internal",
+            "http://192.168.1.1/router",
+            "http://169.254.169.254/metadata",  # AWS/cloud metadata service
+            "http://0.0.0.0/x",
+            "http://100.64.0.1/cgnat",  # RFC 6598 shared address space
+            "http://198.18.0.1/bench",  # Benchmarking range
+        ],
+    )
+    def test_blocks_private_and_reserved_addresses(self, url):
+        assert _is_safe_url(url) is False
+
+    def test_blocks_decimal_encoded_loopback(self):
+        """2130706433 is 127.0.0.1 in decimal integer form."""
+        assert _is_safe_url("http://2130706433/secret") is False
+
+    def test_blocks_decimal_encoded_private(self):
+        """167772161 is 10.0.0.1 in decimal integer form."""
+        assert _is_safe_url("http://167772161/secret") is False
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "file:///etc/passwd",
+            "ftp://example.com/x",
+            "data:text/html,<h1>hi</h1>",
+            "javascript:alert(1)",
+        ],
+    )
+    def test_blocks_non_http_schemes(self, url):
+        assert _is_safe_url(url) is False
+
+    def test_allows_public_ip(self):
+        # 93.184.216.34 is example.com — globally routable
+        assert _is_safe_url("http://93.184.216.34/page") is True
+
+    def test_allows_regular_hostname(self):
+        assert _is_safe_url("https://example.com/page") is True
+
+
+# ---------------------------------------------------------------------------
+# _fetch_single — integration tests with mock transport
+# ---------------------------------------------------------------------------
 
 
 class TestFetchSingleURL:
@@ -75,6 +132,73 @@ class TestFetchSingleURL:
         transport = httpx.MockTransport(mock_handler)
         async with httpx.AsyncClient(transport=transport) as client:
             text = await fetcher._fetch_single(client, url)
+
+        assert text is None
+
+    @pytest.mark.asyncio
+    async def test_blocks_redirect_to_private_ip(self, fetcher):
+        """A response that redirects to a private IP must be blocked after the initial fetch."""
+        calls: list[str] = []
+
+        async def redirecting_handler(request):
+            calls.append(str(request.url))
+            if len(calls) == 1:
+                return httpx.Response(
+                    302,
+                    headers={"location": "http://192.168.1.1/secret"},
+                )
+            return httpx.Response(200, text="<html><body>SSRF data</body></html>")
+
+        transport = httpx.MockTransport(redirecting_handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            # 93.184.216.34 is example.com — passes the initial check
+            text = await fetcher._fetch_single(client, "http://93.184.216.34/page")
+
+        assert text is None
+        # The redirect target (192.168.1.1) must never have been contacted
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_follows_safe_redirect(self, fetcher):
+        """A redirect to another public URL must be followed and its content returned."""
+        calls: list[str] = []
+
+        async def handler(request):
+            calls.append(str(request.url))
+            if len(calls) == 1:
+                return httpx.Response(
+                    301,
+                    headers={"location": "http://93.184.216.34/final"},
+                )
+            return httpx.Response(
+                200,
+                text="<html><body><p>Final page content.</p></body></html>",
+            )
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            text = await fetcher._fetch_single(client, "http://93.184.216.34/start")
+
+        assert text is not None
+        assert "Final page content" in text
+        assert len(calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_stops_after_max_redirects(self, fetcher):
+        """Redirect chains that exceed _MAX_REDIRECTS are aborted."""
+        hop = 0
+
+        async def infinite_redirect(request):
+            nonlocal hop
+            hop += 1
+            return httpx.Response(
+                302,
+                headers={"location": f"http://93.184.216.34/hop{hop}"},
+            )
+
+        transport = httpx.MockTransport(infinite_redirect)
+        async with httpx.AsyncClient(transport=transport) as client:
+            text = await fetcher._fetch_single(client, "http://93.184.216.34/start")
 
         assert text is None
 

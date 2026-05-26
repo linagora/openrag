@@ -1,6 +1,6 @@
 import asyncio
 import ipaddress
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import lxml.html
@@ -17,6 +17,72 @@ _CHARS_PER_TOKEN = 4
 _BOILERPLATE_TAGS = {"nav", "footer", "header", "aside", "script", "style", "noscript"}
 
 _USER_AGENT = "Mozilla/5.0 (compatible; OpenRAG/1.0; +https://github.com/linagora/openrag)"
+
+_MAX_REDIRECTS = 10
+
+
+def _is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True for any IP that a server-side fetcher must not contact.
+
+    Checks all private/reserved/non-global flags explicitly so the guard is
+    correct across Python minor releases (``is_global`` semantics changed
+    between 3.10 and 3.11 for CGNAT and some multicast ranges).
+    """
+    return (
+        addr.is_loopback
+        or addr.is_private
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_unspecified
+        or addr.is_multicast
+        or not addr.is_global
+    )
+
+
+def _is_safe_url(url: str) -> bool:
+    """Return True only if *url* is safe for a server-side fetch.
+
+    Blocks:
+    - Non-HTTP(S) schemes
+    - ``localhost`` hostname
+    - IPv4/IPv6 literals in private, loopback, link-local, or reserved ranges
+    - Decimal-integer-encoded IPv4 addresses (e.g. ``2130706433`` == ``127.0.0.1``)
+
+    Regular hostnames pass through; per-hop redirect validation (in
+    :meth:`ContentFetcher._fetch_single`) re-checks every redirect target,
+    covering the case where a public hostname redirects to a private address.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+
+    if parsed.scheme not in ("http", "https"):
+        return False
+
+    host = parsed.hostname
+    if not host:
+        return False
+
+    if host.lower() == "localhost":
+        return False
+
+    # Dotted-decimal or IPv6 literal (e.g. "127.0.0.1", "::1", "10.0.0.1")
+    try:
+        return not _is_blocked_address(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+
+    # Decimal-integer form (e.g. 2130706433 → 127.0.0.1).
+    # ipaddress.ip_address(int) interprets the value as a packed IPv4 address,
+    # matching how glibc's resolver (and therefore httpx) handles such hostnames.
+    try:
+        return not _is_blocked_address(ipaddress.ip_address(int(host)))
+    except (ValueError, TypeError):
+        pass
+
+    # Regular hostname — passes initial check; every redirect hop is re-validated.
+    return True
 
 
 class ContentFetcher:
@@ -46,29 +112,44 @@ class ContentFetcher:
             truncated = truncated[:last_space]
         return truncated.rstrip() + " [...]"
 
-    @staticmethod
-    def _is_loopback_url(url: str) -> bool:
-        host = urlparse(url).hostname or ""
-        if host == "localhost":
-            return True
-        try:
-            return not ipaddress.ip_address(host).is_global
-        except ValueError:
-            return False  # Regular hostname, let it through
-
     async def _fetch_single(self, client: httpx.AsyncClient, url: str) -> str | None:
-        """Fetch a single URL and extract text. Returns None on any failure."""
-        # Guard against SSRF: URLs come from the search provider, but a compromised
-        # or misbehaving provider could return loopback addresses targeting internal services.
-        if self._is_loopback_url(url):
-            logger.warning("Blocked loopback URL in web search results", url=url)
-            return None
-        try:
-            response = await asyncio.wait_for(
-                client.get(url, follow_redirects=True),
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
+        """Fetch a single URL and extract text. Returns None on any failure.
+
+        Redirects are followed manually (``follow_redirects=False``) so every
+        hop is validated by :func:`_is_safe_url` before the request is sent.
+        This prevents a legitimate initial URL from redirecting to a private
+        address after the initial check passes.
+        """
+        current_url = url
+        for _ in range(_MAX_REDIRECTS + 1):
+            if not _is_safe_url(current_url):
+                logger.warning("Blocked unsafe URL in web search results", url=current_url)
+                return None
+
+            try:
+                response = await asyncio.wait_for(
+                    client.get(current_url, follow_redirects=False),
+                    timeout=self.timeout,
+                )
+            except TimeoutError:
+                logger.debug("Content fetch timed out", url=current_url)
+                return None
+            except Exception as e:
+                logger.debug("Content fetch failed", url=current_url, error=str(e))
+                return None
+
+            if response.is_redirect:
+                location = response.headers.get("location", "")
+                if not location:
+                    return None
+                current_url = urljoin(current_url, location)
+                continue
+
+            try:
+                response.raise_for_status()
+            except Exception as e:
+                logger.debug("Content fetch failed", url=current_url, error=str(e))
+                return None
 
             content_type = response.headers.get("content-type", "")
             if "text/html" not in content_type and "text/plain" not in content_type:
@@ -78,7 +159,6 @@ class ContentFetcher:
             if not html.strip():
                 return None
 
-            # Strip boilerplate elements (nav, footer, etc.) before conversion
             try:
                 tree = lxml.html.fromstring(html)
                 for tag in _BOILERPLATE_TAGS:
@@ -95,12 +175,8 @@ class ContentFetcher:
 
             return self._truncate(text)
 
-        except TimeoutError:
-            logger.debug("Content fetch timed out", url=url)
-            return None
-        except Exception as e:
-            logger.debug("Content fetch failed", url=url, error=str(e))
-            return None
+        logger.debug("Too many redirects, giving up", url=url)
+        return None
 
     async def enrich(self, results: list[WebResult]) -> list[WebResult]:
         """Fetch content for the top N results in parallel. Mutates results in place."""
