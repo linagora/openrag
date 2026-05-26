@@ -32,6 +32,7 @@ from fastapi.responses import JSONResponse
 from services.orchestrators.indexing_service import IndexingService
 from utils.logger import get_logger
 
+from .task_logs import collect_task_logs
 from .utils import (
     check_user_file_quota,
     current_user_partitions,
@@ -468,24 +469,18 @@ async def get_task_logs(task_id: str, max_lines: int = 100, task_details=Depends
     if not LOG_FILE.exists():
         raise HTTPException(status_code=500, detail="Log file not found.")
 
-    logs = []
-    with open(LOG_FILE, errors="replace") as f:
-        for line in reversed(list(f)):
-            try:
-                record = json.loads(line).get("record", {})
-                if record.get("extra", {}).get("task_id") == task_id:
-                    logs.append(
-                        f"{record['time']['repr']} - {record['level']['name']} - {record['message']} - {(record['extra'])}"
-                    )
-                    if len(logs) >= max_lines:
-                        break
-            except json.JSONDecodeError:
-                continue
+    try:
+        logs = collect_task_logs(LOG_FILE, task_id, max_lines)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
 
     if not logs:
         raise HTTPException(status_code=404, detail=f"No logs found for task '{task_id}'")
 
-    return JSONResponse(content={"task_id": task_id, "logs": logs[::-1]})  # restore order
+    return JSONResponse(content={"task_id": task_id, "logs": logs})
 
 
 @router.delete(
