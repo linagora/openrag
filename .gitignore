@@ -88,3 +88,9 @@ docs/plans/
 # Local developer overrides (not committed)
 docker-compose.override.yaml
 docker-compose.override.yml
+
+# Chainlit-generated locale files (only en-US and fr are curated/committed;
+# other locales are auto-written at runtime).
+i8n/*.json
+!i8n/en-US.json
+!i8n/fr.json
