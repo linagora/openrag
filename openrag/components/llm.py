@@ -2,6 +2,7 @@ import copy
 import json
 
 import httpx
+from config import load_config
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -13,6 +14,8 @@ class LLM:
         default_llm_config = llm_config.model_dump()
         self._api_key = default_llm_config.pop("api_key", None)
         self._base_url = default_llm_config.pop("base_url", None)
+        # Force the max_tokens in default config
+        default_llm_config["max_tokens"] = load_config().llm_context.max_output_tokens
         self.default_llm_config = default_llm_config
 
         self.headers = {
@@ -21,16 +24,24 @@ class LLM:
         }
 
     def _extract_llm_overrides(self, request: dict):
-        """Extract and apply LLM overrides from metadata.llm_override."""
+        """Build the upstream payload, optionally applying llm_override.
+
+        - Default path (no llm_override): merge `default_llm_config` with request params
+        - Override path: forward only what the client explicitly sent, to avoid unsupported params
+        """
         metadata = request.get("metadata") or {}
         llm_override = metadata.pop("llm_override", None) or {}
 
-        request.pop("model")
-        payload = copy.deepcopy(self.default_llm_config)
-        payload.update(request)
+        # `model` and `metadata` are openrag-specific. No need to transmit to LLM
+        request.pop("model", None)
+        request.pop("metadata", None)
 
-        if llm_override.get("model"):
-            payload["model"] = llm_override["model"]
+        if llm_override:
+            payload = copy.deepcopy(request)
+            payload["model"] = llm_override.get("model") or self.default_llm_config.get("model", "")
+        else:
+            payload = copy.deepcopy(self.default_llm_config)
+            payload.update(request)
 
         base_url = (llm_override.get("base_url") or self._base_url).rstrip("/")
         api_key = llm_override.get("api_key") or self._api_key
@@ -63,7 +74,7 @@ class LLM:
 
     async def chat_completion(self, request: dict):
         payload, base_url, headers = self._extract_llm_overrides(request)
-        stream = payload["stream"]
+        stream = payload.get("stream", False)
 
         timeout = httpx.Timeout(4 * 60)
         async with httpx.AsyncClient(timeout=timeout) as client:

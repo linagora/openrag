@@ -320,6 +320,13 @@ async def openai_chat_completion(
             detail="The last message must be a non-empty user message",
         )
 
+    llm_override = (request.metadata or {}).get("llm_override") or {}
+    if llm_override.get("base_url") and not llm_override.get("model"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="metadata.llm_override.model is required when metadata.llm_override.base_url is set",
+        )
+
     log.debug(
         "Received chat completion request with messages: {}",
         truncate(str(request.messages)),
@@ -332,7 +339,9 @@ async def openai_chat_completion(
         partitions = await get_partition_name(model_name, user_partitions, is_admin=user["is_admin"])
         log.debug(f"Using partitions: {partitions}")
 
-    llm_output, docs, web_results = await ragpipe.chat_completion(partition=partitions, payload=request.model_dump())
+    llm_output, docs, web_results = await ragpipe.chat_completion(
+        partition=partitions, payload=request.model_dump(exclude_unset=True)
+    )
     log.debug("RAG chat completion pipeline executed.")
 
     sources = __prepare_sources(request2, docs, web_results=web_results)
@@ -426,7 +435,7 @@ async def openai_completion(
     else:
         partitions = await get_partition_name(model_name, user_partitions, is_admin=user["is_admin"])
 
-    llm_output, docs = await ragpipe.completions(partition=partitions, payload=request.model_dump())
+    llm_output, docs = await ragpipe.completions(partition=partitions, payload=request.model_dump(exclude_unset=True))
     log.debug("RAG completion pipeline executed.")
 
     sources = __prepare_sources(request2, docs)

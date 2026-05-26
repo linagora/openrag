@@ -1,7 +1,7 @@
 from typing import Any, Literal
 
 from config import load_config
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 config = load_config()
 default_max_tokens = config.llm_context.max_output_tokens
@@ -11,6 +11,8 @@ default_max_tokens = config.llm_context.max_output_tokens
 class OpenAIMessage(BaseModel):
     """Modèle représentant un message dans l'API OpenAI."""
 
+    model_config = ConfigDict(extra="allow")
+
     role: Literal["user", "assistant", "system"]
     content: str
 
@@ -18,13 +20,16 @@ class OpenAIMessage(BaseModel):
 class OpenAIChatCompletionRequest(BaseModel):
     """Modèle représentant une requête de complétion chat pour l'API OpenAI."""
 
+    model_config = ConfigDict(extra="allow")
+
     model: str | None = Field(None, description="model name")
     messages: list[OpenAIMessage]
     temperature: float | None = Field(0.3)
     top_p: float | None = Field(1.0)
     stream: bool | None = Field(False)
     max_tokens: int | None = Field(default_max_tokens)
-    logprobs: int | None = Field(None)
+    logprobs: bool | None = Field(None)
+    top_logprobs: int | None = Field(None)
     metadata: dict[str, Any] | None = Field(
         {
             "use_map_reduce": False,
@@ -38,6 +43,8 @@ class OpenAIChatCompletionRequest(BaseModel):
 
 class OpenAICompletionRequest(BaseModel):
     """Legacy OpenAI completion API"""
+
+    model_config = ConfigDict(extra="allow")
 
     model: str | None = Field(None, description="model name")
     prompt: str
