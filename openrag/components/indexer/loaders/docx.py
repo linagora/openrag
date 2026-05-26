@@ -71,7 +71,7 @@ class DocxLoader(BaseLoader):
             for block, caption in zip(processed.images, captions):
                 ref = (block.metadata or {}).get("markdown_ref")
                 if ref:
-                    result = result.replace(ref, caption.replace("\\", "/"))
+                    result = result.replace(ref, caption)
 
             result = await self.replace_markdown_images_with_captions(
                 result,

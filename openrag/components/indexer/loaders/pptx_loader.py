@@ -63,7 +63,7 @@ class PPTXLoader(BaseLoader):
             for block, caption in zip(processed.images, captions):
                 ref = (block.metadata or {}).get("markdown_ref")
                 if ref:
-                    md_content = md_content.replace(ref, caption.replace("\\", "/"))
+                    md_content = md_content.replace(ref, caption)
 
         doc = Document(page_content=md_content, metadata=metadata)
         if save_markdown:
