@@ -53,7 +53,7 @@ npm run dev  # Start dev server at http://localhost:4321/openrag
 
 ### Core Components
 
-The main application entry point is `openrag/api.py` which creates a FastAPI app with Ray initialization.
+The main application entry point is `openrag/main.py` which creates a FastAPI app with Ray initialization.
 
 **Ray Actors** (distributed components):
 - `Indexer` (`openrag/components/indexer/indexer.py`) - Handles document ingestion, chunking, and insertion into vector DB
@@ -69,7 +69,7 @@ The main application entry point is `openrag/api.py` which creates a FastAPI app
 
 ### Document Processing Flow
 
-1. Files uploaded via `/indexer/add_file` endpoint
+1. Files uploaded via `POST /indexer/partition/{partition}/file/{file_id}` (multipart with `file=@…`)
 2. `Indexer.add_file()` serializes file to Document using appropriate loader
 3. Chunker splits document into chunks with contextual metadata
 4. Embedder generates vectors via VLLM (OpenAI-compatible API)
@@ -133,7 +133,7 @@ The system uses token-based authentication with role-based access control (RBAC)
 - `workspaces` - Named file subsets within a partition for scoped search/chat
 - `workspace_files` - Join table linking workspaces to files
 
-**Authentication Flow** (`openrag/api.py` - `AuthMiddleware`):
+**Authentication Flow** (`AuthMiddleware` from `openrag/components/auth/middleware.py`, registered in `openrag/main.py`):
 1. Token extracted from `Authorization: Bearer <token>` header (or `?token=` query param for `/static` routes)
 2. Token hashed with SHA-256, looked up in database
 3. User info and accessible partitions set on `request.state.user` and `request.state.user_partitions`
@@ -417,8 +417,10 @@ New table `oidc_sessions`:
 
 **Middleware Behavior**:
 
-- UI paths (`/`, `/chainlit`, `/static`) without auth → 302 redirect to `/auth/login?next=...`
-- API paths (`/v1`, `/indexer`, `/search`, etc.) without auth → 401 JSON response
-- Programmtic access: Bearer `users.token` accepted in both modes
+- UI paths (`/`, `/chainlit`, `/static`) in OIDC mode without auth → 302 redirect to `/auth/login?next=...`
+- API paths (`/v1`, `/indexer`, `/search`, etc.) without auth:
+  - **Token mode** → `403 {"detail": "Missing token"}` (no bearer) or `403 {"detail": "Invalid token"}` (unknown bearer). The 403 status is a legacy contract the robot suite asserts (`tests/api/`).
+  - **OIDC mode** → `401 {"detail": "Unauthenticated"}` (no usable session/bearer and the path isn't a UI redirect target).
+- Programmatic access: Bearer `users.token` accepted in both modes
 
 **See Also**: Full configuration and troubleshooting guide at `docs/oidc.md`.
