@@ -129,6 +129,64 @@ class TestGetImagesFromZip:
         assert images == []
 
 
+class TestCaptionBackslashInjection:
+    """Regression tests for #389.
+
+    The old code passed VLM captions directly to re.sub as the replacement
+    string. Captions containing \\1 or \\g<name> raised re.error. The fix
+    switched to str.replace(), which treats the replacement as a literal.
+    A leftover caption.replace("\\", "/") that mangled backslashes in captions
+    was also removed — this class verifies captions are now injected verbatim.
+    """
+
+    def _inject(self, ref: str, caption: str, content: str) -> str:
+        """Replicate the exact substitution used in DocxLoader and PPTXLoader."""
+        return content.replace(ref, caption)
+
+    def test_backreference_sequence_injected_verbatim(self):
+        r"""Caption containing \1 must appear as-is in the output."""
+        ref = "![](pptx-image-0)"
+        caption = r"Figure with backreference \1 inside"
+        content = f"Slide text {ref} more text"
+        result = self._inject(ref, caption, content)
+        assert r"\1" in result
+        assert caption in result
+
+    def test_named_group_reference_injected_verbatim(self):
+        r"""Caption containing \g<name> must appear as-is in the output."""
+        ref = "![](pptx-image-1)"
+        caption = r"Caption with \g<x> group ref"
+        content = f"Before {ref} after"
+        result = self._inject(ref, caption, content)
+        assert r"\g<x>" in result
+        assert caption in result
+
+    def test_windows_path_in_caption_preserved(self):
+        r"""Caption containing C:\Users\name must not be mangled to C:/Users/name."""
+        ref = "![](pptx-image-2)"
+        caption = r"Screenshot from C:\Users\alice\Desktop"
+        content = f"Intro {ref} end"
+        result = self._inject(ref, caption, content)
+        assert r"C:\Users\alice\Desktop" in result
+        assert r"C:/Users/alice/Desktop" not in result
+
+    def test_no_exception_for_any_backslash_sequence(self):
+        """None of these captions should raise when injected into content."""
+        ref = "![](img)"
+        problematic_captions = [
+            r"\1",
+            r"\g<name>",
+            r"\0",
+            r"\99",
+            r"C:\Windows\System32",
+            r"path\\to\\file",
+            "normal caption without backslashes",
+        ]
+        for caption in problematic_captions:
+            result = self._inject(ref, caption, f"text {ref} end")
+            assert caption in result, f"Caption not injected verbatim: {caption!r}"
+
+
 class TestConvertToPngImage:
     def test_rgb_image(self):
         img = Image.new("RGB", (50, 50), "red")
