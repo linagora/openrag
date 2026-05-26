@@ -29,6 +29,9 @@ def test_app_front_raises_when_secret_missing(monkeypatch):
     monkeypatch.setenv("AUTH_TOKEN", "test-token")
     monkeypatch.delenv("CHAINLIT_AUTH_SECRET", raising=False)
     monkeypatch.setenv("AUTH_MODE", "token")
+    # Prevent load_dotenv() inside app_front.py from re-loading CHAINLIT_AUTH_SECRET
+    # from a .env file that may have it set (e.g. local dev environment).
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
 
     # Drop the previously-imported app_front module so the import body re-runs.
     for mod in [m for m in sys.modules if m == "app_front" or m.endswith(".app_front")]:
