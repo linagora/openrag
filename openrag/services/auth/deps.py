@@ -1,12 +1,14 @@
 """Lazy, process-local singleton for the OIDCClient.
 
-Kept in a dedicated module to avoid circular imports between the router
-(``openrag/routers/auth.py``) and the application entry point (``openrag/api.py``).
+Kept in a dedicated module to avoid circular imports between the auth
+router (:mod:`api.routers.auth.oidc`) and the application entry point
+(:mod:`api.main`).
 
-The OIDC config env vars are resolved here via ``os.getenv`` — the same values
-that ``openrag/api.py`` validates at startup. In ``AUTH_MODE=oidc`` mode, these
-are guaranteed to be non-empty (api.py refuses to start otherwise), so this
-module simply trusts them.
+The OIDC config env vars are resolved here via ``os.getenv``. In
+``AUTH_MODE=oidc`` mode they are guaranteed to be non-empty
+(``OIDCConfig.from_env`` is called from :class:`ServiceContainer`'s
+constructor and refuses to start otherwise), so this module simply
+trusts them.
 """
 
 from __future__ import annotations

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from core.models.user import User
+from core.models.user import User, UserCreate, UserUpdate
 from core.utils.exceptions import UserNotFoundError, ValidationError
-from models.user import UserCreate, UserUpdate
 from services.orchestrators.user_service import UserService
 
 

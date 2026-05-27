@@ -1,0 +1,65 @@
+import pytest
+from api.schemas.admin.common import MessageResponse, TaskStatusResponse
+from api.schemas.admin.tools import ToolInfo
+from api.schemas.admin.users import UserCreate, UserPublic, UserUpdate
+from api.schemas.admin.workspaces import AddFilesRequest, CreateWorkspaceRequest
+from api.schemas.auth.login import CurrentUserResponse, LoginResponse
+from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest, OpenAIMessage
+from api.schemas.user.search import SearchRequest
+from pydantic import ValidationError
+
+
+def test_user_schemas_import_from_api_package():
+    created = UserCreate(display_name="Alice", email=None)
+    updated = UserUpdate(display_name="Bob")
+    public = UserPublic(id=1, display_name="Alice", external_user_id=None, email=None, is_admin=False, created_at=None)
+
+    assert created.email is None
+    assert updated.display_name == "Bob"
+    assert public.file_quota is None
+
+
+def test_openai_schemas_preserve_existing_defaults():
+    request = OpenAIChatCompletionRequest(messages=[OpenAIMessage(role="user", content="hello")])
+    completion = OpenAICompletionRequest(prompt="hello")
+
+    assert request.temperature == 0.3
+    assert request.top_p == 1.0
+    assert request.stream is False
+    assert completion.best_of == 1
+
+
+def test_search_schema_preserves_existing_defaults():
+    request = SearchRequest(query="hello")
+
+    assert request.query == "hello"
+    assert request.top_k == 5
+
+
+def test_admin_common_schema_imports():
+    assert MessageResponse(message="ok").message == "ok"
+    assert TaskStatusResponse(task_status_url="/task/1").task_status_url == "/task/1"
+
+
+def test_auth_schema_imports():
+    assert LoginResponse(detail="Logged out").detail == "Logged out"
+    assert CurrentUserResponse(user_id=1, auth_method="token").auth_method == "token"
+
+
+def test_workspace_schema_validates_workspace_id():
+    req = CreateWorkspaceRequest(workspace_id="my-ws_1")
+    assert req.workspace_id == "my-ws_1"
+    assert req.display_name is None
+
+    with pytest.raises(ValidationError):
+        CreateWorkspaceRequest(workspace_id="bad/slash")
+
+
+def test_add_files_request_accepts_id_list():
+    req = AddFilesRequest(file_ids=["a", "b"])
+    assert req.file_ids == ["a", "b"]
+
+
+def test_tool_info_schema():
+    info = ToolInfo(name="extractText", description="Extract text from a file")
+    assert info.name == "extractText"

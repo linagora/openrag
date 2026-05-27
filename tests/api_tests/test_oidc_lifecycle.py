@@ -294,10 +294,10 @@ from di.providers import get_auth_service, get_user_service  # noqa: E402
 from services.orchestrators.auth_service import AuthService  # noqa: E402
 from services.orchestrators.user_service import UserService  # noqa: E402
 
-sys.modules.pop("routers.auth", None)
-sys.modules.pop("routers.users", None)
-_auth_router_mod = importlib.import_module("routers.auth")
-_users_router_mod = importlib.import_module("routers.users")
+sys.modules.pop("api.routers.auth.oidc", None)
+sys.modules.pop("api.routers.admin.users", None)
+_auth_router_mod = importlib.import_module("api.routers.auth.oidc")
+_users_router_mod = importlib.import_module("api.routers.admin.users")
 
 
 # ---------------------------------------------------------------------------
@@ -418,8 +418,8 @@ def _make_app(router) -> tuple[FastAPI, TestClient]:
     0.22 exposes MockRouter + httpx.MockTransport(router.handler)."""
     app = FastAPI()
 
-    # Install the AuthMiddleware (from components.auth.middleware)
-    from components.auth.middleware import AuthMiddleware  # noqa: E402
+    # Install the AuthMiddleware (Phase 10C: api.middleware.auth)
+    from api.middleware.auth import AuthMiddleware  # noqa: E402
 
     app.add_middleware(AuthMiddleware, get_auth_service=lambda _request: auth_service)
 

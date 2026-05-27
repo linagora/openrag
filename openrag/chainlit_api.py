@@ -1,5 +1,5 @@
+from api.middleware.auth import AuthMiddleware
 from chainlit.utils import mount_chainlit
-from components.auth.middleware import AuthMiddleware
 from fastapi import FastAPI
 
 

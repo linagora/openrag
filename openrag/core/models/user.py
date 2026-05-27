@@ -6,7 +6,35 @@ import uuid
 from datetime import UTC, datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+# ---------------------------------------------------------------------------
+# Request DTOs — shared between the API layer (request bodies) and the
+# UserService orchestrator. Kept in core so neither layer imports the other.
+# ---------------------------------------------------------------------------
+
+
+class UserBase(BaseModel):
+    display_name: str | None = None
+    external_user_id: str | None = None
+    email: str | None = Field(default=None, examples=[None])
+    is_admin: bool = False
+    file_quota: int | None = Field(default=None)
+
+
+class UserCreate(UserBase):
+    model_config = ConfigDict(extra="allow")
+
+
+class UserUpdate(UserBase):
+    model_config = ConfigDict(extra="allow")
+
+
+class UserPublic(UserBase):
+    id: int
+    created_at: str | None
+    file_quota: int | None = None
+    file_count: int | None = None
 
 
 class PartitionRole(str, Enum):

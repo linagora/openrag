@@ -71,29 +71,6 @@ _NO_SETTINGS_MESSAGE = (
 )
 
 
-def _oidc_config_from_env():
-    """Build :class:`OIDCConfig` from the same env vars ``main.py`` validates.
-
-    Phase 8A.1 keeps OIDC config env-sourced (it is not yet wired into the
-    root :class:`Settings`); ``enabled`` mirrors ``AUTH_MODE=oidc``.
-    """
-    from core.config.auth import OIDCConfig
-
-    return OIDCConfig(
-        enabled=os.getenv("AUTH_MODE", "token").strip().lower() == "oidc",
-        issuer_url=os.getenv("OIDC_ENDPOINT", "") or "",
-        client_id=os.getenv("OIDC_CLIENT_ID", "") or "",
-        client_secret=os.getenv("OIDC_CLIENT_SECRET", "") or "",
-        redirect_uri=os.getenv("OIDC_REDIRECT_URI", "") or "",
-        scopes=os.getenv("OIDC_SCOPES", "openid email profile offline_access"),
-        token_encryption_key=os.getenv("OIDC_TOKEN_ENCRYPTION_KEY", "") or "",
-        claim_source=os.getenv("OIDC_CLAIM_SOURCE", "id_token").strip().lower(),
-        claim_mapping=os.getenv("OIDC_CLAIM_MAPPING", "").strip(),
-        post_logout_redirect_uri=os.getenv("OIDC_POST_LOGOUT_REDIRECT_URI", "") or "",
-        auto_provision_login=os.getenv("OIDC_AUTO_PROVISION_LOGIN", "false").strip().lower() == "true",
-    )
-
-
 class ServiceContainer:
     """Populates registries and provides typed factory access."""
 
@@ -102,6 +79,15 @@ class ServiceContainer:
         register_llms()
         register_rerankers()
         register_vlms()
+
+        # Validate + freeze the OIDC env config now so misconfiguration
+        # (AUTH_MODE=oidc with missing OIDC_*, invalid claim_source,
+        # malformed claim_mapping) fails at construction rather than
+        # silently at the first login. See OIDCConfig.from_env for the
+        # full rule set.
+        from core.config.auth import OIDCConfig
+
+        self._oidc_config = OIDCConfig.from_env()
 
         self._settings = settings
         self._catalog_store: CatalogStore | None = create_catalog_store(settings) if settings is not None else None
@@ -251,7 +237,7 @@ class ServiceContainer:
         if self._auth_service is None:
             from services.orchestrators.auth_service import AuthService
 
-            cfg = _oidc_config_from_env()
+            cfg = self._oidc_config
             client = None
             if cfg.enabled:
                 from components.auth import get_oidc_client
