@@ -29,13 +29,11 @@ The legacy ``openrag/main.py`` continues to run the existing entrypoint
 from __future__ import annotations
 
 import os
-import re
 import warnings
 from contextlib import asynccontextmanager
 from enum import Enum
 from importlib.metadata import version as get_package_version
 from pathlib import Path
-from urllib.parse import parse_qs
 
 import ray
 import uvicorn
@@ -51,7 +49,12 @@ if not ray.is_initialized():
 # flake8: noqa: E402  (ray.init must run first)
 import services.workers.bootstrap  # noqa: F401  (side-effect actor creation)
 from api.error_handlers import register_error_handlers
-from components.auth.middleware import AuthMiddleware
+from api.middleware import (
+    AuthMiddleware,
+    InstrumentationMiddleware,
+    RequestIdMiddleware,
+    RequestTimeoutMiddleware,
+)
 from config import load_config
 from di.container import ServiceContainer
 from dotenv import dotenv_values
@@ -64,7 +67,6 @@ from routers.actors import router as actors_router
 from routers.auth import router as auth_router
 from routers.extract import router as extract_router
 from routers.indexer import router as indexer_router
-from routers.monitoring import MonitoringMiddleware
 from routers.monitoring import router as monitoring_router
 from routers.openai import router as openai_router
 from routers.partition import router as partition_router
@@ -74,7 +76,6 @@ from routers.tools import router as tools_router
 from routers.users import router as users_router
 from routers.utils import require_admin
 from routers.workspaces import router as workspaces_router
-from starlette.middleware.base import BaseHTTPMiddleware
 from utils.logger import get_logger
 
 # pydub 0.25.1 ships invalid-escape regex literals; the warning is upstream.
@@ -204,32 +205,6 @@ class AppState:
 
 
 # ---------------------------------------------------------------------------
-# Middleware (Phase 10A keeps these inline; 10C moves them into api/middleware/)
-# ---------------------------------------------------------------------------
-
-
-class TokenRedactingMiddleware(BaseHTTPMiddleware):
-    """Strip ``?token=…`` from access logs while preserving the original
-    value on ``request.state`` so :class:`AuthMiddleware` can still
-    authenticate it.
-
-    Phase 10C merges this into ``api/middleware/request_id.py`` — both
-    deal with request-scoped context setup.
-    """
-
-    TOKEN_PATTERN = re.compile(r"(token=)[^&\s]+", re.IGNORECASE)
-
-    async def dispatch(self, request: Request, call_next):
-        original_query_string = request.scope.get("query_string", b"").decode()
-        if "token=" in original_query_string.lower():
-            params = parse_qs(original_query_string)
-            request.state.original_token = params.get("token", [None])[0]
-            redacted_query = self.TOKEN_PATTERN.sub(r"\1[REDACTED]", original_query_string)
-            request.scope["query_string"] = redacted_query.encode()
-        return await call_next(request)
-
-
-# ---------------------------------------------------------------------------
 # Lifespan — owns the ServiceContainer lifecycle
 # ---------------------------------------------------------------------------
 
@@ -300,16 +275,24 @@ def custom_openapi():
 app.openapi = custom_openapi
 
 
-# Middleware order is reverse of registration — last added runs first on
-# request. Phase 10C reorders to the final stack
-# (Auth → RequestId → RequestTimeout → Instrumentation); 10A preserves
-# the legacy order so the move is a pure file relocation.
+# Middleware stack — registration is the reverse of execution
+# (last ``add_middleware`` call wraps the outermost layer). The
+# Phase 10C target order on a request is:
+#
+#     Instrumentation -> RequestTimeout -> RequestId -> Auth -> route
+#
+# so Auth is the innermost guard (lifespan's request_id already on
+# request.state when an auth failure runs through the error handlers),
+# and Instrumentation captures the full request duration including the
+# auth check. CORS is added later and ends up outside this stack so
+# preflights short-circuit before any instrumentation runs.
 app.add_middleware(
     AuthMiddleware,
     get_auth_service=lambda request: request.app.state.container.auth_service,
 )
-app.add_middleware(TokenRedactingMiddleware)
-app.add_middleware(MonitoringMiddleware)
+app.add_middleware(RequestIdMiddleware)
+app.add_middleware(RequestTimeoutMiddleware)
+app.add_middleware(InstrumentationMiddleware)
 
 # Phase 10B centralises the OpenRAGError + generic Exception handlers in
 # api/error_handlers.py — the inline decorators that used to live here

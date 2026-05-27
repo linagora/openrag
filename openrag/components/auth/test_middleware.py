@@ -246,7 +246,7 @@ class TestOIDCMode:
             }
 
         with patch(
-            "components.auth.middleware.refresh_session_if_needed",
+            "api.middleware.auth.refresh_session_if_needed",
             side_effect=fake_refresh,
         ):
             app = _build_app(vdb)
@@ -267,7 +267,7 @@ class TestOIDCMode:
             return None  # refresh failed → invalid session
 
         with patch(
-            "components.auth.middleware.refresh_session_if_needed",
+            "api.middleware.auth.refresh_session_if_needed",
             side_effect=fake_refresh,
         ):
             app = _build_app(vdb)
