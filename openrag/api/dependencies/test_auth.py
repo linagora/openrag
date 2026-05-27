@@ -2,7 +2,30 @@ import pytest
 from api.dependencies import auth as api_auth
 from api.dependencies.auth import check_user_file_quota, ensure_partition_role, require_task_owner
 from fastapi import HTTPException
-from services.orchestrators.auth_service import AuthService
+
+
+class FakeAuthService:
+    @classmethod
+    def check_partition_access(
+        cls,
+        *,
+        user,
+        partition: str,
+        user_partitions: list[dict],
+        required_role: str,
+        super_admin_mode: bool = False,
+    ) -> bool:
+        return True
+
+    @classmethod
+    def validate_file_quota(
+        cls,
+        user,
+        *,
+        pending_task_count: int,
+        default_quota: int,
+    ) -> None:
+        return None
 
 
 class FakePartitionService:
@@ -40,7 +63,7 @@ async def test_ensure_partition_role_allows_unknown_partition_without_membership
         user={"id": 1},
         user_partitions=[],
         required_role="editor",
-        auth_service=AuthService,
+        auth_service=FakeAuthService,
         partition_service=partition_service,
     )
 
@@ -58,7 +81,7 @@ async def test_ensure_partition_role_forbids_existing_partition_without_membersh
             user={"id": 1},
             user_partitions=[],
             required_role="viewer",
-            auth_service=AuthService,
+            auth_service=FakeAuthService,
             partition_service=partition_service,
         )
 
@@ -87,7 +110,7 @@ async def test_check_user_file_quota_reads_pending_count_through_job_service(mon
 
     user = await check_user_file_quota(
         user={"id": 7, "file_count": 1, "file_quota": 5},
-        auth_service=AuthService,
+        auth_service=FakeAuthService,
         job_service=job_service,
     )
 

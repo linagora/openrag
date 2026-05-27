@@ -4,9 +4,6 @@ from config import load_config
 from core.utils.exceptions import OpenRAGError
 from di.providers import get_auth_service, get_job_service, get_partition_service
 from fastapi import Depends, HTTPException, Request, status
-from services.orchestrators.auth_service import AuthService
-from services.orchestrators.job_service import JobService
-from services.orchestrators.partition_service import PartitionService
 from utils.logger import get_logger
 
 config = load_config()
@@ -64,8 +61,8 @@ async def ensure_partition_role(
     user_partitions,
     required_role: str,
     *,
-    auth_service: AuthService,
-    partition_service: PartitionService,
+    auth_service,
+    partition_service,
 ):
     """Ensure the user has at least `required_role` for the partition."""
     if SUPER_ADMIN_MODE and user.get("is_admin"):
@@ -101,8 +98,8 @@ async def require_partition_viewer(
     partition=Depends(request_partition),
     user=Depends(current_user),
     user_partitions=Depends(current_user_partitions),
-    auth_service: AuthService = Depends(get_auth_service),
-    partition_service: PartitionService = Depends(get_partition_service),
+    auth_service=Depends(get_auth_service),
+    partition_service=Depends(get_partition_service),
 ):
     await ensure_partition_role(
         partition,
@@ -119,8 +116,8 @@ async def require_partition_editor(
     partition=Depends(request_partition),
     user=Depends(current_user),
     user_partitions=Depends(current_user_partitions),
-    auth_service: AuthService = Depends(get_auth_service),
-    partition_service: PartitionService = Depends(get_partition_service),
+    auth_service=Depends(get_auth_service),
+    partition_service=Depends(get_partition_service),
 ):
     await ensure_partition_role(
         partition,
@@ -137,8 +134,8 @@ async def require_partition_owner(
     partition=Depends(request_partition),
     user=Depends(current_user),
     user_partitions=Depends(current_user_partitions),
-    auth_service: AuthService = Depends(get_auth_service),
-    partition_service: PartitionService = Depends(get_partition_service),
+    auth_service=Depends(get_auth_service),
+    partition_service=Depends(get_partition_service),
 ):
     await ensure_partition_role(
         partition,
@@ -155,8 +152,8 @@ async def require_partitions_viewer(
     partitions=Depends(request_partitions),
     user=Depends(current_user),
     user_partitions=Depends(current_user_partitions),
-    auth_service: AuthService = Depends(get_auth_service),
-    partition_service: PartitionService = Depends(get_partition_service),
+    auth_service=Depends(get_auth_service),
+    partition_service=Depends(get_partition_service),
 ):
     if SUPER_ADMIN_MODE and user.get("is_admin"):
         return user
@@ -178,7 +175,7 @@ async def require_partitions_viewer(
 async def require_task_owner(
     task_id=Depends(request_task_id),
     user=Depends(current_user),
-    job_service: JobService = Depends(get_job_service),
+    job_service=Depends(get_job_service),
 ):
     task_details = await job_service.get_task_details(task_id)
     if not task_details:
@@ -237,8 +234,8 @@ def require_admin_or_self(
 
 async def check_user_file_quota(
     user=Depends(current_user),
-    auth_service: AuthService = Depends(get_auth_service),
-    job_service: JobService = Depends(get_job_service),
+    auth_service=Depends(get_auth_service),
+    job_service=Depends(get_job_service),
 ):
     """Check if user has reached their file quota."""
     if user.get("is_admin", False):
