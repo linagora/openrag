@@ -28,7 +28,7 @@ from core.utils.exceptions import UserNotFoundError, ValidationError
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
-    from api.schemas.admin.users import UserCreate, UserUpdate
+    from core.models.user import UserCreate, UserUpdate
     from core.ports.partition_membership_repo import PartitionMembershipRepository
     from core.ports.user_repo import UserRepository
     from services.orchestrators.auth_service import AuthService

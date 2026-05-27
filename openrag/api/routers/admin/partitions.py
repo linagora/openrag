@@ -20,7 +20,6 @@ from api.dependencies.auth import (
 from di.providers import get_partition_service
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
-from services.orchestrators.partition_service import PartitionService
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -48,7 +47,7 @@ Returns a list of partitions you have access to, including:
 )
 async def list_existant_partitions(
     partitions=Depends(partitions_with_details),
-    service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_partition_service),
 ):
     if len(partitions) == 1 and partitions[0]["partition"] == "all":
         partitions = await service.list_partitions()
@@ -76,7 +75,7 @@ Returns 204 No Content on successful deletion.
 async def delete_partition(
     partition: str,
     partition_owner=Depends(require_partition_owner),
-    service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_partition_service),
 ):
     await service.delete_partition(partition)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -106,7 +105,7 @@ async def list_files(
     partition: str,
     limit: int | None = None,
     partition_viewer=Depends(require_partition_viewer),
-    service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_partition_service),
 ):
     file_dicts = await service.list_files(partition, limit)
 
@@ -152,7 +151,7 @@ async def get_file(
     file_id: str,
     limit: int = 2000,
     partition_viewer=Depends(require_partition_viewer),
-    service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_partition_service),
 ):
     if not await service.file_exists(file_id, partition):
         raise HTTPException(
@@ -195,7 +194,7 @@ async def list_all_chunks(
     partition: str,
     include_embedding: bool = True,
     partition_viewer=Depends(require_partition_viewer),
-    service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_partition_service),
 ):
     items = await service.list_all_chunks(partition=partition, include_embedding=include_embedding)
     chunks = [
@@ -231,7 +230,7 @@ Returns 409 Conflict if partition already exists.
 async def create_partition(
     request: Request,
     partition: str,
-    service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_partition_service),
 ):
     if await service.partition_exists(partition):
         raise HTTPException(
@@ -268,7 +267,7 @@ Returns list of partition members with:
 async def list_partition_users(
     partition: str,
     partition_owner=Depends(require_partition_owner),
-    service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_partition_service),
 ):
     """List all users who are members of the given partition."""
     members = await service.list_members(partition=partition)
@@ -301,7 +300,7 @@ async def add_partition_user(
     user_id: int = Form(...),
     role: RoleType = Form("viewer"),
     partition_owner=Depends(require_partition_owner),
-    service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_partition_service),
 ):
     """Add a user as a member of the given partition."""
     await service.add_member(partition=partition, user_id=user_id, role=role)
@@ -332,7 +331,7 @@ async def remove_partition_user(
     partition: str,
     user_id: int,
     partition_owner=Depends(require_partition_owner),
-    service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_partition_service),
 ):
     """Remove a user from the given partition."""
     await service.remove_member(partition=partition, user_id=user_id)
@@ -365,7 +364,7 @@ async def update_partition_user_role(
     user_id: int,
     role: RoleType = Form(...),
     partition_owner=Depends(require_partition_owner),
-    service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_partition_service),
 ):
     """Update a user's role in the given partition."""
     await service.update_role(partition=partition, user_id=user_id, new_role=role)
@@ -400,7 +399,7 @@ async def get_related_files(
     partition: str,
     relationship_id: str,
     partition_viewer=Depends(require_partition_viewer),
-    service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_partition_service),
 ):
     files = await service.get_related_files(partition=partition, relationship_id=relationship_id)
     return JSONResponse(status_code=status.HTTP_200_OK, content={"files": files})
@@ -437,7 +436,7 @@ async def get_file_ancestors(
     file_id: str,
     max_ancestor_depth: int | None = None,
     partition_viewer=Depends(require_partition_viewer),
-    service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_partition_service),
 ):
     if not await service.file_exists(file_id, partition):
         raise HTTPException(

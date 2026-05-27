@@ -35,8 +35,6 @@ from config import load_config
 from di.providers import get_partition_service, get_query_service
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from services.orchestrators.partition_service import PartitionService
-from services.orchestrators.query_service import QueryService
 from utils.exceptions.base import OpenRAGError
 from utils.logger import get_logger
 
@@ -89,7 +87,7 @@ Returns models in OpenAI-compatible format with:
 )
 async def list_models(
     user_partitions=Depends(current_user_or_admin_partitions),
-    partitions: PartitionService = Depends(get_partition_service),
+    partitions=Depends(get_partition_service),
 ):
     if [p["partition"] for p in user_partitions] == ["all"]:
         user_partitions = await partitions.list_partitions()
@@ -260,8 +258,8 @@ async def openai_chat_completion(
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
     _: None = Depends(check_llm_model_availability),
-    service: QueryService = Depends(get_query_service),
-    partition_service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_query_service),
+    partition_service=Depends(get_partition_service),
 ):
     model_name = request.model or config.llm.model
     log = logger.bind(model=model_name, endpoint="/chat/completions")
@@ -352,8 +350,8 @@ async def openai_completion(
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
     _: None = Depends(check_llm_model_availability),
-    service: QueryService = Depends(get_query_service),
-    partition_service: PartitionService = Depends(get_partition_service),
+    service=Depends(get_query_service),
+    partition_service=Depends(get_partition_service),
 ):
     model_name = request.model or config.llm.model
     log = logger.bind(model=model_name, endpoint="/completions")

@@ -22,7 +22,6 @@ from di.providers import get_conversion_service
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from services.orchestrators.conversion_service import ConversionService
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -102,7 +101,7 @@ async def execute_tool(
     file: UploadFile = Depends(validate_file_format),
     tool: str = Depends(validate_tool),
     metadata: dict = Depends(validate_metadata),
-    service: ConversionService = Depends(get_conversion_service),
+    service=Depends(get_conversion_service),
 ):
     file_path = None
     try:

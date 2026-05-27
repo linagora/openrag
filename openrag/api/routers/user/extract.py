@@ -12,7 +12,6 @@ from api.dependencies.auth import current_user_or_admin_partitions_list
 from di.providers import get_conversion_service
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
-from services.orchestrators.conversion_service import ConversionService
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -50,7 +49,7 @@ View detailed content of a specific chunk from search results.
 async def get_extract(
     extract_id: str,
     user_partitions=Depends(current_user_or_admin_partitions_list),
-    service: ConversionService = Depends(get_conversion_service),
+    service=Depends(get_conversion_service),
 ):
     log = logger.bind(extract_id=extract_id)
 
