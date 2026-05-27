@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from components.auth.middleware import AuthMiddleware, is_ui_path
+from api.middleware.auth import AuthMiddleware, is_ui_path
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -246,7 +246,7 @@ class TestOIDCMode:
             }
 
         with patch(
-            "components.auth.middleware.refresh_session_if_needed",
+            "api.middleware.auth.refresh_session_if_needed",
             side_effect=fake_refresh,
         ):
             app = _build_app(vdb)
@@ -267,7 +267,7 @@ class TestOIDCMode:
             return None  # refresh failed → invalid session
 
         with patch(
-            "components.auth.middleware.refresh_session_if_needed",
+            "api.middleware.auth.refresh_session_if_needed",
             side_effect=fake_refresh,
         ):
             app = _build_app(vdb)
@@ -496,7 +496,7 @@ class TestRefreshHelper:
 
 def test_is_bypass_path_chainlit_subtree_only():
     """Only the actual /chainlit subtree may bypass auth — not /chainlitevil."""
-    from components.auth.middleware import is_bypass_path
+    from api.middleware.auth import is_bypass_path
 
     # Legitimate Chainlit paths still bypass
     assert is_bypass_path("/chainlit") is True

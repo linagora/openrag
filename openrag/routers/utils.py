@@ -332,10 +332,6 @@ def human_readable_size(size_bytes: int) -> str:
     return f"{size_bytes:.2f} PB"
 
 
-def get_app_state(request: Request):
-    return request.app.state.app_state
-
-
 async def get_openai_models(base_url: str, api_key: str, timeout: int = 30):
     async with AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout) as client:
         models_response = await client.models.list()

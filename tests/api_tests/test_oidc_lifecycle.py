@@ -418,8 +418,8 @@ def _make_app(router) -> tuple[FastAPI, TestClient]:
     0.22 exposes MockRouter + httpx.MockTransport(router.handler)."""
     app = FastAPI()
 
-    # Install the AuthMiddleware (from components.auth.middleware)
-    from components.auth.middleware import AuthMiddleware  # noqa: E402
+    # Install the AuthMiddleware (Phase 10C: api.middleware.auth)
+    from api.middleware.auth import AuthMiddleware  # noqa: E402
 
     app.add_middleware(AuthMiddleware, get_auth_service=lambda _request: auth_service)
 

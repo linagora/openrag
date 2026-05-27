@@ -11,14 +11,16 @@ shaping (domain ``Chunk`` → ``{link, metadata, content}``).
 
 from typing import Annotated
 
-from api.dependencies.auth import (
+from di.providers import get_retrieval_service, get_workspace_service
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
+from routers.utils import (
     current_user_or_admin_partitions_list,
     require_partition_viewer,
     require_partitions_viewer,
 )
-from di.providers import get_retrieval_service, get_workspace_service
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse
+from services.orchestrators.retrieval_service import RetrievalService
+from services.orchestrators.workspace_service import WorkspaceService
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -139,8 +141,8 @@ async def search_multiple_partitions(
     workspace: str | None = Query(None, description="Workspace ID to filter results"),
     partition_viewer=Depends(require_partitions_viewer),
     user_partitions=Depends(current_user_or_admin_partitions_list),
-    service=Depends(get_retrieval_service),
-    workspaces=Depends(get_workspace_service),
+    service: RetrievalService = Depends(get_retrieval_service),
+    workspaces: WorkspaceService = Depends(get_workspace_service),
 ):
     if partitions == ["all"]:
         partitions = user_partitions
@@ -228,8 +230,8 @@ async def search_one_partition(
     related_params: Annotated[RelatedDocSearchParams, Depends()],
     workspace: str | None = Query(None, description="Workspace ID to filter results"),
     partition_viewer=Depends(require_partition_viewer),
-    service=Depends(get_retrieval_service),
-    workspaces=Depends(get_workspace_service),
+    service: RetrievalService = Depends(get_retrieval_service),
+    workspaces: WorkspaceService = Depends(get_workspace_service),
 ):
     log = logger.bind(
         partition=partition,
@@ -308,7 +310,7 @@ async def search_file(
     file_id: str,
     search_params: Annotated[CommonSearchParams, Depends()],
     partition_viewer=Depends(require_partition_viewer),
-    service=Depends(get_retrieval_service),
+    service: RetrievalService = Depends(get_retrieval_service),
 ):
     log = logger.bind(partition=partition, file_id=file_id, query=search_params.text, top_k=search_params.top_k)
 

@@ -12,16 +12,17 @@ tool validation/dispatch, and the 4xx/5xx error mapping whose exact
 import json
 from pathlib import Path
 
-from api.dependencies.files import (
-    validate_file_format,
-    validate_metadata,
-)
 from components.indexer.utils.files import save_file_to_disk
 from config import load_config
 from di.providers import get_conversion_service
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from routers.utils import (
+    validate_file_format,
+    validate_metadata,
+)
+from services.orchestrators.conversion_service import ConversionService
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -101,7 +102,7 @@ async def execute_tool(
     file: UploadFile = Depends(validate_file_format),
     tool: str = Depends(validate_tool),
     metadata: dict = Depends(validate_metadata),
-    service=Depends(get_conversion_service),
+    service: ConversionService = Depends(get_conversion_service),
 ):
     file_path = None
     try:

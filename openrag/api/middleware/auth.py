@@ -1,26 +1,30 @@
-"""Auth middleware — Phase 5 of the OIDC integration.
+"""AuthMiddleware (Phase 10C — moved from ``components/auth/middleware.py``).
 
-Extracted from ``openrag/api.py`` so the dispatch logic can be unit tested
-without importing the full application (which bootstraps Ray actors at
-import time).
+Pure relocation. Phase 8 already swapped the original Ray-actor calls
+(``vectordb.get_user.remote()``, ``vectordb.get_oidc_session_by_token.remote()``,
+``vectordb.list_user_partitions.remote()``) for ``AuthService`` methods on
+the request-scoped service container, so the dispatch logic moves
+without modification. The middleware supports both auth modes:
 
-The middleware supports both authentication modes:
+* ``AUTH_MODE=token`` (legacy) — single Bearer token from
+  ``Authorization: Bearer ...`` or ``?token=`` for ``/static``. Missing
+  or invalid token returns **403** with the legacy JSON body — the
+  Robot Framework suite under ``tests/api/`` asserts the exact shape.
+* ``AUTH_MODE=oidc`` — cookie-based session set by the OIDC callback,
+  with lazy access-token refresh. A Bearer token is still accepted as
+  a fallback for programmatic clients. Missing/invalid credentials:
 
-  * ``AUTH_MODE=token`` (legacy) — single Bearer token from
-    ``Authorization: Bearer ...`` or ``?token=`` for ``/static``. On missing
-    or invalid token returns **403** with the legacy JSON body (the existing
-    Robot Framework suite asserts this shape).
-
-  * ``AUTH_MODE=oidc`` — cookie-based session (set by the OIDC callback),
-    with lazy access-token refresh. A Bearer token is still accepted as a
-    fallback for programmatic clients. On missing/invalid credentials:
-
-      - UI paths → **302** to ``/auth/login?next=<encoded>``
-      - API paths → **401** JSON ``{"detail": "Unauthenticated"}``
+    - UI paths → **302** to ``/auth/login?next=<encoded>``
+    - API paths → **401** JSON ``{"detail": "Unauthenticated"}``
 
 Environment configuration (``AUTH_MODE``, ``AUTH_TOKEN``,
-``OIDC_TOKEN_ENCRYPTION_KEY``) is read via ``os.getenv`` at **dispatch** time,
-not at import time, so tests can monkeypatch ``os.environ``.
+``OIDC_TOKEN_ENCRYPTION_KEY``) is read at **dispatch** time via
+``os.getenv`` so tests can monkeypatch ``os.environ`` per case.
+
+Phase 10G migrated the last three legacy importers
+(``chainlit_api.py``, the ``components/auth`` test module, and the
+``tests/api_tests/test_oidc_lifecycle.py`` fixture) onto this module
+and deleted the ``components/auth/middleware.py`` shim.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from typing import Any
 from urllib.parse import quote
 
 from components.auth.refresh import refresh_session_if_needed
+from core.config.auth import AuthBypassConfig
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -42,59 +47,41 @@ logger = get_logger()
 SESSION_COOKIE_NAME = "openrag_session"
 
 
-_BYPASS_PATHS = frozenset(
-    {
-        "/docs",
-        "/openapi.json",
-        "/redoc",
-        "/health_check",
-        "/version",
-        "/auth/login",
-        "/auth/callback",
-        "/auth/backchannel-logout",
-        "/auth/logout",
-    }
-)
-
-# Paths that are part of the REST API — unauthenticated requests here must
-# get JSON 401/403, never an HTML redirect to /auth/login (which would break
-# programmatic clients that follow redirects).
-_API_PREFIXES = (
-    "/v1/",
-    "/indexer/",
-    "/search/",
-    "/users/",
-    "/partition/",
-    "/workspaces/",
-    "/queue/",
-    "/extract/",
-    "/actors/",
-    "/monitoring/",
-    "/tools/",
-)
-
-# Browser-facing paths — unauthenticated access in oidc mode → 302 /auth/login.
-_UI_PATH_PREFIXES = ("/static",)
+# Default policy used by the module-level helpers below. The path lists
+# themselves live on :class:`core.config.auth.AuthBypassConfig` so the
+# Phase 10C "config-driven bypass paths" rule is satisfied; callers that
+# need a tighter policy hand a custom :class:`AuthBypassConfig` to
+# :class:`AuthMiddleware` at registration time.
+_DEFAULT_BYPASS_CONFIG = AuthBypassConfig()
 
 
-def is_ui_path(path: str) -> bool:
+def is_ui_path(path: str, *, bypass_config: AuthBypassConfig | None = None) -> bool:
     """True if this path is a browser-facing page (UI), not an API route.
 
     Used only in ``AUTH_MODE=oidc`` to decide between a 302 redirect to
     ``/auth/login`` (UI) and a 401 JSON response (API). When in doubt we
     return ``False`` to avoid redirect loops on non-browser clients.
     """
+    cfg = bypass_config or _DEFAULT_BYPASS_CONFIG
     if path == "/":
         return True
-    if any(path.startswith(p) for p in _API_PREFIXES):
+    if any(path.startswith(p) for p in cfg.api_prefixes):
         return False
-    if any(path.startswith(p) for p in _UI_PATH_PREFIXES):
+    if any(path.startswith(p) for p in cfg.ui_path_prefixes):
         return True
     return False
 
 
-def is_bypass_path(path: str) -> bool:
-    return path in _BYPASS_PATHS or path == "/chainlit" or path.startswith("/chainlit/")
+def is_bypass_path(path: str, *, bypass_config: AuthBypassConfig | None = None) -> bool:
+    """True if ``AuthMiddleware`` should let the request through without
+    consulting the auth service.
+
+    Matches a literal bypass list (``/docs``, health probes, OIDC
+    callback endpoints) plus the entire ``/chainlit`` subtree — Chainlit
+    handles its own header-auth callback for those routes.
+    """
+    cfg = bypass_config or _DEFAULT_BYPASS_CONFIG
+    return path in cfg.bypass_paths or path == "/chainlit" or path.startswith("/chainlit/")
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -102,11 +89,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     Constructor takes a ``get_auth_service`` callable so tests can inject a
     fake service and the live app can resolve the request-time container.
+    An optional :class:`AuthBypassConfig` overrides which paths bypass
+    the auth check; the default matches the legacy hardcoded sets.
     """
 
-    def __init__(self, app, *, get_auth_service: Callable[[Request], Any]):
+    def __init__(
+        self,
+        app,
+        *,
+        get_auth_service: Callable[[Request], Any],
+        bypass_config: AuthBypassConfig | None = None,
+    ):
         super().__init__(app)
         self._get_auth_service = get_auth_service
+        self._bypass_config = bypass_config or AuthBypassConfig()
 
     async def dispatch(self, request: Request, call_next):
         # Read env lazily so tests can flip AUTH_MODE per-test.
@@ -126,7 +122,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # --- Bypass list (docs, health, /auth/* callbacks, chainlit).
         path = request.url.path
-        if is_bypass_path(path):
+        if is_bypass_path(path, bypass_config=self._bypass_config):
             # Special case: browser HTML page-loads on /chainlit/* without an
             # active session can't be served usefully — Chainlit configures no
             # in-app auth provider when headerAuth is used, so the SPA shows
@@ -232,7 +228,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # --- 3) Unauthenticated: redirect UI in oidc mode, else 401 JSON.
         if user is None:
-            if auth_mode == "oidc" and is_ui_path(path):
+            if auth_mode == "oidc" and is_ui_path(path, bypass_config=self._bypass_config):
                 next_path = path
                 if request.url.query:
                     next_path = f"{path}?{request.url.query}"
@@ -247,3 +243,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.user_partitions = await auth_service.list_user_partitions_for_request(user["id"])
         request.state.oidc_session = session  # None when authenticated via Bearer
         return await call_next(request)
+
+
+__all__ = [
+    "AuthMiddleware",
+    "SESSION_COOKIE_NAME",
+    "is_bypass_path",
+    "is_ui_path",
+]
