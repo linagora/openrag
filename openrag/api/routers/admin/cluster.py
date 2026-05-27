@@ -1,11 +1,8 @@
-import ray
+from di.workers import list_ray_actors as list_ray_actor_states
+from di.workers import restart_ray_actor
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
-from ray.util.state import list_actors
 from routers.utils import require_admin
-from services.workers.bootstrap import (
-    actor_creation_map,
-)
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -35,16 +32,7 @@ Returns list of all Ray actors with:
 )
 async def list_ray_actors():
     """List all known Ray actors and their status."""
-    actors = [
-        {
-            "actor_id": a.actor_id,
-            "name": a.name,
-            "class_name": a.class_name,
-            "state": a.state,
-            "namespace": a.ray_namespace,
-        }
-        for a in list_actors()
-    ]
+    actors = list_ray_actor_states()
     return JSONResponse(status_code=status.HTTP_200_OK, content={"actors": actors})
 
 
@@ -81,24 +69,17 @@ async def restart_actor(
     actor_name: str,
 ):
     """Restart a specific Ray actor by name (kill + recreate)."""
-    if actor_name not in actor_creation_map:
+    try:
+        actor_id = restart_ray_actor(actor_name)
+    except KeyError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown actor: {actor_name}")
 
-    try:
-        # Kill existing actor (if alive)
-        actor = ray.get_actor(actor_name, namespace="openrag")
-        ray.kill(actor, no_restart=True)
-        logger.info(f"Killed actor: {actor_name}")
-    except ValueError:
-        logger.warning("Actor not found. Creating new instance.", actor=actor_name)
-
-    new_actor = actor_creation_map[actor_name]()
     logger.info(f"Restarted actor: {actor_name}")
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={
             "message": f"Actor {actor_name} restarted successfully.",
             "actor_name": actor_name,
-            "actor_id": new_actor._actor_id.hex(),
+            "actor_id": actor_id,
         },
     )

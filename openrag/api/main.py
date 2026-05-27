@@ -35,8 +35,9 @@ from pathlib import Path
 import ray
 import uvicorn
 
-# Ray must be initialised before importing modules that look up actors
-# at import time — services.workers.bootstrap creates the long-lived
+# Ray must be initialised before bootstrapping modules that look up actors
+# at import time. The DI helper imports the worker bootstrap after Ray is
+# ready so the API layer does not import services directly.
 # worker pool from its top level. ``ignore_reinit_error`` and the
 # ``is_initialized`` guard keep parallel imports (legacy ``main.py`` +
 # tests + this module) safe.
@@ -44,7 +45,6 @@ if not ray.is_initialized():
     ray.init(dashboard_host="0.0.0.0", ignore_reinit_error=True)
 
 # flake8: noqa: E402  (ray.init must run first)
-import services.workers.bootstrap  # noqa: F401  (side-effect actor creation)
 from api.error_handlers import register_error_handlers
 from api.middleware import (
     AuthMiddleware,
@@ -67,6 +67,7 @@ from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
 from config import load_config
 from di.container import ServiceContainer
+from di.workers import ensure_worker_bootstrap
 from dotenv import dotenv_values
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -113,17 +114,20 @@ except Exception:
 
 class Tags(Enum):
     VDB = "VectorDB operations"
-    INDEXER = ("Indexer",)
-    SEARCH = ("Semantic Search",)
-    OPENAI = ("OpenAI Compatible API",)
-    EXTRACT = ("Document extracts",)
-    PARTITION = ("Partitions & files",)
-    QUEUE = ("Queue management",)
-    ACTORS = ("Ray Actors",)
-    USERS = ("User management",)
-    WORKSPACES = ("Workspaces",)
-    TOOLS = ("Tools",)
-    MONITORING = ("Monitoring",)
+    INDEXER = "Indexer"
+    SEARCH = "Semantic Search"
+    OPENAI = "OpenAI Compatible API"
+    EXTRACT = "Document extracts"
+    PARTITION = "Partitions & files"
+    QUEUE = "Queue management"
+    ACTORS = "Ray Actors"
+    USERS = "User management"
+    WORKSPACES = "Workspaces"
+    TOOLS = "Tools"
+    MONITORING = "Monitoring"
+
+
+ensure_worker_bootstrap()
 
 
 # ---------------------------------------------------------------------------

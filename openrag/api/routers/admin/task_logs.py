@@ -35,13 +35,18 @@ def collect_task_logs(log_file: Path, task_id: str, max_lines: int) -> list[str]
     for line in iter_file_lines_reversed(log_file):
         try:
             record = json.loads(line).get("record", {})
-            if record.get("extra", {}).get("task_id") == task_id:
-                logs.append(
-                    f"{record['time']['repr']} - {record['level']['name']} - {record['message']} - {(record['extra'])}"
-                )
-                if len(logs) >= max_lines:
-                    break
-        except json.JSONDecodeError:
+            extra = record.get("extra") or {}
+            if extra.get("task_id") != task_id:
+                continue
+            time_repr = (record.get("time") or {}).get("repr")
+            level_name = (record.get("level") or {}).get("name")
+            message = record.get("message")
+            if not all((time_repr, level_name, message)):
+                continue
+            logs.append(f"{time_repr} - {level_name} - {message} - {extra}")
+            if len(logs) >= max_lines:
+                break
+        except (json.JSONDecodeError, AttributeError):
             continue
 
     return logs[::-1]

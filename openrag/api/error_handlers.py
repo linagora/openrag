@@ -100,7 +100,11 @@ async def openrag_exception_handler(request: Request, exc: OpenRAGError) -> JSON
     available — additive, so consumers that ignore the field still parse
     the response correctly.
     """
-    logger.error("OpenRAGError occurred", error=str(exc))
+    logger.error(
+        "OpenRAGError occurred",
+        error_code=getattr(exc, "code", type(exc).__name__),
+        status_code=_status_for(exc),
+    )
     body = exc.to_dict()
     request_id = _get_request_id(request)
     if request_id is not None:
@@ -117,7 +121,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     Robot Framework suite and the existing unit assertions still match
     after the move.
     """
-    logger.exception("Unhandled exception", error=str(exc))
+    logger.exception("Unhandled exception", error_type=type(exc).__name__)
     extra: dict[str, object] = {}
     request_id = _get_request_id(request)
     if request_id is not None:

@@ -18,7 +18,6 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import JSONResponse
 from models.user import UserCreate, UserPublic, UserUpdate
 from routers.utils import current_user, require_admin, require_admin_or_self
-from services.orchestrators.user_service import UserService
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -45,7 +44,7 @@ Returns list of all users with:
 )
 async def list_users(
     admin_user=Depends(require_admin),
-    service: UserService = Depends(get_user_service),
+    service=Depends(get_user_service),
 ):
     users = await service.list_users()
     return JSONResponse(status_code=status.HTTP_200_OK, content={"users": users})
@@ -76,7 +75,7 @@ Returns current user details including:
 )
 async def get_current_user_info(
     user=Depends(current_user),
-    service: UserService = Depends(get_user_service),
+    service=Depends(get_user_service),
 ):
     """Get current authenticated user info"""
     return JSONResponse(
@@ -115,7 +114,7 @@ Returns created user including:
 async def create_user(
     body: UserCreate,
     admin_user=Depends(require_admin),
-    service: UserService = Depends(get_user_service),
+    service=Depends(get_user_service),
 ):
     """Create a new user and generate a token."""
     user = await service.create_user(body)
@@ -146,7 +145,7 @@ Returns user details including:
 async def get_user(
     user_id: int,
     admin_user=Depends(require_admin),
-    service: UserService = Depends(get_user_service),
+    service=Depends(get_user_service),
 ):
     """Get details of a specific user (without exposing token)."""
     user = await service.get_user(user_id)
@@ -177,7 +176,7 @@ Returns 204 No Content on successful deletion.
 async def delete_user(
     user_id: int,
     admin_user=Depends(require_admin),
-    service: UserService = Depends(get_user_service),
+    service=Depends(get_user_service),
 ):
     """Delete a user."""
     if user_id == 1:
@@ -216,7 +215,7 @@ Returns user details including the new token:
 async def regenerate_user_token(
     user_id: int,
     _auth=Depends(require_admin_or_self),
-    service: UserService = Depends(get_user_service),
+    service=Depends(get_user_service),
 ):
     """Regenerate a user's token."""
     user = await service.regenerate_token(user_id)
@@ -257,7 +256,7 @@ async def update_user(
     user_id: int,
     body: UserUpdate,
     admin_user=Depends(require_admin),
-    service: UserService = Depends(get_user_service),
+    service=Depends(get_user_service),
 ) -> UserPublic:
     """Update a user's profile fields."""
     # Only block if is_admin was explicitly set to False in the request.

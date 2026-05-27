@@ -24,18 +24,15 @@ from __future__ import annotations
 import os
 
 from components.auth import StateCookieSerializer
+from core.utils.exceptions import OpenRAGError
 from di.providers import get_auth_service
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
-from services.orchestrators.auth_service import (
-    SESSION_COOKIE_NAME,
-    AuthService,
-    OIDCFlowError,
-)
 from utils.logger import get_logger
 
 logger = get_logger()
 router = APIRouter()
+SESSION_COOKIE_NAME = "openrag_session"
 
 
 # ---------------------------------------------------------------------------
@@ -90,11 +87,11 @@ async def login(
     request: Request,
     next: str | None = None,
     _oidc: None = Depends(_require_oidc_mode),
-    service: AuthService = Depends(get_auth_service),
+    service=Depends(get_auth_service),
 ):
     try:
         result = await service.start_oidc_login(next)
-    except OIDCFlowError as e:
+    except OpenRAGError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message) from e
 
     response = RedirectResponse(url=result.authorization_url, status_code=302)
@@ -121,7 +118,7 @@ async def callback(
     code: str | None = None,
     state: str | None = None,
     _oidc: None = Depends(_require_oidc_mode),
-    service: AuthService = Depends(get_auth_service),
+    service=Depends(get_auth_service),
 ):
     try:
         result = await service.handle_oidc_callback(
@@ -129,7 +126,7 @@ async def callback(
             state=state,
             state_cookie_raw=request.cookies.get(StateCookieSerializer.COOKIE_NAME),
         )
-    except OIDCFlowError as e:
+    except OpenRAGError as e:
         return _json_error(e.status_code, e.message, delete_state_cookie=True)
 
     redirect = RedirectResponse(url=result.next_url, status_code=302)
@@ -155,7 +152,7 @@ async def callback(
 async def backchannel_logout(
     logout_token: str = Form(...),
     _oidc: None = Depends(_require_oidc_mode),
-    service: AuthService = Depends(get_auth_service),
+    service=Depends(get_auth_service),
 ):
     """IdP-initiated logout per OIDC Back-Channel Logout spec.
 
@@ -163,10 +160,11 @@ async def backchannel_logout(
     """
     try:
         await service.handle_backchannel_logout(logout_token)
-    except OIDCFlowError as e:
+    except OpenRAGError as e:
         content: dict[str, str] = {"error": "invalid_request"}
-        if e.error_description:
-            content["error_description"] = e.error_description
+        error_description = getattr(e, "error_description", None)
+        if error_description:
+            content["error_description"] = error_description
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content=content,
@@ -188,7 +186,7 @@ async def backchannel_logout(
 async def logout(
     request: Request,
     _oidc: None = Depends(_require_oidc_mode),
-    service: AuthService = Depends(get_auth_service),
+    service=Depends(get_auth_service),
 ):
     redirect_target = await service.logout(request.cookies.get(SESSION_COOKIE_NAME))
 
