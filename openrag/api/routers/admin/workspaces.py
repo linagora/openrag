@@ -12,10 +12,10 @@ unknown/missing-file 404s, the not-removed 404).
 
 import re
 
+from api.dependencies.auth import require_partition_editor, require_partition_owner, require_partition_viewer
 from di.providers import get_workspace_service
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, field_validator
-from routers.utils import require_partition_editor, require_partition_owner, require_partition_viewer
 from utils.logger import get_logger
 
 router = APIRouter()

@@ -4,7 +4,7 @@ Phase 8B.1: partition CRUD, membership, file/chunk reads and the
 relationship queries moved to
 ``services.orchestrators.partition_service.PartitionService``. This
 module keeps HTTP transport only: request-scoped authorization (the
-shared ``Depends`` wrappers in ``routers/utils.py``), ``request.url_for``
+shared ``Depends`` wrappers in ``api.dependencies.auth``), ``request.url_for``
 link building, and the conflict / not-found guards whose exact
 non-bracketed ``{"detail": ...}`` body the legacy endpoints returned via
 ``HTTPException``.
@@ -13,14 +13,14 @@ non-bracketed ``{"detail": ...}`` body the legacy endpoints returned via
 from typing import Literal
 from urllib.parse import quote
 
-from di.providers import get_partition_service
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
-from routers.utils import (
+from api.dependencies.auth import (
     partitions_with_details,
     require_partition_owner,
     require_partition_viewer,
 )
+from di.providers import get_partition_service
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from utils.logger import get_logger
 
 logger = get_logger()

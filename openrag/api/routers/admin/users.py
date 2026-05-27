@@ -13,11 +13,11 @@ from the ``TaskStateManager`` Ray actor, which orchestrators must not
 touch (Phase 8H); it will move to a service once the queue is de-Ray'd.
 """
 
+from api.dependencies.auth import current_user, require_admin, require_admin_or_self
 from di.providers import get_user_service
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import JSONResponse
 from models.user import UserCreate, UserPublic, UserUpdate
-from routers.utils import current_user, require_admin, require_admin_or_self
 from utils.logger import get_logger
 
 logger = get_logger()

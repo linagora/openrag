@@ -16,6 +16,18 @@ import json
 from urllib.parse import urlparse
 
 import consts
+from api.dependencies.auth import (
+    current_user,
+    current_user_or_admin_partitions,
+    current_user_or_admin_partitions_list,
+)
+from api.dependencies.llm import (
+    check_llm_model_availability,
+    get_openai_models,
+    get_partition_name,
+    truncate,
+)
+from api.routers.user.source_links import build_document_source_link
 from components.indexer.utils.text_sanitizer import sanitize_text
 from components.utils import get_num_tokens
 from config import load_config
@@ -23,16 +35,6 @@ from di.providers import get_partition_service, get_query_service
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from models.openai import OpenAIChatCompletionRequest, OpenAICompletionRequest
-from routers.source_links import build_document_source_link
-from routers.utils import (
-    check_llm_model_availability,
-    current_user,
-    current_user_or_admin_partitions,
-    current_user_or_admin_partitions_list,
-    get_openai_models,
-    get_partition_name,
-    truncate,
-)
 from utils.exceptions.base import OpenRAGError
 from utils.logger import get_logger
 

@@ -6,10 +6,10 @@ HTTP transport only: the shared admin/current-user ``Depends`` wrappers
 and the ``request.url_for`` link building.
 """
 
+from api.dependencies.auth import current_user, require_admin
 from di.providers import get_job_service
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse
-from routers.utils import current_user, require_admin
 
 router = APIRouter()
 

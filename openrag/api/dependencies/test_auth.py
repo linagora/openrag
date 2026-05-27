@@ -1,6 +1,7 @@
 import pytest
 from api.dependencies import auth as api_auth
 from api.dependencies.auth import check_user_file_quota, ensure_partition_role, require_task_owner
+from core.utils.exceptions import AuthError
 from fastapi import HTTPException
 
 
@@ -26,6 +27,20 @@ class FakeAuthService:
         default_quota: int,
     ) -> None:
         return None
+
+
+class DenyingAuthService(FakeAuthService):
+    @classmethod
+    def check_partition_access(
+        cls,
+        *,
+        user,
+        partition: str,
+        user_partitions: list[dict],
+        required_role: str,
+        super_admin_mode: bool = False,
+    ) -> bool:
+        raise AuthError(f"{required_role.capitalize()} role required for partition '{partition}'")
 
 
 class FakePartitionService:
@@ -87,6 +102,25 @@ async def test_ensure_partition_role_forbids_existing_partition_without_membersh
 
     assert exc.value.status_code == 403
     assert exc.value.detail == "Access to partition 'existing' forbidden"
+
+
+@pytest.mark.asyncio
+async def test_ensure_partition_role_delegates_membership_role_check_to_auth_service():
+    partition_service = FakePartitionService(existing={"p"})
+
+    with pytest.raises(HTTPException) as exc:
+        await ensure_partition_role(
+            partition="p",
+            user={"id": 1},
+            user_partitions=[{"partition": "p", "role": "viewer"}],
+            required_role="editor",
+            auth_service=DenyingAuthService,
+            partition_service=partition_service,
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "Editor role required for partition 'p'"
+    assert partition_service.checked == []
 
 
 @pytest.mark.asyncio

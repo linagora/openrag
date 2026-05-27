@@ -16,8 +16,8 @@ Notable shape vs the deleted legacy module:
 
 What is still deferred to later phases:
 
-* 10D/Phase 11: ``api/dependencies/auth.py`` will own ``require_admin``
-  etc. — for now they are still imported from ``routers.utils``.
+* 10D/Phase 11: ``api/dependencies/auth.py`` owns ``require_admin`` and
+  related request-state dependency helpers.
 * 10E/Phase 12: Pydantic response schemas under ``api/schemas/`` will
   replace the inline ``JSONResponse(content=...)`` dicts the routers
   still return.
@@ -45,6 +45,7 @@ if not ray.is_initialized():
     ray.init(dashboard_host="0.0.0.0", ignore_reinit_error=True)
 
 # flake8: noqa: E402  (ray.init must run first)
+from api.dependencies.auth import require_admin
 from api.error_handlers import register_error_handlers
 from api.middleware import (
     AuthMiddleware,
@@ -74,7 +75,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from routers.utils import require_admin
 from utils.logger import get_logger
 
 # pydub 0.25.1 ships invalid-escape regex literals; the warning is upstream.

@@ -11,9 +11,9 @@ for callers still on the old import path.
 
 import asyncio
 
+from api.dependencies.auth import require_admin
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
-from routers.utils import require_admin
 from utils.monitoring import get_metrics
 
 router = APIRouter()

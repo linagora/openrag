@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from routers.task_logs import collect_task_logs, iter_file_lines_reversed
+from api.routers.admin.task_logs import collect_task_logs, iter_file_lines_reversed
 
 
 def _record(task_id: str, message: str) -> str:

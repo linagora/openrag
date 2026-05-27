@@ -8,10 +8,10 @@ guards whose exact ``{"detail": ...}`` body the legacy endpoint
 returned via ``HTTPException``.
 """
 
+from api.dependencies.auth import current_user_or_admin_partitions_list
 from di.providers import get_conversion_service
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
-from routers.utils import current_user_or_admin_partitions_list
 from utils.logger import get_logger
 
 logger = get_logger()
