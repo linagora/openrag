@@ -168,7 +168,7 @@ async def require_partitions_viewer(
             auth_service=auth_service,
             partition_service=partition_service,
         )
-        logger.info(f"User has viewer access to partition '{partition}'")
+        logger.bind(partition=partition, user_id=user.get("id")).info("User has viewer access")
     return user
 
 
