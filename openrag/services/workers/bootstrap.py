@@ -14,8 +14,8 @@ the ``main.py`` startup sequence. Before phase 9 the same logic lived in
 ``utils/dependencies.py``; that location violated the "Ray only in
 workers + startup" rule, so the bootstrap moved here.
 
-``actor_creation_map`` is read by ``routers/actors.py`` to restart a
-named actor on-demand from the admin endpoint.
+``actor_creation_map`` is read by :mod:`api.routers.admin.cluster` to
+restart a named actor on-demand from the admin endpoint.
 """
 
 from functools import wraps

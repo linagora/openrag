@@ -16,6 +16,7 @@ from api.dependencies.auth import require_partition_editor, require_partition_ow
 from di.providers import get_workspace_service
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, field_validator
+from services.orchestrators.workspace_service import WorkspaceService
 from utils.logger import get_logger
 
 router = APIRouter()
@@ -49,7 +50,7 @@ class AddFilesRequest(BaseModel):
 async def require_workspace_in_partition(
     partition: str,
     workspace_id: str,
-    service=Depends(get_workspace_service),
+    service: WorkspaceService = Depends(get_workspace_service),
 ) -> dict:
     """Validate that a workspace exists and belongs to the given partition."""
     ws = await service.get_workspace(workspace_id)
@@ -66,7 +67,7 @@ async def create_workspace(
     partition: str,
     body: CreateWorkspaceRequest,
     user=Depends(require_partition_editor),
-    service=Depends(get_workspace_service),
+    service: WorkspaceService = Depends(get_workspace_service),
 ):
     if await service.get_workspace(body.workspace_id):
         raise HTTPException(
@@ -88,7 +89,7 @@ async def create_workspace(
 )
 async def list_workspaces(
     partition: str,
-    service=Depends(get_workspace_service),
+    service: WorkspaceService = Depends(get_workspace_service),
 ):
     return {"workspaces": await service.list_workspaces(partition)}
 
@@ -109,7 +110,7 @@ async def delete_workspace(
     partition: str,
     workspace_id: str,
     _ws=Depends(require_workspace_in_partition),
-    service=Depends(get_workspace_service),
+    service: WorkspaceService = Depends(get_workspace_service),
 ):
     result = await service.delete_workspace(partition, workspace_id)
     return {"status": "deleted", **result}
@@ -124,7 +125,7 @@ async def add_files_to_workspace(
     workspace_id: str,
     body: AddFilesRequest,
     _ws=Depends(require_workspace_in_partition),
-    service=Depends(get_workspace_service),
+    service: WorkspaceService = Depends(get_workspace_service),
 ):
     existing_ids = await service.get_existing_file_ids(partition, body.file_ids)
     unknown_ids = sorted(set(body.file_ids) - set(existing_ids))
@@ -150,7 +151,7 @@ async def add_files_to_workspace(
 async def list_workspace_files(
     workspace_id: str,
     _ws=Depends(require_workspace_in_partition),
-    service=Depends(get_workspace_service),
+    service: WorkspaceService = Depends(get_workspace_service),
 ):
     return {"file_ids": await service.list_files(workspace_id)}
 
@@ -162,7 +163,7 @@ async def list_workspace_files(
 async def list_file_workspaces(
     partition: str,
     file_id: str,
-    service=Depends(get_workspace_service),
+    service: WorkspaceService = Depends(get_workspace_service),
 ):
     workspace_ids = await service.get_file_workspaces(file_id, partition)
     return {"file_id": file_id, "workspace_ids": workspace_ids}
@@ -176,7 +177,7 @@ async def remove_file_from_workspace(
     workspace_id: str,
     file_id: str,
     _ws=Depends(require_workspace_in_partition),
-    service=Depends(get_workspace_service),
+    service: WorkspaceService = Depends(get_workspace_service),
 ):
     removed = await service.remove_file(workspace_id, file_id)
     if not removed:

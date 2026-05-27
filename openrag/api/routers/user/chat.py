@@ -28,13 +28,15 @@ from api.dependencies.llm import (
     truncate,
 )
 from api.routers.user.source_links import build_document_source_link
+from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
 from components.indexer.utils.text_sanitizer import sanitize_text
 from components.utils import get_num_tokens
 from config import load_config
 from di.providers import get_partition_service, get_query_service
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from models.openai import OpenAIChatCompletionRequest, OpenAICompletionRequest
+from services.orchestrators.partition_service import PartitionService
+from services.orchestrators.query_service import QueryService
 from utils.exceptions.base import OpenRAGError
 from utils.logger import get_logger
 
@@ -42,12 +44,19 @@ logger = get_logger()
 config = load_config()
 router = APIRouter()
 
-# Cached max model token limit, populated at startup
+# Cached max model token limit. Populated by ``prime_max_model_tokens``
+# which the application lifespan invokes during startup; ``get_max_model_tokens``
+# falls back to ``config.llm_context.max_llm_context_size`` until then.
 _max_model_tokens: int | None = None
 
 
-@router.on_event("startup")
-async def _cache_max_model_tokens():
+async def prime_max_model_tokens() -> None:
+    """Populate the cached max model token limit.
+
+    Called once from the FastAPI lifespan in ``api/main.py`` (replaces the
+    deprecated ``@router.on_event("startup")`` hook). Safe to call again —
+    it just refreshes the cache.
+    """
     global _max_model_tokens
     _max_model_tokens = await _fetch_max_model_tokens()
 
@@ -80,7 +89,7 @@ Returns models in OpenAI-compatible format with:
 )
 async def list_models(
     user_partitions=Depends(current_user_or_admin_partitions),
-    partitions=Depends(get_partition_service),
+    partitions: PartitionService = Depends(get_partition_service),
 ):
     if [p["partition"] for p in user_partitions] == ["all"]:
         user_partitions = await partitions.list_partitions()
@@ -251,8 +260,8 @@ async def openai_chat_completion(
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
     _: None = Depends(check_llm_model_availability),
-    service=Depends(get_query_service),
-    partition_service=Depends(get_partition_service),
+    service: QueryService = Depends(get_query_service),
+    partition_service: PartitionService = Depends(get_partition_service),
 ):
     model_name = request.model or config.llm.model
     log = logger.bind(model=model_name, endpoint="/chat/completions")
@@ -343,8 +352,8 @@ async def openai_completion(
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
     _: None = Depends(check_llm_model_availability),
-    service=Depends(get_query_service),
-    partition_service=Depends(get_partition_service),
+    service: QueryService = Depends(get_query_service),
+    partition_service: PartitionService = Depends(get_partition_service),
 ):
     model_name = request.model or config.llm.model
     log = logger.bind(model=model_name, endpoint="/completions")

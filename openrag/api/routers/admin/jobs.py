@@ -10,6 +10,7 @@ from api.dependencies.auth import current_user, require_admin
 from di.providers import get_job_service
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse
+from services.orchestrators.job_service import JobService
 
 router = APIRouter()
 
@@ -42,7 +43,7 @@ Monitor system load and worker utilization.
 )
 async def get_queue_info(
     admin=Depends(require_admin),
-    service=Depends(get_job_service),
+    service: JobService = Depends(get_job_service),
 ):
     return await service.get_queue_info()
 
@@ -87,7 +88,7 @@ async def list_tasks(
     request: Request,
     task_status: str | None = None,
     user=Depends(current_user),
-    service=Depends(get_job_service),
+    service: JobService = Depends(get_job_service),
 ):
     """
     - ?task_status=active  → QUEUED | SERIALIZING | CHUNKING | INSERTING

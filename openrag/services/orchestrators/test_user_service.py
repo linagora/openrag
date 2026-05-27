@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from api.schemas.admin.users import UserCreate, UserUpdate
 from core.models.user import User
 from core.utils.exceptions import UserNotFoundError, ValidationError
-from models.user import UserCreate, UserUpdate
 from services.orchestrators.user_service import UserService
 
 

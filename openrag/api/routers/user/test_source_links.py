@@ -1,9 +1,10 @@
 """Regression test for #370 — document source-link building.
 
 These tests exercise the real ``build_document_source_link`` helper used by
-``api.routers.user.chat.__prepare_sources``. The helper lives in the
-import-light ``api.routers.user.source_links`` module so it can be tested
-without importing the chat router.
+``api/routers/user/chat.py::__prepare_sources``. The helper lives in the
+import-light ``api/routers/user/source_links`` module so it can be tested
+without importing ``chat.py`` (which pulls in Ray, the audio loaders, and
+the OpenAI SDK).
 
 Covered:
 - ``Path(source)`` must not crash when ``source`` is missing/None (the #370 bug).

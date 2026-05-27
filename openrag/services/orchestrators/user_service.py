@@ -28,9 +28,9 @@ from core.utils.exceptions import UserNotFoundError, ValidationError
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
+    from api.schemas.admin.users import UserCreate, UserUpdate
     from core.ports.partition_membership_repo import PartitionMembershipRepository
     from core.ports.user_repo import UserRepository
-    from models.user import UserCreate, UserUpdate
     from services.orchestrators.auth_service import AuthService
     from services.orchestrators.job_service import JobService
     from services.orchestrators.partition_service import PartitionService
@@ -57,9 +57,8 @@ class UserService:
         job_service: JobService,
     ) -> None:
         self._user_repo = user_repo
-        # Injected per the Phase 8 prescribed signature: the place future
-        # phases consolidate authz (e.g. require_admin) once the shared
-        # FastAPI Depends wrappers in routers/utils.py are retired.
+        # Injected so future phases can consolidate authz decisions
+        # (e.g. require_admin) on the service rather than the HTTP layer.
         self._auth_service = auth_service
         # Legacy ``file_quota_per_user`` (config.rdb.default_file_quota).
         # Only applied as a creation default when > 0, matching the old

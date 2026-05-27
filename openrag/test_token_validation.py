@@ -17,7 +17,7 @@ if not ray.is_initialized():
     ray.init(runtime_env={"working_dir": None}, ignore_reinit_error=True)
 
 from api.routers.user.chat import validate_tokens_limit  # noqa: E402
-from models.openai import OpenAIChatCompletionRequest, OpenAICompletionRequest  # noqa: E402
+from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest  # noqa: E402
 
 
 def fake_length_function(text: str) -> int:

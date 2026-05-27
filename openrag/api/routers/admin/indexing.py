@@ -22,7 +22,11 @@ from api.dependencies.auth import (
     require_partition_editor,
     require_task_owner,
 )
-from api.dependencies.files import validate_file_format, validate_file_id, validate_metadata
+from api.dependencies.files import (
+    validate_file_format,
+    validate_file_id,
+    validate_metadata,
+)
 from api.routers.admin.task_logs import collect_task_logs
 from components.indexer.utils.files import sanitize_filename, save_file_to_disk
 from config import load_config
@@ -38,6 +42,9 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
+from services.orchestrators.auth_service import AuthService
+from services.orchestrators.indexing_service import IndexingService
+from services.orchestrators.partition_service import PartitionService
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -127,7 +134,7 @@ async def add_file(
     workspace_ids: str | None = Form(None, description="JSON array of workspace IDs to add the file to"),
     user=Depends(require_partition_editor),
     _quota_check=Depends(check_user_file_quota),
-    service=Depends(get_indexing_service),
+    service: IndexingService = Depends(get_indexing_service),
 ):
     if await service.file_exists(file_id, partition):
         raise HTTPException(
@@ -198,7 +205,7 @@ async def delete_file(
     partition: str,
     file_id: str,
     user=Depends(require_partition_editor),
-    service=Depends(get_indexing_service),
+    service: IndexingService = Depends(get_indexing_service),
 ):
     if not await service.file_exists(file_id, partition):
         raise HTTPException(
@@ -250,7 +257,7 @@ async def put_file(
     file: UploadFile = Depends(validate_file_format),
     metadata: dict = Depends(validate_metadata),
     user=Depends(require_partition_editor),
-    service=Depends(get_indexing_service),
+    service: IndexingService = Depends(get_indexing_service),
 ):
     if not await service.file_exists(file_id, partition):
         raise HTTPException(
@@ -306,9 +313,9 @@ async def patch_file(
     metadata: Any | None = Depends(validate_metadata),
     user=Depends(require_partition_editor),
     user_partitions=Depends(current_user_partitions),
-    service=Depends(get_indexing_service),
-    auth_service=Depends(get_auth_service),
-    partition_service=Depends(get_partition_service),
+    service: IndexingService = Depends(get_indexing_service),
+    auth_service: AuthService = Depends(get_auth_service),
+    partition_service: PartitionService = Depends(get_partition_service),
 ):
     # Make sure partition role is valid if partition is being changed
     if "partition" in metadata:
@@ -356,9 +363,9 @@ async def copy_file_between_partitions(
     user=Depends(require_partition_editor),
     user_partitions=Depends(current_user_partitions),
     _quota_check=Depends(check_user_file_quota),
-    service=Depends(get_indexing_service),
-    auth_service=Depends(get_auth_service),
-    partition_service=Depends(get_partition_service),
+    service: IndexingService = Depends(get_indexing_service),
+    auth_service: AuthService = Depends(get_auth_service),
+    partition_service: PartitionService = Depends(get_partition_service),
 ):
     # Make sure user has access to the source partition
     await ensure_partition_role(
@@ -403,7 +410,7 @@ async def get_task_status(
     request: Request,
     task_id: str,
     task_details=Depends(require_task_owner),
-    service=Depends(get_indexing_service),
+    service: IndexingService = Depends(get_indexing_service),
 ):
     state = await service.get_task_state(task_id)
     if state is None:
@@ -442,7 +449,7 @@ Returns error information including:
 async def get_task_error(
     task_id: str,
     task_details=Depends(require_task_owner),
-    service=Depends(get_indexing_service),
+    service: IndexingService = Depends(get_indexing_service),
 ):
     error = await service.get_task_error(task_id)
     if error is None:
@@ -507,7 +514,7 @@ Returns confirmation message that cancellation signal was sent.
 async def cancel_task(
     task_id: str,
     task_details=Depends(require_task_owner),
-    service=Depends(get_indexing_service),
+    service: IndexingService = Depends(get_indexing_service),
 ):
     cancelled = await service.cancel_task(task_id)
     if not cancelled:

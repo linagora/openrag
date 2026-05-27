@@ -1,8 +1,8 @@
 """Pure helpers for assembling source-link dicts in API responses.
 
 Kept import-light (stdlib only) so the logic can be unit-tested without
-importing ``routers/openai.py``, which pulls in Ray, the audio loaders, and
-the OpenAI SDK.
+importing :mod:`api.routers.user.chat`, which pulls in Ray, the audio
+loaders, and the OpenAI SDK.
 """
 
 from collections.abc import Callable

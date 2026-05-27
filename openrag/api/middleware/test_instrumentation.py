@@ -1,26 +1,15 @@
-"""Smoke tests for :class:`InstrumentationMiddleware` (Phase 10C move).
+"""Smoke tests for :class:`InstrumentationMiddleware`.
 
-The class is a verbatim relocation of the legacy ``MonitoringMiddleware``,
-so the focus here is the contract that matters for the stack: the
-middleware records a metric for normal routes and skips the noisy
-self-referential paths (``/metrics``, ``/health_check``, docs).
+Focus is the contract that matters for the stack: the middleware
+records a metric for normal routes and skips the noisy self-referential
+paths (``/metrics``, ``/health_check``, docs).
 """
 
 from __future__ import annotations
 
-from api.middleware.instrumentation import (
-    InstrumentationMiddleware,
-    MonitoringMiddleware,
-)
+from api.middleware.instrumentation import InstrumentationMiddleware
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-
-def test_legacy_name_aliases_new_class() -> None:
-    """``routers/monitoring.py`` and ``openrag/main.py`` import the
-    old name during the strangler-fig window; the alias must point at
-    exactly the new class."""
-    assert MonitoringMiddleware is InstrumentationMiddleware
 
 
 def test_records_metric_for_normal_route(monkeypatch) -> None:

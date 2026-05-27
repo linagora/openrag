@@ -9,7 +9,7 @@ import re
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
-# Mirror of the rule in routers/workspaces.py — kept in sync manually.
+# Mirror of the rule in api/routers/admin/workspaces.py — kept in sync manually.
 _WORKSPACE_ID_RE = re.compile(r"[a-zA-Z0-9_-]+")
 
 

@@ -33,8 +33,8 @@ TEMPORAL_FIELDS = ["created_at"]
 def _human_readable_size(size_bytes: int) -> str:
     """Bytes → human-readable string (e.g. ``'2.40 MB'``).
 
-    Kept private here rather than imported from ``routers/utils.py`` —
-    services must not depend on the HTTP layer.
+    Kept private here so the orchestrator does not depend on the HTTP
+    layer.
     """
     size = float(size_bytes)
     for unit in ["B", "KB", "MB", "GB", "TB"]:

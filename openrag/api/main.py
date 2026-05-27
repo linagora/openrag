@@ -1,26 +1,20 @@
 """FastAPI application entry point.
 
-Phase 10A originally lifted the FastAPI scaffolding out of the legacy
+Phase 10A lifted the FastAPI scaffolding out of the legacy
 ``openrag/main.py``; 10B-10F filled in the surrounding infrastructure
 (``error_handlers``, ``middleware/``, ``routers/``); 10G flipped
 ``entrypoint.sh`` and ``uvicorn`` over to ``api.main:app`` and deleted
-the legacy module + its shims. This file is now the only entry point.
+the legacy module + its shims. This file is the only entry point.
 
 Notable shape vs the deleted legacy module:
 
 * ``@app.on_event("startup"/"shutdown")`` -> single ``@asynccontextmanager``
   lifespan (FastAPI deprecated ``on_event`` in 0.105+).
-* ``ray.init`` is guarded with ``ray.is_initialized()`` so test imports
-  (which run ``ray.init(runtime_env=...)`` first to avoid scanning
-  permission-restricted directories) are safe.
-
-What is still deferred to later phases:
-
-* 10D/Phase 11: ``api/dependencies/auth.py`` owns ``require_admin`` and
-  related request-state dependency helpers.
-* 10E/Phase 12: Pydantic response schemas under ``api/schemas/`` will
-  replace the inline ``JSONResponse(content=...)`` dicts the routers
-  still return.
+* ``ray.init`` runs inside the lifespan rather than at module load, so
+  importing this module does not touch the Ray runtime. The worker
+  bootstrap (``services.workers.bootstrap``) is imported from the
+  lifespan immediately after ``ray.init`` to create the detached worker
+  actors before the container reads from them.
 """
 
 from __future__ import annotations
@@ -34,17 +28,6 @@ from pathlib import Path
 
 import ray
 import uvicorn
-
-# Ray must be initialised before bootstrapping modules that look up actors
-# at import time. The DI helper imports the worker bootstrap after Ray is
-# ready so the API layer does not import services directly.
-# worker pool from its top level. ``ignore_reinit_error`` and the
-# ``is_initialized`` guard keep parallel imports (legacy ``main.py`` +
-# tests + this module) safe.
-if not ray.is_initialized():
-    ray.init(dashboard_host="0.0.0.0", ignore_reinit_error=True)
-
-# flake8: noqa: E402  (ray.init must run first)
 from api.dependencies.auth import require_admin
 from api.error_handlers import register_error_handlers
 from api.middleware import (
@@ -62,6 +45,7 @@ from api.routers.admin.tools import router as tools_router
 from api.routers.admin.users import router as users_router
 from api.routers.admin.workspaces import router as workspaces_router
 from api.routers.auth.oidc import router as auth_router
+from api.routers.user.chat import prime_max_model_tokens
 from api.routers.user.chat import router as openai_router
 from api.routers.user.extract import router as extract_router
 from api.routers.user.health import router as health_router
@@ -114,20 +98,17 @@ except Exception:
 
 class Tags(Enum):
     VDB = "VectorDB operations"
-    INDEXER = "Indexer"
-    SEARCH = "Semantic Search"
-    OPENAI = "OpenAI Compatible API"
-    EXTRACT = "Document extracts"
-    PARTITION = "Partitions & files"
-    QUEUE = "Queue management"
-    ACTORS = "Ray Actors"
-    USERS = "User management"
-    WORKSPACES = "Workspaces"
-    TOOLS = "Tools"
-    MONITORING = "Monitoring"
-
-
-ensure_worker_bootstrap()
+    INDEXER = ("Indexer",)
+    SEARCH = ("Semantic Search",)
+    OPENAI = ("OpenAI Compatible API",)
+    EXTRACT = ("Document extracts",)
+    PARTITION = ("Partitions & files",)
+    QUEUE = ("Queue management",)
+    ACTORS = ("Ray Actors",)
+    USERS = ("User management",)
+    WORKSPACES = ("Workspaces",)
+    TOOLS = ("Tools",)
+    MONITORING = ("Monitoring",)
 
 
 # ---------------------------------------------------------------------------
@@ -137,15 +118,32 @@ ensure_worker_bootstrap()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """ServiceContainer lifecycle.
+    """Boot sequence.
 
     Replaces the legacy ``@app.on_event("startup"/"shutdown")`` pair
-    (deprecated since FastAPI 0.105). Container construction is
-    best-effort: a Milvus / PG hiccup at startup MUST NOT block boot
-    because ``di.providers.get_container`` already serves 503 while the
-    container is absent. The full composition root lands in Phase 11; for
-    now this matches the existing behaviour of ``openrag/main.py``.
+    (deprecated since FastAPI 0.105). Order:
+
+    1. ``ray.init`` (guarded by ``ray.is_initialized``) so test imports
+       can pre-initialise Ray with a custom ``runtime_env``.
+    2. ``services.workers.bootstrap`` — imported here (not at module
+       load) so the detached worker actors are created with Ray live.
+    3. ``ServiceContainer`` — best-effort, mirroring the legacy boot
+       behaviour: a Milvus / PG hiccup MUST NOT block boot because
+       ``di.providers.get_container`` already serves 503 while the
+       container is absent.
+    4. ``prime_max_model_tokens`` — caches the vLLM ``max_model_len`` so
+       per-request validation in the chat router stays synchronous.
     """
+    if not ray.is_initialized():
+        ray.init(dashboard_host="0.0.0.0", ignore_reinit_error=True)
+
+    # ``ensure_worker_bootstrap`` imports ``services.workers.bootstrap``
+    # for its side effect: creating the long-lived detached worker
+    # actors (TaskStateManager, DocSerializer, MarkerPool, semaphores).
+    # The indirection through :mod:`di.workers` keeps API code free of
+    # direct ``services.workers`` imports.
+    ensure_worker_bootstrap()
+
     container: ServiceContainer | None
     try:
         container = ServiceContainer(config)
@@ -165,6 +163,11 @@ async def lifespan(app: FastAPI):
             logger.exception("ServiceContainer.initialize failed; serving degraded (503)")
             app.state.container = None
             container = None
+
+    try:
+        await prime_max_model_tokens()
+    except Exception:  # pragma: no cover - defensive cache guard
+        logger.exception("max_model_tokens cache priming failed; falling back to config")
 
     try:
         yield

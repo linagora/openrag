@@ -1,16 +1,8 @@
-"""InstrumentationMiddleware — Prometheus request metrics (Phase 10C).
+"""InstrumentationMiddleware — Prometheus request metrics.
 
-Moved from ``routers/monitoring.py`` where it shared a module with the
-``/metrics`` endpoint. The middleware lives here because it is request
-infrastructure (every request flows through it); the endpoint itself
-stays in the monitoring router and moves to ``api/routers/admin/`` in
-10F.
-
-The class is intentionally renamed from ``MonitoringMiddleware`` to
-``InstrumentationMiddleware`` to match the target architecture in the
-strategy doc (the file is ``instrumentation.py``). The legacy name is
-re-exported as an alias from ``routers/monitoring.py`` and from this
-module for callers still on the old import path.
+The middleware lives here because it is request infrastructure (every
+request flows through it); the ``/metrics`` endpoint it powers lives in
+:mod:`api.routers.admin.monitoring`.
 """
 
 from __future__ import annotations
@@ -79,7 +71,4 @@ class InstrumentationMiddleware(BaseHTTPMiddleware):
         return "/-unresolved-"
 
 
-# Legacy alias — Phase 12 cleanup removes this once the last caller migrates.
-MonitoringMiddleware = InstrumentationMiddleware
-
-__all__ = ["InstrumentationMiddleware", "MonitoringMiddleware"]
+__all__ = ["InstrumentationMiddleware"]
