@@ -1,8 +1,8 @@
-"""Unit tests for token validation logic in openrag.routers.openai.
+"""Unit tests for token validation logic in :mod:`api.routers.user.chat`.
 
-The test file lives at openrag/ (not openrag/routers/) because a file
-named ``routers/test_*.py`` would shadow the ``openai`` package during
-import resolution, causing a circular import.
+The test file lives at openrag/ (not under api/routers/user/) because a
+file named ``routers/test_*.py`` would shadow the third-party
+``openai`` package during import resolution, causing a circular import.
 """
 
 from unittest.mock import patch
@@ -17,7 +17,7 @@ if not ray.is_initialized():
     ray.init(runtime_env={"working_dir": None}, ignore_reinit_error=True)
 
 from models.openai import OpenAIChatCompletionRequest, OpenAICompletionRequest  # noqa: E402
-from routers.openai import validate_tokens_limit  # noqa: E402
+from api.routers.user.chat import validate_tokens_limit  # noqa: E402
 
 
 def fake_length_function(text: str) -> int:
@@ -27,7 +27,7 @@ def fake_length_function(text: str) -> int:
 
 @pytest.fixture(autouse=True)
 def _mock_get_num_tokens():
-    with patch("routers.openai.get_num_tokens", return_value=fake_length_function):
+    with patch("api.routers.user.chat.get_num_tokens", return_value=fake_length_function):
         yield
 
 
@@ -122,7 +122,7 @@ class TestValidateTokensLimit:
 
     def test_graceful_on_exception(self):
         """When get_num_tokens raises, validation returns True (graceful skip)."""
-        with patch("routers.openai.get_num_tokens", side_effect=RuntimeError("boom")):
+        with patch("api.routers.user.chat.get_num_tokens", side_effect=RuntimeError("boom")):
             req = _chat_request("hello", max_tokens=999999)
             is_valid, msg = validate_tokens_limit(req, max_tokens_allowed=1)
             assert is_valid is True

@@ -55,27 +55,28 @@ from api.middleware import (
     RequestIdMiddleware,
     RequestTimeoutMiddleware,
 )
+from api.routers.admin.cluster import router as actors_router
+from api.routers.admin.indexing import router as indexer_router
+from api.routers.admin.jobs import router as queue_router
+from api.routers.admin.monitoring import router as monitoring_router
+from api.routers.admin.partitions import router as partition_router
+from api.routers.admin.tools import router as tools_router
+from api.routers.admin.users import router as users_router
+from api.routers.admin.workspaces import router as workspaces_router
+from api.routers.auth.oidc import router as auth_router
+from api.routers.user.chat import router as openai_router
+from api.routers.user.extract import router as extract_router
+from api.routers.user.health import router as health_router
+from api.routers.user.search import router as search_router
 from config import load_config
 from di.container import ServiceContainer
 from dotenv import dotenv_values
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from routers.actors import router as actors_router
-from routers.auth import router as auth_router
-from routers.extract import router as extract_router
-from routers.indexer import router as indexer_router
-from routers.monitoring import router as monitoring_router
-from routers.openai import router as openai_router
-from routers.partition import router as partition_router
-from routers.queue import router as queue_router
-from routers.search import router as search_router
-from routers.tools import router as tools_router
-from routers.users import router as users_router
 from routers.utils import require_admin
-from routers.workspaces import router as workspaces_router
 from utils.logger import get_logger
 
 # pydub 0.25.1 ships invalid-escape regex literals; the warning is upstream.
@@ -337,25 +338,17 @@ def root_redirect():
     return JSONResponse({"status": "ok", "app": "openrag", "version": app.version})
 
 
-@app.get("/health_check", summary="Health check endpoint for API", dependencies=[])
-async def health_check(request: Request):
-    # TODO : Error reporting about llm and vlm
-    return "RAG API is up."
-
-
-@app.get("/version", summary="Get openRAG version", dependencies=[])
-def get_version():
-    return {"version": app.version}
-
-
 @app.get("/config", summary="Get current configuration", tags=["Configuration"], dependencies=[Depends(require_admin)])
 def get_config():
     return config
 
 
-# Router mounts. Phase 10F moves these into ``api/routers/{user,admin,auth}/``
-# one file at a time; the prefixes / tags stay identical so the OpenAPI
-# schema and client SDKs do not break across the move.
+# Router mounts. Phase 10F finished moving these into
+# ``api/routers/{user,admin,auth}/``; the legacy ``openrag/routers/*``
+# modules are now strangler-fig shims that re-export from the new
+# locations. Prefixes / tags stay identical so the OpenAPI schema and
+# client SDKs do not break across the move.
+app.include_router(health_router, tags=[Tags.MONITORING])
 app.include_router(indexer_router, prefix="/indexer", tags=[Tags.INDEXER])
 app.include_router(extract_router, prefix="/extract", tags=[Tags.EXTRACT])
 app.include_router(search_router, prefix="/search", tags=[Tags.SEARCH])
