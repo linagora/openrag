@@ -10,40 +10,14 @@ schema validation, and the guards whose exact non-bracketed
 unknown/missing-file 404s, the not-removed 404).
 """
 
-import re
-
 from api.dependencies.auth import require_partition_editor, require_partition_owner, require_partition_viewer
+from api.schemas.admin.workspaces import AddFilesRequest, CreateWorkspaceRequest
 from di.providers import get_workspace_service
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, field_validator
 from utils.logger import get_logger
 
 router = APIRouter()
 logger = get_logger()
-
-_WORKSPACE_ID_RE = re.compile(r"[a-zA-Z0-9_-]+")
-
-
-class CreateWorkspaceRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    workspace_id: str
-    display_name: str | None = None
-
-    @field_validator("workspace_id")
-    @classmethod
-    def validate_workspace_id(cls, v: str) -> str:
-        if not v or not _WORKSPACE_ID_RE.fullmatch(v):
-            raise ValueError(
-                "workspace_id must be non-empty and contain only alphanumeric characters, hyphens, or underscores"
-            )
-        return v
-
-
-class AddFilesRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    file_ids: list[str]
 
 
 async def require_workspace_in_partition(

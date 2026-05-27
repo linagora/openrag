@@ -16,12 +16,12 @@ from api.dependencies.files import (
     validate_file_format,
     validate_metadata,
 )
+from api.schemas.admin.tools import ToolInfo
 from components.indexer.utils.files import save_file_to_disk
 from config import load_config
 from di.providers import get_conversion_service
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -29,11 +29,6 @@ config = load_config()
 data_dir = config.paths.data_dir
 
 router = APIRouter()
-
-
-class ToolInfo(BaseModel):
-    name: str
-    description: str
 
 
 AVAILABLE_TOOLS: list[ToolInfo] = [

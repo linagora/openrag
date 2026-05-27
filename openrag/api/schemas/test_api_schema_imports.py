@@ -1,8 +1,12 @@
+import pytest
 from api.schemas.admin.common import MessageResponse, TaskStatusResponse
+from api.schemas.admin.tools import ToolInfo
 from api.schemas.admin.users import UserCreate, UserPublic, UserUpdate
+from api.schemas.admin.workspaces import AddFilesRequest, CreateWorkspaceRequest
 from api.schemas.auth.login import CurrentUserResponse, LoginResponse
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest, OpenAIMessage
 from api.schemas.user.search import SearchRequest
+from pydantic import ValidationError
 
 
 def test_user_schemas_import_from_api_package():
@@ -40,3 +44,22 @@ def test_admin_common_schema_imports():
 def test_auth_schema_imports():
     assert LoginResponse(detail="Logged out").detail == "Logged out"
     assert CurrentUserResponse(user_id=1, auth_method="token").auth_method == "token"
+
+
+def test_workspace_schema_validates_workspace_id():
+    req = CreateWorkspaceRequest(workspace_id="my-ws_1")
+    assert req.workspace_id == "my-ws_1"
+    assert req.display_name is None
+
+    with pytest.raises(ValidationError):
+        CreateWorkspaceRequest(workspace_id="bad/slash")
+
+
+def test_add_files_request_accepts_id_list():
+    req = AddFilesRequest(file_ids=["a", "b"])
+    assert req.file_ids == ["a", "b"]
+
+
+def test_tool_info_schema():
+    info = ToolInfo(name="extractText", description="Extract text from a file")
+    assert info.name == "extractText"

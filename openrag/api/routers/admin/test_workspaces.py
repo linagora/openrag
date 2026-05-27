@@ -1,35 +1,13 @@
 """Unit tests for workspace_id validation logic.
 
-Tests the regex rule directly to avoid importing the full router module
-(which pulls in Ray, LangChain, and other heavy dependencies).
+Imports ``CreateWorkspaceRequest`` from ``api.schemas.admin.workspaces``
+directly. That schema module is dependency-light (only ``pydantic``) so
+this no longer pulls in the heavy router module (Ray, LangChain, etc.).
 """
 
-import re
-
 import pytest
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
-
-# Mirror of the rule in api/routers/admin/workspaces.py — kept in sync manually.
-_WORKSPACE_ID_RE = re.compile(r"[a-zA-Z0-9_-]+")
-
-
-class CreateWorkspaceRequest(BaseModel):
-    """Minimal copy of CreateWorkspaceRequest for isolated unit testing."""
-
-    model_config = ConfigDict(extra="allow")
-
-    workspace_id: str
-    display_name: str | None = None
-
-    @field_validator("workspace_id")
-    @classmethod
-    def validate_workspace_id(cls, v: str) -> str:
-        if not v or not _WORKSPACE_ID_RE.fullmatch(v):
-            raise ValueError(
-                "workspace_id must be non-empty and contain only alphanumeric characters, hyphens, or underscores"
-            )
-        return v
-
+from api.schemas.admin.workspaces import CreateWorkspaceRequest
+from pydantic import ValidationError
 
 # ---------------------------------------------------------------------------
 # Valid workspace_id values
