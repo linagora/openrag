@@ -80,8 +80,8 @@ def _restore_dependencies_stub(previous_modules: dict[str, types.ModuleType | No
 
 _PREVIOUS_MODULES = _install_dependencies_stub()
 
+from api.routers.auth.oidc import router as auth_router  # noqa: E402
 from di.providers import get_auth_service  # noqa: E402
-from routers.auth import router as auth_router  # noqa: E402
 from services.orchestrators.auth_service import (  # noqa: E402
     SESSION_COOKIE_NAME,
     CallbackResult,

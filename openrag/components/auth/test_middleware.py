@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from components.auth.middleware import AuthMiddleware, is_ui_path
+from api.middleware.auth import AuthMiddleware, is_ui_path
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -496,7 +496,7 @@ class TestRefreshHelper:
 
 def test_is_bypass_path_chainlit_subtree_only():
     """Only the actual /chainlit subtree may bypass auth — not /chainlitevil."""
-    from components.auth.middleware import is_bypass_path
+    from api.middleware.auth import is_bypass_path
 
     # Legitimate Chainlit paths still bypass
     assert is_bypass_path("/chainlit") is True

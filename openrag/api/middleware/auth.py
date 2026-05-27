@@ -21,8 +21,10 @@ Environment configuration (``AUTH_MODE``, ``AUTH_TOKEN``,
 ``OIDC_TOKEN_ENCRYPTION_KEY``) is read at **dispatch** time via
 ``os.getenv`` so tests can monkeypatch ``os.environ`` per case.
 
-The legacy import path (``components.auth.middleware``) keeps working
-through a re-export shim until Phase 12 cleanup.
+Phase 10G migrated the last three legacy importers
+(``chainlit_api.py``, the ``components/auth`` test module, and the
+``tests/api_tests/test_oidc_lifecycle.py`` fixture) onto this module
+and deleted the ``components/auth/middleware.py`` shim.
 """
 
 from __future__ import annotations

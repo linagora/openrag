@@ -1,29 +1,26 @@
-"""FastAPI application entry point (Phase 10A).
+"""FastAPI application entry point.
 
-Phase 10A move of the FastAPI scaffolding out of ``openrag/main.py`` into
-``api/main.py``. Behaviour is intentionally identical to the legacy
-module — same middleware stack, same routers, same OpenAPI shape — so
-the running app keeps working while the rest of Phase 10 drops new
-infrastructure into this directory:
+Phase 10A originally lifted the FastAPI scaffolding out of the legacy
+``openrag/main.py``; 10B-10F filled in the surrounding infrastructure
+(``error_handlers``, ``middleware/``, ``routers/``); 10G flipped
+``entrypoint.sh`` and ``uvicorn`` over to ``api.main:app`` and deleted
+the legacy module + its shims. This file is now the only entry point.
 
-* 10B   ``api/error_handlers.py``     replaces the inline handlers below
-* 10C   ``api/middleware/*.py``       replaces inline / legacy middleware
-* 10D   ``api/dependencies/auth.py``  replaces ``routers/utils.require_admin``
-* 10E   ``api/schemas/**/*.py``       formalises router response shapes
-* 10F   ``api/routers/**/*.py``       replaces ``openrag/routers/*``
-* 10G   entrypoint switch             ``uvicorn openrag.api.main:app``
-
-Structural changes vs the legacy module:
+Notable shape vs the deleted legacy module:
 
 * ``@app.on_event("startup"/"shutdown")`` -> single ``@asynccontextmanager``
   lifespan (FastAPI deprecated ``on_event`` in 0.105+).
-* ``ray.init`` is guarded with ``is_initialized()`` so re-importing the
-  module (tests, the legacy ``openrag/main.py`` shim still in place
-  until 10G) is a no-op rather than an error.
+* ``ray.init`` is guarded with ``ray.is_initialized()`` so test imports
+  (which run ``ray.init(runtime_env=...)`` first to avoid scanning
+  permission-restricted directories) are safe.
 
-The legacy ``openrag/main.py`` continues to run the existing entrypoint
-(``uvicorn main:app``) until 10G flips Dockerfile / entrypoint.sh /
-``__main__`` to ``openrag.api.main:app``.
+What is still deferred to later phases:
+
+* 10D/Phase 11: ``api/dependencies/auth.py`` will own ``require_admin``
+  etc. — for now they are still imported from ``routers.utils``.
+* 10E/Phase 12: Pydantic response schemas under ``api/schemas/`` will
+  replace the inline ``JSONResponse(content=...)`` dicts the routers
+  still return.
 """
 
 from __future__ import annotations
