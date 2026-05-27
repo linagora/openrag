@@ -16,13 +16,13 @@ import json
 from urllib.parse import urlparse
 
 import consts
+from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
 from components.indexer.utils.text_sanitizer import sanitize_text
 from components.utils import get_num_tokens
 from config import load_config
 from di.providers import get_partition_service, get_query_service
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from models.openai import OpenAIChatCompletionRequest, OpenAICompletionRequest
 from services.orchestrators.partition_service import PartitionService
 from services.orchestrators.query_service import QueryService
 from utils.exceptions.base import OpenRAGError
