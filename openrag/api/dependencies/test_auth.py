@@ -29,6 +29,22 @@ class FakeAuthService:
         return None
 
 
+class EnforcingAuthService(FakeAuthService):
+    @classmethod
+    def validate_file_quota(
+        cls,
+        user,
+        *,
+        pending_task_count: int,
+        default_quota: int,
+    ) -> None:
+        quota = user.get("file_quota")
+        if quota is None:
+            quota = default_quota
+        if user.get("file_count", 0) + pending_task_count >= quota:
+            raise AuthError("File quota exceeded")
+
+
 class DenyingAuthService(FakeAuthService):
     @classmethod
     def check_partition_access(
@@ -150,3 +166,28 @@ async def test_check_user_file_quota_reads_pending_count_through_job_service(mon
 
     assert user["id"] == 7
     assert job_service.pending_checks == [7]
+
+
+@pytest.mark.asyncio
+async def test_check_user_file_quota_default_zero_enforces_zero(monkeypatch):
+    monkeypatch.setattr(api_auth, "DEFAULT_FILE_QUOTA", 0)
+
+    allowed_job_service = FakeJobService(pending_count=0)
+    user = await check_user_file_quota(
+        user={"id": 7, "file_count": 0, "file_quota": 1},
+        auth_service=EnforcingAuthService,
+        job_service=allowed_job_service,
+    )
+    assert user["id"] == 7
+    assert allowed_job_service.pending_checks == [7]
+
+    denied_job_service = FakeJobService(pending_count=0)
+    with pytest.raises(HTTPException) as exc:
+        await check_user_file_quota(
+            user={"id": 8, "file_count": 1, "file_quota": None},
+            auth_service=EnforcingAuthService,
+            job_service=denied_job_service,
+        )
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "File quota exceeded"
+    assert denied_job_service.pending_checks == [8]

@@ -98,17 +98,17 @@ except Exception:
 
 class Tags(Enum):
     VDB = "VectorDB operations"
-    INDEXER = ("Indexer",)
-    SEARCH = ("Semantic Search",)
-    OPENAI = ("OpenAI Compatible API",)
-    EXTRACT = ("Document extracts",)
-    PARTITION = ("Partitions & files",)
-    QUEUE = ("Queue management",)
-    ACTORS = ("Ray Actors",)
-    USERS = ("User management",)
-    WORKSPACES = ("Workspaces",)
-    TOOLS = ("Tools",)
-    MONITORING = ("Monitoring",)
+    INDEXER = "Indexer"
+    SEARCH = "Semantic Search"
+    OPENAI = "OpenAI Compatible API"
+    EXTRACT = "Document extracts"
+    PARTITION = "Partitions & files"
+    QUEUE = "Queue management"
+    ACTORS = "Ray Actors"
+    USERS = "User management"
+    WORKSPACES = "Workspaces"
+    TOOLS = "Tools"
+    MONITORING = "Monitoring"
 
 
 # ---------------------------------------------------------------------------

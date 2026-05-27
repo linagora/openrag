@@ -19,7 +19,7 @@ class UserBase(BaseModel):
     external_user_id: str | None = None
     email: str | None = Field(default=None, examples=[None])
     is_admin: bool = False
-    file_quota: int | None = Field(default=10)
+    file_quota: int | None = Field(default=None)
 
 
 class UserCreate(UserBase):
