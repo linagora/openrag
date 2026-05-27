@@ -50,6 +50,7 @@ if not ray.is_initialized():
 
 # flake8: noqa: E402  (ray.init must run first)
 import services.workers.bootstrap  # noqa: F401  (side-effect actor creation)
+from api.error_handlers import register_error_handlers
 from components.auth.middleware import AuthMiddleware
 from config import load_config
 from di.container import ServiceContainer
@@ -74,7 +75,6 @@ from routers.users import router as users_router
 from routers.utils import require_admin
 from routers.workspaces import router as workspaces_router
 from starlette.middleware.base import BaseHTTPMiddleware
-from utils.exceptions import OpenRAGError
 from utils.logger import get_logger
 
 # pydub 0.25.1 ships invalid-escape regex literals; the warning is upstream.
@@ -311,20 +311,10 @@ app.add_middleware(
 app.add_middleware(TokenRedactingMiddleware)
 app.add_middleware(MonitoringMiddleware)
 
-
-@app.exception_handler(OpenRAGError)
-async def openrag_exception_handler(request: Request, exc: OpenRAGError):
-    logger.error("OpenRAGError occurred", error=str(exc))
-    return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
-
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception):
-    logger.exception("Unhandled exception", error=str(exc))
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "[UNEXPECTED_ERROR]: An unexpected error occurred", "extra": {}},
-    )
+# Phase 10B centralises the OpenRAGError + generic Exception handlers in
+# api/error_handlers.py — the inline decorators that used to live here
+# have moved there. Response shape is unchanged.
+register_error_handlers(app)
 
 
 allow_origins = [
