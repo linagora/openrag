@@ -99,81 +99,11 @@ CORS_EXTRA_ORIGINS: list[str] = [o.strip() for o in os.getenv("CORS_EXTRA_ORIGIN
 WITH_CHAINLIT_UI: bool = os.getenv("WITH_CHAINLIT_UI", "true").lower() == "true"
 WITH_OPENAI_API: bool = os.getenv("WITH_OPENAI_API", "true").lower() == "true"
 
-AUTH_MODE: str = os.getenv("AUTH_MODE", "token").strip().lower()
-if AUTH_MODE not in ("token", "oidc"):
-    raise RuntimeError(f"Invalid AUTH_MODE={AUTH_MODE!r}. Expected 'token' or 'oidc'.")
-
-OIDC_ENDPOINT: str | None = os.getenv("OIDC_ENDPOINT")
-OIDC_CLIENT_ID: str | None = os.getenv("OIDC_CLIENT_ID")
-OIDC_CLIENT_SECRET: str | None = os.getenv("OIDC_CLIENT_SECRET")
-OIDC_REDIRECT_URI: str | None = os.getenv("OIDC_REDIRECT_URI")
-OIDC_CLAIM_SOURCE: str = os.getenv("OIDC_CLAIM_SOURCE", "id_token").strip().lower()
-OIDC_CLAIM_MAPPING: str = os.getenv("OIDC_CLAIM_MAPPING", "").strip()
-OIDC_SCOPES: str = os.getenv("OIDC_SCOPES", "openid email profile offline_access")
-OIDC_TOKEN_ENCRYPTION_KEY: str | None = os.getenv("OIDC_TOKEN_ENCRYPTION_KEY")
-OIDC_POST_LOGOUT_REDIRECT_URI: str | None = os.getenv("OIDC_POST_LOGOUT_REDIRECT_URI")
-
-# Whitelist of writable DB fields populated by OIDC claim mapping.
-# is_admin / external_user_id / file_quota / token are either identity-
-# defining or privilege-escalation vectors and must never be writable here.
-_OIDC_CLAIM_MAPPING_ALLOWED_FIELDS = {"display_name", "email"}
-
-
-def _parse_oidc_claim_mapping(raw: str) -> dict[str, str]:
-    """Parse ``OIDC_CLAIM_MAPPING`` (CSV of ``db_field:claim`` pairs).
-
-    Validates each pair against the whitelist and enforces non-empty
-    claim names so misconfiguration fails fast at startup rather than
-    silently at login time.
-    """
-    if not raw:
-        return {}
-    mapping: dict[str, str] = {}
-    for pair in raw.split(","):
-        pair = pair.strip()
-        if not pair:
-            continue
-        if ":" not in pair:
-            raise RuntimeError(f"Invalid OIDC_CLAIM_MAPPING entry {pair!r}: expected 'db_field:claim'")
-        db_field, claim = pair.split(":", 1)
-        db_field = db_field.strip()
-        claim = claim.strip()
-        if db_field not in _OIDC_CLAIM_MAPPING_ALLOWED_FIELDS:
-            raise RuntimeError(
-                f"OIDC_CLAIM_MAPPING db_field {db_field!r} is not writable "
-                f"(allowed: {sorted(_OIDC_CLAIM_MAPPING_ALLOWED_FIELDS)})"
-            )
-        if not claim:
-            raise RuntimeError(f"OIDC_CLAIM_MAPPING entry for {db_field!r} has empty claim name")
-        mapping[db_field] = claim
-    return mapping
-
-
-OIDC_CLAIM_MAPPING_PARSED: dict[str, str] = _parse_oidc_claim_mapping(OIDC_CLAIM_MAPPING)
-
-if AUTH_MODE == "oidc":
-    _missing = [
-        name
-        for name, val in [
-            ("OIDC_ENDPOINT", OIDC_ENDPOINT),
-            ("OIDC_CLIENT_ID", OIDC_CLIENT_ID),
-            ("OIDC_CLIENT_SECRET", OIDC_CLIENT_SECRET),
-            ("OIDC_REDIRECT_URI", OIDC_REDIRECT_URI),
-            ("OIDC_TOKEN_ENCRYPTION_KEY", OIDC_TOKEN_ENCRYPTION_KEY),
-        ]
-        if not val
-    ]
-    if _missing:
-        raise RuntimeError("AUTH_MODE=oidc but the following env vars are missing or empty: " + ", ".join(_missing))
-    if OIDC_CLAIM_SOURCE not in ("id_token", "userinfo"):
-        raise RuntimeError(f"Invalid OIDC_CLAIM_SOURCE={OIDC_CLAIM_SOURCE!r}. Expected 'id_token' or 'userinfo'.")
-    logger.info(
-        "OIDC authentication mode enabled",
-        issuer=OIDC_ENDPOINT,
-        claim_source=OIDC_CLAIM_SOURCE,
-        claim_mapping_fields=sorted(OIDC_CLAIM_MAPPING_PARSED.keys()),
-    )
-
+# AUTH_MODE / OIDC_* env validation lives on OIDCConfig.from_env() so
+# the rules are configuration, not module-load code. ServiceContainer
+# invokes the validator inside __init__, which makes misconfiguration
+# trip when the lifespan constructs the container rather than at the
+# first request.
 
 try:
     app_version = get_package_version("openrag")
@@ -194,12 +124,6 @@ class Tags(Enum):
     WORKSPACES = ("Workspaces",)
     TOOLS = ("Tools",)
     MONITORING = ("Monitoring",)
-
-
-class AppState:
-    def __init__(self, config):
-        self.config = config
-        self.data_dir = Path(config.paths.data_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +236,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.state.app_state = AppState(config)
 
 app.mount("/static", StaticFiles(directory=DATA_DIR.resolve(), check_dir=True), name="static")
 
