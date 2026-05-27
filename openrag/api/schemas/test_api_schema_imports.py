@@ -1,4 +1,6 @@
+from api.schemas.admin.common import MessageResponse, TaskStatusResponse
 from api.schemas.admin.users import UserCreate, UserPublic, UserUpdate
+from api.schemas.auth.login import CurrentUserResponse, LoginResponse
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest, OpenAIMessage
 from api.schemas.user.search import SearchRequest
 
@@ -28,3 +30,13 @@ def test_search_schema_preserves_existing_defaults():
 
     assert request.query == "hello"
     assert request.top_k == 5
+
+
+def test_admin_common_schema_imports():
+    assert MessageResponse(message="ok").message == "ok"
+    assert TaskStatusResponse(task_status_url="/task/1").task_status_url == "/task/1"
+
+
+def test_auth_schema_imports():
+    assert LoginResponse(detail="Logged out").detail == "Logged out"
+    assert CurrentUserResponse(user_id=1, auth_method="token").auth_method == "token"
