@@ -162,34 +162,29 @@ def wait_for_task(
     raise TimeoutError(f"Task {task_id} did not complete within {timeout}s")
 
 
-def wait_for_task_cancellation(
+def wait_for_cancellation(
     api_client,
     task_id: str,
-    timeout: int = TASK_TIMEOUT,
+    timeout: int = 30,
     headers: dict | None = None,
-) -> dict:
-    """Wait for task cancellation, polling status endpoint until state is CANCELLED."""
+) -> None:
+    """Poll task status until it reaches CANCELLED state.
+
+    The DELETE /indexer/task endpoint only signals cancellation — the counter in
+    /queue/info is bumped asynchronously once TaskStateManager completes the
+    transition. Callers must wait here before asserting counter values.
+    """
     start = time.time()
     while time.time() - start < timeout:
         response = api_client.get(f"/indexer/task/{task_id}", headers=headers)
-
-        # Task might not be registered yet, retry on 404
-        if response.status_code == 404:
-            time.sleep(0.5)
-            continue
-
-        if response.status_code != 200:
-            raise AssertionError(f"Task status failed: {response.text}")
-
-        status = response.json()
-        state = (status.get("task_state") or "").upper()
-
-        if state == "CANCELLED":
-            return status
-
+        if response.status_code == 200:
+            state = (response.json().get("task_state") or "").upper()
+            if state == "CANCELLED":
+                return
+            if state in {"FAILED", "FAILURE", "COMPLETED", "SUCCESS"}:
+                raise AssertionError(f"Task {task_id} reached {state} instead of CANCELLED")
         time.sleep(0.5)
-
-    raise TimeoutError(f"Task {task_id} did not reach CANCELLED state within {timeout}s")
+    raise TimeoutError(f"Task {task_id} did not reach CANCELLED within {timeout}s")
 
 
 def wait_for_indexing(api_client, response_data: dict, timeout: int = TASK_TIMEOUT):
