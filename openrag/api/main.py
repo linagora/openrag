@@ -71,8 +71,8 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
 # ---------------------------------------------------------------------------
 
 logger = get_logger()
-config = load_config()
-DATA_DIR = Path(config.paths.data_dir)
+settings = load_config()
+DATA_DIR = Path(settings.paths.data_dir)
 
 SHARED_ENV = os.environ.get("SHARED_ENV", None)
 env_vars = dotenv_values(SHARED_ENV) if SHARED_ENV else {}
@@ -146,11 +146,11 @@ async def lifespan(app: FastAPI):
     # actors (TaskStateManager, DocSerializer, MarkerPool, semaphores).
     # The indirection through :mod:`di.workers` keeps API code free of
     # direct ``services.workers`` imports.
-    ensure_worker_bootstrap()
+    ensure_worker_bootstrap(settings)
 
     container: ServiceContainer | None
     try:
-        container = ServiceContainer(config)
+        container = ServiceContainer(settings)
     except Exception:  # pragma: no cover - defensive boot guard
         logger.exception("ServiceContainer wiring skipped")
         container = None
@@ -169,7 +169,7 @@ async def lifespan(app: FastAPI):
             container = None
 
     try:
-        await prime_max_model_tokens()
+        await prime_max_model_tokens(settings)
     except Exception:  # pragma: no cover - defensive cache guard
         logger.exception("max_model_tokens cache priming failed; falling back to config")
 
@@ -277,7 +277,7 @@ def root_redirect():
 
 @app.get("/config", summary="Get current configuration", tags=["Configuration"], dependencies=[Depends(require_admin)])
 def get_config():
-    return config
+    return settings
 
 
 # Router mounts. Phase 10F finished moving these into
@@ -312,20 +312,20 @@ if WITH_CHAINLIT_UI:
 
 
 if __name__ == "__main__":
-    if config.ray.serve.enable:
+    if settings.ray.serve.enable:
         from ray import serve
 
-        @serve.deployment(num_replicas=config.ray.serve.num_replicas)
+        @serve.deployment(num_replicas=settings.ray.serve.num_replicas)
         @serve.ingress(app)
         class OpenRagAPI:
             pass
 
-        serve.start(http_options={"host": config.ray.serve.host, "port": config.ray.serve.port})
+        serve.start(http_options={"host": settings.ray.serve.host, "port": settings.ray.serve.port})
         if WITH_CHAINLIT_UI:
             from chainlit_api import app as chainlit_app
 
             serve.run(OpenRagAPI.bind(), route_prefix="/")
-            uvicorn.run(chainlit_app, host="0.0.0.0", port=config.ray.serve.chainlit_port)
+            uvicorn.run(chainlit_app, host="0.0.0.0", port=settings.ray.serve.chainlit_port)
         else:
             serve.run(OpenRagAPI.bind(), route_prefix="/", blocking=True)
 

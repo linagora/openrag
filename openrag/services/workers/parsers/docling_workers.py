@@ -31,20 +31,16 @@ from docling.datamodel.pipeline_options import (
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from utils.logger import get_logger
 
-from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff, with_timeout
+from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 
 logger = get_logger()
-config = load_config()
-
-if torch.cuda.is_available():
-    DOCLING_NUM_GPUS = config.loader.docling_num_gpus
-else:
-    DOCLING_NUM_GPUS = 0
-
-DOCLING_MAX_TASKS_PER_WORKER = config.loader.docling_max_tasks_per_worker
 
 
-@ray.remote(num_gpus=DOCLING_NUM_GPUS)
+def _docling_num_gpus(config) -> float:
+    return config.loader.docling_num_gpus if torch.cuda.is_available() else 0
+
+
+@ray.remote
 class DoclingWorker:
     def __init__(self):
         img_scale = 2
@@ -75,17 +71,20 @@ class DoclingPool:
         self.logger = get_logger()
         self.config = load_config()
         self.pool_size = self.config.loader.docling_pool_size
+        self.max_tasks_per_worker = self.config.loader.docling_max_tasks_per_worker
 
-        self.actors = [DoclingWorker.remote() for _ in range(self.pool_size)]
+        self.actors = [
+            DoclingWorker.options(num_gpus=_docling_num_gpus(self.config)).remote() for _ in range(self.pool_size)
+        ]
         self._queue: asyncio.Queue[ray.actor.ActorHandle] = asyncio.Queue()
 
-        for _ in range(DOCLING_MAX_TASKS_PER_WORKER):
+        for _ in range(self.max_tasks_per_worker):
             for actor in self.actors:
                 self._queue.put_nowait(actor)
 
-        total_slots = self.pool_size * DOCLING_MAX_TASKS_PER_WORKER
+        total_slots = self.pool_size * self.max_tasks_per_worker
         self.logger.info(
-            f"Docling pool: {self.pool_size} actors × {DOCLING_MAX_TASKS_PER_WORKER} slots = "
+            f"Docling pool: {self.pool_size} actors × {self.max_tasks_per_worker} slots = "
             f"{total_slots} PDF concurrency"
         )
 
@@ -121,6 +120,7 @@ class DoclingLoader(BasePooledParser):
     """
 
     def __init__(self) -> None:
+        self.config = load_config()
         self.worker: DoclingPool = ray.get_actor("DoclingPool", namespace="openrag")
 
     def supported_types(self) -> list[str]:
@@ -147,12 +147,12 @@ class DoclingLoader(BasePooledParser):
             page_count=len(result.pages),
         )
 
-    @with_timeout(
-        seconds=config.loader.docling_timeout,
-        description="DoclingLoader PDF loading ({file_path})",
-    )
     async def _dispatch(self, file_path: str) -> ConversionResult:
-        return self.worker.process_pdf.remote(file_path)
+        return await call_ray_actor_with_timeout(
+            self.worker.process_pdf.remote(file_path),
+            timeout=self.config.loader.docling_timeout,
+            task_description=f"DoclingLoader PDF loading ({file_path})",
+        )
 
     @staticmethod
     def _build_text_blocks(result: ConversionResult) -> list[TextBlock]:

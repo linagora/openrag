@@ -1,12 +1,11 @@
 import consts
 import openai
 from api.dependencies.auth import SUPER_ADMIN_MODE
-from config import load_config
-from fastapi import HTTPException, status
+from di.providers import get_config
+from fastapi import Depends, HTTPException, status
 from openai import AsyncOpenAI
 from utils.logger import get_logger
 
-config = load_config()
 logger = get_logger()
 
 
@@ -16,7 +15,7 @@ async def get_openai_models(base_url: str, api_key: str, timeout: int = 30):
         return models_response.data
 
 
-async def check_llm_model_availability():
+async def check_llm_model_availability(config=Depends(get_config)):
     llm_param = config.llm
     base_url = llm_param.base_url
     model = llm_param.model

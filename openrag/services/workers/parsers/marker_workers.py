@@ -19,18 +19,16 @@ from core.models.document import (
 from marker.converters.pdf import PdfConverter
 from utils.logger import get_logger
 
-from ..ray_utils import with_retry, with_timeout
+from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 
 logger = get_logger()
-config = load_config()
-
-if torch.cuda.is_available():
-    MARKER_NUM_GPUS = config.loader.marker_num_gpus
-else:  # On CPU
-    MARKER_NUM_GPUS = 0
 
 
-@ray.remote(num_gpus=MARKER_NUM_GPUS, max_restarts=5)
+def _marker_num_gpus(config) -> float:
+    return config.loader.marker_num_gpus if torch.cuda.is_available() else 0
+
+
+@ray.remote
 class MarkerWorker:
     def __init__(self):
         import os
@@ -167,9 +165,10 @@ class MarkerWorker:
 
     def __del__(self):
         """Clean up ProcessPoolExecutor on actor destruction"""
-        if self.executor:
+        executor = getattr(self, "executor", None)
+        if executor:
             try:
-                self.executor.shutdown(wait=False, cancel_futures=True)
+                executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 pass  # Best effort cleanup
 
@@ -184,7 +183,10 @@ class MarkerPool:
         self.config = load_config()
         self.max_processes = self.config.loader.marker_max_processes
         self.pool_size = self.config.loader.marker_pool_size
-        self.actors = [MarkerWorker.remote() for _ in range(self.pool_size)]
+        self.actors = [
+            MarkerWorker.options(num_gpus=_marker_num_gpus(self.config), max_restarts=5).remote()
+            for _ in range(self.pool_size)
+        ]
         self._queue: asyncio.Queue[ray.actor.ActorHandle] = asyncio.Queue()
 
         for _ in range(self.max_processes):
@@ -216,52 +218,55 @@ class MarkerPool:
             chunks.append((page_range, label))
         return chunks
 
-    @with_timeout(
-        seconds=config.loader.marker_timeout,
-        description="MarkerWorker pool health check",
-    )
     async def _check_pool_broken(self, worker):
-        return worker.is_pool_broken.remote()
+        return await call_ray_actor_with_timeout(
+            worker.is_pool_broken.remote(),
+            timeout=self.config.loader.marker_timeout,
+            task_description="MarkerWorker pool health check",
+        )
 
-    @with_timeout(
-        seconds=config.loader.marker_timeout,
-        description="MarkerWorker pool reset",
-    )
     async def _reset_worker_pool(self, worker):
-        return worker.setup_mp.remote()
+        return await call_ray_actor_with_timeout(
+            worker.setup_mp.remote(),
+            timeout=self.config.loader.marker_timeout,
+            task_description="MarkerWorker pool reset",
+        )
 
     async def ensure_worker_pool_healthy(self, worker):
         if await self._check_pool_broken(worker):
             self.logger.warning("Worker ProcessPoolExecutor is broken. Reinitializing pool...")
             await self._reset_worker_pool(worker)
 
-    @with_timeout(
-        seconds=config.loader.marker_timeout,
-        description="MarkerPool PDF {label} ({file_path})",
-    )
     async def _run_chunk(self, worker, file_path: str, page_range: list[int] | None, label: str):
-        return worker.process_pdf.remote(file_path, page_range=page_range)
+        return await call_ray_actor_with_timeout(
+            worker.process_pdf.remote(file_path, page_range=page_range),
+            timeout=self.config.loader.marker_timeout,
+            task_description=f"MarkerPool PDF {label} ({file_path})",
+        )
 
-    @with_retry(
-        max_retries=config.loader.marker_max_task_retry,
-        base_delay=config.loader.marker_retry_base_delay,
-        description="MarkerPool PDF {label} ({file_path})",
-    )
     async def _process_chunk(self, file_path: str, page_range: list[int] | None, label: str):
         """Acquire a worker slot, process a PDF chunk, and release the slot.
 
         A fresh worker is acquired per attempt so a flaky worker can be
         sidestepped and ``ensure_worker_pool_healthy`` re-runs each time.
-        Retries are handled by ``@with_retry``.
+        Retries are handled by ``retry_with_backoff``.
         """
-        worker = await self._queue.get()
-        try:
-            self.logger.info(f"MarkerWorker allocated for {label}")
-            await self.ensure_worker_pool_healthy(worker)
-            return await self._run_chunk(worker, file_path, page_range, label)
-        finally:
-            await self._queue.put(worker)
-            self.logger.debug(f"MarkerWorker returned to pool for {label}")
+        async def attempt(_i: int):
+            worker = await self._queue.get()
+            try:
+                self.logger.info(f"MarkerWorker allocated for {label}")
+                await self.ensure_worker_pool_healthy(worker)
+                return await self._run_chunk(worker, file_path, page_range, label)
+            finally:
+                await self._queue.put(worker)
+                self.logger.debug(f"MarkerWorker returned to pool for {label}")
+
+        return await retry_with_backoff(
+            attempt,
+            max_retries=self.config.loader.marker_max_task_retry,
+            base_delay=self.config.loader.marker_retry_base_delay,
+            task_description=f"MarkerPool PDF {label} ({file_path})",
+        )
 
     async def process_pdf(self, file_path: str):
         chunk_size = self.config.loader.marker_chunk_size
@@ -340,6 +345,7 @@ class MarkerLoader(BasePooledParser):
     _PAGE_MARKER_RE = re.compile(r"\{(\d+)\}" + re.escape(PAGE_SEP))
 
     def __init__(self) -> None:
+        self.config = load_config()
         self.worker = ray.get_actor("MarkerPool", namespace="openrag")
 
     def supported_types(self) -> list[str]:
@@ -369,12 +375,12 @@ class MarkerLoader(BasePooledParser):
 
     # ----- helpers -----
 
-    @with_timeout(
-        seconds=config.loader.marker_timeout,
-        description="MarkerLoader PDF loading ({file_path})",
-    )
     async def _convert_pdf(self, file_path: str):
-        return self.worker.process_pdf.remote(file_path)
+        return await call_ray_actor_with_timeout(
+            self.worker.process_pdf.remote(file_path),
+            timeout=self.config.loader.marker_timeout,
+            task_description=f"MarkerLoader PDF loading ({file_path})",
+        )
 
     async def _dispatch(self, file_path: str) -> tuple[str, dict]:
         start = time.time()

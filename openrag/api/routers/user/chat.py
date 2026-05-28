@@ -13,6 +13,7 @@ handed to the service as a callable), and ``StreamingResponse`` /
 
 import asyncio
 import json
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import consts
@@ -32,15 +33,17 @@ from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionR
 from components.indexer.utils.text_sanitizer import sanitize_text
 from components.utils import get_num_tokens
 from config import load_config
-from di.providers import get_partition_service, get_query_service
+from di.providers import get_config, get_partition_service, get_query_service
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from utils.exceptions.base import OpenRAGError
 from utils.logger import get_logger
 
 logger = get_logger()
-config = load_config()
 router = APIRouter()
+
+if TYPE_CHECKING:
+    from core.config.root import Settings
 
 # Cached max model token limit. Populated by ``prime_max_model_tokens``
 # which the application lifespan invokes during startup; ``get_max_model_tokens``
@@ -48,7 +51,11 @@ router = APIRouter()
 _max_model_tokens: int | None = None
 
 
-async def prime_max_model_tokens() -> None:
+def _runtime_config(settings: "Settings | None" = None) -> "Settings":
+    return settings if settings is not None else load_config()
+
+
+async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
     """Populate the cached max model token limit.
 
     Called once from the FastAPI lifespan in ``api/main.py`` (replaces the
@@ -56,7 +63,7 @@ async def prime_max_model_tokens() -> None:
     it just refreshes the cache.
     """
     global _max_model_tokens
-    _max_model_tokens = await _fetch_max_model_tokens()
+    _max_model_tokens = await _fetch_max_model_tokens(_runtime_config(settings))
 
 
 def _make_sse_error(message: str, code: str) -> str:
@@ -134,12 +141,14 @@ def __prepare_sources(request: Request, docs: list, web_results: list | None = N
 
 def is_direct_llm_model(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
+    settings: "Settings | None" = None,
 ) -> bool:
     """True if the request should use the LLM directly (no RAG partition)."""
+    config = _runtime_config(settings)
     return request.model is None or request.model == "" or request.model == config.llm.model
 
 
-async def _fetch_max_model_tokens() -> int:
+async def _fetch_max_model_tokens(config: "Settings") -> int:
     """Fetch the max model token limit from vLLM's OpenAI server.
 
     Falls back to ``config.llm_context.max_llm_context_size`` if unavailable.
@@ -168,15 +177,18 @@ def get_max_model_tokens() -> int:
     """Return the cached max model token limit (populated at startup)."""
     if _max_model_tokens is not None:
         return _max_model_tokens
+    config = _runtime_config()
     return int(config.llm_context.max_llm_context_size)
 
 
 def validate_tokens_limit(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
     max_tokens_allowed: int,
+    settings: "Settings | None" = None,
 ) -> tuple[bool, str]:
     """Validate if the request respects the maximum token limit."""
     try:
+        config = _runtime_config(settings)
         _length_function = get_num_tokens()
 
         if isinstance(request, OpenAIChatCompletionRequest):
@@ -216,9 +228,14 @@ def validate_tokens_limit(
 def check_tokens_limit(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
     log,
+    settings: "Settings | None" = None,
 ):
     """Validate token limit and raise HTTPException(413) if exceeded."""
-    is_valid, error_message = validate_tokens_limit(request, max_tokens_allowed=get_max_model_tokens())
+    is_valid, error_message = validate_tokens_limit(
+        request,
+        max_tokens_allowed=get_max_model_tokens(),
+        settings=settings,
+    )
     if not is_valid:
         log.info("Request exceeds token limit", detail=error_message)
         raise HTTPException(
@@ -260,6 +277,7 @@ async def openai_chat_completion(
     _: None = Depends(check_llm_model_availability),
     service=Depends(get_query_service),
     partition_service=Depends(get_partition_service),
+    config=Depends(get_config),
 ):
     model_name = request.model or config.llm.model
     log = logger.bind(model=model_name, endpoint="/chat/completions")
@@ -273,8 +291,8 @@ async def openai_chat_completion(
 
     log.debug("Received chat completion request with messages: {}", truncate(str(request.messages)))
 
-    if is_direct_llm_model(request):
-        check_tokens_limit(request, log)
+    if is_direct_llm_model(request, config):
+        check_tokens_limit(request, log, config)
         partitions = None
     else:
         partitions = await get_partition_name(
@@ -352,6 +370,7 @@ async def openai_completion(
     _: None = Depends(check_llm_model_availability),
     service=Depends(get_query_service),
     partition_service=Depends(get_partition_service),
+    config=Depends(get_config),
 ):
     model_name = request.model or config.llm.model
     log = logger.bind(model=model_name, endpoint="/completions")
@@ -367,8 +386,8 @@ async def openai_completion(
             detail="Streaming is not supported for this endpoint",
         )
 
-    if is_direct_llm_model(request):
-        check_tokens_limit(request, log)
+    if is_direct_llm_model(request, config):
+        check_tokens_limit(request, log, config)
         partitions = None
     else:
         partitions = await get_partition_name(

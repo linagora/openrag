@@ -16,8 +16,6 @@ from utils.logger import get_logger
 
 SOURCE_SEPARATOR = "-" * 10 + "\n\n"
 
-# Global variables
-config = load_config()
 logger = get_logger()
 
 
@@ -43,6 +41,7 @@ def get_num_tokens():
         try:
             from langchain_openai import ChatOpenAI
 
+            config = load_config()
             llm = ChatOpenAI(**config.llm.model_dump())
             _cached_length_function = llm.get_num_tokens
         except Exception as exc:
@@ -304,6 +303,7 @@ def detect_language(text: str):
 
 
 def get_llm_semaphore() -> DistributedSemaphore:
+    config = load_config()
     return DistributedSemaphore(
         name="llmSemaphore",
         max_concurrent_ops=config.semaphore.llm_semaphore,
@@ -311,6 +311,7 @@ def get_llm_semaphore() -> DistributedSemaphore:
 
 
 def get_vlm_semaphore() -> DistributedSemaphore:
+    config = load_config()
     return DistributedSemaphore(
         name="vlmSemaphore",
         max_concurrent_ops=config.semaphore.vlm_semaphore,
@@ -318,12 +319,8 @@ def get_vlm_semaphore() -> DistributedSemaphore:
 
 
 def get_audio_semaphore() -> DistributedSemaphore:
+    config = load_config()
     return DistributedSemaphore(
         name="audioSemaphore",
         max_concurrent_ops=config.loader.transcriber.max_concurrent_chunks,
     )
-
-
-get_llm_semaphore()
-get_vlm_semaphore()
-get_audio_semaphore()
