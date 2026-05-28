@@ -30,10 +30,6 @@ if TYPE_CHECKING:
     from langchain_openai import ChatOpenAI
 
 logger = get_logger()
-config = load_config()
-
-CONTEXTUALIZATION_TIMEOUT = config.chunker.contextualization_timeout
-MAX_CONCURRENT_CONTEXTUALIZATION = config.chunker.max_concurrent_contextualization
 
 
 class _LangChainLLMAdapter(_CoreLLM):
@@ -109,12 +105,14 @@ class BaseChunker:
 
         self.contextual_retrieval = contextual_retrieval
         if contextual_retrieval:
-            _lc_llm = ChatOpenAI(**{**llm_config, "timeout": CONTEXTUALIZATION_TIMEOUT})
+            config = load_config()
+            contextualization_timeout = config.chunker.contextualization_timeout
+            _lc_llm = ChatOpenAI(**{**llm_config, "timeout": contextualization_timeout})
             self.contextualizer: _CoreChunkContextualizer | None = _CoreChunkContextualizer(
                 llm=_LangChainLLMAdapter(_lc_llm),
                 system_prompt=CHUNK_CONTEXTUALIZER_PROMPT,
-                timeout_seconds=CONTEXTUALIZATION_TIMEOUT,
-                max_concurrent=MAX_CONCURRENT_CONTEXTUALIZATION,
+                timeout_seconds=contextualization_timeout,
+                max_concurrent=config.chunker.max_concurrent_contextualization,
                 semaphore=get_vlm_semaphore(),
             )
         else:

@@ -1,10 +1,12 @@
 from typing import Any, Literal
 
-from config import load_config
 from pydantic import BaseModel, Field
 
-config = load_config()
-default_max_tokens = config.llm_context.max_output_tokens
+
+def default_max_tokens():
+    from config import load_config
+
+    return load_config().llm_context.max_output_tokens
 
 
 class OpenAIMessage(BaseModel):
@@ -18,7 +20,7 @@ class OpenAIChatCompletionRequest(BaseModel):
     temperature: float | None = Field(0.3)
     top_p: float | None = Field(1.0)
     stream: bool | None = Field(False)
-    max_tokens: int | None = Field(default_max_tokens)
+    max_tokens: int | None = Field(default_factory=default_max_tokens)
     logprobs: int | None = Field(None)
     metadata: dict[str, Any] | None = Field(
         {
@@ -39,7 +41,7 @@ class OpenAICompletionRequest(BaseModel):
     frequency_penalty: float | None = Field(0.0)
     logit_bias: dict | None = Field(None)
     logprobs: int | None = Field(None)
-    max_tokens: int | None = Field(default_max_tokens)
+    max_tokens: int | None = Field(default_factory=default_max_tokens)
     n: int | None = Field(1)
     presence_penalty: float | None = Field(0.0)
     seed: int | None = Field(None)

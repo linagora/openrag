@@ -19,21 +19,25 @@ restart a named actor on-demand from the admin endpoint.
 """
 
 from functools import wraps
+from typing import TYPE_CHECKING
 
 import ray
-from components.indexer.loaders.audio import WhisperActor, WhisperPool
-from components.indexer.loaders.pdf_loaders.docling2 import DoclingPool
-from components.indexer.loaders.pdf_loaders.marker import MarkerPool
-from components.indexer.loaders.serializer import DocSerializer
-from config import load_config
-from services.inference.distributed_semaphore import DistributedSemaphoreActor
-from services.workers.task_state import TaskStateManager
 from utils.logger import get_logger
 
-config = load_config()
+if TYPE_CHECKING:
+    from core.config.root import Settings
+
+
 logger = get_logger()
 
 actor_creation_map: dict[str, callable] = {}
+_settings: "Settings | None" = None
+
+
+def _require_settings() -> "Settings":
+    if _settings is None:
+        raise RuntimeError("Worker bootstrap has not been initialized.")
+    return _settings
 
 
 def _track_actor(func):
@@ -56,14 +60,22 @@ def get_or_create_actor(name, cls, namespace="openrag", remote_args=(), **option
 
 
 def get_task_state_manager():
+    from services.workers.task_state import TaskStateManager
+
     return get_or_create_actor("TaskStateManager", TaskStateManager, lifetime="detached")
 
 
 def get_serializer():
+    from components.indexer.loaders.serializer import DocSerializer
+
     return get_or_create_actor("DocSerializer", DocSerializer, lifetime="detached")
 
 
 def get_marker_pool():
+    from components.indexer.loaders.pdf_loaders.docling2 import DoclingPool
+    from components.indexer.loaders.pdf_loaders.marker import MarkerPool
+
+    config = _require_settings()
     pdf_loader = config.loader.file_loaders.pdf
     match pdf_loader:
         case "DoclingLoader2":
@@ -73,6 +85,9 @@ def get_marker_pool():
 
 
 def init_audio_actor():
+    from services.workers.parsers.whisper_workers import WhisperActor, WhisperPool, whisper_actor_options
+
+    config = _require_settings()
     use_whisper_lang_detector = config.loader.transcriber.use_whisper_lang_detector
     file_loaders = config.loader.file_loaders
     loader_values = set(file_loaders.values()) if file_loaders else set()
@@ -81,10 +96,13 @@ def init_audio_actor():
         return get_or_create_actor("WhisperPool", WhisperPool, lifetime="detached")
 
     if "OpenAIAudioLoader" in loader_values and use_whisper_lang_detector:
-        return get_or_create_actor("WhisperActor", WhisperActor, lifetime="detached")
+        return get_or_create_actor("WhisperActor", WhisperActor, lifetime="detached", **whisper_actor_options(config))
 
 
 def init_llm_semaphore():
+    from services.inference.distributed_semaphore import DistributedSemaphoreActor
+
+    config = _require_settings()
     return get_or_create_actor(
         "llmSemaphore",
         DistributedSemaphoreActor,
@@ -94,6 +112,9 @@ def init_llm_semaphore():
 
 
 def init_vlm_semaphore():
+    from services.inference.distributed_semaphore import DistributedSemaphoreActor
+
+    config = _require_settings()
     return get_or_create_actor(
         "vlmSemaphore",
         DistributedSemaphoreActor,
@@ -103,6 +124,9 @@ def init_vlm_semaphore():
 
 
 def init_audio_semaphore():
+    from services.inference.distributed_semaphore import DistributedSemaphoreActor
+
+    config = _require_settings()
     return get_or_create_actor(
         "audioSemaphore",
         DistributedSemaphoreActor,
@@ -111,11 +135,15 @@ def init_audio_semaphore():
     )
 
 
-init_llm_semaphore()
-init_vlm_semaphore()
-init_audio_semaphore()
-init_audio_actor()
-get_marker_pool()
+def initialize_worker_bootstrap(settings: "Settings") -> None:
+    """Create the detached worker actors required by the request path."""
+    global _settings
+    _settings = settings
 
-task_state_manager = get_task_state_manager()
-serializer = get_serializer()
+    init_llm_semaphore()
+    init_vlm_semaphore()
+    init_audio_semaphore()
+    init_audio_actor()
+    get_marker_pool()
+    get_task_state_manager()
+    get_serializer()

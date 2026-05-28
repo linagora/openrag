@@ -1,16 +1,13 @@
 import os
 
-from config import load_config
 from core.utils.exceptions import OpenRAGError
-from di.providers import get_auth_service, get_job_service, get_partition_service
+from di.providers import get_auth_service, get_config, get_job_service, get_partition_service
 from fastapi import Depends, HTTPException, Request, status
 from utils.logger import get_logger
 
-config = load_config()
 logger = get_logger()
 
 SUPER_ADMIN_MODE = os.getenv("SUPER_ADMIN_MODE", "false").lower() == "true"
-DEFAULT_FILE_QUOTA = config.rdb.default_file_quota
 
 
 def current_user(request: Request):
@@ -236,11 +233,13 @@ async def check_user_file_quota(
     user=Depends(current_user),
     auth_service=Depends(get_auth_service),
     job_service=Depends(get_job_service),
+    config=Depends(get_config),
 ):
     """Check if user has reached their file quota."""
+    default_file_quota = config.rdb.default_file_quota
     if user.get("is_admin", False):
         return user
-    if DEFAULT_FILE_QUOTA < 0:
+    if default_file_quota < 0:
         return user
     user_quota = user.get("file_quota")
     if user_quota is not None and user_quota < 0:
@@ -259,7 +258,7 @@ async def check_user_file_quota(
         auth_service.validate_file_quota(
             user,
             pending_task_count=pending_count,
-            default_quota=DEFAULT_FILE_QUOTA,
+            default_quota=default_file_quota,
         )
     except OpenRAGError as exc:
         raise HTTPException(

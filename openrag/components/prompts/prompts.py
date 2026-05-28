@@ -16,17 +16,15 @@ from pathlib import Path
 from config import load_config
 from core.prompts.template_loader import load_template_by_key
 
-config = load_config()
-
-prompts_dir: Path = config.paths.prompts_dir
-prompt_mapping = config.prompts
-
 
 def load_prompt(
     prompt_name: str,
-    prompts_dir: Path = prompts_dir,
-    prompt_mapping=prompt_mapping,
+    prompts_dir: Path | None = None,
+    prompt_mapping=None,
 ) -> str:
+    config = load_config()
+    prompts_dir = prompts_dir or config.paths.prompts_dir
+    prompt_mapping = prompt_mapping or config.prompts
     return load_template_by_key(prompts_dir, prompt_mapping, prompt_name)
 
 

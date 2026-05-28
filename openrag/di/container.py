@@ -21,7 +21,7 @@ queries.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from core.embeddings import embedder_registry
 from core.llm import llm_registry
@@ -33,6 +33,7 @@ from di.repositories import create_catalog_store
 from di.rerankers import register_rerankers
 from di.vector_stores import create_vector_store
 from di.vlms import register_vlms
+from utils.logger import get_logger
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -65,6 +66,8 @@ if TYPE_CHECKING:
     from services.orchestrators.workspace_service import WorkspaceService
 
 
+logger = get_logger()
+
 _NO_SETTINGS_MESSAGE = (
     "ServiceContainer was constructed without a Settings instance — "
     "pass Settings to ServiceContainer(...) to wire storage adapters."
@@ -90,6 +93,8 @@ class ServiceContainer:
         self._oidc_config = OIDCConfig.from_env()
 
         self._settings = settings
+        self._initialized = False
+        self._inference_clients: list[Any] = []
         self._catalog_store: CatalogStore | None = create_catalog_store(settings) if settings is not None else None
         self._vector_store: VectorStore | None = create_vector_store(settings) if settings is not None else None
         self._auth_service: AuthService | None = None
@@ -121,13 +126,42 @@ class ServiceContainer:
     async def initialize(self) -> None:
         """Open the storage adapters (asyncpg pool + Alembic migrations)."""
         if self._catalog_store is not None:
+            logger.info("ServiceContainer.initialize: initializing catalog store")
             await self._catalog_store.initialize()
+            logger.info("ServiceContainer.initialize: ensuring admin user")
             await self.user_repo.ensure_admin_user(os.getenv("AUTH_TOKEN"))
+            logger.info("ServiceContainer.initialize: admin user ready")
+        self._initialized = True
 
     async def shutdown(self) -> None:
-        """Close the storage adapters cleanly."""
-        if self._catalog_store is not None:
-            await self._catalog_store.shutdown()
+        """Close inference clients and storage adapters cleanly.
+
+        Best-effort: a failure closing one client must not skip the
+        remaining clients, the database pool, or the state reset.
+        """
+        try:
+            for client in self._inference_clients:
+                aclose = getattr(client, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()
+                    except Exception:
+                        logger.exception("Failed to close inference client")
+            if self._catalog_store is not None:
+                await self._catalog_store.shutdown()
+        finally:
+            self._inference_clients.clear()
+            self._initialized = False
+
+    @property
+    def is_initialized(self) -> bool:
+        """True once :meth:`initialize` has completed its async I/O."""
+        return self._initialized
+
+    @property
+    def config(self) -> Settings:
+        """The root settings this container was wired from."""
+        return self._require_settings()
 
     # ------------------------------------------------------------------
     # Storage adapters
@@ -443,18 +477,23 @@ class ServiceContainer:
     # Registry-based inference factories (Phase 6)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def create_embedder(name: str = "vllm", **kwargs):
-        return embedder_registry.create(name, **kwargs)
+    def create_embedder(self, name: str = "vllm", **kwargs):
+        """Build an embedder client, tracking it for shutdown cleanup."""
+        return self._track(embedder_registry.create(name, **kwargs))
 
-    @staticmethod
-    def create_llm(name: str = "vllm", **kwargs):
-        return llm_registry.create(name, **kwargs)
+    def create_llm(self, name: str = "vllm", **kwargs):
+        """Build an LLM client, tracking it for shutdown cleanup."""
+        return self._track(llm_registry.create(name, **kwargs))
 
-    @staticmethod
-    def create_reranker(name: str = "infinity", **kwargs):
-        return reranker_registry.create(name, **kwargs)
+    def create_reranker(self, name: str = "infinity", **kwargs):
+        """Build a reranker client, tracking it for shutdown cleanup."""
+        return self._track(reranker_registry.create(name, **kwargs))
 
-    @staticmethod
-    def create_vlm(name: str = "vllm", **kwargs):
-        return vlm_registry.create(name, **kwargs)
+    def create_vlm(self, name: str = "vllm", **kwargs):
+        """Build a VLM client, tracking it for shutdown cleanup."""
+        return self._track(vlm_registry.create(name, **kwargs))
+
+    def _track(self, client: Any) -> Any:
+        """Register a built inference client so :meth:`shutdown` can close it."""
+        self._inference_clients.append(client)
+        return client

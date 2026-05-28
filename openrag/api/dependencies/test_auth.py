@@ -1,5 +1,6 @@
+from types import SimpleNamespace
+
 import pytest
-from api.dependencies import auth as api_auth
 from api.dependencies.auth import check_user_file_quota, ensure_partition_role, require_task_owner
 from core.utils.exceptions import AuthError
 from fastapi import HTTPException
@@ -85,6 +86,10 @@ class FakeJobService:
         return self.pending_count
 
 
+def _config(default_file_quota: int):
+    return SimpleNamespace(rdb=SimpleNamespace(default_file_quota=default_file_quota))
+
+
 @pytest.mark.asyncio
 async def test_ensure_partition_role_allows_unknown_partition_without_membership():
     partition_service = FakePartitionService(existing=set())
@@ -154,14 +159,14 @@ async def test_require_task_owner_reads_task_details_through_job_service():
 
 
 @pytest.mark.asyncio
-async def test_check_user_file_quota_reads_pending_count_through_job_service(monkeypatch):
-    monkeypatch.setattr(api_auth, "DEFAULT_FILE_QUOTA", 10)
+async def test_check_user_file_quota_reads_pending_count_through_job_service():
     job_service = FakeJobService(pending_count=2)
 
     user = await check_user_file_quota(
         user={"id": 7, "file_count": 1, "file_quota": 5},
         auth_service=FakeAuthService,
         job_service=job_service,
+        config=_config(default_file_quota=10),
     )
 
     assert user["id"] == 7
@@ -169,14 +174,13 @@ async def test_check_user_file_quota_reads_pending_count_through_job_service(mon
 
 
 @pytest.mark.asyncio
-async def test_check_user_file_quota_default_zero_enforces_zero(monkeypatch):
-    monkeypatch.setattr(api_auth, "DEFAULT_FILE_QUOTA", 0)
-
+async def test_check_user_file_quota_default_zero_enforces_zero():
     allowed_job_service = FakeJobService(pending_count=0)
     user = await check_user_file_quota(
         user={"id": 7, "file_count": 0, "file_quota": 1},
         auth_service=EnforcingAuthService,
         job_service=allowed_job_service,
+        config=_config(default_file_quota=0),
     )
     assert user["id"] == 7
     assert allowed_job_service.pending_checks == [7]
@@ -187,6 +191,7 @@ async def test_check_user_file_quota_default_zero_enforces_zero(monkeypatch):
             user={"id": 8, "file_count": 1, "file_quota": None},
             auth_service=EnforcingAuthService,
             job_service=denied_job_service,
+            config=_config(default_file_quota=0),
         )
     assert exc.value.status_code == 403
     assert exc.value.detail == "File quota exceeded"

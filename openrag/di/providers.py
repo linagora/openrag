@@ -1,16 +1,16 @@
 """FastAPI dependency providers.
 
-Thin accessors over the request-scoped :class:`ServiceContainer` that
-``main.py`` attaches at ``app.state.container``. Phase 8 keeps these as
-one-liners — the container (``di/container.py``) is the composition
-root. Phase 11 moves the attachment into a proper FastAPI lifespan and
-wires ``container.initialize()``; until then the OIDC flow that needs
-the asyncpg pool is dormant (token-mode auth routes already short-circuit
-before reaching a service).
+This module is the API layer's bridge to the composition root. During
+the Phase 10 -> 11 transition it supports both access patterns:
+
+* request-scoped lookup from ``request.app.state.container``;
+* process-level override via :func:`set_container` for tests and the
+  Phase 11 lifespan.
 """
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request, status
@@ -27,48 +27,117 @@ if TYPE_CHECKING:
     from services.orchestrators.user_service import UserService
     from services.orchestrators.workspace_service import WorkspaceService
 
+_container: ServiceContainer | None = None
+_container_lock = threading.Lock()
 
-def get_container(request: Request) -> ServiceContainer:
-    container = getattr(request.app.state, "container", None)
+
+def set_container(container: ServiceContainer | None) -> None:
+    """Override the process-level container.
+
+    Tests use this to install a fake container. The app lifespan can use
+    it after constructing the real container. Passing ``None`` clears the
+    override.
+    """
+    global _container
+    with _container_lock:
+        _container = container
+
+
+def get_container(request: Request = None) -> ServiceContainer:
+    """Resolve the active service container from request state or process state."""
+    if request is not None and hasattr(request.app.state, "container"):
+        container = request.app.state.container
+        if container is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Service container is not available.",
+            )
+        return container
+
+    global _container
+    container = _container
     if container is None:
+        with _container_lock:
+            if _container is None:
+                from di.container import ServiceContainer
+
+                _container = ServiceContainer()
+            container = _container
+    return container
+
+
+def _require_initialized(request: Request = None) -> ServiceContainer:
+    """Return the active container only after its initialization guard passes."""
+    container = get_container(request)
+    if not getattr(container, "is_initialized", True):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Service container is not available.",
+            detail="Service container has not been initialized.",
         )
     return container
 
 
-def get_auth_service(request: Request) -> AuthService:
-    return get_container(request).auth_service
+def get_auth_service(request: Request = None) -> AuthService:
+    """Resolve the authentication orchestrator from the active container."""
+    return _require_initialized(request).auth_service
 
 
-def get_user_service(request: Request) -> UserService:
-    return get_container(request).user_service
+def get_user_service(request: Request = None) -> UserService:
+    """Resolve the user orchestrator from the active container."""
+    return _require_initialized(request).user_service
 
 
-def get_partition_service(request: Request) -> PartitionService:
-    return get_container(request).partition_service
+def get_partition_service(request: Request = None) -> PartitionService:
+    """Resolve the partition orchestrator from the active container."""
+    return _require_initialized(request).partition_service
 
 
-def get_workspace_service(request: Request) -> WorkspaceService:
-    return get_container(request).workspace_service
+def get_workspace_service(request: Request = None) -> WorkspaceService:
+    """Resolve the workspace orchestrator from the active container."""
+    return _require_initialized(request).workspace_service
 
 
-def get_retrieval_service(request: Request) -> RetrievalService:
-    return get_container(request).retrieval_service
+def get_retrieval_service(request: Request = None) -> RetrievalService:
+    """Resolve the retrieval orchestrator from the active container."""
+    return _require_initialized(request).retrieval_service
 
 
-def get_query_service(request: Request) -> QueryService:
-    return get_container(request).query_service
+def get_query_service(request: Request = None) -> QueryService:
+    """Resolve the query orchestrator from the active container."""
+    return _require_initialized(request).query_service
 
 
-def get_indexing_service(request: Request) -> IndexingService:
-    return get_container(request).indexing_service
+def get_indexing_service(request: Request = None) -> IndexingService:
+    """Resolve the indexing orchestrator from the active container."""
+    return _require_initialized(request).indexing_service
 
 
-def get_job_service(request: Request) -> JobService:
-    return get_container(request).job_service
+def get_job_service(request: Request = None) -> JobService:
+    """Resolve the job orchestrator from the active container."""
+    return _require_initialized(request).job_service
 
 
-def get_conversion_service(request: Request) -> ConversionService:
-    return get_container(request).conversion_service
+def get_conversion_service(request: Request = None) -> ConversionService:
+    """Resolve the conversion orchestrator from the active container."""
+    return _require_initialized(request).conversion_service
+
+
+def get_config(request: Request = None):
+    """Resolve application configuration from the active container."""
+    return _require_initialized(request).config
+
+
+__all__ = [
+    "get_auth_service",
+    "get_config",
+    "get_container",
+    "get_conversion_service",
+    "get_indexing_service",
+    "get_job_service",
+    "get_partition_service",
+    "get_query_service",
+    "get_retrieval_service",
+    "get_user_service",
+    "get_workspace_service",
+    "set_container",
+]
