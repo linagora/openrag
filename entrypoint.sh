@@ -9,5 +9,5 @@ if [[ "${ENABLE_RAY_SERVE}" == "true" ]]; then
   uv run $ENV_ARG -m api.main
 else
   echo "🚀 Starting with Uvicorn..."
-  uv run --no-dev $ENV_ARG uvicorn api.main:app --host 0.0.0.0 --port ${APP_PORT:-8080} --reload --workers ${API_NUM_WORKERS:-1}
+  uv run --no-dev $ENV_ARG uvicorn api.main:app --host 0.0.0.0 --port ${APP_iPORT:-8080} --reload --workers ${API_NUM_WORKERS:-1}
 fi
