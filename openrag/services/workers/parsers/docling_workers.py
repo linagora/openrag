@@ -84,8 +84,7 @@ class DoclingPool:
 
         total_slots = self.pool_size * self.max_tasks_per_worker
         self.logger.info(
-            f"Docling pool: {self.pool_size} actors × {self.max_tasks_per_worker} slots = "
-            f"{total_slots} PDF concurrency"
+            f"Docling pool: {self.pool_size} actors × {self.max_tasks_per_worker} slots = {total_slots} PDF concurrency"
         )
 
     async def process_pdf(self, file_path: str) -> ConversionResult:

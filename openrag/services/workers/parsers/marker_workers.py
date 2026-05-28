@@ -251,6 +251,7 @@ class MarkerPool:
         sidestepped and ``ensure_worker_pool_healthy`` re-runs each time.
         Retries are handled by ``retry_with_backoff``.
         """
+
         async def attempt(_i: int):
             worker = await self._queue.get()
             try:
