@@ -2,6 +2,7 @@
 
 
 def register_parsers() -> None:
+    """Import parser implementations so they register with the core registry."""
     import core.indexing.parsers.audio.client_based  # noqa: F401
     import core.indexing.parsers.audio.local_whisper  # noqa: F401
     import core.indexing.parsers.doc_parser  # noqa: F401

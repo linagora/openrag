@@ -44,6 +44,7 @@ def set_container(container: ServiceContainer | None) -> None:
 
 
 def get_container(request: Request = None) -> ServiceContainer:
+    """Resolve the active service container from request state or process state."""
     if request is not None and hasattr(request.app.state, "container"):
         container = request.app.state.container
         if container is None:
@@ -66,6 +67,7 @@ def get_container(request: Request = None) -> ServiceContainer:
 
 
 def _require_initialized(request: Request = None) -> ServiceContainer:
+    """Return the active container only after its initialization guard passes."""
     container = get_container(request)
     if not getattr(container, "is_initialized", True):
         raise HTTPException(
@@ -76,42 +78,52 @@ def _require_initialized(request: Request = None) -> ServiceContainer:
 
 
 def get_auth_service(request: Request = None) -> AuthService:
+    """Resolve the authentication orchestrator from the active container."""
     return _require_initialized(request).auth_service
 
 
 def get_user_service(request: Request = None) -> UserService:
+    """Resolve the user orchestrator from the active container."""
     return _require_initialized(request).user_service
 
 
 def get_partition_service(request: Request = None) -> PartitionService:
+    """Resolve the partition orchestrator from the active container."""
     return _require_initialized(request).partition_service
 
 
 def get_workspace_service(request: Request = None) -> WorkspaceService:
+    """Resolve the workspace orchestrator from the active container."""
     return _require_initialized(request).workspace_service
 
 
 def get_retrieval_service(request: Request = None) -> RetrievalService:
+    """Resolve the retrieval orchestrator from the active container."""
     return _require_initialized(request).retrieval_service
 
 
 def get_query_service(request: Request = None) -> QueryService:
+    """Resolve the query orchestrator from the active container."""
     return _require_initialized(request).query_service
 
 
 def get_indexing_service(request: Request = None) -> IndexingService:
+    """Resolve the indexing orchestrator from the active container."""
     return _require_initialized(request).indexing_service
 
 
 def get_job_service(request: Request = None) -> JobService:
+    """Resolve the job orchestrator from the active container."""
     return _require_initialized(request).job_service
 
 
 def get_conversion_service(request: Request = None) -> ConversionService:
+    """Resolve the conversion orchestrator from the active container."""
     return _require_initialized(request).conversion_service
 
 
 def get_config(request: Request = None):
+    """Resolve application configuration from the active container."""
     return _require_initialized(request).config
 
 
