@@ -21,7 +21,7 @@ queries.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from core.embeddings import embedder_registry
 from core.llm import llm_registry
@@ -90,6 +90,8 @@ class ServiceContainer:
         self._oidc_config = OIDCConfig.from_env()
 
         self._settings = settings
+        self._initialized = False
+        self._inference_clients: list[Any] = []
         self._catalog_store: CatalogStore | None = create_catalog_store(settings) if settings is not None else None
         self._vector_store: VectorStore | None = create_vector_store(settings) if settings is not None else None
         self._auth_service: AuthService | None = None
@@ -123,11 +125,28 @@ class ServiceContainer:
         if self._catalog_store is not None:
             await self._catalog_store.initialize()
             await self.user_repo.ensure_admin_user(os.getenv("AUTH_TOKEN"))
+        self._initialized = True
 
     async def shutdown(self) -> None:
-        """Close the storage adapters cleanly."""
+        """Close inference clients and storage adapters cleanly."""
+        for client in self._inference_clients:
+            aclose = getattr(client, "aclose", None)
+            if aclose is not None:
+                await aclose()
+        self._inference_clients.clear()
         if self._catalog_store is not None:
             await self._catalog_store.shutdown()
+        self._initialized = False
+
+    @property
+    def is_initialized(self) -> bool:
+        """True once :meth:`initialize` has completed its async I/O."""
+        return self._initialized
+
+    @property
+    def config(self) -> Settings:
+        """The root settings this container was wired from."""
+        return self._settings
 
     # ------------------------------------------------------------------
     # Storage adapters
@@ -443,18 +462,23 @@ class ServiceContainer:
     # Registry-based inference factories (Phase 6)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def create_embedder(name: str = "vllm", **kwargs):
-        return embedder_registry.create(name, **kwargs)
+    def create_embedder(self, name: str = "vllm", **kwargs):
+        """Build an embedder client, tracking it for shutdown cleanup."""
+        return self._track(embedder_registry.create(name, **kwargs))
 
-    @staticmethod
-    def create_llm(name: str = "vllm", **kwargs):
-        return llm_registry.create(name, **kwargs)
+    def create_llm(self, name: str = "vllm", **kwargs):
+        """Build an LLM client, tracking it for shutdown cleanup."""
+        return self._track(llm_registry.create(name, **kwargs))
 
-    @staticmethod
-    def create_reranker(name: str = "infinity", **kwargs):
-        return reranker_registry.create(name, **kwargs)
+    def create_reranker(self, name: str = "infinity", **kwargs):
+        """Build a reranker client, tracking it for shutdown cleanup."""
+        return self._track(reranker_registry.create(name, **kwargs))
 
-    @staticmethod
-    def create_vlm(name: str = "vllm", **kwargs):
-        return vlm_registry.create(name, **kwargs)
+    def create_vlm(self, name: str = "vllm", **kwargs):
+        """Build a VLM client, tracking it for shutdown cleanup."""
+        return self._track(vlm_registry.create(name, **kwargs))
+
+    def _track(self, client: Any) -> Any:
+        """Register a built inference client so :meth:`shutdown` can close it."""
+        self._inference_clients.append(client)
+        return client

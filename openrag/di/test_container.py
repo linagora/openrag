@@ -326,3 +326,50 @@ class TestPhase11ProviderBridge:
             providers.set_container(None)
 
         assert exc.value.status_code == 503
+
+
+class TestPhase11ContainerLifecycle:
+    """Phase 11 introspection + lifecycle the provider bridge relies on."""
+
+    def test_config_returns_wired_settings(self):
+        """Expose the settings the container was built from."""
+        settings = _settings()
+        assert ServiceContainer(settings).config is settings
+
+    def test_is_initialized_false_before_initialize(self):
+        """Report not-initialized until the async phase has run."""
+        assert ServiceContainer(_settings()).is_initialized is False
+
+    @pytest.mark.asyncio
+    async def test_initialize_sets_is_initialized(self):
+        """Flip the init guard once the async phase completes."""
+        c = ServiceContainer()  # no settings: initialize is a no-op but still flips the flag
+        await c.initialize()
+        assert c.is_initialized is True
+
+    def test_create_tracks_inference_client(self):
+        """Record clients built through the factory for shutdown cleanup."""
+        c = ServiceContainer()
+        client = c.create_llm(endpoint="http://vllm:8000/v1", model_name="m")
+        assert c._inference_clients == [client]
+
+    @pytest.mark.asyncio
+    async def test_shutdown_closes_clients_and_resets_state(self):
+        """Close every tracked client, clear the list, and drop the init flag."""
+        closed = []
+
+        class _FakeClient:
+            async def aclose(self):
+                """Record that the client was closed."""
+                closed.append(self)
+
+        c = ServiceContainer()
+        c._initialized = True
+        fake = _FakeClient()
+        c._inference_clients.append(fake)
+
+        await c.shutdown()
+
+        assert closed == [fake]
+        assert c._inference_clients == []
+        assert c.is_initialized is False
