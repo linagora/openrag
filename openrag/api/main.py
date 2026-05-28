@@ -52,6 +52,7 @@ from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
 from config import load_config
 from di.container import ServiceContainer
+from di.providers import set_container
 from di.workers import ensure_worker_bootstrap
 from dotenv import dotenv_values
 from fastapi import Depends, FastAPI
@@ -133,6 +134,9 @@ async def lifespan(app: FastAPI):
        container is absent.
     4. ``prime_max_model_tokens`` — caches the vLLM ``max_model_len`` so
        per-request validation in the chat router stays synchronous.
+    5. ``set_container`` — registers the resolved container as the
+       process-level singleton for callers that resolve it without a
+       request; cleared on shutdown.
     """
     if not ray.is_initialized():
         ray.init(dashboard_host="0.0.0.0", ignore_reinit_error=True)
@@ -169,6 +173,12 @@ async def lifespan(app: FastAPI):
     except Exception:  # pragma: no cover - defensive cache guard
         logger.exception("max_model_tokens cache priming failed; falling back to config")
 
+    # Mirror the resolved boot state into the process-level singleton so
+    # callers without a request (Chainlit, background tasks) resolve the
+    # same container the HTTP routes get via request.app.state. None on a
+    # degraded boot keeps di.providers serving the intended 503.
+    set_container(getattr(app.state, "container", None))
+
     try:
         yield
     finally:
@@ -178,6 +188,7 @@ async def lifespan(app: FastAPI):
                 await live.shutdown()
             except Exception:  # pragma: no cover - defensive shutdown guard
                 logger.exception("ServiceContainer.shutdown skipped")
+        set_container(None)
 
 
 # ---------------------------------------------------------------------------
