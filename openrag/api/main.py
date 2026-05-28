@@ -19,6 +19,7 @@ Notable shape vs the deleted legacy module:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import warnings
 from contextlib import asynccontextmanager
@@ -73,6 +74,9 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
 logger = get_logger()
 settings = load_config()
 DATA_DIR = Path(settings.paths.data_dir)
+CONTAINER_STARTUP_TIMEOUT = float(
+    os.getenv("OPENRAG_CONTAINER_STARTUP_TIMEOUT", max(60, settings.rdb.command_timeout * 4))
+)
 
 SHARED_ENV = os.environ.get("SHARED_ENV", None)
 env_vars = dotenv_values(SHARED_ENV) if SHARED_ENV else {}
@@ -139,18 +143,24 @@ async def lifespan(app: FastAPI):
        request; cleared on shutdown.
     """
     if not ray.is_initialized():
+        logger.info("Startup: initializing Ray")
         ray.init(dashboard_host="0.0.0.0", ignore_reinit_error=True)
+    logger.info("Startup: Ray is initialized")
 
     # ``ensure_worker_bootstrap`` imports ``services.workers.bootstrap``
     # for its side effect: creating the long-lived detached worker
     # actors (TaskStateManager, DocSerializer, MarkerPool, semaphores).
     # The indirection through :mod:`di.workers` keeps API code free of
     # direct ``services.workers`` imports.
+    logger.info("Startup: initializing worker bootstrap")
     ensure_worker_bootstrap(settings)
+    logger.info("Startup: worker bootstrap initialized")
 
     container: ServiceContainer | None
     try:
+        logger.info("Startup: wiring ServiceContainer")
         container = ServiceContainer(settings)
+        logger.info("Startup: ServiceContainer wired")
     except Exception:  # pragma: no cover - defensive boot guard
         logger.exception("ServiceContainer wiring skipped")
         container = None
@@ -159,7 +169,13 @@ async def lifespan(app: FastAPI):
 
     if container is not None:
         try:
-            await container.initialize()
+            logger.info("Startup: initializing ServiceContainer", timeout=CONTAINER_STARTUP_TIMEOUT)
+            await asyncio.wait_for(container.initialize(), timeout=CONTAINER_STARTUP_TIMEOUT)
+            logger.info("Startup: ServiceContainer initialized")
+        except TimeoutError:  # pragma: no cover - defensive boot guard
+            logger.exception("ServiceContainer.initialize timed out; serving degraded (503)")
+            app.state.container = None
+            container = None
         except Exception:  # pragma: no cover - defensive boot guard
             # A half-initialised container (asyncpg pool never opened)
             # would route requests into broken repos and 500. Drop it so
@@ -169,7 +185,9 @@ async def lifespan(app: FastAPI):
             container = None
 
     try:
+        logger.info("Startup: priming max model token cache")
         await prime_max_model_tokens(settings)
+        logger.info("Startup: max model token cache primed")
     except Exception:  # pragma: no cover - defensive cache guard
         logger.exception("max_model_tokens cache priming failed; falling back to config")
 
@@ -177,7 +195,9 @@ async def lifespan(app: FastAPI):
     # callers without a request (Chainlit, background tasks) resolve the
     # same container the HTTP routes get via request.app.state. None on a
     # degraded boot keeps di.providers serving the intended 503.
+    logger.info("Startup: registering process container", available=getattr(app.state, "container", None) is not None)
     set_container(getattr(app.state, "container", None))
+    logger.info("Startup: complete")
 
     try:
         yield

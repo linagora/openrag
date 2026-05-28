@@ -126,8 +126,11 @@ class ServiceContainer:
     async def initialize(self) -> None:
         """Open the storage adapters (asyncpg pool + Alembic migrations)."""
         if self._catalog_store is not None:
+            logger.info("ServiceContainer.initialize: initializing catalog store")
             await self._catalog_store.initialize()
+            logger.info("ServiceContainer.initialize: ensuring admin user")
             await self.user_repo.ensure_admin_user(os.getenv("AUTH_TOKEN"))
+            logger.info("ServiceContainer.initialize: admin user ready")
         self._initialized = True
 
     async def shutdown(self) -> None:
