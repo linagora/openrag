@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from core.embeddings import embedder_registry
+from core.indexing.parsers import parser_registry
 from core.llm import llm_registry
 from core.rerankers import reranker_registry
 from core.vlm import vlm_registry
 from di.container import ServiceContainer
 from di.inference import register_inference
+from di.parsers import register_parsers
 
 
 class TestRegisterInference:
@@ -13,7 +15,9 @@ class TestRegisterInference:
         register_inference()
 
         assert "vllm" in llm_registry
+        assert "ollama" in llm_registry
         assert "vllm" in embedder_registry
+        assert "ollama" in embedder_registry
         assert "vllm" in vlm_registry
         assert "infinity" in reranker_registry
         assert "openai" in reranker_registry
@@ -23,12 +27,40 @@ class TestRegisterInference:
         register_inference()
 
 
+class TestRegisterParsers:
+    def test_parser_registry_populated(self):
+        register_parsers()
+
+        assert {
+            "audio_client",
+            "doc",
+            "docling",
+            "docx",
+            "eml",
+            "html",
+            "image",
+            "local_whisper",
+            "markdown",
+            "marker",
+            "pdf_client",
+            "pptx",
+            "pymupdf",
+            "text",
+        }.issubset(set(parser_registry.list_registered()))
+
+    def test_idempotent(self):
+        register_parsers()
+        register_parsers()
+
+
 class TestServiceContainer:
     def test_container_populates_all_registries(self):
         ServiceContainer()
 
         assert "vllm" in llm_registry
+        assert "ollama" in llm_registry
         assert "vllm" in embedder_registry
+        assert "ollama" in embedder_registry
         assert "vllm" in vlm_registry
         assert "infinity" in reranker_registry
         assert "openai" in reranker_registry
