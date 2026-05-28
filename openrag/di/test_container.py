@@ -26,6 +26,7 @@ from core.ports.workspace_repo import WorkspaceRepository
 from di.container import ServiceContainer
 from di.repositories import create_catalog_store
 from di.vector_stores import create_vector_store
+from fastapi import HTTPException
 
 
 def _settings(database: str | None = None, collection: str = "vdb_test") -> Settings:
@@ -244,3 +245,51 @@ class TestPhase8OrchestratorWiring:
 
         wired = {name for name in vars(providers) if name.startswith("get_") and name.endswith("_service")}
         assert wired == {p for _, p in _ORCHESTRATORS}
+
+
+class TestPhase11ProviderBridge:
+    def test_set_container_supports_no_request_lookup(self):
+        from di import providers
+
+        fake_container = SimpleNamespace(is_initialized=True, config=object())
+        try:
+            providers.set_container(fake_container)
+            assert providers.get_container() is fake_container
+            assert providers.get_config() is fake_container.config
+        finally:
+            providers.set_container(None)
+
+    def test_request_container_takes_precedence_over_process_container(self):
+        from di import providers
+
+        process_container = SimpleNamespace(auth_service=object())
+        request_container = SimpleNamespace(auth_service=object())
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=request_container)))
+        try:
+            providers.set_container(process_container)
+            assert providers.get_container(request) is request_container
+            assert providers.get_auth_service(request) is request_container.auth_service
+        finally:
+            providers.set_container(None)
+
+    def test_request_container_none_returns_503(self):
+        from di import providers
+
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=None)))
+        with pytest.raises(HTTPException) as exc:
+            providers.get_container(request)
+
+        assert exc.value.status_code == 503
+
+    def test_uninitialized_container_returns_503_for_service_getter(self):
+        from di import providers
+
+        fake_container = SimpleNamespace(is_initialized=False, auth_service=object())
+        try:
+            providers.set_container(fake_container)
+            with pytest.raises(HTTPException) as exc:
+                providers.get_auth_service()
+        finally:
+            providers.set_container(None)
+
+        assert exc.value.status_code == 503
