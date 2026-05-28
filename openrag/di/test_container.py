@@ -373,3 +373,29 @@ class TestPhase11ContainerLifecycle:
         assert closed == [fake]
         assert c._inference_clients == []
         assert c.is_initialized is False
+
+    @pytest.mark.asyncio
+    async def test_shutdown_is_best_effort_when_a_client_fails(self):
+        """One client close failure must not skip the rest or the reset."""
+        closed = []
+
+        class _BadClient:
+            async def aclose(self):
+                """Fail to close, exercising the best-effort path."""
+                raise RuntimeError("boom")
+
+        class _GoodClient:
+            async def aclose(self):
+                """Record a successful close after a prior failure."""
+                closed.append(self)
+
+        c = ServiceContainer()
+        c._initialized = True
+        good = _GoodClient()
+        c._inference_clients.extend([_BadClient(), good])
+
+        await c.shutdown()  # must not raise
+
+        assert closed == [good]
+        assert c._inference_clients == []
+        assert c.is_initialized is False

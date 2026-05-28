@@ -33,6 +33,7 @@ from di.repositories import create_catalog_store
 from di.rerankers import register_rerankers
 from di.vector_stores import create_vector_store
 from di.vlms import register_vlms
+from utils.logger import get_logger
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -64,6 +65,8 @@ if TYPE_CHECKING:
     from services.orchestrators.user_service import UserService
     from services.orchestrators.workspace_service import WorkspaceService
 
+
+logger = get_logger()
 
 _NO_SETTINGS_MESSAGE = (
     "ServiceContainer was constructed without a Settings instance — "
@@ -128,15 +131,24 @@ class ServiceContainer:
         self._initialized = True
 
     async def shutdown(self) -> None:
-        """Close inference clients and storage adapters cleanly."""
-        for client in self._inference_clients:
-            aclose = getattr(client, "aclose", None)
-            if aclose is not None:
-                await aclose()
-        self._inference_clients.clear()
-        if self._catalog_store is not None:
-            await self._catalog_store.shutdown()
-        self._initialized = False
+        """Close inference clients and storage adapters cleanly.
+
+        Best-effort: a failure closing one client must not skip the
+        remaining clients, the database pool, or the state reset.
+        """
+        try:
+            for client in self._inference_clients:
+                aclose = getattr(client, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()
+                    except Exception:
+                        logger.exception("Failed to close inference client")
+            if self._catalog_store is not None:
+                await self._catalog_store.shutdown()
+        finally:
+            self._inference_clients.clear()
+            self._initialized = False
 
     @property
     def is_initialized(self) -> bool:
@@ -146,7 +158,7 @@ class ServiceContainer:
     @property
     def config(self) -> Settings:
         """The root settings this container was wired from."""
-        return self._settings
+        return self._require_settings()
 
     # ------------------------------------------------------------------
     # Storage adapters
