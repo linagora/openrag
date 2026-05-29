@@ -1,8 +1,10 @@
-from core.utils.logging import logger  # assuming you have a shared logger instance
+from core.utils.logging import get_logger
 from PIL import Image
 from tqdm.asyncio import tqdm
 
 from .openai import OpenAILoader
+
+logger = get_logger()
 
 
 class DotsOCRLoader(OpenAILoader):

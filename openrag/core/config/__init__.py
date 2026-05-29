@@ -6,7 +6,10 @@ Public API:
     get_settings()  — cached singleton accessor
 """
 
+from collections.abc import Mapping
 from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
 from .root import Settings
 
@@ -19,7 +22,10 @@ def get_settings() -> Settings:
     return _load()
 
 
-def load_config(config_path=None, overrides=None) -> Settings:
+def load_config(
+    config_path: str | Path | None = None,
+    overrides: Mapping[str, Any] | None = None,
+) -> Settings:
     """Return the cached Pydantic Settings singleton.
 
     The ``config_path`` parameter is kept for backward compatibility.
@@ -27,7 +33,7 @@ def load_config(config_path=None, overrides=None) -> Settings:
 
     The ``overrides`` parameter bypasses the cache (useful for tests).
     """
-    if overrides or config_path:
+    if overrides is not None or config_path is not None:
         from .loader import load_config as _load
 
         return _load(conf_dir=config_path, overrides=overrides)
