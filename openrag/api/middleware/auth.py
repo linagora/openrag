@@ -34,11 +34,11 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
-from components.auth.refresh import refresh_session_if_needed
 from core.config.auth import AuthBypassConfig
 from core.utils.logging import get_logger
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from services.auth.refresh import refresh_session_if_needed
 from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = get_logger()
