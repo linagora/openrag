@@ -362,6 +362,21 @@ class AuthService:
     async def revoke_oidc_session_by_id_for_request(self, session_id: int) -> None:
         await self._oidc_session_repo.revoke_session(session_id)
 
+    async def refresh_session_if_needed(
+        self, *, session: dict[str, Any], enc_key: str
+    ) -> dict[str, Any] | None:
+        """Refresh the IdP access token when it is near expiry.
+
+        Thin seam over :func:`services.auth.refresh.refresh_session_if_needed`,
+        passing ``self`` as the auth-service the helper calls back into. Keeping
+        it on the orchestrator lets the middleware reach refresh through the same
+        ``AuthService`` it already uses for every other session operation —
+        the API layer never imports the services helper directly.
+        """
+        from services.auth.refresh import refresh_session_if_needed as _refresh
+
+        return await _refresh(session=session, enc_key=enc_key, auth_service=self)
+
     # ------------------------------------------------------------------
     # Auth policy — pure helpers (no I/O)
     # ------------------------------------------------------------------

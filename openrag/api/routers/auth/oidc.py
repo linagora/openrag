@@ -23,12 +23,12 @@ from __future__ import annotations
 
 import os
 
+from core.auth.state_cookie import StateCookieSerializer
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from di.providers import get_auth_service
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
-from services.auth.state_cookie import StateCookieSerializer
 
 logger = get_logger()
 router = APIRouter()

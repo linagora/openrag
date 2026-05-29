@@ -1,5 +1,5 @@
-"""Re-export shim — implementation lives in services.auth.state_cookie."""
+"""Re-export shim — implementation lives in core.auth.state_cookie."""
 
-from services.auth.state_cookie import StateCookiePayload, StateCookieSerializer
+from core.auth.state_cookie import StateCookiePayload, StateCookieSerializer
 
 __all__ = ["StateCookieSerializer", "StateCookiePayload"]

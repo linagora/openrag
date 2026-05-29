@@ -38,7 +38,6 @@ from core.config.auth import AuthBypassConfig
 from core.utils.logging import get_logger
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
-from services.auth.refresh import refresh_session_if_needed
 from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = get_logger()
@@ -164,10 +163,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if cookie_token:
             session = await auth_service.get_oidc_session_by_token_for_request(cookie_token)
             if session is not None:
-                refreshed = await refresh_session_if_needed(
+                refreshed = await auth_service.refresh_session_if_needed(
                     session=session,
                     enc_key=enc_key,
-                    auth_service=auth_service,
                 )
                 if refreshed is None:
                     # Refresh failed or session unusable → revoke and fall through.
@@ -199,10 +197,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 if auth_mode == "oidc":
                     session = await auth_service.get_oidc_session_by_token_for_request(token)
                     if session is not None:
-                        refreshed = await refresh_session_if_needed(
+                        refreshed = await auth_service.refresh_session_if_needed(
                             session=session,
                             enc_key=enc_key,
-                            auth_service=auth_service,
                         )
                         if refreshed is None:
                             try:

@@ -47,6 +47,17 @@ def _make_auth_service_mock(
 
     mock.update_oidc_session_tokens_for_request = AsyncMock(return_value=None)
 
+    # Default refresh delegates to the real helper with this mock as the
+    # auth-service seam — mirrors the production middleware, which now reaches
+    # refresh through ``auth_service.refresh_session_if_needed`` rather than a
+    # module-level import. Tests needing a specific refresh outcome override it.
+    from services.auth.refresh import refresh_session_if_needed as _real_refresh
+
+    async def _default_refresh(*, session, enc_key):
+        return await _real_refresh(session=session, enc_key=enc_key, auth_service=mock)
+
+    mock.refresh_session_if_needed = AsyncMock(side_effect=_default_refresh)
+
     return mock
 
 
@@ -230,9 +241,9 @@ class TestOIDCMode:
 
         # Patch the helper at its import site inside the middleware module
         # to avoid any dependency on a real OIDC client.
-        async def fake_refresh(*, session, enc_key, auth_service):
+        async def fake_refresh(*, session, enc_key):
             new_exp = datetime.now() + timedelta(minutes=30)
-            await auth_service.update_oidc_session_tokens_for_request(
+            await vdb.update_oidc_session_tokens_for_request(
                 session_id=session["id"],
                 access_token_encrypted=b"new-enc-access",
                 refresh_token_encrypted=b"new-enc-refresh",
@@ -245,14 +256,11 @@ class TestOIDCMode:
                 "refresh_token_encrypted": b"new-enc-refresh",
             }
 
-        with patch(
-            "api.middleware.auth.refresh_session_if_needed",
-            side_effect=fake_refresh,
-        ):
-            app = _build_app(vdb)
-            with TestClient(app) as client:
-                client.cookies.set("openrag_session", "plain-cookie")
-                r = client.get("/v1/chat/completions")
+        vdb.refresh_session_if_needed = AsyncMock(side_effect=fake_refresh)
+        app = _build_app(vdb)
+        with TestClient(app) as client:
+            client.cookies.set("openrag_session", "plain-cookie")
+            r = client.get("/v1/chat/completions")
 
         assert r.status_code == 200
         vdb.update_oidc_session_tokens_for_request.assert_awaited()
@@ -263,17 +271,14 @@ class TestOIDCMode:
         session["access_token_expires_at"] = datetime.now() - timedelta(minutes=1)
         vdb = _make_auth_service_mock(user=None, session=session)
 
-        async def fake_refresh(*, session, enc_key, auth_service):
+        async def fake_refresh(*, session, enc_key):
             return None  # refresh failed → invalid session
 
-        with patch(
-            "api.middleware.auth.refresh_session_if_needed",
-            side_effect=fake_refresh,
-        ):
-            app = _build_app(vdb)
-            with TestClient(app) as client:
-                client.cookies.set("openrag_session", "plain-cookie")
-                r = client.get("/", follow_redirects=False)
+        vdb.refresh_session_if_needed = AsyncMock(side_effect=fake_refresh)
+        app = _build_app(vdb)
+        with TestClient(app) as client:
+            client.cookies.set("openrag_session", "plain-cookie")
+            r = client.get("/", follow_redirects=False)
 
         assert r.status_code == 302
         assert r.headers["location"].startswith("/auth/login?next=")
