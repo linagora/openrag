@@ -261,7 +261,7 @@ def main():
         Returns:
             tuple: (RDBConfig, VectorDBConfig) Pydantic config models.
         """
-        from config import load_config
+        from core.config import load_config
 
         try:
             config = load_config()

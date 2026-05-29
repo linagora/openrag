@@ -60,6 +60,31 @@ async def test_save_file_to_disk_with_random_prefix(tmp_path, monkeypatch):
     assert saved_path.read_bytes() == file_content
 
 
+@pytest.mark.asyncio
+async def test_save_file_to_disk_strips_path_components(tmp_path):
+    upload = UploadFile(
+        filename="../../nested/evil.txt",
+        file=io.BytesIO(b"content"),
+    )
+
+    saved_path = await save_file_to_disk(file=upload, dest_dir=tmp_path)
+
+    assert saved_path.parent == tmp_path.resolve()
+    assert saved_path.name == "evil.txt"
+    assert saved_path.read_bytes() == b"content"
+
+
+@pytest.mark.asyncio
+async def test_save_file_to_disk_rejects_empty_filename(tmp_path):
+    upload = UploadFile(
+        filename="",
+        file=io.BytesIO(b"content"),
+    )
+
+    with pytest.raises(ValidationError):
+        await save_file_to_disk(file=upload, dest_dir=tmp_path)
+
+
 @pytest.mark.parametrize(
     "input_name,expected",
     [

@@ -6,7 +6,7 @@ import time
 import pypdfium2
 import ray
 import torch
-from config import load_config
+from core.config import load_config
 from core.indexing.image_preprocessor import pil_to_png_bytes
 from core.indexing.parsers.document_parser import BasePooledParser
 from core.models.document import (
@@ -33,7 +33,7 @@ class MarkerWorker:
     def __init__(self):
         import os
 
-        from config import load_config
+        from core.config import load_config
         from core.utils.logging import get_logger
 
         self.logger = get_logger()
@@ -176,7 +176,7 @@ class MarkerWorker:
 @ray.remote(max_restarts=5)
 class MarkerPool:
     def __init__(self):
-        from config import load_config
+        from core.config import load_config
         from core.utils.logging import get_logger
 
         self.logger = get_logger()

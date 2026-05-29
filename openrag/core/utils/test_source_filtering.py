@@ -5,6 +5,7 @@ import json
 import pytest
 from core.utils.source_filtering import (
     _min_sources_tag_buffer_size,
+    _sanitize_log_preview,
     extract_and_strip_sources_block,
     filter_sources_by_citations,
     stream_with_source_filtering,
@@ -100,6 +101,17 @@ class TestExtractAndStripSourcesBlock:
         clean, citations = extract_and_strip_sources_block(text)
         assert clean == "Answer text"
         assert citations == set()
+
+    def test_sources_numbers_case_insensitive(self):
+        text = "Answer text\n[sources: 1, 3]"
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == "Answer text"
+        assert citations == {1, 3}
+
+    def test_log_preview_redacts_email_addresses(self):
+        preview = _sanitize_log_preview("Contact alice@example.com for details")
+        assert "alice@example.com" not in preview
+        assert "***@***" in preview
 
     def test_multiple_line_terminal_tags_stripped(self):
         """Bullet-leak case: LLM emits [Sources: X] per bullet item instead of once at end."""

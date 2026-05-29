@@ -4,6 +4,7 @@ from typing import Any
 import aiofiles
 import consts
 from core.indexing import validators as core_validators
+from core.utils.exceptions import ValidationError
 from core.utils.filename import make_unique_filename
 from di.providers import get_config
 from fastapi import Depends, Form, UploadFile
@@ -43,9 +44,19 @@ async def save_file_to_disk(
 ) -> Path:
     """Save an uploaded file to disk in chunks and return the saved path."""
     dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir = dest_dir.resolve()
 
-    filename = make_unique_filename(file.filename) if with_random_prefix else file.filename
-    file_path = dest_dir / filename
+    raw_filename = file.filename or ""
+    safe_basename = raw_filename.replace("\\", "/").split("/")[-1].strip()
+    if not safe_basename:
+        raise ValidationError("Uploaded file must have a filename.", status_code=400)
+
+    filename = make_unique_filename(safe_basename) if with_random_prefix else safe_basename
+    file_path = (dest_dir / filename).resolve()
+    try:
+        file_path.relative_to(dest_dir)
+    except ValueError:
+        raise ValidationError("Uploaded filename resolves outside destination directory.", status_code=400)
 
     async with aiofiles.open(file_path, "wb") as buffer:
         while True:

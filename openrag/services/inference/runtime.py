@@ -16,8 +16,17 @@ _lang_detector = LangDetector(
 
 def detect_language(text: str):
     """Detect the primary language of ``text``."""
-    outputs = _lang_detector.detect(text, k=1)
-    return outputs[0].get("lang")
+    normalized = text.strip() if isinstance(text, str) else ""
+    if not normalized:
+        return None
+    try:
+        outputs = _lang_detector.detect(normalized, k=1)
+    except Exception:
+        return None
+    if not outputs:
+        return None
+    first = outputs[0]
+    return first.get("lang") if isinstance(first, dict) else None
 
 
 def get_llm_semaphore() -> DistributedSemaphore:

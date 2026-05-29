@@ -11,11 +11,19 @@ from core.utils.logging import get_logger
 
 logger = get_logger()
 
+_EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 _SOURCES_NONE_RE = re.compile(
     r"\n?[ \t]*\[?Sources?\]?\s*:\s*\[?\s*none\s*\]?[.\s]*?(?=\n|$)",
     re.IGNORECASE,
 )
-_SOURCES_NUMS_RE = re.compile(r"\n?[ \t]*\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?[.\s]*?(?=\n|$)")
+_SOURCES_NUMS_RE = re.compile(r"\n?[ \t]*\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?[.\s]*?(?=\n|$)", re.IGNORECASE)
+
+
+def _sanitize_log_preview(text: str, max_length: int = 150) -> str:
+    preview = _EMAIL_RE.sub("***@***", text)
+    if len(preview) > max_length:
+        preview = preview[-max_length:]
+    return preview
 
 
 def _strip_sources_tags(text: str) -> tuple[str, set[int], bool]:
@@ -35,7 +43,7 @@ def extract_and_strip_sources_block(text: str) -> tuple[str, set[int] | None]:
 
     if not citations and not saw_none:
         tail = text[-150:] if len(text) > 150 else text
-        logger.debug("No [Sources: ...] tag found in LLM response", tail=repr(tail))
+        logger.debug("No [Sources: ...] tag found in LLM response", tail=repr(_sanitize_log_preview(tail)))
         return text, None
 
     cleaned = cleaned.rstrip()

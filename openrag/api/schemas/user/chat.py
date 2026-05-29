@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 
 def default_max_tokens():
-    from config import load_config
+    from core.config import load_config
 
     return load_config().llm_context.max_output_tokens
 

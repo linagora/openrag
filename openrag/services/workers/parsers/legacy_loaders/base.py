@@ -4,8 +4,7 @@ import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from components.prompts import IMAGE_DESCRIBER
-from components.utils import get_vlm_semaphore, load_config
+from core.config import load_config
 from core.indexing.image_preprocessor import (
     DATA_URI_IMAGE_PATTERN as _CORE_DATA_URI_IMAGE_PATTERN,
 )
@@ -19,12 +18,14 @@ from core.indexing.image_preprocessor import (
     ensure_png_compatible_mode,  # noqa: F401  (re-exported for legacy import path)
     pil_to_png_bytes,
 )
+from core.prompts import load_template_by_key
 from core.utils.external_errors import is_external_resource_error
 from core.utils.logging import get_logger
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from openai import BadRequestError
 from PIL import Image
+from services.inference.runtime import get_vlm_semaphore
 from tqdm.asyncio import tqdm
 
 logger = get_logger()
@@ -52,6 +53,13 @@ class BaseLoader(ABC):
 
         self.image_captioning = self.config.loader.image_captioning
         self.image_captioning_url = self.config.loader.image_captioning_url
+        self.image_describer_prompt = ""
+        if self.image_captioning or self.image_captioning_url:
+            self.image_describer_prompt = load_template_by_key(
+                self.config.paths.prompts_dir,
+                self.config.prompts,
+                "image_describer",
+            )
 
         self.vlm_endpoint = ChatOpenAI(**settings).with_retry(stop_after_attempt=2)
 
@@ -152,7 +160,7 @@ class BaseLoader(ABC):
                             "type": "image_url",
                             "image_url": {"url": image_url},
                         },
-                        {"type": "text", "text": IMAGE_DESCRIBER},
+                        {"type": "text", "text": self.image_describer_prompt},
                     ]
                 )
 

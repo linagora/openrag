@@ -1,8 +1,8 @@
 import asyncio
 
 import torch
-from components.utils import SingletonMeta
 from core.utils.logging import get_logger
+from core.utils.singleton import SingletonMeta
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.document import ConversionResult

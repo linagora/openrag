@@ -51,7 +51,7 @@ from api.routers.user.chat import router as openai_router
 from api.routers.user.extract import router as extract_router
 from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
-from config import load_config
+from core.config import load_config
 from core.utils.logging import get_logger
 from di.container import ServiceContainer
 from di.providers import set_container

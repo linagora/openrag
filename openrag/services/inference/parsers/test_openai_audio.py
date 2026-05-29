@@ -21,7 +21,7 @@ import pytest
 if "pydub" not in sys.modules:
     try:
         import pydub  # noqa: E402,F401  — prefer the real library when it imports cleanly
-    except Exception:
+    except (ImportError, ModuleNotFoundError):
         fake_pydub = types.ModuleType("pydub")
         fake_pydub.AudioSegment = MagicMock()  # type: ignore[attr-defined]
         sys.modules["pydub"] = fake_pydub

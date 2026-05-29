@@ -13,7 +13,7 @@ class IndexerPool:
 
     def __init__(self) -> None:
         import services.inference.vllm_client  # noqa: F401
-        from config import load_config
+        from core.config import load_config
         from core.embeddings import embedder_registry
         from services.storage.milvus_store import MilvusVectorStore
         from services.storage.postgres_store import PostgresStore
@@ -102,7 +102,7 @@ def _build_chunker(cfg: Any) -> Any:
     from core.chunking.factory import create_chunker
 
     chunker = create_chunker(cfg)
-    if not hasattr(chunker, "chunk"):
+    if not callable(getattr(chunker, "chunk", None)):
         raise TypeError("Configured chunker does not expose a chunk(document, partition) method")
     return chunker
 
