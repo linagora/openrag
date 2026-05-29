@@ -18,15 +18,12 @@ from api.dependencies.files import (
 )
 from api.schemas.admin.tools import ToolInfo
 from components.indexer.utils.files import save_file_to_disk
-from config import load_config
-from di.providers import get_conversion_service
+from di.providers import get_config, get_conversion_service
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 from utils.logger import get_logger
 
 logger = get_logger()
-config = load_config()
-data_dir = config.paths.data_dir
 
 router = APIRouter()
 
@@ -96,12 +93,13 @@ async def execute_tool(
     file: UploadFile = Depends(validate_file_format),
     tool: str = Depends(validate_tool),
     metadata: dict = Depends(validate_metadata),
+    config=Depends(get_config),
     service=Depends(get_conversion_service),
 ):
     file_path = None
     try:
         if tool["name"] == "extractText":
-            file_path = await save_file_to_disk(file, Path(data_dir), with_random_prefix=True)
+            file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
 
             logger.debug(f"Execute tool extractText with file {file.filename}")
             sanitized_content = await service.serialize_file(

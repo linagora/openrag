@@ -5,8 +5,6 @@ from config import load_config
 from core.utils.log_tail import app_log_file
 from loguru import logger
 
-config = load_config()
-
 
 def escape_markup(s: str) -> str:
     return s.replace("\\", "\\\\").replace("<", "\\<").replace(">", "\\>")
@@ -28,7 +26,9 @@ def mask_email(email: str | None) -> str:
     return f"{masked_local}@{domain}"
 
 
-def get_logger():
+def get_logger(config=None):
+    config = config or load_config()
+
     def formatter(record):
         level = record["level"].name
         mod = record["name"]

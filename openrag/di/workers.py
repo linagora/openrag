@@ -22,9 +22,11 @@ def list_ray_actors() -> list[dict[str, str | None]]:
     ]
 
 
-def ensure_worker_bootstrap() -> None:
-    """Import the worker bootstrap after Ray has been initialized."""
-    import services.workers.bootstrap  # noqa: F401
+def ensure_worker_bootstrap(settings: Any) -> None:
+    """Initialize the worker bootstrap after Ray has been initialized."""
+    from services.workers.bootstrap import initialize_worker_bootstrap
+
+    initialize_worker_bootstrap(settings)
 
 
 def get_actor_creation_map() -> Mapping[str, Callable[[], Any]]:

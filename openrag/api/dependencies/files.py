@@ -1,14 +1,10 @@
 from typing import Any
 
-from config import load_config
 from core.indexing import validators as core_validators
+from di.providers import get_config
 from fastapi import Depends, Form, UploadFile
 
-config = load_config()
-
 FORBIDDEN_CHARS_IN_FILE_ID = set("/")
-ACCEPTED_FILE_FORMATS = config.loader.file_loaders.model_dump().keys()
-DICT_MIMETYPES = config.loader.mimetypes.to_dict()
 
 
 async def validate_file_id(file_id: str):
@@ -22,11 +18,14 @@ async def validate_metadata(metadata: Any | None = Form(None)):
 async def validate_file_format(
     file: UploadFile,
     metadata: dict = Depends(validate_metadata),
+    config=Depends(get_config),
 ):
+    accepted_file_formats = config.loader.file_loaders.model_dump().keys()
+    mimetypes = config.loader.mimetypes.to_dict()
     core_validators.validate_file_format(
         filename=file.filename,
-        accepted_formats=ACCEPTED_FILE_FORMATS,
-        accepted_mimetypes=DICT_MIMETYPES.keys(),
+        accepted_formats=accepted_file_formats,
+        accepted_mimetypes=mimetypes.keys(),
         mimetype=metadata.get("mimetype"),
     )
     return file

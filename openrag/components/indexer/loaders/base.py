@@ -28,7 +28,6 @@ from utils.external_resource_errors import is_external_resource_error
 from utils.logger import get_logger
 
 logger = get_logger()
-config = load_config()
 
 
 class BaseLoader(ABC):
@@ -41,7 +40,7 @@ class BaseLoader(ABC):
 
     def __init__(self, **kwargs) -> None:
         self.page_sep = "[PAGE_SEP]"
-        self.config = kwargs.get("config")
+        self.config = kwargs.get("config") or load_config()
         settings: dict = self.config.vlm.model_dump()
         model_settings = {
             "temperature": 0.2,

@@ -14,27 +14,28 @@ from core.models.document import (
 from faster_whisper import WhisperModel
 from utils.logger import get_logger
 
-from ..ray_utils import with_retry, with_timeout
+from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 
 logger = get_logger()
-config = load_config()
 
 
-if torch.cuda.is_available():
-    WHISPER_NUM_GPUS = config.loader.local_whisper.whisper_num_gpus
-else:  # On CPU
-    WHISPER_NUM_GPUS = 0
+def _whisper_num_gpus(config) -> float:
+    return config.loader.local_whisper.whisper_num_gpus if torch.cuda.is_available() else 0
 
-WHISPER_CONCURRENCY_PER_WORKER = config.loader.local_whisper.whisper_concurrency_per_worker
+
+def whisper_actor_options(config) -> dict[str, float | int]:
+    return {
+        "num_gpus": _whisper_num_gpus(config),
+        "max_restarts": 5,
+        "max_concurrency": config.loader.local_whisper.whisper_concurrency_per_worker,
+    }
 
 
 # Duration of the audio sample used for language detection
 LANG_DETECT_SAMPLE_MS = 30_000  # 30 s
 
 
-@ray.remote(
-    num_gpus=WHISPER_NUM_GPUS, max_restarts=5, max_concurrency=WHISPER_CONCURRENCY_PER_WORKER
-)  # Ensure each worker processes one file at a time
+@ray.remote
 class WhisperActor:
     def __init__(self):
         import torch
@@ -101,34 +102,39 @@ class WhisperPool:
     """
 
     def __init__(self):
+        from config import load_config
         from utils.logger import get_logger
 
         self.logger = get_logger()
+        self.config = load_config()
 
-        n_workers = config.loader.local_whisper.whisper_n_workers
+        n_workers = self.config.loader.local_whisper.whisper_n_workers
         self.logger.info(f"Starting WhisperPool with {n_workers} workers")
-        self.workers = [WhisperActor.remote() for _ in range(n_workers)]
+        self.workers = [WhisperActor.options(**whisper_actor_options(self.config)).remote() for _ in range(n_workers)]
         self._pending = [0] * n_workers
 
-    @with_timeout(
-        seconds=config.loader.local_whisper.whisper_timeout,
-        description="WhisperPool transcribe ({path})",
-    )
     async def _transcribe_chunk(self, idx: int, path):
-        return self.workers[idx].transcribe.remote(path)
+        return await call_ray_actor_with_timeout(
+            self.workers[idx].transcribe.remote(path),
+            timeout=self.config.loader.local_whisper.whisper_timeout,
+            task_description=f"WhisperPool transcribe ({path})",
+        )
 
-    @with_retry(
-        max_retries=config.loader.local_whisper.whisper_max_task_retry,
-        base_delay=config.loader.local_whisper.whisper_retry_base_delay,
-        description="WhisperPool transcribe ({path})",
-    )
     async def transcribe(self, path):
-        idx = min(range(len(self._pending)), key=lambda j: self._pending[j])
-        self._pending[idx] += 1
-        try:
-            return await self._transcribe_chunk(idx, path)
-        finally:
-            self._pending[idx] -= 1
+        async def attempt(_i: int):
+            idx = min(range(len(self._pending)), key=lambda j: self._pending[j])
+            self._pending[idx] += 1
+            try:
+                return await self._transcribe_chunk(idx, path)
+            finally:
+                self._pending[idx] -= 1
+
+        return await retry_with_backoff(
+            attempt,
+            max_retries=self.config.loader.local_whisper.whisper_max_task_retry,
+            base_delay=self.config.loader.local_whisper.whisper_retry_base_delay,
+            task_description=f"WhisperPool transcribe ({path})",
+        )
 
 
 async def detect_language_via_actor(
@@ -143,10 +149,14 @@ async def detect_language_via_actor(
     loader's optional language detector) can stay Ray-free. Returns
     ``None`` on failure so callers can fall back to a default behaviour.
     """
-    from ..ray_utils import call_ray_actor_with_timeout
-
+    config = load_config()
     try:
-        actor = WhisperActor.options(name="WhisperActor", namespace="openrag", get_if_exists=True).remote()
+        actor = WhisperActor.options(
+            name="WhisperActor",
+            namespace="openrag",
+            get_if_exists=True,
+            **whisper_actor_options(config),
+        ).remote()
     except Exception:
         logger.exception("Error getting WhisperActor")
         return None
@@ -173,6 +183,7 @@ class LocalWhisperLoader(BasePooledParser):
     """
 
     def __init__(self):
+        self.config = load_config()
         self.whisper_actor: WhisperPool = ray.get_actor("WhisperPool", namespace="openrag")
 
     def supported_types(self) -> list[str]:

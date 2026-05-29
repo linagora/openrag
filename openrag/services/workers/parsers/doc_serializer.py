@@ -12,17 +12,7 @@ from pathlib import Path
 import ray
 import torch
 from components.indexer.loaders import get_loader_classes
-from config import load_config
 from langchain_core.documents.base import Document
-
-config = load_config()
-
-if torch.cuda.is_available():
-    NUM_GPUS = config.ray.num_gpus
-else:
-    NUM_GPUS = 0
-
-DICT_MIMETYPES = config.loader.mimetypes.to_dict()
 
 
 @ray.remote(max_restarts=5)
@@ -61,10 +51,11 @@ class DocSerializer:
         p = Path(path)
         file_ext = p.suffix.lower()
         mimetype = metadata.get("mimetype", None)
+        mimetypes = self.config.loader.mimetypes.to_dict()
         if mimetype is None:
             loader_cls = self.loader_classes.get(file_ext)
         else:
-            loader_cls = self.loader_classes.get(DICT_MIMETYPES.get(mimetype))
+            loader_cls = self.loader_classes.get(mimetypes.get(mimetype))
 
         if loader_cls is None:
             log.warning(f"No loader available for {p.name}")

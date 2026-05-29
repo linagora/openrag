@@ -29,9 +29,8 @@ from api.dependencies.files import (
 )
 from api.routers.admin.task_logs import collect_task_logs
 from components.indexer.utils.files import sanitize_filename, save_file_to_disk
-from config import load_config
 from core.utils.log_tail import app_log_file
-from di.providers import get_auth_service, get_indexing_service, get_partition_service
+from di.providers import get_auth_service, get_config, get_indexing_service, get_partition_service
 from fastapi import (
     APIRouter,
     Depends,
@@ -47,22 +46,12 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
-config = load_config()
-DATA_DIR = config.paths.data_dir
-LOG_FILE = app_log_file(config.paths.log_dir)
 
-# supported file formats or mimetypes
-ACCEPTED_FILE_FORMATS = config.loader.file_loaders.model_dump().keys()
-DICT_MIMETYPES = config.loader.mimetypes.to_dict()
-
-PREFERRED_URL_SCHEME = config.server.preferred_url_scheme
-
-
-def build_url(request: Request, route_name: str, **path_params) -> str:
+def build_url(request: Request, route_name: str, *, preferred_url_scheme: str | None = None, **path_params) -> str:
     """Build a URL using the preferred scheme if configured."""
     url = request.url_for(route_name, **path_params)
-    if PREFERRED_URL_SCHEME:
-        url = url.replace(scheme=PREFERRED_URL_SCHEME)
+    if preferred_url_scheme:
+        url = url.replace(scheme=preferred_url_scheme)
     return str(url)
 
 
@@ -77,7 +66,7 @@ router = APIRouter()
 Returns a list of supported file extensions and MIME types that can be indexed by the system.
 """,
 )
-async def get_supported_types():
+async def get_supported_types(config=Depends(get_config)):
     """
     Get a list of supported types for indexing.
 
@@ -86,7 +75,9 @@ async def get_supported_types():
         - `extensions`: List of supported file extensions.
         - `mimetypes`: List of supported MIME types.
     """
-    resp = {"extensions": list(ACCEPTED_FILE_FORMATS), "mimetypes": list(DICT_MIMETYPES)}
+    accepted_file_formats = config.loader.file_loaders.model_dump().keys()
+    mimetypes = config.loader.mimetypes.to_dict()
+    resp = {"extensions": list(accepted_file_formats), "mimetypes": list(mimetypes)}
     return JSONResponse(content=resp)
 
 
@@ -132,6 +123,7 @@ async def add_file(
     workspace_ids: str | None = Form(None, description="JSON array of workspace IDs to add the file to"),
     user=Depends(require_partition_editor),
     _quota_check=Depends(check_user_file_quota),
+    config=Depends(get_config),
     service=Depends(get_indexing_service),
 ):
     if await service.file_exists(file_id, partition):
@@ -143,7 +135,7 @@ async def add_file(
     original_filename = file.filename
     file.filename = sanitize_filename(file.filename)
     try:
-        file_path = await save_file_to_disk(file, Path(DATA_DIR), with_random_prefix=True)
+        file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
     except Exception as e:
         logger.exception("Failed to save file to disk.", error=str(e))
         raise HTTPException(
@@ -183,7 +175,14 @@ async def add_file(
 
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
-        content={"task_status_url": build_url(request, "get_task_status", task_id=task_id)},
+        content={
+            "task_status_url": build_url(
+                request,
+                "get_task_status",
+                preferred_url_scheme=config.server.preferred_url_scheme,
+                task_id=task_id,
+            )
+        },
     )
 
 
@@ -255,6 +254,7 @@ async def put_file(
     file: UploadFile = Depends(validate_file_format),
     metadata: dict = Depends(validate_metadata),
     user=Depends(require_partition_editor),
+    config=Depends(get_config),
     service=Depends(get_indexing_service),
 ):
     if not await service.file_exists(file_id, partition):
@@ -268,7 +268,7 @@ async def put_file(
     # then deletes old ones — so the file is never left in a half-replaced state.
     original_filename = file.filename
     file.filename = sanitize_filename(file.filename)
-    file_path = await save_file_to_disk(file, Path(DATA_DIR), with_random_prefix=True)
+    file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
 
     task_id = await service.add_file(
         file_path=str(file_path),
@@ -283,7 +283,14 @@ async def put_file(
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
-        content={"task_status_url": build_url(request, "get_task_status", task_id=task_id)},
+        content={
+            "task_status_url": build_url(
+                request,
+                "get_task_status",
+                preferred_url_scheme=config.server.preferred_url_scheme,
+                task_id=task_id,
+            )
+        },
     )
 
 
@@ -408,6 +415,7 @@ async def get_task_status(
     request: Request,
     task_id: str,
     task_details=Depends(require_task_owner),
+    config=Depends(get_config),
     service=Depends(get_indexing_service),
 ):
     state = await service.get_task_state(task_id)
@@ -424,7 +432,12 @@ async def get_task_status(
     }
 
     if state == "FAILED":
-        content["error_url"] = build_url(request, "get_task_error", task_id=task_id)
+        content["error_url"] = build_url(
+            request,
+            "get_task_error",
+            preferred_url_scheme=config.server.preferred_url_scheme,
+            task_id=task_id,
+        )
 
     return JSONResponse(status_code=status.HTTP_200_OK, content=content)
 
@@ -474,12 +487,18 @@ Returns task logs including:
 **Note:** Logs are returned in chronological order (oldest first).
 """,
 )
-async def get_task_logs(task_id: str, max_lines: int = 100, task_details=Depends(require_task_owner)):
-    if not LOG_FILE.exists():
+async def get_task_logs(
+    task_id: str,
+    max_lines: int = 100,
+    task_details=Depends(require_task_owner),
+    config=Depends(get_config),
+):
+    log_file = app_log_file(config.paths.log_dir)
+    if not log_file.exists():
         raise HTTPException(status_code=500, detail="Log file not found.")
 
     try:
-        logs = collect_task_logs(LOG_FILE, task_id, max_lines)
+        logs = collect_task_logs(log_file, task_id, max_lines)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

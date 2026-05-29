@@ -19,6 +19,7 @@ Notable shape vs the deleted legacy module:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import warnings
 from contextlib import asynccontextmanager
@@ -52,6 +53,7 @@ from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
 from config import load_config
 from di.container import ServiceContainer
+from di.providers import set_container
 from di.workers import ensure_worker_bootstrap
 from dotenv import dotenv_values
 from fastapi import Depends, FastAPI
@@ -70,8 +72,11 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
 # ---------------------------------------------------------------------------
 
 logger = get_logger()
-config = load_config()
-DATA_DIR = Path(config.paths.data_dir)
+settings = load_config()
+DATA_DIR = Path(settings.paths.data_dir)
+CONTAINER_STARTUP_TIMEOUT = float(
+    os.getenv("OPENRAG_CONTAINER_STARTUP_TIMEOUT", max(60, settings.rdb.command_timeout * 4))
+)
 
 SHARED_ENV = os.environ.get("SHARED_ENV", None)
 env_vars = dotenv_values(SHARED_ENV) if SHARED_ENV else {}
@@ -133,20 +138,29 @@ async def lifespan(app: FastAPI):
        container is absent.
     4. ``prime_max_model_tokens`` — caches the vLLM ``max_model_len`` so
        per-request validation in the chat router stays synchronous.
+    5. ``set_container`` — registers the resolved container as the
+       process-level singleton for callers that resolve it without a
+       request; cleared on shutdown.
     """
     if not ray.is_initialized():
+        logger.info("Startup: initializing Ray")
         ray.init(dashboard_host="0.0.0.0", ignore_reinit_error=True)
+    logger.info("Startup: Ray is initialized")
 
     # ``ensure_worker_bootstrap`` imports ``services.workers.bootstrap``
     # for its side effect: creating the long-lived detached worker
     # actors (TaskStateManager, DocSerializer, MarkerPool, semaphores).
     # The indirection through :mod:`di.workers` keeps API code free of
     # direct ``services.workers`` imports.
-    ensure_worker_bootstrap()
+    logger.info("Startup: initializing worker bootstrap")
+    ensure_worker_bootstrap(settings)
+    logger.info("Startup: worker bootstrap initialized")
 
     container: ServiceContainer | None
     try:
-        container = ServiceContainer(config)
+        logger.info("Startup: wiring ServiceContainer")
+        container = ServiceContainer(settings)
+        logger.info("Startup: ServiceContainer wired")
     except Exception:  # pragma: no cover - defensive boot guard
         logger.exception("ServiceContainer wiring skipped")
         container = None
@@ -155,7 +169,13 @@ async def lifespan(app: FastAPI):
 
     if container is not None:
         try:
-            await container.initialize()
+            logger.info("Startup: initializing ServiceContainer", timeout=CONTAINER_STARTUP_TIMEOUT)
+            await asyncio.wait_for(container.initialize(), timeout=CONTAINER_STARTUP_TIMEOUT)
+            logger.info("Startup: ServiceContainer initialized")
+        except TimeoutError:  # pragma: no cover - defensive boot guard
+            logger.exception("ServiceContainer.initialize timed out; serving degraded (503)")
+            app.state.container = None
+            container = None
         except Exception:  # pragma: no cover - defensive boot guard
             # A half-initialised container (asyncpg pool never opened)
             # would route requests into broken repos and 500. Drop it so
@@ -165,9 +185,19 @@ async def lifespan(app: FastAPI):
             container = None
 
     try:
-        await prime_max_model_tokens()
+        logger.info("Startup: priming max model token cache")
+        await prime_max_model_tokens(settings)
+        logger.info("Startup: max model token cache primed")
     except Exception:  # pragma: no cover - defensive cache guard
         logger.exception("max_model_tokens cache priming failed; falling back to config")
+
+    # Mirror the resolved boot state into the process-level singleton so
+    # callers without a request (Chainlit, background tasks) resolve the
+    # same container the HTTP routes get via request.app.state. None on a
+    # degraded boot keeps di.providers serving the intended 503.
+    logger.info("Startup: registering process container", available=getattr(app.state, "container", None) is not None)
+    set_container(getattr(app.state, "container", None))
+    logger.info("Startup: complete")
 
     try:
         yield
@@ -178,6 +208,7 @@ async def lifespan(app: FastAPI):
                 await live.shutdown()
             except Exception:  # pragma: no cover - defensive shutdown guard
                 logger.exception("ServiceContainer.shutdown skipped")
+        set_container(None)
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +297,7 @@ def root_redirect():
 
 @app.get("/config", summary="Get current configuration", tags=["Configuration"], dependencies=[Depends(require_admin)])
 def get_config():
-    return config
+    return settings
 
 
 # Router mounts. Phase 10F finished moving these into
@@ -301,20 +332,20 @@ if WITH_CHAINLIT_UI:
 
 
 if __name__ == "__main__":
-    if config.ray.serve.enable:
+    if settings.ray.serve.enable:
         from ray import serve
 
-        @serve.deployment(num_replicas=config.ray.serve.num_replicas)
+        @serve.deployment(num_replicas=settings.ray.serve.num_replicas)
         @serve.ingress(app)
         class OpenRagAPI:
             pass
 
-        serve.start(http_options={"host": config.ray.serve.host, "port": config.ray.serve.port})
+        serve.start(http_options={"host": settings.ray.serve.host, "port": settings.ray.serve.port})
         if WITH_CHAINLIT_UI:
             from chainlit_api import app as chainlit_app
 
             serve.run(OpenRagAPI.bind(), route_prefix="/")
-            uvicorn.run(chainlit_app, host="0.0.0.0", port=config.ray.serve.chainlit_port)
+            uvicorn.run(chainlit_app, host="0.0.0.0", port=settings.ray.serve.chainlit_port)
         else:
             serve.run(OpenRagAPI.bind(), route_prefix="/", blocking=True)
 

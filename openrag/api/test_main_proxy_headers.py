@@ -10,7 +10,10 @@ catching kwarg drift on the new module.
 """
 
 import ast
+import importlib
 import os
+import sys
+from types import ModuleType
 
 _MAIN_PATH = os.path.dirname(__file__) + "/main.py"
 
@@ -59,3 +62,15 @@ def test_default_forwarded_allow_ips_env_var_used():
     with open(_MAIN_PATH) as f:
         src = f.read()
     assert "UVICORN_FORWARDED_ALLOW_IPS" in src
+
+
+def test_api_package_exports_app_for_legacy_uvicorn_path(monkeypatch):
+    """Older images or overrides may still run ``uvicorn api:app``."""
+    fake_app = object()
+    fake_main = ModuleType("api.main")
+    fake_main.app = fake_app
+    monkeypatch.setitem(sys.modules, "api.main", fake_main)
+
+    api_module = importlib.import_module("api")
+
+    assert api_module.app is fake_app
