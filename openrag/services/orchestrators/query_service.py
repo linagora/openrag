@@ -42,16 +42,12 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from components.prompts import (
-    QUERY_CONTEXTUALIZER_PROMPT,
-    SPOKEN_STYLE_ANSWER_PROMPT,
-    SYS_PROMPT_TMPLT,
-)
 from core.models.query import Query, SearchQueries
 from core.prompts import (
     SOURCE_SEPARATOR,
     format_context,
     format_web_context,
+    load_template_by_key,
 )
 from core.utils.logging import get_logger
 from core.utils.source_filtering import (
@@ -127,6 +123,11 @@ class QueryService:
         self._mr_expansion = mr.expansion_batch_size
         self._mr_max = mr.max_total_documents
 
+        prompts_dir, mapping = config.paths.prompts_dir, config.prompts
+        self._query_contextualizer_prompt = load_template_by_key(prompts_dir, mapping, "query_contextualizer")
+        self._spoken_style_answer_prompt = load_template_by_key(prompts_dir, mapping, "spoken_style_answer")
+        self._sys_prompt_tmplt = load_template_by_key(prompts_dir, mapping, "sys_prompt")
+
     # ------------------------------------------------------------------
     # Query generation (was RagPipeline.generate_query — no LangChain)
     # ------------------------------------------------------------------
@@ -137,7 +138,7 @@ class QueryService:
             return SearchQueries(query_list=[Query(query=last_user)])
 
         chat_history = "".join(f"{m['role']}: {m['content']}\n" for m in messages)
-        prompt = QUERY_CONTEXTUALIZER_PROMPT.format(
+        prompt = self._query_contextualizer_prompt.format(
             query_language=detect_language(last_user),
             current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
         )
@@ -284,7 +285,7 @@ class QueryService:
             context = f"{context}{SOURCE_SEPARATOR}{web_formatted}" if context else web_formatted
 
         new_messages = copy.deepcopy(messages)
-        tmpl = SPOKEN_STYLE_ANSWER_PROMPT if spoken_style else SYS_PROMPT_TMPLT
+        tmpl = self._spoken_style_answer_prompt if spoken_style else self._sys_prompt_tmplt
         new_messages.insert(
             0,
             {

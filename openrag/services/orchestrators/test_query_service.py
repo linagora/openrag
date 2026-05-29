@@ -15,8 +15,13 @@ from types import SimpleNamespace
 
 import pytest
 import services.orchestrators.query_service as qs
+from core.config import load_config
 from core.models.chunk import Chunk
 from services.orchestrators.query_service import QueryService
+
+# Real prompt-template config (dir + key->filename mapping) so QueryService
+# can load its system / contextualizer / spoken-style templates from disk.
+_PROMPT_CFG = load_config()
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +93,8 @@ def _config(mode="SimpleRag"):
         reranker=SimpleNamespace(top_k=5),
         chunker=SimpleNamespace(chunk_size=512),
         map_reduce=SimpleNamespace(initial_batch_size=2, expansion_batch_size=2, max_total_documents=4),
+        paths=_PROMPT_CFG.paths,
+        prompts=_PROMPT_CFG.prompts,
     )
 
 
