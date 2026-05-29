@@ -23,6 +23,7 @@ from .infrastructure import (
     VectorDBConfig,
     VerboseConfig,
 )
+from .mcp import MCPServerConfig
 from .retrieval import (
     MapReduceConfig,
     RAGConfig,
@@ -61,3 +62,4 @@ class Settings(ConfigMixin):
     retriever: RetrieverConfig = Field(default_factory=SingleRetrieverConfig)
     rag: RAGConfig = Field(default_factory=RAGConfig)
     websearch: WebSearchConfig = Field(default_factory=StaanWebSearchConfig)
+    mcp: MCPServerConfig = Field(default_factory=MCPServerConfig)

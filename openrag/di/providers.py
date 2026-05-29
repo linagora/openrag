@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from services.orchestrators.conversion_service import ConversionService
     from services.orchestrators.indexing_service import IndexingService
     from services.orchestrators.job_service import JobService
+    from services.orchestrators.mcp_service import MCPService
     from services.orchestrators.partition_service import PartitionService
     from services.orchestrators.query_service import QueryService
     from services.orchestrators.retrieval_service import RetrievalService
@@ -72,3 +73,7 @@ def get_job_service(request: Request) -> JobService:
 
 def get_conversion_service(request: Request) -> ConversionService:
     return get_container(request).conversion_service
+
+
+def get_mcp_service(request: Request) -> MCPService:
+    return get_container(request).mcp_service

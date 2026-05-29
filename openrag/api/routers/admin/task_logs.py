@@ -1,30 +1,11 @@
 import json
 from pathlib import Path
 
+# Re-exported for callers/tests that import it from this module; the single
+# implementation now lives in core.utils so the MCP server can share it.
+from core.utils.log_tail import iter_file_lines_reversed
+
 MAX_TASK_LOG_LINES = 5000
-TASK_LOG_READ_BLOCK_SIZE = 64 * 1024
-
-
-def iter_file_lines_reversed(path: Path, block_size: int = TASK_LOG_READ_BLOCK_SIZE):
-    with path.open("rb") as f:
-        f.seek(0, 2)
-        position = f.tell()
-        pending = b""
-
-        while position > 0:
-            read_size = min(block_size, position)
-            position -= read_size
-            f.seek(position)
-            pending = f.read(read_size) + pending
-            lines = pending.split(b"\n")
-            pending = lines[0]
-
-            for line in reversed(lines[1:]):
-                if line:
-                    yield line.decode(errors="replace")
-
-        if pending:
-            yield pending.decode(errors="replace")
 
 
 def collect_task_logs(log_file: Path, task_id: str, max_lines: int) -> list[str]:

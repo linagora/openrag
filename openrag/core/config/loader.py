@@ -169,6 +169,16 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("WEBSEARCH_FETCH_TIMEOUT", "websearch.fetch_timeout", float),
     ("WEBSEARCH_FETCH_MAX_TOKENS", "websearch.fetch_max_tokens", int),
     ("WEBSEARCH_FETCH_VERIFY_SSL", "websearch.fetch_verify_ssl", bool),
+    # MCP server
+    ("OPENRAG_MCP_SERVER_NAME", "mcp.server_name", str),
+    ("OPENRAG_MCP_HOST", "mcp.host", str),
+    ("OPENRAG_MCP_PORT", "mcp.port", int),
+    ("OPENRAG_MCP_PATH", "mcp.path", str),
+    ("OPENRAG_MCP_DEFAULT_TOP_K", "mcp.default_top_k", int),
+    ("OPENRAG_MCP_MAX_TOP_K", "mcp.max_top_k", int),
+    ("OPENRAG_MCP_SIMILARITY_THRESHOLD", "mcp.similarity_threshold", float),
+    ("OPENRAG_MCP_DOWNLOAD_TIMEOUT", "mcp.download_timeout", float),
+    ("OPENRAG_MCP_MAX_DOWNLOAD_BYTES", "mcp.max_download_bytes", int),
 ]
 
 _AUDIO_EXTENSIONS = ("mp3", "flac", "ogg", "aac", "flv", "wma", "mp4")
