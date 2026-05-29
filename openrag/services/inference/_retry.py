@@ -1,5 +1,6 @@
 import httpx
 from core.utils.exceptions import OpenRAGError
+from core.utils.logging import get_logger
 from tenacity import (
     RetryCallState,
     retry,
@@ -7,7 +8,6 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential_jitter,
 )
-from utils.logger import get_logger
 
 logger = get_logger()
 

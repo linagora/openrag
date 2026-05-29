@@ -21,9 +21,9 @@ from core.llm.llm import LLM as _CoreLLM
 from core.models.chunk import Chunk as _CoreChunk
 from core.models.document import ProcessedDocument, TextBlock
 from core.prompts.contextualization_builder import wrap_chunk_with_context
+from core.utils.logging import get_logger
 from langchain_core.documents.base import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from utils.logger import get_logger
 
 if TYPE_CHECKING:
     from components.indexer.embeddings import BaseEmbedding

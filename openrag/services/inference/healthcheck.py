@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import httpx
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 
 logger = get_logger()
 

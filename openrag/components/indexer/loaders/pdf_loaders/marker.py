@@ -24,6 +24,7 @@ from pathlib import Path
 from core.indexing.parsers.pdf.marker import MarkerParser
 from core.models.document import Document as CoreDocument
 from core.models.document import DocumentType
+from core.utils.logging import get_logger
 from langchain_core.documents.base import Document
 from PIL import Image
 from services.workers.parsers.marker_workers import (  # noqa: F401  (re-exported for legacy import paths)
@@ -33,7 +34,6 @@ from services.workers.parsers.marker_workers import (  # noqa: F401
     MarkerPool,
     MarkerWorker,
 )
-from utils.logger import get_logger
 
 from ..base import BaseLoader
 

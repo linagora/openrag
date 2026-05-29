@@ -25,7 +25,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from core.utils.exceptions import UserNotFoundError, ValidationError
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from core.models.user import UserCreate, UserUpdate

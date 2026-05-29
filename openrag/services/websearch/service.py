@@ -1,6 +1,6 @@
+from core.utils.logging import get_logger
 from services.websearch.base import BaseWebSearchProvider, WebResult
 from services.websearch.content_fetcher import ContentFetcher
-from utils.logger import get_logger
 
 logger = get_logger()
 

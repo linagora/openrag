@@ -7,12 +7,14 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 import pypdfium2 as pdfium
+from core.utils.logging import get_logger
 from langchain.schema import Document
 from langchain_openai import ChatOpenAI
 from PIL import Image
-from utils.logger import logger
 
 from ..base import BaseLoader
+
+logger = get_logger()
 
 
 async def pdf_to_images(pdf_path: str, scale: float = 1.0) -> list[Image.Image]:

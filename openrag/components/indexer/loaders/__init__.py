@@ -8,7 +8,7 @@ import importlib
 import pkgutil
 from pathlib import Path
 
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 
 from .base import BaseLoader
 

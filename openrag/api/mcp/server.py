@@ -37,13 +37,13 @@ from api.mcp.auth_context import (
 )
 from config import load_config
 from core.utils.log_tail import app_log_file
+from core.utils.logging import get_logger
 from di.container import ServiceContainer
 from di.workers import ensure_worker_bootstrap
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from utils.logger import get_logger
 
 logger = get_logger()
 

@@ -19,7 +19,7 @@ from langchain_core.documents.base import Document
 class DocSerializer:
     def __init__(self, data_dir=None, **kwargs) -> None:
         from config import load_config
-        from utils.logger import get_logger
+        from core.utils.logging import get_logger
 
         self.logger = get_logger()
         self.config = load_config()

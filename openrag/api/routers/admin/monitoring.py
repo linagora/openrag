@@ -7,9 +7,9 @@ serves lives in :mod:`api.middleware.instrumentation`.
 import asyncio
 
 from api.dependencies.auth import require_admin
+from core.observability.monitoring import get_metrics
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
-from utils.monitoring import get_metrics
 
 router = APIRouter()
 

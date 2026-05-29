@@ -9,8 +9,8 @@ import warnings
 
 import httpx
 from config.models import LLMConfig
+from core.utils.logging import get_logger
 from services.inference.vllm_client import VLLMClient  # noqa: F401
-from utils.logger import get_logger
 
 logger = get_logger()
 

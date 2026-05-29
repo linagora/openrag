@@ -27,8 +27,8 @@ from collections.abc import Callable
 from typing import Any
 
 import ray
+from core.utils.logging import get_logger
 from ray.exceptions import RayTaskError, TaskCancelledError
-from utils.logger import get_logger
 
 logger = get_logger()
 

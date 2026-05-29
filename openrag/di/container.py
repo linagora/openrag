@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from core.embeddings import embedder_registry
 from core.llm import llm_registry
 from core.rerankers import reranker_registry
+from core.utils.logging import get_logger
 from core.vlm import vlm_registry
 from di.embedders import register_embedders
 from di.llms import register_llms
@@ -33,7 +34,6 @@ from di.repositories import create_catalog_store
 from di.rerankers import register_rerankers
 from di.vector_stores import create_vector_store
 from di.vlms import register_vlms
-from utils.logger import get_logger
 
 if TYPE_CHECKING:
     from core.config.root import Settings

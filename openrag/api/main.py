@@ -52,6 +52,7 @@ from api.routers.user.extract import router as extract_router
 from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
 from config import load_config
+from core.utils.logging import get_logger
 from di.container import ServiceContainer
 from di.providers import set_container
 from di.workers import ensure_worker_bootstrap
@@ -61,7 +62,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from utils.logger import get_logger
 
 # pydub 0.25.1 ships invalid-escape regex literals; the warning is upstream.
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")

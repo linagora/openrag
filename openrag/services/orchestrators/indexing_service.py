@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from components.indexer.utils.files import extract_temporal_fields
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from core.indexing.dispatcher import IndexingDispatcher

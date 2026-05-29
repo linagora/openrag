@@ -19,13 +19,13 @@ from core.indexing.image_preprocessor import (
     ensure_png_compatible_mode,  # noqa: F401  (re-exported for legacy import path)
     pil_to_png_bytes,
 )
+from core.utils.external_errors import is_external_resource_error
+from core.utils.logging import get_logger
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from openai import BadRequestError
 from PIL import Image
 from tqdm.asyncio import tqdm
-from utils.external_resource_errors import is_external_resource_error
-from utils.logger import get_logger
 
 logger = get_logger()
 

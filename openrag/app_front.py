@@ -9,9 +9,9 @@ import httpx
 from chainlit.config import config as cl_config
 from chainlit.context import get_context
 from consts import PARTITION_PREFIX
+from core.utils.logging import get_logger, mask_email
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from utils.logger import get_logger
 
 load_dotenv()
 logger = get_logger()
@@ -130,7 +130,7 @@ if AUTH_TOKEN and AUTH_MODE != "oidc":
             )
 
         except httpx.HTTPStatusError:
-            logger.info("Authentication failed", username=username)
+            logger.info("Authentication failed", username=mask_email(username))
             return None
         except Exception as e:
             logger.exception("Unexpected error during authentication", error=str(e))

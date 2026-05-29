@@ -1,9 +1,9 @@
 from api.dependencies.auth import require_admin
+from core.utils.logging import get_logger
 from di.workers import list_ray_actors as list_ray_actor_states
 from di.workers import restart_ray_actor
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
-from utils.logger import get_logger
 
 logger = get_logger()
 

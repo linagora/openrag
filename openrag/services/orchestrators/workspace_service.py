@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from core.ports.document_repo import DocumentRepository

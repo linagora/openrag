@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import time
 
+from core.observability.monitoring import record_request
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
-from utils.monitoring import record_request
 
 # Paths to exclude from metric recording — avoids self-referential noise
 # and inflated counters on probe traffic.

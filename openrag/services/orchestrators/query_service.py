@@ -58,7 +58,7 @@ from components.utils import (
     stream_with_source_filtering,
 )
 from core.models.query import Query, SearchQueries
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from core.config.root import Settings

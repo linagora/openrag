@@ -18,9 +18,9 @@ from core.indexing.parsers.image_parser import ImageParser
 from core.models.document import Document as CoreDocument
 from core.models.document import DocumentType
 from core.utils.exceptions import OpenRAGError
+from core.utils.logging import get_logger
 from langchain_core.documents import Document
 from PIL import Image
-from utils.logger import get_logger
 
 from .base import BaseLoader
 
