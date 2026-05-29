@@ -122,7 +122,7 @@ class _BaseWebSearchConfig(ConfigMixin):
     fetch_max_results: int = 3
     fetch_timeout: float = 1.0
     fetch_max_tokens: int = 500
-    fetch_verify_ssl: bool = False
+    fetch_verify_ssl: bool = True
 
 
 class StaanWebSearchConfig(_BaseWebSearchConfig):

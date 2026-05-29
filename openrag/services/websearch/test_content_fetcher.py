@@ -2,8 +2,8 @@ import asyncio
 
 import httpx
 import pytest
-from components.websearch.base import WebResult
-from components.websearch.content_fetcher import ContentFetcher, _is_safe_url
+from services.websearch.base import WebResult
+from services.websearch.content_fetcher import ContentFetcher, _is_safe_url
 
 
 @pytest.fixture
@@ -300,7 +300,7 @@ def test_fetch_verify_ssl_default_is_true():
     ``fetch_verify_ssl`` defaults to ``True`` so server-side fetches of
     web-search results verify TLS unless an operator opts out.
     """
-    from config.models import StaanWebSearchConfig
+    from core.config.retrieval import StaanWebSearchConfig
 
     cfg = StaanWebSearchConfig()
     assert cfg.fetch_verify_ssl is True

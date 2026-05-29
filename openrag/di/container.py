@@ -391,12 +391,12 @@ class ServiceContainer:
 
         Shares the same core LLM construction as ``retrieval_service``
         (built from ``settings.llm``); the web-search service comes from
-        the legacy ``WebSearchFactory`` (provider is ``None`` when
+        the ``WebSearchFactory`` (provider is ``None`` when
         ``WEBSEARCH_API_TOKEN`` is unset — web search silently disabled).
         """
         if self._query_service is None:
-            from components.websearch import WebSearchFactory
             from services.orchestrators.query_service import QueryService
+            from services.websearch import WebSearchFactory
 
             settings = self._require_settings()
             llm_cfg = settings.llm.model_dump()
