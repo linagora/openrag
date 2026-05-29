@@ -87,7 +87,7 @@ async def test_eml_below_cap_does_not_skip(tmp_path):
 def test_recursion_cap_lives_in_loader_config():
     """The cap must come from the loader config (operator-tunable), not be
     hardcoded in the loader. Assert the contract: a positive integer."""
-    from config import load_config
+    from core.config import load_config
 
     cap = load_config().loader.eml_max_recursion_depth
     assert isinstance(cap, int)

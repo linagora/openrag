@@ -13,7 +13,7 @@ class _FakePool:
 
 
 def test_hard_cap_lives_in_retriever_config():
-    from config import load_config
+    from core.config import load_config
 
     cap = load_config().retriever.max_ancestor_depth_cap
     assert isinstance(cap, int)
@@ -22,7 +22,7 @@ def test_hard_cap_lives_in_retriever_config():
 
 @pytest.mark.asyncio
 async def test_none_max_depth_is_clamped_to_hard_cap():
-    from config import load_config
+    from core.config import load_config
     from services.persistence.document_repo import PgDocumentRepository
 
     pool = _FakePool()
@@ -34,7 +34,7 @@ async def test_none_max_depth_is_clamped_to_hard_cap():
 
 @pytest.mark.asyncio
 async def test_explicit_depth_above_cap_is_clamped():
-    from config import load_config
+    from core.config import load_config
     from services.persistence.document_repo import PgDocumentRepository
 
     cap = int(load_config().retriever.max_ancestor_depth_cap)

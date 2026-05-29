@@ -35,7 +35,7 @@ from api.mcp.auth_context import (
     reset_auth_context,
     set_auth_context,
 )
-from config import load_config
+from core.config import load_config
 from core.utils.log_tail import app_log_file
 from core.utils.logging import get_logger
 from di.container import ServiceContainer

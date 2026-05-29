@@ -17,7 +17,7 @@ class DocSerializerAdapter(FileSerializer):
 
     async def serialize(self, path: str, metadata: dict) -> str:
         import ray
-        from config import load_config
+        from core.config import load_config
         from services.workers.ray_utils import call_ray_actor_with_timeout
 
         cfg = load_config()

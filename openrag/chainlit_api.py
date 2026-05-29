@@ -6,7 +6,7 @@ from fastapi import FastAPI
 def _get_auth_service(request):
     container = getattr(request.app.state, "container", None)
     if container is None:
-        from config import load_config
+        from core.config import load_config
         from di.container import ServiceContainer
 
         container = ServiceContainer(load_config())

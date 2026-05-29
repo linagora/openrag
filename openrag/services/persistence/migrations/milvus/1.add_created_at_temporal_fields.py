@@ -32,7 +32,7 @@ Or run this script directly:
 import argparse
 import sys
 
-from config import load_config
+from core.config import load_config
 from core.utils.logging import get_logger
 from pymilvus import DataType, MilvusClient
 from services.storage.milvus_store import SCHEMA_VERSION_PROPERTY_KEY

@@ -12,7 +12,8 @@ without being swallowed.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from config.models import LoaderConfig, VLMConfig
+from core.config.endpoints import VLMConfig
+from core.config.indexation import LoaderConfig
 from core.models.document import ProcessedDocument, TextBlock
 from langchain_core.documents.base import Document as LCDocument
 

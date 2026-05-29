@@ -14,7 +14,7 @@ import asyncio
 
 import ray
 import torch
-from config import load_config
+from core.config import load_config
 from core.indexing.image_preprocessor import pil_to_png_bytes
 from core.indexing.parsers.document_parser import BasePooledParser
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock

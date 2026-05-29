@@ -3,7 +3,7 @@ from pathlib import Path
 
 import ray
 import torch
-from config import load_config
+from core.config import load_config
 from core.indexing.parsers.document_parser import BasePooledParser
 from core.models.document import (
     Document,
@@ -39,7 +39,7 @@ LANG_DETECT_SAMPLE_MS = 30_000  # 30 s
 class WhisperActor:
     def __init__(self):
         import torch
-        from config import load_config
+        from core.config import load_config
         from core.utils.logging import get_logger
 
         self.logger = get_logger()
@@ -102,7 +102,7 @@ class WhisperPool:
     """
 
     def __init__(self):
-        from config import load_config
+        from core.config import load_config
         from core.utils.logging import get_logger
 
         self.logger = get_logger()
