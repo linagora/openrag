@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from services.orchestrators.mcp_service import MCPService
 
@@ -648,6 +649,35 @@ async def test_index_url_auto_creates_partition_and_indexes(monkeypatch):
     assert out["task_id"] == "task-123"
 
 
+@pytest.mark.asyncio
+async def test_safe_download_rejects_redirect_to_private(monkeypatch, tmp_path):
+    # A public host that 302-redirects to a loopback target must be rejected on
+    # the re-validated hop, not followed.
+    from services.orchestrators import mcp_service as mcp_mod
+
+    def handler(request):
+        return httpx.Response(302, headers={"location": "http://127.0.0.1/secret"})
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = mcp_mod.httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_mod.httpx, "AsyncClient", factory)
+
+    svc = _service()
+
+    async def _resolves_ok(host):  # skip real DNS for the initial public host
+        return None
+
+    monkeypatch.setattr(svc, "_assert_host_resolves_safely", _resolves_ok)
+
+    with pytest.raises(ValueError, match="disallowed"):
+        await svc._safe_download("http://public.example/file.pdf", tmp_path / "out")
+
+
 # ---------------------------------------------------------------------------
 # Metadata hardening + input bounds
 # ---------------------------------------------------------------------------
@@ -667,6 +697,25 @@ async def test_update_metadata_strips_protected_keys_keeps_move():
     assert sent_md["author"] == "x"
     assert sent_md["partition"] == "dest"  # authorized move control preserved
     assert "source" not in sent_md and "created_by" not in sent_md
+
+
+@pytest.mark.asyncio
+async def test_update_metadata_move_requires_editor_on_destination():
+    # Non-wildcard caller: editor on source but only viewer on the move target.
+    class P(FakePartitions):
+        async def list_members(self, partition):
+            role = "viewer" if partition == "dest" else "editor"
+            return [{"user_id": 5, "role": role}]
+
+    svc = _service(partitions=P(exists=True))
+    with pytest.raises(PermissionError):
+        await svc.update_file_metadata(
+            partition="src",
+            file_id="f1",
+            metadata={"partition": "dest"},
+            allowed_partitions=["src", "dest"],
+            user_id=5,
+        )
 
 
 @pytest.mark.asyncio
