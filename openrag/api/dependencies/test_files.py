@@ -2,9 +2,10 @@ import io
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException, UploadFile
-
-from .files import extract_temporal_fields, sanitize_filename, save_file_to_disk
+from api.dependencies.files import save_file_to_disk
+from core.utils.exceptions import ValidationError
+from core.utils.filename import extract_temporal_fields, sanitize_filename
+from fastapi import UploadFile
 
 
 @pytest.mark.asyncio
@@ -36,7 +37,7 @@ async def test_save_file_to_disk_with_random_prefix(tmp_path, monkeypatch):
         return "PREFIX_1234_test.txt"
 
     monkeypatch.setattr(
-        "openrag.components.indexer.utils.files.make_unique_filename",
+        "api.dependencies.files.make_unique_filename",
         fake_make_unique_filename,
     )
 
@@ -105,8 +106,8 @@ def test_extract_temporal_fields_with_timezone():
 
 
 def test_extract_temporal_fields_invalid_datetime_raises_400():
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(ValidationError) as exc_info:
         extract_temporal_fields({"created_at": "not-a-date"}, ["created_at"])
     assert exc_info.value.status_code == 400
-    assert "not-a-date" in exc_info.value.detail
-    assert "created_at" in exc_info.value.detail
+    assert "not-a-date" in str(exc_info.value)
+    assert "created_at" in str(exc_info.value)

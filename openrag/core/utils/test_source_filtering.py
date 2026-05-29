@@ -3,7 +3,8 @@
 import json
 
 import pytest
-from components.utils import (
+from core.utils.source_filtering import (
+    _min_sources_tag_buffer_size,
     extract_and_strip_sources_block,
     filter_sources_by_citations,
     stream_with_source_filtering,
@@ -321,8 +322,6 @@ class TestStreamWithSourceFiltering:
 
 
 def test_min_sources_tag_buffer_size_fits_many_sources():
-    from components.utils import _min_sources_tag_buffer_size
-
     for n in (1, 10, 60, 100):
         tag = "\n[Sources: " + ", ".join(str(i) for i in range(1, n + 1)) + "]"
         assert _min_sources_tag_buffer_size(n) >= len(tag), n

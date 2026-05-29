@@ -13,11 +13,11 @@ import json
 from pathlib import Path
 
 from api.dependencies.files import (
+    save_file_to_disk,
     validate_file_format,
     validate_metadata,
 )
 from api.schemas.admin.tools import ToolInfo
-from components.indexer.utils.files import save_file_to_disk
 from core.utils.logging import get_logger
 from di.providers import get_config, get_conversion_service
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status

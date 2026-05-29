@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from components.indexer.utils.files import extract_temporal_fields
+from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:

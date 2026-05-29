@@ -16,7 +16,7 @@ Two logged decisions (REFACTORING_DECISION_LOG Phase 8):
   (retry → raw user query; relevancy=False on parse failure).
 * **Streaming + citations live here; the router is pure transport.**
   ``chat_stream`` drives the proven
-  ``components.utils.stream_with_source_filtering`` (100-char buffer that
+  ``core.utils.source_filtering.stream_with_source_filtering`` (100-char buffer that
   strips the ``[Sources: N]`` tag before it reaches the client);
   ``chat`` / ``complete`` return the finalized OpenAI dict with the
   citation-filtered ``extra`` sources. The router only maps the
@@ -24,7 +24,7 @@ Two logged decisions (REFACTORING_DECISION_LOG Phase 8):
   callable — keeps ``request.url_for`` in transport), and wraps
   ``StreamingResponse`` / ``JSONResponse``.
 
-Imports from ``components.*`` (pure helpers / prompts / websearch) are
+Imports from ``components.*`` (prompt shims) are
 allowed during the Phase-8 shim (legacy layer, unchecked by the guard;
 no LangChain symbol is imported into this file → 8H clean). ``Chunk`` is
 converted to LangChain ``Document`` via ``Chunk.to_langchain()`` at the
@@ -47,18 +47,20 @@ from components.prompts import (
     SPOKEN_STYLE_ANSWER_PROMPT,
     SYS_PROMPT_TMPLT,
 )
-from components.utils import (
+from core.models.query import Query, SearchQueries
+from core.prompts import (
     SOURCE_SEPARATOR,
-    detect_language,
-    extract_and_strip_sources_block,
-    filter_sources_by_citations,
     format_context,
     format_web_context,
-    get_llm_semaphore,
+)
+from core.utils.logging import get_logger
+from core.utils.source_filtering import (
+    extract_and_strip_sources_block,
+    filter_sources_by_citations,
     stream_with_source_filtering,
 )
-from core.models.query import Query, SearchQueries
-from core.utils.logging import get_logger
+from core.utils.text import get_num_tokens
+from services.inference.runtime import detect_language, get_llm_semaphore
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -257,15 +259,25 @@ class QueryService:
         web_formatted, web_tokens = "", 0
         if web_results:
             web_formatted, _, web_tokens = format_web_context(
-                web_results, start_index=1, max_tokens=self._web.max_tokens
+                web_results,
+                length_function=get_num_tokens(),
+                start_index=1,
+                max_tokens=self._web.max_tokens,
             )
-        context, included = format_context(docs, max_context_tokens=self._max_context_tokens - web_tokens)
+        context, included = format_context(
+            [doc.page_content for doc in docs],
+            max_context_tokens=self._max_context_tokens - web_tokens,
+            length_function=get_num_tokens(),
+        )
         docs = [docs[i] for i in included]
 
         if web_results:
             if docs:
                 web_formatted, _, _ = format_web_context(
-                    web_results, start_index=len(docs) + 1, max_tokens=self._web.max_tokens
+                    web_results,
+                    length_function=get_num_tokens(),
+                    start_index=len(docs) + 1,
+                    max_tokens=self._web.max_tokens,
                 )
             else:
                 context = ""
@@ -298,7 +310,11 @@ class QueryService:
         queries = await self.generate_query([{"role": "user", "content": prompt}])
         chunks = await self._retrieval.retrieve_multi(partitions=partition, search_queries=queries)
         docs = [c.to_langchain() for c in chunks]
-        context, included = format_context(docs, max_context_tokens=self._max_context_tokens)
+        context, included = format_context(
+            [doc.page_content for doc in docs],
+            max_context_tokens=self._max_context_tokens,
+            length_function=get_num_tokens(),
+        )
         docs = [docs[i] for i in included]
         if docs:
             payload["prompt"] = (
