@@ -12,9 +12,7 @@ the Ray ``vectordb`` actor, so it deals in :class:`User` /
 
 The cryptographic / cookie primitives (``OIDCClient``, the state-cookie
 serializer, Fernet token (de)encryption, opaque session-token issuance)
-still come from ``components.auth`` during the Phase-8 shim period —
-those are infrastructure adapters scheduled to move under
-``services/auth`` in Phase 9.
+come from ``services.auth`` — the infrastructure adapters for OIDC.
 """
 
 from __future__ import annotations
@@ -25,7 +23,10 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urlparse
 
-from components.auth import (
+from core.models.user import OIDCSession, User
+from core.utils.exceptions import AuthError, OpenRAGError
+from core.utils.logging import get_logger, mask_email
+from services.auth import (
     OIDCClient,
     StateCookiePayload,
     StateCookieSerializer,
@@ -34,9 +35,6 @@ from components.auth import (
     hash_session_token,
     issue_session_token,
 )
-from core.models.user import OIDCSession, User
-from core.utils.exceptions import AuthError, OpenRAGError
-from core.utils.logging import get_logger, mask_email
 
 if TYPE_CHECKING:
     from core.config.auth import OIDCConfig

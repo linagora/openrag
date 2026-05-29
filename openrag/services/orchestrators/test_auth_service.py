@@ -9,11 +9,11 @@ faked. Each test asserts behaviour the legacy router used to own.
 from __future__ import annotations
 
 import pytest
-from components.auth import StateCookieSerializer, hash_session_token
-from components.auth.oidc_client import LogoutTokenClaims, TokenBundle
 from core.config.auth import OIDCConfig
 from core.models.user import User
 from cryptography.fernet import Fernet
+from services.auth import StateCookieSerializer, hash_session_token
+from services.auth.oidc_client import LogoutTokenClaims, TokenBundle
 from services.orchestrators.auth_service import AuthService, OIDCFlowError
 
 KEY = Fernet.generate_key().decode()

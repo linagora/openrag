@@ -10,7 +10,7 @@ seven OIDC methods (``create_oidc_session``, ``get_oidc_session_by_token``,
 
 Tokens (``id_token``, ``access_token``, ``refresh_token``) are stored
 **Fernet-encrypted** as ``BYTEA``. Encryption and decryption are the
-caller's responsibility (see ``components.auth.crypto``) — the repo
+caller's responsibility (see ``services.auth.session_tokens``) — the repo
 treats the bytes as opaque. The plain session cookie value is hashed
 (SHA-256) at the caller before being passed in.
 
@@ -302,7 +302,7 @@ class PgOIDCSessionRepository(OIDCSessionRepository):
 
         ``SELECT ... FOR UPDATE`` serialises concurrent refresh callers on
         the same session row — Postgres only. The wider stampede guard in
-        :mod:`components.auth.refresh` short-circuits before this is even
+        :mod:`services.auth.refresh` short-circuits before this is even
         called in the common case.
         """
         async with self.pool.acquire() as conn:

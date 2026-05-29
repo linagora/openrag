@@ -276,7 +276,7 @@ class ServiceContainer:
             cfg = self._oidc_config
             client = None
             if cfg.enabled:
-                from components.auth import get_oidc_client
+                from services.auth import get_oidc_client
 
                 client = get_oidc_client()
             self._auth_service = AuthService(
