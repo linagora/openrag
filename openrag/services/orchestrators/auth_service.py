@@ -36,7 +36,7 @@ from components.auth import (
 )
 from core.models.user import OIDCSession, User
 from core.utils.exceptions import AuthError, OpenRAGError
-from utils.logger import get_logger, mask_email
+from core.utils.logging import get_logger, mask_email
 
 if TYPE_CHECKING:
     from core.config.auth import OIDCConfig

@@ -22,7 +22,7 @@ from functools import wraps
 from typing import TYPE_CHECKING
 
 import ray
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from core.config.root import Settings

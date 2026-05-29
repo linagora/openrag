@@ -2,6 +2,7 @@ import asyncio
 
 import torch
 from components.utils import SingletonMeta
+from core.utils.logging import get_logger
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.document import ConversionResult
@@ -15,7 +16,6 @@ from docling.datamodel.pipeline_options import (
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc.document import PictureItem
 from langchain_core.documents.base import Document
-from utils.logger import get_logger
 
 from ..base import BaseLoader
 

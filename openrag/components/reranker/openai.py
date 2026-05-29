@@ -6,9 +6,9 @@ All new code should import directly from ``services.inference.reranker_clients``
 import asyncio
 
 import httpx
+from core.utils.logging import get_logger
 from langchain_core.documents.base import Document
 from services.inference.reranker_clients import OpenAIReranker as OpenAIRerankerAdapter  # noqa: F401
-from utils.logger import get_logger
 
 from .base import BaseReranker
 

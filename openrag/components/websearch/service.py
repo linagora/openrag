@@ -1,6 +1,6 @@
 from components.websearch.base import BaseWebSearchProvider, WebResult
 from components.websearch.content_fetcher import ContentFetcher
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 
 logger = get_logger()
 

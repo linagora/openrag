@@ -6,13 +6,13 @@ import threading
 from typing import ClassVar
 
 from config import load_config
+from core.utils.logging import get_logger
 from fast_langdetect import LangDetectConfig, LangDetector
 from langchain_core.documents.base import Document
 from services.inference.distributed_semaphore import (
     DistributedSemaphore,  # noqa: F401
     DistributedSemaphoreActor,  # noqa: F401
 )
-from utils.logger import get_logger
 
 SOURCE_SEPARATOR = "-" * 10 + "\n\n"
 

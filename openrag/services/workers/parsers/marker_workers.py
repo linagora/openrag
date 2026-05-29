@@ -16,8 +16,8 @@ from core.models.document import (
     ProcessedDocument,
     TextBlock,
 )
+from core.utils.logging import get_logger
 from marker.converters.pdf import PdfConverter
-from utils.logger import get_logger
 
 from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 
@@ -34,7 +34,7 @@ class MarkerWorker:
         import os
 
         from config import load_config
-        from utils.logger import get_logger
+        from core.utils.logging import get_logger
 
         self.logger = get_logger()
         self.config = load_config()
@@ -177,7 +177,7 @@ class MarkerWorker:
 class MarkerPool:
     def __init__(self):
         from config import load_config
-        from utils.logger import get_logger
+        from core.utils.logging import get_logger
 
         self.logger = get_logger()
         self.config = load_config()

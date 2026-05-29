@@ -35,7 +35,7 @@ from core.retrieval.retriever import (
     _expand_with_related_chunks,
 )
 from core.retrieval.rrf import rrf_reranking
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from core.config.root import Settings

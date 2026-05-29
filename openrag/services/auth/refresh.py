@@ -40,9 +40,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
+from core.utils.logging import get_logger
 from services.auth.deps import get_oidc_client
 from services.auth.session_tokens import decrypt_token, encrypt_token
-from utils.logger import get_logger
 
 _REFRESH_BUFFER = timedelta(seconds=60)
 _STAMPEDE_WINDOW = timedelta(seconds=5)

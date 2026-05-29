@@ -22,7 +22,7 @@ from core.utils.exceptions import (
     InferenceError,
     InferenceTimeoutError,
 )
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 
 from ._circuit_breaker import with_circuit_breaker
 from ._retry import with_retry

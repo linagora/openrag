@@ -16,10 +16,10 @@ service once the queue is de-Ray'd.
 
 from api.dependencies.auth import current_user, require_admin, require_admin_or_self
 from api.schemas.admin.users import UserCreate, UserPublic, UserUpdate
+from core.utils.logging import get_logger
 from di.providers import get_user_service
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import JSONResponse
-from utils.logger import get_logger
 
 logger = get_logger()
 router = APIRouter()

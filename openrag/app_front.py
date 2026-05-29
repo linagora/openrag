@@ -9,9 +9,9 @@ import httpx
 from chainlit.config import config as cl_config
 from chainlit.context import get_context
 from consts import PARTITION_PREFIX
+from core.utils.logging import get_logger
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from utils.logger import get_logger
 
 load_dotenv()
 logger = get_logger()

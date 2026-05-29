@@ -37,9 +37,9 @@ from pathlib import Path
 from types import ModuleType
 
 from config import load_config
+from core.utils.logging import get_logger
 from pymilvus import MilvusClient
 from services.storage.milvus_store import SCHEMA_VERSION_PROPERTY_KEY
-from utils.logger import get_logger
 
 logger = get_logger()
 

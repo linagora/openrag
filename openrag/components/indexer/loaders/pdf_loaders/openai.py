@@ -7,10 +7,10 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 import pypdfium2 as pdfium
+from core.utils.logging import logger
 from langchain.schema import Document
 from langchain_openai import ChatOpenAI
 from PIL import Image
-from utils.logger import logger
 
 from ..base import BaseLoader
 

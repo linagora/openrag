@@ -1,6 +1,6 @@
+from core.utils.logging import logger  # assuming you have a shared logger instance
 from PIL import Image
 from tqdm.asyncio import tqdm
-from utils.logger import logger  # assuming you have a shared logger instance
 
 from .openai import OpenAILoader
 

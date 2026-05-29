@@ -1,7 +1,7 @@
 import os
 import sys
 
-from config import load_config
+from core.config import load_config
 from core.utils.log_tail import app_log_file
 from loguru import logger
 

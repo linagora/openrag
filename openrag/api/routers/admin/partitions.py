@@ -17,10 +17,10 @@ from api.dependencies.auth import (
     require_partition_owner,
     require_partition_viewer,
 )
+from core.utils.logging import get_logger
 from di.providers import get_partition_service
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
-from utils.logger import get_logger
 
 logger = get_logger()
 router = APIRouter()

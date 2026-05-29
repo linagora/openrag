@@ -9,10 +9,10 @@ returned via ``HTTPException``.
 """
 
 from api.dependencies.auth import current_user_or_admin_partitions_list
+from core.utils.logging import get_logger
 from di.providers import get_conversion_service
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
-from utils.logger import get_logger
 
 logger = get_logger()
 

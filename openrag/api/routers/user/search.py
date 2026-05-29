@@ -16,10 +16,10 @@ from api.dependencies.auth import (
     require_partition_viewer,
     require_partitions_viewer,
 )
+from core.utils.logging import get_logger
 from di.providers import get_retrieval_service, get_workspace_service
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
-from utils.logger import get_logger
 
 logger = get_logger()
 

@@ -23,6 +23,7 @@ from pathlib import Path
 
 from core.indexing.parsers.audio.local_whisper import LocalWhisperParser
 from core.models.document import Document as CoreDocument
+from core.utils.logging import get_logger
 from langchain_core.documents.base import Document
 from services.workers.parsers.whisper_workers import (  # noqa: F401  (re-exported for legacy import paths)
     LocalWhisperLoader as _ServicesWhisperPool,
@@ -31,7 +32,6 @@ from services.workers.parsers.whisper_workers import (  # noqa: F401
     WhisperActor,
     WhisperPool,
 )
-from utils.logger import get_logger
 
 from ..base import BaseLoader
 

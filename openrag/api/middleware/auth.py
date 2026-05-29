@@ -36,10 +36,10 @@ from urllib.parse import quote
 
 from components.auth.refresh import refresh_session_if_needed
 from core.config.auth import AuthBypassConfig
+from core.utils.logging import get_logger
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from utils.logger import get_logger
 
 logger = get_logger()
 

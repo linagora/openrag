@@ -5,12 +5,12 @@ All new code should import directly from ``services.inference.reranker_clients``
 
 import asyncio
 
+from core.utils.logging import get_logger
 from infinity_client import Client
 from infinity_client.api.default import rerank
 from infinity_client.models import RerankInput, ReRankResult
 from langchain_core.documents.base import Document
 from services.inference.reranker_clients import InfinityReranker as InfinityRerankerAdapter  # noqa: F401
-from utils.logger import get_logger
 
 from .base import BaseReranker
 

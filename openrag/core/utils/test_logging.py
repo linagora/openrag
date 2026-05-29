@@ -1,4 +1,4 @@
-from utils.logger import escape_markup, mask_email
+from core.utils.logging import escape_markup, mask_email
 
 
 def test_mask_email_keeps_first_char_and_domain():

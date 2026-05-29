@@ -34,8 +34,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from core.utils.log_tail import collect_task_logs
+from core.utils.logging import get_logger
 from core.utils.url_safety import is_blocked_address, is_safe_url
-from utils.logger import get_logger
 
 if TYPE_CHECKING:
     from core.vector_stores import VectorStore

@@ -5,8 +5,8 @@ from urllib.parse import urljoin, urlparse
 import httpx
 import lxml.html
 from components.websearch.base import WebResult
+from core.utils.logging import get_logger
 from html_to_markdown import convert
-from utils.logger import get_logger
 
 logger = get_logger()
 

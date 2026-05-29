@@ -15,13 +15,13 @@ consumers migrate.
 
 from __future__ import annotations
 
+from core.utils.logging import get_logger
 from langchain_core.documents.base import Document
 from services.workers.parsers.docling_workers import (  # noqa: F401  (re-exported for legacy paths)
     DoclingLoader,
     DoclingPool,
     DoclingWorker,
 )
-from utils.logger import get_logger
 
 from ..base import BaseLoader
 

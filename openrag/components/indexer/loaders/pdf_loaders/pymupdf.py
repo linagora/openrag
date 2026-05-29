@@ -17,9 +17,9 @@ from pathlib import Path
 from core.indexing.parsers.pdf.pymupdf import PyMuPDFParser
 from core.models.document import Document as CoreDocument
 from core.models.document import DocumentType
+from core.utils.logging import get_logger
 from langchain_core.documents.base import Document
 from PIL import Image
-from utils.logger import get_logger
 
 from ..base import BaseLoader
 

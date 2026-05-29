@@ -19,10 +19,10 @@ from pathlib import Path
 from core.indexing.parsers.audio.client_based import ClientAudioParser
 from core.models.document import Document as CoreDocument
 from core.models.document import DocumentType
+from core.utils.logging import get_logger
 from langchain_core.documents.base import Document
 from services.inference.parsers.openai_audio import OpenAIAudioClient
 from services.workers.parsers.whisper_workers import detect_language_via_actor
-from utils.logger import get_logger
 
 from ..base import BaseLoader
 

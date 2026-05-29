@@ -9,11 +9,15 @@ from concurrent.futures import ThreadPoolExecutor
 import httpx
 import openai
 from core.config.endpoints import EmbedderConfig
+from core.utils.exceptions import (
+    EmbeddingAPIError,
+    EmbeddingResponseError,
+    UnexpectedEmbeddingError,
+)
+from core.utils.logging import get_logger
 from langchain_core.documents.base import Document
 from openai import OpenAI
 from services.inference.vllm_client import VLLMEmbedder  # noqa: F401
-from utils.exceptions.embeddings import *
-from utils.logger import get_logger
 
 from .base import BaseEmbedding
 

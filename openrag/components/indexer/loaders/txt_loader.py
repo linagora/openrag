@@ -19,8 +19,8 @@ from core.indexing.parsers.markdown_parser import MarkdownParser
 from core.indexing.parsers.text_parser import TextParser
 from core.models.document import Document as CoreDocument
 from core.models.document import DocumentType
+from core.utils.logging import get_logger
 from langchain_core.documents.base import Document
-from utils.logger import get_logger
 
 logger = get_logger()
 
