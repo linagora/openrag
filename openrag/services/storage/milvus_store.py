@@ -683,7 +683,14 @@ class MilvusVectorStore(VectorStore):
         for hit in response[0]:
             entity = hit.get("entity", {}) if isinstance(hit, dict) else {}
             record = {k: v for k, v in entity.items() if k not in _SEARCH_RESULT_DROPPED_KEYS}
-            record["id"] = self._milvus_id_to_str(hit.get("id"))
+            # The primary key field is named ``_id`` (auto_id INT64), so Milvus
+            # exposes it on the hit as ``_id`` and also inside ``entity`` — NOT
+            # under the generic ``id`` key. Reading ``id`` yielded a literal
+            # "None" string for every search result.
+            pk = hit.get("_id")
+            if pk is None:
+                pk = entity.get("_id")
+            record["id"] = self._milvus_id_to_str(pk) if pk is not None else None
             record["score"] = hit.get("distance")
             out.append(record)
         return out

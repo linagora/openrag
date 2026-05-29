@@ -444,3 +444,37 @@ class TestHybridDispatch:
         """
         with pytest.raises(VDBSearchError, match="query_text"):
             await store.search([0.1, 0.2], collection="default")
+
+
+# ---------------------------------------------------------------------------
+# _parse_search_response
+# ---------------------------------------------------------------------------
+
+
+class TestParseSearchResponse:
+    """Milvus 2.6 exposes the ``_id`` auto-id PK on the hit (and in the entity),
+    never under the generic ``id`` key — the parser must surface the real id."""
+
+    def test_id_taken_from_hit_underscore_id(self, store: MilvusVectorStore) -> None:
+        hit = {
+            "_id": 466609479666371445,
+            "distance": 0.42,
+            "entity": {"_id": 466609479666371445, "text": "hello", "file_id": "doc1", "vector": [0.1, 0.2]},
+        }
+        (record,) = store._parse_search_response([[hit]])
+        assert record["id"] == "466609479666371445"  # not the literal "None"
+        assert record["score"] == 0.42
+        assert "vector" not in record
+
+    def test_id_falls_back_to_entity_underscore_id(self, store: MilvusVectorStore) -> None:
+        hit = {"distance": 0.1, "entity": {"_id": 123, "text": "t"}}
+        (record,) = store._parse_search_response([[hit]])
+        assert record["id"] == "123"
+
+    def test_missing_pk_yields_none_not_the_string(self, store: MilvusVectorStore) -> None:
+        hit = {"distance": 0.1, "entity": {"text": "t"}}
+        (record,) = store._parse_search_response([[hit]])
+        assert record["id"] is None
+
+    def test_empty_response_is_empty_list(self, store: MilvusVectorStore) -> None:
+        assert store._parse_search_response([]) == []
