@@ -442,19 +442,14 @@ async def test_get_task_logs_missing_file_raises(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_task_logs_caps_max_lines(tmp_path, monkeypatch):
-    from services.orchestrators import mcp_service as mcp_mod
-
-    monkeypatch.setattr(mcp_mod, "_MAX_LOG_LINES", 2)
-    lines = [
-        {"record": {"time": {"repr": f"T{i}"}, "level": {"name": "INFO"}, "message": f"m{i}", "extra": {"task_id": "t1"}}}
-        for i in range(5)
-    ]
+async def test_get_task_logs_rejects_out_of_range_max_lines(tmp_path):
+    # The shared core.collect_task_logs enforces the 1..MAX_TASK_LOG_LINES bound,
+    # same as the admin task-logs route.
     log = tmp_path / "app.json"
-    log.write_text("\n".join(json.dumps(line) for line in lines))
+    log.write_text("")
     svc = _service(jobs=FakeJobs(details={"user_id": 1}))
-    out = await svc.get_task_logs(task_id="t1", user_id=1, is_admin=False, log_file=log, max_lines=100)
-    assert out["count"] == 2
+    with pytest.raises(ValueError):
+        await svc.get_task_logs(task_id="t1", user_id=1, is_admin=False, log_file=log, max_lines=10_000)
 
 
 # ---------------------------------------------------------------------------

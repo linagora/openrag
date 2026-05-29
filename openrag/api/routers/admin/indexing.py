@@ -30,6 +30,7 @@ from api.dependencies.files import (
 from api.routers.admin.task_logs import collect_task_logs
 from components.indexer.utils.files import sanitize_filename, save_file_to_disk
 from config import load_config
+from core.utils.log_tail import app_log_file
 from di.providers import get_auth_service, get_indexing_service, get_partition_service
 from fastapi import (
     APIRouter,
@@ -48,7 +49,7 @@ logger = get_logger()
 
 config = load_config()
 DATA_DIR = config.paths.data_dir
-LOG_FILE = Path(config.paths.log_dir or "logs") / "app.json"
+LOG_FILE = app_log_file(config.paths.log_dir)
 
 # supported file formats or mimetypes
 ACCEPTED_FILE_FORMATS = config.loader.file_loaders.model_dump().keys()

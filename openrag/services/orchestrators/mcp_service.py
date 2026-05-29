@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from core.utils.log_tail import iter_file_lines_reversed
+from core.utils.log_tail import collect_task_logs
 from core.utils.url_safety import is_blocked_address, is_safe_url
 from utils.logger import get_logger
 
@@ -50,7 +50,6 @@ logger = get_logger()
 _ROLE_HIERARCHY: dict[str, int] = {"viewer": 1, "editor": 2, "owner": 3}
 _FORBIDDEN_FILE_ID_CHARS: frozenset[str] = frozenset("/")
 _ACTIVE_STATES = {"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"}
-_MAX_LOG_LINES = 5000
 _MAX_REDIRECTS = 10
 _MAX_CHUNKS_PER_CALL = 200
 _MAX_FUZZY_CANDIDATES = 5000
@@ -73,33 +72,6 @@ def _strip_protected_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]
     if removed:
         logger.warning("Dropped protected metadata keys from MCP write", keys=sorted(removed))
     return md
-
-
-def _read_task_logs(log_file: Path, task_id: str, max_lines: int) -> list[str]:
-    """Return chronological loguru log lines tagged with ``task_id``.
-
-    Scans the JSON-per-line application log from the end (block by block, never
-    loading the whole file) so the newest ``max_lines`` matching records are
-    collected, then restores chronological order.
-    """
-    logs: list[str] = []
-    for line in iter_file_lines_reversed(log_file):
-        try:
-            record = json.loads(line).get("record", {})
-            extra = record.get("extra") or {}
-            if extra.get("task_id") != task_id:
-                continue
-            time_repr = (record.get("time") or {}).get("repr")
-            level_name = (record.get("level") or {}).get("name")
-            message = record.get("message")
-            if not all((time_repr, level_name, message)):
-                continue
-            logs.append(f"{time_repr} - {level_name} - {message} - {extra}")
-            if len(logs) >= max_lines:
-                break
-        except (json.JSONDecodeError, AttributeError):
-            continue
-    return logs[::-1]
 
 
 class MCPService:
@@ -467,7 +439,7 @@ class MCPService:
         log_path = Path(log_file)
         if not log_path.exists():
             raise FileNotFoundError(f"Log file not found: {log_path}")
-        logs = _read_task_logs(log_path, task_id, min(max_lines, _MAX_LOG_LINES))
+        logs = collect_task_logs(log_path, task_id, max_lines)
         return {"task_id": task_id, "count": len(logs), "logs": logs}
 
     # ------------------------------------------------------------------

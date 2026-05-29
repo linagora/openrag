@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Any
 
 from config import load_config
@@ -8,7 +7,6 @@ from fastapi import Depends, Form, UploadFile
 config = load_config()
 
 FORBIDDEN_CHARS_IN_FILE_ID = set("/")
-LOG_FILE = Path(config.paths.log_dir or "logs") / "app.json"
 ACCEPTED_FILE_FORMATS = config.loader.file_loaders.model_dump().keys()
 DICT_MIMETYPES = config.loader.mimetypes.to_dict()
 

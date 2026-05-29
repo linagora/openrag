@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import ray
 from api.mcp.auth_context import (
@@ -37,6 +36,7 @@ from api.mcp.auth_context import (
     set_auth_context,
 )
 from config import load_config
+from core.utils.log_tail import app_log_file
 from di.container import ServiceContainer
 from di.workers import ensure_worker_bootstrap
 from mcp.server.fastmcp import FastMCP
@@ -52,7 +52,7 @@ mcp_config = config.mcp
 
 server = FastMCP(mcp_config.server_name, stateless_http=True, json_response=True)
 
-LOG_FILE = Path(config.paths.log_dir or "logs") / "app.json"
+LOG_FILE = app_log_file(config.paths.log_dir)
 
 
 # ---------------------------------------------------------------------------
