@@ -12,7 +12,7 @@ class DocSerializerBridgeParser(DocumentParser):
     """Transitional parser backed by the legacy loader registry."""
 
     def __init__(self, config: Any) -> None:
-        from components.indexer.loaders import get_loader_classes
+        from services.workers.parsers.legacy_loaders import get_loader_classes
 
         self._config = config
         self._loader_classes = get_loader_classes(config=config)

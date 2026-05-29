@@ -32,9 +32,9 @@ def metadata():
 
 
 _PATCHES = [
-    patch("components.indexer.loaders.doc.DocParser"),
-    patch("components.indexer.loaders.base.ChatOpenAI"),
-    patch("components.indexer.loaders.base.load_config"),
+    patch("services.workers.parsers.legacy_loaders.doc.DocParser"),
+    patch("services.workers.parsers.legacy_loaders.base.ChatOpenAI"),
+    patch("services.workers.parsers.legacy_loaders.base.load_config"),
 ]
 
 
@@ -59,7 +59,7 @@ def _patch_cleanup():
 
 
 def _make_loader(mock_config):
-    from components.indexer.loaders.doc import DocLoader
+    from services.workers.parsers.legacy_loaders.doc import DocLoader
 
     return DocLoader(config=mock_config)
 

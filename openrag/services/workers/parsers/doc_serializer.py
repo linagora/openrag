@@ -11,8 +11,8 @@ from pathlib import Path
 
 import ray
 import torch
-from components.indexer.loaders import get_loader_classes
 from langchain_core.documents.base import Document
+from services.workers.parsers.legacy_loaders import get_loader_classes
 
 
 @ray.remote(max_restarts=5)
