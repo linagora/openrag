@@ -362,9 +362,7 @@ class AuthService:
     async def revoke_oidc_session_by_id_for_request(self, session_id: int) -> None:
         await self._oidc_session_repo.revoke_session(session_id)
 
-    async def refresh_session_if_needed(
-        self, *, session: dict[str, Any], enc_key: str
-    ) -> dict[str, Any] | None:
+    async def refresh_session_if_needed(self, *, session: dict[str, Any], enc_key: str) -> dict[str, Any] | None:
         """Refresh the IdP access token when it is near expiry.
 
         Thin seam over :func:`services.auth.refresh.refresh_session_if_needed`,
