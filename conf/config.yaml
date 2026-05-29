@@ -320,3 +320,19 @@ websearch:
   fetch_timeout: 1.0
   fetch_max_tokens: 500
   fetch_verify_ssl: false
+
+# --- MCP server ---
+# Env: OPENRAG_MCP_SERVER_NAME, OPENRAG_MCP_HOST, OPENRAG_MCP_PORT,
+#      OPENRAG_MCP_PATH, OPENRAG_MCP_DEFAULT_TOP_K, OPENRAG_MCP_MAX_TOP_K,
+#      OPENRAG_MCP_SIMILARITY_THRESHOLD, OPENRAG_MCP_DOWNLOAD_TIMEOUT,
+#      OPENRAG_MCP_MAX_DOWNLOAD_BYTES
+mcp:
+  server_name: OpenRAG MCP
+  host: 0.0.0.0
+  port: 8081
+  path: /mcp
+  default_top_k: 5
+  max_top_k: 50
+  similarity_threshold: 0.8
+  download_timeout: 30.0
+  max_download_bytes: 104857600  # 100 MiB

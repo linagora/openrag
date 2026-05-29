@@ -29,6 +29,7 @@ from api.dependencies.files import (
 )
 from api.routers.admin.task_logs import collect_task_logs
 from components.indexer.utils.files import sanitize_filename, save_file_to_disk
+from core.utils.log_tail import app_log_file
 from di.providers import get_auth_service, get_config, get_indexing_service, get_partition_service
 from fastapi import (
     APIRouter,
@@ -492,7 +493,7 @@ async def get_task_logs(
     task_details=Depends(require_task_owner),
     config=Depends(get_config),
 ):
-    log_file = Path(config.paths.log_dir or "logs") / "app.json"
+    log_file = app_log_file(config.paths.log_dir)
     if not log_file.exists():
         raise HTTPException(status_code=500, detail="Log file not found.")
 

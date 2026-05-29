@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from services.orchestrators.conversion_service import ConversionService
     from services.orchestrators.indexing_service import IndexingService
     from services.orchestrators.job_service import JobService
+    from services.orchestrators.mcp_service import MCPService
     from services.orchestrators.partition_service import PartitionService
     from services.orchestrators.query_service import QueryService
     from services.orchestrators.retrieval_service import RetrievalService
@@ -122,6 +123,11 @@ def get_conversion_service(request: Request = None) -> ConversionService:
     return _require_initialized(request).conversion_service
 
 
+def get_mcp_service(request: Request = None) -> MCPService:
+    """Resolve the MCP orchestrator from the active container."""
+    return _require_initialized(request).mcp_service
+
+
 def get_config(request: Request = None):
     """Resolve application configuration from the active container."""
     return _require_initialized(request).config
@@ -134,6 +140,7 @@ __all__ = [
     "get_conversion_service",
     "get_indexing_service",
     "get_job_service",
+    "get_mcp_service",
     "get_partition_service",
     "get_query_service",
     "get_retrieval_service",

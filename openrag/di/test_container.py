@@ -237,11 +237,12 @@ _ORCHESTRATORS = [
     ("indexing_service", "get_indexing_service"),
     ("job_service", "get_job_service"),
     ("conversion_service", "get_conversion_service"),
+    ("mcp_service", "get_mcp_service"),
 ]
 
 
 class TestPhase8OrchestratorWiring:
-    """8F: all nine orchestrators wired consistently (container + providers)."""
+    """8F: all orchestrators wired consistently (container + providers)."""
 
     @pytest.mark.parametrize("prop,_provider", _ORCHESTRATORS)
     def test_property_is_lazy_and_cache_slot_starts_none(self, prop, _provider):

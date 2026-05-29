@@ -2,6 +2,7 @@ import os
 import sys
 
 from config import load_config
+from core.utils.log_tail import app_log_file
 from loguru import logger
 
 
@@ -44,11 +45,11 @@ def get_logger(config=None):
     logger.add(sys.stderr, format=formatter, level=config.verbose.level, colorize=False)
 
     # JSON logs to file for later use (e.g. Grafana ingestion)
-    log_dir = config.paths.log_dir if hasattr(config.paths, "log_dir") else "logs"
+    log_path = app_log_file(getattr(config.paths, "log_dir", None))
     try:
-        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(log_path.parent, exist_ok=True)
         logger.add(
-            f"{log_dir}/app.json",
+            str(log_path),
             serialize=True,
             level=config.verbose.level,
             rotation="10 MB",

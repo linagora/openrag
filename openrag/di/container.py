@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from services.orchestrators.conversion_service import ConversionService
     from services.orchestrators.indexing_service import IndexingService
     from services.orchestrators.job_service import JobService
+    from services.orchestrators.mcp_service import MCPService
     from services.orchestrators.partition_service import PartitionService
     from services.orchestrators.query_service import QueryService
     from services.orchestrators.retrieval_service import RetrievalService
@@ -106,6 +107,7 @@ class ServiceContainer:
         self._indexing_service: IndexingService | None = None
         self._job_service: JobService | None = None
         self._conversion_service: ConversionService | None = None
+        self._mcp_service: MCPService | None = None
 
     def _require_settings(self) -> Settings:
         """Settings guard for the settings-dependent service properties.
@@ -472,6 +474,36 @@ class ServiceContainer:
                 collection=settings.vectordb.collection_name,
             )
         return self._conversion_service
+
+    @property
+    def mcp_service(self) -> MCPService:
+        """MCPService — lazily built, cached for the container's lifetime.
+
+        Composes the retrieval/partition/indexing/job/conversion
+        orchestrators plus the vector-store port into the application layer
+        the standalone MCP server (``api/mcp``) drives. Search defaults and
+        bounds come from the ``mcp`` settings section.
+        """
+        if self._mcp_service is None:
+            from services.orchestrators.mcp_service import MCPService
+
+            settings = self._require_settings()
+            mcp_cfg = settings.mcp
+            self._mcp_service = MCPService(
+                retrieval_service=self.retrieval_service,
+                partition_service=self.partition_service,
+                indexing_service=self.indexing_service,
+                job_service=self.job_service,
+                conversion_service=self.conversion_service,
+                vector_store=self.vector_store,
+                collection=settings.vectordb.collection_name,
+                default_top_k=mcp_cfg.default_top_k,
+                max_top_k=mcp_cfg.max_top_k,
+                similarity_threshold=mcp_cfg.similarity_threshold,
+                download_timeout=mcp_cfg.download_timeout,
+                max_download_bytes=mcp_cfg.max_download_bytes,
+            )
+        return self._mcp_service
 
     # ------------------------------------------------------------------
     # Registry-based inference factories (Phase 6)
