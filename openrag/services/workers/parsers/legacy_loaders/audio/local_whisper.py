@@ -6,7 +6,7 @@ The Ray actor + pool that drive ``faster-whisper`` (``WhisperActor``,
 implementation now live in
 ``services/workers/parsers/whisper_workers.py``; this module re-exports
 ``WhisperActor`` and ``WhisperPool`` for legacy import paths
-(``components.indexer.loaders.audio.local_whisper.WhisperActor`` is
+(``services.workers.parsers.legacy_loaders.audio.local_whisper.WhisperActor`` is
 still used by the OpenAI audio loader for language detection, and by
 ``services/workers/bootstrap.py`` for the actor bootstrap).
 

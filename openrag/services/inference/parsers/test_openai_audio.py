@@ -19,9 +19,12 @@ import pytest
 # ---- shim pydub before importing openai_audio ------------------------------
 
 if "pydub" not in sys.modules:
-    pydub = types.ModuleType("pydub")
-    pydub.AudioSegment = MagicMock()  # type: ignore[attr-defined]
-    sys.modules["pydub"] = pydub
+    try:
+        import pydub  # noqa: E402,F401  — prefer the real library when it imports cleanly
+    except Exception:
+        fake_pydub = types.ModuleType("pydub")
+        fake_pydub.AudioSegment = MagicMock()  # type: ignore[attr-defined]
+        sys.modules["pydub"] = fake_pydub
 
 from core.models.document import Document, DocumentType  # noqa: E402
 

@@ -66,14 +66,14 @@ def get_task_state_manager():
 
 
 def get_serializer():
-    from components.indexer.loaders.serializer import DocSerializer
+    from services.workers.parsers.doc_serializer import DocSerializer
 
     return get_or_create_actor("DocSerializer", DocSerializer, lifetime="detached")
 
 
 def get_marker_pool():
-    from components.indexer.loaders.pdf_loaders.docling2 import DoclingPool
-    from components.indexer.loaders.pdf_loaders.marker import MarkerPool
+    from services.workers.parsers.docling_workers import DoclingPool
+    from services.workers.parsers.marker_workers import MarkerPool
 
     config = _require_settings()
     pdf_loader = config.loader.file_loaders.pdf

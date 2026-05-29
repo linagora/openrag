@@ -17,7 +17,7 @@ logger = get_logger()
 
 def get_loader_classes(config) -> dict[str, type[BaseLoader]]:
     # 1. Discover all subclasses
-    root_pkg = "components.indexer.loaders"
+    root_pkg = "services.workers.parsers.legacy_loaders"
     root_path = Path(__file__).parent
 
     discovered: dict[str, type[BaseLoader]] = {}
