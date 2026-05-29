@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from core.prompts import load_template_by_key
 from core.retrieval.pipeline import RetrieverPipeline
 from core.retrieval.retriever import (
     HyDeRetriever,
@@ -77,20 +78,16 @@ class RetrievalService:
         }
         rtype = rcfg.type
         if rtype == "multiQuery":
-            from components.prompts import MULTI_QUERY_PROMPT
-
             retriever = MultiQueryRetriever(
                 llm=llm,
-                multi_query_template=MULTI_QUERY_PROMPT,
+                multi_query_template=load_template_by_key(config.paths.prompts_dir, config.prompts, "multi_query"),
                 k_queries=rcfg.k_queries,
                 **common,
             )
         elif rtype == "hyde":
-            from components.prompts import HYDE_PROMPT
-
             retriever = HyDeRetriever(
                 llm=llm,
-                hyde_template=HYDE_PROMPT,
+                hyde_template=load_template_by_key(config.paths.prompts_dir, config.prompts, "hyde"),
                 combine=rcfg.combine,
                 **common,
             )
