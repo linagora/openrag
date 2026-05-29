@@ -11,15 +11,15 @@ from pathlib import Path
 
 import ray
 import torch
-from components.indexer.loaders import get_loader_classes
 from langchain_core.documents.base import Document
+from services.workers.parsers.legacy_loaders import get_loader_classes
 
 
 @ray.remote(max_restarts=5)
 class DocSerializer:
     def __init__(self, data_dir=None, **kwargs) -> None:
-        from config import load_config
-        from utils.logger import get_logger
+        from core.config import load_config
+        from core.utils.logging import get_logger
 
         self.logger = get_logger()
         self.config = load_config()

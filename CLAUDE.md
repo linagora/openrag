@@ -312,7 +312,7 @@ All custom exceptions inherit from `OpenRAGError` (`openrag/utils/exceptions/`):
 
 Uses Loguru with structured logging:
 ```python
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 logger = get_logger()
 logger.bind(file_id=file_id, partition=partition).info("Message")
 ```
@@ -323,7 +323,7 @@ Use absolute imports from the `openrag/` directory (which is the Python path roo
 ```python
 # Correct - absolute imports
 from components.ray_utils import call_ray_actor_with_timeout
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 from config import load_config
 
 # Avoid relative imports across packages

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from core.embeddings import embedder_registry
 from core.llm import llm_registry
 from core.rerankers import reranker_registry
+from core.utils.logging import get_logger
 from core.vlm import vlm_registry
 from di.embedders import register_embedders
 from di.llms import register_llms
@@ -33,7 +34,6 @@ from di.repositories import create_catalog_store
 from di.rerankers import register_rerankers
 from di.vector_stores import create_vector_store
 from di.vlms import register_vlms
-from utils.logger import get_logger
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -276,7 +276,7 @@ class ServiceContainer:
             cfg = self._oidc_config
             client = None
             if cfg.enabled:
-                from components.auth import get_oidc_client
+                from services.auth import get_oidc_client
 
                 client = get_oidc_client()
             self._auth_service = AuthService(
@@ -391,12 +391,12 @@ class ServiceContainer:
 
         Shares the same core LLM construction as ``retrieval_service``
         (built from ``settings.llm``); the web-search service comes from
-        the legacy ``WebSearchFactory`` (provider is ``None`` when
+        the ``WebSearchFactory`` (provider is ``None`` when
         ``WEBSEARCH_API_TOKEN`` is unset — web search silently disabled).
         """
         if self._query_service is None:
-            from components.websearch import WebSearchFactory
             from services.orchestrators.query_service import QueryService
+            from services.websearch import WebSearchFactory
 
             settings = self._require_settings()
             llm_cfg = settings.llm.model_dump()

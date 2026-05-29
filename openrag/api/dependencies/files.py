@@ -1,6 +1,11 @@
+from pathlib import Path
 from typing import Any
 
+import aiofiles
+import consts
 from core.indexing import validators as core_validators
+from core.utils.exceptions import ValidationError
+from core.utils.filename import make_unique_filename
 from di.providers import get_config
 from fastapi import Depends, Form, UploadFile
 
@@ -29,3 +34,35 @@ async def validate_file_format(
         mimetype=metadata.get("mimetype"),
     )
     return file
+
+
+async def save_file_to_disk(
+    file: UploadFile,
+    dest_dir: Path,
+    chunk_size: int = consts.FILE_READ_CHUNK_SIZE,
+    with_random_prefix: bool = False,
+) -> Path:
+    """Save an uploaded file to disk in chunks and return the saved path."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir = dest_dir.resolve()
+
+    raw_filename = file.filename or ""
+    safe_basename = raw_filename.replace("\\", "/").split("/")[-1].strip()
+    if not safe_basename:
+        raise ValidationError("Uploaded file must have a filename.", status_code=400)
+
+    filename = make_unique_filename(safe_basename) if with_random_prefix else safe_basename
+    file_path = (dest_dir / filename).resolve()
+    try:
+        file_path.relative_to(dest_dir)
+    except ValueError:
+        raise ValidationError("Uploaded filename resolves outside destination directory.", status_code=400)
+
+    async with aiofiles.open(file_path, "wb") as buffer:
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            await buffer.write(chunk)
+
+    return file_path

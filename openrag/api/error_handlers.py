@@ -38,9 +38,9 @@ from core.utils.exceptions import (
     StorageError,
     ValidationError,
 )
+from core.utils.logging import get_logger
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from utils.logger import get_logger
 
 logger = get_logger()
 

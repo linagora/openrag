@@ -11,7 +11,7 @@ from __future__ import annotations
 import httpx
 from core.rerankers import Reranker, reranker_registry
 from core.utils.exceptions import InferenceConnectionError, InferenceTimeoutError
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 
 from ._circuit_breaker import with_circuit_breaker
 from ._retry import with_retry

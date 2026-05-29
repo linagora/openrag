@@ -7,7 +7,7 @@ from logging.config import fileConfig
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from alembic import context
-from config import load_config
+from core.config import load_config
 from services.persistence.schema import metadata as target_metadata
 from sqlalchemy import URL, engine_from_config, pool
 

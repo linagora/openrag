@@ -12,9 +12,7 @@ the Ray ``vectordb`` actor, so it deals in :class:`User` /
 
 The cryptographic / cookie primitives (``OIDCClient``, the state-cookie
 serializer, Fernet token (de)encryption, opaque session-token issuance)
-still come from ``components.auth`` during the Phase-8 shim period —
-those are infrastructure adapters scheduled to move under
-``services/auth`` in Phase 9.
+come from ``services.auth`` — the infrastructure adapters for OIDC.
 """
 
 from __future__ import annotations
@@ -25,7 +23,10 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urlparse
 
-from components.auth import (
+from core.models.user import OIDCSession, User
+from core.utils.exceptions import AuthError, OpenRAGError
+from core.utils.logging import get_logger, mask_email
+from services.auth import (
     OIDCClient,
     StateCookiePayload,
     StateCookieSerializer,
@@ -34,9 +35,6 @@ from components.auth import (
     hash_session_token,
     issue_session_token,
 )
-from core.models.user import OIDCSession, User
-from core.utils.exceptions import AuthError, OpenRAGError
-from utils.logger import get_logger, mask_email
 
 if TYPE_CHECKING:
     from core.config.auth import OIDCConfig
@@ -363,6 +361,19 @@ class AuthService:
 
     async def revoke_oidc_session_by_id_for_request(self, session_id: int) -> None:
         await self._oidc_session_repo.revoke_session(session_id)
+
+    async def refresh_session_if_needed(self, *, session: dict[str, Any], enc_key: str) -> dict[str, Any] | None:
+        """Refresh the IdP access token when it is near expiry.
+
+        Thin seam over :func:`services.auth.refresh.refresh_session_if_needed`,
+        passing ``self`` as the auth-service the helper calls back into. Keeping
+        it on the orchestrator lets the middleware reach refresh through the same
+        ``AuthService`` it already uses for every other session operation —
+        the API layer never imports the services helper directly.
+        """
+        from services.auth.refresh import refresh_session_if_needed as _refresh
+
+        return await _refresh(session=session, enc_key=enc_key, auth_service=self)
 
     # ------------------------------------------------------------------
     # Auth policy — pure helpers (no I/O)

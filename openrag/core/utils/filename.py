@@ -8,7 +8,10 @@ Extracted from: components/indexer/utils/files.py (pure parts only).
 import re
 import secrets
 import time
+from datetime import UTC, datetime
 from pathlib import Path
+
+from core.utils.exceptions import ValidationError
 
 
 def sanitize_filename(filename: str) -> str:
@@ -47,3 +50,25 @@ def make_unique_filename(filename: str) -> str:
     ts = int(time.time() * 1000)
     rand = secrets.token_hex(2)
     return f"{ts}_{rand}_{filename}"
+
+
+def extract_temporal_fields(metadata: dict, temporal_fields: list) -> dict:
+    """Extract and validate ISO-8601 temporal metadata fields."""
+    result = {}
+    for field in temporal_fields:
+        if field not in metadata or metadata[field] is None:
+            continue
+
+        datetime_str = metadata[field]
+        try:
+            parsed = datetime.fromisoformat(datetime_str)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            result[field] = parsed.isoformat()
+        except Exception:
+            raise ValidationError(
+                f"Invalid ISO 8601 datetime field ({datetime_str}) for field '{field}'.",
+                status_code=400,
+            )
+
+    return result

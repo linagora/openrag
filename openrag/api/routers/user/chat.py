@@ -30,14 +30,13 @@ from api.dependencies.llm import (
 )
 from api.routers.user.source_links import build_document_source_link
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
-from components.indexer.utils.text_sanitizer import sanitize_text
-from components.utils import get_num_tokens
-from config import load_config
+from core.config import load_config
+from core.utils.exceptions import OpenRAGError
+from core.utils.logging import get_logger
+from core.utils.text import get_num_tokens, sanitize_text
 from di.providers import get_config, get_partition_service, get_query_service
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from utils.exceptions.base import OpenRAGError
-from utils.logger import get_logger
 
 logger = get_logger()
 router = APIRouter()

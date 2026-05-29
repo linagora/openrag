@@ -6,7 +6,7 @@ import time
 import pypdfium2
 import ray
 import torch
-from config import load_config
+from core.config import load_config
 from core.indexing.image_preprocessor import pil_to_png_bytes
 from core.indexing.parsers.document_parser import BasePooledParser
 from core.models.document import (
@@ -16,8 +16,8 @@ from core.models.document import (
     ProcessedDocument,
     TextBlock,
 )
+from core.utils.logging import get_logger
 from marker.converters.pdf import PdfConverter
-from utils.logger import get_logger
 
 from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 
@@ -33,8 +33,8 @@ class MarkerWorker:
     def __init__(self):
         import os
 
-        from config import load_config
-        from utils.logger import get_logger
+        from core.config import load_config
+        from core.utils.logging import get_logger
 
         self.logger = get_logger()
         self.config = load_config()
@@ -176,8 +176,8 @@ class MarkerWorker:
 @ray.remote(max_restarts=5)
 class MarkerPool:
     def __init__(self):
-        from config import load_config
-        from utils.logger import get_logger
+        from core.config import load_config
+        from core.utils.logging import get_logger
 
         self.logger = get_logger()
         self.config = load_config()

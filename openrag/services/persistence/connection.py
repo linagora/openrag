@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import asyncpg
-from utils.logger import get_logger
+from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from core.config.infrastructure import RDBConfig

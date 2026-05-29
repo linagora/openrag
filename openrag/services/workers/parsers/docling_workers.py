@@ -14,10 +14,11 @@ import asyncio
 
 import ray
 import torch
-from config import load_config
+from core.config import load_config
 from core.indexing.image_preprocessor import pil_to_png_bytes
 from core.indexing.parsers.document_parser import BasePooledParser
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
+from core.utils.logging import get_logger
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.document import ConversionResult
@@ -29,7 +30,6 @@ from docling.datamodel.pipeline_options import (
     TableStructureOptions,
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
-from utils.logger import get_logger
 
 from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 

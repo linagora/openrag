@@ -12,9 +12,9 @@ unknown/missing-file 404s, the not-removed 404).
 
 from api.dependencies.auth import require_partition_editor, require_partition_owner, require_partition_viewer
 from api.schemas.admin.workspaces import AddFilesRequest, CreateWorkspaceRequest
+from core.utils.logging import get_logger
 from di.providers import get_workspace_service
 from fastapi import APIRouter, Depends, HTTPException, status
-from utils.logger import get_logger
 
 router = APIRouter()
 logger = get_logger()

@@ -9,7 +9,37 @@ Moved from: components/indexer/utils/text_sanitizer.py
 import re
 import unicodedata
 
+from core.config import load_config
+from core.utils.logging import get_logger
+
 DEFAULT_FALLBACK_ENCODING = "utf-8"
+
+logger = get_logger()
+
+
+_cached_length_function = None
+
+
+def get_num_tokens():
+    """Return the configured token counter, with a local tiktoken fallback."""
+    global _cached_length_function
+    if _cached_length_function is None:
+        try:
+            from langchain_openai import ChatOpenAI
+
+            config = load_config()
+            llm = ChatOpenAI(**config.llm.model_dump())
+            _cached_length_function = llm.get_num_tokens
+        except Exception as exc:
+            import tiktoken
+
+            logger.warning(
+                "ChatOpenAI unavailable for token counting, falling back to tiktoken cl100k_base",
+                error=str(exc),
+            )
+            encoding = tiktoken.get_encoding("cl100k_base")
+            _cached_length_function = lambda text: len(encoding.encode(text))  # noqa: E731
+    return _cached_length_function
 
 
 def decode_bytes(raw: bytes, encoding: str | None = None) -> str:

@@ -23,13 +23,15 @@ from api.dependencies.auth import (
     require_task_owner,
 )
 from api.dependencies.files import (
+    save_file_to_disk,
     validate_file_format,
     validate_file_id,
     validate_metadata,
 )
 from api.routers.admin.task_logs import collect_task_logs
-from components.indexer.utils.files import sanitize_filename, save_file_to_disk
+from core.utils.filename import sanitize_filename
 from core.utils.log_tail import app_log_file
+from core.utils.logging import get_logger
 from di.providers import get_auth_service, get_config, get_indexing_service, get_partition_service
 from fastapi import (
     APIRouter,
@@ -42,7 +44,6 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
-from utils.logger import get_logger
 
 logger = get_logger()
 

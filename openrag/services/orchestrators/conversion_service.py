@@ -28,8 +28,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from core.utils.logging import get_logger
 from core.utils.text import sanitize_extracted_text
-from utils.logger import get_logger
 
 if TYPE_CHECKING:
     from core.indexing.serializer import FileSerializer

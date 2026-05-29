@@ -13,7 +13,7 @@ class IndexerPool:
 
     def __init__(self) -> None:
         import services.inference.vllm_client  # noqa: F401
-        from config import load_config
+        from core.config import load_config
         from core.embeddings import embedder_registry
         from services.storage.milvus_store import MilvusVectorStore
         from services.storage.postgres_store import PostgresStore
@@ -99,15 +99,12 @@ def build_indexer_pool(namespace: str = "openrag") -> Any:
 
 
 def _build_chunker(cfg: Any) -> Any:
-    from components.indexer.chunker.chunker import ChunkerFactory
+    from core.chunking.factory import create_chunker
 
-    legacy_chunker = ChunkerFactory.create_chunker(cfg)
-    if hasattr(legacy_chunker, "chunk"):
-        return legacy_chunker
-    core_chunker = getattr(legacy_chunker, "_core_splitter", None)
-    if core_chunker is None or not hasattr(core_chunker, "chunk"):
+    chunker = create_chunker(cfg)
+    if not callable(getattr(chunker, "chunk", None)):
         raise TypeError("Configured chunker does not expose a chunk(document, partition) method")
-    return core_chunker
+    return chunker
 
 
 __all__ = ["IndexerPool", "build_indexer_pool"]

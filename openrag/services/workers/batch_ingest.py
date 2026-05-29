@@ -4,8 +4,8 @@ import asyncio
 from collections.abc import MutableMapping, Sequence
 from typing import Any
 
+from core.utils.logging import get_logger
 from services.workers.pipeline_builder import IndexingPipeline
-from utils.logger import get_logger
 
 _logger = get_logger().bind(component="batch_ingest")
 

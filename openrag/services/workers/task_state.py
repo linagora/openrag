@@ -7,7 +7,7 @@ from typing import Any
 import ray
 
 try:
-    from config import load_config as _load_config
+    from core.config import load_config as _load_config
 
     _cfg = _load_config()
     _POOL_SIZE: int = _cfg.ray.pool_size

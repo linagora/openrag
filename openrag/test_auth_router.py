@@ -34,7 +34,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-_STUBBED_MODULES = ("utils", "utils.logger", "services.workers.bootstrap")
+_STUBBED_MODULES = ("core.utils.logging", "services.workers.bootstrap")
 
 
 def _install_dependencies_stub() -> dict[str, types.ModuleType | None]:
@@ -58,7 +58,7 @@ def _install_dependencies_stub() -> dict[str, types.ModuleType | None]:
         logger.bind = lambda *args, **kwargs: logger
         return logger
 
-    logger_stub = types.ModuleType("utils.logger")
+    logger_stub = types.ModuleType("core.utils.logging")
     logger_stub.escape_markup = lambda s: s.replace("\\", "\\\\").replace("<", "\\<").replace(">", "\\>")
     logger_stub.mask_email = (
         lambda email: f"{email.partition('@')[0][0]}***@{email.partition('@')[2]}"
@@ -66,7 +66,7 @@ def _install_dependencies_stub() -> dict[str, types.ModuleType | None]:
         else "***"
     )
     logger_stub.get_logger = _logger
-    sys.modules["utils.logger"] = logger_stub
+    sys.modules["core.utils.logging"] = logger_stub
     return previous_modules
 
 

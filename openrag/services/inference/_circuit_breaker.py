@@ -4,8 +4,8 @@ from functools import wraps
 import httpx
 from aiobreaker import CircuitBreaker, CircuitBreakerError, CircuitBreakerListener
 from core.utils.exceptions import InferenceConnectionError, LLMParsingError, OpenRAGError
+from core.utils.logging import get_logger
 from prometheus_client import Gauge
-from utils.logger import get_logger
 
 logger = get_logger()
 

@@ -17,7 +17,7 @@ Pipeline:
 
 Adapted from the legacy
 ``components/indexer/loaders/audio/openai.py`` ``AudioTranscriber``;
-the new version drops the in-memory ``components.utils`` semaphore (now
+the new version drops the old in-memory semaphore helper (now
 per-instance via ``concurrency_limit``) and the embedded WhisperActor
 ref-getter (now an injected callable).
 """

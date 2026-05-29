@@ -3,7 +3,7 @@ from pathlib import Path
 
 import ray
 import torch
-from config import load_config
+from core.config import load_config
 from core.indexing.parsers.document_parser import BasePooledParser
 from core.models.document import (
     Document,
@@ -11,8 +11,8 @@ from core.models.document import (
     ProcessedDocument,
     TextBlock,
 )
+from core.utils.logging import get_logger
 from faster_whisper import WhisperModel
-from utils.logger import get_logger
 
 from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 
@@ -39,8 +39,8 @@ LANG_DETECT_SAMPLE_MS = 30_000  # 30 s
 class WhisperActor:
     def __init__(self):
         import torch
-        from config import load_config
-        from utils.logger import get_logger
+        from core.config import load_config
+        from core.utils.logging import get_logger
 
         self.logger = get_logger()
         self.config = load_config()
@@ -102,8 +102,8 @@ class WhisperPool:
     """
 
     def __init__(self):
-        from config import load_config
-        from utils.logger import get_logger
+        from core.config import load_config
+        from core.utils.logging import get_logger
 
         self.logger = get_logger()
         self.config = load_config()

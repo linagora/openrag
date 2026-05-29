@@ -1,9 +1,9 @@
 import os
 
 from core.utils.exceptions import OpenRAGError
+from core.utils.logging import get_logger
 from di.providers import get_auth_service, get_config, get_job_service, get_partition_service
 from fastapi import Depends, HTTPException, Request, status
-from utils.logger import get_logger
 
 logger = get_logger()
 

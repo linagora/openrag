@@ -5,11 +5,11 @@ import os
 import sys
 from typing import IO, Any
 
+from core.utils.logging import get_logger
 from pymilvus import Collection, connections
 from services.persistence.schema import files as files_table
 from services.persistence.schema import partitions as partitions_table
 from sqlalchemy import create_engine, select
-from utils.logger import get_logger
 
 
 def _list_partitions(conn) -> list[dict]:
@@ -212,7 +212,7 @@ def main():
         Returns:
             tuple: (RDBConfig, VectorDBConfig) Pydantic config models.
         """
-        from config import load_config
+        from core.config import load_config
 
         try:
             config = load_config()

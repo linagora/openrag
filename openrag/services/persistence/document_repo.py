@@ -474,7 +474,7 @@ class PgDocumentRepository(DocumentRepository):
         1000) so a self-referential or cyclic ``parent_id`` chain can't
         loop indefinitely.
         """
-        from config import load_config
+        from core.config import load_config
 
         hard_cap = int(load_config().retriever.max_ancestor_depth_cap)
         effective_cap = hard_cap

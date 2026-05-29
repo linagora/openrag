@@ -1,10 +1,10 @@
 import consts
 import openai
 from api.dependencies.auth import SUPER_ADMIN_MODE
+from core.utils.logging import get_logger
 from di.providers import get_config
 from fastapi import Depends, HTTPException, status
 from openai import AsyncOpenAI
-from utils.logger import get_logger
 
 logger = get_logger()
 
