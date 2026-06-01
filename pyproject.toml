@@ -127,3 +127,18 @@ known-first-party = ["openrag"]
 
 [tool.uv.workspace]
 exclude = ["tests/load/prompt_eval"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["./openrag"]
+python_files = ["test_*.py"]
+addopts = "--strict-markers"
+env = [
+    "PROMPTS_DIR=./openrag/prompts/templates",
+    "LOG_DIR=./logs",
+]
+markers = [
+    "integration: Integration tests requiring running OpenRAG server",
+    "unit: Unit tests that run without external dependencies",
+    "slow: Slow tests and load/performance benchmarks",
+]

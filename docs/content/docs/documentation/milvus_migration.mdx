@@ -59,10 +59,10 @@ During this step, keep your current version of OpenRAG (&lt; 1.1.7) running. Onl
 
 Milvus requires an intermediate upgrade to **v2.5.16** before jumping to 2.6.x. This step must be done manually **before** updating OpenRAG.
 
-Temporarily edit `vdb/milvus.yaml` to set the intermediate Milvus image:
+Temporarily edit `infra/compose/milvus/milvus.yaml` to set the intermediate Milvus image:
 
 ```diff lang=yaml
-// vdb/milvus.yaml
+// infra/compose/milvus/milvus.yaml
 milvus:
 -  image: milvusdb/milvus:v2.5.4
 +  image: milvusdb/milvus:v2.5.16
@@ -84,7 +84,7 @@ docker inspect milvus-standalone --format '{{ .Config.Image }}'
 
 ### Step 2 — Update OpenRAG
 
-Once Milvus 2.5.16 is healthy, stop all services and update OpenRAG to the new version. The updated `vdb/milvus.yaml` already includes Milvus 2.6.11 and the required MinIO and etcd upgrades.
+Once Milvus 2.5.16 is healthy, stop all services and update OpenRAG to the new version. The updated `infra/compose/milvus/milvus.yaml` already includes Milvus 2.6.11 and the required MinIO and etcd upgrades.
 
 ```bash
 docker compose down
