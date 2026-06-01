@@ -126,4 +126,4 @@ ignore = [
 known-first-party = ["openrag"]
 
 [tool.uv.workspace]
-exclude = ["benchmarks/prompt_eval"]
+exclude = ["tests/load/prompt_eval"]

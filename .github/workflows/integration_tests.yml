@@ -46,7 +46,7 @@ jobs:
         run: uv sync
 
       - name: Start Milvus stack
-        working-directory: tests/integration
+        working-directory: tests/integration/repos
         run: docker compose up -d --wait --wait-timeout 180
 
       - name: Verify Milvus reachable from host
@@ -65,11 +65,11 @@ jobs:
         env:
           OPENRAG_TEST_VDB_HOST: localhost
           OPENRAG_TEST_VDB_PORT: "19530"
-        run: uv run pytest tests/integration/ -m integration -v --tb=short
+        run: uv run pytest tests/integration/repos/ -m integration -v --tb=short
 
       - name: Show logs on failure
         if: failure()
-        working-directory: tests/integration
+        working-directory: tests/integration/repos
         run: |
           echo "=== Milvus Logs ==="
           docker compose logs milvus --tail=200
@@ -80,5 +80,5 @@ jobs:
 
       - name: Cleanup
         if: always()
-        working-directory: tests/integration
+        working-directory: tests/integration/repos
         run: docker compose down -v

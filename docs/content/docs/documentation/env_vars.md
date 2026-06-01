@@ -44,7 +44,7 @@ The `MarkerLoader` is the default PDF parsing engine. It can be configured using
 :::note[Page chunking with `MARKER_CHUNK_SIZE`]
 Enabling page chunking allows processing large PDFs **significantly faster** by dispatching page ranges to all available workers in parallel rather than sending the entire file to a single worker. The main benefit is the ability to safely scale `MARKER_MAX_PROCESSES` without risking OOM.
 
-It also **reduces per-worker GPU memory spikes** on large files. With a reasonable chunk size (around 10 pages), spikes are shorter and lower, making it safer to run more concurrent workers. See `benchmarks/marker/marker_page_chunking.md` for measured results.
+It also **reduces per-worker GPU memory spikes** on large files. With a reasonable chunk size (around 10 pages), spikes are shorter and lower, making it safer to run more concurrent workers. See `tests/load/marker/marker_page_chunking.md` for measured results.
 
 **NB:** Consider increasing `MARKER_MAX_TASKS_PER_CHILD` when using page chunking, as worker utilization increases significantly and you may observe frequent subprocess restarts with the default value.
 :::

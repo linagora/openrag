@@ -39,7 +39,7 @@ mkdir -p "${BACKUP_DIR}"
 echo "Step 1: Creating backup of partition '${PARTITION}'..."
 docker compose --env-file "${ENV_FILE}" run --rm \
     -v "${BACKUP_DIR}:/backup:rw" \
-    --entrypoint "bash /app/openrag/scripts/entrypoint-backup.sh ${PARTITION}" \
+    --entrypoint "bash /app/scripts/entrypoint-backup.sh ${PARTITION}" \
     openrag-cpu
 
 BACKUP_FILE="${BACKUP_DIR}/${PARTITION}.openrag"
@@ -63,7 +63,7 @@ echo ""
 echo "Step 3: Restoring backup to new partition '${PARTITION_RESTORED}'..."
 docker compose --env-file "${ENV_FILE}" run --rm \
     -v "${BACKUP_DIR}:/backup:ro" \
-    --entrypoint "bash /app/openrag/scripts/entrypoint-restore.sh ${PARTITION_RESTORED} /backup/modified.openrag" \
+    --entrypoint "bash /app/scripts/entrypoint-restore.sh ${PARTITION_RESTORED} /backup/modified.openrag" \
     openrag-cpu
 
 echo "Restore completed"
@@ -73,7 +73,7 @@ echo ""
 echo "Step 4: Creating backup of restored partition '${PARTITION_RESTORED}'..."
 docker compose --env-file "${ENV_FILE}" run --rm \
     -v "${BACKUP_DIR}:/backup:rw" \
-    --entrypoint "bash /app/openrag/scripts/entrypoint-backup.sh ${PARTITION_RESTORED}" \
+    --entrypoint "bash /app/scripts/entrypoint-backup.sh ${PARTITION_RESTORED}" \
     openrag-cpu
 
 RESTORED_BACKUP="${BACKUP_DIR}/${PARTITION_RESTORED}.openrag"

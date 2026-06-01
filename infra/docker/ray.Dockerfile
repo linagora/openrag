@@ -47,7 +47,8 @@ WORKDIR /app/openrag
 # Copy source code
 COPY openrag/ .
 
-# Copy config (prompt templates ship inside the package under openrag/prompts/)
+# Copy assets and config (prompt templates ship inside the package under openrag/prompts/)
+COPY scripts/ /app/scripts/
 COPY conf/ /app/conf/
 
 RUN ln -s /app/.venv/bin/ray /usr/local/bin/ray

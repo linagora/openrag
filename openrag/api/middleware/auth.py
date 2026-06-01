@@ -23,7 +23,7 @@ Environment configuration (``AUTH_MODE``, ``AUTH_TOKEN``,
 
 Phase 10G migrated the last three legacy importers
 (``chainlit_api.py``, the ``components/auth`` test module, and the
-``tests/api_tests/test_oidc_lifecycle.py`` fixture) onto this module
+``tests/integration/api/test_oidc_lifecycle.py`` fixture) onto this module
 and deleted the ``components/auth/middleware.py`` shim.
 """
 
