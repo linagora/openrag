@@ -1,14 +1,16 @@
 include:
-  - vdb/milvus.yaml
-  - ${CHAINLIT_DATALAYER_COMPOSE:-extern/dummy.yaml}
-  - extern/reranker/${RERANKER_PROVIDER:-infinity}.yaml
-  - ${TRANSCRIBER_COMPOSE:-extern/dummy.yaml}
+  - milvus/milvus.yaml
+  - ${CHAINLIT_DATALAYER_COMPOSE:-../../extern/dummy.yaml}
+  - ../../extern/reranker/${RERANKER_PROVIDER:-infinity}.yaml
+  - ${TRANSCRIBER_COMPOSE:-../../extern/dummy.yaml}
 
 x-openrag: &openrag_template
   image: linagoraai/openrag:latest
   build:
-    context: .
-    dockerfile: Dockerfile
+    # Build context is the repo root so the Dockerfile can COPY pyproject.toml,
+    # uv.lock, openrag/, conf/ and infra/scripts/entrypoint.sh directly.
+    context: ../..
+    dockerfile: infra/docker/api.Dockerfile
   extra_hosts:
     # Let containers reach services running on the Docker host via
     # ``host.docker.internal`` (Linux Docker >= 20.10). Useful when an OIDC
@@ -19,12 +21,12 @@ x-openrag: &openrag_template
     # shadowed for other users.
     - "host.docker.internal:host-gateway"
   volumes:
-    - ${DATA_VOLUME:-./data}:/app/data
-    - ./i8n:/app/openrag/.chainlit/translations
+    - ${DATA_VOLUME:-../../data}:/app/data
+    - ../../i8n:/app/openrag/.chainlit/translations
     - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
-    - ./openrag:/app/openrag # For dev mode
+    - ../../openrag:/app/openrag # For dev mode
     - /$SHARED_ENV:/ray_mount/.env # Shared environment variables
-    - ./logs:/app/logs # For dev mode
+    - ../../logs:/app/logs # For dev mode
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
     - ${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
@@ -74,7 +76,7 @@ services:
   indexer-ui:
     image: linagoraai/indexer-ui:latest
     build:
-      context: ./extern/indexer-ui
+      context: ../../extern/indexer-ui
       dockerfile: Dockerfile
       args:
         # Mount indexer-ui under a subpath (e.g. /indexerui/) on a shared
@@ -135,8 +137,8 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-root_password}
       - POSTGRES_USER=${POSTGRES_USER:-root}
     volumes:
-      - ${DB_VOLUME:-./db}:/var/lib/postgresql/data
-      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
+      - ${DB_VOLUME:-../../db}:/var/lib/postgresql/data
+      - ../../scripts/postgres-init:/docker-entrypoint-initdb.d:ro
     expose:
       - 5432
 
@@ -161,7 +163,7 @@ services:
   vllm-cpu:
     <<: *vllm_template
     build:
-      context: extern/vllm
+      context: ../../extern/vllm
       dockerfile: Dockerfile.cpu
       target: vllm-openai
     image: openrag-vllm-openai-cpu
