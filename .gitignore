@@ -67,7 +67,7 @@ volumes/*
 *.pkl
 
 #helm
-charts/openrag-stack/charts/*.tgz
+infra/charts/openrag-stack/charts/*.tgz
 
 # Planning
 .planning/
