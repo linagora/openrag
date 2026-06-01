@@ -7,7 +7,8 @@
 **/*chainlit.md
 .venv/
 qdrant_storage/
-vdb/volumes
+vdb/
+db/
 
 # other files and folders
 misc
@@ -67,7 +68,7 @@ volumes/*
 *.pkl
 
 #helm
-charts/openrag-stack/charts/*.tgz
+infra/charts/openrag-stack/charts/*.tgz
 
 # Planning
 .planning/
@@ -84,6 +85,12 @@ docs/plans/
 
 # Build artifacts
 *.egg-info/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
 
 # Local developer overrides (not committed)
 docker-compose.override.yaml

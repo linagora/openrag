@@ -94,8 +94,13 @@ class RayConfig(ConfigMixin):
 # ---------------------------------------------------------------------------
 
 
+# Bundled prompt templates: openrag/prompts/templates/ (this file is at
+# openrag/core/config/infrastructure.py, three levels under the package root).
+_DEFAULT_PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts" / "templates"
+
+
 class PathsConfig(ConfigMixin):
-    prompts_dir: Path = Path("../prompts/example1")
+    prompts_dir: Path = _DEFAULT_PROMPTS_DIR
     data_dir: Path = Path("../data")
     db_dir: Path = Path("/app/db")
     log_dir: Path = Path("/app/logs")

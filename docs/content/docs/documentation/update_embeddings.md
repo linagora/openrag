@@ -8,7 +8,7 @@ A command-line utility for generating text embeddings using any **OpenAI-compati
 It supports adaptive batching for optimal performance and handles both plain and `.xz` compressed [backup files](/openrag/documentation/backup_restore/#backup-dump-format).
 
 ```bash
-python3 openrag/scripts/embed.py \
+python3 scripts/embed.py \
     -u http://openai-compatible-endpoint/v1 \
     -m Qwen/Qwen3-Embedding-0.6B \
     -k sk-... \
@@ -17,7 +17,7 @@ python3 openrag/scripts/embed.py \
     -o output-file.openrag(.xz)
 
 ## The following version if you're using uv
-# uv run python3 openrag/scripts/embed.py \
+# uv run python3 scripts/embed.py \
 #     -u http://openai-compatible-endpoint/v1 \
 #     -m Qwen/Qwen3-Embedding-0.6B \
 #     -k sk-... \

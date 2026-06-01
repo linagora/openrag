@@ -107,7 +107,9 @@ llm_context:
 # --- Paths ---
 # Env: PROMPTS_DIR, DATA_DIR, DB_DIR, LOG_DIR
 paths:
-  prompts_dir: ../prompts/example1
+  # prompts_dir defaults to the templates bundled in the package
+  # (openrag/prompts/templates). Override via PROMPTS_DIR to load templates
+  # from a custom directory.
   data_dir: ../data
   db_dir: /app/db
   log_dir: /app/logs

@@ -6,6 +6,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 OpenRag is a modular Retrieval-Augmented Generation (RAG) framework built with FastAPI, Ray for distributed computing, and Milvus as the vector database. It provides document ingestion, chunking, embedding, and retrieval capabilities with an OpenAI-compatible API.
 
+## Project Layout
+
+```text
+openrag/        # Python package (application code only): core/ services/ api/ di/ prompts/
+conf/           # YAML configuration
+infra/          # All deployment infrastructure
+  docker/       #   api.Dockerfile, ray.Dockerfile (build from repo root)
+  compose/      #   docker-compose.yaml + service configs (grafana, prometheus, milvus, .env.example)
+  scripts/      #   entrypoint.sh and other deployment scripts
+  ansible/      #   Ansible playbooks
+  charts/       #   Helm charts (openrag-stack)
+  quick_start/  #   Getting-started compose
+  cluster.yaml  #   Ray cluster config
+scripts/        # Developer/operational CLI tools (check_layer_imports.py, data_indexer.py, postgres-init/)
+tests/          # Integration tests (api_tests/, integration/)
+docs/           # Documentation (Astro site + refactoring docs)
+ui -> extern/indexer-ui   # Symlink to the admin frontend submodule
+extern/         # Git submodules + compose service includes
+```
+
+Prompt templates ship inside the package at `openrag/prompts/templates/*.txt` and are
+loaded into `DEFAULT_SEEDS` by `openrag/prompts/__init__.py`.
+
 ## Common Commands
 
 ### Development
@@ -14,9 +37,11 @@ OpenRag is a modular Retrieval-Augmented Generation (RAG) framework built with F
 # Install dependencies
 uv sync
 
-# Run the application locally (requires Docker services)
-docker compose up -d           # GPU deployment
-docker compose --profile cpu up -d  # CPU deployment
+# Run the application locally (requires Docker services).
+# The compose stack and its service configs live under infra/compose/.
+cd infra/compose
+docker compose up -d                 # GPU deployment
+docker compose --profile cpu up -d   # CPU deployment
 
 # Run with rebuild for development
 docker compose up --build -d
@@ -25,14 +50,18 @@ docker compose up --build -d
 ### Testing
 
 ```bash
-# Run all unit tests
-uv run pytest
+# Run all unit tests (fast, no infra needed)
+uv run pytest tests/unit/
 
 # Run a single test file
-uv run pytest openrag/components/indexer/chunker/test_chunking.py
+uv run pytest tests/unit/core/models/test_chunk.py
 
 # Run tests matching a pattern
 uv run pytest -k "test_chunk"
+
+# Integration tests (need running services) / load tests
+uv run pytest tests/integration/
+uv run pytest tests/load/
 ```
 
 ### Linting
@@ -53,19 +82,19 @@ npm run dev  # Start dev server at http://localhost:4321/openrag
 
 ### Core Components
 
-The main application entry point is `openrag/main.py` which creates a FastAPI app with Ray initialization.
+The main application entry point is `openrag/api/main.py` which creates a FastAPI app with Ray initialization.
 
 **Ray Actors** (distributed components):
-- `Indexer` (`openrag/components/indexer/indexer.py`) - Handles document ingestion, chunking, and insertion into vector DB
-- `TaskStateManager` (`openrag/components/indexer/indexer.py`) - Tracks async task states: QUEUED → SERIALIZING → CHUNKING → INSERTING → COMPLETED (or FAILED or CANCELLED)
-- `Vectordb` / `MilvusDB` (`openrag/components/indexer/vectordb/vectordb.py`) - Vector database operations with hybrid search (dense + BM25 sparse)
-- `DocSerializer` - Serializes files to Document objects using appropriate loaders
-- `MarkerPool` / `MarkerWorker` - Pool of workers for PDF processing with Marker
+- `Indexer` (`openrag/services/workers/indexer_pool.py`) - Handles document ingestion, chunking, and insertion into vector DB
+- `TaskStateManager` (`openrag/services/workers/task_state.py`) - Tracks async task states: QUEUED → SERIALIZING → CHUNKING → INSERTING → COMPLETED (or FAILED or CANCELLED)
+- `Vectordb` / `MilvusDB` (`openrag/services/storage/milvus_store.py`) - Vector database operations with hybrid search (dense + BM25 sparse)
+- `DocSerializer` (`openrag/services/workers/parsers/doc_serializer.py`) - Serializes files to Document objects using appropriate loaders
+- `MarkerPool` / `MarkerWorker` (`openrag/services/workers/parsers/marker_workers.py`) - Pool of workers for PDF processing with Marker
 
 **Pipeline Classes**:
-- `RagPipeline` (`openrag/components/pipeline.py`) - Orchestrates retrieval and LLM generation
-- `RetrieverPipeline` - Handles document retrieval and reranking
-- `RAGMapReduce` (`openrag/components/map_reduce.py`) - Map-reduce for processing large document sets
+- `RagPipeline` (`openrag/services/orchestrators/query_service.py`) - Orchestrates retrieval and LLM generation
+- `RetrieverPipeline` (`openrag/core/retrieval/pipeline.py`) - Handles document retrieval and reranking
+- `RAGMapReduce` (`openrag/services/orchestrators/query_service.py`) - Map-reduce for processing large document sets
 
 ### Document Processing Flow
 
@@ -75,10 +104,10 @@ The main application entry point is `openrag/main.py` which creates a FastAPI ap
 4. Embedder generates vectors via VLLM (OpenAI-compatible API)
 5. Chunks inserted into Milvus with partition-based organization
 
-### File Loaders (`openrag/components/indexer/loaders/`)
+### File Loaders (`openrag/services/workers/parsers/legacy_loaders/`)
 
 Each file type has a dedicated loader that converts to markdown:
-- `MarkerLoader` (default for PDF, in `pdf_loaders/`) - Supports OCR, complex layouts, tables
+- `MarkerLoader` (default for PDF, in `pdf_loaders/marker.py`) - Supports OCR, complex layouts, tables
 - `DocxLoader`, `PPTXLoader`, `DocLoader` - Office formats (uses MarkItDown library)
 - `ImageLoader` - VLM-powered image captioning
 - `VideoAudioLoader` - Audio transcription via Whisper
@@ -102,30 +131,30 @@ Each file type has a dedicated loader that converts to markdown:
 
 The RAG pipeline filters out false-positive sources by having the LLM self-report which sources it actually used:
 
-1. `format_context()` (`openrag/components/utils.py`) numbers each source (`[Source 1]`, `[Source 2]`, ...) in the context and returns `(formatted_text, included_indices)` — the indices track which docs fit within the token budget
-2. Prompt templates (`prompts/example1/*.txt`) instruct the LLM to append `[Sources: 1, 3, 5]` at the end of its response
-3. `extract_and_strip_sources_block()` strips this tag from the response before sending to the client
-4. `filter_sources_by_citations()` filters the source metadata to only include cited sources (falls back to all sources if none match)
+1. `format_context()` (`openrag/core/prompts/chat_prompt_builder.py`) numbers each source (`[Source 1]`, `[Source 2]`, ...) in the context and returns `(formatted_text, included_indices)` — the indices track which docs fit within the token budget
+2. Prompt templates (`openrag/prompts/templates/*.txt`) instruct the LLM to append `[Sources: 1, 3, 5]` at the end of its response
+3. `extract_and_strip_sources_block()` (`openrag/core/utils/source_filtering.py`) strips this tag from the response before sending to the client
+4. `filter_sources_by_citations()` (`openrag/core/utils/source_filtering.py`) filters the source metadata to only include cited sources (falls back to all sources if none match)
 5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
 
 The `extra` field in API responses is a JSON string: `{"sources": [filtered_source_list]}`.
 
-### API Routers (`openrag/routers/`)
+### API Routers (`openrag/api/routers/`)
 
-- `openai.py` - OpenAI-compatible `/v1/chat/completions` endpoint
-- `indexer.py` - Document ingestion endpoints
-- `search.py` - Semantic search endpoints
-- `partition.py` - Partition management (multi-tenant document collections)
-- `users.py` - User and membership management
-- `queue.py` - Task queue monitoring
-- `workspaces.py` - Workspace CRUD and file management
-- `tools.py` - Tools like `extractText` at `/v1/tools/execute` (tool param requires JSON: `{"name": "extractText"}`)
+- `user/chat.py` - OpenAI-compatible `/v1/chat/completions` endpoint
+- `admin/indexing.py` - Document ingestion endpoints
+- `user/search.py` - Semantic search endpoints
+- `admin/partitions.py` - Partition management (multi-tenant document collections)
+- `admin/users.py` - User and membership management
+- `admin/jobs.py` - Task queue monitoring
+- `admin/workspaces.py` - Workspace CRUD and file management
+- `admin/tools.py` - Tools like `extractText` at `/v1/tools/execute` (tool param requires JSON: `{"name": "extractText"}`)
 
 ### User Management & Authentication
 
 The system uses token-based authentication with role-based access control (RBAC) for multi-tenant partition access.
 
-**Database Schema** (PostgreSQL with SQLAlchemy, in `openrag/components/indexer/vectordb/utils.py`):
+**Database Schema** (PostgreSQL with SQLAlchemy, in `openrag/services/persistence/schema.py`):
 - `users` - User accounts with `id`, `external_user_id`, `display_name`, `token` (SHA-256 hashed), `is_admin`, `file_quota`, `file_count`
 - `files` - File records with `file_id`, `partition_name`, `file_metadata`, `created_by` (FK to users), `relationship_id`, `parent_id`
 - `partition_memberships` - Join table linking users to partitions with roles (`owner`, `editor`, `viewer`)
@@ -133,19 +162,19 @@ The system uses token-based authentication with role-based access control (RBAC)
 - `workspaces` - Named file subsets within a partition for scoped search/chat
 - `workspace_files` - Join table linking workspaces to files
 
-**Authentication Flow** (`AuthMiddleware` from `openrag/components/auth/middleware.py`, registered in `openrag/main.py`):
+**Authentication Flow** (`AuthMiddleware` from `openrag/api/middleware/auth.py`, registered in `openrag/api/main.py`):
 1. Token extracted from `Authorization: Bearer <token>` header (or `?token=` query param for `/static` routes)
 2. Token hashed with SHA-256, looked up in database
 3. User info and accessible partitions set on `request.state.user` and `request.state.user_partitions`
 4. Bypassed for: `/docs`, `/openapi.json`, `/redoc`, `/health_check`, `/version`, `/chainlit/*`
 5. If `AUTH_TOKEN` env var is not set, defaults to admin user (id=1) for all requests
 
-**Role Hierarchy** (`openrag/routers/utils.py`):
+**Role Hierarchy** (`openrag/services/orchestrators/auth_service.py`):
 ```python
 ROLE_HIERARCHY = {"viewer": 1, "editor": 2, "owner": 3}
 ```
 
-**Permission Dependencies** (`openrag/routers/utils.py`):
+**Permission Dependencies** (`openrag/api/dependencies/auth.py`):
 - `require_admin` - User must have `is_admin=True`
 - `require_partition_viewer` / `require_partition_editor` / `require_partition_owner` - Check partition membership role
 - `SUPER_ADMIN_MODE=true` env var allows admin users (`is_admin=True`) to bypass partition checks; regular users remain restricted to their partition memberships
@@ -168,7 +197,7 @@ ROLE_HIERARCHY = {"viewer": 1, "editor": 2, "owner": 3}
 | `/partition/{partition}/users/{user_id}` | DELETE | Owner | Remove user |
 | `/partition/{partition}/users/{user_id}` | PATCH | Owner | Update user role |
 
-**Core Implementation** (`PartitionFileManager` in `openrag/components/indexer/vectordb/utils.py`):
+**Core Implementation** (`PartitionFileManager` in `openrag/services/persistence/partition_repo.py`):
 ```python
 # User operations (called via MilvusDB Ray actor)
 await vectordb.create_user.remote(display_name="Name", is_admin=False)
@@ -196,7 +225,7 @@ await vectordb.list_partition_members.remote(partition)
 
 Optional web search augmentation via the Staan API, allowing the LLM to combine RAG document context with live web results.
 
-**Configuration** (`.hydra_config/config.yaml` → `websearch:` block, env vars):
+**Configuration** (`conf/config.yaml` → `websearch:` block, env vars):
 - `WEBSEARCH_API_TOKEN` — provider API token; if unset, web search is silently disabled
 - `WEBSEARCH_BASE_URL` — provider endpoint (default: Staan API)
 - `WEBSEARCH_TOP_K` — number of web results (default: 5)
@@ -209,10 +238,10 @@ Optional web search augmentation via the Staan API, allowing the LLM to combine 
 - Source entries include `source_type: "document"` or `source_type: "web"` in the `extra.sources` response
 
 **Key files:**
-- `openrag/components/websearch/` — `WebSearchService`, `BaseWebSearchProvider`, `StaanProvider`
-- `openrag/components/utils.py` — `format_web_context()` formats web results as numbered source blocks
-- `openrag/components/pipeline.py` — `_prepare_for_web_only()`, web search logic in `_prepare_for_chat_completion()`
-- `openrag/routers/openai.py` — `__prepare_sources()` merges document and web sources
+- `openrag/services/websearch/` — `WebSearchService` (`service.py`), `BaseWebSearchProvider` (`base.py`), `StaanProvider` (`providers/staan.py`)
+- `openrag/core/prompts/chat_prompt_builder.py` — `format_web_context()` formats web results as numbered source blocks
+- `openrag/services/orchestrators/query_service.py` — `_prepare_for_web_only()`, web search logic in `_prepare_for_chat_completion()`
+- `openrag/api/routers/user/chat.py` — `__prepare_sources()` merges document and web sources
 
 ### File Quota System
 
@@ -223,7 +252,7 @@ Per-user file quota enforcement tracked via the `file_count` and `file_quota` co
 - `users.file_count` is incremented/decremented in application code (in `PartitionFileManager`) — no SQL triggers
 - Decrements use `func.greatest(file_count - N, 0)` to prevent negative values from race conditions
 - `delete_partition` queries per-uploader counts before cascade delete, then bulk decrements
-- Quota check (`check_user_file_quota` in `openrag/routers/utils.py`) runs on upload, considering both indexed files and pending tasks
+- Quota check (`check_user_file_quota` in `openrag/api/dependencies/auth.py`) runs on upload, considering both indexed files and pending tasks
 
 **Quota logic (`file_quota` column):**
 - `None` → use global default (`DEFAULT_FILE_QUOTA` env var, default `-1`)
@@ -236,30 +265,32 @@ Per-user file quota enforcement tracked via the `file_count` and `file_quota` co
 - `created_by` uses `ondelete="SET NULL"` so deleting a user doesn't cascade-delete their files
 - `Indexer.delete_file` and `MilvusDB.delete_file/delete_partition` don't need a `user_id` parameter — the uploader is looked up from `files.created_by`
 
-**Migration:** `openrag/scripts/migrations/alembic/versions/c224d4befe71_add_file_count_and_file_quota.py`
+**Migration:** `openrag/services/persistence/migrations/alembic/versions/c224d4befe71_add_file_count_and_file_quota.py`
 
 ### Alembic Migration Idempotency
 
-`Base.metadata.create_all()` runs at app startup (`PartitionFileManager.__init__` in `openrag/components/indexer/vectordb/utils.py`), so a freshly bootstrapped database already contains the full current-model schema before alembic ever touches it. Migrations must therefore be **idempotent** — re-applying an `ADD COLUMN` / `CREATE TABLE` / `CREATE INDEX` against an already-existing object would raise `DuplicateColumn` / `DuplicateTable`.
+`Base.metadata.create_all()` runs at app startup (`PartitionFileManager.__init__` in `openrag/services/persistence/partition_repo.py`), so a freshly bootstrapped database already contains the full current-model schema before alembic ever touches it. Migrations must therefore be **idempotent** — re-applying an `ADD COLUMN` / `CREATE TABLE` / `CREATE INDEX` against an already-existing object would raise `DuplicateColumn` / `DuplicateTable`.
 
 Guard every schema-mutating op with an inspector-based existence check (`table_exists`, `column_exists`, `index_exists`, `fk_exists`), in both `upgrade()` and `downgrade()`. For migrations that convert a column type, also short-circuit if the column is already the target type.
 
 ### Configuration
 
-Configuration uses Hydra with YAML files in `.hydra_config/`:
-- Main config: `.hydra_config/config.yaml`
-- Chunker configs: `.hydra_config/chunker/`
-- Retriever configs: `.hydra_config/retriever/`
-- RAG mode configs: `.hydra_config/rag/`
+Configuration is a single YAML file validated with Pydantic models:
+- Main config: `conf/config.yaml`
+- Loaded by `openrag/core/config/loader.py` (`load_config()` exposed from `openrag/core/config/__init__.py`)
+- Pydantic config classes live in `openrag/core/config/` (`root.py`, `auth.py`, `chunking.py`, `retrieval.py`, `indexation.py`, `endpoints.py`, `mcp.py`, `infrastructure.py`, `base.py`)
 
-Environment variables override config values (see `.env.example`).
+Environment variables override config values (see `infra/compose/.env.example`).
 
 ### Testing Structure
 
-- Unit tests: `openrag/components/**/test_*.py` (pytest)
-- API integration tests: `tests/api_tests/*.py` (pytest, requires running server)
-- Robot Framework tests: `tests/api/*.robot`
-- Test config in `pytest.ini` sets `CONFIG_PATH` and `PROMPTS_DIR`
+All tests live in a separate `tests/` tree (zero test files inside the `openrag/` package):
+- Unit tests: `tests/unit/**/test_*.py` (pytest, mirrors the package structure; no external services needed)
+- Integration tests: `tests/integration/api/*.py` (HTTP endpoint tests, requires running server) and `tests/integration/repos/*.py` (repo/store tests)
+- Robot Framework tests: `tests/integration/robot/api/*.robot`
+- Load/benchmark tests: `tests/load/`
+- Shared fixtures: `tests/unit/conftest.py` (mock ports), `tests/unit/api/conftest.py` (ASGI client), plus per-suite conftests
+- Test config lives in `pyproject.toml` (`[tool.pytest.ini_options]`): `testpaths = ["tests"]`, `pythonpath = ["./openrag"]`, and the `env` block sets `PROMPTS_DIR=./openrag/prompts/templates` and `LOG_DIR`
 
 **Running integration tests locally with act:**
 ```bash
@@ -288,7 +319,7 @@ await vectordb.async_search.remote(query=query, partition=partition)
 Use the centralized utility for calling Ray actors with proper timeout and cancellation handling:
 
 ```python
-from components.ray_utils import call_ray_actor_with_timeout
+from services.workers.ray_utils import call_ray_actor_with_timeout
 
 result = await call_ray_actor_with_timeout(
     future=actor.method.remote(args),
@@ -304,7 +335,7 @@ This handles:
 
 ### Custom Exceptions
 
-All custom exceptions inherit from `OpenRAGError` (`openrag/utils/exceptions/`):
+All custom exceptions inherit from `OpenRAGError` (`openrag/core/utils/exceptions.py`):
 - `VDBError` subclasses for vector database errors
 - `EmbeddingError` for embedding failures
 
@@ -322,9 +353,9 @@ logger.bind(file_id=file_id, partition=partition).info("Message")
 Use absolute imports from the `openrag/` directory (which is the Python path root):
 ```python
 # Correct - absolute imports
-from components.ray_utils import call_ray_actor_with_timeout
+from services.workers.ray_utils import call_ray_actor_with_timeout
 from core.utils.logging import get_logger
-from config import load_config
+from core.config import load_config
 
 # Avoid relative imports across packages
 # from .ray_utils import ...  # Only within same package

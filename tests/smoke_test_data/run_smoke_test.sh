@@ -28,7 +28,7 @@ echo "Step 1: Checking API health..."
 # Step 2: Index documents
 echo ""
 echo "Step 2: Indexing 500 documents..."
-python3 "${PROJECT_ROOT}/utility/data_indexer.py" \
+python3 "${PROJECT_ROOT}/scripts/data_indexer.py" \
     -u "${URL}" \
     -d "${DATA_DIR}" \
     -p "${PARTITION}"

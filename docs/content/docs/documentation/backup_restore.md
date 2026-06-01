@@ -15,7 +15,7 @@ docker compose --env-file .env \
     --build \
     --rm \
     -v /my-backup-dir/:/backup:rw \
-    --entrypoint "bash /app/openrag/scripts/entrypoint-backup.sh ${PARTITION_NAME}" \
+    --entrypoint "bash /app/scripts/entrypoint-backup.sh ${PARTITION_NAME}" \
     openrag-cpu
 
 ```
@@ -28,7 +28,7 @@ docker compose --env-file .env \
     --build \
     --rm \
     -v /my-backup-dir/:/backup:rw \
-    --entrypoint "bash /app/openrag/scripts/entrypoint-backup-mt.sh ${PARTITION_NAME}" \
+    --entrypoint "bash /app/scripts/entrypoint-backup-mt.sh ${PARTITION_NAME}" \
     openrag-cpu
 ```
 :::
@@ -40,7 +40,7 @@ docker compose --env-file .env \
 docker compose --env-file .env \
   run --build --rm \
   -v ~/backup:/backup:rw \
-  --entrypoint "uv run /app/openrag/scripts/backup.py -o /backup/test.openrag" \
+  --entrypoint "uv run /app/scripts/backup.py -o /backup/test.openrag" \
   openrag
 
 # Use --include-only to specify the partitions to back up.
@@ -57,7 +57,7 @@ docker compose --env-file .env \
     --build \
     --rm \
     -v /my-backup-dir/:/backup:ro \
-    --entrypoint "bash /app/openrag/scripts/entrypoint-restore-dry-run.sh backup-file-without-path parition-name" \
+    --entrypoint "bash /app/scripts/entrypoint-restore-dry-run.sh backup-file-without-path parition-name" \
     openrag-cpu
 ```
 Backup files are expected to be in `/my-backup-dir/`. If the dry run is successful, run the following script to insert the data :
@@ -68,7 +68,7 @@ docker compose --env-file .env \
     --build \
     --rm \
     -v /my-backup-dir/:/backup:ro \
-    --entrypoint "bash /app/openrag/scripts/entrypoint-restore.sh backup-file-without-path parition-name" \
+    --entrypoint "bash /app/scripts/entrypoint-restore.sh backup-file-without-path parition-name" \
     openrag-cpu
 ```
 
@@ -78,7 +78,7 @@ docker compose --env-file .env \
 docker compose --env-file .env \
   run --build --rm \
   -v ~/backup:/backup:rw \
-  --entrypoint "uv run /app/openrag/scripts/restore.py /backup/test.openrag"\
+  --entrypoint "uv run /app/scripts/restore.py /backup/test.openrag"\
   openrag
 
 # Use --include-only to specify the partitions to restore.

@@ -18,7 +18,7 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `IMAGE_CAPTIONING` | `bool` | `true` | If `true`, an LLM is used to describe images and convert them into text using a [specific prompt](https://github.com/linagora/openrag/blob/main/prompts/example1/image_captioning_tmpl.txt). The image in files are replaced by their descriptions |
+| `IMAGE_CAPTIONING` | `bool` | `true` | If `true`, an LLM is used to describe images and convert them into text using a [specific prompt](https://github.com/linagora/openrag/blob/main/openrag/prompts/templates/image_captioning_tmpl.txt). The image in files are replaced by their descriptions |
 | `IMAGE_CAPTIONING_URL` | `bool` | `true` | If `true`, HTTP/HTTPS image URLs in markdown files are fetched and described by the VLM. |
 | `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing is saved. Useful for debugging and verifying the correctness of the generated markdown. |
 |`SAVE_UPLOADED_FILES`|`bool`|`false`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
@@ -44,7 +44,7 @@ The `MarkerLoader` is the default PDF parsing engine. It can be configured using
 :::note[Page chunking with `MARKER_CHUNK_SIZE`]
 Enabling page chunking allows processing large PDFs **significantly faster** by dispatching page ranges to all available workers in parallel rather than sending the entire file to a single worker. The main benefit is the ability to safely scale `MARKER_MAX_PROCESSES` without risking OOM.
 
-It also **reduces per-worker GPU memory spikes** on large files. With a reasonable chunk size (around 10 pages), spikes are shorter and lower, making it safer to run more concurrent workers. See `benchmarks/marker/marker_page_chunking.md` for measured results.
+It also **reduces per-worker GPU memory spikes** on large files. With a reasonable chunk size (around 10 pages), spikes are shorter and lower, making it safer to run more concurrent workers. See `tests/load/marker/marker_page_chunking.md` for measured results.
 
 **NB:** Consider increasing `MARKER_MAX_TASKS_PER_CHILD` when using page chunking, as worker utilization increases significantly and you may observe frequent subprocess restarts with the default value.
 :::
@@ -265,7 +265,7 @@ The reranker enhances search quality by re-scoring and reordering retrieved docu
 ## Extra
 ### Prompts
 
-The RAG pipeline comes with preconfigured prompts **`./prompts/example1`**. Here are available Prompt Templates in that folder.
+The RAG pipeline ships with preconfigured prompts bundled inside the package at **`openrag/prompts/templates`**. Here are the available Prompt Templates in that folder.
 
 | Template File | Purpose |
 |---------------|---------|
@@ -278,19 +278,19 @@ The RAG pipeline comes with preconfigured prompts **`./prompts/example1`**. Here
 | `multi_query_pmpt_tmpl.txt` | Template for generating multiple query variations |
 
 To customize prompt:
-1. **Duplicate the example folder**: Copy the `example1` folder from `./prompts/`
+1. **Copy the bundled templates**: Copy `openrag/prompts/templates` to a folder of your choice
 2. **Create your custom folder**: Rename it to something meaningful, e.g., `my_prompt`
 3. **Modify the prompts**: Edit any prompt templates within your new folder
-4. **Update configuration**: Point to your custom prompts directory
+4. **Update configuration**: Point `PROMPTS_DIR` at your custom prompts directory
   ```bash
   //.env
   # Use custom prompts
-  export PROMPTS_DIR=../prompts/my_prompt
+  export PROMPTS_DIR=/path/to/my_prompt
   ```
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `PROMPTS_DIR` | str | ../prompts/example1 | Path to the directory containing your prompt templates |
+| `PROMPTS_DIR` | str | (bundled `openrag/prompts/templates`) | Path to a directory of prompt templates. Unset uses the templates bundled in the package; set it only to override with a custom directory. |
 
 ### Logging
 Our application uses Loguru with custom formatting. Log messages appear in two places:

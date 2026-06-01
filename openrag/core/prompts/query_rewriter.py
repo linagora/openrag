@@ -1,8 +1,8 @@
 """Query-rewriting prompt builders for HyDe and Multi-Query retrieval.
 
-Templates live on disk under ``prompts/<example>/`` and are loaded via
-``template_loader``. These functions are pure: they take a template string +
-substitution variables and return the formatted prompt.
+Templates ship with the package under ``openrag/prompts/templates/`` and are
+loaded via ``template_loader``. These functions are pure: they take a template
+string + substitution variables and return the formatted prompt.
 
 Template variables expected:
     HyDe template: ``{question}``

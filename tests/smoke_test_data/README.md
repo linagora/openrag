@@ -39,7 +39,7 @@ Indexes 500 SimplWiki documents and waits for completion.
 
 **What it does:**
 1. Checks API health at `/health_check`
-2. Indexes 500 documents to partition `simplewiki-500` using `utility/data_indexer.py`
+2. Indexes 500 documents to partition `simplewiki-500` using `scripts/data_indexer.py`
 3. Waits for all indexing tasks to complete via `/queue/info`
 
 **Prerequisites:**
