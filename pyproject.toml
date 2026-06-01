@@ -78,6 +78,10 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["openrag*"]
 
+# Ship the bundled prompt templates (read at import time by openrag/prompts)
+# inside the wheel — they are non-.py data files setuptools would otherwise skip.
+[tool.setuptools.package-data]
+"openrag.prompts" = ["templates/*.txt"]
 
 
 [tool.ruff]
@@ -96,7 +100,9 @@ exclude = [
     "logs",
     ".astro",
     "openrag.egg-info",
-    "extern"
+    "extern",
+    "infra",
+    "tests/load",
 ]
 
 [tool.ruff.lint]
