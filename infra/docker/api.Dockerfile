@@ -42,8 +42,7 @@ WORKDIR /app/openrag
 # Copy source code
 COPY openrag/ .
 
-# Copy assets and config
-COPY prompts/ /app/prompts/
+# Copy config (prompt templates ship inside the package under openrag/prompts/)
 COPY conf/ /app/conf/
 ENV PYTHONPATH=/app/openrag/
 ENV APP_iPORT=${APP_iPORT:-8080}

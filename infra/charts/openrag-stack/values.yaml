@@ -300,8 +300,8 @@ env:
     RERANKER_BASE_URL: "http://{{ .Release.Name }}-reranker:{{ .Values.reranker.servicePort }}"
     RERANKER_MODEL_TYPE: "infinity"
 
-    # Prompts
-    PROMPTS_DIR: "../prompts/example1"
+    # Prompts: templates ship inside the package (openrag/prompts/templates);
+    # set PROMPTS_DIR only to override with a custom template directory.
 
     # Loaders
     PDFLoader: "MarkerLoader"
