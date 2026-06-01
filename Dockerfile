@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 # Installer curl
-RUN apt-get update && apt-get install -y curl && apt-get clean
+RUN apt-get update && apt-get install -y curl cron tzdata && apt-get clean
 RUN apt-get update && apt-get install -y git && apt-get clean
 RUN apt-get update && apt-get install -y iputils-ping
 RUN apt-get update && apt-get install -y \
@@ -40,10 +40,11 @@ WORKDIR /app/openrag
 
 # Copy source code
 COPY openrag/ .
+COPY rag_audit/ /app/rag_audit/
 
 # Copy assets and config
 COPY prompts/ /app/prompts/
 COPY conf/ /app/conf/
-ENV PYTHONPATH=/app/openrag/
+ENV PYTHONPATH=/app:/app/openrag/
 ENV APP_iPORT=${APP_iPORT:-8080}
 ENTRYPOINT ../entrypoint.sh

@@ -18,6 +18,7 @@ erDiagram
     partitions ||--o{ files : contains
     partitions ||--o{ partition_memberships : has
     partitions ||--o{ workspaces : has
+    partitions ||--o{ rag_audit_runs : audited_by
     users ||--o{ partition_memberships : belongs_to
     workspaces ||--o{ workspace_files : has
     files ||--o{ workspace_files : referenced_by
@@ -67,6 +68,23 @@ erDiagram
         int id PK
         varchar workspace_id FK
         varchar file_id FK
+    }
+
+    rag_audit_runs {
+        int id PK
+        varchar run_id UK
+        int partition_id
+        varchar partition_name FK
+        varchar status
+        datetime started_at
+        datetime finished_at
+        int document_count
+        int chunk_count
+        float overall_score
+        varchar overall_grade
+        json config_json
+        json result_json
+        varchar error
     }
 ```
 
@@ -180,6 +198,31 @@ Join table linking workspaces to files.
 
 **Constraints:**
 - `UniqueConstraint(workspace_id, file_id)` → a file appears at most once per workspace
+
+---
+
+### `rag_audit_runs`
+
+Stores persisted nightly corpus quality audit runs for each partition.
+
+| Column | Type | Description |
+|------------------|------|-------------|
+| `id` | Integer (PK) | Internal identifier |
+| `run_id` | String (unique) | Public audit run identifier |
+| `partition_id` | Integer | Database ID of the audited partition |
+| `partition_name` | String (FK → `partitions.partition`, CASCADE) | Audited partition |
+| `status` | String | `running`, `completed`, `failed`, or `skipped` |
+| `started_at` | DateTime | Audit start time |
+| `finished_at` | DateTime | Audit finish time |
+| `document_count` | Integer | Number of file records audited |
+| `chunk_count` | Integer | Number of chunks audited |
+| `overall_score` | Float | Weighted audit score |
+| `overall_grade` | String | Letter grade |
+| `config_json` | JSON | Effective audit configuration |
+| `result_json` | JSON | Sanitized detailed audit result |
+| `error` | String | Failure message for failed runs |
+
+Audit runs are deleted automatically when their partition is deleted.
 
 ---
 

@@ -13,7 +13,7 @@ from dotenv import dotenv_values
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 ray.init(dashboard_host="0.0.0.0")
@@ -57,6 +57,7 @@ env_vars["PYTHONPATH"] = "/app/openrag"
 logger = get_logger()
 config = load_config()
 DATA_DIR = Path(config.paths.data_dir)
+AUDIT_VIEWER_PATH = Path(__file__).resolve().parent / "public" / "rag_audit_viewer.html"
 
 
 class Tags(Enum):
@@ -285,6 +286,11 @@ async def health_check(request: Request):
 @app.get("/version", summary="Get openRAG version", dependencies=[])
 def get_version():
     return {"version": app.version}
+
+
+@app.get("/audit-viewer", include_in_schema=False, response_class=HTMLResponse)
+def audit_viewer():
+    return HTMLResponse(AUDIT_VIEWER_PATH.read_text(encoding="utf-8"))
 
 
 @app.get("/config", summary="Get current configuration", tags=["Configuration"], dependencies=[Depends(require_admin)])

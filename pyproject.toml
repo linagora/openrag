@@ -55,6 +55,9 @@ dependencies = [
     "authlib>=1.3",
     "itsdangerous>=2.2",
     "cryptography>=42",
+    "datasketch>=1.6.5",
+    "langid>=1.1.6",
+    "scikit-learn>=1.5",
 ]
 
 [dependency-groups]
@@ -73,7 +76,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["openrag*"]
+include = ["openrag*", "rag_audit*"]
 
 
 

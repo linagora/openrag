@@ -1,0 +1,17 @@
+.git
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+node_modules
+dist
+.astro
+db
+logs
+data
+model_weights
+ray_mount
+vdb/volumes
+rag_audit/.venv
+rag_audit/test

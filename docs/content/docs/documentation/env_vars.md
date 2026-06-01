@@ -424,6 +424,27 @@ Web search allows the LLM to augment RAG document context with live web results.
 When chatting, you can enable web search through the OpenAI-compatible API by setting `"websearch": true` in the `metadata` field of the request body. See the [API documentation](/openrag/documentation/api/#extra-arguments) for examples.
 :::
 
+### RAG Audit Configuration
+
+RAG audit runs corpus quality checks for each partition and persists sanitized results for the audit API.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `RAG_AUDIT_ENABLED` | `bool` | `true` | Enables or disables scheduled audit work. |
+| `RAG_AUDIT_RETENTION_DAYS` | `int` | `90` | Number of days to keep persisted audit runs. |
+| `RAG_AUDIT_RETRIEVABILITY_TOP_K` | `int` | `10` | Number of search results requested for retrievability probes. |
+| `RAG_AUDIT_RETRIEVABILITY_MAX_QUERIES` | `int` | `500` | Maximum generated retrievability probes per partition. |
+| `RAG_AUDIT_MAX_CONCURRENT_PARTITIONS` | `int` | `1` | Maximum partitions audited concurrently. |
+| `RAG_AUDIT_CRON_ENABLED` | `bool` | `true` in Docker Compose | Starts the in-container cron entry for scheduled audit runs. |
+| `RAG_AUDIT_CRON_SCHEDULE` | `str` | `0 0 * * *` in Docker Compose | Cron expression for the in-container audit job. |
+| `RAG_AUDIT_CRON_TZ` | `str` | `Europe/Paris` in Docker Compose | Timezone for the in-container audit cron job. |
+
+The audit job always discovers and audits every partition. In Docker Compose, cron runs inside the existing OpenRAG container. To run the same all-partitions job manually:
+
+```bash
+docker compose exec -T openrag uv run --no-dev python -m rag_audit.openrag_job --pretty
+```
+
 ### Map & Reduce Configuration
 The map & reduce mechanism processes documents by fetching chunks (map phase), filtering out irrelevant ones and summarizing relevant content (reduce phase) with respect to the user's query. The algorithm works as follows:
 

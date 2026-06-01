@@ -730,6 +730,19 @@ wheels = [
 ]
 
 [[package]]
+name = "datasketch"
+version = "1.10.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8d/73/8e9014887f9fca2d785777a0a6186813e4fc7faa24f05fc88c6420624891/datasketch-1.10.0.tar.gz", hash = "sha256:d23aea80ce4c40790ca7a40795659848be92ecc43db80942be26f21e81d24714", size = 91699, upload-time = "2026-04-17T23:06:56.388Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ed/e7/a94668082e078099eb0161635649510aa887690767b779fffe4bdc479913/datasketch-1.10.0-py3-none-any.whl", hash = "sha256:303dd90cda0948a21abba3aaefc9f8528fa12b8204edc5e1ae8b1d7b750234e7", size = 99914, upload-time = "2026-04-17T23:06:54.39Z" },
+]
+
+[[package]]
 name = "defusedxml"
 version = "0.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1780,6 +1793,15 @@ wheels = [
 ]
 
 [[package]]
+name = "langid"
+version = "1.1.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ea/4c/0fb7d900d3b0b9c8703be316fbddffecdab23c64e1b46c7a83561d78bd43/langid-1.1.6.tar.gz", hash = "sha256:044bcae1912dab85c33d8e98f2811b8f4ff1213e5e9a9e9510137b84da2cb293", size = 1925978, upload-time = "2016-04-05T22:34:15.786Z" }
+
+[[package]]
 name = "langsmith"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -2644,6 +2666,7 @@ dependencies = [
     { name = "chainlit" },
     { name = "chardet" },
     { name = "cryptography" },
+    { name = "datasketch" },
     { name = "docling" },
     { name = "einops" },
     { name = "eml-parser" },
@@ -2659,6 +2682,7 @@ dependencies = [
     { name = "langchain-huggingface" },
     { name = "langchain-openai" },
     { name = "langchain-qdrant" },
+    { name = "langid" },
     { name = "llvmlite" },
     { name = "loguru" },
     { name = "lxml" },
@@ -2681,6 +2705,7 @@ dependencies = [
     { name = "robotframework" },
     { name = "robotframework-requests" },
     { name = "ruff" },
+    { name = "scikit-learn" },
     { name = "spire-doc" },
     { name = "sqlalchemy-utils" },
     { name = "torch" },
@@ -2708,6 +2733,7 @@ requires-dist = [
     { name = "chainlit", specifier = ">=2.2.1" },
     { name = "chardet", specifier = ">=5.2.0" },
     { name = "cryptography", specifier = ">=42" },
+    { name = "datasketch", specifier = ">=1.6.5" },
     { name = "docling", specifier = ">=2.24.0" },
     { name = "einops", specifier = ">=0.8.1" },
     { name = "eml-parser", specifier = ">=2.0.0" },
@@ -2723,6 +2749,7 @@ requires-dist = [
     { name = "langchain-huggingface", specifier = ">=0.1.2" },
     { name = "langchain-openai", specifier = ">=0.3.7" },
     { name = "langchain-qdrant", specifier = ">=0.2.0" },
+    { name = "langid", specifier = ">=1.1.6" },
     { name = "llvmlite", specifier = ">=0.44.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "lxml", specifier = ">=5.0.0" },
@@ -2745,6 +2772,7 @@ requires-dist = [
     { name = "robotframework", specifier = ">=7.2.2" },
     { name = "robotframework-requests", specifier = ">=0.9.7" },
     { name = "ruff", specifier = ">=0.14.1" },
+    { name = "scikit-learn", specifier = ">=1.5" },
     { name = "spire-doc", specifier = ">=13.1.0" },
     { name = "sqlalchemy-utils" },
     { name = "torch", specifier = ">=2.4.1" },

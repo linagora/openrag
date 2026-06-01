@@ -1300,6 +1300,29 @@ class MilvusDB(BaseVectorDB):
         self._check_partition_exists(partition)
         return self.partition_file_manager.list_partition_members(partition)
 
+    async def create_audit_run(self, partition: str, config_json: dict | None = None) -> dict:
+        self._check_partition_exists(partition)
+        return self.partition_file_manager.create_audit_run(partition, config_json)
+
+    async def update_audit_run(self, run_id: str, **fields) -> dict | None:
+        return self.partition_file_manager.update_audit_run(run_id, **fields)
+
+    async def list_audit_runs(self, partition: str, limit: int = 20, status: str | None = None) -> list[dict]:
+        self._check_partition_exists(partition)
+        return self.partition_file_manager.list_audit_runs(partition, limit=limit, status=status)
+
+    async def get_audit_run(self, partition: str, run_id: str) -> dict | None:
+        self._check_partition_exists(partition)
+        return self.partition_file_manager.get_audit_run(partition, run_id)
+
+    async def get_latest_audit_run(self, partition: str, status: str = "completed") -> dict | None:
+        self._check_partition_exists(partition)
+        return self.partition_file_manager.get_latest_audit_run(partition, status=status)
+
+    async def cleanup_audit_runs(self, partition: str, retention_days: int) -> int:
+        self._check_partition_exists(partition)
+        return self.partition_file_manager.cleanup_audit_runs(partition, retention_days)
+
     async def update_partition_member_role(self, partition: str, user_id: int, new_role: str):
         self._check_membership_exists(partition, user_id)
         self.partition_file_manager.update_partition_member_role(partition, user_id, new_role)

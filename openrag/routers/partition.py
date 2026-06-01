@@ -1,11 +1,12 @@
 from typing import Literal
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from utils.dependencies import get_vectordb
 from utils.logger import get_logger
 
+from .audit_utils import summarize_audit_run
 from .utils import (
     ROLE_HIERARCHY,
     partitions_with_details,
@@ -386,6 +387,128 @@ async def update_partition_user_role(
 
     log.debug("User role updated successfully")
     return Response(status_code=status.HTTP_200_OK)
+
+
+# RAG audit endpoints
+
+
+@router.get(
+    "/{partition}/audit/summary",
+    description="""Get a compact latest completed RAG audit summary for a partition.
+
+**Parameters:**
+- `partition`: The partition name
+
+**Response:**
+Returns overall score, grade, counts, timestamps, and each audit axis with score
+and key metrics. Detailed chart data and audit logs are omitted.
+
+**Permissions:**
+- Requires partition viewer role or higher
+""",
+)
+async def get_latest_partition_audit_summary(
+    partition: str,
+    vectordb=Depends(get_vectordb),
+    partition_viewer=Depends(require_partition_viewer),
+):
+    run = await vectordb.get_latest_audit_run.remote(partition=partition, status="completed")
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No completed audit run found for partition '{partition}'",
+        )
+    return JSONResponse(status_code=status.HTTP_200_OK, content=summarize_audit_run(run))
+
+
+@router.get(
+    "/{partition}/audit",
+    description="""Get the latest completed RAG audit result for a partition.
+
+**Parameters:**
+- `partition`: The partition name
+
+**Response:**
+Returns the latest completed audit run with overall score, grade, counts, timestamps,
+and sanitized per-axis result payload.
+
+**Permissions:**
+- Requires partition viewer role or higher
+""",
+)
+async def get_latest_partition_audit(
+    partition: str,
+    vectordb=Depends(get_vectordb),
+    partition_viewer=Depends(require_partition_viewer),
+):
+    run = await vectordb.get_latest_audit_run.remote(partition=partition, status="completed")
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No completed audit run found for partition '{partition}'",
+        )
+    return JSONResponse(status_code=status.HTTP_200_OK, content=run)
+
+
+@router.get(
+    "/{partition}/audit/runs",
+    description="""List RAG audit runs for a partition.
+
+**Parameters:**
+- `partition`: The partition name
+- `limit`: Maximum number of runs to return (default: 20, max: 100)
+- `status`: Optional status filter: running, completed, failed, or skipped
+
+**Response:**
+Returns audit run summaries without the full result JSON payload.
+
+**Permissions:**
+- Requires partition viewer role or higher
+""",
+)
+async def list_partition_audit_runs(
+    partition: str,
+    limit: int = 20,
+    status_filter: str | None = Query(None, alias="status"),
+    vectordb=Depends(get_vectordb),
+    partition_viewer=Depends(require_partition_viewer),
+):
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="limit must be between 1 and 100")
+    if status_filter and status_filter not in {"running", "completed", "failed", "skipped"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid audit run status")
+    runs = await vectordb.list_audit_runs.remote(partition=partition, limit=limit, status=status_filter)
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"runs": runs})
+
+
+@router.get(
+    "/{partition}/audit/runs/{run_id}",
+    description="""Get a specific RAG audit run for a partition.
+
+**Parameters:**
+- `partition`: The partition name
+- `run_id`: Audit run identifier
+
+**Response:**
+Returns a full audit run, including sanitized result JSON when available.
+
+**Permissions:**
+- Requires partition viewer role or higher
+""",
+)
+async def get_partition_audit_run(
+    partition: str,
+    run_id: str,
+    vectordb=Depends(get_vectordb),
+    partition_viewer=Depends(require_partition_viewer),
+):
+    run = await vectordb.get_audit_run.remote(partition=partition, run_id=run_id)
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Audit run '{run_id}' not found for partition '{partition}'",
+        )
+    return JSONResponse(status_code=status.HTTP_200_OK, content=run)
 
 
 # Document relationship endpoints

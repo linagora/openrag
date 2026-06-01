@@ -207,6 +207,38 @@ GET /indexer/task/{task_id}/logs
 GET /indexer/task/{task_id}/error
 ```
 
+---
+
+### 📊 RAG Audit
+
+RAG audit endpoints expose persisted corpus quality reports for a partition. They do not start audit work; the nightly audit scheduler writes results in the background.
+
+```http
+GET /partition/{partition}/audit/summary
+```
+
+Returns a compact latest completed audit summary for the partition: partition name and ID, overall score, grade, counts, timestamps, and each audit axis with score and key metrics. Full chart data and detailed logs are omitted.
+
+```http
+GET /partition/{partition}/audit
+```
+
+Returns the latest completed full audit run for the partition, including partition name and ID, overall score, grade, per-axis results, metrics, chart data, and detailed audit payload.
+
+```http
+GET /partition/{partition}/audit/runs?limit=20&status=completed
+```
+
+Lists audit run summaries for the partition. `status` is optional and can be `running`, `completed`, `failed`, or `skipped`.
+
+```http
+GET /partition/{partition}/audit/runs/{run_id}
+```
+
+Returns a single audit run with its sanitized detailed result payload.
+
+**Permissions:** Requires viewer role on the partition.
+
 
 ### 🔍 Semantic Search
 

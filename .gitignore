@@ -16,6 +16,8 @@ tmp
 # Ignore __pycache__ directories
 __pycache__/
 **/__pycache__/
+rag_audit/.venv/
+rag_audit/test/
 
 **/*upload_dir
 

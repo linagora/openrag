@@ -472,6 +472,17 @@ class RAGConfig(ConfigMixin):
 
 
 # ---------------------------------------------------------------------------
+# RAG Audit
+# ---------------------------------------------------------------------------
+class RagAuditConfig(ConfigMixin):
+    enabled: bool = True
+    retention_days: int = 90
+    retrievability_top_k: int = 10
+    retrievability_max_queries: int = 500
+    max_concurrent_partitions: int = 1
+
+
+# ---------------------------------------------------------------------------
 # WebSearch
 # ---------------------------------------------------------------------------
 class _BaseWebSearchConfig(ConfigMixin):
@@ -526,4 +537,5 @@ class Settings(ConfigMixin):
     chunker: ChunkerConfig = Field(default_factory=ChunkerConfig)
     retriever: RetrieverConfig = Field(default_factory=SingleRetrieverConfig)
     rag: RAGConfig = Field(default_factory=RAGConfig)
+    rag_audit: RagAuditConfig = Field(default_factory=RagAuditConfig)
     websearch: WebSearchConfig = Field(default_factory=StaanWebSearchConfig)

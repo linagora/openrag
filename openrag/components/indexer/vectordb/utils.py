@@ -1,7 +1,8 @@
 import hashlib
 import os
 import secrets
-from datetime import datetime, timedelta
+import uuid
+from datetime import UTC, datetime, timedelta
 
 from config import load_config
 from models.user import UserCreate, UserUpdate
@@ -21,6 +22,7 @@ from .models import (
     OIDCSession,
     Partition,
     PartitionMembership,
+    RagAuditRun,
     User,
     Workspace,
     WorkspaceFile,
@@ -674,6 +676,97 @@ class PartitionFileManager:
         """
         ancestors = self.get_file_ancestors(partition, file_id, max_ancestor_depth)
         return [a["file_id"] for a in ancestors]
+
+    # --- RAG audit methods ---
+
+    def create_audit_run(self, partition: str, config_json: dict | None = None) -> dict:
+        with self.Session() as session:
+            partition_obj = session.query(Partition).filter(Partition.partition == partition).first()
+            if not partition_obj:
+                raise VDBPartitionNotFound(f"Partition '{partition}' does not exist.", partition=partition)
+            run = RagAuditRun(
+                run_id=str(uuid.uuid4()),
+                partition_id=partition_obj.id,
+                partition_name=partition,
+                status="running",
+                config_json=config_json or {},
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            return run.to_dict(include_result=False)
+
+    def update_audit_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        document_count: int | None = None,
+        chunk_count: int | None = None,
+        overall_score: float | None = None,
+        overall_grade: str | None = None,
+        result_json: dict | None = None,
+        error: str | None = None,
+    ) -> dict | None:
+        with self.Session() as session:
+            run = session.query(RagAuditRun).filter(RagAuditRun.run_id == run_id).first()
+            if not run:
+                return None
+            run.status = status
+            run.finished_at = datetime.now(UTC).replace(tzinfo=None) if status in {"completed", "failed", "skipped"} else None
+            if document_count is not None:
+                run.document_count = document_count
+            if chunk_count is not None:
+                run.chunk_count = chunk_count
+            if overall_score is not None:
+                run.overall_score = float(overall_score)
+            if overall_grade is not None:
+                run.overall_grade = overall_grade
+            if result_json is not None:
+                run.result_json = result_json
+            if error is not None:
+                run.error = error
+            session.commit()
+            session.refresh(run)
+            return run.to_dict(include_result=True)
+
+    def list_audit_runs(self, partition: str, limit: int = 20, status: str | None = None) -> list[dict]:
+        with self.Session() as session:
+            query = session.query(RagAuditRun).filter(RagAuditRun.partition_name == partition)
+            if status:
+                query = query.filter(RagAuditRun.status == status)
+            runs = query.order_by(RagAuditRun.started_at.desc()).limit(limit).all()
+            return [run.to_dict(include_result=False) for run in runs]
+
+    def get_audit_run(self, partition: str, run_id: str) -> dict | None:
+        with self.Session() as session:
+            run = (
+                session.query(RagAuditRun)
+                .filter(RagAuditRun.partition_name == partition, RagAuditRun.run_id == run_id)
+                .first()
+            )
+            return run.to_dict(include_result=True) if run else None
+
+    def get_latest_audit_run(self, partition: str, status: str = "completed") -> dict | None:
+        with self.Session() as session:
+            run = (
+                session.query(RagAuditRun)
+                .filter(RagAuditRun.partition_name == partition, RagAuditRun.status == status)
+                .order_by(RagAuditRun.started_at.desc())
+                .first()
+            )
+            return run.to_dict(include_result=True) if run else None
+
+    def cleanup_audit_runs(self, partition: str, retention_days: int) -> int:
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=max(retention_days, 0))
+        with self.Session() as session:
+            deleted = (
+                session.query(RagAuditRun)
+                .filter(RagAuditRun.partition_name == partition, RagAuditRun.started_at < cutoff)
+                .delete(synchronize_session=False)
+            )
+            session.commit()
+            return int(deleted or 0)
 
     # --- Workspace methods ---
 

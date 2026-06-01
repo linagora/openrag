@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenRAG Audit Viewer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f8fafc;
+      --panel: #ffffff;
+      --line: #dbe3ea;
+      --text: #172033;
+      --muted: #66758a;
+      --good: #16803c;
+      --ok: #6a8f13;
+      --warn: #b85c00;
+      --bad: #c93232;
+      --blue: #1c64b7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 3;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+      padding: 14px 18px;
+    }
+    main { max-width: 1220px; margin: 0 auto; padding: 18px; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    h2 { font-size: 17px; margin: 22px 0 10px; }
+    h3 { font-size: 15px; margin: 16px 0 8px; }
+    .controls {
+      display: grid;
+      grid-template-columns: minmax(150px, 220px) minmax(220px, 1fr) minmax(120px, 180px) auto auto;
+      gap: 8px;
+      align-items: end;
+    }
+    label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+    input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font: inherit;
+      background: #fff;
+      color: var(--text);
+    }
+    button {
+      border: 1px solid #b7c4d1;
+      border-radius: 6px;
+      padding: 8px 12px;
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+      min-height: 37px;
+    }
+    button.primary {
+      border-color: var(--blue);
+      background: var(--blue);
+      color: #fff;
+    }
+    .status {
+      margin-top: 10px;
+      color: var(--muted);
+      min-height: 20px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+    .metric {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      min-height: 66px;
+    }
+    .metric b { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .metric span { font-size: 19px; font-weight: 650; }
+    .bar-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 180px) minmax(160px, 1fr) 68px;
+      gap: 10px;
+      align-items: center;
+      margin: 7px 0;
+    }
+    .track { height: 13px; background: #e7edf3; border-radius: 4px; overflow: hidden; }
+    .fill { height: 100%; width: 0; background: var(--blue); }
+    details {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      margin-bottom: 10px;
+      overflow: hidden;
+    }
+    summary {
+      cursor: pointer;
+      padding: 12px 14px;
+      font-weight: 650;
+      background: #f4f7fa;
+    }
+    .details-body { padding: 12px 14px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 8px 0 14px;
+      table-layout: fixed;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 7px 8px;
+      text-align: left;
+      vertical-align: top;
+      word-break: break-word;
+    }
+    th { background: #f4f7fa; color: #3a4655; }
+    pre {
+      background: #101827;
+      color: #e2e8f0;
+      padding: 12px;
+      border-radius: 6px;
+      max-height: 360px;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
+    .muted { color: var(--muted); }
+    .error { color: var(--bad); font-weight: 650; }
+    canvas {
+      width: 100%;
+      height: 360px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+    }
+    @media (max-width: 800px) {
+      .controls { grid-template-columns: 1fr; }
+      .bar-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OpenRAG Audit Viewer</h1>
+    <div class="controls">
+      <label>Partition
+        <input id="partition" value="abc" autocomplete="off">
+      </label>
+      <label>Bearer token
+        <input id="token" type="password" placeholder="Optional AUTH_TOKEN">
+      </label>
+      <label>Row limit
+        <input id="limit" type="number" min="5" max="500" value="50">
+      </label>
+      <button class="primary" id="load">Load audit</button>
+      <button id="download" disabled>Download JSON</button>
+    </div>
+    <div class="status" id="status"></div>
+  </header>
+  <main id="app"></main>
+
+  <script>
+    const state = { audit: null };
+    const app = document.getElementById("app");
+    const statusEl = document.getElementById("status");
+    const partitionEl = document.getElementById("partition");
+    const tokenEl = document.getElementById("token");
+    const limitEl = document.getElementById("limit");
+    const downloadEl = document.getElementById("download");
+
+    const params = new URLSearchParams(window.location.search);
+    partitionEl.value = params.get("partition") || "abc";
+    tokenEl.value = localStorage.getItem("openragAuditToken") || "";
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, char => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+      }[char]));
+    }
+
+    function scoreColor(score) {
+      const value = Number(score);
+      if (!Number.isFinite(value)) return "#94a3b8";
+      if (value >= 80) return "var(--good)";
+      if (value >= 60) return "var(--ok)";
+      if (value >= 40) return "var(--warn)";
+      return "var(--bad)";
+    }
+
+    function setStatus(message, isError = false) {
+      statusEl.className = isError ? "status error" : "status";
+      statusEl.textContent = message;
+    }
+
+    function rowLimit() {
+      const value = Number(limitEl.value);
+      return Number.isFinite(value) ? Math.max(5, Math.min(500, value)) : 50;
+    }
+
+    function bar(label, value, max = 100, scoreMode = true) {
+      const numeric = Number(value);
+      const safeValue = Number.isFinite(numeric) ? numeric : 0;
+      const pct = Math.max(0, Math.min(100, max > 0 ? safeValue / max * 100 : 0));
+      const color = scoreMode ? scoreColor(safeValue) : "var(--blue)";
+      return `
+        <div class="bar-row">
+          <div><b>${escapeHtml(label)}</b></div>
+          <div class="track"><div class="fill" style="width:${pct}%;background:${color}"></div></div>
+          <div>${safeValue.toFixed(scoreMode ? 1 : 2)}</div>
+        </div>
+      `;
+    }
+
+    function metric(label, value) {
+      return `<div class="metric"><b>${escapeHtml(label)}</b><span>${escapeHtml(value)}</span></div>`;
+    }
+
+    function table(rows, limit = rowLimit()) {
+      if (!Array.isArray(rows) || rows.length === 0) return `<p class="muted">No rows.</p>`;
+      const sample = rows.slice(0, limit);
+      const cols = [...new Set(sample.flatMap(row => Object.keys(row || {})))];
+      const body = sample.map(row => `<tr>${cols.map(col => `<td>${cell(row?.[col])}</td>`).join("")}</tr>`).join("");
+      const suffix = rows.length > limit ? `<p class="muted">Showing ${limit} of ${rows.length} rows.</p>` : "";
+      return `
+        <table>
+          <thead><tr>${cols.map(col => `<th>${escapeHtml(col)}</th>`).join("")}</tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+        ${suffix}
+      `;
+    }
+
+    function cell(value) {
+      if (value == null) return "";
+      if (typeof value === "object") return `<pre>${escapeHtml(JSON.stringify(value, null, 2)).slice(0, 4000)}</pre>`;
+      return escapeHtml(value);
+    }
+
+    function jsonBlock(value, maxChars = 12000) {
+      let text = JSON.stringify(value, null, 2);
+      if (text.length > maxChars) text = text.slice(0, maxChars) + "\\n... truncated ...";
+      return `<pre>${escapeHtml(text)}</pre>`;
+    }
+
+    function renderOverview(audit, axes) {
+      return `
+        <section class="panel">
+          <h2>Overview</h2>
+          <div class="grid">
+            ${metric("Partition", audit.partition_name || audit.partition)}
+            ${metric("Partition ID", audit.partition_id)}
+            ${metric("Status", audit.status)}
+            ${metric("Documents", audit.document_count)}
+            ${metric("Chunks", audit.chunk_count)}
+            ${metric("Overall", `${audit.overall_score ?? ""} (${audit.overall_grade ?? ""})`)}
+          </div>
+          <h3>Axis scores</h3>
+          ${axes.map(axis => bar(axis.axis, axis.score)).join("")}
+        </section>
+      `;
+    }
+
+    function renderSubscores(axes) {
+      return `
+        <section class="panel">
+          <h2>Sub-scores</h2>
+          ${axes.map(axis => {
+            const subs = axis.metrics?.sub_scores || {};
+            const rows = Object.entries(subs).map(([name, value]) => bar(`${axis.axis}: ${name}`, value)).join("");
+            return rows || `<p class="muted">No sub-scores for ${escapeHtml(axis.axis)}.</p>`;
+          }).join("")}
+        </section>
+      `;
+    }
+
+    function numericChart(rows, labelKeys, valueKey) {
+      if (!Array.isArray(rows) || rows.length === 0) return `<p class="muted">No chart rows.</p>`;
+      const limited = rows.slice(0, rowLimit());
+      const max = Math.max(...limited.map(row => Number(row[valueKey]) || 0), 1);
+      return limited.map(row => {
+        const label = labelKeys.map(key => row[key]).filter(value => value != null).join(" / ");
+        return bar(label, row[valueKey], max, false);
+      }).join("");
+    }
+
+    function renderChartBlock(key, value) {
+      const known = {
+        length_histogram: [["bin_start", "bin_end"], "count"],
+        token_histogram: [["bin_start", "bin_end"], "count"],
+        dup_distribution: [["doc_id"], "count"],
+        language_pie: [["language"], "count"],
+        pii_by_type: [["type"], "count"],
+        topic_volumes: [["topic", "terms"], "count"],
+        rank_histogram: [["value"], "count"],
+        recall_curve: [["k"], "recall"]
+      };
+      if (Array.isArray(value) && known[key]) return numericChart(value, known[key][0], known[key][1]);
+      if (Array.isArray(value) && value.length && typeof value[0] === "object") return table(value);
+      if (typeof value === "object") return jsonBlock(value, 8000);
+      return `<p>${escapeHtml(value)}</p>`;
+    }
+
+    function renderCharts(axes) {
+      return axes.map(axis => {
+        const chartData = axis.chart_data || {};
+        const blocks = Object.entries(chartData).map(([key, value]) => `
+          <h3>${escapeHtml(key)}</h3>
+          ${renderChartBlock(key, value)}
+        `).join("") || `<p class="muted">No chart data.</p>`;
+        return `
+          <details>
+            <summary>${escapeHtml(axis.axis)} charts</summary>
+            <div class="details-body">${blocks}</div>
+          </details>
+        `;
+      }).join("");
+    }
+
+    function drawCoverageScatter(axes) {
+      const axis = axes.find(item => item.axis === "coverage");
+      const points = axis?.chart_data?.scatter_2d || [];
+      if (!points.length) return "";
+      return `
+        <section class="panel">
+          <h2>Coverage Scatter</h2>
+          <canvas id="coverageCanvas" width="1100" height="420"></canvas>
+        </section>
+      `;
+    }
+
+    function paintCoverageScatter(axes) {
+      const canvas = document.getElementById("coverageCanvas");
+      if (!canvas) return;
+      const axis = axes.find(item => item.axis === "coverage");
+      const points = axis?.chart_data?.scatter_2d || [];
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      const pad = 34;
+      const xs = points.map(p => Number(p.x)).filter(Number.isFinite);
+      const ys = points.map(p => Number(p.y)).filter(Number.isFinite);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, w, h);
+      ctx.strokeStyle = "#dbe3ea";
+      ctx.strokeRect(pad, pad, w - pad * 2, h - pad * 2);
+      for (const point of points.slice(0, 1200)) {
+        const x = pad + ((Number(point.x) - minX) / ((maxX - minX) || 1)) * (w - pad * 2);
+        const y = h - pad - ((Number(point.y) - minY) / ((maxY - minY) || 1)) * (h - pad * 2);
+        const topic = Number(point.topic) || 0;
+        ctx.fillStyle = `hsl(${(topic * 47) % 360} 65% 45%)`;
+        ctx.globalAlpha = point.outlier ? 0.95 : 0.7;
+        ctx.beginPath();
+        ctx.arc(x, y, point.outlier ? 5 : 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function renderDetails(axes) {
+      return axes.map(axis => {
+        const details = axis.details || {};
+        const body = Object.entries(details).map(([key, value]) => {
+          if (Array.isArray(value) && value.length && typeof value[0] === "object") {
+            return `<h3>${escapeHtml(key)}</h3>${table(value)}`;
+          }
+          if (Array.isArray(value)) {
+            return `<h3>${escapeHtml(key)}</h3>${table(value.map(item => ({ value: item })))}`;
+          }
+          return `<h3>${escapeHtml(key)}</h3>${jsonBlock(value, 8000)}`;
+        }).join("") || `<p class="muted">No detailed findings.</p>`;
+        return `
+          <details>
+            <summary>${escapeHtml(axis.axis)} details</summary>
+            <div class="details-body">${body}</div>
+          </details>
+        `;
+      }).join("");
+    }
+
+    async function loadAudit() {
+      const partition = partitionEl.value.trim() || "abc";
+      const token = tokenEl.value.trim();
+      localStorage.setItem("openragAuditToken", token);
+      const url = `/partition/${encodeURIComponent(partition)}/audit`;
+      setStatus(`Loading ${url} ...`);
+      app.innerHTML = "";
+      downloadEl.disabled = true;
+      try {
+        const response = await fetch(url, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        });
+        const text = await response.text();
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${text}`);
+        const audit = JSON.parse(text);
+        state.audit = audit;
+        const axes = audit.result?.axis_results || [];
+        app.innerHTML = [
+          renderOverview(audit, axes),
+          renderSubscores(axes),
+          drawCoverageScatter(axes),
+          `<section class="panel"><h2>Chart Payloads</h2>${renderCharts(axes)}</section>`,
+          `<section class="panel"><h2>Detailed Findings</h2>${renderDetails(axes)}</section>`
+        ].join("");
+        paintCoverageScatter(axes);
+        downloadEl.disabled = false;
+        setStatus(`Loaded ${axes.length} axes for partition ${partition}.`);
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    }
+
+    function downloadJson() {
+      if (!state.audit) return;
+      const blob = new Blob([JSON.stringify(state.audit, null, 2)], { type: "application/json" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `rag_audit_${partitionEl.value.trim() || "abc"}_full_result.json`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    document.getElementById("load").addEventListener("click", loadAudit);
+    downloadEl.addEventListener("click", downloadJson);
+    loadAudit();
+  </script>
+</body>
+</html>

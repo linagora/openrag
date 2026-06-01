@@ -153,6 +153,12 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("RETRIEVER_ALLOW_FILTERLESS_FALLBACK", "retriever.allow_filterless_fallback", bool),
     # RAG
     ("RAG_MODE", "rag.mode", str),
+    # RAG Audit
+    ("RAG_AUDIT_ENABLED", "rag_audit.enabled", bool),
+    ("RAG_AUDIT_RETENTION_DAYS", "rag_audit.retention_days", int),
+    ("RAG_AUDIT_RETRIEVABILITY_TOP_K", "rag_audit.retrievability_top_k", int),
+    ("RAG_AUDIT_RETRIEVABILITY_MAX_QUERIES", "rag_audit.retrievability_max_queries", int),
+    ("RAG_AUDIT_MAX_CONCURRENT_PARTITIONS", "rag_audit.max_concurrent_partitions", int),
     # WebSearch
     ("WEBSEARCH_PROVIDER", "websearch.provider", str),
     ("WEBSEARCH_API_TOKEN", "websearch.api_token", str),

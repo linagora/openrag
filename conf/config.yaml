@@ -303,6 +303,17 @@ rag:
   chat_history_depth: 4
   max_contextualized_query_len: 512
 
+# --- RAG Audit ---
+# Env: RAG_AUDIT_ENABLED, RAG_AUDIT_RETENTION_DAYS,
+#      RAG_AUDIT_RETRIEVABILITY_TOP_K, RAG_AUDIT_RETRIEVABILITY_MAX_QUERIES,
+#      RAG_AUDIT_MAX_CONCURRENT_PARTITIONS
+rag_audit:
+  enabled: true
+  retention_days: 90
+  retrievability_top_k: 10
+  retrievability_max_queries: 500
+  max_concurrent_partitions: 1
+
 # --- Web Search ---
 # Env: WEBSEARCH_PROVIDER, WEBSEARCH_API_TOKEN, WEBSEARCH_BASE_URL,
 #      WEBSEARCH_TOP_K, WEBSEARCH_LANG, WEBSEARCH_MAX_TOKENS,
