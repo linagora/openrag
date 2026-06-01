@@ -118,7 +118,7 @@ worker_start_ray_commands:
     - uv run ray start --address ${HEAD_NODE_IP:-10.0.0.1}:6379
 ```
 
-> 🛠️ The base image (`ghcr.io/linagora/openrag-ray`) must be built from `Dockerfile.ray` and pushed to a container registry before use.
+> 🛠️ The base image (`ghcr.io/linagora/openrag-ray`) must be built from the repository root with `infra/docker/ray.Dockerfile` and pushed to a container registry before use.
 
 ### ⬆️ Launch the cluster
 

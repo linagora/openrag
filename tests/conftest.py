@@ -7,7 +7,7 @@ third-party imports such as ``openai``.
 
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -16,4 +16,7 @@ root = str(OPENRAG_ROOT)
 if root not in sys.path:
     sys.path.insert(0, root)
 
-sys.modules.setdefault("openai", importlib.import_module("openai"))
+if importlib.util.find_spec("openai") is not None:
+    import openai
+
+    sys.modules.setdefault("openai", openai)

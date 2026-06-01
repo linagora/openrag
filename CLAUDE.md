@@ -8,7 +8,7 @@ OpenRag is a modular Retrieval-Augmented Generation (RAG) framework built with F
 
 ## Project Layout
 
-```
+```text
 openrag/        # Python package (application code only): core/ services/ api/ di/ prompts/
 conf/           # YAML configuration
 infra/          # All deployment infrastructure
