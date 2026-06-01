@@ -137,10 +137,10 @@ cd openrag
 git checkout main # or a given release
 ```
 #### 2. Create a `.env` File
-Create a `.env` file at the root of the project, mirroring the structure of `.env.example`, to configure your environment and supply blank environment variables.
+Create a `.env` file under `infra/compose/`, mirroring the structure of `infra/compose/.env.example`, to configure your environment and supply blank environment variables.
 
 ```bash
-cp .env.example .env
+cp infra/compose/.env.example infra/compose/.env
 ```
 #### 3. File Parser configuration 
 All supported file format parsers are pre-configured. For PDF processing, **[MarkerLoader](https://github.com/datalab-to/marker)** serves as the default parser, offering comprehensive support for OCR-scanned documents, complex layouts, tables, and embedded images. MarkerLoader operates efficiently on both GPU and CPU environments.
@@ -160,10 +160,10 @@ For CPU-only deployments or lightweight testing scenarios, you can consider swit
 
 * **Simple and quick** launch for testing
   >[!IMPORTANT]
-  > For a **simple `quick deployment`** using only the docker-compose file, only the [quick_start **folder**](./quick_start/) is required. Follow these steps to launch the application:
+  > For a **simple `quick deployment`** using only the docker-compose file, only the [quick_start **folder**](./infra/quick_start/) is required. Follow these steps to launch the application:
   
-  1. Navigate to the **`quick_start`** directory or download only that folder
-  2. Place your **`.env`** file inside the **`quick_start`** directory
+  1. Navigate to the **`infra/quick_start`** directory or download only that folder
+  2. Place your **`.env`** file inside the **`infra/quick_start`** directory
   3. Run the appropriate command for your system:
 
   ```bash
@@ -177,7 +177,7 @@ For CPU-only deployments or lightweight testing scenarios, you can consider swit
   ```
 * **Development Environment**: For development builds, use the **`--build`** flag to rebuild images:
   >[!NOTE]
-  > Execute these commands from the project root directory
+  > The full stack and its service configs live under `infra/compose/`. Execute these commands from there (`cd infra/compose`).
 
   ```bash
   # GPU deployment with rebuild (recommended for optimal performance)
@@ -215,7 +215,7 @@ OpenRag supports two authentication modes:
 - **Token Mode** (`AUTH_MODE=token`, default): Bearer token authentication via `Authorization: Bearer <AUTH_TOKEN>` header. Suitable for development and programmatic access.
 - **OIDC Mode** (`AUTH_MODE=oidc`): OpenID Connect flow with an external identity provider (Keycloak, LemonLDAP::NG, etc.). Users authenticate via browser redirect to the IdP.
 
-To enable OIDC, set `AUTH_MODE=oidc` and configure the required OIDC variables (see [`.env.example`](./.env.example) for the full list).
+To enable OIDC, set `AUTH_MODE=oidc` and configure the required OIDC variables (see [`infra/compose/.env.example`](./infra/compose/.env.example) for the full list).
 
 For comprehensive OIDC setup and configuration, see the [OIDC Authentication Guide](./docs/oidc.md).
 

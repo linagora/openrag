@@ -27,7 +27,7 @@ These scripts are designed for installation on fresh production servers.
 ### 2. Local Deployment (Easiest)
 
 ```bash
-cd ansible/
+cd infra/ansible/
 ./deploy.sh
 # Choose option 1: "Deploy to local machine"
 # Select CPU-only or GPU-enabled deployment when prompted

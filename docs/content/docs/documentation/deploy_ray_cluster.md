@@ -84,7 +84,7 @@ We recommend using **GlusterFS** for this.
 
 ## 🚀 3. Start the Ray Cluster
 
-First, prepare your `cluster.yaml` file. Here's an example for a **local provider**:
+First, prepare your `cluster.yaml` file (a ready-to-edit example ships at `infra/cluster.yaml`). Here's an example for a **local provider**:
 
 ```yaml
 // cluster.yaml

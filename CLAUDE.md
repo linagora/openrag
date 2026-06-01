@@ -6,6 +6,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 OpenRag is a modular Retrieval-Augmented Generation (RAG) framework built with FastAPI, Ray for distributed computing, and Milvus as the vector database. It provides document ingestion, chunking, embedding, and retrieval capabilities with an OpenAI-compatible API.
 
+## Project Layout
+
+```
+openrag/        # Python package (application code only): core/ services/ api/ di/ prompts/
+conf/           # YAML configuration
+infra/          # All deployment infrastructure
+  docker/       #   api.Dockerfile, ray.Dockerfile (build from repo root)
+  compose/      #   docker-compose.yaml + service configs (grafana, prometheus, milvus, .env.example)
+  scripts/      #   entrypoint.sh and other deployment scripts
+  ansible/      #   Ansible playbooks
+  charts/       #   Helm charts (openrag-stack)
+  quick_start/  #   Getting-started compose
+  cluster.yaml  #   Ray cluster config
+scripts/        # Developer/operational CLI tools (check_layer_imports.py, data_indexer.py, postgres-init/)
+tests/          # Integration tests (api_tests/, integration/)
+docs/           # Documentation (Astro site + refactoring docs)
+ui -> extern/indexer-ui   # Symlink to the admin frontend submodule
+extern/         # Git submodules + compose service includes
+```
+
+Prompt templates ship inside the package at `openrag/prompts/templates/*.txt` and are
+loaded into `DEFAULT_SEEDS` by `openrag/prompts/__init__.py`.
+
 ## Common Commands
 
 ### Development
@@ -14,9 +37,11 @@ OpenRag is a modular Retrieval-Augmented Generation (RAG) framework built with F
 # Install dependencies
 uv sync
 
-# Run the application locally (requires Docker services)
-docker compose up -d           # GPU deployment
-docker compose --profile cpu up -d  # CPU deployment
+# Run the application locally (requires Docker services).
+# The compose stack and its service configs live under infra/compose/.
+cd infra/compose
+docker compose up -d                 # GPU deployment
+docker compose --profile cpu up -d   # CPU deployment
 
 # Run with rebuild for development
 docker compose up --build -d
@@ -29,7 +54,7 @@ docker compose up --build -d
 uv run pytest
 
 # Run a single test file
-uv run pytest openrag/components/indexer/chunker/test_chunking.py
+uv run pytest openrag/core/models/test_chunk.py
 
 # Run tests matching a pattern
 uv run pytest -k "test_chunk"
@@ -103,7 +128,7 @@ Each file type has a dedicated loader that converts to markdown:
 The RAG pipeline filters out false-positive sources by having the LLM self-report which sources it actually used:
 
 1. `format_context()` (`openrag/components/utils.py`) numbers each source (`[Source 1]`, `[Source 2]`, ...) in the context and returns `(formatted_text, included_indices)` — the indices track which docs fit within the token budget
-2. Prompt templates (`prompts/example1/*.txt`) instruct the LLM to append `[Sources: 1, 3, 5]` at the end of its response
+2. Prompt templates (`openrag/prompts/templates/*.txt`) instruct the LLM to append `[Sources: 1, 3, 5]` at the end of its response
 3. `extract_and_strip_sources_block()` strips this tag from the response before sending to the client
 4. `filter_sources_by_citations()` filters the source metadata to only include cited sources (falls back to all sources if none match)
 5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
@@ -236,7 +261,7 @@ Per-user file quota enforcement tracked via the `file_count` and `file_quota` co
 - `created_by` uses `ondelete="SET NULL"` so deleting a user doesn't cascade-delete their files
 - `Indexer.delete_file` and `MilvusDB.delete_file/delete_partition` don't need a `user_id` parameter — the uploader is looked up from `files.created_by`
 
-**Migration:** `openrag/scripts/migrations/alembic/versions/c224d4befe71_add_file_count_and_file_quota.py`
+**Migration:** `openrag/services/persistence/migrations/alembic/versions/c224d4befe71_add_file_count_and_file_quota.py`
 
 ### Alembic Migration Idempotency
 
@@ -252,14 +277,14 @@ Configuration uses Hydra with YAML files in `.hydra_config/`:
 - Retriever configs: `.hydra_config/retriever/`
 - RAG mode configs: `.hydra_config/rag/`
 
-Environment variables override config values (see `.env.example`).
+Environment variables override config values (see `infra/compose/.env.example`).
 
 ### Testing Structure
 
-- Unit tests: `openrag/components/**/test_*.py` (pytest)
+- Unit tests: `openrag/**/test_*.py` (pytest, co-located with source)
 - API integration tests: `tests/api_tests/*.py` (pytest, requires running server)
 - Robot Framework tests: `tests/api/*.robot`
-- Test config in `pytest.ini` sets `CONFIG_PATH` and `PROMPTS_DIR`
+- Test config in `pytest.ini` sets `PROMPTS_DIR` (now `./openrag/prompts/templates`) and `LOG_DIR`
 
 **Running integration tests locally with act:**
 ```bash
