@@ -76,7 +76,7 @@ services:
   openrag:
     build:
       context: ../../..
-      dockerfile: Dockerfile
+      dockerfile: infra/docker/api.Dockerfile
     environment:
       - EMBEDDER_MODEL_NAME=mock-embedding-model
       - EMBEDDER_BASE_URL=http://vllm:8000/v1/
