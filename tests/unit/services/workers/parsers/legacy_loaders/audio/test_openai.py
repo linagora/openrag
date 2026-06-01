@@ -15,6 +15,13 @@ import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import pytest  # noqa: E402
+
+# These tests exercise real pydub audio operations. pydub depends on the stdlib
+# ``audioop`` module, which was removed in Python 3.13 — guard on it directly so
+# the module skips cleanly (other tests register a mock ``pydub`` in sys.modules,
+# so importorskip("pydub") would not catch the missing dependency).
+pytest.importorskip("audioop")
+
 from pydub import AudioSegment  # noqa: E402
 from pydub.generators import Sine  # noqa: E402
 

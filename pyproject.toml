@@ -132,7 +132,8 @@ exclude = ["tests/load/prompt_eval"]
 testpaths = ["tests"]
 pythonpath = ["./openrag"]
 python_files = ["test_*.py"]
-addopts = "--strict-markers"
+addopts = "--strict-markers --tb=short"
+asyncio_mode = "auto"
 env = [
     "PROMPTS_DIR=./openrag/prompts/templates",
     "LOG_DIR=./logs",
