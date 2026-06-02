@@ -64,6 +64,37 @@ def test_default_forwarded_allow_ips_env_var_used():
     assert "UVICORN_FORWARDED_ALLOW_IPS" in src
 
 
+def test_phase14_admin_routers_are_mounted():
+    """Phase 14 admin routes must be exposed under stable API prefixes."""
+    with open(_MAIN_PATH) as f:
+        tree = ast.parse(f.read())
+
+    mounted: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "include_router"):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Name):
+            continue
+        router_name = node.args[0].id
+        prefix = None
+        tag = None
+        for kw in node.keywords:
+            if kw.arg == "prefix" and isinstance(kw.value, ast.Constant):
+                prefix = kw.value.value
+            if kw.arg == "tags" and isinstance(kw.value, ast.List) and kw.value.elts:
+                first_tag = kw.value.elts[0]
+                if isinstance(first_tag, ast.Attribute):
+                    tag = first_tag.attr
+        if prefix is not None and tag is not None:
+            mounted[router_name] = f"{prefix}:{tag}"
+
+    assert mounted["model_endpoints_router"] == "/model-endpoints:MODEL_ENDPOINTS"
+    assert mounted["presets_router"] == "/presets:PRESETS"
+
+
 def test_api_package_exports_app_for_legacy_uvicorn_path(monkeypatch):
     """Older images or overrides may still run ``uvicorn api:app``."""
     fake_app = object()
