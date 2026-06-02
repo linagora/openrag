@@ -37,7 +37,7 @@ def _require_service_method(service, method_name: str):
     method = getattr(service, method_name, None)
     if not callable(method):
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail=f"{method_name} is not available.",
         )
     return method

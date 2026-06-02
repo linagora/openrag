@@ -97,14 +97,14 @@ async def test_get_partition_config_returns_resolved_config(async_client_factory
 
 
 @pytest.mark.asyncio
-async def test_partition_config_routes_return_503_until_service_methods_exist(async_client_factory):
+async def test_partition_config_routes_return_501_until_service_methods_exist(async_client_factory):
     app = _build_app(MissingPartitionConfigService())
 
     async with async_client_factory(app) as client:
         patch_response = await client.patch("/partition/legal", json={"description": "Updated"})
         get_response = await client.get("/partition/legal/config")
 
-    assert patch_response.status_code == 503
+    assert patch_response.status_code == 501
     assert patch_response.json()["detail"] == "update_partition_config is not available."
-    assert get_response.status_code == 503
+    assert get_response.status_code == 501
     assert get_response.json()["detail"] == "get_partition_config is not available."
