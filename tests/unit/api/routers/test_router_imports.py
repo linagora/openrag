@@ -25,6 +25,7 @@ import pytest
     ],
 )
 def test_phase_10_router_module_imports(module_name):
+    """Router modules should import and expose a FastAPI router."""
     module = importlib.import_module(module_name)
 
     assert module.router is not None

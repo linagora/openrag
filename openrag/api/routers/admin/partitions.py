@@ -30,10 +30,12 @@ RoleType = Literal["viewer", "editor", "owner"]
 
 
 def _quote_param_value(s: str) -> str:
+    """Percent-encode a path parameter value for URL generation."""
     return quote(s, safe="")
 
 
 def _require_service_method(service, method_name: str):
+    """Return a service method or fail clearly when a phased method is absent."""
     method = getattr(service, method_name, None)
     if not callable(method):
         raise HTTPException(
@@ -60,6 +62,7 @@ async def list_existant_partitions(
     partitions=Depends(partitions_with_details),
     service=Depends(get_partition_service),
 ):
+    """List partitions visible to the current user."""
     if len(partitions) == 1 and partitions[0]["partition"] == "all":
         partitions = await service.list_partitions()
     logger.debug("Returned list of existing partitions.", partition_count=len(partitions))
@@ -88,6 +91,7 @@ async def delete_partition(
     partition_owner=Depends(require_partition_owner),
     service=Depends(get_partition_service),
 ):
+    """Delete a partition owned by the current user."""
     await service.delete_partition(partition)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -118,9 +122,11 @@ async def list_files(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
+    """List files stored in a partition."""
     file_dicts = await service.list_files(partition, limit)
 
     def process_file(file_dict):
+        """Add a canonical file-detail link to one file row."""
         return {
             "link": str(
                 request.url_for(
@@ -164,6 +170,7 @@ async def get_file(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
+    """Return metadata and chunk links for one file in a partition."""
     if not await service.file_exists(file_id, partition):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -207,6 +214,7 @@ async def list_all_chunks(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
+    """List all chunks in a partition."""
     items = await service.list_all_chunks(partition=partition, include_embedding=include_embedding)
     chunks = [
         {
@@ -243,6 +251,7 @@ async def create_partition(
     partition: str,
     service=Depends(get_partition_service),
 ):
+    """Create a new partition owned by the current user."""
     if await service.partition_exists(partition):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -475,6 +484,7 @@ async def get_related_files(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
+    """Return files sharing a relationship identifier."""
     files = await service.get_related_files(partition=partition, relationship_id=relationship_id)
     return JSONResponse(status_code=status.HTTP_200_OK, content={"files": files})
 
@@ -512,6 +522,7 @@ async def get_file_ancestors(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
+    """Return the ancestor path for one file."""
     if not await service.file_exists(file_id, partition):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -27,6 +27,8 @@ def _normalize_endpoint(value: str) -> str:
 
 
 class CreateModelEndpointRequest(BaseModel):
+    """Request body for registering a model endpoint."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str
@@ -52,6 +54,8 @@ class CreateModelEndpointRequest(BaseModel):
 
 
 class UpdateModelEndpointRequest(BaseModel):
+    """Request body for updating a registered model endpoint."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
@@ -85,6 +89,8 @@ class UpdateModelEndpointRequest(BaseModel):
 
 
 class ModelEndpointResponse(BaseModel):
+    """Response body for a registered model endpoint."""
+
     name: str
     model_type: ModelEndpointType
     endpoint: str
@@ -98,6 +104,8 @@ class ModelEndpointResponse(BaseModel):
 
 
 class ValidateEndpointResponse(BaseModel):
+    """Response body for a model endpoint validation probe."""
+
     reachable: bool
     model_found: bool | None = None
     models_served: list[str] | None = None

@@ -26,6 +26,8 @@ def _reject_explicit_null(field_name: str, value):
 
 
 class CreatePresetRequest(BaseModel):
+    """Request body for creating an indexation or retrieval preset."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str
@@ -40,6 +42,8 @@ class CreatePresetRequest(BaseModel):
 
 
 class UpdatePresetRequest(BaseModel):
+    """Request body for updating an existing preset."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
@@ -66,6 +70,8 @@ class UpdatePresetRequest(BaseModel):
 
 
 class PresetResponse(BaseModel):
+    """Response body for a stored pipeline preset."""
+
     name: str
     preset_type: PresetType
     config: dict[str, Any]
@@ -74,6 +80,8 @@ class PresetResponse(BaseModel):
 
 
 class PresetOptionsResponse(BaseModel):
+    """Response body listing allowed preset option values."""
+
     chunking_strategies: list[str]
     retrieval_types: list[str]
     reranker_providers: list[str]

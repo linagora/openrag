@@ -403,6 +403,8 @@ class TestPhase11ContainerLifecycle:
         closed = []
 
         class _FakeClient:
+            """Client double that records successful close calls."""
+
             async def aclose(self):
                 """Record that the client was closed."""
                 closed.append(self)
@@ -424,11 +426,15 @@ class TestPhase11ContainerLifecycle:
         closed = []
 
         class _BadClient:
+            """Client double that fails during close."""
+
             async def aclose(self):
                 """Fail to close, exercising the best-effort path."""
                 raise RuntimeError("boom")
 
         class _GoodClient:
+            """Client double that records close calls after a failure."""
+
             async def aclose(self):
                 """Record a successful close after a prior failure."""
                 closed.append(self)

@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 
 def _model_endpoint_row(**overrides: Any) -> dict[str, Any]:
+    """Build a model endpoint response row for router tests."""
     row = {
         "name": "default",
         "model_type": "llm",
@@ -27,6 +28,7 @@ def _model_endpoint_row(**overrides: Any) -> dict[str, Any]:
 
 
 def _preset_row(**overrides: Any) -> dict[str, Any]:
+    """Build a preset response row for router tests."""
     row = {
         "name": "default",
         "preset_type": "retrieval",
@@ -39,58 +41,76 @@ def _preset_row(**overrides: Any) -> dict[str, Any]:
 
 
 class FakeModelEndpointService:
+    """Fake model endpoint service that records router calls."""
+
     def __init__(self) -> None:
+        """Initialize the call log."""
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def create_model_endpoint(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Record endpoint creation and echo a response row."""
         self.calls.append(("create", payload))
         return _model_endpoint_row(**payload)
 
     async def list_model_endpoints(self, model_type: str | None = None) -> list[dict[str, Any]]:
+        """Record endpoint listing with the optional type filter."""
         self.calls.append(("list", {"model_type": model_type}))
         return [_model_endpoint_row(model_type=model_type or "llm")]
 
     async def get_model_endpoint(self, name: str, model_type: str) -> dict[str, Any]:
+        """Record a single endpoint lookup."""
         self.calls.append(("get", {"name": name, "model_type": model_type}))
         return _model_endpoint_row(name=name, model_type=model_type)
 
     async def update_model_endpoint(self, name: str, model_type: str, **fields: Any) -> dict[str, Any]:
+        """Record endpoint updates and echo the merged response row."""
         self.calls.append(("update", {"name": name, "model_type": model_type, **fields}))
         return _model_endpoint_row(**{"name": name, "model_type": model_type, **fields})
 
     async def delete_model_endpoint(self, name: str, model_type: str) -> None:
+        """Record endpoint deletion."""
         self.calls.append(("delete", {"name": name, "model_type": model_type}))
 
     async def set_default(self, model_type: str, name: str) -> dict[str, Any]:
+        """Record default promotion."""
         self.calls.append(("set_default", {"name": name, "model_type": model_type}))
         return _model_endpoint_row(name=name, model_type=model_type, is_default=True)
 
     async def validate_endpoint(self, name: str, model_type: str) -> dict[str, Any]:
+        """Record endpoint validation."""
         self.calls.append(("validate", {"name": name, "model_type": model_type}))
         return {"reachable": True, "model_found": True, "models_served": ["mistral"], "detail": None}
 
 
 class FakePresetService:
+    """Fake preset service that records router calls."""
+
     def __init__(self) -> None:
+        """Initialize the call log."""
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def create_preset(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Record preset creation and echo a response row."""
         self.calls.append(("create", payload))
         return _preset_row(**payload)
 
     async def list_presets(self, preset_type: str | None = None) -> list[dict[str, Any]]:
+        """Record preset listing with the optional type filter."""
         self.calls.append(("list", {"preset_type": preset_type}))
         return [_preset_row(preset_type=preset_type or "retrieval")]
 
     async def get_preset(self, name: str, preset_type: str) -> dict[str, Any]:
+        """Record a single preset lookup."""
         self.calls.append(("get", {"name": name, "preset_type": preset_type}))
         return _preset_row(name=name, preset_type=preset_type)
 
     async def update_preset(self, name: str, preset_type: str, **fields: Any) -> dict[str, Any]:
+        """Record preset updates and echo the merged response row."""
         self.calls.append(("update", {"name": name, "preset_type": preset_type, **fields}))
         return _preset_row(**{"name": name, "preset_type": preset_type, **fields})
 
     async def delete_preset(self, name: str, preset_type: str) -> None:
+        """Record preset deletion."""
         self.calls.append(("delete", {"name": name, "preset_type": preset_type}))
 
 
@@ -99,6 +119,7 @@ def _build_app(
     model_service: FakeModelEndpointService | None = None,
     preset_service: FakePresetService | None = None,
 ) -> FastAPI:
+    """Build a small app with Phase 14 routers and fake dependencies."""
     app = FastAPI()
     app.include_router(model_endpoints.router, prefix="/model-endpoints")
     app.include_router(presets.router, prefix="/presets")
@@ -112,6 +133,7 @@ def _build_app(
 
 @pytest.mark.asyncio
 async def test_create_model_endpoint_normalizes_payload(async_client_factory):
+    """Model endpoint creation should pass normalized schema data to the service."""
     model_service = FakeModelEndpointService()
     app = _build_app(model_service=model_service)
 
@@ -146,6 +168,7 @@ async def test_create_model_endpoint_normalizes_payload(async_client_factory):
 
 @pytest.mark.asyncio
 async def test_update_model_endpoint_forwards_only_provided_fields(async_client_factory):
+    """Model endpoint updates should exclude omitted fields."""
     model_service = FakeModelEndpointService()
     app = _build_app(model_service=model_service)
 
@@ -171,6 +194,7 @@ async def test_update_model_endpoint_forwards_only_provided_fields(async_client_
 
 @pytest.mark.asyncio
 async def test_validate_model_endpoint_uses_route_identity(async_client_factory):
+    """Endpoint validation should use name and type from the route."""
     model_service = FakeModelEndpointService()
     app = _build_app(model_service=model_service)
 
@@ -184,6 +208,7 @@ async def test_validate_model_endpoint_uses_route_identity(async_client_factory)
 
 @pytest.mark.asyncio
 async def test_preset_options_return_registered_choices(async_client_factory):
+    """Preset options should expose available registry choices."""
     app = _build_app()
 
     async with async_client_factory(app) as client:
@@ -198,6 +223,7 @@ async def test_preset_options_return_registered_choices(async_client_factory):
 
 @pytest.mark.asyncio
 async def test_create_preset_forwards_schema_payload(async_client_factory):
+    """Preset creation should pass normalized schema data to the service."""
     preset_service = FakePresetService()
     app = _build_app(preset_service=preset_service)
 
@@ -215,6 +241,7 @@ async def test_create_preset_forwards_schema_payload(async_client_factory):
 
 @pytest.mark.asyncio
 async def test_update_preset_forwards_only_provided_fields(async_client_factory):
+    """Preset updates should exclude omitted fields."""
     preset_service = FakePresetService()
     app = _build_app(preset_service=preset_service)
 

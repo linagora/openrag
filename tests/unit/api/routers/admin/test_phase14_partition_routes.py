@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 
 def _partition_detail(**overrides: Any) -> dict[str, Any]:
+    """Build a resolved partition detail response row for router tests."""
     row = {
         "name": "legal",
         "description": "Legal documents",
@@ -26,23 +27,29 @@ def _partition_detail(**overrides: Any) -> dict[str, Any]:
 
 
 class FakePartitionConfigService:
+    """Fake partition config service that records router calls."""
+
     def __init__(self) -> None:
+        """Initialize the call log."""
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def update_partition_config(self, partition: str, **fields: Any) -> dict[str, Any]:
+        """Record partition config updates and echo a response row."""
         self.calls.append(("update", {"partition": partition, **fields}))
         return _partition_detail(name=partition, **fields)
 
     async def get_partition_config(self, partition: str) -> dict[str, Any]:
+        """Record partition config reads."""
         self.calls.append(("get", {"partition": partition}))
         return _partition_detail(name=partition)
 
 
 class MissingPartitionConfigService:
-    pass
+    """Service double without Phase 14 config methods."""
 
 
 def _build_app(service) -> FastAPI:
+    """Build a small app with partition routes and fake dependencies."""
     app = FastAPI()
     app.include_router(partitions.router, prefix="/partition")
     app.dependency_overrides[require_partition_owner] = lambda: {"id": "admin", "is_admin": True}
@@ -53,6 +60,7 @@ def _build_app(service) -> FastAPI:
 
 @pytest.mark.asyncio
 async def test_update_partition_config_forwards_only_provided_fields(async_client_factory):
+    """Partition config updates should exclude omitted fields."""
     service = FakePartitionConfigService()
     app = _build_app(service)
 
@@ -83,6 +91,7 @@ async def test_update_partition_config_forwards_only_provided_fields(async_clien
 
 @pytest.mark.asyncio
 async def test_get_partition_config_returns_resolved_config(async_client_factory):
+    """Partition config reads should return the resolved service payload."""
     service = FakePartitionConfigService()
     app = _build_app(service)
 
@@ -98,6 +107,7 @@ async def test_get_partition_config_returns_resolved_config(async_client_factory
 
 @pytest.mark.asyncio
 async def test_partition_config_routes_return_501_until_service_methods_exist(async_client_factory):
+    """Missing phased service methods should return not-implemented responses."""
     app = _build_app(MissingPartitionConfigService())
 
     async with async_client_factory(app) as client:

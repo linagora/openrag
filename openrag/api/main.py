@@ -104,6 +104,8 @@ except Exception:
 
 
 class Tags(Enum):
+    """OpenAPI tag labels used by mounted routers."""
+
     VDB = "VectorDB operations"
     INDEXER = "Indexer"
     SEARCH = "Semantic Search"
@@ -223,6 +225,7 @@ app = FastAPI(version=app_version, lifespan=lifespan)
 
 
 def custom_openapi():
+    """Build the OpenAPI schema with global bearer authentication metadata."""
     if app.openapi_schema:
         return app.openapi_schema
     openapi_schema = get_openapi(
@@ -301,6 +304,7 @@ def root_redirect():
 
 @app.get("/config", summary="Get current configuration", tags=["Configuration"], dependencies=[Depends(require_admin)])
 def get_config():
+    """Return the loaded application settings for admins."""
     return settings
 
 
@@ -344,7 +348,7 @@ if __name__ == "__main__":
         @serve.deployment(num_replicas=settings.ray.serve.num_replicas)
         @serve.ingress(app)
         class OpenRagAPI:
-            pass
+            """Ray Serve deployment wrapper for the FastAPI app."""
 
         serve.start(http_options={"host": settings.ray.serve.host, "port": settings.ray.serve.port})
         if WITH_CHAINLIT_UI:

@@ -24,6 +24,8 @@ def _reject_explicit_null(field_name: str, value):
 
 
 class CreatePartitionRequest(BaseModel):
+    """Request body for creating a partition with preset references."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str
@@ -42,6 +44,8 @@ class CreatePartitionRequest(BaseModel):
 
 
 class UpdatePartitionRequest(BaseModel):
+    """Request body for updating partition preset assignments."""
+
     model_config = ConfigDict(extra="forbid")
 
     description: str | None = None
@@ -78,6 +82,8 @@ class UpdatePartitionRequest(BaseModel):
 
 
 class PartitionDetailResponse(BaseModel):
+    """Response body for a resolved partition configuration."""
+
     name: str
     description: str
     embedder: str
