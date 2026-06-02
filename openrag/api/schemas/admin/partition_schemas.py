@@ -9,9 +9,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 def _normalize_name(value: str) -> str:
+    """Trim a partition/preset reference and reject blank values."""
     value = value.strip()
     if not value:
         raise ValueError("name must be non-empty")
+    return value
+
+
+def _reject_explicit_null(field_name: str, value):
+    """Reject explicit null while still allowing omitted optional fields."""
+    if value is None:
+        raise ValueError(f"{field_name} cannot be null")
     return value
 
 
@@ -29,6 +37,7 @@ class CreatePartitionRequest(BaseModel):
     @field_validator("name", "embedder", "indexation_preset", "retrieval_preset")
     @classmethod
     def validate_non_empty_name(cls, value: str) -> str:
+        """Normalize non-null partition and preset names."""
         return _normalize_name(value)
 
 
@@ -45,10 +54,24 @@ class UpdatePartitionRequest(BaseModel):
     @field_validator("embedder", "indexation_preset", "retrieval_preset")
     @classmethod
     def validate_non_empty_name(cls, value: str | None) -> str | None:
-        return _normalize_name(value) if value is not None else None
+        """Normalize updated references and reject explicit null."""
+        return _normalize_name(_reject_explicit_null("name", value))
+
+    @field_validator("description")
+    @classmethod
+    def reject_null_description(cls, value: str | None) -> str:
+        """Reject explicit null for description updates."""
+        return _reject_explicit_null("description", value)
+
+    @field_validator("chat_history_depth")
+    @classmethod
+    def reject_null_chat_history_depth(cls, value: int | None) -> int:
+        """Reject explicit null for chat history depth updates."""
+        return _reject_explicit_null("chat_history_depth", value)
 
     @model_validator(mode="after")
     def require_at_least_one_update(self) -> UpdatePartitionRequest:
+        """Reject empty update payloads."""
         if not self.model_fields_set:
             raise ValueError("at least one field must be provided")
         return self

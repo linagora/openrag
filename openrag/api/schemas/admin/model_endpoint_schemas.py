@@ -11,10 +11,19 @@ ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm"]
 
 
 def _normalize_name(value: str) -> str:
+    """Trim a user-facing registry name and reject blank values."""
     value = value.strip()
     if not value:
         raise ValueError("name must be non-empty")
     return value
+
+
+def _normalize_endpoint(value: str) -> str:
+    """Trim an endpoint URL and reject values that normalize to empty."""
+    normalized = value.strip().rstrip("/")
+    if not normalized:
+        raise ValueError("endpoint must be non-empty")
+    return normalized
 
 
 class CreateModelEndpointRequest(BaseModel):
@@ -32,15 +41,14 @@ class CreateModelEndpointRequest(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name(cls, value: str) -> str:
+        """Normalize the endpoint registry name."""
         return _normalize_name(value)
 
     @field_validator("endpoint")
     @classmethod
     def validate_endpoint(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("endpoint must be non-empty")
-        return value.rstrip("/")
+        """Normalize the endpoint URL."""
+        return _normalize_endpoint(value)
 
 
 class UpdateModelEndpointRequest(BaseModel):
@@ -57,20 +65,20 @@ class UpdateModelEndpointRequest(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name(cls, value: str | None) -> str | None:
+        """Normalize the optional replacement name."""
         return _normalize_name(value) if value is not None else None
 
     @field_validator("endpoint")
     @classmethod
     def validate_endpoint(cls, value: str | None) -> str | None:
+        """Normalize the optional replacement endpoint URL."""
         if value is None:
             return None
-        value = value.strip()
-        if not value:
-            raise ValueError("endpoint must be non-empty")
-        return value.rstrip("/")
+        return _normalize_endpoint(value)
 
     @model_validator(mode="after")
     def require_at_least_one_update(self) -> UpdateModelEndpointRequest:
+        """Reject empty update payloads."""
         if not self.model_fields_set:
             raise ValueError("at least one field must be provided")
         return self
