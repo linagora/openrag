@@ -144,10 +144,10 @@ class MilvusVectorStore(VectorStore):
         self._collection_name = config.collection_name
         self._hybrid = config.hybrid_search
         self._uri = f"http://{config.host}:{config.port}"
-
+        self._timeout = 60
         try:
-            self._client = MilvusClient(uri=self._uri)
-            self._async_client = AsyncMilvusClient(uri=self._uri)
+            self._client = MilvusClient(uri=self._uri, timeout=self._timeout)
+            self._async_client = AsyncMilvusClient(uri=self._uri, timeout=self._timeout)
         except MilvusException as e:
             raise VDBConnectionError(
                 f"Failed to connect to Milvus: {e!s}",
