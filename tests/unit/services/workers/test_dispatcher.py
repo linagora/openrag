@@ -118,6 +118,8 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
             user={"id": 42},
             workspace_ids=["ws-1"],
             replace=True,
+            indexation_config={"parsing_strategy": "pymupdf"},
+            embedder_name="embed-fast",
         )
 
     assert task_id == "task-1"
@@ -137,6 +139,8 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         user={"id": 42},
         workspace_ids=["ws-1"],
         replace=True,
+        indexation_config={"parsing_strategy": "pymupdf"},
+        embedder_name="embed-fast",
     )
     tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})
 

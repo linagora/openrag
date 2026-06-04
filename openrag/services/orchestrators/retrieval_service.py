@@ -25,7 +25,8 @@ built ``searcher`` / ``reranker`` / ``llm`` plus ``config``.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from core.prompts import load_template_by_key
 from core.retrieval.pipeline import RetrieverPipeline
@@ -36,6 +37,7 @@ from core.retrieval.retriever import (
     _expand_with_related_chunks,
 )
 from core.retrieval.rrf import rrf_reranking
+from core.utils.exceptions import PartitionNotFoundError
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -60,14 +62,34 @@ class RetrievalService:
         self,
         *,
         searcher: RetrievalSearcher,
-        reranker: Reranker | None,
-        llm: LLM | None,
+        reranker: Reranker | None = None,
+        llm: LLM | None = None,
         config: Settings,
+        embedder_factory: Callable[[str], Any] | None = None,
+        reranker_factory: Callable[[str], Reranker] | None = None,
+        llm_factory: Callable[[str], LLM] | None = None,
     ) -> None:
         self._searcher = searcher
+        self._config = config
+        self._legacy_reranker = reranker
+        self._legacy_llm = llm
+        self._embedder_factory = embedder_factory
+        self._reranker_factory = reranker_factory
+        self._llm_factory = llm_factory
+        self._pipeline = self._build_legacy_pipeline(reranker=reranker, llm=llm)
+
+        logger.debug(
+            "RetrievalService ready",
+            retriever=config.retriever.type,
+            reranker_enabled=config.reranker.enabled and reranker is not None,
+            partition_configs=len(getattr(config, "partitions", {}) or {}),
+        )
+
+    def _build_legacy_pipeline(self, *, reranker: Reranker | None, llm: LLM | None) -> RetrieverPipeline:
+        config = self._config
         rcfg = config.retriever
         common = {
-            "searcher": searcher,
+            "searcher": self._searcher,
             "top_k": rcfg.top_k,
             "similarity_threshold": rcfg.similarity_threshold,
             "with_surrounding_chunks": rcfg.with_surrounding_chunks,
@@ -94,17 +116,107 @@ class RetrievalService:
         else:
             retriever = SingleRetriever(**common)
 
-        self._pipeline = RetrieverPipeline(
+        return RetrieverPipeline(
             retriever=retriever,
             reranker=reranker if config.reranker.enabled else None,
             reranker_top_k=config.reranker.top_k,
             allow_filterless_fallback=rcfg.allow_filterless_fallback,
         )
-        logger.debug(
-            "RetrievalService ready",
-            retriever=rtype,
-            reranker_enabled=config.reranker.enabled and reranker is not None,
+
+    def _build_retriever(
+        self,
+        *,
+        rtype: str,
+        common: dict[str, Any],
+        llm: LLM | None,
+        k_queries: int,
+        combine: bool,
+    ):
+        if rtype == "multiQuery":
+            return MultiQueryRetriever(
+                llm=llm,
+                multi_query_template=load_template_by_key(
+                    self._config.paths.prompts_dir,
+                    self._config.prompts,
+                    "multi_query",
+                ),
+                k_queries=k_queries,
+                **common,
+            )
+        if rtype == "hyde":
+            return HyDeRetriever(
+                llm=llm,
+                hyde_template=load_template_by_key(self._config.paths.prompts_dir, self._config.prompts, "hyde"),
+                combine=combine,
+                **common,
+            )
+        return SingleRetriever(**common)
+
+    def _partition_configs(self) -> dict[str, Any]:
+        return getattr(self._config, "partitions", {}) or {}
+
+    def _require_partition_config(self, partition: str):
+        partitions = self._partition_configs()
+        if partition not in partitions:
+            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
+        return partitions[partition]
+
+    def _legacy_retriever_value(self, name: str, default: Any) -> Any:
+        return getattr(self._config.retriever, name, default)
+
+    def _pipeline_for_partition(self, partition: str) -> tuple[RetrieverPipeline, int | None]:
+        if partition == "all" or not self._partition_configs():
+            return self._pipeline, None
+
+        partition_cfg = self._require_partition_config(partition)
+        pipeline_cfg = partition_cfg.retrieval
+        if self._embedder_factory is not None:
+            self._embedder_factory(partition_cfg.embedder)
+
+        rtype = pipeline_cfg.type
+        llm = self._legacy_llm
+        if rtype in {"multiQuery", "hyde"} and self._llm_factory is not None:
+            llm = self._llm_factory(pipeline_cfg.llm or partition_cfg.chat_llm or "default")
+
+        reranker = None
+        if pipeline_cfg.enable_reranker:
+            if self._reranker_factory is not None:
+                reranker = self._reranker_factory(pipeline_cfg.reranker or "default")
+            else:
+                reranker = self._legacy_reranker
+
+        retriever = self._build_retriever(
+            rtype=rtype,
+            common={
+                "searcher": self._searcher,
+                "top_k": pipeline_cfg.top_k,
+                "similarity_threshold": pipeline_cfg.similarity_threshold,
+                "with_surrounding_chunks": self._legacy_retriever_value("with_surrounding_chunks", False),
+                "include_related": pipeline_cfg.include_related,
+                "include_ancestors": pipeline_cfg.include_ancestors,
+                "related_limit": self._legacy_retriever_value("related_limit", 10),
+                "max_ancestor_depth": self._legacy_retriever_value("max_ancestor_depth", None),
+            },
+            llm=llm,
+            k_queries=self._legacy_retriever_value("k_queries", 3),
+            combine=self._legacy_retriever_value("combine", False),
         )
+        pipeline = RetrieverPipeline(
+            retriever=retriever,
+            reranker=reranker,
+            reranker_top_k=pipeline_cfg.top_n,
+            allow_filterless_fallback=self._legacy_retriever_value("allow_filterless_fallback", True),
+        )
+        return pipeline, pipeline_cfg.top_n
+
+    def _pipeline_groups_for_partitions(self, partitions: list[str]) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
+        if not partitions or "all" in partitions or not self._partition_configs():
+            return [(["all"] if "all" in partitions else partitions, self._pipeline, None)]
+        return [
+            ([partition], pipeline, default_top_k)
+            for partition in partitions
+            for pipeline, default_top_k in [self._pipeline_for_partition(partition)]
+        ]
 
     # ------------------------------------------------------------------
     # Raw semantic search (powers routers/search.py — was indexer.asearch)
@@ -164,12 +276,18 @@ class RetrievalService:
         filter_params: dict | None = None,
     ) -> list[Chunk]:
         """Single ``Query`` through retrieve → expand → rerank."""
-        return await self._pipeline.retrieve_docs(
-            partition=partitions,
-            query=query,
-            top_k=top_k,
-            filter_params=filter_params,
+        ranked_lists = await asyncio.gather(
+            *[
+                pipeline.retrieve_docs(
+                    partition=partition_group,
+                    query=query,
+                    top_k=top_k if top_k is not None else default_top_k,
+                    filter_params=filter_params,
+                )
+                for partition_group, pipeline, default_top_k in self._pipeline_groups_for_partitions(partitions)
+            ]
         )
+        return ranked_lists[0] if len(ranked_lists) == 1 else self.fuse(ranked_lists, top_k=top_k)
 
     async def retrieve_multi(
         self,
@@ -180,12 +298,18 @@ class RetrievalService:
         filter_params: dict | None = None,
     ) -> list[Chunk]:
         """Every sub-query in parallel, fused with RRF."""
-        return await self._pipeline.get_relevant_docs(
-            partition=partitions,
-            search_queries=search_queries,
-            top_k=top_k,
-            filter_params=filter_params,
+        ranked_lists = await asyncio.gather(
+            *[
+                pipeline.get_relevant_docs(
+                    partition=partition_group,
+                    search_queries=search_queries,
+                    top_k=top_k if top_k is not None else default_top_k,
+                    filter_params=filter_params,
+                )
+                for partition_group, pipeline, default_top_k in self._pipeline_groups_for_partitions(partitions)
+            ]
         )
+        return ranked_lists[0] if len(ranked_lists) == 1 else self.fuse(ranked_lists, top_k=top_k)
 
     async def retrieve_per_query(
         self,
@@ -202,15 +326,7 @@ class RetrievalService:
         lets it run one ``asyncio.gather`` over both.
         """
         return await asyncio.gather(
-            *[
-                self._pipeline.retrieve_docs(
-                    partition=partitions,
-                    query=q,
-                    top_k=top_k,
-                    filter_params=filter_params,
-                )
-                for q in queries
-            ]
+            *[self.retrieve(partitions=partitions, query=q, top_k=top_k, filter_params=filter_params) for q in queries]
         )
 
     @staticmethod

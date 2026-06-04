@@ -35,6 +35,8 @@ class IndexingDispatcher(ABC):
         user: dict | None,
         workspace_ids: list[str] | None,
         replace: bool,
+        indexation_config: dict | None = None,
+        embedder_name: str | None = None,
     ) -> str:
         """Queue an (re)indexing job, register its task state, return its id."""
         ...

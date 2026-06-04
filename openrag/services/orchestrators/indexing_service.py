@@ -14,12 +14,14 @@ returned via ``HTTPException``.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from core.utils.exceptions import PartitionNotFoundError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from core.config.root import Settings
     from core.indexing.dispatcher import IndexingDispatcher
     from core.ports.document_repo import DocumentRepository
     from core.ports.workspace_repo import WorkspaceRepository
@@ -53,10 +55,12 @@ class IndexingService:
         document_repo: DocumentRepository,
         workspace_repo: WorkspaceRepository,
         dispatcher: IndexingDispatcher,
+        config: Settings | None = None,
     ) -> None:
         self._document_repo = document_repo
         self._workspace_repo = workspace_repo
         self._dispatcher = dispatcher
+        self._config = config
 
     # ------------------------------------------------------------------
     # Lookups (used by the thin router for its byte-identical guards)
@@ -103,6 +107,20 @@ class IndexingService:
         metadata.update(extract_temporal_fields(metadata, temporal_fields=TEMPORAL_FIELDS))
         return metadata
 
+    def _partition_configs(self) -> dict[str, Any]:
+        if self._config is None:
+            return {}
+        return getattr(self._config, "partitions", {}) or {}
+
+    def _resolve_indexation_dispatch_config(self, partition: str) -> tuple[dict | None, str | None]:
+        partitions = self._partition_configs()
+        if not partitions:
+            return None, None
+        if partition not in partitions:
+            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
+        partition_cfg = partitions[partition]
+        return partition_cfg.indexation.model_dump(mode="json"), partition_cfg.embedder
+
     async def add_file(
         self,
         *,
@@ -128,6 +146,7 @@ class IndexingService:
             sanitized_filename=sanitized_filename,
             original_filename=original_filename,
         )
+        indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
         return await self._dispatcher.dispatch_indexing(
             path=file_path,
             metadata=full_metadata,
@@ -135,6 +154,8 @@ class IndexingService:
             user=user,
             workspace_ids=workspace_ids,
             replace=replace,
+            indexation_config=indexation_config,
+            embedder_name=embedder_name,
         )
 
     async def delete_file(self, file_id: str, partition: str) -> None:

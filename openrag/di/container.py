@@ -442,6 +442,9 @@ class ServiceContainer:
                 reranker=reranker,
                 llm=llm,
                 config=settings,
+                embedder_factory=self.embedder_factory,
+                reranker_factory=self.reranker_factory,
+                llm_factory=self.llm_factory,
             )
         return self._retrieval_service
 
@@ -497,6 +500,7 @@ class ServiceContainer:
                     workspace_repo=self.workspace_repo,
                     collection=settings.vectordb.collection_name,
                 ),
+                config=settings,
             )
         return self._indexing_service
 

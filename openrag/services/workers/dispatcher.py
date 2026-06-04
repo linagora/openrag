@@ -65,6 +65,8 @@ class WorkerDispatcher(IndexingDispatcher):
         user: dict | None,
         workspace_ids: list[str] | None,
         replace: bool,
+        indexation_config: dict | None = None,
+        embedder_name: str | None = None,
     ) -> str:
         task_id = uuid.uuid4().hex
 
@@ -93,6 +95,8 @@ class WorkerDispatcher(IndexingDispatcher):
             user=user,
             workspace_ids=workspace_ids,
             replace=replace,
+            indexation_config=indexation_config,
+            embedder_name=embedder_name,
         )
 
         await self._call(

@@ -69,12 +69,13 @@ class PgDocumentRepository(DocumentRepository):
         await self.pool.execute(
             """
             INSERT INTO files (file_id, partition_name, file_metadata,
-                               created_by, relationship_id, parent_id)
-            VALUES ($1, $2, $3::json, $4, $5, $6)
+                               indexation_config, created_by, relationship_id, parent_id)
+            VALUES ($1, $2, $3::json, $4::jsonb, $5, $6, $7)
             """,
             file_id,
             doc.partition,
             metadata,
+            doc.indexation_config,
             doc.created_by,
             doc.relationship_id,
             doc.parent_id,
@@ -157,6 +158,9 @@ class PgDocumentRepository(DocumentRepository):
             # We always rewrite file_metadata so JSON-only updates are persisted.
             params.append(metadata)
             sets.append(f"file_metadata = ${len(params)}::json")
+            if "indexation_config" in fields:
+                params.append(fields.pop("indexation_config"))
+                sets.append(f"indexation_config = ${len(params)}::jsonb")
 
             for column in ("relationship_id", "parent_id", "created_by"):
                 if column in fields:
@@ -266,6 +270,7 @@ class PgDocumentRepository(DocumentRepository):
         user_id: int | None = None,
         relationship_id: str | None = None,
         parent_id: str | None = None,
+        indexation_config: dict | None = None,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
@@ -309,12 +314,13 @@ class PgDocumentRepository(DocumentRepository):
                 await conn.execute(
                     """
                     INSERT INTO files (file_id, partition_name, file_metadata,
-                                       created_by, relationship_id, parent_id)
-                    VALUES ($1, $2, $3::json, $4, $5, $6)
+                                       indexation_config, created_by, relationship_id, parent_id)
+                    VALUES ($1, $2, $3::json, $4::jsonb, $5, $6, $7)
                     """,
                     file_id,
                     partition,
                     file_metadata or {},
+                    indexation_config,
                     user_id,
                     relationship_id,
                     parent_id,
@@ -386,6 +392,7 @@ class PgDocumentRepository(DocumentRepository):
         file_metadata: dict | None = None,
         relationship_id: object = _UNSET,
         parent_id: object = _UNSET,
+        indexation_config: object = _UNSET,
     ) -> bool:
         """TODO(phase-9): remove. PUT-style in-place update.
 
@@ -404,6 +411,9 @@ class PgDocumentRepository(DocumentRepository):
         if parent_id is not self._UNSET:
             params.append(parent_id)
             sets.append(f"parent_id = ${len(params)}")
+        if indexation_config is not self._UNSET:
+            params.append(indexation_config)
+            sets.append(f"indexation_config = ${len(params)}::jsonb")
         if not sets:
             # Match legacy: report whether the row exists at all.
             return await self.file_exists_in_partition(file_id, partition)
@@ -569,6 +579,7 @@ class PgDocumentRepository(DocumentRepository):
             created_by=row["created_by"],
             relationship_id=row["relationship_id"],
             parent_id=row["parent_id"],
+            indexation_config=row["indexation_config"],
         )
 
 

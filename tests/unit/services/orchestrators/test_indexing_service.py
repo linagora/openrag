@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from core.config.indexation_pipeline import IndexationPipelineConfig
+from core.config.retrieval_pipeline import RetrievalPipelineConfig
+from core.models.preset import PartitionConfig
+from core.utils.exceptions import PartitionNotFoundError
 from services.orchestrators.indexing_service import IndexingService
 
 
@@ -34,7 +38,18 @@ class FakeDispatcher:
         self.cancelled: list[str] = []
         self.cancel_result = True
 
-    async def dispatch_indexing(self, *, path, metadata, partition, user, workspace_ids, replace):
+    async def dispatch_indexing(
+        self,
+        *,
+        path,
+        metadata,
+        partition,
+        user,
+        workspace_ids,
+        replace,
+        indexation_config=None,
+        embedder_name=None,
+    ):
         self.dispatched.append(
             {
                 "path": path,
@@ -43,6 +58,8 @@ class FakeDispatcher:
                 "user": user,
                 "workspace_ids": workspace_ids,
                 "replace": replace,
+                "indexation_config": indexation_config,
+                "embedder_name": embedder_name,
             }
         )
         return "task-abc"
@@ -67,11 +84,34 @@ class FakeDispatcher:
         return self.cancel_result
 
 
-def _service(*, doc=None, ws=None, disp=None):
+def _config_with_partition(partition: str = "tenant-a"):
+    return type(
+        "Config",
+        (),
+        {
+            "partitions": {
+                partition: PartitionConfig(
+                    name=partition,
+                    embedder="embed-fast",
+                    indexation=IndexationPipelineConfig(
+                        parsing_strategy="pymupdf",
+                        enable_image_captioning=False,
+                        enable_contextualization=True,
+                        contextualization_llm="llm-context",
+                    ),
+                    retrieval=RetrievalPipelineConfig(),
+                )
+            }
+        },
+    )()
+
+
+def _service(*, doc=None, ws=None, disp=None, config=None):
     return IndexingService(
         document_repo=doc or FakeDocumentRepo(),
         workspace_repo=ws or FakeWorkspaceRepo(),
         dispatcher=disp or FakeDispatcher(),
+        config=config,
     )
 
 
@@ -145,6 +185,49 @@ async def test_replace_sets_replace_flag(tmp_path):
         replace=True,
     )
     assert disp.dispatched[0]["replace"] is True
+
+
+@pytest.mark.asyncio
+async def test_add_file_dispatches_partition_indexation_config_and_embedder(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    disp = FakeDispatcher()
+    svc = _service(disp=disp, config=_config_with_partition("tenant-a"))
+
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="tenant-a",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user=None,
+    )
+
+    sent = disp.dispatched[0]
+    assert sent["embedder_name"] == "embed-fast"
+    assert sent["indexation_config"]["parsing_strategy"] == "pymupdf"
+    assert sent["indexation_config"]["enable_image_captioning"] is False
+    assert sent["indexation_config"]["enable_contextualization"] is True
+    assert sent["indexation_config"]["contextualization_llm"] == "llm-context"
+
+
+@pytest.mark.asyncio
+async def test_add_file_rejects_unknown_partition_when_partition_configs_exist(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    svc = _service(config=_config_with_partition("tenant-a"))
+
+    with pytest.raises(PartitionNotFoundError, match="tenant-b"):
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="tenant-b",
+            metadata={},
+            sanitized_filename="doc.txt",
+            original_filename="doc.txt",
+            user=None,
+        )
 
 
 @pytest.mark.asyncio

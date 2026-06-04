@@ -12,8 +12,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from core.config.indexation_pipeline import IndexationPipelineConfig
+from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
+from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
+from core.utils.exceptions import PartitionNotFoundError
 from services.orchestrators.retrieval_service import RetrievalService
 
 
@@ -58,7 +62,31 @@ def _config(rtype: str = "single", reranker_enabled: bool = False) -> SimpleName
             combine=False,
         ),
         reranker=SimpleNamespace(enabled=reranker_enabled, top_k=5),
+        partitions={},
     )
+
+
+def _partition(
+    *,
+    name: str = "tenant-a",
+    embedder: str = "embed-a",
+    retrieval: RetrievalPipelineConfig | None = None,
+) -> PartitionConfig:
+    return PartitionConfig(
+        name=name,
+        embedder=embedder,
+        indexation=IndexationPipelineConfig(),
+        retrieval=retrieval or RetrievalPipelineConfig(),
+    )
+
+
+class FakeReranker:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def rerank(self, *, query, documents, top_k):
+        self.calls.append({"query": query, "documents": documents, "top_k": top_k})
+        return [(idx, 1.0) for idx in range(len(documents))]
 
 
 def _svc(searcher, *, rtype="single", reranker_enabled=False) -> RetrievalService:
@@ -169,3 +197,61 @@ def test_fuse_rrf_merges_and_dedupes():
 def test_fuse_respects_top_k():
     a, b, c = _chunk("a"), _chunk("b"), _chunk("c")
     assert len(RetrievalService.fuse([[a, b], [b, c]], top_k=2)) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Phase 14J.1 — per-partition retrieval pipeline config
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_retrieve_uses_partition_retrieval_config_and_named_reranker():
+    s = FakeSearcher()
+    s.search_result = [_chunk("a"), _chunk("b"), _chunk("c")]
+    reranker = FakeReranker()
+    embedder_calls: list[str] = []
+    reranker_calls: list[str] = []
+    cfg = _config()
+    cfg.partitions = {
+        "tenant-a": _partition(
+            retrieval=RetrievalPipelineConfig(
+                top_k=3,
+                top_n=2,
+                similarity_threshold=0.77,
+                include_related=False,
+                include_ancestors=False,
+                enable_reranker=True,
+                reranker="fast-ranker",
+            )
+        )
+    }
+
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        embedder_factory=lambda name: embedder_calls.append(name) or object(),
+        reranker_factory=lambda name: reranker_calls.append(name) or reranker,
+    )
+
+    out = await svc.retrieve(partitions=["tenant-a"], query=Query(query="hello"))
+
+    assert [c.id for c in out] == ["a", "b"]
+    assert embedder_calls == ["embed-a"]
+    assert reranker_calls == ["fast-ranker"]
+    assert reranker.calls[0]["query"] == "hello"
+    call = s.search_calls[0]
+    assert call["partition"] == ["tenant-a"]
+    assert call["top_k"] == 3
+    assert call["similarity_threshold"] == 0.77
+
+
+@pytest.mark.asyncio
+async def test_retrieve_rejects_unknown_partition_when_partition_configs_exist():
+    cfg = _config()
+    cfg.partitions = {"tenant-a": _partition()}
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg)
+
+    with pytest.raises(PartitionNotFoundError, match="tenant-b"):
+        await svc.retrieve(partitions=["tenant-b"], query=Query(query="hello"))
