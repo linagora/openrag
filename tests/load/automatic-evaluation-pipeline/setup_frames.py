@@ -73,7 +73,7 @@ FORMAT_DEFAULTS: dict[str, tuple[str, str]] = {
 
 
 def load_dataset_cached(limit: int | None = None) -> list[dict]:
-    """Load dataset from local cache, or download from HuggingFace on first run."""
+    """Load dataset from local cache, downloading from HuggingFace when the cache is absent."""
     if DATASET_CACHE.exists():
         logger.info(f"Loading dataset from cache ({DATASET_CACHE.name})...")
         with open(DATASET_CACHE, encoding="utf-8") as f:

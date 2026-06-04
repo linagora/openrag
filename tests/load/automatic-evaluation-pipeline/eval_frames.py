@@ -147,7 +147,7 @@ def load_dataset_cached(limit: int | None = None, dataset_path: str | None = Non
         with open(cache_path, encoding="utf-8") as f:
             dataset = json.load(f)
     else:
-        logger.info("Downloading FRAMES benchmark from HuggingFace (first time only)...")
+        logger.info("Downloading FRAMES benchmark from HuggingFace (no local cache found)...")
         from datasets import load_dataset
         hf_dataset = load_dataset("google/frames-benchmark", split="test")
         dataset = [dict(row) for row in hf_dataset]
