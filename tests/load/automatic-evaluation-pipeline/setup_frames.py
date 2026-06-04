@@ -25,9 +25,12 @@ Environment variables (from .env):
 import argparse
 import ast
 import asyncio
+import hashlib
 import json
 import os
 import re
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
@@ -51,8 +54,11 @@ WIKIPEDIA_REST_HTML = "https://en.wikipedia.org/api/rest_v1/page/html"
 WIKIPEDIA_REST_PDF = "https://en.wikipedia.org/api/rest_v1/page/pdf"
 WIKIPEDIA_USER_AGENT = "OpenRAG-FRAMES-Benchmark/1.0 (https://github.com/linagora/openrag; eval pipeline)"
 
-TERMINAL_STATES = {"COMPLETED", "FAILED"}
+TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED"}
 POLL_INTERVAL = 5
+# Upper bound on how long to poll a single indexing task before giving up, so a
+# stuck or silently-dropped task can never hang the whole run forever.
+MAX_POLL_SECONDS = 1800
 
 DATASET_CACHE = Path(__file__).parent / "frames_dataset.json"
 
@@ -129,13 +135,37 @@ def safe_filename(title: str) -> str:
     safe = re.sub(r'[^\w\s\-()]', '', title).strip()
     safe = re.sub(r'\s+', '_', safe)
     if not safe:
-        safe = f"article_{hash(title) % 10**8}"
+        # Stable hash so eval_frames.py derives the same name (built-in hash() is
+        # salted per process and would not match across the two scripts).
+        safe = f"article_{hashlib.md5(title.encode('utf-8')).hexdigest()[:8]}"
     return safe
 
 
 def title_to_wiki_slug(title: str) -> str:
     decoded = unquote(title)
     return quote(decoded.replace(" ", "_"), safe="/:@!$&'()*+,;=-._~")
+
+
+def _retry_after_seconds(resp: httpx.Response, attempt: int) -> float:
+    """Seconds to wait, honoring a numeric or HTTP-date Retry-After header.
+
+    Falls back to capped exponential backoff when the header is absent or
+    unparseable (a bare float() would raise on the HTTP-date form).
+    """
+    header = resp.headers.get("retry-after")
+    fallback = float(min(2 ** attempt + 1, 60))
+    if not header:
+        return fallback
+    try:
+        return float(header)
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(header)
+        now = datetime.now(UTC) if retry_at.tzinfo else datetime.now()
+        return max((retry_at - now).total_seconds(), 0.0)
+    except (TypeError, ValueError):
+        return fallback
 
 
 # ─── Fetch ───────────────────────────────────────────────────────────────────
@@ -153,7 +183,7 @@ async def fetch_markdown(
         try:
             resp = await client.get(WIKIPEDIA_API_URL, params=params)
             if resp.status_code == 429 or resp.status_code >= 500:
-                wait = float(resp.headers.get("retry-after") or min(2 ** attempt + 1, 60))
+                wait = _retry_after_seconds(resp, attempt)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(wait)
                     continue
@@ -190,7 +220,7 @@ async def fetch_rest(
         try:
             resp = await client.get(url)
             if resp.status_code == 429 or resp.status_code >= 500:
-                wait = float(resp.headers.get("retry-after") or min(2 ** attempt + 1, 60))
+                wait = _retry_after_seconds(resp, attempt)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(wait)
                     continue
@@ -307,9 +337,13 @@ async def upload_and_track(
                 resp.raise_for_status()
 
             task_url = resp.json().get("task_status_url")
+            if not task_url:
+                return {"file_id": file_id, "status": "ERROR", "error": "no task_status_url in response"}
             if task_url.startswith("/"):
                 task_url = f"{OPENRAG_BASE_URL}{task_url}"
 
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + MAX_POLL_SECONDS
             while True:
                 poll = await client.get(task_url, headers=headers)
                 if poll.status_code == 200:
@@ -318,6 +352,8 @@ async def upload_and_track(
                         return {"file_id": file_id, "status": state}
                 else:
                     logger.warning(f"Poll failed for '{file_id}': {poll.status_code}")
+                if loop.time() >= deadline:
+                    return {"file_id": file_id, "status": "ERROR", "error": f"timed out after {MAX_POLL_SECONDS}s"}
                 await asyncio.sleep(POLL_INTERVAL)
         except Exception as e:
             logger.error(f"Error processing '{file_id}': {e}")

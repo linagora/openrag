@@ -25,6 +25,7 @@ Environment variables (from .env):
 import argparse
 import ast
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -61,6 +62,22 @@ OPENRAG_BASE_URL = f"http://{APP_URL}:{APP_PORT}"
 
 MAX_RETRIES = 3
 _RETRY_BACKOFF = [2, 5, 10]
+
+
+def _require_llm_config(*, judge_only: bool = False) -> None:
+    """Fail fast with a clear message when the LLM env vars are missing.
+
+    ChatOpenAI(model=None, base_url=None, ...) otherwise fails deep inside the
+    client with an opaque error. The --no-rag and --oracle modes need MODEL /
+    BASE_URL / API_KEY; every mode that runs the judge needs the JUDGE_* values
+    (which default to the primary ones).
+    """
+    pairs = [("MODEL_JUDGE", JUDGE_MODEL), ("BASE_URL_JUDGE", JUDGE_BASE_URL), ("API_KEY_JUDGE", JUDGE_API_KEY)]
+    if not judge_only:
+        pairs = [("MODEL", MODEL), ("BASE_URL", BASE_URL), ("API_KEY", API_KEY), *pairs]
+    missing = [name for name, val in pairs if not val]
+    if missing:
+        raise SystemExit(f"ERROR: missing required environment variable(s): {', '.join(missing)}")
 
 
 async def _http_with_retry(
@@ -211,11 +228,16 @@ def parse_wiki_links(row) -> list[str]:
 
 
 def _safe_filename(title: str) -> str:
-    """Convert a Wikipedia title to a safe filename."""
+    """Convert a Wikipedia title to a safe filename.
+
+    Uses a stable hash as a last resort so the fallback name matches the one
+    setup_frames.py wrote on disk (Python's built-in hash() is salted per
+    process, which would break oracle / gold-file matching across runs).
+    """
     safe_name = re.sub(r'[^\w\s\-()]', '', title).strip()
     safe_name = re.sub(r'\s+', '_', safe_name)
     if not safe_name:
-        safe_name = f"article_{hash(title) % 10**8}"
+        safe_name = f"article_{hashlib.md5(title.encode('utf-8')).hexdigest()[:8]}"
     return safe_name
 
 
@@ -365,14 +387,22 @@ async def add_files_to_workspace(
     workspace_id: str,
     file_ids: list[str],
 ) -> None:
-    """Attach files to a workspace."""
+    """Attach files to a workspace.
+
+    Tolerant of partial failures: some gold articles may have failed to download
+    or index, so a rejected attachment is logged and skipped rather than aborting
+    the whole evaluation run.
+    """
     headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
     resp = await client.post(
         f"{OPENRAG_BASE_URL}/partition/{partition}/workspaces/{workspace_id}/files",
         json={"file_ids": file_ids},
         headers=headers,
     )
-    resp.raise_for_status()
+    if resp.status_code not in (200, 201):
+        logger.warning(
+            f"Could not attach files to workspace '{workspace_id}': {resp.status_code} - {resp.text[:200]}"
+        )
 
 
 async def prepare_gold_workspace_for_question(
@@ -709,6 +739,9 @@ async def main() -> None:
     if args.reuse_gold_workspaces and not args.gold_workspaces:
         parser.error("--reuse-gold-workspaces requires --gold-workspaces")
 
+    # Every mode ends by running the LLM judge, so its config must be present.
+    _require_llm_config(judge_only=True)
+
     dataset = load_dataset_cached(limit=args.limit, dataset_path=args.dataset_path)
     docs_dir = Path(args.docs_dir)
     if not docs_dir.is_absolute():
@@ -724,6 +757,7 @@ async def main() -> None:
         await run_accuracy_judging(results, concurrency=args.judge_concurrency)
 
     elif args.no_rag:
+        _require_llm_config()
         print(f"Evaluating {len(dataset)} questions [NO_RAG]")
         llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=API_KEY, temperature=0.2, max_tokens=512)
         sem = asyncio.Semaphore(args.concurrency)
@@ -736,6 +770,7 @@ async def main() -> None:
         await run_accuracy_judging(results, concurrency=args.judge_concurrency)
 
     elif args.oracle:
+        _require_llm_config()
         print(f"Evaluating {len(dataset)} questions [ORACLE]")
         if not docs_dir.exists():
             print(f"ERROR: docs dir {docs_dir} not found. Run setup_frames.py first.")
@@ -811,6 +846,9 @@ async def main() -> None:
 
     else:
         print(f"Evaluating {len(dataset)} questions on partition '{args.partition}' at {OPENRAG_BASE_URL}")
+        async with httpx.AsyncClient(timeout=60) as client:
+            if not await _check_openrag_health(client):
+                return
         sem = asyncio.Semaphore(args.concurrency)
         raw = await tqdm.gather(
             *[query_openrag_answer(row["Prompt"], args.partition, sem) for row in dataset],
