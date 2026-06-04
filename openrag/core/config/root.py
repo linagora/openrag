@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from core.models.preset import PartitionConfig
 from pydantic import Field
 
 from .base import ConfigMixin
@@ -24,6 +25,8 @@ from .infrastructure import (
     VerboseConfig,
 )
 from .mcp import MCPServerConfig
+from .model_endpoints import ModelsConfig
+from .presets import PresetsConfig
 from .retrieval import (
     MapReduceConfig,
     RAGConfig,
@@ -63,3 +66,6 @@ class Settings(ConfigMixin):
     rag: RAGConfig = Field(default_factory=RAGConfig)
     websearch: WebSearchConfig = Field(default_factory=StaanWebSearchConfig)
     mcp: MCPServerConfig = Field(default_factory=MCPServerConfig)
+    models: ModelsConfig = Field(default_factory=ModelsConfig)
+    presets: PresetsConfig = Field(default_factory=PresetsConfig)
+    partitions: dict[str, PartitionConfig] = Field(default_factory=dict)
