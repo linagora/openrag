@@ -130,7 +130,7 @@ def upgrade() -> None:
         if not column_exists("partitions", col_name):
             op.add_column("partitions", col_def)
 
-    if not index_exists("ix_workspaces_partition_name"):
+    if not index_exists("workspaces", "ix_workspaces_partition_name"):
         op.create_index(
             op.f("ix_workspaces_partition_name"),
             "workspaces",
@@ -140,7 +140,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if index_exists("ix_workspaces_partition_name"):
+    if index_exists("workspaces", "ix_workspaces_partition_name"):
         op.drop_index(op.f("ix_workspaces_partition_name"), table_name="workspaces")
 
     for col in [
