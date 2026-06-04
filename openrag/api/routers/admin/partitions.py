@@ -17,6 +17,7 @@ from api.dependencies.auth import (
     require_partition_owner,
     require_partition_viewer,
 )
+from api.schemas.admin.partition_schemas import PartitionDetailResponse, UpdatePartitionRequest
 from core.utils.logging import get_logger
 from di.providers import get_partition_service
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
@@ -29,7 +30,19 @@ RoleType = Literal["viewer", "editor", "owner"]
 
 
 def _quote_param_value(s: str) -> str:
+    """Percent-encode a path parameter value for URL generation."""
     return quote(s, safe="")
+
+
+def _require_service_method(service, method_name: str):
+    """Return a service method or fail clearly when a phased method is absent."""
+    method = getattr(service, method_name, None)
+    if not callable(method):
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=f"{method_name} is not available.",
+        )
+    return method
 
 
 @router.get(
@@ -49,6 +62,7 @@ async def list_existant_partitions(
     partitions=Depends(partitions_with_details),
     service=Depends(get_partition_service),
 ):
+    """List partitions visible to the current user."""
     if len(partitions) == 1 and partitions[0]["partition"] == "all":
         partitions = await service.list_partitions()
     logger.debug("Returned list of existing partitions.", partition_count=len(partitions))
@@ -77,6 +91,7 @@ async def delete_partition(
     partition_owner=Depends(require_partition_owner),
     service=Depends(get_partition_service),
 ):
+    """Delete a partition owned by the current user."""
     await service.delete_partition(partition)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -107,9 +122,11 @@ async def list_files(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
+    """List files stored in a partition."""
     file_dicts = await service.list_files(partition, limit)
 
     def process_file(file_dict):
+        """Add a canonical file-detail link to one file row."""
         return {
             "link": str(
                 request.url_for(
@@ -153,6 +170,7 @@ async def get_file(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
+    """Return metadata and chunk links for one file in a partition."""
     if not await service.file_exists(file_id, partition):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -196,6 +214,7 @@ async def list_all_chunks(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
+    """List all chunks in a partition."""
     items = await service.list_all_chunks(partition=partition, include_embedding=include_embedding)
     chunks = [
         {
@@ -232,6 +251,7 @@ async def create_partition(
     partition: str,
     service=Depends(get_partition_service),
 ):
+    """Create a new partition owned by the current user."""
     if await service.partition_exists(partition):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -240,6 +260,69 @@ async def create_partition(
     user_id = request.state.user["id"]
     await service.create_partition(partition=partition, user_id=user_id)
     return Response(status_code=status.HTTP_201_CREATED)
+
+
+@router.patch(
+    "/{partition}",
+    response_model=PartitionDetailResponse,
+    description="""Update Phase 14 preset assignments for a partition.
+
+**Parameters:**
+- `partition`: The partition name
+
+**Body:**
+Accepts partition config fields such as:
+- `description`
+- `embedder`
+- `indexation_preset`
+- `retrieval_preset`
+- `chat_history_depth`
+- `chat_llm`
+
+**Permissions:**
+- Requires partition owner role
+
+**Response:**
+Returns the updated resolved partition configuration.
+""",
+)
+async def update_partition_config(
+    partition: str,
+    body: UpdatePartitionRequest,
+    partition_owner=Depends(require_partition_owner),
+    service=Depends(get_partition_service),
+):
+    """Update Phase 14 preset references for a partition."""
+    method = _require_service_method(service, "update_partition_config")
+    return await method(
+        partition=partition,
+        **body.model_dump(exclude_unset=True),
+    )
+
+
+@router.get(
+    "/{partition}/config",
+    response_model=PartitionDetailResponse,
+    description="""Return the resolved Phase 14 pipeline config for a partition.
+
+**Parameters:**
+- `partition`: The partition name
+
+**Permissions:**
+- Requires partition viewer role or higher
+
+**Response:**
+Returns partition metadata, preset references, and resolved indexation/retrieval pipeline configs.
+""",
+)
+async def get_partition_config(
+    partition: str,
+    partition_viewer=Depends(require_partition_viewer),
+    service=Depends(get_partition_service),
+):
+    """Return the resolved Phase 14 config for a partition."""
+    method = _require_service_method(service, "get_partition_config")
+    return await method(partition=partition)
 
 
 @router.get(
@@ -401,6 +484,7 @@ async def get_related_files(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
+    """Return files sharing a relationship identifier."""
     files = await service.get_related_files(partition=partition, relationship_id=relationship_id)
     return JSONResponse(status_code=status.HTTP_200_OK, content={"files": files})
 
@@ -438,6 +522,7 @@ async def get_file_ancestors(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
+    """Return the ancestor path for one file."""
     if not await service.file_exists(file_id, partition):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
