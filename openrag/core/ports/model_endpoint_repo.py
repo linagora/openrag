@@ -4,18 +4,29 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from core.config.model_endpoints import ModelEndpointRow
+
 
 class ModelEndpointRepository(ABC):
-    """CRUD operations for model endpoint configurations."""
+    """CRUD operations for named model endpoint configurations."""
 
     @abstractmethod
-    async def get(self, name: str, model_type: str) -> dict | None: ...
+    async def create(self, row: ModelEndpointRow) -> ModelEndpointRow: ...
 
     @abstractmethod
-    async def list_all(self, model_type: str | None = None) -> list[dict]: ...
+    async def get(self, name: str, model_type: str) -> ModelEndpointRow | None: ...
 
     @abstractmethod
-    async def upsert(self, name: str, model_type: str, config: dict) -> dict: ...
+    async def list_all(self, model_type: str | None = None) -> list[ModelEndpointRow]: ...
+
+    @abstractmethod
+    async def update(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow | None: ...
+
+    @abstractmethod
+    async def rename(self, name: str, model_type: str, new_name: str) -> None: ...
 
     @abstractmethod
     async def delete(self, name: str, model_type: str) -> bool: ...
+
+    @abstractmethod
+    async def set_default(self, model_type: str, name: str) -> None: ...
