@@ -1,31 +1,90 @@
-"""Stub :class:`PresetRepository`.
+"""asyncpg-backed :class:`PresetRepository`.
 
-Pipeline presets — named bundles of chunker/embedder/retriever config —
-are P0 on the post-refactoring roadmap. They are the mechanism that
-will let each partition pick its own pipeline configuration without
-operators touching YAML. No table exists today.
+Manages the ``pipeline_presets`` table — named pipeline configuration
+bundles for indexation and retrieval. Phase 14D replaces the earlier
+stub with real SQL.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
 from core.ports.preset_repo import PresetRepository
-from services.persistence._stubs import _StubRepositoryBase, stub_not_implemented
+
+if TYPE_CHECKING:
+    import asyncpg
 
 
-class PgPresetRepository(_StubRepositoryBase, PresetRepository):
-    """TODO: real impl once the ``presets`` table is added — see REFACTORING P0 plan."""
+class PgPresetRepository(PresetRepository):
+    """asyncpg-backed implementation of :class:`PresetRepository`."""
+
+    def __init__(self, pool_getter: Callable[[], asyncpg.Pool]) -> None:
+        self._pool_getter = pool_getter
+
+    @property
+    def pool(self) -> asyncpg.Pool:
+        return self._pool_getter()
+
+    @staticmethod
+    def _row_to_dict(row: asyncpg.Record) -> dict:
+        return {
+            "name": row["name"],
+            "preset_type": row["preset_type"],
+            "config": row["config"] or {},
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
 
     async def get(self, name: str, preset_type: str) -> dict | None:
-        raise stub_not_implemented("Per-partition pipeline presets")
+        rec = await self.pool.fetchrow(
+            "SELECT * FROM pipeline_presets WHERE name = $1 AND preset_type = $2",
+            name,
+            preset_type,
+        )
+        return self._row_to_dict(rec) if rec else None
 
     async def list_all(self, preset_type: str | None = None) -> list[dict]:
-        raise stub_not_implemented("Per-partition pipeline presets")
+        if preset_type is not None:
+            rows = await self.pool.fetch(
+                "SELECT * FROM pipeline_presets WHERE preset_type = $1 ORDER BY name",
+                preset_type,
+            )
+        else:
+            rows = await self.pool.fetch(
+                "SELECT * FROM pipeline_presets ORDER BY preset_type, name",
+            )
+        return [self._row_to_dict(r) for r in rows]
 
     async def upsert(self, name: str, preset_type: str, config: dict) -> dict:
-        raise stub_not_implemented("Per-partition pipeline presets")
+        rec = await self.pool.fetchrow(
+            """
+            INSERT INTO pipeline_presets (name, preset_type, config)
+            VALUES ($1, $2, $3::jsonb)
+            ON CONFLICT (name, preset_type) DO UPDATE
+              SET config = EXCLUDED.config, updated_at = now()
+            RETURNING *
+            """,
+            name,
+            preset_type,
+            config,
+        )
+        return self._row_to_dict(rec)
 
     async def delete(self, name: str, preset_type: str) -> bool:
-        raise stub_not_implemented("Per-partition pipeline presets")
+        result = await self.pool.execute(
+            "DELETE FROM pipeline_presets WHERE name = $1 AND preset_type = $2",
+            name,
+            preset_type,
+        )
+        return result == "DELETE 1"
+
+    async def count_partitions_using(self, name: str, preset_type: str) -> int:
+        col = "indexation_preset" if preset_type == "indexation" else "retrieval_preset"
+        return await self.pool.fetchval(
+            f"SELECT COUNT(*)::int FROM partitions WHERE {col} = $1",
+            name,
+        )
 
 
 __all__ = ["PgPresetRepository"]

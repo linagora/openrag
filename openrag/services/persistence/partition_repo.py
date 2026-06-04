@@ -136,6 +136,51 @@ class PgPartitionRepository(PartitionRepository):
             name,
         )
 
+    # ── Phase 14 — full config row methods ───────────────────────────
+
+    async def get_partition_row(self, name: str) -> dict | None:
+        row = await self.pool.fetchrow(
+            "SELECT * FROM partitions WHERE partition = $1",
+            name,
+        )
+        return self._row_to_full_dict(row) if row else None
+
+    async def list_partition_rows(self) -> list[dict]:
+        rows = await self.pool.fetch(
+            "SELECT * FROM partitions ORDER BY created_at",
+        )
+        return [self._row_to_full_dict(r) for r in rows]
+
+    async def update_partition(self, name: str, **fields: object) -> dict | None:
+        _ALLOWED = frozenset(
+            {
+                "description",
+                "embedder",
+                "indexation_preset",
+                "retrieval_preset",
+                "dimension",
+                "collection_name",
+                "chat_history_depth",
+                "chat_llm",
+            }
+        )
+        updates = {k: v for k, v in fields.items() if k in _ALLOWED}
+        if not updates:
+            return await self.get_partition_row(name)
+
+        params: list = [name]
+        sets: list[str] = []
+        for col, val in updates.items():
+            idx = len(params) + 1
+            sets.append(f"{col} = ${idx}")
+            params.append(val)
+
+        row = await self.pool.fetchrow(
+            f"UPDATE partitions SET {', '.join(sets)}, updated_at = now() WHERE partition = $1 RETURNING *",
+            *params,
+        )
+        return self._row_to_full_dict(row) if row else None
+
     # ── Legacy method names used by the Phase 7C shim ────────────────
 
     async def get_partition_file_count(self, partition: str) -> int:
@@ -158,6 +203,23 @@ class PgPartitionRepository(PartitionRepository):
         return {
             "partition": row["partition"],
             "created_at": created.isoformat() if created else None,
+        }
+
+    @staticmethod
+    def _row_to_full_dict(row: asyncpg.Record) -> dict:
+        """Full partition row including all Phase 14 config columns."""
+        return {
+            "partition": row["partition"],
+            "description": row["description"],
+            "embedder": row["embedder"],
+            "indexation_preset": row["indexation_preset"],
+            "retrieval_preset": row["retrieval_preset"],
+            "dimension": row["dimension"],
+            "collection_name": row["collection_name"],
+            "chat_history_depth": row["chat_history_depth"],
+            "chat_llm": row["chat_llm"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
         }
 
 

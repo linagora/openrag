@@ -19,3 +19,6 @@ class PresetRepository(ABC):
 
     @abstractmethod
     async def delete(self, name: str, preset_type: str) -> bool: ...
+
+    @abstractmethod
+    async def count_partitions_using(self, name: str, preset_type: str) -> int: ...
