@@ -11,7 +11,7 @@ the Phase 10 -> 11 transition it supports both access patterns:
 from __future__ import annotations
 
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Request, status
 
@@ -128,6 +128,27 @@ def get_mcp_service(request: Request = None) -> MCPService:
     return _require_initialized(request).mcp_service
 
 
+def _get_optional_service(container: ServiceContainer, attribute_name: str) -> Any:
+    """Resolve a service that can be absent until its phase lands."""
+    service = getattr(container, attribute_name, None)
+    if service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"{attribute_name} is not available.",
+        )
+    return service
+
+
+def get_model_endpoint_service(request: Request = None) -> Any:
+    """Resolve the Phase 14 model endpoint orchestrator from the active container."""
+    return _get_optional_service(_require_initialized(request), "model_endpoint_service")
+
+
+def get_preset_service(request: Request = None) -> Any:
+    """Resolve the Phase 14 preset orchestrator from the active container."""
+    return _get_optional_service(_require_initialized(request), "preset_service")
+
+
 def get_config(request: Request = None):
     """Resolve application configuration from the active container."""
     return _require_initialized(request).config
@@ -141,7 +162,9 @@ __all__ = [
     "get_indexing_service",
     "get_job_service",
     "get_mcp_service",
+    "get_model_endpoint_service",
     "get_partition_service",
+    "get_preset_service",
     "get_query_service",
     "get_retrieval_service",
     "get_user_service",

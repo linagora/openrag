@@ -240,6 +240,8 @@ _ORCHESTRATORS = [
     ("mcp_service", "get_mcp_service"),
 ]
 
+_OPTIONAL_PHASE_PROVIDERS = {"get_model_endpoint_service", "get_preset_service"}
+
 
 class TestPhase8OrchestratorWiring:
     """8F: all orchestrators wired consistently (container + providers)."""
@@ -272,6 +274,7 @@ class TestPhase8OrchestratorWiring:
         from di import providers
 
         wired = {name for name in vars(providers) if name.startswith("get_") and name.endswith("_service")}
+        wired -= _OPTIONAL_PHASE_PROVIDERS
         assert wired == {p for _, p in _ORCHESTRATORS}
 
 
@@ -328,6 +331,46 @@ class TestPhase11ProviderBridge:
 
         assert exc.value.status_code == 503
 
+    @pytest.mark.parametrize(
+        ("provider", "attribute_name"),
+        [
+            ("get_model_endpoint_service", "model_endpoint_service"),
+            ("get_preset_service", "preset_service"),
+        ],
+    )
+    def test_optional_phase14_provider_resolves_if_present(self, provider, attribute_name):
+        """Resolve optional Phase 14 services once the container exposes them."""
+        from di import providers
+
+        sentinel = object()
+        fake_container = SimpleNamespace(is_initialized=True, **{attribute_name: sentinel})
+        try:
+            providers.set_container(fake_container)
+            assert getattr(providers, provider)() is sentinel
+        finally:
+            providers.set_container(None)
+
+    @pytest.mark.parametrize(
+        "provider",
+        [
+            "get_model_endpoint_service",
+            "get_preset_service",
+        ],
+    )
+    def test_optional_phase14_provider_missing_returns_503(self, provider):
+        """Return service-unavailable until optional Phase 14 services are wired."""
+        from di import providers
+
+        fake_container = SimpleNamespace(is_initialized=True)
+        try:
+            providers.set_container(fake_container)
+            with pytest.raises(HTTPException) as exc:
+                getattr(providers, provider)()
+        finally:
+            providers.set_container(None)
+
+        assert exc.value.status_code == 503
+
 
 class TestPhase11ContainerLifecycle:
     """Phase 11 introspection + lifecycle the provider bridge relies on."""
@@ -360,6 +403,8 @@ class TestPhase11ContainerLifecycle:
         closed = []
 
         class _FakeClient:
+            """Client double that records successful close calls."""
+
             async def aclose(self):
                 """Record that the client was closed."""
                 closed.append(self)
@@ -381,11 +426,15 @@ class TestPhase11ContainerLifecycle:
         closed = []
 
         class _BadClient:
+            """Client double that fails during close."""
+
             async def aclose(self):
                 """Fail to close, exercising the best-effort path."""
                 raise RuntimeError("boom")
 
         class _GoodClient:
+            """Client double that records close calls after a failure."""
+
             async def aclose(self):
                 """Record a successful close after a prior failure."""
                 closed.append(self)
