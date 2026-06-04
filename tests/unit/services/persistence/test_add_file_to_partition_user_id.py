@@ -91,7 +91,9 @@ async def test_add_file_to_partition_persists_indexation_config_column():
         )
         is True
     )
-    insert_query, insert_params = next((query, params) for query, params in pool.conn.executed if "INSERT INTO files" in query)
+    insert_query, insert_params = next(
+        (query, params) for query, params in pool.conn.executed if "INSERT INTO files" in query
+    )
     assert "indexation_config" in insert_query
     assert snapshot in insert_params
 

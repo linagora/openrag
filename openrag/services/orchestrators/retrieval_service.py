@@ -209,7 +209,9 @@ class RetrievalService:
         )
         return pipeline, pipeline_cfg.top_n
 
-    def _pipeline_groups_for_partitions(self, partitions: list[str]) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
+    def _pipeline_groups_for_partitions(
+        self, partitions: list[str]
+    ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
         if not partitions or "all" in partitions or not self._partition_configs():
             return [(["all"] if "all" in partitions else partitions, self._pipeline, None)]
         return [
