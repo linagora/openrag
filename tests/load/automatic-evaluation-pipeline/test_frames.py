@@ -93,6 +93,28 @@ class TestExtractAllTitles:
         ]
         assert su.extract_all_titles(ds) == ["Apple", "Banana"]
 
+    def test_glued_urls_are_split(self):
+        # Two URLs in one string must both be downloaded, matching eval's
+        # parse_wiki_links so oracle/gold files line up.
+        ds = [{"wiki_links": ["https://en.wikipedia.org/wiki/A https://en.wikipedia.org/wiki/B"]}]
+        assert su.extract_all_titles(ds) == ["A", "B"]
+
+
+class TestParsersAgree:
+    """setup_frames and eval_frames must resolve the same article set."""
+
+    @pytest.mark.parametrize("wiki_links", [
+        None,
+        ["https://en.wikipedia.org/wiki/Alan_Turing"],
+        "['https://en.wikipedia.org/wiki/A', 'https://en.wikipedia.org/wiki/B']",
+        ["https://en.wikipedia.org/wiki/A https://en.wikipedia.org/wiki/B"],
+        ["https://example.com/x", "https://en.wikipedia.org/wiki/A"],
+        "https://en.wikipedia.org/wiki/A, https://en.wikipedia.org/wiki/B",
+    ])
+    def test_parse_wiki_links_identical(self, wiki_links):
+        row = {"wiki_links": wiki_links}
+        assert su.parse_wiki_links(row) == ev.parse_wiki_links(row)
+
 
 # ─── Pure helpers: filenames (cross-module stability is a real audit fix) ─────
 

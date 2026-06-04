@@ -106,28 +106,66 @@ def extract_title_from_url(url: str) -> str | None:
     return None
 
 
+def parse_wiki_links(row: dict) -> list[str]:
+    """Extract Wikipedia URLs from a FRAMES dataset row.
+
+    Mirrors eval_frames.parse_wiki_links so both scripts resolve the same set of
+    articles — including rows where several URLs are glued into a single string.
+    """
+    wiki_links = row.get("wiki_links")
+    if not wiki_links:
+        return []
+
+    def _split_embedded_wiki_urls(value: str) -> list[str]:
+        pattern = r"https?://(?:[\w.-]+\.)?wikipedia\.org/wiki/"
+        starts = [m.start() for m in re.finditer(pattern, value)]
+        if not starts:
+            return []
+        if len(starts) == 1:
+            return [value.strip().strip(",")]
+
+        urls = []
+        for idx, start in enumerate(starts):
+            end = starts[idx + 1] if idx + 1 < len(starts) else len(value)
+            candidate = value[start:end].strip().strip(",").strip("'").strip('"')
+            if candidate:
+                urls.append(candidate)
+        return urls
+
+    if isinstance(wiki_links, str):
+        try:
+            links = ast.literal_eval(wiki_links)
+        except (ValueError, SyntaxError):
+            try:
+                links = json.loads(wiki_links)
+            except json.JSONDecodeError:
+                links = [part.strip() for part in wiki_links.split(",") if part.strip()]
+    else:
+        links = wiki_links
+
+    normalized_links = []
+    for link in links:
+        if not isinstance(link, str) or "wikipedia.org" not in link:
+            continue
+        normalized_links.extend(_split_embedded_wiki_urls(link))
+
+    seen = set()
+    deduped = []
+    for link in normalized_links:
+        if link not in seen:
+            seen.add(link)
+            deduped.append(link)
+    return deduped
+
+
 def extract_all_titles(dataset: list[dict]) -> list[str]:
     """Extract unique Wikipedia article titles referenced by the dataset."""
     titles: set[str] = set()
     for row in dataset:
-        wiki_links = row.get("wiki_links")
-        if not wiki_links:
-            continue
-        if isinstance(wiki_links, str):
-            try:
-                links = ast.literal_eval(wiki_links)
-            except (ValueError, SyntaxError):
-                try:
-                    links = json.loads(wiki_links)
-                except json.JSONDecodeError:
-                    links = [part.strip() for part in wiki_links.split(",") if part.strip()]
-        else:
-            links = wiki_links
-        for link in links:
-            if isinstance(link, str) and "wikipedia.org" in link:
-                title = extract_title_from_url(link.strip())
-                if title:
-                    titles.add(title)
+        for url in parse_wiki_links(row):
+            title = extract_title_from_url(url)
+            if title:
+                titles.add(title)
     return sorted(titles)
 
 
