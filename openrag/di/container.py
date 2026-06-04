@@ -29,6 +29,7 @@ from core.rerankers import reranker_registry
 from core.utils.logging import get_logger
 from core.vlm import vlm_registry
 from di.embedders import register_embedders
+from di.factories import make_component_factory
 from di.llms import register_llms
 from di.repositories import create_catalog_store
 from di.rerankers import register_rerankers
@@ -96,6 +97,15 @@ class ServiceContainer:
         self._settings = settings
         self._initialized = False
         self._inference_clients: list[Any] = []
+        self._client_caches: list[dict[str, Any]] = []
+        self._embedder_cache: dict[str, Any] = {}
+        self._reranker_cache: dict[str, Any] = {}
+        self._llm_cache: dict[str, Any] = {}
+        self._vlm_cache: dict[str, Any] = {}
+        self.embedder_factory = self._missing_named_factory("embedder")
+        self.reranker_factory = self._missing_named_factory("reranker")
+        self.llm_factory = self._missing_named_factory("llm")
+        self.vlm_factory = self._missing_named_factory("vlm")
         self._catalog_store: CatalogStore | None = create_catalog_store(settings) if settings is not None else None
         self._vector_store: VectorStore | None = create_vector_store(settings) if settings is not None else None
         self._auth_service: AuthService | None = None
@@ -108,6 +118,8 @@ class ServiceContainer:
         self._job_service: JobService | None = None
         self._conversion_service: ConversionService | None = None
         self._mcp_service: MCPService | None = None
+        if settings is not None:
+            self._wire_named_component_factories(settings)
 
     def _require_settings(self) -> Settings:
         """Settings guard for the settings-dependent service properties.
@@ -120,6 +132,40 @@ class ServiceContainer:
         if self._settings is None:
             raise RuntimeError(_NO_SETTINGS_MESSAGE)
         return self._settings
+
+    def _missing_named_factory(self, _kind: str):
+        def factory(_name: str = "default"):
+            raise RuntimeError(_NO_SETTINGS_MESSAGE)
+
+        return factory
+
+    def _wire_named_component_factories(self, settings: Settings) -> None:
+        """Wire Phase 14 named inference factories from ``settings.models``."""
+        models = settings.models
+        self.embedder_factory, self._embedder_cache = make_component_factory(
+            registry=embedder_registry,
+            config_section=models.embedder,
+            default_impl="vllm",
+            client_caches=self._client_caches,
+        )
+        self.reranker_factory, self._reranker_cache = make_component_factory(
+            registry=reranker_registry,
+            config_section=models.reranker,
+            default_impl="infinity",
+            client_caches=self._client_caches,
+        )
+        self.llm_factory, self._llm_cache = make_component_factory(
+            registry=llm_registry,
+            config_section=models.llm,
+            default_impl="vllm",
+            client_caches=self._client_caches,
+        )
+        self.vlm_factory, self._vlm_cache = make_component_factory(
+            registry=vlm_registry,
+            config_section=models.vlm,
+            default_impl="vllm",
+            client_caches=self._client_caches,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -142,18 +188,32 @@ class ServiceContainer:
         remaining clients, the database pool, or the state reset.
         """
         try:
+            seen_client_ids: set[int] = set()
             for client in self._inference_clients:
-                aclose = getattr(client, "aclose", None)
-                if aclose is not None:
-                    try:
-                        await aclose()
-                    except Exception:
-                        logger.exception("Failed to close inference client")
+                await self._close_inference_client(client, seen_client_ids)
+            for cache in self._client_caches:
+                for client in list(cache.values()):
+                    await self._close_inference_client(client, seen_client_ids)
+                cache.clear()
             if self._catalog_store is not None:
                 await self._catalog_store.shutdown()
         finally:
             self._inference_clients.clear()
             self._initialized = False
+
+    async def _close_inference_client(self, client: Any, seen_client_ids: set[int]) -> None:
+        """Close one tracked inference client once, best-effort."""
+        client_id = id(client)
+        if client_id in seen_client_ids:
+            return
+        seen_client_ids.add(client_id)
+        aclose = getattr(client, "aclose", None)
+        if aclose is None:
+            return
+        try:
+            await aclose()
+        except Exception:
+            logger.exception("Failed to close inference client")
 
     @property
     def is_initialized(self) -> bool:

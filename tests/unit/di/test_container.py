@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from core.config.infrastructure import RDBConfig, VectorDBConfig
+from core.config.model_endpoints import ModelEndpointConfig, ModelsConfig
 from core.config.root import Settings
+from core.embeddings import embedder_registry
+from core.llm import llm_registry
 from core.ports.audit_log_repo import AuditLogRepository
 from core.ports.catalog_store import CatalogStore
 from core.ports.chunk_repo import ChunkRepository
@@ -23,6 +27,8 @@ from core.ports.prompt_repo import PromptRepository
 from core.ports.topic_tag_repo import TopicTagRepository
 from core.ports.user_repo import UserRepository
 from core.ports.workspace_repo import WorkspaceRepository
+from core.rerankers import reranker_registry
+from core.vlm import vlm_registry
 from di.container import ServiceContainer
 from di.repositories import create_catalog_store
 from di.vector_stores import create_vector_store
@@ -34,6 +40,61 @@ def _settings(database: str | None = None, collection: str = "vdb_test") -> Sett
     return Settings(
         rdb=RDBConfig(password="x", database=database),
         vectordb=VectorDBConfig(collection_name=collection),
+    )
+
+
+class _NamedClient:
+    """Inference client double built by named component factories."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.closed = False
+
+    async def aclose(self):
+        """Record shutdown cleanup."""
+        self.closed = True
+
+
+def _settings_with_named_models() -> Settings:
+    """Build settings with one endpoint per model kind."""
+    return Settings(
+        rdb=RDBConfig(password="x"),
+        vectordb=VectorDBConfig(collection_name="vdb_test"),
+        models=ModelsConfig(
+            embedder={
+                "embed-a": ModelEndpointConfig(
+                    endpoint="http://embedder:8000/v1",
+                    model_name="embed-model",
+                    batch_size=16,
+                    timeout=12.5,
+                    extra={"implementation": "phase14i-test", "api_key": "embed-key", "dimension": 384},
+                )
+            },
+            reranker={
+                "rank-a": ModelEndpointConfig(
+                    endpoint="http://reranker:8000",
+                    model_name="rank-model",
+                    timeout=3.5,
+                    extra={"implementation": "phase14i-test", "api_key": "rank-key"},
+                )
+            },
+            llm={
+                "chat-a": ModelEndpointConfig(
+                    endpoint="http://llm:8000/v1",
+                    model_name="chat-model",
+                    timeout=42.0,
+                    extra={"implementation": "phase14i-test", "temperature": 0.2},
+                )
+            },
+            vlm={
+                "vision-a": ModelEndpointConfig(
+                    endpoint="http://vlm:8000/v1",
+                    model_name="vision-model",
+                    timeout=7.0,
+                    extra={"implementation": "phase14i-test", "max_tokens": 256},
+                )
+            },
+        ),
     )
 
 
@@ -419,6 +480,69 @@ class TestPhase11ContainerLifecycle:
         assert closed == [fake]
         assert c._inference_clients == []
         assert c.is_initialized is False
+
+
+class TestPhase14NamedComponentFactories:
+    """14I: ServiceContainer exposes named, cached component factories."""
+
+    @pytest.fixture(autouse=True)
+    def _register_named_client(self, monkeypatch):
+        """Register one test implementation in every inference registry."""
+        for registry in (embedder_registry, reranker_registry, llm_registry, vlm_registry):
+            monkeypatch.setitem(registry._registry, "phase14i-test", _NamedClient)
+
+    def test_container_wires_named_factories_from_models_config(self):
+        """Build each component kind from ``settings.models`` by endpoint name."""
+        c = ServiceContainer(_settings_with_named_models())
+
+        embedder = c.embedder_factory("embed-a")
+        reranker = c.reranker_factory("rank-a")
+        llm = c.llm_factory("chat-a")
+        vlm = c.vlm_factory("vision-a")
+
+        assert embedder.kwargs == {
+            "endpoint": "http://embedder:8000/v1",
+            "model_name": "embed-model",
+            "batch_size": 16,
+            "timeout": 12.5,
+            "api_key": "embed-key",
+            "dimension": 384,
+        }
+        assert reranker.kwargs["endpoint"] == "http://reranker:8000"
+        assert reranker.kwargs["model_name"] == "rank-model"
+        assert reranker.kwargs["api_key"] == "rank-key"
+        assert llm.kwargs["endpoint"] == "http://llm:8000/v1"
+        assert llm.kwargs["temperature"] == 0.2
+        assert vlm.kwargs["endpoint"] == "http://vlm:8000/v1"
+        assert vlm.kwargs["max_tokens"] == 256
+
+    def test_named_factories_cache_by_endpoint_name(self):
+        """Repeated factory calls for the same endpoint return one client."""
+        c = ServiceContainer(_settings_with_named_models())
+
+        assert c.embedder_factory("embed-a") is c.embedder_factory("embed-a")
+        assert c.llm_factory("chat-a") is c.llm_factory("chat-a")
+
+    @pytest.mark.asyncio
+    async def test_shutdown_closes_named_factory_clients(self):
+        """Shutdown closes clients created through named factory caches."""
+        c = ServiceContainer(_settings_with_named_models())
+        embedder = c.embedder_factory("embed-a")
+        llm = c.llm_factory("chat-a")
+        c._initialized = True
+
+        await c.shutdown()
+
+        assert embedder.closed is True
+        assert llm.closed is True
+        assert c.is_initialized is False
+
+    def test_no_settings_named_factory_fails_with_settings_error(self):
+        """Legacy no-settings containers reject named factory use clearly."""
+        c = ServiceContainer()
+
+        with pytest.raises(RuntimeError, match="without a Settings instance"):
+            c.embedder_factory("default")
 
     @pytest.mark.asyncio
     async def test_shutdown_is_best_effort_when_a_client_fails(self):
