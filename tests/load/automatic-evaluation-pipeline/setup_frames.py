@@ -109,8 +109,7 @@ def extract_title_from_url(url: str) -> str | None:
 def parse_wiki_links(row: dict) -> list[str]:
     """Extract Wikipedia URLs from a FRAMES dataset row.
 
-    Mirrors eval_frames.parse_wiki_links so both scripts resolve the same set of
-    articles — including rows where several URLs are glued into a single string.
+    Handles rows where several URLs are glued into a single string.
     """
     wiki_links = row.get("wiki_links")
     if not wiki_links:
@@ -173,8 +172,7 @@ def safe_filename(title: str) -> str:
     safe = re.sub(r'[^\w\s\-()]', '', title).strip()
     safe = re.sub(r'\s+', '_', safe)
     if not safe:
-        # Stable hash so eval_frames.py derives the same name (built-in hash() is
-        # salted per process and would not match across the two scripts).
+        # Stable md5 name so the same title always maps to the same file.
         safe = f"article_{hashlib.md5(title.encode('utf-8')).hexdigest()[:8]}"
     return safe
 
@@ -188,7 +186,7 @@ def _retry_after_seconds(resp: httpx.Response, attempt: int) -> float:
     """Seconds to wait, honoring a numeric or HTTP-date Retry-After header.
 
     Falls back to capped exponential backoff when the header is absent or
-    unparseable (a bare float() would raise on the HTTP-date form).
+    unparseable.
     """
     header = resp.headers.get("retry-after")
     fallback = float(min(2 ** attempt + 1, 60))

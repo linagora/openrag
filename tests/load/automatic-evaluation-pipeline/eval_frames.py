@@ -230,9 +230,8 @@ def parse_wiki_links(row) -> list[str]:
 def _safe_filename(title: str) -> str:
     """Convert a Wikipedia title to a safe filename.
 
-    Uses a stable hash as a last resort so the fallback name matches the one
-    setup_frames.py wrote on disk (Python's built-in hash() is salted per
-    process, which would break oracle / gold-file matching across runs).
+    Empty results fall back to a stable md5-based name, so the same title always
+    maps to the same file across processes and across both scripts.
     """
     safe_name = re.sub(r'[^\w\s\-()]', '', title).strip()
     safe_name = re.sub(r'\s+', '_', safe_name)

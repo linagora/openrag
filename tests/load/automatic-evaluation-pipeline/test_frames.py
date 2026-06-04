@@ -116,7 +116,7 @@ class TestParsersAgree:
         assert su.parse_wiki_links(row) == ev.parse_wiki_links(row)
 
 
-# ─── Pure helpers: filenames (cross-module stability is a real audit fix) ─────
+# ─── Pure helpers: filenames ─────────────────────────────────────────────────
 
 
 class TestSafeFilename:
@@ -131,8 +131,8 @@ class TestSafeFilename:
         assert fn("AC/DC: Back?") == "ACDC_Back"
 
     def test_empty_title_fallback_is_stable_and_cross_module(self):
-        # Built-in hash() is salted per process; the fix uses md5 so the two
-        # scripts agree on the same on-disk name. This is the bug guard.
+        # The empty-title fallback must be stable across processes and identical
+        # in both scripts so oracle / gold-file lookups line up.
         weird = "©®™"
         a = ev._safe_filename(weird)
         b = su.safe_filename(weird)
@@ -149,7 +149,7 @@ class TestWikiSlug:
         assert su.title_to_wiki_slug("C++") == "C++"
 
 
-# ─── Pure helpers: Retry-After parsing (audit fix) ───────────────────────────
+# ─── Pure helpers: Retry-After parsing ───────────────────────────────────────
 
 
 def _resp_with_retry_after(value):
@@ -419,7 +419,7 @@ async def test_ensure_workspace_states():
 @pytest.mark.asyncio
 @respx.mock
 async def test_add_files_to_workspace_tolerates_rejection():
-    # Audit fix: a rejected attach must NOT raise (would abort the whole run).
+    # A rejected attach must not raise, so one bad file can't abort the run.
     base = ev.OPENRAG_BASE_URL
     respx.post(f"{base}/partition/P/workspaces/w/files").mock(
         return_value=httpx.Response(400, text="file not found")
@@ -438,7 +438,7 @@ async def test_add_files_to_workspace_success():
     assert json.loads(route.calls[0].request.content) == {"file_ids": ["a", "b"]}
 
 
-# ─── Mocked HTTP: upload_and_track (audit fixes: CANCELLED, timeout, no url) ──
+# ─── Mocked HTTP: upload_and_track ───────────────────────────────────────────
 
 
 @pytest.fixture
@@ -478,7 +478,7 @@ async def test_upload_and_track_409_skips(tmp_file):
 @pytest.mark.asyncio
 @respx.mock
 async def test_upload_and_track_cancelled_is_terminal(no_sleep, tmp_file, monkeypatch):
-    # Audit fix #1: CANCELLED must end the poll loop (else it spins forever).
+    # CANCELLED is terminal: it must end the poll loop.
     monkeypatch.setattr(su, "POLL_INTERVAL", 0)
     base = su.OPENRAG_BASE_URL
     respx.post(f"{base}/indexer/partition/P/file/Article").mock(
@@ -493,7 +493,7 @@ async def test_upload_and_track_cancelled_is_terminal(no_sleep, tmp_file, monkey
 @pytest.mark.asyncio
 @respx.mock
 async def test_upload_and_track_poll_timeout(no_sleep, tmp_file, monkeypatch):
-    # Audit fix #1: a never-terminal task must time out, not hang forever.
+    # A never-terminal task must time out rather than poll forever.
     monkeypatch.setattr(su, "POLL_INTERVAL", 0)
     monkeypatch.setattr(su, "MAX_POLL_SECONDS", 0)
     base = su.OPENRAG_BASE_URL
@@ -509,7 +509,7 @@ async def test_upload_and_track_poll_timeout(no_sleep, tmp_file, monkeypatch):
 @pytest.mark.asyncio
 @respx.mock
 async def test_upload_and_track_missing_task_url(tmp_file):
-    # Audit fix #4: a 201 without task_status_url must not crash on None.startswith.
+    # A 201 without task_status_url must return an error, not crash.
     base = su.OPENRAG_BASE_URL
     respx.post(f"{base}/indexer/partition/P/file/Article").mock(return_value=httpx.Response(201, json={}))
     async with httpx.AsyncClient() as client:
@@ -517,7 +517,7 @@ async def test_upload_and_track_missing_task_url(tmp_file):
     assert res["status"] == "ERROR" and "task_status_url" in res["error"]
 
 
-# ─── Env validation (audit fix) ──────────────────────────────────────────────
+# ─── Env validation ──────────────────────────────────────────────────────────
 
 
 def test_require_llm_config_raises_when_missing(monkeypatch):
