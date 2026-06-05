@@ -43,6 +43,11 @@ def _settings(database: str | None = None, collection: str = "vdb_test") -> Sett
     )
 
 
+async def _async_call(calls: list, value: object) -> None:
+    """Record an async lifecycle method call."""
+    calls.append(value)
+
+
 class _NamedClient:
     """Inference client double built by named component factories."""
 
@@ -230,10 +235,31 @@ class TestCatalogStoreWiring:
         monkeypatch.setenv("AUTH_TOKEN", "admin-token")
         c = ServiceContainer(_settings())
         c._catalog_store = FakeCatalogStore()
+        c._model_endpoint_service = SimpleNamespace(
+            seed_defaults=lambda: _async_call(calls, "endpoint.seed"),
+            load_all=lambda: _async_call(calls, "endpoint.load"),
+        )
+        c._preset_service = SimpleNamespace(
+            seed_defaults=lambda: _async_call(calls, "preset.seed"),
+            load_all=lambda: _async_call(calls, "preset.load"),
+        )
+        c._partition_service = SimpleNamespace(
+            seed_default_partition=lambda: _async_call(calls, "partition.seed"),
+            load_partitions=lambda: _async_call(calls, "partition.load"),
+        )
 
         await c.initialize()
 
-        assert calls == ["initialize", "admin-token"]
+        assert calls == [
+            "initialize",
+            "admin-token",
+            "endpoint.seed",
+            "endpoint.load",
+            "preset.seed",
+            "preset.load",
+            "partition.seed",
+            "partition.load",
+        ]
 
 
 class TestVectorStoreWiring:
@@ -573,3 +599,108 @@ class TestPhase14NamedComponentFactories:
         assert closed == [good]
         assert c._inference_clients == []
         assert c.is_initialized is False
+
+
+class TestPhase14ServiceWiring:
+    """14K: endpoint/preset services and startup resolution are wired."""
+
+    def test_model_endpoint_service_is_lazy_cached_and_shares_factory_caches(self):
+        """Expose ModelEndpointService with the same caches used by named factories."""
+        from services.orchestrators.model_endpoint_service import ModelEndpointService
+
+        c = ServiceContainer(_settings())
+
+        service = c.model_endpoint_service
+
+        assert isinstance(service, ModelEndpointService)
+        assert c.model_endpoint_service is service
+        assert service._client_caches["embedder"] is c._embedder_cache
+        assert service._client_caches["reranker"] is c._reranker_cache
+        assert service._client_caches["llm"] is c._llm_cache
+        assert service._client_caches["vlm"] is c._vlm_cache
+
+    def test_preset_service_is_lazy_cached_with_partition_back_reference(self):
+        """Expose PresetService with the config-aware PartitionService reference."""
+        from services.orchestrators.preset_service import PresetService
+
+        settings = _settings()
+        c = ServiceContainer(settings)
+
+        service = c.preset_service
+
+        assert isinstance(service, PresetService)
+        assert c.preset_service is service
+        assert service._partition_service is c.partition_service
+        assert c.partition_service._config is settings
+
+    @pytest.mark.asyncio
+    async def test_initialize_loads_phase14_registries_before_partitions(self, monkeypatch):
+        """Load endpoints, then presets, then partitions after admin seeding."""
+        calls = []
+
+        async def ensure_admin_user(token):
+            """Record admin token seeding calls."""
+            calls.append(("admin", token))
+
+        class FakeCatalogStore:
+            """Small catalog-store stand-in for initialization sequencing."""
+
+            user_repo = SimpleNamespace(ensure_admin_user=ensure_admin_user)
+
+            async def initialize(self):
+                """Record catalog initialization calls."""
+                calls.append("catalog")
+
+        class FakeEndpointService:
+            """Endpoint registry lifecycle recorder."""
+
+            async def seed_defaults(self):
+                """Record endpoint seeding."""
+                calls.append("endpoint.seed")
+
+            async def load_all(self):
+                """Record endpoint loading."""
+                calls.append("endpoint.load")
+
+        class FakePresetService:
+            """Preset registry lifecycle recorder."""
+
+            async def seed_defaults(self):
+                """Record preset seeding."""
+                calls.append("preset.seed")
+
+            async def load_all(self):
+                """Record preset loading."""
+                calls.append("preset.load")
+
+        class FakePartitionService:
+            """Partition cache lifecycle recorder."""
+
+            async def seed_default_partition(self):
+                """Record default partition seeding."""
+                calls.append("partition.seed")
+
+            async def load_partitions(self):
+                """Record partition config loading."""
+                calls.append("partition.load")
+
+        monkeypatch.setenv("AUTH_TOKEN", "admin-token")
+        c = ServiceContainer(_settings())
+        c._catalog_store = FakeCatalogStore()
+        c._model_endpoint_service = FakeEndpointService()
+        c._preset_service = FakePresetService()
+        c._partition_service = FakePartitionService()
+
+        await c.initialize()
+
+        assert calls == [
+            "catalog",
+            ("admin", "admin-token"),
+            "endpoint.seed",
+            "endpoint.load",
+            "preset.seed",
+            "preset.load",
+            "partition.seed",
+            "partition.load",
+        ]
+        assert c.is_initialized is True

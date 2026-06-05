@@ -61,7 +61,9 @@ if TYPE_CHECKING:
     from services.orchestrators.indexing_service import IndexingService
     from services.orchestrators.job_service import JobService
     from services.orchestrators.mcp_service import MCPService
+    from services.orchestrators.model_endpoint_service import ModelEndpointService
     from services.orchestrators.partition_service import PartitionService
+    from services.orchestrators.preset_service import PresetService
     from services.orchestrators.query_service import QueryService
     from services.orchestrators.retrieval_service import RetrievalService
     from services.orchestrators.user_service import UserService
@@ -111,6 +113,8 @@ class ServiceContainer:
         self._auth_service: AuthService | None = None
         self._user_service: UserService | None = None
         self._partition_service: PartitionService | None = None
+        self._model_endpoint_service: ModelEndpointService | None = None
+        self._preset_service: PresetService | None = None
         self._workspace_service: WorkspaceService | None = None
         self._retrieval_service: RetrievalService | None = None
         self._query_service: QueryService | None = None
@@ -179,6 +183,18 @@ class ServiceContainer:
             logger.info("ServiceContainer.initialize: ensuring admin user")
             await self.user_repo.ensure_admin_user(os.getenv("AUTH_TOKEN"))
             logger.info("ServiceContainer.initialize: admin user ready")
+            logger.info("ServiceContainer.initialize: seeding model endpoints")
+            await self.model_endpoint_service.seed_defaults()
+            logger.info("ServiceContainer.initialize: loading model endpoints")
+            await self.model_endpoint_service.load_all()
+            logger.info("ServiceContainer.initialize: seeding pipeline presets")
+            await self.preset_service.seed_defaults()
+            logger.info("ServiceContainer.initialize: loading pipeline presets")
+            await self.preset_service.load_all()
+            logger.info("ServiceContainer.initialize: ensuring default partition")
+            await self.partition_service.seed_default_partition()
+            logger.info("ServiceContainer.initialize: loading partition configs")
+            await self.partition_service.load_partitions()
         self._initialized = True
 
     async def shutdown(self) -> None:
@@ -379,8 +395,41 @@ class ServiceContainer:
                 vector_store=self.vector_store,
                 user_repo=self.user_repo,
                 collection=settings.vectordb.collection_name,
+                config=settings,
             )
         return self._partition_service
+
+    @property
+    def model_endpoint_service(self) -> ModelEndpointService:
+        """ModelEndpointService — DB-backed named model endpoint registry."""
+        if self._model_endpoint_service is None:
+            from services.orchestrators.model_endpoint_service import ModelEndpointService
+
+            self._model_endpoint_service = ModelEndpointService(
+                model_endpoint_repo=self.model_endpoint_repo,
+                config=self._require_settings(),
+                partition_service=self.partition_service,
+                client_caches={
+                    "embedder": self._embedder_cache,
+                    "reranker": self._reranker_cache,
+                    "llm": self._llm_cache,
+                    "vlm": self._vlm_cache,
+                },
+            )
+        return self._model_endpoint_service
+
+    @property
+    def preset_service(self) -> PresetService:
+        """PresetService — DB-backed pipeline preset registry."""
+        if self._preset_service is None:
+            from services.orchestrators.preset_service import PresetService
+
+            self._preset_service = PresetService(
+                preset_repo=self.preset_repo,
+                config=self._require_settings(),
+                partition_service=self.partition_service,
+            )
+        return self._preset_service
 
     @property
     def workspace_service(self) -> WorkspaceService:
