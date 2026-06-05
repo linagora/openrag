@@ -379,7 +379,6 @@ class ServiceContainer:
                 vector_store=self.vector_store,
                 user_repo=self.user_repo,
                 collection=settings.vectordb.collection_name,
-                config=settings,
             )
         return self._partition_service
 
