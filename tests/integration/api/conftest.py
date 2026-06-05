@@ -162,6 +162,36 @@ def wait_for_task(
     raise TimeoutError(f"Task {task_id} did not complete within {timeout}s")
 
 
+def wait_for_task_cancellation(
+    api_client,
+    task_id: str,
+    timeout: int = TASK_TIMEOUT,
+    headers: dict | None = None,
+) -> dict:
+    """Wait for task cancellation, polling status endpoint until state is CANCELLED."""
+    start = time.time()
+    while time.time() - start < timeout:
+        response = api_client.get(f"/indexer/task/{task_id}", headers=headers)
+
+        # Task might not be registered yet, retry on 404
+        if response.status_code == 404:
+            time.sleep(0.5)
+            continue
+
+        if response.status_code != 200:
+            raise AssertionError(f"Task status failed: {response.text}")
+
+        status = response.json()
+        state = (status.get("task_state") or "").upper()
+
+        if state == "CANCELLED":
+            return status
+
+        time.sleep(0.5)
+
+    raise TimeoutError(f"Task {task_id} did not reach CANCELLED state within {timeout}s")
+
+
 def wait_for_indexing(api_client, response_data: dict, timeout: int = TASK_TIMEOUT):
     """Wait for file indexing task to complete, extracting task_id from response."""
     if "task_id" in response_data:
