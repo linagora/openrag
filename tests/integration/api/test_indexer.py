@@ -266,6 +266,8 @@ class TestSVGIndexing:
     def test_upload_svg_file(self, api_client, created_partition):
         """Test uploading and indexing an SVG file."""
         svg_file = RESOURCES_DIR / "test_file.svg"
+        if not svg_file.exists():
+            pytest.skip(f"Test SVG not found: {svg_file}")
         file_id = "test-svg-001"
 
         with open(svg_file, "rb") as f:
