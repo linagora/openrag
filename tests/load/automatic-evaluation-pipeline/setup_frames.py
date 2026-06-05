@@ -87,7 +87,7 @@ def load_dataset_cached(limit: int | None = None) -> list[dict]:
             json.dump(dataset, f, ensure_ascii=False, indent=2)
         logger.info(f"Cached {len(dataset)} questions to {DATASET_CACHE.name}")
 
-    if limit:
+    if limit is not None:
         dataset = dataset[:limit]
     logger.info(f"Loaded {len(dataset)} questions.")
     return dataset
@@ -293,7 +293,7 @@ async def download_articles(
         else:
             to_fetch.append(title)
 
-    print(f"Articles ({fmt}): {len(ready)} on disk, {len(to_fetch)} to fetch.")
+    logger.info(f"Articles ({fmt}): {len(ready)} on disk, {len(to_fetch)} to fetch.")
     if not to_fetch:
         return ready
 
@@ -321,7 +321,7 @@ async def download_articles(
         path.write_bytes(content)
         ready.append((stem, path))
         fetched += 1
-    print(f"Fetched {fetched} new articles ({len(to_fetch) - fetched} failed).")
+    logger.info(f"Fetched {fetched} new articles ({len(to_fetch) - fetched} failed).")
     return ready
 
 
@@ -332,10 +332,10 @@ async def check_health(client: httpx.AsyncClient) -> bool:
     try:
         resp = await client.get(f"{OPENRAG_BASE_URL}/health_check")
         resp.raise_for_status()
-        print("OpenRAG API is up.")
+        logger.info("OpenRAG API is up.")
         return True
     except Exception as e:
-        print(f"ERROR: Cannot reach OpenRAG at {OPENRAG_BASE_URL}: {e}")
+        logger.error(f"Cannot reach OpenRAG at {OPENRAG_BASE_URL}: {e}")
         return False
 
 
@@ -343,9 +343,9 @@ async def create_partition(client: httpx.AsyncClient, partition: str) -> None:
     headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
     resp = await client.post(f"{OPENRAG_BASE_URL}/partition/{partition}", headers=headers)
     if resp.status_code == 201:
-        print(f"Partition '{partition}' created.")
+        logger.info(f"Partition '{partition}' created.")
     elif resp.status_code == 409:
-        print(f"Partition '{partition}' already exists.")
+        logger.info(f"Partition '{partition}' already exists.")
     else:
         resp.raise_for_status()
 
@@ -407,7 +407,7 @@ async def index_files(
             return
         await create_partition(client, partition)
 
-        print(f"Uploading {len(doc_files)} files to '{partition}' (concurrency={concurrency})...")
+        logger.info(f"Uploading {len(doc_files)} files to '{partition}' (concurrency={concurrency})...")
         sem = asyncio.Semaphore(concurrency)
         tasks = [upload_and_track(client, partition, fid, path, mime, sem) for fid, path in doc_files]
         results = await tqdm.gather(*tasks, desc="Uploading & indexing")
@@ -417,22 +417,29 @@ async def index_files(
     skipped = sum(1 for r in results if r["status"] == "skipped")
     errors = sum(1 for r in results if r["status"] == "ERROR")
 
-    print(f"\n{'='*60}")
-    print(f"Indexing complete for partition '{partition}'")
-    print(f"  COMPLETED: {completed}")
-    print(f"  FAILED:    {failed}")
-    print(f"  SKIPPED:   {skipped} (already existed)")
-    print(f"  ERRORS:    {errors}")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Indexing complete for partition '{partition}'")
+    logger.info(f"  COMPLETED: {completed}")
+    logger.info(f"  FAILED:    {failed}")
+    logger.info(f"  SKIPPED:   {skipped} (already existed)")
+    logger.info(f"  ERRORS:    {errors}")
+    logger.info(f"{'='*60}")
 
     if failed or errors:
-        print("\nFailed/errored files:")
+        logger.info("\nFailed/errored files:")
         for r in results:
             if r["status"] in ("FAILED", "ERROR"):
-                print(f"  - {r['file_id']}: {r['status']} {r.get('error', '')}")
+                logger.info(f"  - {r['file_id']}: {r['status']} {r.get('error', '')}")
 
 
 # ─── Main ────────────────────────────────────────────────────────────────────
+
+
+def _positive_int(value: str) -> int:
+    ivalue = int(value)
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return ivalue
 
 
 async def main() -> None:
@@ -442,9 +449,9 @@ async def main() -> None:
     parser.add_argument("--output-dir", default=None,
                         help="Override article directory (defaults per format).")
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--concurrency", type=int, default=4,
+    parser.add_argument("--concurrency", type=_positive_int, default=4,
                         help="Max concurrent uploads (default: 4)")
-    parser.add_argument("--wiki-concurrency", type=int, default=3,
+    parser.add_argument("--wiki-concurrency", type=_positive_int, default=3,
                         help="Max concurrent Wikipedia fetches (default: 3)")
     parser.add_argument("--index-only", action="store_true",
                         help="Skip download, index existing files from output-dir")
@@ -459,23 +466,23 @@ async def main() -> None:
 
     if args.index_only:
         if not output_dir.exists():
-            print(f"ERROR: Output directory {output_dir} does not exist.")
+            logger.error(f"Output directory {output_dir} does not exist.")
             return
         doc_files = [(p.stem, p) for p in sorted(output_dir.glob(f"*.{args.format}"))]
-        print(f"Index-only: {len(doc_files)} .{args.format} files in {output_dir}")
+        logger.info(f"Index-only: {len(doc_files)} .{args.format} files in {output_dir}")
     else:
         dataset = load_dataset_cached(limit=args.limit)
         titles = extract_all_titles(dataset)
-        print(f"Found {len(titles)} unique Wikipedia articles referenced.")
+        logger.info(f"Found {len(titles)} unique Wikipedia articles referenced.")
 
         before = {p.stem for p in output_dir.glob(f"*.{args.format}")} if output_dir.exists() else set()
         doc_files = await download_articles(titles, output_dir, args.format, args.wiki_concurrency)
         if args.retry_missing:
             doc_files = [(fid, path) for fid, path in doc_files if fid not in before]
-            print(f"Will only upload {len(doc_files)} newly-fetched files.")
+            logger.info(f"Will only upload {len(doc_files)} newly-fetched files.")
 
     if not doc_files:
-        print("Nothing to upload.")
+        logger.info("Nothing to upload.")
         return
 
     await index_files(doc_files, args.partition, mime, args.concurrency)

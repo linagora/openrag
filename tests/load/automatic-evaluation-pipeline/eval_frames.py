@@ -112,10 +112,10 @@ async def _check_openrag_health(client: httpx.AsyncClient) -> bool:
     try:
         resp = await client.get(f"{OPENRAG_BASE_URL}/health_check")
         resp.raise_for_status()
-        print("OpenRAG API is up.")
+        logger.info("OpenRAG API is up.")
         return True
     except Exception as e:
-        print(f"ERROR: Cannot reach OpenRAG at {OPENRAG_BASE_URL}: {e}")
+        logger.error(f"Cannot reach OpenRAG at {OPENRAG_BASE_URL}: {e}")
         return False
 
 
@@ -157,7 +157,7 @@ def load_dataset_cached(limit: int | None = None, dataset_path: str | None = Non
         logger.info(f"Cached {len(dataset)} questions to {cache_path.name}")
 
     logger.info(f"Loaded {len(dataset)} questions.")
-    if limit:
+    if limit is not None:
         dataset = dataset[:limit]
         logger.info(f"Limited to {len(dataset)} questions.")
     return dataset
@@ -275,7 +275,7 @@ def load_articles_from_disk(rows: list[dict], docs_dir: Path) -> dict[str, str]:
         else:
             missing.append(title)
 
-    print(f"Loaded {len(articles)} articles from disk ({len(missing)} missing).")
+    logger.info(f"Loaded {len(articles)} articles from disk ({len(missing)} missing).")
     if missing:
         logger.info(f"Missing articles: {missing[:20]}{'...' if len(missing) > 20 else ''}")
     return articles
@@ -658,30 +658,30 @@ def _print_summary(results: list[dict], total_questions: int) -> None:
         "gold_workspaces": "GOLD_WORKSPACES", "rag": "RAG",
     }.get(mode, mode.upper())
 
-    print(f"\n{'='*60}")
-    print(f"  Mode: {mode_display}")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"  Mode: {mode_display}")
+    logger.info(f"{'='*60}")
 
     acc_results = [r for r in valid if "accuracy" in r]
     if acc_results:
         correct = sum(1 for r in acc_results if r["accuracy"])
-        print(f"  Accuracy: {correct / len(acc_results):.1%} ({correct}/{len(acc_results)})")
+        logger.info(f"  Accuracy: {correct / len(acc_results):.1%} ({correct}/{len(acc_results)})")
     else:
-        print("  Accuracy: N/A")
+        logger.info("  Accuracy: N/A")
 
     em_results = [r for r in valid if "exact_match" in r]
     if em_results:
         exact = sum(1 for r in em_results if r["exact_match"])
-        print(f"  Exact match: {exact / len(em_results):.1%} ({exact}/{len(em_results)})")
+        logger.info(f"  Exact match: {exact / len(em_results):.1%} ({exact}/{len(em_results)})")
         ua = [r for r in em_results if r.get("is_unanswerable")]
         if ua:
             ua_exact = sum(1 for r in ua if r["exact_match"])
-            print(f"  EM unanswerable: {ua_exact / len(ua):.1%} ({ua_exact}/{len(ua)})")
+            logger.info(f"  EM unanswerable: {ua_exact / len(ua):.1%} ({ua_exact}/{len(ua)})")
     else:
-        print("  Exact match: N/A")
+        logger.info("  Exact match: N/A")
 
-    print(f"  Total questions: {total_questions} | Valid answers: {len(valid)}")
-    print(f"{'='*60}")
+    logger.info(f"  Total questions: {total_questions} | Valid answers: {len(valid)}")
+    logger.info(f"{'='*60}")
 
     type_groups: dict[str, list[dict]] = defaultdict(list)
     for r in valid:
@@ -689,17 +689,24 @@ def _print_summary(results: list[dict], total_questions: int) -> None:
         type_groups[rtype].append(r)
 
     if len(type_groups) > 1 or (len(type_groups) == 1 and "unknown" not in type_groups):
-        print(f"\n{'TYPE':<35} {'COUNT':>6} {'ACCURACY':>10}")
-        print(f"{'-'*55}")
+        logger.info(f"\n{'TYPE':<35} {'COUNT':>6} {'ACCURACY':>10}")
+        logger.info(f"{'-'*55}")
         for rtype in sorted(type_groups.keys()):
             group = type_groups[rtype]
             acc_group = [r for r in group if "accuracy" in r]
             acc = sum(1 for r in acc_group if r["accuracy"]) / len(acc_group) if acc_group else 0
-            print(f"{rtype:<35} {len(group):>6} {acc:>9.1%}")
-        print(f"{'='*55}")
+            logger.info(f"{rtype:<35} {len(group):>6} {acc:>9.1%}")
+        logger.info(f"{'='*55}")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
+
+
+def _positive_int(value: str) -> int:
+    ivalue = int(value)
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return ivalue
 
 
 async def main() -> None:
@@ -707,7 +714,7 @@ async def main() -> None:
     parser.add_argument("--partition", default="FRAMES")
     parser.add_argument("--output", default="results_frames.json")
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--concurrency", type=_positive_int, default=4)
     parser.add_argument("--no-rag", action="store_true", default=False,
                         help="Bypass OpenRAG, send question directly to LLM")
     parser.add_argument("--oracle", action="store_true", default=False,
@@ -722,7 +729,7 @@ async def main() -> None:
                         help="Max chars for oracle context (default: 20000). 0 = no limit.")
     parser.add_argument("--docs-dir", default="./frames_docs",
                         help="Directory with .md Wikipedia articles for oracle mode (default: ./frames_docs)")
-    parser.add_argument("--judge-concurrency", type=int, default=10)
+    parser.add_argument("--judge-concurrency", type=_positive_int, default=10)
     parser.add_argument("--from-results", metavar="FILE", default=None,
                         help="Load existing results JSON, skip generation, recompute metrics")
     parser.add_argument("--dataset-path", default=None,
@@ -741,23 +748,21 @@ async def main() -> None:
     # Every mode ends by running the LLM judge, so its config must be present.
     _require_llm_config(judge_only=True)
 
-    dataset = load_dataset_cached(limit=args.limit, dataset_path=args.dataset_path)
-    docs_dir = Path(args.docs_dir)
-    if not docs_dir.is_absolute():
-        docs_dir = (Path(__file__).parent / docs_dir).resolve()
-
     # ── Load existing results or generate ────────────────────────────────────
     if args.from_results:
         from_path = Path(args.from_results) if Path(args.from_results).is_absolute() else Path(__file__).parent / args.from_results
-        print(f"Loading existing results from {from_path} ...")
+        logger.info(f"Loading existing results from {from_path} ...")
         with open(from_path, encoding="utf-8") as f:
             results: list[dict] = json.load(f)
         annotate_exact_match(results)
         await run_accuracy_judging(results, concurrency=args.judge_concurrency)
+        total_questions = len(results)
 
     elif args.no_rag:
         _require_llm_config()
-        print(f"Evaluating {len(dataset)} questions [NO_RAG]")
+        dataset = load_dataset_cached(limit=args.limit, dataset_path=args.dataset_path)
+        total_questions = len(dataset)
+        logger.info(f"Evaluating {total_questions} questions [NO_RAG]")
         llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=API_KEY, temperature=0.2, max_tokens=512)
         sem = asyncio.Semaphore(args.concurrency)
         raw = await tqdm.gather(
@@ -770,9 +775,14 @@ async def main() -> None:
 
     elif args.oracle:
         _require_llm_config()
-        print(f"Evaluating {len(dataset)} questions [ORACLE]")
+        dataset = load_dataset_cached(limit=args.limit, dataset_path=args.dataset_path)
+        total_questions = len(dataset)
+        docs_dir = Path(args.docs_dir)
+        if not docs_dir.is_absolute():
+            docs_dir = (Path(__file__).parent / docs_dir).resolve()
+        logger.info(f"Evaluating {total_questions} questions [ORACLE]")
         if not docs_dir.exists():
-            print(f"ERROR: docs dir {docs_dir} not found. Run setup_frames.py first.")
+            logger.error(f"docs dir {docs_dir} not found. Run setup_frames.py first.")
             return
         oracle_articles = load_articles_from_disk(dataset, docs_dir)
         llm = ChatOpenAI(model=MODEL, base_url=BASE_URL, api_key=API_KEY, temperature=0.2, max_tokens=512)
@@ -797,16 +807,18 @@ async def main() -> None:
         await run_accuracy_judging(results, concurrency=args.judge_concurrency)
 
     elif args.gold_workspaces:
+        dataset = load_dataset_cached(limit=args.limit, dataset_path=args.dataset_path)
+        total_questions = len(dataset)
         workspace_prefix = args.gold_workspace_prefix or f"{args.partition}-goldws"
         reuse = args.reuse_gold_workspaces
-        print(f"Evaluating {len(dataset)} questions [GOLD_WORKSPACES{'_REUSE' if reuse else ''}, partition={args.partition}]")
+        logger.info(f"Evaluating {total_questions} questions [GOLD_WORKSPACES{'_REUSE' if reuse else ''}, partition={args.partition}]")
 
         async with httpx.AsyncClient(timeout=600) as client:
             if not await _check_openrag_health(client):
                 return
             available = await get_available_openrag_partitions(client)
             if args.partition not in available:
-                print(f"ERROR: partition '{args.partition}' not available. Available: {', '.join(sorted(available)) or '(none)'}")
+                logger.error(f"partition '{args.partition}' not available. Available: {', '.join(sorted(available)) or '(none)'}")
                 return
 
             if reuse:
@@ -817,7 +829,7 @@ async def main() -> None:
                 existing_ws = await get_available_workspaces(client, args.partition)
                 missing = [ws for ws, _ in prepared if ws not in existing_ws]
                 if missing:
-                    print(f"ERROR: {len(missing)} gold workspaces missing: {', '.join(missing[:10])}{'...' if len(missing) > 10 else ''}")
+                    logger.error(f"{len(missing)} gold workspaces missing: {', '.join(missing[:10])}{'...' if len(missing) > 10 else ''}")
                     return
             else:
                 ws_sem = asyncio.Semaphore(args.concurrency)
@@ -844,7 +856,9 @@ async def main() -> None:
         await run_accuracy_judging(results, concurrency=args.judge_concurrency)
 
     else:
-        print(f"Evaluating {len(dataset)} questions on partition '{args.partition}' at {OPENRAG_BASE_URL}")
+        dataset = load_dataset_cached(limit=args.limit, dataset_path=args.dataset_path)
+        total_questions = len(dataset)
+        logger.info(f"Evaluating {total_questions} questions on partition '{args.partition}' at {OPENRAG_BASE_URL}")
         async with httpx.AsyncClient(timeout=60) as client:
             if not await _check_openrag_health(client):
                 return
@@ -861,8 +875,8 @@ async def main() -> None:
     output_path = Path(__file__).parent / args.output
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
-    print(f"\nResults saved to {output_path}")
-    _print_summary(results, len(dataset))
+    logger.info(f"Results saved to {output_path}")
+    _print_summary(results, total_questions)
 
 
 if __name__ == "__main__":
