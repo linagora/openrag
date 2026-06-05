@@ -178,9 +178,7 @@ def wait_for_cancellation(
     while time.time() - start < timeout:
         response = api_client.get(f"/indexer/task/{task_id}", headers=headers)
         if response.status_code != 200:
-            raise AssertionError(
-                f"Unexpected status {response.status_code} for task {task_id}: {response.text}"
-            )
+            raise AssertionError(f"Unexpected status {response.status_code} for task {task_id}: {response.text}")
 
         payload = response.json()
         state = (payload.get("task_state") or "").upper()
