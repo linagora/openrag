@@ -177,13 +177,23 @@ def wait_for_cancellation(
     start = time.time()
     while time.time() - start < timeout:
         response = api_client.get(f"/indexer/task/{task_id}", headers=headers)
-        if response.status_code == 200:
-            state = (response.json().get("task_state") or "").upper()
-            if state == "CANCELLED":
-                return
-            if state in {"FAILED", "FAILURE", "COMPLETED", "SUCCESS"}:
-                raise AssertionError(f"Task {task_id} reached {state} instead of CANCELLED")
+        if response.status_code != 200:
+            raise AssertionError(
+                f"Unexpected status {response.status_code} for task {task_id}: {response.text}"
+            )
+
+        payload = response.json()
+        state = (payload.get("task_state") or "").upper()
+        if not state:
+            raise AssertionError(f"Missing task_state in response for {task_id}: {payload}")
+
+        if state == "CANCELLED":
+            return
+        if state in {"FAILED", "FAILURE", "COMPLETED", "SUCCESS"}:
+            raise AssertionError(f"Task {task_id} reached {state} instead of CANCELLED")
+
         time.sleep(0.5)
+
     raise TimeoutError(f"Task {task_id} did not reach CANCELLED within {timeout}s")
 
 
