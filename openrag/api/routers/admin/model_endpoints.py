@@ -5,6 +5,8 @@ response shaping live here, while endpoint persistence and validation are
 delegated to the service resolved from the DI container.
 """
 
+from datetime import UTC, datetime
+
 from api.dependencies.auth import require_admin
 from api.schemas.admin.model_endpoint_schemas import (
     CreateModelEndpointRequest,
@@ -13,6 +15,7 @@ from api.schemas.admin.model_endpoint_schemas import (
     UpdateModelEndpointRequest,
     ValidateEndpointResponse,
 )
+from core.config.model_endpoints import ModelEndpointRow
 from di.providers import get_model_endpoint_service
 from fastapi import APIRouter, Depends, Response, status
 
@@ -29,7 +32,9 @@ async def create_model_endpoint(
     service=Depends(get_model_endpoint_service),
 ):
     """Register a named inference endpoint."""
-    return await service.create_model_endpoint(body.model_dump())
+    now = datetime.now(UTC)
+    row = ModelEndpointRow(**body.model_dump(), created_at=now, updated_at=now)
+    return await service.create_model_endpoint(row)
 
 
 @router.get("/", response_model=list[ModelEndpointResponse])

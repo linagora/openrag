@@ -47,8 +47,9 @@ class FakeModelEndpointService:
         """Initialize the call log."""
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def create_model_endpoint(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Record endpoint creation and echo a response row."""
+    async def create_model_endpoint(self, row: Any) -> dict[str, Any]:
+        """Record endpoint creation (from a ModelEndpointRow) and echo a row."""
+        payload = row.model_dump(exclude={"created_at", "updated_at"})
         self.calls.append(("create", payload))
         return _model_endpoint_row(**payload)
 
@@ -89,8 +90,9 @@ class FakePresetService:
         """Initialize the call log."""
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def create_preset(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Record preset creation and echo a response row."""
+    async def create_preset(self, name: str, preset_type: str, config: dict[str, Any]) -> dict[str, Any]:
+        """Record preset creation (from unpacked kwargs) and echo a row."""
+        payload = {"name": name, "preset_type": preset_type, "config": config}
         self.calls.append(("create", payload))
         return _preset_row(**payload)
 

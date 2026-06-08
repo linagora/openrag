@@ -43,7 +43,7 @@ async def create_preset(
     service=Depends(get_preset_service),
 ):
     """Create a named pipeline preset."""
-    return await service.create_preset(body.model_dump())
+    return await service.create_preset(**body.model_dump())
 
 
 @router.get("/", response_model=list[PresetResponse])
