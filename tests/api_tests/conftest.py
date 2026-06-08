@@ -162,6 +162,44 @@ def wait_for_task(
     raise TimeoutError(f"Task {task_id} did not complete within {timeout}s")
 
 
+def wait_for_task_state(
+    api_client,
+    task_id: str,
+    target_state: str,
+    timeout: int = 30,
+    headers: dict | None = None,
+) -> dict:
+    """Poll the task status endpoint until the task reaches ``target_state``.
+
+    Useful for states the indexer reaches asynchronously (e.g. CANCELLED is set
+    by the worker only once the task actually transitions, after the cancel
+    endpoint has already returned). Handles 404 responses gracefully as the task
+    may not be registered yet.
+    """
+    target = target_state.upper()
+    start = time.time()
+    last_state = None
+    while time.time() - start < timeout:
+        response = api_client.get(f"/indexer/task/{task_id}", headers=headers)
+
+        # Task might not be registered yet, retry on 404
+        if response.status_code == 404:
+            time.sleep(0.5)
+            continue
+
+        if response.status_code != 200:
+            raise AssertionError(f"Task status failed: {response.text}")
+
+        status = response.json()
+        last_state = (status.get("task_state") or "").upper()
+        if last_state == target:
+            return status
+
+        time.sleep(0.5)
+
+    raise TimeoutError(f"Task {task_id} did not reach state {target} within {timeout}s (last state: {last_state})")
+
+
 def wait_for_indexing(api_client, response_data: dict, timeout: int = TASK_TIMEOUT):
     """Wait for file indexing task to complete, extracting task_id from response."""
     if "task_id" in response_data:

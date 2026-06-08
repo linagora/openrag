@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import TASK_TIMEOUT, wait_for_task
+from .conftest import TASK_TIMEOUT, wait_for_task, wait_for_task_state
 
 # Check if image captioning is enabled (disabled in CI)
 IMAGE_CAPTIONING_ENABLED = os.environ.get("IMAGE_CAPTIONING", "").lower() not in ("false", "0", "")
@@ -758,10 +758,10 @@ class TestTaskCancellation:
         assert cancel_response.status_code == 200
         assert "Cancellation signal sent" in cancel_response.json()["message"]
 
-        # State must be CANCELLED right after the cancel endpoint returns
-        status_response = api_client.get(f"/indexer/task/{task_id}")
-        assert status_response.status_code == 200
-        assert status_response.json()["task_state"] == "CANCELLED"
+        # The cancel endpoint only sends the signal; the task transitions to
+        # CANCELLED asynchronously. Poll until it lands instead of reading once.
+        status_response = wait_for_task_state(api_client, task_id, "CANCELLED")
+        assert status_response["task_state"] == "CANCELLED"
 
     def test_cancel_increments_total_cancelled(self, api_client, created_partition, pdf_file_path):
         """Cancelling a task must increment total_cancelled in /queue/info."""
@@ -783,6 +783,11 @@ class TestTaskCancellation:
 
         cancel_response = api_client.delete(f"/indexer/task/{task_id}")
         assert cancel_response.status_code == 200
+
+        # The cancel endpoint only sends the signal; total_cancelled is bumped
+        # asynchronously once the task transitions to CANCELLED. Wait for that
+        # transition before reading the counter, otherwise the read races it.
+        wait_for_task_state(api_client, task_id, "CANCELLED")
 
         info_after = api_client.get("/queue/info")
         assert info_after.status_code == 200
