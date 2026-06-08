@@ -145,10 +145,34 @@ async def test_delete_partition_missing_raises_404():
 
 
 @pytest.mark.asyncio
-async def test_delete_partition_drops_vectors_then_rows():
+async def test_delete_partition_deletes_rows_before_vectors():
+    """Regression for #379: partition deletion from database happens first.
+
+    If database cleanup succeeds but vector store delete fails, the data model remains
+    consistent (partition is gone from database, orphaned chunks logged for reconciliation).
+    """
     prepo = FakePartitionRepo(existing={"p1"})
     vstore = FakeVectorStore(ids=["c1", "c2"])
+    call_order = []
+
+    prepo_delete_orig = prepo.delete_partition
+
+    async def tracked_prepo_delete(*args, **kwargs):
+        call_order.append("prepo_delete")
+        return await prepo_delete_orig(*args, **kwargs)
+
+    prepo.delete_partition = tracked_prepo_delete
+    vstore_delete_orig = vstore.delete
+
+    async def tracked_vstore_delete(*args, **kwargs):
+        call_order.append("vstore_delete")
+        return await vstore_delete_orig(*args, **kwargs)
+
+    vstore.delete = tracked_vstore_delete
+
     await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
+
+    assert call_order == ["prepo_delete", "vstore_delete"]
     assert vstore.deleted_ids == ["c1", "c2"]
     assert prepo.deleted == ["p1"]
 
@@ -160,6 +184,28 @@ async def test_delete_partition_no_vectors_still_deletes_rows():
     await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
     assert vstore.deleted_ids == []
     assert prepo.deleted == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_logs_error_if_vector_store_delete_fails():
+    """Regression for #379: if vector store delete fails after database cleanup,
+    log an error for reconciliation but don't raise (data model is consistent)."""
+    prepo = FakePartitionRepo(existing={"p1"})
+
+    class FailingVectorStore(FakeVectorStore):
+        async def delete(self, ids, collection="default") -> int:
+            raise Exception("Milvus connection failed")
+
+    vstore = FailingVectorStore(ids=["c1", "c2"])
+
+    with pytest.importorskip("unittest.mock").patch("services.orchestrators.partition_service.logger") as mock_logger:
+        await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
+
+        mock_logger.error.assert_called_once()
+        call_args = mock_logger.error.call_args
+        assert "reconciliation task required" in call_args[0][0]
+        assert call_args[1]["partition"] == "p1"
+        assert call_args[1]["chunk_count"] == 2
 
 
 # --------------------------------------------------------------------------- #

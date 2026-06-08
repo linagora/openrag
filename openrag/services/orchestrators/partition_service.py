@@ -177,14 +177,23 @@ class PartitionService:
     async def delete_partition(self, partition: str) -> None:
         """Drop a partition's vectors *and* relational rows (cross-cutting)."""
         await self._ensure_partition(partition)
+        await self._partition_repo.delete_partition(name=partition)
         ids = await self._vector_store.query_ids_by_filter(
             self._collection,
             {"partition": partition},
         )
         if ids:
-            deleted = await self._vector_store.delete(ids, self._collection)
-            logger.info("Deleted points from partition", partition=partition, count=deleted)
-        await self._partition_repo.delete_partition(name=partition)
+            try:
+                deleted = await self._vector_store.delete(ids, self._collection)
+                logger.info("Deleted points from partition", partition=partition, count=deleted)
+            except Exception as e:
+                logger.error(
+                    "Failed to delete chunks from vector store after removing partition from database; "
+                    "reconciliation task required",
+                    partition=partition,
+                    chunk_count=len(ids),
+                    error=str(e),
+                )
         logger.info("Partition successfully deleted.", partition=partition)
 
     async def update_partition(self, partition: str, **fields: object) -> dict | None:

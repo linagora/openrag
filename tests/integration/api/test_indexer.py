@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import TASK_TIMEOUT, wait_for_task
+from conftest import TASK_TIMEOUT, wait_for_task, wait_for_task_cancellation
 
 # Check if image captioning is enabled (disabled in CI)
 IMAGE_CAPTIONING_ENABLED = os.environ.get("IMAGE_CAPTIONING", "").lower() not in ("false", "0", "")
@@ -782,6 +782,9 @@ class TestTaskCancellation:
 
         cancel_response = api_client.delete(f"/indexer/task/{task_id}")
         assert cancel_response.status_code == 200
+
+        # Wait for task to reach CANCELLED state before checking counter
+        wait_for_task_cancellation(api_client, task_id)
 
         info_after = api_client.get("/queue/info")
         assert info_after.status_code == 200

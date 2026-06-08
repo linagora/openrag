@@ -233,3 +233,69 @@ async def test_cancel_task_marks_cancelled_even_if_worker_finished_first() -> No
 
     assert result is True
     tsm.set_state.remote.assert_called_once_with("task-1", "CANCELLED")
+
+
+@pytest.mark.asyncio
+async def test_delete_file_cleans_database_before_vector_store() -> None:
+    """Regression for #378: database cleanup happens first, vector store cleanup after.
+
+    If database cleanup succeeds but vector store delete fails, the data model remains
+    consistent (file is gone from database, orphaned chunks logged for reconciliation).
+    """
+    from services.workers.dispatcher import WorkerDispatcher
+
+    vector_store = _vector_store()
+    document_repo = _document_repo()
+    workspace_repo = _workspace_repo()
+
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=workspace_repo,
+        collection="default",
+    )
+
+    call_order = []
+    workspace_repo.remove_file_from_all_workspaces = AsyncMock(side_effect=lambda *a, **k: call_order.append("workspace"))
+    document_repo.remove_file_from_partition = AsyncMock(side_effect=lambda *a, **k: call_order.append("document"))
+    vector_store.query_ids_by_filter = AsyncMock(return_value=["1", "2"], side_effect=lambda *a, **k: call_order.append("query") or ["1", "2"])
+    vector_store.delete = AsyncMock(side_effect=lambda *a, **k: call_order.append("delete") or None)
+
+    await dispatcher.delete_file("file-1", "tenant-a")
+
+    assert call_order == ["workspace", "document", "query", "delete"]
+
+
+@pytest.mark.asyncio
+async def test_delete_file_logs_error_if_vector_store_delete_fails() -> None:
+    """Regression for #378: if vector store delete fails after database cleanup,
+    log an error for reconciliation but don't raise (data model is consistent)."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    vector_store = _vector_store()
+    document_repo = _document_repo()
+    workspace_repo = _workspace_repo()
+
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=workspace_repo,
+        collection="default",
+    )
+
+    vector_store.query_ids_by_filter = AsyncMock(return_value=["1", "2"])
+    vector_store.delete = AsyncMock(side_effect=Exception("Milvus connection failed"))
+
+    with patch("services.workers.dispatcher.logger") as mock_logger:
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+        mock_logger.error.assert_called_once()
+        call_args = mock_logger.error.call_args
+        assert "reconciliation task required" in call_args[0][0]
+        assert call_args[1]["file_id"] == "file-1"
+        assert call_args[1]["partition"] == "tenant-a"
+        assert call_args[1]["chunk_count"] == 2
