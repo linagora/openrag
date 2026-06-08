@@ -203,13 +203,15 @@ async def test_seed_default_partition_skips_when_present():
 
 @pytest.mark.asyncio
 async def test_create_partition_validates_presets_before_write():
-    from core.utils.exceptions import ConfigError
+    from core.utils.exceptions import ValidationError
 
     repo = _FakePartitionRepo()
     svc = _make_service(repo)
 
-    with pytest.raises(ConfigError, match="Indexation preset 'nope'"):
+    # User-supplied preset name → 422 ValidationError, not a 500 ConfigError.
+    with pytest.raises(ValidationError, match="Indexation preset 'nope'") as exc:
         await svc.create_partition("p1", user_id=1, indexation_preset="nope")
+    assert exc.value.status_code == 422
 
     assert not await repo.partition_exists("p1")
 
@@ -246,13 +248,14 @@ async def test_update_partition_validates_and_reloads():
 
 @pytest.mark.asyncio
 async def test_update_partition_rejects_unknown_preset():
-    from core.utils.exceptions import ConfigError
+    from core.utils.exceptions import ValidationError
 
     repo = _FakePartitionRepo(rows=[_full_row("p1")])
     svc = _make_service(repo)
 
-    with pytest.raises(ConfigError, match="Retrieval preset 'ghost'"):
+    with pytest.raises(ValidationError, match="Retrieval preset 'ghost'") as exc:
         await svc.update_partition("p1", retrieval_preset="ghost")
+    assert exc.value.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -262,3 +265,45 @@ async def test_update_partition_missing_raises_404():
     svc = _make_service(_FakePartitionRepo())
     with pytest.raises(PartitionNotFoundError):
         await svc.update_partition("ghost", description="x")
+
+
+# ------------------------------------------------------------------
+# get_partition_config / update_partition_config (PartitionDetailResponse)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_partition_config_returns_resolved_detail():
+    repo = _FakePartitionRepo(rows=[_full_row("p1", description="docs")])
+    svc = _make_service(repo)
+
+    detail = await svc.get_partition_config("p1")
+
+    assert detail["name"] == "p1"
+    assert detail["description"] == "docs"
+    assert detail["embedder"] == "default"
+    assert detail["indexation_preset"] == "default"
+    assert detail["retrieval_preset"] == "default"
+    assert detail["dimension"] == 1024
+    assert detail["retrieval_pipeline"]["top_k"] == 50
+    assert "chunking" in detail["indexation_pipeline"]
+
+
+@pytest.mark.asyncio
+async def test_get_partition_config_missing_raises_404():
+    from core.utils.exceptions import PartitionNotFoundError
+
+    svc = _make_service(_FakePartitionRepo())
+    with pytest.raises(PartitionNotFoundError):
+        await svc.get_partition_config("ghost")
+
+
+@pytest.mark.asyncio
+async def test_update_partition_config_applies_and_returns_detail():
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo)
+
+    detail = await svc.update_partition_config("p1", description="new")
+
+    assert detail["description"] == "new"
+    assert repo._store["p1"]["description"] == "new"

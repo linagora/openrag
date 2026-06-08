@@ -161,7 +161,7 @@ class PartitionService:
 
         # Validate the preset references before touching the DB.
         if self._config is not None:
-            self.resolve_partition_row({"partition": partition, **config_fields})
+            self._validate_preset_refs({"partition": partition, **config_fields})
 
         await self._partition_repo.create_partition(name=partition, user_id=user_id)
 
@@ -210,7 +210,7 @@ class PartitionService:
             current = await self._partition_repo.get_partition_row(partition)
             if current is None:
                 raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
-            self.resolve_partition_row({**current, **updates})
+            self._validate_preset_refs({**current, **updates})
 
         result = await self._partition_repo.update_partition(partition, **updates)
 
@@ -219,6 +219,50 @@ class PartitionService:
 
         logger.info("Partition updated.", partition=partition, fields=sorted(updates))
         return result
+
+    async def get_partition_config(self, partition: str) -> dict:
+        """Return the resolved Phase 14 detail for a partition.
+
+        Shapes a ``PartitionDetailResponse``: the stored preset references plus
+        the fully resolved indexation/retrieval pipelines. Raises 404 if the
+        partition does not exist.
+        """
+        self._require_config()
+        row = await self._partition_repo.get_partition_row(partition)
+        if row is None:
+            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
+        return self._partition_detail(row, self.resolve_partition_row(row))
+
+    async def update_partition_config(self, partition: str, **fields: object) -> dict:
+        """Update a partition's preset references and return the resolved detail."""
+        await self.update_partition(partition, **fields)
+        return await self.get_partition_config(partition)
+
+    def _validate_preset_refs(self, row: dict) -> None:
+        """Validate a row's preset references for create/update.
+
+        The preset names come from user input, so a missing preset is a client
+        error: translate the resolver's ConfigError (which maps to 500) into a
+        422 ValidationError.
+        """
+        try:
+            self.resolve_partition_row(row)
+        except ConfigError as exc:
+            raise ValidationError(exc.message, code="PRESET_NOT_FOUND") from exc
+
+    def _partition_detail(self, row: dict, cfg: PartitionConfig) -> dict:
+        """Shape a resolved row into the ``PartitionDetailResponse`` payload."""
+        return {
+            "name": cfg.name,
+            "description": cfg.description,
+            "embedder": cfg.embedder,
+            "indexation_preset": row.get("indexation_preset") or "default",
+            "retrieval_preset": row.get("retrieval_preset") or "default",
+            "indexation_pipeline": cfg.indexation.model_dump(mode="json"),
+            "retrieval_pipeline": cfg.retrieval.model_dump(mode="json"),
+            "dimension": row.get("dimension"),
+            "created_at": row.get("created_at"),
+        }
 
     # ------------------------------------------------------------------
     # Preset resolution + in-memory cache
