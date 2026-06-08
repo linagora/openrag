@@ -101,10 +101,13 @@ class ModelEndpointService:
                 "extra": {"implementation": "vllm"},
             },
             "reranker": {
-                # A disabled reranker is not advertised as an available endpoint;
-                # an empty endpoint makes seed_defaults skip it (see the skip
-                # branch above). Operators can still register one via the API.
-                "endpoint": (os.getenv("RERANKER_ENDPOINT", s.reranker.base_url) if s.reranker.enabled else ""),
+                # Catalog the reranker endpoint whenever it is configured, like
+                # the embedder — registration is about availability, not whether
+                # reranking is on. Activation is the retrieval preset's
+                # enable_reranker kill-switch, which inherits reranker.enabled,
+                # so a disabled reranker is seeded but unused by default and
+                # remains available for per-partition opt-in.
+                "endpoint": os.getenv("RERANKER_ENDPOINT", s.reranker.base_url),
                 "model_name": os.getenv("RERANKER_MODEL", s.reranker.model_name),
                 "extra": {"implementation": s.reranker.provider},
             },

@@ -137,12 +137,29 @@ async def test_seed_defaults_skips_empty_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_seed_defaults_skips_reranker_when_disabled(monkeypatch):
+async def test_seed_defaults_seeds_disabled_reranker_when_configured(monkeypatch):
     from core.config.root import Settings
 
     monkeypatch.delenv("RERANKER_ENDPOINT", raising=False)
-    # base_url still defaults to a real host; only ``enabled`` is flipped off.
+    # A disabled reranker is still catalogued as long as it is configured
+    # (base_url set): registration is about availability, while activation is
+    # the retrieval preset's enable_reranker kill-switch.
     settings = Settings(reranker={"provider": "infinity", "enabled": False})
+    repo = _FakeEndpointRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    creates = [c for c in repo.calls if c[0] == "create"]
+    assert any(name_type[1] == "reranker" for _, name_type in creates)
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_skips_reranker_when_unconfigured(monkeypatch):
+    from core.config.root import Settings
+
+    monkeypatch.delenv("RERANKER_ENDPOINT", raising=False)
+    # No base_url configured → nothing to advertise, so the reranker is skipped.
+    settings = Settings(reranker={"provider": "openai", "base_url": ""})
     repo = _FakeEndpointRepo()
     svc = _make_service(repo, settings=settings)
     await svc.seed_defaults()
