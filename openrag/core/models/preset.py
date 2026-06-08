@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+PresetType = Literal["indexation", "retrieval"]
 
 
 class PresetRow(BaseModel):
     """DB representation of a pipeline preset row."""
 
     name: str
-    preset_type: str  # "indexation" | "retrieval"
+    preset_type: PresetType
     config: dict[str, Any]
     created_at: datetime
     updated_at: datetime
@@ -29,9 +31,9 @@ class PartitionRow(BaseModel):
     embedder: str = "default"
     indexation_preset: str = "default"
     retrieval_preset: str = "default"
-    dimension: int = 1024
+    dimension: int = Field(default=1024, gt=0)
     collection_name: str | None = None
-    chat_history_depth: int = 0
+    chat_history_depth: int = Field(default=0, ge=0)
     chat_llm: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -50,8 +52,8 @@ class PartitionConfig(BaseModel):
     indexation: IndexationPipelineConfig
     retrieval: RetrievalPipelineConfig
     collection_name: str | None = None
-    chat_history_depth: int = 0
+    chat_history_depth: int = Field(default=0, ge=0)
     chat_llm: str | None = None
 
 
-__all__ = ["PresetRow", "PartitionRow", "PartitionConfig"]
+__all__ = ["PresetRow", "PartitionRow", "PartitionConfig", "PresetType"]

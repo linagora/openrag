@@ -9,10 +9,9 @@ import pytest
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _make_row(**kwargs):
-    from core.config.model_endpoints import ModelEndpointRow
-
-    base = {
+def _row_payload(**kwargs):
+    """Build a model endpoint row payload with targeted overrides."""
+    payload = {
         "name": "default",
         "model_type": "embedder",
         "endpoint": "http://vllm:8000/v1",
@@ -24,8 +23,20 @@ def _make_row(**kwargs):
         "created_at": _NOW,
         "updated_at": _NOW,
     }
-    base.update(kwargs)
-    return ModelEndpointRow(**base)
+    payload.update(kwargs)
+    return payload
+
+
+def _make_row(**kwargs):
+    from core.config.model_endpoints import ModelEndpointRow
+
+    return ModelEndpointRow(**_row_payload(**kwargs))
+
+
+def _make_unvalidated_row(**kwargs):
+    from core.config.model_endpoints import ModelEndpointRow
+
+    return ModelEndpointRow.model_construct(**_row_payload(**kwargs))
 
 
 class _FakeEndpointRepo:
@@ -190,7 +201,7 @@ async def test_create_model_endpoint_rejects_invalid_type():
     from core.utils.exceptions import ValidationError
 
     svc = _make_service()
-    row = _make_row(model_type="unknown_type")
+    row = _make_unvalidated_row(model_type="unknown_type")
     with pytest.raises(ValidationError, match="Invalid model_type"):
         await svc.create_model_endpoint(row)
 

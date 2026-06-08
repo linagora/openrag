@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 PresetType = Literal["indexation", "retrieval"]
 
@@ -51,9 +51,9 @@ class UpdatePresetRequest(BaseModel):
 
     @field_validator("name")
     @classmethod
-    def validate_name(cls, value: str | None) -> str | None:
+    def validate_name(cls, value: str | None, info: ValidationInfo) -> str | None:
         """Normalize the optional replacement name and reject null."""
-        return _normalize_name(_reject_explicit_null("name", value))
+        return _normalize_name(_reject_explicit_null(info.field_name, value))
 
     @field_validator("config")
     @classmethod

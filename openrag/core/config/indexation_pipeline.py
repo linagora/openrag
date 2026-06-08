@@ -7,9 +7,10 @@ and caches the resolved PartitionConfig.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
 
-from .chunking import ChunkerConfig
+from core.config.chunking import ChunkerConfig
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class IndexationPipelineConfig(BaseModel):
@@ -18,7 +19,7 @@ class IndexationPipelineConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     chunking: ChunkerConfig = Field(default_factory=ChunkerConfig)
-    parsing_strategy: str = "marker"  # "pymupdf" | "marker" | "docling"
+    parsing_strategy: Literal["pymupdf", "marker", "docling"] = "marker"
 
     # VLM / image captioning
     vlm: str | None = None  # endpoint name; None = use global default
@@ -27,7 +28,7 @@ class IndexationPipelineConfig(BaseModel):
     # Contextualization (LLM-generated chunk context)
     enable_contextualization: bool = False
     contextualization_llm: str | None = None
-    contextualization_mode: str = "none"  # "none" | "simple" | "structured"
+    contextualization_mode: Literal["none", "simple", "structured"] = "none"
 
     # Metadata extraction
     enable_metadata_extraction: bool = True

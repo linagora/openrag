@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
+from core.config.base import ConfigMixin
 from pydantic import BaseModel, Field
 
-from .base import ConfigMixin
+ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm"]
 
 
 class ModelEndpointConfig(BaseModel):
@@ -45,15 +46,15 @@ class ModelEndpointRow(BaseModel):
     """DB representation of a model endpoint (returned by the repository)."""
 
     name: str
-    model_type: str  # embedder | reranker | llm | vlm
+    model_type: ModelEndpointType
     endpoint: str
     model_name: str | None = None
-    batch_size: int = 32
-    timeout: float = 30.0
+    batch_size: int = Field(default=32, gt=0)
+    timeout: float = Field(default=30.0, gt=0)
     extra: dict[str, Any] = Field(default_factory=dict)
     is_default: bool = False
     created_at: datetime
     updated_at: datetime
 
 
-__all__ = ["ModelEndpointConfig", "ModelsConfig", "ModelEndpointRow"]
+__all__ = ["ModelEndpointConfig", "ModelsConfig", "ModelEndpointRow", "ModelEndpointType"]
