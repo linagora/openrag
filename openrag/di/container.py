@@ -550,6 +550,7 @@ class ServiceContainer:
                     collection=settings.vectordb.collection_name,
                 ),
                 config=settings,
+                partition_service=self.partition_service,
             )
         return self._indexing_service
 

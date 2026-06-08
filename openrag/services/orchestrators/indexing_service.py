@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from core.indexing.dispatcher import IndexingDispatcher
     from core.ports.document_repo import DocumentRepository
     from core.ports.workspace_repo import WorkspaceRepository
+    from services.orchestrators.partition_service import PartitionService
 
 logger = get_logger()
 
@@ -56,11 +57,13 @@ class IndexingService:
         workspace_repo: WorkspaceRepository,
         dispatcher: IndexingDispatcher,
         config: Settings | None = None,
+        partition_service: PartitionService | None = None,
     ) -> None:
         self._document_repo = document_repo
         self._workspace_repo = workspace_repo
         self._dispatcher = dispatcher
         self._config = config
+        self._partition_service = partition_service
 
     # ------------------------------------------------------------------
     # Lookups (used by the thin router for its byte-identical guards)
@@ -121,6 +124,28 @@ class IndexingService:
         partition_cfg = partitions[partition]
         return partition_cfg.indexation.model_dump(mode="json"), partition_cfg.embedder
 
+    async def _ensure_partition_exists(self, partition: str, user: dict | None) -> None:
+        """Auto-create the partition on first index, matching legacy behaviour.
+
+        Indexing into an unknown partition historically created it (with the
+        uploader as owner) and then indexed. Phase 14J's per-partition
+        resolution requires the partition to be present in ``config.partitions``,
+        so create it here with default presets before resolving. No-op when
+        there is no preset registry to resolve against (legacy passthrough) or
+        no partition service wired.
+        """
+        if self._partition_service is None or not self._partition_configs():
+            return
+        if partition in self._partition_configs():
+            return
+        if await self._partition_service.partition_exists(partition):
+            # Row exists but the in-memory cache is stale — refresh it.
+            await self._partition_service.load_partitions()
+            return
+        user_id = (user or {}).get("id") or 1
+        await self._partition_service.create_partition(partition, user_id=user_id)
+        logger.bind(partition=partition, user_id=user_id).info("Auto-created partition on index.")
+
     async def add_file(
         self,
         *,
@@ -146,6 +171,7 @@ class IndexingService:
             sanitized_filename=sanitized_filename,
             original_filename=original_filename,
         )
+        await self._ensure_partition_exists(partition, user)
         indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
         return await self._dispatcher.dispatch_indexing(
             path=file_path,
