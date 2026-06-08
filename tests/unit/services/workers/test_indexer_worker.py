@@ -8,7 +8,6 @@ import pytest
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from services.workers.indexer_actor import IndexerWorker, _load_document
-from services.workers.parsers.doc_serializer_bridge import INDEXATION_CONFIG_METADATA_KEY
 from services.workers.pipeline_builder import build_indexing_pipeline
 
 # ---------------------------------------------------------------------------
@@ -114,16 +113,6 @@ def test_load_document_falls_back_to_filename_when_no_file_id(tmp_path: Path) ->
     doc = _load_document(str(p), {}, "p")
 
     assert doc.filename == "note.txt"
-
-
-def test_load_document_attaches_internal_indexation_config(tmp_path: Path) -> None:
-    p = tmp_path / "note.txt"
-    p.write_bytes(b"hi")
-    config = {"enable_image_captioning": False}
-
-    doc = _load_document(str(p), {"source": "note.txt"}, "p", indexation_config=config)
-
-    assert doc.metadata[INDEXATION_CONFIG_METADATA_KEY] == config
 
 
 # ---------------------------------------------------------------------------

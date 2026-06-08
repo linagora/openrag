@@ -7,8 +7,6 @@ from typing import Any
 from core.indexing.parsers.document_parser import DocumentParser
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 
-INDEXATION_CONFIG_METADATA_KEY = "_openrag_indexation_config"
-
 
 class DocSerializerBridgeParser(DocumentParser):
     """Transitional parser backed by the legacy loader registry."""
@@ -35,12 +33,11 @@ class DocSerializerBridgeParser(DocumentParser):
 
     async def _load_via_legacy(self, path: str, document: Document) -> ProcessedDocument:
         metadata = dict(document.metadata or {})
-        indexation_config = metadata.pop(INDEXATION_CONFIG_METADATA_KEY, None)
         loader_cls = self._loader_for(path, metadata)
         if loader_cls is None:
             raise ValueError(f"No loader registered for file extension {Path(path).suffix.lower()!r}")
 
-        loader = loader_cls(config=_legacy_loader_config(self._config, indexation_config))
+        loader = loader_cls(config=self._config)
         lang_doc = await loader.aload_document(
             file_path=path,
             metadata=metadata,
@@ -79,22 +76,6 @@ def _suffix_from_document(document: Document) -> str:
         if suffix:
             return suffix
     return f".{document.content_type.value}" if document.content_type else ""
-
-
-def _legacy_loader_config(config: Any, indexation_config: Any) -> Any:
-    """Apply per-file indexation overrides to legacy loader config."""
-    if not isinstance(indexation_config, dict):
-        return config
-    if indexation_config.get("enable_image_captioning", True):
-        return config
-
-    loader = config.loader.model_copy(
-        update={
-            "image_captioning": False,
-            "image_captioning_url": False,
-        }
-    )
-    return config.model_copy(update={"loader": loader})
 
 
 __all__ = ["DocSerializerBridgeParser"]

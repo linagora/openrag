@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 from core.models.document import Document
-from services.workers.parsers.doc_serializer_bridge import INDEXATION_CONFIG_METADATA_KEY
 from services.workers.pipeline_builder import IndexingPipeline
 
 
@@ -58,7 +57,7 @@ class IndexerWorker:
         """
         await self._tsm.set_state.remote(task_id, "SERIALIZING")
         try:
-            document = _load_document(path, metadata, partition, indexation_config=indexation_config)
+            document = _load_document(path, metadata, partition)
             row: dict[str, Any] = {
                 "document": document,
                 "partition": partition,
@@ -122,23 +121,14 @@ async def _write_catalog_record(
     )
 
 
-def _load_document(
-    path: str,
-    metadata: dict[str, Any],
-    partition: str,
-    *,
-    indexation_config: dict[str, Any] | None = None,
-) -> Document:
+def _load_document(path: str, metadata: dict[str, Any], partition: str) -> Document:
     p = Path(path)
-    document_metadata = dict(metadata)
-    if indexation_config is not None:
-        document_metadata[INDEXATION_CONFIG_METADATA_KEY] = dict(indexation_config)
     return Document(
         filename=metadata.get("file_id") or p.name,
         raw_bytes=p.read_bytes(),
         content_type=Document.detect_content_type(p.name),
         partition=partition,
-        metadata=document_metadata,
+        metadata=metadata,
     )
 
 
