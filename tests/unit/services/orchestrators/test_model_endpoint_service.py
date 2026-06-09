@@ -370,3 +370,64 @@ async def test_set_default_calls_repo_and_reloads():
 
     assert "default" not in cache
     assert any(c[0] == "list_all" for c in repo.calls)
+
+
+# ------------------------------------------------------------------
+# validate_endpoint
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_raises_404_when_missing():
+    from core.utils.exceptions import NotFoundError
+
+    svc = _make_service()
+
+    with pytest.raises(NotFoundError):
+        await svc.validate_endpoint(name="ghost", model_type="llm")
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_uses_registered_endpoint(monkeypatch):
+    import httpx
+
+    row = _make_row(
+        name="mistral",
+        model_type="llm",
+        endpoint="http://llm:8000/v1",
+        model_name="mistral-small",
+    )
+    svc = _make_service(rows=[row])
+    calls: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "mistral-small"}]}
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            assert timeout == 5.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(url)
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(name="mistral", model_type="llm")
+
+    assert calls == ["http://llm:8000/v1/models"]
+    assert result == {
+        "reachable": True,
+        "model_found": True,
+        "models_served": ["mistral-small"],
+        "detail": None,
+    }
