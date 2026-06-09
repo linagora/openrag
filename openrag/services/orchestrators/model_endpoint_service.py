@@ -30,6 +30,13 @@ def _slug(model_name: str) -> str:
     return model_name.split("/")[-1] if model_name else "default"
 
 
+def _with_api_key(extra: dict[str, Any], api_key: str | None) -> dict[str, Any]:
+    """Add ``api_key`` to endpoint extras when configured."""
+    if api_key:
+        return {**extra, "api_key": api_key}
+    return extra
+
+
 class ModelEndpointService:
     """CRUD and lifecycle management for named model endpoints."""
 
@@ -88,17 +95,26 @@ class ModelEndpointService:
             "embedder": {
                 "endpoint": os.getenv("EMBEDDER_ENDPOINT", s.embedder.base_url),
                 "model_name": os.getenv("EMBEDDING_MODEL", s.embedder.model_name),
-                "extra": {"implementation": "vllm"},
+                "extra": _with_api_key(
+                    {"implementation": "vllm"},
+                    os.getenv("EMBEDDER_API_KEY", s.embedder.api_key),
+                ),
             },
             "llm": {
                 "endpoint": os.getenv("LLM_ENDPOINT", s.llm.base_url),
                 "model_name": os.getenv("LLM_MODEL", s.llm.model),
-                "extra": {"implementation": "vllm"},
+                "extra": _with_api_key(
+                    {"implementation": "vllm"},
+                    os.getenv("API_KEY", s.llm.api_key),
+                ),
             },
             "vlm": {
                 "endpoint": os.getenv("VLM_ENDPOINT", s.vlm.base_url),
                 "model_name": os.getenv("VLM_MODEL", s.vlm.model),
-                "extra": {"implementation": "vllm"},
+                "extra": _with_api_key(
+                    {"implementation": "vllm"},
+                    os.getenv("VLM_API_KEY", s.vlm.api_key),
+                ),
             },
             "reranker": {
                 # Catalog the reranker endpoint whenever it is configured, like
@@ -109,7 +125,10 @@ class ModelEndpointService:
                 # remains available for per-partition opt-in.
                 "endpoint": os.getenv("RERANKER_ENDPOINT", s.reranker.base_url),
                 "model_name": os.getenv("RERANKER_MODEL", s.reranker.model_name),
-                "extra": {"implementation": s.reranker.provider},
+                "extra": _with_api_key(
+                    {"implementation": s.reranker.provider},
+                    os.getenv("RERANKER_API_KEY", s.reranker.api_key),
+                ),
             },
         }
 
@@ -244,7 +263,13 @@ class ModelEndpointService:
     # Endpoint validation
     # ------------------------------------------------------------------
 
-    async def validate_endpoint(self, url: str, model_name: str | None = None) -> dict[str, Any]:
+    async def validate_endpoint(
+        self,
+        url: str,
+        model_name: str | None = None,
+        *,
+        api_key: str | None = None,
+    ) -> dict[str, Any]:
         """Probe ``{url}/models`` to verify the endpoint is reachable and serving.
 
         Returns a dict with ``reachable``, ``model_found``, ``models_served``,
@@ -259,8 +284,9 @@ class ModelEndpointService:
             "detail": None,
         }
         models_url = url.rstrip("/") + "/models"
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=5.0, headers=headers) as client:
                 resp = await client.get(models_url)
             result["reachable"] = True
             if resp.status_code == 200:

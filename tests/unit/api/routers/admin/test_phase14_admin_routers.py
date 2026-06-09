@@ -46,6 +46,7 @@ class FakeModelEndpointService:
     def __init__(self) -> None:
         """Initialize the call log."""
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.endpoint_extra: dict[str, Any] = {}
 
     async def create_model_endpoint(self, row: Any) -> dict[str, Any]:
         """Record endpoint creation (from a ModelEndpointRow) and echo a row."""
@@ -63,7 +64,7 @@ class FakeModelEndpointService:
         from core.config.model_endpoints import ModelEndpointRow
 
         self.calls.append(("get", {"name": name, "model_type": model_type}))
-        return ModelEndpointRow(**_model_endpoint_row(name=name, model_type=model_type))
+        return ModelEndpointRow(**_model_endpoint_row(name=name, model_type=model_type, extra=self.endpoint_extra))
 
     async def update_model_endpoint(self, name: str, model_type: str, **fields: Any) -> dict[str, Any]:
         """Record endpoint updates and echo the merged response row."""
@@ -78,9 +79,15 @@ class FakeModelEndpointService:
         """Record default promotion."""
         self.calls.append(("set_default", {"name": name, "model_type": model_type}))
 
-    async def validate_endpoint(self, url: str, model_name: str | None = None) -> dict[str, Any]:
+    async def validate_endpoint(
+        self,
+        url: str,
+        model_name: str | None = None,
+        *,
+        api_key: str | None = None,
+    ) -> dict[str, Any]:
         """Record endpoint validation."""
-        self.calls.append(("validate", {"url": url, "model_name": model_name}))
+        self.calls.append(("validate", {"url": url, "model_name": model_name, "api_key": api_key}))
         return {"reachable": True, "model_found": True, "models_served": ["mistral"], "detail": None}
 
 
@@ -208,7 +215,24 @@ async def test_validate_model_endpoint_uses_route_identity(async_client_factory)
     assert response.json()["reachable"] is True
     assert model_service.calls == [
         ("get", {"name": "default", "model_type": "llm"}),
-        ("validate", {"url": "http://llm:8000/v1", "model_name": "mistral"}),
+        ("validate", {"url": "http://llm:8000/v1", "model_name": "mistral", "api_key": None}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_validate_model_endpoint_uses_stored_api_key(async_client_factory):
+    """Endpoint validation should authenticate with the stored endpoint key."""
+    model_service = FakeModelEndpointService()
+    model_service.endpoint_extra = {"api_key": "secret-token"}
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post("/model-endpoints/llm/default/validate")
+
+    assert response.status_code == 200
+    assert model_service.calls == [
+        ("get", {"name": "default", "model_type": "llm"}),
+        ("validate", {"url": "http://llm:8000/v1", "model_name": "mistral", "api_key": "secret-token"}),
     ]
 
 

@@ -154,6 +154,33 @@ async def test_seed_defaults_seeds_disabled_reranker_when_configured(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_preserves_endpoint_api_keys(monkeypatch):
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    settings = Settings(
+        embedder={"api_key": "embed-key"},
+        llm={"base_url": "http://llm:8000/v1", "model": "mistral", "api_key": "llm-key"},
+        vlm={"base_url": "http://vlm:8000/v1", "model": "pixtral", "api_key": "vlm-key"},
+        reranker={"provider": "infinity", "api_key": "rerank-key"},
+    )
+    repo = _FakeEndpointRepo()
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    rows = repo._store.values()
+    assert {row.model_type: row.extra.get("api_key") for row in rows} == {
+        "embedder": "embed-key",
+        "llm": "llm-key",
+        "vlm": "vlm-key",
+        "reranker": "rerank-key",
+    }
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_skips_reranker_when_unconfigured(monkeypatch):
     from core.config.root import Settings
 
@@ -391,8 +418,9 @@ async def test_validate_endpoint_probes_url_and_model_name(monkeypatch):
             return {"data": [{"id": "mistral-small"}]}
 
     class FakeClient:
-        def __init__(self, *, timeout):
+        def __init__(self, *, timeout, headers):
             assert timeout == 5.0
+            assert headers == {}
 
         async def __aenter__(self):
             return self
@@ -415,3 +443,36 @@ async def test_validate_endpoint_probes_url_and_model_name(monkeypatch):
         "models_served": ["mistral-small"],
         "detail": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_sends_api_key(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+    captured_headers: list[dict[str, str]] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "mistral-small"}]}
+
+    class FakeClient:
+        def __init__(self, *, timeout, headers):
+            captured_headers.append(headers)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    await svc.validate_endpoint("http://llm:8000/v1", "mistral-small", api_key="secret-token")
+
+    assert captured_headers == [{"Authorization": "Bearer secret-token"}]
