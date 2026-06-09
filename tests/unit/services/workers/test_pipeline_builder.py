@@ -1,6 +1,7 @@
 import pytest
+from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.models.chunk import Chunk
-from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from services.workers.pipeline_builder import build_indexing_pipeline
 
 
@@ -51,6 +52,24 @@ class FakeVectorStore:
 
     async def ensure_collection(self, name: str, dimension: int, **kwargs) -> None:
         self.ensure_calls.append((name, dimension))
+
+
+class FakeVLM:
+    def __init__(self) -> None:
+        self.calls: list[bytes] = []
+
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        self.calls.append(image_bytes)
+        return "caption"
+
+
+class FakeContextualizer:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[Chunk], str, str]] = []
+
+    async def contextualize(self, chunks, *, filename: str = "", lang: str = "en") -> list[Chunk]:
+        self.calls.append((list(chunks), filename, lang))
+        return [chunk.model_copy(update={"text": f"ctx {chunk.text}", "context": "ctx"}) for chunk in chunks]
 
 
 @pytest.mark.asyncio
@@ -105,3 +124,96 @@ async def test_pipeline_stops_before_later_stages_when_a_stage_fails():
     assert row["error"] == "chunk failed"
     assert vector_store.calls == []
     assert "password" not in row
+
+
+@pytest.mark.asyncio
+async def test_pipeline_indexation_config_disables_caption_and_contextualization():
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    chunks = [Chunk(id="c1", text="hello", partition="tenant-a")]
+    vlm = FakeVLM()
+    contextualizer = FakeContextualizer()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker(chunks),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        contextualizer=contextualizer,
+        indexation_config=IndexationPipelineConfig(
+            enable_image_captioning=False,
+            enable_contextualization=False,
+        ),
+    )
+
+    row = {"document": document, "partition": "tenant-a", "filename": "note.txt"}
+    await pipeline.run(row)
+
+    assert vlm.calls == []
+    assert contextualizer.calls == []
+    assert row["stage"] == "stored"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_row_indexation_config_selects_components():
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    default_processed = ProcessedDocument(document_id="default", text_blocks=[TextBlock(text="default")])
+    selected_processed = ProcessedDocument(
+        document_id="selected",
+        text_blocks=[TextBlock(text="selected")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    selected_chunk = Chunk(id="selected", text="selected", partition="tenant-a")
+    selected_parser = FakeParser(selected_processed)
+    selected_chunker = FakeChunker([selected_chunk])
+    selected_embedder = FakeEmbedder([[0.5]])
+    selected_vlm = FakeVLM()
+    selected_contextualizer = FakeContextualizer()
+    parser_calls: list[str] = []
+    chunker_calls: list[object] = []
+    embedder_calls: list[str] = []
+    vlm_calls: list[str] = []
+    contextualizer_calls: list[str] = []
+
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(default_processed),
+        chunker=FakeChunker([Chunk(id="default", text="default")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        parser_factory=lambda name: parser_calls.append(name) or selected_parser,
+        chunker_factory=lambda config: chunker_calls.append(config) or selected_chunker,
+        embedder_factory=lambda name: embedder_calls.append(name) or selected_embedder,
+        vlm_factory=lambda name: vlm_calls.append(name) or selected_vlm,
+        contextualizer_factory=lambda name: contextualizer_calls.append(name) or selected_contextualizer,
+    )
+    row = {
+        "document": document,
+        "partition": "tenant-a",
+        "filename": "note.txt",
+        "embedder_name": "embed-fast",
+        "indexation_config": {
+            "parsing_strategy": "pymupdf",
+            "chunking": {"name": "recursive_splitter", "chunk_size": 128, "chunk_overlap_rate": 0.1},
+            "enable_image_captioning": True,
+            "vlm": "vlm-fast",
+            "enable_contextualization": True,
+            "contextualization_llm": "llm-context",
+        },
+    }
+
+    await pipeline.run(row)
+
+    assert parser_calls == ["pymupdf"]
+    assert chunker_calls[0].chunk_size == 128
+    assert embedder_calls == ["embed-fast"]
+    assert vlm_calls == ["vlm-fast"]
+    assert contextualizer_calls == ["llm-context"]
+    assert selected_parser.calls == [document]
+    assert selected_chunker.calls == [(row["processed_document"], "tenant-a")]
+    assert selected_vlm.calls == [b"png"]
+    assert selected_contextualizer.calls[0][1:] == ("note.txt", "en")
+    assert row["chunks"][0].embedding == [0.5]

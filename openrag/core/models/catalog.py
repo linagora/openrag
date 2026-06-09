@@ -36,6 +36,7 @@ class DocumentRecord(BaseModel):
     filename: str = ""
     partition: str = "default"
     metadata: dict[str, Any] = Field(default_factory=dict)
+    indexation_config: dict[str, Any] | None = None
     status: DocumentStatus = DocumentStatus.QUEUED
     error_message: str | None = None
     created_by: int | None = None

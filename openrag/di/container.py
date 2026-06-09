@@ -21,6 +21,7 @@ queries.
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from core.embeddings import embedder_registry
@@ -29,6 +30,7 @@ from core.rerankers import reranker_registry
 from core.utils.logging import get_logger
 from core.vlm import vlm_registry
 from di.embedders import register_embedders
+from di.factories import make_component_factory
 from di.llms import register_llms
 from di.repositories import create_catalog_store
 from di.rerankers import register_rerankers
@@ -60,7 +62,9 @@ if TYPE_CHECKING:
     from services.orchestrators.indexing_service import IndexingService
     from services.orchestrators.job_service import JobService
     from services.orchestrators.mcp_service import MCPService
+    from services.orchestrators.model_endpoint_service import ModelEndpointService
     from services.orchestrators.partition_service import PartitionService
+    from services.orchestrators.preset_service import PresetService
     from services.orchestrators.query_service import QueryService
     from services.orchestrators.retrieval_service import RetrievalService
     from services.orchestrators.user_service import UserService
@@ -96,11 +100,22 @@ class ServiceContainer:
         self._settings = settings
         self._initialized = False
         self._inference_clients: list[Any] = []
+        self._client_caches: list[dict[str, Any]] = []
+        self._embedder_cache: dict[str, Any] = {}
+        self._reranker_cache: dict[str, Any] = {}
+        self._llm_cache: dict[str, Any] = {}
+        self._vlm_cache: dict[str, Any] = {}
+        self.embedder_factory = self._missing_named_factory("embedder")
+        self.reranker_factory = self._missing_named_factory("reranker")
+        self.llm_factory = self._missing_named_factory("llm")
+        self.vlm_factory = self._missing_named_factory("vlm")
         self._catalog_store: CatalogStore | None = create_catalog_store(settings) if settings is not None else None
         self._vector_store: VectorStore | None = create_vector_store(settings) if settings is not None else None
         self._auth_service: AuthService | None = None
         self._user_service: UserService | None = None
         self._partition_service: PartitionService | None = None
+        self._model_endpoint_service: ModelEndpointService | None = None
+        self._preset_service: PresetService | None = None
         self._workspace_service: WorkspaceService | None = None
         self._retrieval_service: RetrievalService | None = None
         self._query_service: QueryService | None = None
@@ -108,6 +123,8 @@ class ServiceContainer:
         self._job_service: JobService | None = None
         self._conversion_service: ConversionService | None = None
         self._mcp_service: MCPService | None = None
+        if settings is not None:
+            self._wire_named_component_factories(settings)
 
     def _require_settings(self) -> Settings:
         """Settings guard for the settings-dependent service properties.
@@ -121,6 +138,40 @@ class ServiceContainer:
             raise RuntimeError(_NO_SETTINGS_MESSAGE)
         return self._settings
 
+    def _missing_named_factory(self, _kind: str):
+        def factory(_name: str = "default"):
+            raise RuntimeError(_NO_SETTINGS_MESSAGE)
+
+        return factory
+
+    def _wire_named_component_factories(self, settings: Settings) -> None:
+        """Wire Phase 14 named inference factories from ``settings.models``."""
+        models = settings.models
+        self.embedder_factory, self._embedder_cache = make_component_factory(
+            registry=embedder_registry,
+            config_section=models.embedder,
+            default_impl="vllm",
+            client_caches=self._client_caches,
+        )
+        self.reranker_factory, self._reranker_cache = make_component_factory(
+            registry=reranker_registry,
+            config_section=models.reranker,
+            default_impl="infinity",
+            client_caches=self._client_caches,
+        )
+        self.llm_factory, self._llm_cache = make_component_factory(
+            registry=llm_registry,
+            config_section=models.llm,
+            default_impl="vllm",
+            client_caches=self._client_caches,
+        )
+        self.vlm_factory, self._vlm_cache = make_component_factory(
+            registry=vlm_registry,
+            config_section=models.vlm,
+            default_impl="vllm",
+            client_caches=self._client_caches,
+        )
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -128,12 +179,27 @@ class ServiceContainer:
     async def initialize(self) -> None:
         """Open the storage adapters (asyncpg pool + Alembic migrations)."""
         if self._catalog_store is not None:
-            logger.info("ServiceContainer.initialize: initializing catalog store")
-            await self._catalog_store.initialize()
-            logger.info("ServiceContainer.initialize: ensuring admin user")
-            await self.user_repo.ensure_admin_user(os.getenv("AUTH_TOKEN"))
-            logger.info("ServiceContainer.initialize: admin user ready")
+            await self._initialize_step("initializing catalog store", self._catalog_store.initialize)
+            await self._initialize_step(
+                "ensuring admin user",
+                lambda: self.user_repo.ensure_admin_user(os.getenv("AUTH_TOKEN")),
+            )
+            await self._initialize_step("seeding model endpoints", self.model_endpoint_service.seed_defaults)
+            await self._initialize_step("loading model endpoints", self.model_endpoint_service.load_all)
+            await self._initialize_step("seeding pipeline presets", self.preset_service.seed_defaults)
+            await self._initialize_step("loading pipeline presets", self.preset_service.load_all)
+            await self._initialize_step("ensuring default partition", self.partition_service.seed_default_partition)
+            await self._initialize_step("loading partition configs", self.partition_service.load_partitions)
         self._initialized = True
+
+    async def _initialize_step(self, label: str, operation: Callable[[], Awaitable[Any]]) -> None:
+        """Run one startup step with consistent failure logging."""
+        logger.info(f"ServiceContainer.initialize: {label}")
+        try:
+            await operation()
+        except Exception:
+            logger.exception("ServiceContainer initialization step failed", step=label)
+            raise
 
     async def shutdown(self) -> None:
         """Close inference clients and storage adapters cleanly.
@@ -142,18 +208,32 @@ class ServiceContainer:
         remaining clients, the database pool, or the state reset.
         """
         try:
+            seen_client_ids: set[int] = set()
             for client in self._inference_clients:
-                aclose = getattr(client, "aclose", None)
-                if aclose is not None:
-                    try:
-                        await aclose()
-                    except Exception:
-                        logger.exception("Failed to close inference client")
+                await self._close_inference_client(client, seen_client_ids)
+            for cache in self._client_caches:
+                for client in list(cache.values()):
+                    await self._close_inference_client(client, seen_client_ids)
+                cache.clear()
             if self._catalog_store is not None:
                 await self._catalog_store.shutdown()
         finally:
             self._inference_clients.clear()
             self._initialized = False
+
+    async def _close_inference_client(self, client: Any, seen_client_ids: set[int]) -> None:
+        """Close one tracked inference client once, best-effort."""
+        client_id = id(client)
+        if client_id in seen_client_ids:
+            return
+        seen_client_ids.add(client_id)
+        aclose = getattr(client, "aclose", None)
+        if aclose is None:
+            return
+        try:
+            await aclose()
+        except Exception:
+            logger.exception("Failed to close inference client")
 
     @property
     def is_initialized(self) -> bool:
@@ -319,8 +399,41 @@ class ServiceContainer:
                 vector_store=self.vector_store,
                 user_repo=self.user_repo,
                 collection=settings.vectordb.collection_name,
+                config=settings,
             )
         return self._partition_service
+
+    @property
+    def model_endpoint_service(self) -> ModelEndpointService:
+        """ModelEndpointService — DB-backed named model endpoint registry."""
+        if self._model_endpoint_service is None:
+            from services.orchestrators.model_endpoint_service import ModelEndpointService
+
+            self._model_endpoint_service = ModelEndpointService(
+                model_endpoint_repo=self.model_endpoint_repo,
+                config=self._require_settings(),
+                partition_service=self.partition_service,
+                client_caches={
+                    "embedder": self._embedder_cache,
+                    "reranker": self._reranker_cache,
+                    "llm": self._llm_cache,
+                    "vlm": self._vlm_cache,
+                },
+            )
+        return self._model_endpoint_service
+
+    @property
+    def preset_service(self) -> PresetService:
+        """PresetService — DB-backed pipeline preset registry."""
+        if self._preset_service is None:
+            from services.orchestrators.preset_service import PresetService
+
+            self._preset_service = PresetService(
+                preset_repo=self.preset_repo,
+                config=self._require_settings(),
+                partition_service=self.partition_service,
+            )
+        return self._preset_service
 
     @property
     def workspace_service(self) -> WorkspaceService:
@@ -359,6 +472,15 @@ class ServiceContainer:
                 document_repo=self.document_repo,
                 collection=settings.vectordb.collection_name,
             )
+
+            def searcher_factory(embedder_name: str):
+                return VectorStoreSearcher(
+                    vector_store=self.vector_store,
+                    embedder=self.embedder_factory(embedder_name),
+                    document_repo=self.document_repo,
+                    collection=settings.vectordb.collection_name,
+                )
+
             llm_cfg = settings.llm.model_dump()
             llm = self.create_llm(
                 "vllm",
@@ -382,6 +504,9 @@ class ServiceContainer:
                 reranker=reranker,
                 llm=llm,
                 config=settings,
+                searcher_factory=searcher_factory,
+                reranker_factory=self.reranker_factory,
+                llm_factory=self.llm_factory,
             )
         return self._retrieval_service
 
@@ -437,6 +562,8 @@ class ServiceContainer:
                     workspace_repo=self.workspace_repo,
                     collection=settings.vectordb.collection_name,
                 ),
+                config=settings,
+                partition_service=self.partition_service,
             )
         return self._indexing_service
 

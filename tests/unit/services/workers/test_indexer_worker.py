@@ -8,6 +8,7 @@ import pytest
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from services.workers.indexer_actor import IndexerWorker, _load_document
+from services.workers.parsers.doc_serializer_bridge import INDEXATION_CONFIG_METADATA_KEY
 from services.workers.pipeline_builder import build_indexing_pipeline
 
 # ---------------------------------------------------------------------------
@@ -113,6 +114,16 @@ def test_load_document_falls_back_to_filename_when_no_file_id(tmp_path: Path) ->
     doc = _load_document(str(p), {}, "p")
 
     assert doc.filename == "note.txt"
+
+
+def test_load_document_attaches_internal_indexation_config(tmp_path: Path) -> None:
+    p = tmp_path / "note.txt"
+    p.write_bytes(b"hi")
+    config = {"enable_image_captioning": False}
+
+    doc = _load_document(str(p), {"source": "note.txt"}, "p", indexation_config=config)
+
+    assert doc.metadata[INDEXATION_CONFIG_METADATA_KEY] == config
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +275,32 @@ async def test_process_file_creates_catalog_record_after_successful_pipeline(tmp
 
 
 @pytest.mark.asyncio
+async def test_process_file_stores_indexation_config_snapshot_on_new_file(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    repo = FakeDocumentRepo()
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=_fake_tsm(),
+        document_repo=repo,
+    )
+    indexation_config = {"parsing_strategy": "pymupdf", "enable_image_captioning": False}
+
+    await worker.process_file(
+        task_id="t-new",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+        user={"id": 42},
+        indexation_config=indexation_config,
+    )
+
+    assert repo.add_calls[0]["indexation_config"] == indexation_config
+
+
+@pytest.mark.asyncio
 async def test_process_file_updates_catalog_record_on_replace(tmp_path: Path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")
@@ -294,6 +331,32 @@ async def test_process_file_updates_catalog_record_on_replace(tmp_path: Path) ->
         }
     ]
     assert repo.add_calls == []
+
+
+@pytest.mark.asyncio
+async def test_process_file_stores_indexation_config_snapshot_on_replace(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    repo = FakeDocumentRepo()
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=_fake_tsm(),
+        document_repo=repo,
+    )
+    indexation_config = {"parsing_strategy": "marker", "enable_contextualization": True}
+
+    await worker.process_file(
+        task_id="t-replace",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+        replace=True,
+        indexation_config=indexation_config,
+    )
+
+    assert repo.update_calls[0]["indexation_config"] == indexation_config
 
 
 @pytest.mark.asyncio

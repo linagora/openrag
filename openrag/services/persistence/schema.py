@@ -21,6 +21,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -29,9 +30,66 @@ from sqlalchemy import (
     String,
     Table,
     UniqueConstraint,
+    text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 
 metadata = MetaData()
+
+
+model_endpoints = Table(
+    "model_endpoints",
+    metadata,
+    Column("name", String, primary_key=True),
+    Column("model_type", String, primary_key=True),
+    Column("endpoint", String, nullable=False),
+    Column("model_name", String, nullable=True),
+    Column("batch_size", Integer, server_default="32", nullable=False),
+    Column("timeout", Float, server_default="30.0", nullable=False),
+    Column("extra", JSONB, server_default=text("'{}'::jsonb"), nullable=False),
+    Column("is_default", Boolean, server_default="false", nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+    ),
+    CheckConstraint(
+        "model_type IN ('embedder','reranker','llm','vlm')",
+        name="ck_model_endpoint_type",
+    ),
+)
+
+
+pipeline_presets = Table(
+    "pipeline_presets",
+    metadata,
+    Column("name", String, primary_key=True),
+    Column("preset_type", String, primary_key=True),
+    Column("config", JSONB, nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+    ),
+    CheckConstraint(
+        "preset_type IN ('indexation','retrieval')",
+        name="ck_pipeline_preset_type",
+    ),
+)
 
 
 partitions = Table(
@@ -40,6 +98,20 @@ partitions = Table(
     Column("id", Integer, primary_key=True),
     Column("partition", String, unique=True, nullable=False, index=True),
     Column("created_at", DateTime, default=datetime.now, nullable=False, index=True),
+    Column("description", String, server_default=text("''"), nullable=False),
+    Column("embedder", String, server_default=text("'default'"), nullable=False),
+    Column("indexation_preset", String, server_default=text("'default'"), nullable=False),
+    Column("retrieval_preset", String, server_default=text("'default'"), nullable=False),
+    Column("dimension", Integer, server_default="1024", nullable=False),
+    Column("collection_name", String, nullable=True),
+    Column("chat_history_depth", Integer, server_default="0", nullable=False),
+    Column("chat_llm", String, nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+    ),
 )
 
 
@@ -56,6 +128,7 @@ files = Table(
         index=True,
     ),
     Column("file_metadata", JSON, nullable=True, default=dict),
+    Column("indexation_config", JSONB, nullable=True),
     Column(
         "created_by",
         Integer,
@@ -195,6 +268,8 @@ workspace_files = Table(
 
 __all__ = [
     "metadata",
+    "model_endpoints",
+    "pipeline_presets",
     "partitions",
     "files",
     "users",

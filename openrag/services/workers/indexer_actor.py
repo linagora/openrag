@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from core.models.document import Document
+from services.workers.parsers.doc_serializer_bridge import INDEXATION_CONFIG_METADATA_KEY
 from services.workers.pipeline_builder import IndexingPipeline
 
 
@@ -46,6 +47,8 @@ class IndexerWorker:
         user: dict[str, Any] | None = None,
         workspace_ids: list[str] | None = None,
         replace: bool = False,
+        indexation_config: dict[str, Any] | None = None,
+        embedder_name: str | None = None,
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
@@ -55,7 +58,7 @@ class IndexerWorker:
         """
         await self._tsm.set_state.remote(task_id, "SERIALIZING")
         try:
-            document = _load_document(path, metadata, partition)
+            document = _load_document(path, metadata, partition, indexation_config=indexation_config)
             row: dict[str, Any] = {
                 "document": document,
                 "partition": partition,
@@ -64,6 +67,8 @@ class IndexerWorker:
                 "replace": replace,
                 "user": user,
                 "workspace_ids": workspace_ids,
+                "indexation_config": indexation_config,
+                "embedder_name": embedder_name,
             }
             await self._pipeline.run(row)
             if self._document_repo is not None:
@@ -73,6 +78,7 @@ class IndexerWorker:
                     partition=partition,
                     user=user,
                     replace=replace,
+                    indexation_config=indexation_config,
                 )
             await self._tsm.set_state.remote(task_id, "COMPLETED")
             return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
@@ -89,9 +95,11 @@ async def _write_catalog_record(
     partition: str,
     user: dict[str, Any] | None,
     replace: bool,
+    indexation_config: dict[str, Any] | None,
 ) -> None:
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
+    config_kwargs = {"indexation_config": indexation_config} if indexation_config is not None else {}
     if replace:
         await doc_repo.update_file_in_partition(
             file_id=file_id,
@@ -99,6 +107,7 @@ async def _write_catalog_record(
             file_metadata=file_metadata,
             relationship_id=metadata.get("relationship_id"),
             parent_id=metadata.get("parent_id"),
+            **config_kwargs,
         )
         return
 
@@ -109,17 +118,27 @@ async def _write_catalog_record(
         user_id=user.get("id") if user else None,
         relationship_id=metadata.get("relationship_id"),
         parent_id=metadata.get("parent_id"),
+        **config_kwargs,
     )
 
 
-def _load_document(path: str, metadata: dict[str, Any], partition: str) -> Document:
+def _load_document(
+    path: str,
+    metadata: dict[str, Any],
+    partition: str,
+    *,
+    indexation_config: dict[str, Any] | None = None,
+) -> Document:
     p = Path(path)
+    document_metadata = dict(metadata)
+    if indexation_config is not None:
+        document_metadata[INDEXATION_CONFIG_METADATA_KEY] = dict(indexation_config)
     return Document(
         filename=metadata.get("file_id") or p.name,
         raw_bytes=p.read_bytes(),
         content_type=Document.detect_content_type(p.name),
         partition=partition,
-        metadata=metadata,
+        metadata=document_metadata,
     )
 
 

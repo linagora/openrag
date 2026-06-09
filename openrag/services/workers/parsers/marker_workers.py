@@ -25,7 +25,21 @@ logger = get_logger()
 
 
 def _marker_num_gpus(config) -> float:
-    return config.loader.marker_num_gpus if torch.cuda.is_available() else 0
+    """Return Marker's Ray GPU reservation, falling back to CUDA detection.
+
+    Ray scheduling must see GPU capacity before an actor can request a GPU
+    fraction. If Ray cannot report cluster resources yet, use local CUDA
+    availability as the fallback so single-node startup still honors the
+    configured Marker GPU request.
+    """
+    requested_gpus = config.loader.marker_num_gpus
+    if requested_gpus <= 0:
+        return 0
+    try:
+        return requested_gpus if ray.cluster_resources().get("GPU", 0) > 0 else 0
+    except Exception as exc:
+        logger.warning("Failed to query Ray cluster GPU resources; falling back to CUDA check", error=str(exc))
+        return requested_gpus if torch.cuda.is_available() else 0
 
 
 @ray.remote

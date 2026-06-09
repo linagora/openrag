@@ -28,7 +28,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from core.config.indexation_pipeline import IndexationPipelineConfig
+from core.config.retrieval_pipeline import RetrievalPipelineConfig
+from core.models.preset import PartitionConfig
 from core.utils.exceptions import (
+    ConfigError,
     NotFoundError,
     PartitionNotFoundError,
     UserNotFoundError,
@@ -37,6 +41,7 @@ from core.utils.exceptions import (
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from core.config.root import Settings
     from core.ports.document_repo import DocumentRepository
     from core.ports.partition_membership_repo import PartitionMembershipRepository
     from core.ports.partition_repo import PartitionRepository
@@ -58,6 +63,7 @@ class PartitionService:
         vector_store: VectorStore,
         user_repo: UserRepository,
         collection: str,
+        config: Settings | None = None,
     ) -> None:
         self._partition_repo = partition_repo
         self._membership_repo = membership_repo
@@ -65,6 +71,7 @@ class PartitionService:
         self._vector_store = vector_store
         self._user_repo = user_repo
         self._collection = collection
+        self._config = config
 
     # ------------------------------------------------------------------
     # Existence guards (mirror the legacy _check_* helpers, core exceptions)
@@ -113,12 +120,28 @@ class PartitionService:
     async def list_partitions(self) -> list[dict]:
         return await self._partition_repo.list_partitions()
 
-    async def create_partition(self, partition: str, user_id: int) -> None:
-        """Create a partition owned by ``user_id``.
+    async def create_partition(
+        self,
+        partition: str,
+        user_id: int,
+        *,
+        description: str = "",
+        embedder: str = "default",
+        indexation_preset: str = "default",
+        retrieval_preset: str = "default",
+        chat_history_depth: int = 0,
+        chat_llm: str | None = None,
+    ) -> None:
+        """Create a partition owned by ``user_id`` with preset references.
 
         The 409-on-exists check lives in the thin router (it returns a
         non-bracketed ``{"detail": ...}`` body that must stay identical);
         this raises only if the race is lost between that check and here.
+
+        When ``config`` was supplied to the service, the referenced presets
+        are validated *before* the row is written (so a bad preset name fails
+        fast and atomically), the non-default config columns are persisted,
+        and the in-memory partition cache is re-resolved.
         """
         if await self._partition_repo.partition_exists(name=partition):
             raise ValidationError(
@@ -126,7 +149,29 @@ class PartitionService:
                 status_code=409,
                 code="PARTITION_EXISTS",
             )
+
+        config_fields = {
+            "description": description,
+            "embedder": embedder,
+            "indexation_preset": indexation_preset,
+            "retrieval_preset": retrieval_preset,
+            "chat_history_depth": chat_history_depth,
+            "chat_llm": chat_llm,
+        }
+
+        # Validate the preset references before touching the DB.
+        if self._config is not None:
+            self._validate_preset_refs({"partition": partition, **config_fields})
+
         await self._partition_repo.create_partition(name=partition, user_id=user_id)
+
+        # Persist the config columns (the insert only sets server defaults)
+        # and re-resolve the in-memory cache. Only done in the Phase 14 flow
+        # where a config was supplied.
+        if self._config is not None:
+            await self._partition_repo.update_partition(partition, **config_fields)
+            await self.load_partitions()
+
         logger.info(f"Partition '{partition}' created by user_id {user_id}.")
 
     async def delete_partition(self, partition: str) -> None:
@@ -150,6 +195,136 @@ class PartitionService:
                     error=str(e),
                 )
         logger.info("Partition successfully deleted.", partition=partition)
+
+    async def update_partition(self, partition: str, **fields: object) -> dict | None:
+        """Update a partition's config columns and re-resolve the cache.
+
+        ``None`` values are ignored (so partial PATCH semantics work). When a
+        preset reference changes, the merged row is validated *before* the
+        write so an unknown preset name fails fast.
+        """
+        await self._ensure_partition(partition)
+        updates = {k: v for k, v in fields.items() if v is not None}
+
+        if self._config is not None and updates:
+            current = await self._partition_repo.get_partition_row(partition)
+            if current is None:
+                raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
+            self._validate_preset_refs({**current, **updates})
+
+        result = await self._partition_repo.update_partition(partition, **updates)
+
+        if self._config is not None:
+            await self.load_partitions()
+
+        logger.info("Partition updated.", partition=partition, fields=sorted(updates))
+        return result
+
+    async def get_partition_config(self, partition: str) -> dict:
+        """Return the resolved Phase 14 detail for a partition.
+
+        Shapes a ``PartitionDetailResponse``: the stored preset references plus
+        the fully resolved indexation/retrieval pipelines. Raises 404 if the
+        partition does not exist.
+        """
+        self._require_config()
+        row = await self._partition_repo.get_partition_row(partition)
+        if row is None:
+            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
+        return self._partition_detail(row, self.resolve_partition_row(row))
+
+    async def update_partition_config(self, partition: str, **fields: object) -> dict:
+        """Update a partition's preset references and return the resolved detail."""
+        await self.update_partition(partition, **fields)
+        return await self.get_partition_config(partition)
+
+    def _validate_preset_refs(self, row: dict) -> None:
+        """Validate a row's preset references for create/update.
+
+        The preset names come from user input, so a missing preset is a client
+        error: translate the resolver's ConfigError (which maps to 500) into a
+        422 ValidationError.
+        """
+        try:
+            self.resolve_partition_row(row)
+        except ConfigError as exc:
+            raise ValidationError(exc.message, code="PRESET_NOT_FOUND") from exc
+
+    def _partition_detail(self, row: dict, cfg: PartitionConfig) -> dict:
+        """Shape a resolved row into the ``PartitionDetailResponse`` payload."""
+        return {
+            "name": cfg.name,
+            "description": cfg.description,
+            "embedder": cfg.embedder,
+            "indexation_preset": row.get("indexation_preset") or "default",
+            "retrieval_preset": row.get("retrieval_preset") or "default",
+            "indexation_pipeline": cfg.indexation.model_dump(mode="json"),
+            "retrieval_pipeline": cfg.retrieval.model_dump(mode="json"),
+            "dimension": row.get("dimension"),
+            "created_at": row.get("created_at"),
+        }
+
+    # ------------------------------------------------------------------
+    # Preset resolution + in-memory cache
+    # ------------------------------------------------------------------
+
+    def resolve_partition_row(self, row: dict) -> PartitionConfig:
+        """Resolve a partition DB row into a fully-validated PartitionConfig.
+
+        Looks the referenced preset names up in ``config.presets`` and builds
+        the Pydantic pipeline configs. Raises :class:`ConfigError` if either
+        referenced preset is missing — the caller decides whether that is a
+        startup failure or a 4xx on create/update.
+        """
+        cfg = self._require_config()
+        name = row["partition"]
+        idx_name = row.get("indexation_preset") or "default"
+        ret_name = row.get("retrieval_preset") or "default"
+
+        idx_preset = cfg.presets.indexation.get(idx_name)
+        if idx_preset is None:
+            raise ConfigError(f"Indexation preset '{idx_name}' referenced by partition '{name}' not found.")
+        ret_preset = cfg.presets.retrieval.get(ret_name)
+        if ret_preset is None:
+            raise ConfigError(f"Retrieval preset '{ret_name}' referenced by partition '{name}' not found.")
+
+        return PartitionConfig(
+            name=name,
+            description=row.get("description") or "",
+            embedder=row.get("embedder") or "default",
+            indexation=IndexationPipelineConfig(**idx_preset),
+            retrieval=RetrievalPipelineConfig(**ret_preset),
+            collection_name=row.get("collection_name"),
+            chat_history_depth=row.get("chat_history_depth") or 0,
+            chat_llm=row.get("chat_llm"),
+        )
+
+    async def load_partitions(self) -> None:
+        """Resolve every partition row and swap the in-memory cache atomically.
+
+        Uses clear()+update() so any reference already held to the
+        ``config.partitions`` dict stays valid after the swap.
+        """
+        cfg = self._require_config()
+        rows = await self._partition_repo.list_partition_rows()
+        resolved = {row["partition"]: self.resolve_partition_row(row) for row in rows}
+
+        cache = cfg.partitions
+        cache.clear()
+        cache.update(resolved)
+        logger.info("Loaded partition configs.", n_partitions=len(resolved))
+
+    async def seed_default_partition(self, user_id: int = 1) -> None:
+        """Ensure the 'default' partition exists with default presets."""
+        if await self._partition_repo.partition_exists(name="default"):
+            return
+        await self._partition_repo.create_partition(name="default", user_id=user_id)
+        logger.info("Seeded 'default' partition.")
+
+    def _require_config(self) -> Settings:
+        if self._config is None:
+            raise ConfigError("PartitionService was constructed without a config; preset resolution unavailable.")
+        return self._config
 
     # ------------------------------------------------------------------
     # File / chunk reads

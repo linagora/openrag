@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from typing import Any
 
 from core.chunking.chunking_strategy import ChunkingStrategy
+from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
@@ -45,29 +46,42 @@ class IndexingPipeline:
     vlm: VLM | None = None
     contextualizer: ChunkContextualizer | None = None
     timeouts: PipelineTimeouts = PipelineTimeouts()
+    indexation_config: IndexationPipelineConfig | None = None
+    parser_factory: Callable[[str], DocumentParser] | None = None
+    chunker_factory: Callable[[Any], ChunkingStrategy] | None = None
+    embedder_factory: Callable[[str], Embedder] | None = None
+    vlm_factory: Callable[[str], VLM] | None = None
+    contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
 
     async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store."""
 
-        await parse_stage(row, self.parser, timeout=self.timeouts.parse)
-        if self.vlm is not None:
+        config = self._effective_indexation_config(row)
+        parser = self._select_parser(config)
+        chunker = self._select_chunker(config)
+        embedder = self._select_embedder(row)
+        vlm = self._select_vlm(config)
+        contextualizer = self._select_contextualizer(config)
+
+        await parse_stage(row, parser, timeout=self.timeouts.parse)
+        if vlm is not None:
             await caption_stage(
                 row,
-                self.vlm,
+                vlm,
                 timeout=self.timeouts.caption,
                 per_image_timeout=self.timeouts.caption_per_image,
             )
-        await chunk_stage(row, self.chunker, timeout=self.timeouts.chunk)
-        if self.contextualizer is not None:
+        await chunk_stage(row, chunker, timeout=self.timeouts.chunk)
+        if contextualizer is not None:
             await contextualize_stage(
                 row,
-                self.contextualizer,
+                contextualizer,
                 timeout=self.timeouts.contextualize,
                 per_chunk_timeout=self.timeouts.contextualize_per_chunk,
             )
         await embed_stage(
             row,
-            self.embedder,
+            embedder,
             timeout=self.timeouts.embed,
             per_chunk_timeout=self.timeouts.embed_per_chunk,
         )
@@ -79,6 +93,48 @@ class IndexingPipeline:
         )
         return row
 
+    def _effective_indexation_config(self, row: MutableMapping[str, Any]) -> IndexationPipelineConfig | None:
+        raw_config = row.get("indexation_config", self.indexation_config)
+        if raw_config is None:
+            return None
+        if isinstance(raw_config, IndexationPipelineConfig):
+            return raw_config
+        if isinstance(raw_config, dict):
+            return IndexationPipelineConfig(**raw_config)
+        raise TypeError("indexation_config must be an IndexationPipelineConfig or dict")
+
+    def _select_parser(self, config: IndexationPipelineConfig | None) -> DocumentParser:
+        if config is not None and self.parser_factory is not None:
+            return self.parser_factory(config.parsing_strategy)
+        return self.parser
+
+    def _select_chunker(self, config: IndexationPipelineConfig | None) -> ChunkingStrategy:
+        if config is not None and self.chunker_factory is not None:
+            return self.chunker_factory(config.chunking)
+        return self.chunker
+
+    def _select_embedder(self, row: MutableMapping[str, Any]) -> Embedder:
+        embedder_name = row.get("embedder_name")
+        if embedder_name and self.embedder_factory is not None:
+            return self.embedder_factory(str(embedder_name))
+        return self.embedder
+
+    def _select_vlm(self, config: IndexationPipelineConfig | None) -> VLM | None:
+        if config is not None:
+            if not config.enable_image_captioning:
+                return None
+            if self.vlm_factory is not None:
+                return self.vlm_factory(config.vlm or "default")
+        return self.vlm
+
+    def _select_contextualizer(self, config: IndexationPipelineConfig | None) -> ChunkContextualizer | None:
+        if config is not None:
+            if not config.enable_contextualization:
+                return None
+            if self.contextualizer_factory is not None:
+                return self.contextualizer_factory(config.contextualization_llm or "default")
+        return self.contextualizer
+
 
 def build_indexing_pipeline(
     *,
@@ -89,6 +145,12 @@ def build_indexing_pipeline(
     vlm: VLM | None = None,
     contextualizer: ChunkContextualizer | None = None,
     timeouts: PipelineTimeouts | None = None,
+    indexation_config: IndexationPipelineConfig | None = None,
+    parser_factory: Callable[[str], DocumentParser] | None = None,
+    chunker_factory: Callable[[Any], ChunkingStrategy] | None = None,
+    embedder_factory: Callable[[str], Embedder] | None = None,
+    vlm_factory: Callable[[str], VLM] | None = None,
+    contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None,
 ) -> IndexingPipeline:
     """Build the default sequential indexing pipeline."""
 
@@ -100,6 +162,12 @@ def build_indexing_pipeline(
         vlm=vlm,
         contextualizer=contextualizer,
         timeouts=timeouts or PipelineTimeouts(),
+        indexation_config=indexation_config,
+        parser_factory=parser_factory,
+        chunker_factory=chunker_factory,
+        embedder_factory=embedder_factory,
+        vlm_factory=vlm_factory,
+        contextualizer_factory=contextualizer_factory,
     )
 
 

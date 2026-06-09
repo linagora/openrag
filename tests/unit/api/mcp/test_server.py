@@ -238,3 +238,27 @@ def test_require_container_raises_when_unset(monkeypatch):
     monkeypatch.setattr(server, "_container", None)
     with pytest.raises(RuntimeError):
         server._require_container()
+
+
+@pytest.mark.asyncio
+async def test_startup_shuts_down_container_when_initialize_fails(monkeypatch):
+    calls: list[str] = []
+
+    class FailingContainer:
+        async def initialize(self):
+            calls.append("initialize")
+            raise RuntimeError("init failed")
+
+        async def shutdown(self):
+            calls.append("shutdown")
+
+    monkeypatch.setattr(server.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(server, "ensure_worker_bootstrap", lambda: calls.append("bootstrap"))
+    monkeypatch.setattr(server, "ServiceContainer", lambda _config: FailingContainer())
+    monkeypatch.setattr(server, "_container", None)
+
+    with pytest.raises(RuntimeError, match="init failed"):
+        await server._startup()
+
+    assert calls == ["bootstrap", "initialize", "shutdown"]
+    assert server._container is None

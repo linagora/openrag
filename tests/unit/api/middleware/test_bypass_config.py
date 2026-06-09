@@ -9,6 +9,7 @@ requirement.
 
 from __future__ import annotations
 
+import pytest
 from api.middleware.auth import (
     AuthMiddleware,
     is_bypass_path,
@@ -21,6 +22,7 @@ from core.config.auth import (
     AuthBypassConfig,
 )
 from fastapi import FastAPI, Request
+from starlette.responses import Response
 
 # ---------------------------------------------------------------------------
 # Defaults match the legacy hardcoded sets
@@ -163,6 +165,45 @@ def test_auth_middleware_accepts_custom_bypass_config() -> None:
     assert instance._bypass_config is custom
 
 
+def _request(headers=None):
+    raw = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+    scope = {"type": "http", "method": "GET", "path": "/indexer/files", "headers": raw, "query_string": b""}
+    return Request(scope)
+
+
+async def _unused_call_next(_request):
+    return Response("ok")
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_returns_503_when_auth_service_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+
+    def unavailable(_request):
+        raise RuntimeError("container unavailable")
+
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=unavailable)
+
+    response = await middleware.dispatch(_request(headers={"authorization": "Bearer token"}), _unused_call_next)
+
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_does_not_swallow_programming_errors(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+
+    def broken(_request):
+        raise ValueError("unexpected bug")
+
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=broken)
+
+    with pytest.raises(ValueError, match="unexpected bug"):
+        await middleware.dispatch(_request(headers={"authorization": "Bearer token"}), _unused_call_next)
+
+
 # ---------------------------------------------------------------------------
 # Minor: argument is keyword-only so we don't accidentally pass it positionally
 # ---------------------------------------------------------------------------
@@ -171,8 +212,6 @@ def test_auth_middleware_accepts_custom_bypass_config() -> None:
 def test_is_bypass_path_bypass_config_is_keyword_only() -> None:
     """Positional misuse should fail loudly rather than silently
     treating an arbitrary value as the config."""
-    import pytest
-
     with pytest.raises(TypeError):
         is_bypass_path("/docs", AuthBypassConfig())  # type: ignore[misc]
 

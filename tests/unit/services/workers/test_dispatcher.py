@@ -118,6 +118,8 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
             user={"id": 42},
             workspace_ids=["ws-1"],
             replace=True,
+            indexation_config={"parsing_strategy": "pymupdf"},
+            embedder_name="embed-fast",
         )
 
     assert task_id == "task-1"
@@ -137,6 +139,8 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         user={"id": 42},
         workspace_ids=["ws-1"],
         replace=True,
+        indexation_config={"parsing_strategy": "pymupdf"},
+        embedder_name="embed-fast",
     )
     tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})
 
@@ -254,9 +258,13 @@ async def test_delete_file_cleans_database_before_vector_store() -> None:
     )
 
     call_order = []
-    workspace_repo.remove_file_from_all_workspaces = AsyncMock(side_effect=lambda *a, **k: call_order.append("workspace"))
+    workspace_repo.remove_file_from_all_workspaces = AsyncMock(
+        side_effect=lambda *a, **k: call_order.append("workspace")
+    )
     document_repo.remove_file_from_partition = AsyncMock(side_effect=lambda *a, **k: call_order.append("document"))
-    vector_store.query_ids_by_filter = AsyncMock(return_value=["1", "2"], side_effect=lambda *a, **k: call_order.append("query") or ["1", "2"])
+    vector_store.query_ids_by_filter = AsyncMock(
+        return_value=["1", "2"], side_effect=lambda *a, **k: call_order.append("query") or ["1", "2"]
+    )
     vector_store.delete = AsyncMock(side_effect=lambda *a, **k: call_order.append("delete") or None)
 
     await dispatcher.delete_file("file-1", "tenant-a")
