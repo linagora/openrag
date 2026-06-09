@@ -74,10 +74,9 @@ class FakeModelEndpointService:
         """Record endpoint deletion."""
         self.calls.append(("delete", {"name": name, "model_type": model_type}))
 
-    async def set_default(self, model_type: str, name: str) -> dict[str, Any]:
+    async def set_default(self, model_type: str, name: str) -> None:
         """Record default promotion."""
         self.calls.append(("set_default", {"name": name, "model_type": model_type}))
-        return _model_endpoint_row(name=name, model_type=model_type, is_default=True)
 
     async def validate_endpoint(self, url: str, model_name: str | None = None) -> dict[str, Any]:
         """Record endpoint validation."""
@@ -210,6 +209,23 @@ async def test_validate_model_endpoint_uses_route_identity(async_client_factory)
     assert model_service.calls == [
         ("get", {"name": "default", "model_type": "llm"}),
         ("validate", {"url": "http://llm:8000/v1", "model_name": "mistral"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_set_default_model_endpoint_returns_promoted_endpoint(async_client_factory):
+    """Default promotion should return the promoted endpoint row."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post("/model-endpoints/llm/default/set-default")
+
+    assert response.status_code == 200
+    assert response.json()["is_default"] is True
+    assert model_service.calls == [
+        ("set_default", {"name": "default", "model_type": "llm"}),
+        ("get", {"name": "default", "model_type": "llm"}),
     ]
 
 

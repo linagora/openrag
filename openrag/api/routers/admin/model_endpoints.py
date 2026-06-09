@@ -89,7 +89,8 @@ async def set_default_model_endpoint(
     service=Depends(get_model_endpoint_service),
 ):
     """Promote a registered endpoint to the default for its type."""
-    return await service.set_default(model_type=model_type, name=name)
+    await service.set_default(model_type=model_type, name=name)
+    return await service.get_model_endpoint(name=name, model_type=model_type)
 
 
 @router.post("/{model_type}/{name}/validate", response_model=ValidateEndpointResponse)
