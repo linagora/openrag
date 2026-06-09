@@ -65,7 +65,7 @@ class RetrievalService:
         reranker: Reranker | None = None,
         llm: LLM | None = None,
         config: Settings,
-        embedder_factory: Callable[[str], Any] | None = None,
+        searcher_factory: Callable[[str], RetrievalSearcher] | None = None,
         reranker_factory: Callable[[str], Reranker] | None = None,
         llm_factory: Callable[[str], LLM] | None = None,
     ) -> None:
@@ -73,7 +73,7 @@ class RetrievalService:
         self._config = config
         self._legacy_reranker = reranker
         self._legacy_llm = llm
-        self._embedder_factory = embedder_factory
+        self._searcher_factory = searcher_factory
         self._reranker_factory = reranker_factory
         self._llm_factory = llm_factory
         self._pipeline = self._build_legacy_pipeline(reranker=reranker, llm=llm)
@@ -170,8 +170,9 @@ class RetrievalService:
 
         partition_cfg = self._require_partition_config(partition)
         pipeline_cfg = partition_cfg.retrieval
-        if self._embedder_factory is not None:
-            self._embedder_factory(partition_cfg.embedder)
+        searcher = (
+            self._searcher_factory(partition_cfg.embedder) if self._searcher_factory is not None else self._searcher
+        )
 
         rtype = pipeline_cfg.type
         llm = self._legacy_llm
@@ -188,7 +189,7 @@ class RetrievalService:
         retriever = self._build_retriever(
             rtype=rtype,
             common={
-                "searcher": self._searcher,
+                "searcher": searcher,
                 "top_k": pipeline_cfg.top_k,
                 "similarity_threshold": pipeline_cfg.similarity_threshold,
                 "with_surrounding_chunks": self._legacy_retriever_value("with_surrounding_chunks", False),

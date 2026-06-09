@@ -18,6 +18,9 @@ class PresetRepository(ABC):
     async def upsert(self, name: str, preset_type: str, config: dict) -> dict: ...
 
     @abstractmethod
+    async def rename(self, old_name: str, new_name: str, preset_type: str, config: dict) -> dict: ...
+
+    @abstractmethod
     async def delete(self, name: str, preset_type: str) -> bool: ...
 
     @abstractmethod

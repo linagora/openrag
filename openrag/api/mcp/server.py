@@ -80,7 +80,12 @@ async def _startup() -> None:
         ray.init(dashboard_host="0.0.0.0", ignore_reinit_error=True)
     ensure_worker_bootstrap()
     container = ServiceContainer(config)
-    await container.initialize()
+    try:
+        await container.initialize()
+    except Exception:
+        logger.exception("MCP server container initialization failed")
+        await container.shutdown()
+        raise
     _container = container
     logger.info("MCP server container initialized")
 

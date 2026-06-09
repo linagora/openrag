@@ -21,6 +21,7 @@ queries.
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from core.embeddings import embedder_registry
@@ -178,24 +179,27 @@ class ServiceContainer:
     async def initialize(self) -> None:
         """Open the storage adapters (asyncpg pool + Alembic migrations)."""
         if self._catalog_store is not None:
-            logger.info("ServiceContainer.initialize: initializing catalog store")
-            await self._catalog_store.initialize()
-            logger.info("ServiceContainer.initialize: ensuring admin user")
-            await self.user_repo.ensure_admin_user(os.getenv("AUTH_TOKEN"))
-            logger.info("ServiceContainer.initialize: admin user ready")
-            logger.info("ServiceContainer.initialize: seeding model endpoints")
-            await self.model_endpoint_service.seed_defaults()
-            logger.info("ServiceContainer.initialize: loading model endpoints")
-            await self.model_endpoint_service.load_all()
-            logger.info("ServiceContainer.initialize: seeding pipeline presets")
-            await self.preset_service.seed_defaults()
-            logger.info("ServiceContainer.initialize: loading pipeline presets")
-            await self.preset_service.load_all()
-            logger.info("ServiceContainer.initialize: ensuring default partition")
-            await self.partition_service.seed_default_partition()
-            logger.info("ServiceContainer.initialize: loading partition configs")
-            await self.partition_service.load_partitions()
+            await self._initialize_step("initializing catalog store", self._catalog_store.initialize)
+            await self._initialize_step(
+                "ensuring admin user",
+                lambda: self.user_repo.ensure_admin_user(os.getenv("AUTH_TOKEN")),
+            )
+            await self._initialize_step("seeding model endpoints", self.model_endpoint_service.seed_defaults)
+            await self._initialize_step("loading model endpoints", self.model_endpoint_service.load_all)
+            await self._initialize_step("seeding pipeline presets", self.preset_service.seed_defaults)
+            await self._initialize_step("loading pipeline presets", self.preset_service.load_all)
+            await self._initialize_step("ensuring default partition", self.partition_service.seed_default_partition)
+            await self._initialize_step("loading partition configs", self.partition_service.load_partitions)
         self._initialized = True
+
+    async def _initialize_step(self, label: str, operation: Callable[[], Awaitable[Any]]) -> None:
+        """Run one startup step with consistent failure logging."""
+        logger.info(f"ServiceContainer.initialize: {label}")
+        try:
+            await operation()
+        except Exception:
+            logger.exception("ServiceContainer initialization step failed", step=label)
+            raise
 
     async def shutdown(self) -> None:
         """Close inference clients and storage adapters cleanly.
@@ -468,6 +472,15 @@ class ServiceContainer:
                 document_repo=self.document_repo,
                 collection=settings.vectordb.collection_name,
             )
+
+            def searcher_factory(embedder_name: str):
+                return VectorStoreSearcher(
+                    vector_store=self.vector_store,
+                    embedder=self.embedder_factory(embedder_name),
+                    document_repo=self.document_repo,
+                    collection=settings.vectordb.collection_name,
+                )
+
             llm_cfg = settings.llm.model_dump()
             llm = self.create_llm(
                 "vllm",
@@ -491,7 +504,7 @@ class ServiceContainer:
                 reranker=reranker,
                 llm=llm,
                 config=settings,
-                embedder_factory=self.embedder_factory,
+                searcher_factory=searcher_factory,
                 reranker_factory=self.reranker_factory,
                 llm_factory=self.llm_factory,
             )

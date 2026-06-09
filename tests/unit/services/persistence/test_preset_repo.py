@@ -44,6 +44,40 @@ class _FakePool:
         self.executed.append((query, params))
         return "DELETE 1"
 
+    def acquire(self):
+        return _FakeAcquire(self)
+
+    def transaction(self):
+        return _FakeTransaction(self)
+
+
+class _FakeAcquire:
+    def __init__(self, pool: _FakePool) -> None:
+        self.pool = pool
+
+    async def __aenter__(self):
+        return self.pool
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeTransaction:
+    def __init__(self, pool: _FakePool) -> None:
+        self.pool = pool
+        self.entered = False
+        self.exited = False
+
+    async def __aenter__(self):
+        self.entered = True
+        self.pool.executed.append(("BEGIN", ()))
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.exited = True
+        self.pool.executed.append(("COMMIT" if exc_type is None else "ROLLBACK", ()))
+        return False
+
 
 @pytest.mark.asyncio
 async def test_get_returns_none_when_missing():
@@ -140,6 +174,24 @@ async def test_delete_returns_false_when_missing():
 
 
 @pytest.mark.asyncio
+async def test_rename_runs_delete_and_upsert_in_one_transaction():
+    from services.persistence.preset_repo import PgPresetRepository
+
+    pool = _FakePool()
+    pool._fetchrow_result = _make_row(name="new", config={"chunk_size": 256})
+    repo = PgPresetRepository(pool_getter=lambda: pool)
+
+    result = await repo.rename("old", "new", "indexation", {"chunk_size": 256})
+
+    assert result["name"] == "new"
+    operations = [query for query, _params in pool.executed]
+    assert operations[0] == "BEGIN"
+    assert "DELETE FROM pipeline_presets" in operations[1]
+    assert "INSERT INTO pipeline_presets" in operations[2]
+    assert operations[-1] == "COMMIT"
+
+
+@pytest.mark.asyncio
 async def test_count_partitions_using_indexation_queries_correct_column():
     from services.persistence.preset_repo import PgPresetRepository
 
@@ -167,3 +219,15 @@ async def test_count_partitions_using_retrieval_queries_correct_column():
     query, params = pool.executed[0]
     assert "retrieval_preset" in query
     assert params == ("default",)
+
+
+@pytest.mark.asyncio
+async def test_count_partitions_using_rejects_invalid_type():
+    from services.persistence.preset_repo import PgPresetRepository
+
+    pool = _FakePool()
+    repo = PgPresetRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ValueError, match="Invalid preset_type"):
+        await repo.count_partitions_using("default", "bad-type")
+    assert pool.executed == []

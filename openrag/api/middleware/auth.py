@@ -155,8 +155,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         session = None
         try:
             auth_service = self._get_auth_service(request)
-        except Exception as exc:
-            logger.warning("Auth service unavailable", error_type=type(exc).__name__, path=request.url.path)
+        except RuntimeError:
+            logger.warning("Auth service unavailable", reason="service_unavailable", path=request.url.path)
             return JSONResponse(status_code=503, content={"detail": "Service unavailable"})
 
         # --- 1) Cookie session (OIDC UI flow). Gated on oidc mode so the

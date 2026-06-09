@@ -25,7 +25,13 @@ logger = get_logger()
 
 
 def _marker_num_gpus(config) -> float:
-    """Return the configured Marker GPU request when Ray reports GPU capacity."""
+    """Return Marker's Ray GPU reservation, falling back to CUDA detection.
+
+    Ray scheduling must see GPU capacity before an actor can request a GPU
+    fraction. If Ray cannot report cluster resources yet, use local CUDA
+    availability as the fallback so single-node startup still honors the
+    configured Marker GPU request.
+    """
     requested_gpus = config.loader.marker_num_gpus
     if requested_gpus <= 0:
         return 0

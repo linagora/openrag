@@ -15,6 +15,19 @@ from core.ports.preset_repo import PresetRepository
 if TYPE_CHECKING:
     import asyncpg
 
+_VALID_PRESET_COLUMNS = {
+    "indexation": "indexation_preset",
+    "retrieval": "retrieval_preset",
+}
+
+_UPSERT_PRESET_SQL = """
+    INSERT INTO pipeline_presets (name, preset_type, config)
+    VALUES ($1, $2, $3::jsonb)
+    ON CONFLICT (name, preset_type) DO UPDATE
+      SET config = EXCLUDED.config, updated_at = now()
+    RETURNING *
+    """
+
 
 class PgPresetRepository(PresetRepository):
     """asyncpg-backed implementation of :class:`PresetRepository`."""
@@ -58,17 +71,27 @@ class PgPresetRepository(PresetRepository):
 
     async def upsert(self, name: str, preset_type: str, config: dict) -> dict:
         rec = await self.pool.fetchrow(
-            """
-            INSERT INTO pipeline_presets (name, preset_type, config)
-            VALUES ($1, $2, $3::jsonb)
-            ON CONFLICT (name, preset_type) DO UPDATE
-              SET config = EXCLUDED.config, updated_at = now()
-            RETURNING *
-            """,
+            _UPSERT_PRESET_SQL,
             name,
             preset_type,
             config,
         )
+        return self._row_to_dict(rec)
+
+    async def rename(self, old_name: str, new_name: str, preset_type: str, config: dict) -> dict:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM pipeline_presets WHERE name = $1 AND preset_type = $2",
+                    old_name,
+                    preset_type,
+                )
+                rec = await conn.fetchrow(
+                    _UPSERT_PRESET_SQL,
+                    new_name,
+                    preset_type,
+                    config,
+                )
         return self._row_to_dict(rec)
 
     async def delete(self, name: str, preset_type: str) -> bool:
@@ -80,11 +103,18 @@ class PgPresetRepository(PresetRepository):
         return result == "DELETE 1"
 
     async def count_partitions_using(self, name: str, preset_type: str) -> int:
-        col = "indexation_preset" if preset_type == "indexation" else "retrieval_preset"
+        col = _preset_column(preset_type)
         return await self.pool.fetchval(
             f"SELECT COUNT(*)::int FROM partitions WHERE {col} = $1",
             name,
         )
+
+
+def _preset_column(preset_type: str) -> str:
+    try:
+        return _VALID_PRESET_COLUMNS[preset_type]
+    except KeyError as exc:
+        raise ValueError(f"Invalid preset_type: {preset_type}") from exc
 
 
 __all__ = ["PgPresetRepository"]

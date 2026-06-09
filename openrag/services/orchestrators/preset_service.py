@@ -198,10 +198,10 @@ class PresetService:
         effective_name = name
 
         if new_name and new_name != name:
-            await self._repo.delete(name, preset_type)
             effective_name = new_name
-
-        result = await self._repo.upsert(effective_name, preset_type, effective_config)
+            result = await self._repo.rename(name, effective_name, preset_type, effective_config)
+        else:
+            result = await self._repo.upsert(effective_name, preset_type, effective_config)
         await self.load_all()
 
         if self._partition_service is not None:

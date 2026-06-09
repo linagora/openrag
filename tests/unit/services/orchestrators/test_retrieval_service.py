@@ -209,7 +209,7 @@ async def test_retrieve_uses_partition_retrieval_config_and_named_reranker():
     s = FakeSearcher()
     s.search_result = [_chunk("a"), _chunk("b"), _chunk("c")]
     reranker = FakeReranker()
-    embedder_calls: list[str] = []
+    searcher_calls: list[str] = []
     reranker_calls: list[str] = []
     cfg = _config()
     cfg.partitions = {
@@ -231,20 +231,45 @@ async def test_retrieve_uses_partition_retrieval_config_and_named_reranker():
         reranker=None,
         llm=None,
         config=cfg,
-        embedder_factory=lambda name: embedder_calls.append(name) or object(),
+        searcher_factory=lambda name: searcher_calls.append(name) or s,
         reranker_factory=lambda name: reranker_calls.append(name) or reranker,
     )
 
     out = await svc.retrieve(partitions=["tenant-a"], query=Query(query="hello"))
 
     assert [c.id for c in out] == ["a", "b"]
-    assert embedder_calls == ["embed-a"]
+    assert searcher_calls == ["embed-a"]
     assert reranker_calls == ["fast-ranker"]
     assert reranker.calls[0]["query"] == "hello"
     call = s.search_calls[0]
     assert call["partition"] == ["tenant-a"]
     assert call["top_k"] == 3
     assert call["similarity_threshold"] == 0.77
+
+
+@pytest.mark.asyncio
+async def test_retrieve_uses_partition_searcher_factory_for_named_embedder():
+    default_searcher = FakeSearcher()
+    tenant_searcher = FakeSearcher()
+    tenant_searcher.search_result = [_chunk("tenant")]
+    searcher_names: list[str] = []
+    cfg = _config()
+    cfg.partitions = {"tenant-a": _partition(embedder="embed-a")}
+
+    svc = RetrievalService(
+        searcher=default_searcher,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda name: searcher_names.append(name) or tenant_searcher,
+    )
+
+    out = await svc.retrieve(partitions=["tenant-a"], query=Query(query="hello"))
+
+    assert [c.id for c in out] == ["tenant"]
+    assert searcher_names == ["embed-a"]
+    assert default_searcher.search_calls == []
+    assert tenant_searcher.search_calls[0]["partition"] == ["tenant-a"]
 
 
 @pytest.mark.asyncio

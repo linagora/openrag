@@ -62,6 +62,13 @@ class _FakePresetRepo:
         self.calls.append(("delete", (name, preset_type)))
         return self._store.pop((name, preset_type), None) is not None
 
+    async def rename(self, old_name: str, new_name: str, preset_type: str, config: dict) -> dict:
+        self.calls.append(("rename", (old_name, new_name, preset_type)))
+        self._store.pop((old_name, preset_type), None)
+        row = _make_row(new_name, preset_type, config)
+        self._store[(new_name, preset_type)] = row
+        return row
+
     async def count_partitions_using(self, name: str, preset_type: str) -> int:
         self.calls.append(("count_partitions_using", (name, preset_type)))
         return self._partition_counts.get((name, preset_type), 0)
@@ -277,6 +284,8 @@ async def test_update_preset_renames_preset():
 
     assert ("old-name", "retrieval") not in repo._store
     assert ("new-name", "retrieval") in repo._store
+    assert ("rename", ("old-name", "new-name", "retrieval")) in repo.calls
+    assert not any(call[0] == "delete" for call in repo.calls)
 
 
 @pytest.mark.asyncio
