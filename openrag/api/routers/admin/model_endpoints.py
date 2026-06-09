@@ -64,10 +64,13 @@ async def update_model_endpoint(
     service=Depends(get_model_endpoint_service),
 ):
     """Update a registered inference endpoint."""
+    fields = body.model_dump(exclude_unset=True)
+    if "name" in fields:
+        fields["new_name"] = fields.pop("name")
     return await service.update_model_endpoint(
         name=name,
         model_type=model_type,
-        **body.model_dump(exclude_unset=True),
+        **fields,
     )
 
 

@@ -203,6 +203,31 @@ async def test_update_model_endpoint_forwards_only_provided_fields(async_client_
 
 
 @pytest.mark.asyncio
+async def test_update_model_endpoint_maps_name_to_new_name(async_client_factory):
+    """Model endpoint rename should use the service rename field."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.put(
+            "/model-endpoints/llm/default",
+            json={"name": "mistral-small"},
+        )
+
+    assert response.status_code == 200
+    assert model_service.calls == [
+        (
+            "update",
+            {
+                "name": "default",
+                "model_type": "llm",
+                "new_name": "mistral-small",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_validate_model_endpoint_uses_route_identity(async_client_factory):
     """Endpoint validation should resolve route identity before probing."""
     model_service = FakeModelEndpointService()
@@ -306,6 +331,31 @@ async def test_update_preset_forwards_only_provided_fields(async_client_factory)
                 "name": "default",
                 "preset_type": "retrieval",
                 "config": {"type": "hyde", "top_k": 20},
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_preset_maps_name_to_new_name(async_client_factory):
+    """Preset rename should use the service rename field."""
+    preset_service = FakePresetService()
+    app = _build_app(preset_service=preset_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.put(
+            "/presets/retrieval/default",
+            json={"name": "legal"},
+        )
+
+    assert response.status_code == 200
+    assert preset_service.calls == [
+        (
+            "update",
+            {
+                "name": "default",
+                "preset_type": "retrieval",
+                "new_name": "legal",
             },
         )
     ]

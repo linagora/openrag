@@ -73,10 +73,13 @@ async def update_preset(
     service=Depends(get_preset_service),
 ):
     """Update a pipeline preset."""
+    fields = body.model_dump(exclude_unset=True)
+    if "name" in fields:
+        fields["new_name"] = fields.pop("name")
     return await service.update_preset(
         name=name,
         preset_type=preset_type,
-        **body.model_dump(exclude_unset=True),
+        **fields,
     )
 
 
