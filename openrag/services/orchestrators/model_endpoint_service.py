@@ -244,14 +244,7 @@ class ModelEndpointService:
     # Endpoint validation
     # ------------------------------------------------------------------
 
-    async def validate_endpoint(self, name: str, model_type: str) -> dict[str, Any]:
-        """Validate a registered endpoint by registry identity."""
-        row = await self._repo.get(name, model_type)
-        if row is None:
-            raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
-        return await self._probe_endpoint(row.endpoint, row.model_name)
-
-    async def _probe_endpoint(self, url: str, model_name: str | None = None) -> dict[str, Any]:
+    async def validate_endpoint(self, url: str, model_name: str | None = None) -> dict[str, Any]:
         """Probe ``{url}/models`` to verify the endpoint is reachable and serving.
 
         Returns a dict with ``reachable``, ``model_found``, ``models_served``,

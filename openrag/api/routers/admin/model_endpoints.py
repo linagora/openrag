@@ -99,4 +99,5 @@ async def validate_model_endpoint(
     service=Depends(get_model_endpoint_service),
 ):
     """Probe a registered endpoint for reachability and model availability."""
-    return await service.validate_endpoint(name=name, model_type=model_type)
+    endpoint = await service.get_model_endpoint(name=name, model_type=model_type)
+    return await service.validate_endpoint(url=endpoint.endpoint, model_name=endpoint.model_name)

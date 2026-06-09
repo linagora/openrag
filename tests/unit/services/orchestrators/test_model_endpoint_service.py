@@ -378,26 +378,10 @@ async def test_set_default_calls_repo_and_reloads():
 
 
 @pytest.mark.asyncio
-async def test_validate_endpoint_raises_404_when_missing():
-    from core.utils.exceptions import NotFoundError
-
-    svc = _make_service()
-
-    with pytest.raises(NotFoundError):
-        await svc.validate_endpoint(name="ghost", model_type="llm")
-
-
-@pytest.mark.asyncio
-async def test_validate_endpoint_uses_registered_endpoint(monkeypatch):
+async def test_validate_endpoint_probes_url_and_model_name(monkeypatch):
     import httpx
 
-    row = _make_row(
-        name="mistral",
-        model_type="llm",
-        endpoint="http://llm:8000/v1",
-        model_name="mistral-small",
-    )
-    svc = _make_service(rows=[row])
+    svc = _make_service()
     calls: list[str] = []
 
     class FakeResponse:
@@ -422,7 +406,7 @@ async def test_validate_endpoint_uses_registered_endpoint(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
-    result = await svc.validate_endpoint(name="mistral", model_type="llm")
+    result = await svc.validate_endpoint("http://llm:8000/v1", "mistral-small")
 
     assert calls == ["http://llm:8000/v1/models"]
     assert result == {

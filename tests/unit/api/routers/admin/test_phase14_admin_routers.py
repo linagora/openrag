@@ -58,10 +58,12 @@ class FakeModelEndpointService:
         self.calls.append(("list", {"model_type": model_type}))
         return [_model_endpoint_row(model_type=model_type or "llm")]
 
-    async def get_model_endpoint(self, name: str, model_type: str) -> dict[str, Any]:
+    async def get_model_endpoint(self, name: str, model_type: str) -> Any:
         """Record a single endpoint lookup."""
+        from core.config.model_endpoints import ModelEndpointRow
+
         self.calls.append(("get", {"name": name, "model_type": model_type}))
-        return _model_endpoint_row(name=name, model_type=model_type)
+        return ModelEndpointRow(**_model_endpoint_row(name=name, model_type=model_type))
 
     async def update_model_endpoint(self, name: str, model_type: str, **fields: Any) -> dict[str, Any]:
         """Record endpoint updates and echo the merged response row."""
@@ -77,9 +79,9 @@ class FakeModelEndpointService:
         self.calls.append(("set_default", {"name": name, "model_type": model_type}))
         return _model_endpoint_row(name=name, model_type=model_type, is_default=True)
 
-    async def validate_endpoint(self, name: str, model_type: str) -> dict[str, Any]:
+    async def validate_endpoint(self, url: str, model_name: str | None = None) -> dict[str, Any]:
         """Record endpoint validation."""
-        self.calls.append(("validate", {"name": name, "model_type": model_type}))
+        self.calls.append(("validate", {"url": url, "model_name": model_name}))
         return {"reachable": True, "model_found": True, "models_served": ["mistral"], "detail": None}
 
 
@@ -196,7 +198,7 @@ async def test_update_model_endpoint_forwards_only_provided_fields(async_client_
 
 @pytest.mark.asyncio
 async def test_validate_model_endpoint_uses_route_identity(async_client_factory):
-    """Endpoint validation should use name and type from the route."""
+    """Endpoint validation should resolve route identity before probing."""
     model_service = FakeModelEndpointService()
     app = _build_app(model_service=model_service)
 
@@ -205,7 +207,10 @@ async def test_validate_model_endpoint_uses_route_identity(async_client_factory)
 
     assert response.status_code == 200
     assert response.json()["reachable"] is True
-    assert model_service.calls == [("validate", {"name": "default", "model_type": "llm"})]
+    assert model_service.calls == [
+        ("get", {"name": "default", "model_type": "llm"}),
+        ("validate", {"url": "http://llm:8000/v1", "model_name": "mistral"}),
+    ]
 
 
 @pytest.mark.asyncio
