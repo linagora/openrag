@@ -287,7 +287,6 @@ env:
     POSTGRES_HOST: "{{ .Release.Name }}-postgresql"
     POSTGRES_PORT: *pgPort
     POSTGRES_USER: *pgUser
-    POSTGRES_PASSWORD: *pgPass
 
     # Embedder
     EMBEDDER_MODEL_NAME: *embedderModel
@@ -324,6 +323,18 @@ env:
     UV_LINK_MODE: "copy"
     UV_CACHE_DIR: "/tmp/uv-cache"
 
+  # Name of a pre-existing Kubernetes Secret whose keys will be injected as env vars
+  # into the openrag and ray pods (via envFrom.secretRef).
+  # When set:
+  #   - The chart does NOT create the rag-env-secrets Secret.
+  #   - env.secrets values below are ignored.
+  #   - The referenced secret must contain ALL keys listed under env.secrets,
+  #     including POSTGRES_PASSWORD.
+  #   - vLLM pods reference HF_TOKEN via vllm.servingEngineSpec.modelSpec[*].hf_token;
+  #     update those secretName fields to match your existing secret name as well.
+  existingSecret: ""
+
+  # Used only when existingSecret is empty (chart creates the rag-env-secrets Secret).
   secrets:
     API_KEY: "sk-xxxx" # LLM API KEY
     VLM_API_KEY: "sk-xxxx" # VLM API KEY
@@ -331,3 +342,4 @@ env:
     TRANSCRIBER_API_KEY: "EMPTY"
     AUTH_TOKEN: "sk-xxxx" # API KEY for OpenRAG
     HF_TOKEN: "hf_xxxx" # HuggingFace token
+    POSTGRES_PASSWORD: *pgPass # PostgreSQL password

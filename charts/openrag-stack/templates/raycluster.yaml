@@ -69,7 +69,7 @@ spec:
               - configMapRef:
                   name: rag-env
               - secretRef:
-                  name: rag-env-secrets
+                  name: {{ include "openrag-stack.secretName" . }}
             resources:
               limits:
                 nvidia.com/gpu: 1
@@ -129,7 +129,7 @@ spec:
                 - configMapRef:
                     name: rag-env
                 - secretRef:
-                    name: rag-env-secrets
+                    name: {{ include "openrag-stack.secretName" $ }}
               resources:
                 limits:
                   nvidia.com/gpu: 1

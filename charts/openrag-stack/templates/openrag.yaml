@@ -43,7 +43,7 @@ spec:
             - configMapRef:
                 name: rag-env
             - secretRef:
-                name: rag-env-secrets
+                name: {{ include "openrag-stack.secretName" . }}
           volumeMounts:
             - name: model-weights
               mountPath: /app/model_weights

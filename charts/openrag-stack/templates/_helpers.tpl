@@ -60,3 +60,11 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Name of the secret holding sensitive env vars.
+Uses an existing secret when env.existingSecret is set, otherwise the chart-managed one.
+*/}}
+{{- define "openrag-stack.secretName" -}}
+{{- .Values.env.existingSecret | default "rag-env-secrets" }}
+{{- end }}
