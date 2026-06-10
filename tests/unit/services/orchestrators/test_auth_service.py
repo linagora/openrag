@@ -334,8 +334,6 @@ async def test_claim_mapping_from_userinfo_updates_user():
     urepo = FakeUserRepo({"kc-c": user})
     client = FakeOIDCClient(
         bundle=_bundle(claims={"sub": "kc-c", "sid": "s"}),
-        # OIDC Core 1.0 §5.3.2: userinfo must echo the same sub as the
-        # id_token before claim mapping is allowed.
         userinfo={"sub": "kc-c", "mail": "new@x.io"},
     )
     svc = _service(
@@ -351,11 +349,11 @@ async def test_claim_mapping_from_userinfo_updates_user():
 
 @pytest.mark.asyncio
 async def test_claim_mapping_rejects_userinfo_sub_mismatch():
+    """OIDC Core 1.0 §5.3.2: userinfo sub must match id_token sub."""
     user = User(id=9, display_name="Old", external_user_id="kc-c", email="old@x.io")
     urepo = FakeUserRepo({"kc-c": user})
     client = FakeOIDCClient(
         bundle=_bundle(claims={"sub": "kc-c", "sid": "s"}),
-        # userinfo sub differs from id_token sub — token-substitution scenario.
         userinfo={"sub": "kc-attacker", "mail": "evil@x.io"},
     )
     svc = _service(
@@ -364,8 +362,32 @@ async def test_claim_mapping_rejects_userinfo_sub_mismatch():
         cfg=_cfg(claim_source="userinfo", claim_mapping="email:mail"),
     )
     state, cookie = await _login_and_get_state(svc)
-    with pytest.raises(OIDCFlowError, match="Userinfo sub does not match"):
+    with pytest.raises(OIDCFlowError, match="Userinfo sub does not match") as ei:
         await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+
+    assert ei.value.status_code == 401
+    assert not urepo.updated
+
+
+@pytest.mark.asyncio
+async def test_claim_mapping_rejects_userinfo_missing_sub():
+    """Userinfo response without a sub claim must be rejected."""
+    user = User(id=9, display_name="Old", external_user_id="kc-c", email="old@x.io")
+    urepo = FakeUserRepo({"kc-c": user})
+    client = FakeOIDCClient(
+        bundle=_bundle(claims={"sub": "kc-c", "sid": "s"}),
+        userinfo={"mail": "evil@x.io"},
+    )
+    svc = _service(
+        user_repo=urepo,
+        client=client,
+        cfg=_cfg(claim_source="userinfo", claim_mapping="email:mail"),
+    )
+    state, cookie = await _login_and_get_state(svc)
+    with pytest.raises(OIDCFlowError, match="Userinfo sub does not match") as ei:
+        await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+
+    assert ei.value.status_code == 401
     assert not urepo.updated
 
 
