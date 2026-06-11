@@ -27,6 +27,13 @@ ENV HF_HUB_CACHE=${HF_HUB_CACHE:-/app/model_weights/hub}
 # Set workdir for uv
 WORKDIR /app
 
+# Keep uv's managed Python, cache and project venv outside $HOME so the
+# artifacts produced during the (root) build stay reachable for the
+# unprivileged user that runs the container.
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    UV_CACHE_DIR=/opt/uv/cache \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+
 # Install uv & setup venv
 COPY pyproject.toml uv.lock ./
 RUN pip3 install uv && \
@@ -46,4 +53,20 @@ COPY prompts/ /app/prompts/
 COPY conf/ /app/conf/
 ENV PYTHONPATH=/app/openrag/
 ENV APP_iPORT=${APP_iPORT:-8080}
+
+# --- Run as an unprivileged user -------------------------------------------
+# openrag only ever writes under /app (data, logs, db, the HF model cache and
+# the uv-created venv) and binds non-privileged ports, so it has no need for
+# root. Create a dedicated user that owns those paths. UID/GID are build args
+# so a deployment can match the host user owning the bind-mounted volumes
+# (./data, ./logs, ~/.cache/huggingface); the 1000 default fits a typical
+# single-user host.
+ARG APP_UID=1000
+ARG APP_GID=1000
+RUN groupadd --gid ${APP_GID} openrag \
+    && useradd --uid ${APP_UID} --gid ${APP_GID} --no-log-init --create-home --shell /bin/bash openrag \
+    && mkdir -p /app/data /app/logs /app/db /app/model_weights/hub /opt/uv \
+    && chown -R openrag:openrag /app /opt/uv
+USER openrag
+
 ENTRYPOINT ../entrypoint.sh
