@@ -9,6 +9,11 @@ x-openrag: &openrag_template
   build:
     context: .
     dockerfile: Dockerfile
+    args:
+      # Keep the image's baked-in user in sync with the uid/gid that owns the
+      # bind-mounted volumes (see init-perms below).
+      APP_UID: ${PUID:-1000}
+      APP_GID: ${PGID:-1000}
   extra_hosts:
     # Let containers reach services running on the Docker host via
     # ``host.docker.internal`` (Linux Docker >= 20.10). Useful when an OIDC
@@ -40,8 +45,18 @@ x-openrag: &openrag_template
 x-vllm-env: &vllm_env
   HUGGING_FACE_HUB_TOKEN:
   VLLM_SLEEP_WHEN_IDLE: 1  # Avoid 100% CPU usage when idle
+  # Run unprivileged: point HOME and the HF cache at the writable mounted
+  # volume so vllm never needs to write under root-owned /root.
+  HOME: /cache
+  HF_HOME: /cache/huggingface
+  # vllm calls getpass.getuser() (torch.compile temp dir). With an arbitrary
+  # uid that has no /etc/passwd entry it would fall back to pwd.getpwuid() and
+  # crash; setting USER/LOGNAME makes getuser() resolve without a passwd entry.
+  USER: openrag
+  LOGNAME: openrag
 
 x-vllm: &vllm_template
+  user: "${PUID:-1000}:${PGID:-1000}"
   networks:
     default:
       aliases:
@@ -51,7 +66,7 @@ x-vllm: &vllm_template
     <<: *vllm_env
   ipc: "host"
   volumes:
-    - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface # put ./vllm_cache if you want to have the weights on the vllm_cache folder in your project
+    - ${VLLM_CACHE:-./.cache/huggingface}:/cache # HF + framework caches (HOME=/cache)
   command: >
     --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
     --trust-remote-code
@@ -60,6 +75,9 @@ x-vllm: &vllm_template
     --max-model-len ${MAX_MODEL_LEN:-8192}
   # --max-num-seqs 1
   # gpu_memory_utilization, max-num-seqs et max-model-len can be tuned depending on your GPU memory
+  depends_on:
+    init-perms:
+      condition: service_completed_successfully
 
   healthcheck:
     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -70,7 +88,41 @@ x-vllm: &vllm_template
   # ports:
   #   - ${VLLM_PORT:-8000}:8000
 services:
+  # ---------------------------------------------------------------------------
+  # One-shot ownership bootstrap. This is the ONLY container that runs as root,
+  # and it runs no application code: it just creates the host bind-mount
+  # directories and chowns them to the unprivileged uid/gid the real services
+  # run as. Docker creates missing bind-mount sources as root, so without this
+  # the non-root services below could not write to their volumes. It exits
+  # immediately and every other service waits for it via depends_on.
+  # ---------------------------------------------------------------------------
+  init-perms:
+    image: busybox:1.37
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        mkdir -p /mnt/data /mnt/logs /mnt/db /mnt/hfcache \
+                 /mnt/volumes/etcd /mnt/volumes/minio /mnt/volumes/milvus
+        chown -R ${PUID:-1000}:${PGID:-1000} /mnt/data /mnt/logs /mnt/hfcache /mnt/volumes
+        chown -R 999:999 /mnt/db
+    volumes:
+      - ${DATA_VOLUME:-./data}:/mnt/data
+      - ./logs:/mnt/logs
+      - ${DB_VOLUME:-./db}:/mnt/db
+      - ${VLLM_CACHE:-./.cache/huggingface}:/mnt/hfcache
+      # NB: vdb/milvus.yaml is `include`d, so its default ./volumes resolves
+      # relative to vdb/ — i.e. ./vdb/volumes from here. Keep these in sync.
+      - ${MILVUS_VOLUME_DIRECTORY:-./vdb/volumes}:/mnt/volumes
+    restart: "no"
+
   # OpenRAG Indexer UI
+  # NOTE: still runs as root. Its entrypoint writes /app/config.json into the
+  # image's root-owned /app at startup, so it can't drop privileges without an
+  # image-level fix in the openrag-admin-ui repo (add a USER + a writable
+  # config path). Tracked as the remaining non-root gap.
   indexer-ui:
     image: linagoraai/indexer-ui:latest
     build:
@@ -108,6 +160,8 @@ services:
     profiles:
       - ""
     depends_on:
+      init-perms:
+        condition: service_completed_successfully
       rdb:
         condition: service_started
       milvus:
@@ -122,6 +176,8 @@ services:
     profiles:
       - "cpu"
     depends_on:
+      init-perms:
+        condition: service_completed_successfully
       rdb:
         condition: service_started
       milvus:
@@ -131,6 +187,9 @@ services:
 
   rdb:
     image: postgres:15
+    # Run as the image's built-in `postgres` user (uid 999) instead of root;
+    # init-perms hands /var/lib/postgresql/data to 999.
+    user: "999:999"
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-root_password}
       - POSTGRES_USER=${POSTGRES_USER:-root}
@@ -138,6 +197,9 @@ services:
       - ${DB_VOLUME:-./db}:/var/lib/postgresql/data
     expose:
       - 5432
+    depends_on:
+      init-perms:
+        condition: service_completed_successfully
 
   vllm-gpu:
     <<: *vllm_template
@@ -181,4 +243,3 @@ services:
     # For details see https://github.com/vllm-project/vllm/issues/21179
     profiles:
       - "cpu"
-

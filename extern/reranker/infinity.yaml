@@ -1,10 +1,22 @@
 x-reranker: &reranker_template
+  user: "${PUID:-1000}:${PGID:-1000}"
   networks:
     default:
       aliases:
         - reranker
+  environment:
+    # Run unprivileged: keep HOME and the HF cache on the writable mounted
+    # volume so infinity never needs to write under root-owned /root.
+    HOME: /cache
+    HF_HOME: /cache/huggingface
   volumes:
-    - ${VLLM_CACHE:-/root/.cache/huggingface}:/app/.cache/huggingface # Model weights for RAG
+    # This file is `include`d, so a relative default resolves relative to
+    # extern/reranker/. ../../ points back at the project root so the cache
+    # matches vllm's and the dir init-perms chowns.
+    - ${VLLM_CACHE:-../../.cache/huggingface}:/cache # Model weights for RAG (HOME=/cache)
+  depends_on:
+    init-perms:
+      condition: service_completed_successfully
   # ports:
   #   - ${RERANKER_PORT:-7997}:7997
 
