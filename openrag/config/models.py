@@ -119,7 +119,7 @@ class VectorDBConfig(ConfigMixin):
 class RDBConfig(ConfigMixin):
     host: str = "rdb"
     port: int = 5432
-    user: str = "root"
+    user: str = "openrag"
     password: str = Field(default="", repr=False)
     default_file_quota: int = -1
 

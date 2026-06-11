@@ -63,8 +63,8 @@ vectordb:
 rdb:
   host: rdb
   port: 5432
-  user: root
-  password: "root_password"
+  user: openrag
+  password: "openrag_password"
   default_file_quota: -1
 
 # --- Reranker ---

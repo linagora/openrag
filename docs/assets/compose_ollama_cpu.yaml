@@ -38,8 +38,8 @@ services:
   rdb:
     image: postgres:15
     environment:
-      - POSTGRES_PASSWORD=root
-      - POSTGRES_USER=root
+      - POSTGRES_PASSWORD=openrag_password
+      - POSTGRES_USER=openrag
     volumes:
       - ./db:/var/lib/postgresql/data
 

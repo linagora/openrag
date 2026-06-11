@@ -105,8 +105,8 @@ services:
   rdb:
     image: postgres:15
     environment:
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-root_password}
-      - POSTGRES_USER=${POSTGRES_USER:-root}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-openrag_password}
+      - POSTGRES_USER=${POSTGRES_USER:-openrag}
     volumes:
       - ${DB_VOLUME:-./db}:/var/lib/postgresql/data
 

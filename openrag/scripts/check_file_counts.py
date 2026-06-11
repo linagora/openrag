@@ -16,8 +16,8 @@ from components.indexer.vectordb.utils import File, User
 def build_database_url(args):
     host = args.host or os.environ.get("POSTGRES_HOST", "localhost")
     port = args.port or os.environ.get("POSTGRES_PORT", "5432")
-    user = args.user or os.environ.get("POSTGRES_USER", "root")
-    password = args.password or os.environ.get("POSTGRES_PASSWORD", "root_password")
+    user = args.user or os.environ.get("POSTGRES_USER", "openrag")
+    password = args.password or os.environ.get("POSTGRES_PASSWORD", "openrag_password")
     collection = args.collection or os.environ.get("VDB_COLLECTION_NAME", "vdb_test")
     db_name = f"partitions_for_collection_{collection}"
     return f"postgresql://{user}:{password}@{host}:{port}/{db_name}"
@@ -87,7 +87,7 @@ def main():
     parser = argparse.ArgumentParser(description="Verify user file_count against actual files in the database.")
     parser.add_argument("--host", help="PostgreSQL host (default: $POSTGRES_HOST or localhost)")
     parser.add_argument("--port", help="PostgreSQL port (default: $POSTGRES_PORT or 5432)")
-    parser.add_argument("--user", help="PostgreSQL user (default: $POSTGRES_USER or root)")
+    parser.add_argument("--user", help="PostgreSQL user (default: $POSTGRES_USER or openrag)")
     parser.add_argument("--password", help="PostgreSQL password (default: $POSTGRES_PASSWORD)")
     parser.add_argument("--collection", help="VDB collection name (default: $VDB_COLLECTION_NAME or vdb_test)")
     parser.add_argument("--fix", action="store_true", help="Fix mismatched counts in the database")

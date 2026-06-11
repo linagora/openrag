@@ -26,9 +26,19 @@ ray:
 postgresql:
   enabled: true
   auth:
-    username: &pgUser root
-    password: &pgPass root_password
+    # Dedicated application user (non-superuser). OpenRAG creates its
+    # database (partitions_for_collection_<collection>) at runtime, hence
+    # the CREATEDB grant in primary.initdb.scripts below.
+    username: &pgUser openrag
+    password: &pgPass openrag_password
+    database: openrag
   primary:
+    initdb:
+      scripts:
+        # Runs once, on first initialization of an empty data volume.
+        # The role name must match auth.username above.
+        10-grant-createdb.sql: |
+          ALTER ROLE openrag CREATEDB;
     persistence:
       enabled: true
       size: 10Gi

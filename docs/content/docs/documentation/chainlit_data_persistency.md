@@ -33,7 +33,7 @@ Knowing that OpenRAG already has a running postgres service (**`rdb`**) (refer t
 
 ```bash
 // .env
-DATABASE_URL=postgresql://root:root_password@rdb:5432/chainlit
+DATABASE_URL=postgresql://openrag:openrag_password@rdb:5432/chainlit
 ```
 * Variables for chainlit to use the **`S3 Bucket`**
 Add the following variables to your `.env` so that chainlit can use them to connect to the locally deployed S3 bucket

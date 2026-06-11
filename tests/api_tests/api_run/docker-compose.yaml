@@ -19,10 +19,10 @@ services:
   rdb:
     image: postgres:15
     environment:
-      - POSTGRES_PASSWORD=root_password
-      - POSTGRES_USER=root
+      - POSTGRES_PASSWORD=openrag_password
+      - POSTGRES_USER=openrag
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U root"]
+      test: ["CMD-SHELL", "pg_isready -U openrag"]
       interval: 2s
       timeout: 5s
       retries: 10
@@ -82,8 +82,8 @@ services:
       - EMBEDDER_BASE_URL=http://vllm:8000/v1/
       - EMBEDDER_API_KEY=EMPTY
       - POSTGRES_HOST=rdb
-      - POSTGRES_USER=root
-      - POSTGRES_PASSWORD=root_password
+      - POSTGRES_USER=openrag
+      - POSTGRES_PASSWORD=openrag_password
       - VDB_HOST=milvus
       - BASE_URL=http://vllm:8000/v1/
       - API_KEY=EMPTY

@@ -192,8 +192,8 @@ The PostgreSQL database is configured using the following environment variables:
 |----------|------|---------|-------------|
 | `POSTGRES_HOST` | str | rdb | Hostname of the PostgreSQL database service |
 | `POSTGRES_PORT` | int | 5432 | Port on which the PostgreSQL database listens |
-| `POSTGRES_USER` | str | root | Username for database authentication |
-| `POSTGRES_PASSWORD` | str | root_password | Password for database authentication |
+| `POSTGRES_USER` | str | openrag | Username for database authentication |
+| `POSTGRES_PASSWORD` | str | openrag_password | Password for database authentication |
 
 ## Chat Pipeline
 ### LLM & VLM Configuration
