@@ -122,6 +122,14 @@ Each pair is `db_field:oidc_claim`. Only `display_name` and `email` are writable
 
 By default OpenRag reads the claims from the verified ID token (`OIDC_CLAIM_SOURCE=id_token`, no extra HTTP call). Switch to `userinfo` if your IdP only exposes certain claims via the `/userinfo` endpoint.
 
+### Optional: grant partition access from IdP groups
+
+If your IdP models access as groups (e.g. Keycloak groups like `/openrag/project-alpha/editor`),
+OpenRag can map them to partition memberships automatically on every login — set
+`OIDC_CLAIM_GROUPS` and friends. See `docs/oidc.md` →
+[Group → Partition Mapping](./oidc.md#group--partition-mapping-optional). (`is_admin` is never
+derived from groups.)
+
 ---
 
 ## Step 5 — Pre-provision users

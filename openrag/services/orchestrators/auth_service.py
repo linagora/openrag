@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urlparse
 
-from core.models.user import OIDCSession, User
+from core.models.user import OIDCSession, PartitionRole, User, UserPartition
 from core.utils.exceptions import AuthError, OpenRAGError
 from core.utils.logging import get_logger, mask_email
 from services.auth import (
@@ -35,6 +35,7 @@ from services.auth import (
     hash_session_token,
     issue_session_token,
 )
+from services.auth.oidc_groups import extract_partition_roles
 
 if TYPE_CHECKING:
     from core.config.auth import OIDCConfig
@@ -206,6 +207,7 @@ class AuthService:
         user = await self._resolve_user(sub, bundle.claims)
         user = await self._sync_auto_provisioned(user, sub, bundle.claims)
         user = await self._apply_claim_mapping(user, bundle)
+        await self._sync_oidc_memberships(user, bundle.claims)
 
         now = _utcnow()
         expires_in = max(int(bundle.expires_in or 0), 60)
@@ -732,6 +734,85 @@ class AuthService:
             logger.warning(f"update_user failed for user_id={user.id}: {e}")
             return user
         return refreshed or user
+
+    async def _sync_oidc_memberships(self, user: User, claims: dict[str, Any]) -> None:
+        """Reconcile partition memberships from the IdP group claim (Phase 15).
+
+        Off unless ``OIDC_CLAIM_GROUPS`` names a claim. When on, the verified
+        ID-token groups are translated to ``(partition, role)`` pairs and the
+        user's memberships are brought in line: missing ones are added, changed
+        roles updated, and — only when ``OIDC_GROUP_SYNC_PRUNE`` is set *and*
+        the token actually carries the groups claim — memberships absent from
+        the token are removed (the IdP becomes the sole source of truth). A
+        missing claim never prunes, to avoid mass-revocation on a
+        misconfiguration. ``is_admin`` is never touched here.
+
+        Never raises: a single bad/unknown group (e.g. a partition that does
+        not exist yet, which trips the FK) is logged and skipped so it cannot
+        block an otherwise-valid login. Reads groups from the claims already in
+        hand — no extra IdP round-trip.
+        """
+        if not (self._config.claim_groups or "").strip():
+            return
+
+        desired = dict(extract_partition_roles(claims, self._config))  # {partition: role}
+
+        try:
+            current_memberships = await self._membership_repo.list_user_partitions(user.id)
+        except Exception as e:
+            logger.bind(user_id=user.id).warning(f"OIDC group sync: failed to read memberships: {e}")
+            return
+        current = {m.partition: m.role.value for m in current_memberships}
+
+        # Add missing / update changed roles from the token.
+        for partition, role in desired.items():
+            if current.get(partition) == role:
+                continue
+            try:
+                if partition in current:
+                    await self._membership_repo.update_partition_role(user.id, partition, PartitionRole(role))
+                    logger.bind(user_id=user.id, partition=partition, role=role).info(
+                        "OIDC group sync: updated partition role"
+                    )
+                else:
+                    await self._membership_repo.assign_partition(
+                        UserPartition(user_id=user.id, partition=partition, role=PartitionRole(role))
+                    )
+                    logger.bind(user_id=user.id, partition=partition, role=role).info(
+                        "OIDC group sync: added partition membership"
+                    )
+            except Exception as e:
+                logger.bind(user_id=user.id, partition=partition, role=role).warning(
+                    f"OIDC group sync: could not apply membership (partition may not exist or other error): {e}"
+                )
+
+        # Prune memberships not present in the token (opt-in).
+        #
+        # Mass-revocation guard: only prune when the IdP actually *asserted* a
+        # groups claim in this token. A missing claim (mapper disabled, wrong
+        # OIDC_CLAIM_GROUPS, scope not granted, transient omission) yields an
+        # empty ``desired`` that means "no signal" — NOT "revoke everything";
+        # pruning there would wipe every synced user's access on a single
+        # config mistake. An explicit empty list (``groups: []`` — user
+        # genuinely in no groups) is a real signal and still prunes.
+        if self._config.group_sync_prune:
+            groups_asserted = isinstance(claims, dict) and claims.get(self._config.claim_groups) is not None
+            if not groups_asserted:
+                logger.bind(user_id=user.id).warning(
+                    f"OIDC group sync: skipping prune — token carries no {self._config.claim_groups!r} "
+                    "claim (guard against mass-revocation on a missing/misconfigured claim)"
+                )
+                return
+            for partition in current:
+                if partition in desired:
+                    continue
+                try:
+                    await self._membership_repo.remove_partition(user.id, partition)
+                    logger.bind(user_id=user.id, partition=partition).info(
+                        "OIDC group sync: pruned partition membership"
+                    )
+                except Exception as e:
+                    logger.bind(user_id=user.id, partition=partition).warning(f"OIDC group sync: prune failed: {e}")
 
 
 __all__ = [
