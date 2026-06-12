@@ -795,11 +795,18 @@ class AuthService:
         # pruning there would wipe every synced user's access on a single
         # config mistake. An explicit empty list (``groups: []`` — user
         # genuinely in no groups) is a real signal and still prunes.
+        #
+        # "Asserted" must match what the mapper can actually parse
+        # (``_coerce_groups`` accepts only ``str``/``list``/``tuple``): a
+        # malformed non-null claim (number, dict) maps to zero groups, so
+        # treating it as asserted would prune everything on the exact
+        # misconfiguration this guard defends against. Such claims skip prune.
         if self._config.group_sync_prune:
-            groups_asserted = isinstance(claims, dict) and claims.get(self._config.claim_groups) is not None
+            raw_groups = claims.get(self._config.claim_groups) if isinstance(claims, dict) else None
+            groups_asserted = isinstance(raw_groups, (str, list, tuple))
             if not groups_asserted:
                 logger.bind(user_id=user.id).warning(
-                    f"OIDC group sync: skipping prune — token carries no {self._config.claim_groups!r} "
+                    f"OIDC group sync: skipping prune — token carries no usable {self._config.claim_groups!r} "
                     "claim (guard against mass-revocation on a missing/misconfigured claim)"
                 )
                 return

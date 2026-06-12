@@ -593,6 +593,18 @@ async def test_membership_sync_prune_skips_when_groups_claim_is_null():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_claim", [42, {"a": 1}, 3.14, True])
+async def test_membership_sync_prune_skips_when_groups_claim_is_malformed_type(bad_claim):
+    """A present-but-malformed claim (number/dict) maps to zero groups via
+    ``_coerce_groups`` — the same misconfiguration the guard defends against,
+    so it must NOT prune. Only ``str``/``list`` count as an asserted signal."""
+    repo = FakeMembershipRepo(seed=[(1, "alpha", "editor"), (1, "beta", "viewer")])
+    svc = _service(cfg=_group_cfg(group_sync_prune=True), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": bad_claim})
+    assert repo.removed == []  # nothing wiped on a garbage claim
+
+
+@pytest.mark.asyncio
 async def test_membership_sync_prune_runs_on_explicit_empty_group_list():
     """``groups: []`` is a real signal (user genuinely in no groups) → prune."""
     repo = FakeMembershipRepo(seed=[(1, "alpha", "editor"), (1, "beta", "viewer")])
