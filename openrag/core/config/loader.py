@@ -39,6 +39,9 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("EMBEDDER_BASE_URL", "embedder.base_url", str),
     ("EMBEDDER_API_KEY", "embedder.api_key", str),
     ("MAX_MODEL_LEN", "embedder.max_model_len", int),
+    ("EMBEDDER_TIMEOUT", "embedder.timeout", float),
+    ("EMBEDDER_BATCH_SIZE", "embedder.batch_size", int),
+    ("EMBEDDER_CONCURRENCY", "embedder.embed_concurrency", int),
     # VectorDB
     ("VDB_HOST", "vectordb.host", str),
     ("VDB_iPORT", "vectordb.port", int),
