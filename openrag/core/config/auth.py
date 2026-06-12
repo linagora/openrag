@@ -80,22 +80,27 @@ _DEFAULT_OIDC_GROUP_PATTERN: str = r"(.+)/(owner|editor|viewer)$"
 
 
 def _compile_group_pattern(raw: str) -> re.Pattern[str]:
-    """Compile ``OIDC_GROUP_PATTERN`` and assert it captures two groups.
+    """Compile ``OIDC_GROUP_PATTERN`` and assert it captures exactly two groups.
 
-    Raises ``RuntimeError`` on an invalid regex, or one exposing fewer than
-    two capture groups (partition + role), so an operator typo trips at
-    startup rather than silently mapping zero groups at the next login. Run
-    unconditionally (like :func:`_parse_oidc_claim_mapping`) so a bad pattern
-    fails even before ``OIDC_CLAIM_GROUPS`` is set to switch the feature on.
+    Raises ``RuntimeError`` on an invalid regex, or one not exposing exactly
+    two capture groups, so an operator typo trips at startup rather than
+    silently mis-mapping at the next login. The mapper reads ``group(1)`` as
+    the partition and ``group(2)`` as the role positionally, so the count must
+    be exact: with fewer than two it maps nothing, and with extra captures
+    ``group(2)`` is no longer the role and sync silently breaks. Operators who
+    need internal grouping can use non-capturing ``(?:...)`` groups, which do
+    not count. Run unconditionally (like :func:`_parse_oidc_claim_mapping`) so
+    a bad pattern fails even before ``OIDC_CLAIM_GROUPS`` switches the feature on.
     """
     try:
         pattern = re.compile(raw)
     except re.error as e:
         raise RuntimeError(f"Invalid OIDC_GROUP_PATTERN {raw!r}: {e}") from e
-    if pattern.groups < 2:
+    if pattern.groups != 2:
         raise RuntimeError(
-            f"OIDC_GROUP_PATTERN {raw!r} must expose at least two capture groups "
-            f"(partition, role); got {pattern.groups}"
+            f"OIDC_GROUP_PATTERN {raw!r} must expose exactly two capture groups "
+            f"(group 1 = partition, group 2 = role); got {pattern.groups}. "
+            "Use non-capturing (?:...) groups for any internal grouping."
         )
     return pattern
 

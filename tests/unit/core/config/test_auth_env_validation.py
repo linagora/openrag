@@ -249,8 +249,24 @@ def test_group_pattern_with_too_few_groups_raises(monkeypatch):
     """A pattern that captures only the partition (no role group) is a
     config error — it would map every group to an undefined role."""
     _set_env(monkeypatch, OIDC_GROUP_PATTERN=r"(.+)/owner")
-    with pytest.raises(RuntimeError, match="at least two capture groups"):
+    with pytest.raises(RuntimeError, match="exactly two capture groups"):
         OIDCConfig.from_env()
+
+
+def test_group_pattern_with_too_many_groups_raises(monkeypatch):
+    """Extra capture groups shift ``group(2)`` off the role, silently breaking
+    sync — so they must trip startup validation, not just too-few."""
+    _set_env(monkeypatch, OIDC_GROUP_PATTERN=r"((?:team-)?[^/]+)/([^/]+)/(owner|editor|viewer)$")
+    with pytest.raises(RuntimeError, match="exactly two capture groups"):
+        OIDCConfig.from_env()
+
+
+def test_group_pattern_non_capturing_groups_are_allowed(monkeypatch):
+    """Non-capturing ``(?:...)`` groups don't count toward the two-capture
+    contract, so operators can use them for internal grouping."""
+    _set_env(monkeypatch, OIDC_GROUP_PATTERN=r"(?:team-)?(.+)/(owner|editor|viewer)$")
+    cfg = OIDCConfig.from_env()
+    assert cfg.group_pattern == r"(?:team-)?(.+)/(owner|editor|viewer)$"
 
 
 def test_group_pattern_validated_even_in_token_mode(monkeypatch):
