@@ -40,11 +40,15 @@ class EmbedderConfig(ConfigMixin):
     base_url: str = "http://vllm:8000/v1"
     api_key: str = Field(default="EMPTY", repr=False)
     max_model_len: int = 8192
-    timeout: float = 120.0
+    # Constrained > 0: a bad env var should fail at config load, not silently
+    # degrade into surprising runtime behavior (VLLMEmbedder rewrites a
+    # non-positive batch_size/embed_concurrency to 1 and would pass a <= 0
+    # timeout straight into httpx).
+    timeout: float = Field(default=120.0, gt=0)
     # Big documents are embedded in slices of `batch_size`, at most
     # `embed_concurrency` requests in flight, to stay within the timeout above.
-    batch_size: int = 64
-    embed_concurrency: int = 4
+    batch_size: int = Field(default=64, gt=0)
+    embed_concurrency: int = Field(default=4, gt=0)
 
 
 class SemaphoreConfig(ConfigMixin):
