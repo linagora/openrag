@@ -28,6 +28,7 @@ from core.utils.exceptions import (
 )
 from core.utils.logging import get_logger
 from core.vlm import VLM, vlm_registry
+from tqdm.asyncio import tqdm
 
 from ._circuit_breaker import with_circuit_breaker
 from ._retry import with_retry
@@ -184,7 +185,9 @@ class VLLMEmbedder(Embedder):
         *,
         max_model_len: int | None = None,
         dimension: int | None = None,
-        timeout: float = 60.0,
+        timeout: float = 120.0,
+        batch_size: int = 64,
+        embed_concurrency: int = 4,
         api_key: str = "",
         **_kwargs,
     ) -> None:
@@ -192,14 +195,48 @@ class VLLMEmbedder(Embedder):
         self._model = model_name
         self._max_model_len = max_model_len
         self._dimension: int | None = dimension
+        # Big documents produce thousands of chunks; sending them in one request
+        # overruns the endpoint's time budget. Split into `batch_size` slices and
+        # run at most `embed_concurrency` of them at once to bound remote load.
+        self._batch_size = max(1, batch_size)
+        self._embed_concurrency = max(1, embed_concurrency)
         headers: dict[str, str] = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
 
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed *texts*, splitting large inputs into bounded-concurrent batches.
+
+        A single request for thousands of chunks (e.g. a big PDF) overruns the
+        embedder's time budget and trips the client timeout. We slice the input
+        into ``batch_size`` chunks and run at most ``embed_concurrency`` requests
+        at once, then concatenate the vectors back in input order.
+        """
+        if not texts:
+            return []
+        if len(texts) <= self._batch_size:
+            return await self._embed_batch(texts)
+
+        batches = [texts[i : i + self._batch_size] for i in range(0, len(texts), self._batch_size)]
+        semaphore = asyncio.Semaphore(self._embed_concurrency)
+
+        async def _run(batch: list[str]) -> list[list[float]]:
+            async with semaphore:
+                return await self._embed_batch(batch)
+
+        results = await tqdm.gather(
+            *(_run(batch) for batch in batches),
+            desc=f"Embedding {len(texts)} chunks ({len(batches)} batches of {self._batch_size})",
+        )
+        vectors: list[list[float]] = []
+        for batch_vectors in results:
+            vectors.extend(batch_vectors)
+        return vectors
+
     @with_circuit_breaker("embedder")
     @with_retry(max_attempts=3)
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         body: dict = {"model": self._model, "input": texts}
         if self._max_model_len is not None:
             body["truncate_prompt_tokens"] = self._max_model_len

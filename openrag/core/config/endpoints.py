@@ -40,6 +40,11 @@ class EmbedderConfig(ConfigMixin):
     base_url: str = "http://vllm:8000/v1"
     api_key: str = Field(default="EMPTY", repr=False)
     max_model_len: int = 8192
+    timeout: float = 120.0
+    # Big documents are embedded in slices of `batch_size`, at most
+    # `embed_concurrency` requests in flight, to stay within the timeout above.
+    batch_size: int = 64
+    embed_concurrency: int = 4
 
 
 class SemaphoreConfig(ConfigMixin):

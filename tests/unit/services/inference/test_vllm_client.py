@@ -262,6 +262,35 @@ class TestVLLMEmbedder:
         assert result == [[0.1, 0.2], [0.3, 0.4]]
 
     @pytest.mark.asyncio
+    async def test_embed_splits_large_input_into_batches(self):
+        """Inputs larger than batch_size are split into multiple requests and
+        the vectors are reassembled in the original input order."""
+        request_sizes: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            inputs = json.loads(request.content)["input"]
+            request_sizes.append(len(inputs))
+            # Echo each text's int value back as a 1-d vector so we can assert order.
+            data = [{"index": i, "embedding": [float(t)]} for i, t in enumerate(inputs)]
+            return httpx.Response(200, json={"data": data})
+
+        texts = [str(i) for i in range(10)]
+        embedder = self._make_embedder(handler, batch_size=4, embed_concurrency=2)
+        result = await embedder.embed(texts)
+
+        assert result == [[float(i)] for i in range(10)]  # order preserved across batches
+        # 10 texts split into batches of 4; completion order is non-deterministic
+        # under concurrency, so compare the multiset of request sizes.
+        assert sorted(request_sizes) == [2, 4, 4]
+
+    @pytest.mark.asyncio
+    async def test_embed_empty_returns_empty(self):
+        def handler(req: httpx.Request) -> httpx.Response:  # pragma: no cover - must not be called
+            raise AssertionError("no request should be sent for empty input")
+
+        assert await self._make_embedder(handler).embed([]) == []
+
+    @pytest.mark.asyncio
     async def test_embed_single(self):
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.5, 0.6, 0.7]}]})

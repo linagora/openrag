@@ -38,13 +38,17 @@ semaphore:
   vlm_semaphore: 10
 
 # --- Embedder ---
-# Env: EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY, MAX_MODEL_LEN
+# Env: EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY, MAX_MODEL_LEN,
+#      EMBEDDER_TIMEOUT, EMBEDDER_BATCH_SIZE, EMBEDDER_CONCURRENCY
 embedder:
   provider: openai
   model_name: jinaai/jina-embeddings-v3
   base_url: http://vllm:8000/v1
   api_key: EMPTY
   max_model_len: 8192
+  timeout: 120.0       # per-request HTTP timeout (s); raise for slow remote endpoints
+  batch_size: 64       # chunks per embedding request (big docs are split into batches)
+  embed_concurrency: 4 # max embedding requests in flight at once
 
 # --- Vector Database (Milvus) ---
 # Env: VDB_HOST, VDB_PORT, VDB_CONNECTOR_NAME, VDB_COLLECTION_NAME, VDB_HYBRID_SEARCH,

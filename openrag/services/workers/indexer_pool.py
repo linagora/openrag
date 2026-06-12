@@ -36,6 +36,9 @@ class IndexerPool:
             model_name=embed_cfg.model_name,
             api_key=embed_cfg.api_key,
             max_model_len=embed_cfg.max_model_len,
+            timeout=embed_cfg.timeout,
+            batch_size=embed_cfg.batch_size,
+            embed_concurrency=embed_cfg.embed_concurrency,
         )
         self._vector_store = MilvusVectorStore(cfg.vectordb)
         task_state_manager = ray.get_actor("TaskStateManager", namespace="openrag")
