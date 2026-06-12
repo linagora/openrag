@@ -32,6 +32,10 @@ def _clear_oidc_env(monkeypatch):
         "OIDC_SCOPES",
         "OIDC_POST_LOGOUT_REDIRECT_URI",
         "OIDC_AUTO_PROVISION_LOGIN",
+        "OIDC_CLAIM_GROUPS",
+        "OIDC_GROUP_PREFIX",
+        "OIDC_GROUP_PATTERN",
+        "OIDC_GROUP_SYNC_PRUNE",
     ]:
         monkeypatch.delenv(name, raising=False)
 
@@ -195,4 +199,64 @@ def test_claim_mapping_validated_even_in_token_mode(monkeypatch):
     monkeypatch.setenv("AUTH_MODE", "token")
     monkeypatch.setenv("OIDC_CLAIM_MAPPING", "is_admin:role")
     with pytest.raises(RuntimeError, match="is not writable"):
+        OIDCConfig.from_env()
+
+
+# ---------------------------------------------------------------------------
+# group → partition sync (Phase 15)
+# ---------------------------------------------------------------------------
+
+
+def test_group_sync_defaults_are_off_and_conventional(monkeypatch):
+    """Unset group vars: feature is OFF (empty claim) with the documented
+    defaults, so no existing deployment changes behaviour."""
+    _set_env(monkeypatch)
+    cfg = OIDCConfig.from_env()
+    assert cfg.claim_groups == ""
+    assert cfg.group_prefix == "/openrag/"
+    assert cfg.group_pattern == r"(.+)/(owner|editor|viewer)$"
+    assert cfg.group_sync_prune is False
+
+
+def test_group_sync_vars_round_trip(monkeypatch):
+    _set_env(
+        monkeypatch,
+        OIDC_CLAIM_GROUPS="groups",
+        OIDC_GROUP_PREFIX="/corp/",
+        OIDC_GROUP_PATTERN=r"(.+)/(owner|editor|viewer)$",
+        OIDC_GROUP_SYNC_PRUNE="true",
+    )
+    cfg = OIDCConfig.from_env()
+    assert cfg.claim_groups == "groups"
+    assert cfg.group_prefix == "/corp/"
+    assert cfg.group_sync_prune is True
+
+
+def test_group_sync_prune_is_truthy_only_for_literal_true(monkeypatch):
+    _set_env(monkeypatch, OIDC_GROUP_SYNC_PRUNE="yes")
+    assert OIDCConfig.from_env().group_sync_prune is False
+    _set_env(monkeypatch, OIDC_GROUP_SYNC_PRUNE="True")
+    assert OIDCConfig.from_env().group_sync_prune is True
+
+
+def test_uncompilable_group_pattern_raises(monkeypatch):
+    _set_env(monkeypatch, OIDC_GROUP_PATTERN="(.+/(owner|editor")
+    with pytest.raises(RuntimeError, match="Invalid OIDC_GROUP_PATTERN"):
+        OIDCConfig.from_env()
+
+
+def test_group_pattern_with_too_few_groups_raises(monkeypatch):
+    """A pattern that captures only the partition (no role group) is a
+    config error — it would map every group to an undefined role."""
+    _set_env(monkeypatch, OIDC_GROUP_PATTERN=r"(.+)/owner")
+    with pytest.raises(RuntimeError, match="at least two capture groups"):
+        OIDCConfig.from_env()
+
+
+def test_group_pattern_validated_even_in_token_mode(monkeypatch):
+    """Like claim mapping, a bad pattern must fail at startup before the
+    operator flips AUTH_MODE=oidc."""
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("OIDC_GROUP_PATTERN", "(unbalanced")
+    with pytest.raises(RuntimeError, match="Invalid OIDC_GROUP_PATTERN"):
         OIDCConfig.from_env()

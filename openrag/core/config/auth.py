@@ -20,6 +20,7 @@ here so the rules are configuration, not code:
 from __future__ import annotations
 
 import os
+import re
 from typing import ClassVar
 
 from pydantic import BaseModel
@@ -69,6 +70,36 @@ def _parse_oidc_claim_mapping(raw: str) -> dict[str, str]:
     return mapping
 
 
+# Default Keycloak group → (partition, role) pattern, applied to each group
+# *after* ``OIDC_GROUP_PREFIX`` is stripped. For a group ``/openrag/alpha/editor``
+# with the default prefix ``/openrag/`` it matches the remainder ``alpha/editor``
+# and captures ``("alpha", "editor")`` — group 1 = partition, group 2 = role.
+# The trailing ``$`` anchor is a deliberate refinement over the strategy doc so
+# trailing garbage cannot accidentally match (operators may override it).
+_DEFAULT_OIDC_GROUP_PATTERN: str = r"(.+)/(owner|editor|viewer)$"
+
+
+def _compile_group_pattern(raw: str) -> re.Pattern[str]:
+    """Compile ``OIDC_GROUP_PATTERN`` and assert it captures two groups.
+
+    Raises ``RuntimeError`` on an invalid regex, or one exposing fewer than
+    two capture groups (partition + role), so an operator typo trips at
+    startup rather than silently mapping zero groups at the next login. Run
+    unconditionally (like :func:`_parse_oidc_claim_mapping`) so a bad pattern
+    fails even before ``OIDC_CLAIM_GROUPS`` is set to switch the feature on.
+    """
+    try:
+        pattern = re.compile(raw)
+    except re.error as e:
+        raise RuntimeError(f"Invalid OIDC_GROUP_PATTERN {raw!r}: {e}") from e
+    if pattern.groups < 2:
+        raise RuntimeError(
+            f"OIDC_GROUP_PATTERN {raw!r} must expose at least two capture groups "
+            f"(partition, role); got {pattern.groups}"
+        )
+    return pattern
+
+
 class OIDCConfig(BaseModel):
     """OIDC configuration for Keycloak / external IdP integration.
 
@@ -90,6 +121,21 @@ class OIDCConfig(BaseModel):
     # non-admin user on the fly from the ID-token claims. Default keeps
     # the strict "admin pre-creates every user" policy.
     auto_provision_login: bool = False
+
+    # --- Group → partition membership sync (Phase 15) ---------------------
+    # Empty ``claim_groups`` disables the feature entirely, so every existing
+    # deployment is unaffected. When set, the named claim is read from the
+    # verified ID token at callback time, each group is matched against
+    # ``group_pattern`` (after ``group_prefix`` is stripped) to yield a
+    # (partition, role) pair, and the user's memberships are reconciled.
+    # ``is_admin`` is never derived from claims — that hard boundary (see the
+    # claim-mapping whitelist above) is preserved.
+    claim_groups: str = ""
+    group_prefix: str = "/openrag/"
+    group_pattern: str = _DEFAULT_OIDC_GROUP_PATTERN
+    # When True, memberships absent from the token are removed (the IdP is the
+    # sole source of truth). Default keeps manually-granted memberships.
+    group_sync_prune: bool = False
 
     # The five env vars required when AUTH_MODE=oidc; unset/empty values
     # trip the validator with a single error listing every missing key.
@@ -148,6 +194,12 @@ class OIDCConfig(BaseModel):
         # the moment they flipped AUTH_MODE=oidc.
         _parse_oidc_claim_mapping(claim_mapping)
 
+        # Same parse-and-discard philosophy for the group pattern: validate
+        # the regex compiles and exposes two capture groups regardless of
+        # whether group sync is currently active.
+        group_pattern = os.getenv("OIDC_GROUP_PATTERN", _DEFAULT_OIDC_GROUP_PATTERN)
+        _compile_group_pattern(group_pattern)
+
         return cls(
             enabled=enabled,
             issuer_url=env_values["OIDC_ENDPOINT"] or "",
@@ -160,6 +212,10 @@ class OIDCConfig(BaseModel):
             claim_mapping=claim_mapping,
             post_logout_redirect_uri=os.getenv("OIDC_POST_LOGOUT_REDIRECT_URI", "") or "",
             auto_provision_login=os.getenv("OIDC_AUTO_PROVISION_LOGIN", "false").strip().lower() == "true",
+            claim_groups=os.getenv("OIDC_CLAIM_GROUPS", "").strip(),
+            group_prefix=os.getenv("OIDC_GROUP_PREFIX", "/openrag/"),
+            group_pattern=group_pattern,
+            group_sync_prune=os.getenv("OIDC_GROUP_SYNC_PRUNE", "false").strip().lower() == "true",
         )
 
 
