@@ -27,8 +27,15 @@ x-openrag: &openrag_template
     - ./logs:/app/logs # For dev mode
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
-    - ${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
-    - ${CHAINLIT_PORT:-8090}:${CHAINLIT_PORT:-8090}
+    # Ray Dashboard (8265) is commented out by default: Ray's dashboard/job
+    # submission API has NO authentication and is actively exploited for
+    # unauthenticated RCE (CVE-2023-48022 / "ShadowRay"). Only expose it on a
+    # trusted network behind an auth proxy. Uncomment if you need it locally.
+    # - ${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
+    # Chainlit is served under the API port at /chainlit; this extra direct
+    # port mapping is not needed for the default deployment. Uncomment to
+    # expose Chainlit on its own port.
+    # - ${CHAINLIT_PORT:-8090}:${CHAINLIT_PORT:-8090}
   networks:
     default:
       aliases:
