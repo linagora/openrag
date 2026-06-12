@@ -365,6 +365,11 @@ async def openai_chat_completion(
         filtered = filter_sources_by_citations(sources, citations)
         chunk["extra"] = json.dumps({"sources": filtered})
         log.debug("Returning non-streaming completion chunk.")
+        if not clean_content.strip():
+            log.warning("LLM and RAG response empty after source stripping, returning fallback message")
+            chunk["choices"][0]["message"]["content"] = (
+                "I do not have the necessary documentation in order to answer your message"
+            )
         return JSONResponse(content=chunk)
 
 
@@ -440,4 +445,9 @@ async def openai_completion(
     filtered = filter_sources_by_citations(sources, citations)
     complete_response["extra"] = json.dumps({"sources": filtered})
     log.debug("Returning completion response.")
+    if not clean_text.strip():
+        log.warning("LLM and RAG response empty after source stripping, returning fallback message")
+        complete_response["choices"][0]["text"] = (
+            "I do not have the necessary documentation in order to answer your message"
+        )
     return JSONResponse(content=complete_response)

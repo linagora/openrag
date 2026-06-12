@@ -264,21 +264,28 @@ async def stream_with_source_filtering(
             filtered = filter_sources_by_citations(sources, citations)
             filtered_json = json.dumps({"sources": filtered})
 
-            if chunk_template and len(final_clean) > emitted_len:
-                tail_chunk = copy.deepcopy(chunk_template)
-                tail_chunk["choices"][0]["delta"] = {"content": final_clean[emitted_len:]}
-                tail_chunk["extra"] = filtered_json
-                yield f"data: {json.dumps(tail_chunk)}\n\n"
+            def _sse(delta: dict, finish_reason: str | None = None) -> str:
+                """Build an SSE chunk from the template, overriding delta/extra."""
+                chunk = copy.deepcopy(chunk_template)
+                chunk["choices"][0]["delta"] = delta
+                if finish_reason is not None:
+                    chunk["choices"][0]["finish_reason"] = finish_reason
+                chunk["extra"] = filtered_json
+                return f"data: {json.dumps(chunk)}\n\n"
+
+            if chunk_template and not final_clean.strip():
+                # Response was only a [Sources: ...] tag (or empty) — send a default
+                # message so the client never receives an empty completion.
+                logger.warning("LLM and RAG response empty after source stripping, returning fallback message")
+                yield _sse({"content": "I do not have the necessary documentation in order to answer your message"})
+            elif chunk_template and len(final_clean) > emitted_len:
+                yield _sse({"content": final_clean[emitted_len:]})
 
             if chunk_template:
                 # FIXME: race condition where clients miss sources because finish_reason
                 # arrives before the sources metadata
                 await asyncio.sleep(0.05)
-                finish_chunk = copy.deepcopy(chunk_template)
-                finish_chunk["choices"][0]["delta"] = {}
-                finish_chunk["choices"][0]["finish_reason"] = last_finish_reason or "stop"
-                finish_chunk["extra"] = filtered_json
-                yield f"data: {json.dumps(finish_chunk)}\n\n"
+                yield _sse({}, finish_reason=last_finish_reason or "stop")
 
             yield "data: [DONE]\n\n"
             continue
