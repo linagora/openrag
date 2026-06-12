@@ -349,7 +349,7 @@ Ray is used for distributed task processing and parallel execution in the RAG pi
 |----------|------|---------|-------------|
 | `RAY_POOL_SIZE` | `int` | 1 | Number of serializer actor instances (typically 1 actor per cluster node) |
 | `RAY_MAX_TASKS_PER_WORKER` | `int` | 8 | Maximum number of concurrent tasks (serialization tasks) per serializer actor instance |
-| `RAY_DASHBOARD_PORT` | `int` | 8265 | Ray Dashboard port used for monitoring. In production, [comment out this line](https://github.com/linagora/openrag/blob/ee732ea8e080dcde0107d62d12703a7525f810cd/docker-compose.yaml#L21C1-L22C1) to avoid exposing the port, as it may introduce security vulnerabilities. |
+| `RAY_DASHBOARD_PORT` | `int` | 8265 | Ray Dashboard port used for monitoring. **The mapping is commented out by default in `docker-compose.yaml`** because Ray's dashboard / job-submission API has no authentication and is actively exploited for unauthenticated remote code execution ([CVE-2023-48022](https://www.sentinelone.com/vulnerability-database/cve-2023-48022/) / ["ShadowRay"](https://www.oligo.security/blog/shadowray-attack-ai-workloads-actively-exploited-in-the-wild)). Only uncomment it to expose the dashboard on a trusted network, ideally behind an authentication proxy. |
 
 :::danger[Attention]
 The following environment variables control Ray's logging behavior, task retry settings. These are not set by default and must be supplied [as suggested in the .env](/openrag/getting_started/quickstart#2-create-a-env-file)
