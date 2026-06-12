@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -282,6 +283,34 @@ class TestVLLMEmbedder:
         # 10 texts split into batches of 4; completion order is non-deterministic
         # under concurrency, so compare the multiset of request sizes.
         assert sorted(request_sizes) == [2, 4, 4]
+
+    @pytest.mark.asyncio
+    async def test_embed_cancels_pending_batches_on_failure(self):
+        """When one batch fails, the other in-flight batches are cancelled
+        instead of being left running and consuming embedder capacity."""
+        embedder = VLLMEmbedder(endpoint="http://x", model_name="m", batch_size=1, embed_concurrency=5)
+        started: list[str] = []
+        cancelled: list[str] = []
+
+        async def fake_embed_batch(texts: list[str]) -> list[list[float]]:
+            value = texts[0]
+            started.append(value)
+            if value == "fail":
+                raise EmbeddingAPIError("boom", model_name="m", base_url="http://x", error="boom")
+            try:
+                await asyncio.sleep(10)  # slow batch, still in flight when 'fail' raises
+                return [[0.0]]
+            except asyncio.CancelledError:
+                cancelled.append(value)
+                raise
+
+        embedder._embed_batch = fake_embed_batch  # type: ignore[method-assign]
+
+        with pytest.raises(EmbeddingAPIError):
+            await embedder.embed(["slow1", "fail", "slow2"])
+
+        assert "fail" in started
+        assert sorted(cancelled) == ["slow1", "slow2"]  # both slow batches were cancelled
 
     @pytest.mark.asyncio
     async def test_embed_empty_returns_empty(self):

@@ -225,10 +225,22 @@ class VLLMEmbedder(Embedder):
             async with semaphore:
                 return await self._embed_batch(batch)
 
-        results = await tqdm.gather(
-            *(_run(batch) for batch in batches),
-            desc=f"Embedding {len(texts)} chunks ({len(batches)} batches of {self._batch_size})",
-        )
+        # Explicit tasks so that when one batch fails we can cancel the rest.
+        # tqdm.gather (like asyncio.gather) propagates the first exception but
+        # leaves the other in-flight batches running, where they would keep
+        # consuming embedder capacity after embed() has already failed.
+        tasks = [asyncio.ensure_future(_run(batch)) for batch in batches]
+        try:
+            results = await tqdm.gather(
+                *tasks,
+                desc=f"Embedding {len(texts)} chunks ({len(batches)} batches of {self._batch_size})",
+            )
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         vectors: list[list[float]] = []
         for batch_vectors in results:
             vectors.extend(batch_vectors)
