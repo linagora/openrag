@@ -56,17 +56,23 @@ ENV APP_iPORT=${APP_iPORT:-8080}
 
 # --- Run as an unprivileged user -------------------------------------------
 # openrag only ever writes under /app (data, logs, db, the HF model cache and
-# the uv-created venv) and binds non-privileged ports, so it has no need for
-# root. Create a dedicated user that owns those paths. UID/GID are build args
-# so a deployment can match the host user owning the bind-mounted volumes
+# the uv-created venv) plus uv's cache, and binds non-privileged ports, so it
+# has no need for root. Create a dedicated user and give it ownership of *only*
+# those runtime-write paths, plus the /app dir node itself so the runtime
+# `uv run` can create the venv and the editable install's openrag.egg-info at
+# the project root. The application code, config files and uv's managed Python
+# install stay root-owned/read-only (least privilege). UID/GID are build
+# args so a deployment can match the host user owning the bind-mounted volumes
 # (./data, ./logs, ~/.cache/huggingface); the 1000 default fits a typical
 # single-user host.
 ARG APP_UID=1000
 ARG APP_GID=1000
 RUN groupadd --gid ${APP_GID} openrag \
     && useradd --uid ${APP_UID} --gid ${APP_GID} --no-log-init --create-home --shell /bin/bash openrag \
-    && mkdir -p /app/data /app/logs /app/db /app/model_weights/hub /opt/uv \
-    && chown -R openrag:openrag /app /opt/uv
+    && mkdir -p /app/data /app/logs /app/db /app/model_weights/hub /app/.venv /opt/uv/cache \
+    && chown openrag:openrag /app \
+    && chown -R openrag:openrag \
+       /app/data /app/logs /app/db /app/model_weights /app/.venv /opt/uv/cache
 USER openrag
 
 ENTRYPOINT ../entrypoint.sh
