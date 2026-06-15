@@ -187,6 +187,23 @@ for (const doc of documents) {
 
 // --- Handlers ---
 
+const docCount = (name: string) => documents.filter((d) => d.partition === name).length;
+const partitionConfig = (name: string) => {
+  const p = partitions.find((x) => x.name === name) ?? partitions[0];
+  return {
+    name,
+    description: p.description,
+    embedder: p.indexation_pipeline?.embedder ?? "bge-m3",
+    indexation_preset: p.indexation_preset,
+    retrieval_preset: p.retrieval_preset,
+    indexation_pipeline: p.indexation_pipeline ?? {},
+    retrieval_pipeline: p.retrieval_pipeline ?? {},
+    dimension: p.dimension,
+    created_at: p.created_at,
+    document_count: docCount(name),
+  };
+};
+
 export const handlers = [
   // Auth
   http.post(`${API}/api/v1/auth/login`, () => {
@@ -210,46 +227,55 @@ export const handlers = [
     return HttpResponse.json({ token: `or-${rand}` });
   }),
 
-  // Partitions
-  http.get(`${API}/api/v1/admin/partitions`, ({ request }) => {
-    const url = new URL(request.url);
-    const search = url.searchParams.get("search")?.toLowerCase();
-    const limit = parseInt(url.searchParams.get("limit") ?? "100");
-    let filtered = partitions;
-    if (search) filtered = filtered.filter((p) => p.name.toLowerCase().includes(search));
-    return HttpResponse.json({ partitions: filtered.slice(0, limit) });
+  // Partitions — OpenRag `/partition` shapes
+  http.get(`${API}/partition/`, () =>
+    HttpResponse.json({
+      partitions: partitions.map((p) => ({
+        partition: p.name,
+        role: "owner",
+        created_at: p.created_at,
+        document_count: docCount(p.name),
+      })),
+    }),
+  ),
+
+  http.get(`${API}/partition/:name/config`, ({ params }) => {
+    const name = params.name as string;
+    if (!partitions.some((x) => x.name === name)) {
+      return HttpResponse.json({ detail: "Not found" }, { status: 404 });
+    }
+    return HttpResponse.json(partitionConfig(name));
   }),
 
-  http.get(`${API}/api/v1/admin/partitions/:name`, ({ params }) => {
-    const p = partitions.find((x) => x.name === params.name);
-    if (!p) return HttpResponse.json({ detail: "Not found" }, { status: 404 });
-    return HttpResponse.json(p);
+  // GET /partition/{name} lists files (read side for the documents slice)
+  http.get(`${API}/partition/:name`, ({ params }) => {
+    const name = params.name as string;
+    const files = documents
+      .filter((d) => d.partition === name)
+      .map((d) => ({ file_id: d.id, partition: name, filename: d.filename, link: `/partition/${name}/file/${d.id}` }));
+    return HttpResponse.json({ files });
   }),
 
-  http.post(`${API}/api/v1/admin/partitions`, async ({ request }) => {
-    const body = (await request.json()) as Record<string, unknown>;
-    const created = { ...partitions[0], ...body, exists: true, indexation_pipeline: {}, retrieval_pipeline: {}, created_at: new Date().toISOString() };
-    return HttpResponse.json(created);
-  }),
+  http.post(`${API}/partition/:name`, () => new HttpResponse(null, { status: 201 })),
 
-  http.put(`${API}/api/v1/admin/partitions/:name`, ({ params }) => {
-    const p = partitions.find((x) => x.name === params.name);
-    return HttpResponse.json(p || partitions[0]);
-  }),
+  http.patch(`${API}/partition/:name`, ({ params }) => HttpResponse.json(partitionConfig(params.name as string))),
 
-  http.delete(`${API}/api/v1/admin/partitions/:name`, ({ params }) => {
-    return HttpResponse.json({ deleted: params.name });
-  }),
+  http.delete(`${API}/partition/:name`, () => new HttpResponse(null, { status: 204 })),
 
-  http.get(`${API}/api/v1/admin/partitions/:name/users`, () => {
-    return HttpResponse.json({
-      partition: "legal-docs",
-      users: [
-        { user_id: "usr-001", partition: "legal-docs", role: "owner", created_at: "2025-01-10T00:00:00Z" },
-        { user_id: "usr-002", partition: "legal-docs", role: "reader", created_at: "2025-01-12T00:00:00Z" },
+  http.get(`${API}/partition/:name/users`, () =>
+    HttpResponse.json({
+      members: [
+        { user_id: 1, role: "owner", added_at: "2025-01-10T00:00:00Z" },
+        { user_id: 2, role: "editor", added_at: "2025-01-12T00:00:00Z" },
       ],
-    });
-  }),
+    }),
+  ),
+
+  http.post(`${API}/partition/:name/users`, () => new HttpResponse(null, { status: 201 })),
+
+  http.patch(`${API}/partition/:name/users/:userId`, () => new HttpResponse(null, { status: 200 })),
+
+  http.delete(`${API}/partition/:name/users/:userId`, () => new HttpResponse(null, { status: 204 })),
 
   // Documents
   http.get(`${API}/api/v1/admin/documents`, ({ request }) => {
