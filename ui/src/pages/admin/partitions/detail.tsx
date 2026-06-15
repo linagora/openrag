@@ -74,16 +74,11 @@ function GeneralTab({ partition }: { partition: PartitionResponse }) {
 
   const validateLlm = useCallback(
     async (name: string) => {
-      const ep = llmEndpoints?.endpoints.find((e) => e.name === name);
+      const ep = llmEndpoints?.find((e) => e.name === name);
       if (!ep) return;
       setLlmValidating(true);
       try {
-        const res = await validateModelEndpoint({
-          endpoint: ep.endpoint,
-          model_name: ep.model_name ?? undefined,
-          timeout: ep.timeout,
-          extra: ep.extra as Record<string, unknown>,
-        });
+        const res = await validateModelEndpoint("llm", name);
         setLlmValidated(res.reachable);
         if (!res.reachable) {
           toast.error(res.detail || "LLM endpoint is unreachable");
@@ -115,8 +110,8 @@ function GeneralTab({ partition }: { partition: PartitionResponse }) {
     }
   }, [partition.chat_llm, llmEndpoints, llmValidated, llmValidating, validateLlm]);
 
-  const indexationPresets = presetsData?.presets.filter((p) => p.preset_type === "indexation") ?? [];
-  const retrievalPresets = presetsData?.presets.filter((p) => p.preset_type === "retrieval") ?? [];
+  const indexationPresets = presetsData?.filter((p) => p.preset_type === "indexation") ?? [];
+  const retrievalPresets = presetsData?.filter((p) => p.preset_type === "retrieval") ?? [];
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -229,7 +224,7 @@ function GeneralTab({ partition }: { partition: PartitionResponse }) {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__default__">Default (from retrieval config)</SelectItem>
-                  {llmEndpoints?.endpoints.map((ep) => (
+                  {llmEndpoints?.map((ep) => (
                     <SelectItem key={ep.name} value={ep.name}>
                       {ep.name}
                     </SelectItem>

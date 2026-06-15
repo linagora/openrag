@@ -9,7 +9,7 @@ import {
   deletePreset,
   getPresetOptions,
 } from "@/lib/api/presets";
-import type { PresetResponse } from "@/lib/api/presets";
+import type { PresetResponse, PresetType } from "@/lib/api/presets";
 import { listPrompts } from "@/lib/api/prompts";
 import type { PromptResponse } from "@/lib/api/prompts";
 import { listModelEndpoints } from "@/lib/api/models";
@@ -65,7 +65,7 @@ export default function PresetsPage() {
 
   const updateMut = useMutation({
     mutationFn: ({ type, originalName, name, config }: { type: string; originalName: string; name: string; config: Record<string, unknown> }) =>
-      updatePreset(type, originalName, { ...(name !== originalName ? { name } : {}), config }),
+      updatePreset(type as PresetType, originalName, { ...(name !== originalName ? { name } : {}), config }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["presets"] });
       toast.success("Preset updated");
@@ -76,7 +76,7 @@ export default function PresetsPage() {
   });
 
   const deleteMut = useMutation({
-    mutationFn: ({ type, name }: { type: string; name: string }) => deletePreset(type, name),
+    mutationFn: ({ type, name }: { type: string; name: string }) => deletePreset(type as PresetType, name),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["presets"] });
       toast.success("Preset deleted");
@@ -84,7 +84,7 @@ export default function PresetsPage() {
     onError: (e) => toast.error(e.message),
   });
 
-  const presets = data?.presets || [];
+  const presets = data ?? [];
 
   const summarizeConfig = (config: Record<string, unknown>): string[] => {
     const summary: string[] = [];
@@ -793,7 +793,7 @@ function PresetDialog({
   onOpenChange: (v: boolean) => void;
   editing: PresetResponse | null;
   activeTab: string;
-  onCreate: (data: { name: string; preset_type: string; config: Record<string, unknown> }) => void;
+  onCreate: (data: { name: string; preset_type: PresetType; config: Record<string, unknown> }) => void;
   onUpdate: (type: string, originalName: string, name: string, config: Record<string, unknown>) => void;
   loading: boolean;
 }) {
@@ -831,9 +831,9 @@ function PresetDialog({
     enabled: open && presetType === "indexation",
   });
 
-  const llms = (llmData?.endpoints ?? []).map((e) => e.name);
-  const vlms = (vlmData?.endpoints ?? []).map((e) => e.name);
-  const rerankers = options?.rerankers ?? [];
+  const llms = (llmData ?? []).map((e) => e.name);
+  const vlms = (vlmData ?? []).map((e) => e.name);
+  const rerankers = options?.reranker_providers ?? [];
 
   const { data: promptData } = useQuery({
     queryKey: ["prompts-for-presets"],
@@ -847,7 +847,7 @@ function PresetDialog({
     if (editing) {
       onUpdate(editing.preset_type, editing.name, name, config);
     } else {
-      onCreate({ name, preset_type: activeTab, config });
+      onCreate({ name, preset_type: activeTab as PresetType, config });
     }
   };
 
@@ -878,7 +878,7 @@ function PresetDialog({
             <RetrievalPresetForm
               config={config}
               onChange={setConfig}
-              retrievalPipelines={options?.retrieval_pipelines ?? []}
+              retrievalPipelines={options?.retrieval_types ?? []}
               rerankers={rerankers}
             />
           )}

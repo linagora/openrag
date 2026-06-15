@@ -14,6 +14,7 @@ import type {
   ModelEndpointResponse,
   CreateModelEndpointRequest,
   UpdateModelEndpointRequest,
+  ModelType,
 } from "@/lib/api/models";
 import { health } from "@/lib/api/system";
 import { PageHeader } from "@/components/shared/page-header";
@@ -66,7 +67,7 @@ export default function ModelsPage() {
 
   const updateMut = useMutation({
     mutationFn: ({ type, name, data }: { type: string; name: string; data: UpdateModelEndpointRequest }) =>
-      updateModelEndpoint(type, name, data),
+      updateModelEndpoint(type as ModelType, name, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["model-endpoints"] });
       toast.success("Model endpoint updated");
@@ -78,7 +79,7 @@ export default function ModelsPage() {
 
   const deleteMut = useMutation({
     mutationFn: ({ type, name }: { type: string; name: string }) =>
-      deleteModelEndpoint(type, name),
+      deleteModelEndpoint(type as ModelType, name),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["model-endpoints"] });
       toast.success("Model endpoint deleted");
@@ -88,7 +89,7 @@ export default function ModelsPage() {
 
   const setDefaultMut = useMutation({
     mutationFn: ({ type, name }: { type: string; name: string }) =>
-      setDefaultModelEndpoint(type, name),
+      setDefaultModelEndpoint(type as ModelType, name),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["model-endpoints"] });
       toast.success("Default endpoint updated");
@@ -96,7 +97,7 @@ export default function ModelsPage() {
     onError: (e) => toast.error(e.message),
   });
 
-  const endpoints = data?.endpoints || [];
+  const endpoints = data ?? [];
 
   const getHealthStatus = (type: string, name: string) => {
     if (!healthData) return undefined;
@@ -295,25 +296,15 @@ function EndpointDialog({
   }, [endpoint, modelName, extraJson]);
 
   const handleValidate = async () => {
-    if (!endpoint) {
-      toast.error("Endpoint URL is required");
-      return;
-    }
-    let extra: Record<string, unknown> = {};
-    try {
-      extra = JSON.parse(extraJson);
-    } catch {
-      toast.error("Invalid JSON in extra field");
+    // OpenRag validates a *stored* endpoint by (type, name) — there is no
+    // draft-validation API, so this is only available when editing a saved one.
+    if (!editing) {
+      toast.error("Save the endpoint first, then validate it");
       return;
     }
     setValidating(true);
     try {
-      const res = await validateModelEndpoint({
-        endpoint,
-        model_name: modelName || undefined,
-        timeout: parseFloat(timeout) || 5,
-        extra,
-      });
+      const res = await validateModelEndpoint(editing.model_type, editing.name);
       setValidated(res.reachable);
       if (res.reachable) {
         toast.success(res.detail || "Endpoint is reachable");
@@ -353,7 +344,7 @@ function EndpointDialog({
     } else {
       onCreate({
         name,
-        model_type: activeTab,
+        model_type: activeTab as ModelType,
         endpoint,
         model_name: modelName || undefined,
         batch_size: parseInt(batchSize),
@@ -412,7 +403,8 @@ function EndpointDialog({
               type="button"
               variant="outline"
               onClick={handleValidate}
-              disabled={validating || !endpoint}
+              disabled={validating || !editing}
+              title={!editing ? "Save the endpoint first, then validate it" : undefined}
             >
               {validating ? (
                 <Loader2 className="mr-1 h-4 w-4 animate-spin" />

@@ -1,20 +1,27 @@
 import { request } from "./client";
 
+// OpenRag pipeline-preset registry (Phase 14). Mounted at `/presets` (admin-only).
+// Shapes verified against openrag/api/schemas/admin/preset_schemas.py + routers/admin/presets.py:
+//   GET    /presets/options              { chunking_strategies, retrieval_types, reranker_providers }
+//   GET    /presets/                     list (bare array; optional ?preset_type=)
+//   GET    /presets/{type}/{name}        get one
+//   POST   /presets/                     create → 201
+//   PUT    /presets/{type}/{name}        update
+//   DELETE /presets/{type}/{name}        delete → 204
+
+export type PresetType = "indexation" | "retrieval";
+
 export interface PresetResponse {
   name: string;
-  preset_type: string;
+  preset_type: PresetType;
   config: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 }
 
-export interface PresetListResponse {
-  presets: PresetResponse[];
-}
-
 export interface CreatePresetRequest {
   name: string;
-  preset_type: string;
+  preset_type: PresetType;
   config?: Record<string, unknown>;
 }
 
@@ -25,47 +32,47 @@ export interface UpdatePresetRequest {
 
 export interface PresetOptionsResponse {
   chunking_strategies: string[];
-  retrieval_pipelines: string[];
-  rerankers: string[];
+  retrieval_types: string[];
+  reranker_providers: string[];
 }
 
-const BASE = "/api/v1/admin/presets";
+const BASE = "/presets";
+const enc = encodeURIComponent;
 
 export function getPresetOptions() {
   return request<PresetOptionsResponse>(`${BASE}/options`);
 }
 
-export function listPresets(presetType?: string) {
-  const search = new URLSearchParams();
-  if (presetType) search.set("preset_type", presetType);
-  const qs = search.toString();
-  return request<PresetListResponse>(`${BASE}${qs ? `?${qs}` : ""}`);
+/** List presets (bare array). Optionally filter by preset type. */
+export function listPresets(presetType?: PresetType) {
+  const qs = presetType ? `?preset_type=${enc(presetType)}` : "";
+  return request<PresetResponse[]>(`${BASE}/${qs}`);
 }
 
-export function getPreset(presetType: string, name: string) {
-  return request<PresetResponse>(`${BASE}/${presetType}/${name}`);
+export function getPreset(presetType: PresetType, name: string) {
+  return request<PresetResponse>(`${BASE}/${enc(presetType)}/${enc(name)}`);
 }
 
 export function createPreset(data: CreatePresetRequest) {
-  return request<PresetResponse>(BASE, {
+  return request<PresetResponse>(`${BASE}/`, {
     method: "POST",
     body: JSON.stringify(data),
   });
 }
 
 export function updatePreset(
-  presetType: string,
+  presetType: PresetType,
   name: string,
   data: UpdatePresetRequest,
 ) {
-  return request<PresetResponse>(`${BASE}/${presetType}/${name}`, {
+  return request<PresetResponse>(`${BASE}/${enc(presetType)}/${enc(name)}`, {
     method: "PUT",
     body: JSON.stringify(data),
   });
 }
 
-export function deletePreset(presetType: string, name: string) {
-  return request<{ deleted: string }>(`${BASE}/${presetType}/${name}`, {
+export function deletePreset(presetType: PresetType, name: string) {
+  return request<void>(`${BASE}/${enc(presetType)}/${enc(name)}`, {
     method: "DELETE",
   });
 }

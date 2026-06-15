@@ -78,10 +78,10 @@ const users = [
 ];
 
 const modelEndpoints = [
-  { name: "bge-m3", model_type: "embedder", endpoint: "http://tei-embedder:8080", model_name: "BAAI/bge-m3", batch_size: 64, timeout: 30, extra: {}, created_at: "2024-12-15T00:00:00Z", updated_at: "2025-01-10T00:00:00Z" },
-  { name: "bge-reranker-v2", model_type: "reranker", endpoint: "http://tei-reranker:8080", model_name: "BAAI/bge-reranker-v2-m3", batch_size: 32, timeout: 30, extra: {}, created_at: "2024-12-15T00:00:00Z", updated_at: "2025-01-10T00:00:00Z" },
-  { name: "llama-3.1", model_type: "llm", endpoint: "http://vllm:8000/v1", model_name: "meta-llama/Llama-3.1-8B-Instruct", batch_size: 1, timeout: 120, extra: { max_tokens: 2048 }, created_at: "2024-12-20T00:00:00Z", updated_at: "2025-01-12T00:00:00Z" },
-  { name: "qwen-vl", model_type: "vlm", endpoint: "http://vllm-vlm:8000/v1", model_name: "Qwen/Qwen2-VL-7B-Instruct", batch_size: 1, timeout: 60, extra: {}, created_at: "2025-01-05T00:00:00Z", updated_at: "2025-01-05T00:00:00Z" },
+  { name: "bge-m3", model_type: "embedder", endpoint: "http://tei-embedder:8080", model_name: "BAAI/bge-m3", batch_size: 64, timeout: 30, extra: {}, is_default: true, created_at: "2024-12-15T00:00:00Z", updated_at: "2025-01-10T00:00:00Z" },
+  { name: "bge-reranker-v2", model_type: "reranker", endpoint: "http://tei-reranker:8080", model_name: "BAAI/bge-reranker-v2-m3", batch_size: 32, timeout: 30, extra: {}, is_default: true, created_at: "2024-12-15T00:00:00Z", updated_at: "2025-01-10T00:00:00Z" },
+  { name: "llama-3.1", model_type: "llm", endpoint: "http://vllm:8000/v1", model_name: "meta-llama/Llama-3.1-8B-Instruct", batch_size: 1, timeout: 120, extra: { max_tokens: 2048 }, is_default: true, created_at: "2024-12-20T00:00:00Z", updated_at: "2025-01-12T00:00:00Z" },
+  { name: "qwen-vl", model_type: "vlm", endpoint: "http://vllm-vlm:8000/v1", model_name: "Qwen/Qwen2-VL-7B-Instruct", batch_size: 1, timeout: 60, extra: {}, is_default: true, created_at: "2025-01-05T00:00:00Z", updated_at: "2025-01-05T00:00:00Z" },
 ];
 
 const presets = [
@@ -397,63 +397,84 @@ export const handlers = [
     return new HttpResponse(null, { status: 204 });
   }),
 
-  // Model Endpoints
-  http.get(`${API}/api/v1/admin/model-endpoints`, ({ request }) => {
+  // Model Endpoints — OpenRag `/model-endpoints` (bare array, 204 delete)
+  http.get(`${API}/model-endpoints/`, ({ request }) => {
     const url = new URL(request.url);
     const type = url.searchParams.get("model_type");
     let filtered = modelEndpoints;
     if (type) filtered = filtered.filter((m) => m.model_type === type);
-    return HttpResponse.json({ endpoints: filtered });
+    return HttpResponse.json(filtered);
   }),
 
-  http.get(`${API}/api/v1/admin/model-endpoints/:type/:name`, ({ params }) => {
+  http.get(`${API}/model-endpoints/:type/:name`, ({ params }) => {
     const ep = modelEndpoints.find((m) => m.model_type === params.type && m.name === params.name);
     if (!ep) return HttpResponse.json({ detail: "Not found" }, { status: 404 });
     return HttpResponse.json(ep);
   }),
 
-  http.post(`${API}/api/v1/admin/model-endpoints`, async ({ request }) => {
+  http.post(`${API}/model-endpoints/`, async ({ request }) => {
     const body = (await request.json()) as Record<string, unknown>;
-    return HttpResponse.json({ ...modelEndpoints[0], ...body, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+    return HttpResponse.json(
+      { ...modelEndpoints[0], ...body, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { status: 201 },
+    );
   }),
 
-  http.put(`${API}/api/v1/admin/model-endpoints/:type/:name`, ({ params }) => {
+  http.put(`${API}/model-endpoints/:type/:name`, async ({ params, request }) => {
+    const body = (await request.json()) as Record<string, unknown>;
     const ep = modelEndpoints.find((m) => m.model_type === params.type && m.name === params.name);
-    return HttpResponse.json(ep || modelEndpoints[0]);
+    return HttpResponse.json({ ...(ep || modelEndpoints[0]), ...body, updated_at: new Date().toISOString() });
   }),
 
-  http.delete(`${API}/api/v1/admin/model-endpoints/:type/:name`, ({ params }) => {
-    return HttpResponse.json({ deleted: `${params.type}/${params.name}` });
+  http.delete(`${API}/model-endpoints/:type/:name`, () => new HttpResponse(null, { status: 204 })),
+
+  http.post(`${API}/model-endpoints/:type/:name/set-default`, ({ params }) => {
+    const ep = modelEndpoints.find((m) => m.model_type === params.type && m.name === params.name);
+    return HttpResponse.json({ ...(ep || modelEndpoints[0]), is_default: true });
   }),
 
-  // Presets
-  http.get(`${API}/api/v1/admin/presets`, ({ request }) => {
+  http.post(`${API}/model-endpoints/:type/:name/validate`, () =>
+    HttpResponse.json({ reachable: true, model_found: true, models_served: [], detail: "Endpoint reachable (mock)" }),
+  ),
+
+  // Presets — OpenRag `/presets` (bare array, 204 delete)
+  http.get(`${API}/presets/options`, () =>
+    HttpResponse.json({
+      chunking_strategies: ["recursive", "sentence", "semantic", "markdown"],
+      retrieval_types: ["simple", "multiquery", "hyde"],
+      reranker_providers: ["infinity", "openai", "none"],
+    }),
+  ),
+
+  http.get(`${API}/presets/`, ({ request }) => {
     const url = new URL(request.url);
     const type = url.searchParams.get("preset_type");
     let filtered = presets;
     if (type) filtered = filtered.filter((p) => p.preset_type === type);
-    return HttpResponse.json({ presets: filtered });
+    return HttpResponse.json(filtered);
   }),
 
-  http.get(`${API}/api/v1/admin/presets/:type/:name`, ({ params }) => {
+  http.get(`${API}/presets/:type/:name`, ({ params }) => {
     const preset = presets.find((p) => p.preset_type === params.type && p.name === params.name);
     if (!preset) return HttpResponse.json({ detail: "Not found" }, { status: 404 });
     return HttpResponse.json(preset);
   }),
 
-  http.post(`${API}/api/v1/admin/presets`, async ({ request }) => {
+  http.post(`${API}/presets/`, async ({ request }) => {
     const body = (await request.json()) as Record<string, unknown>;
-    return HttpResponse.json({ ...presets[0], ...body, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+    return HttpResponse.json(
+      { ...presets[0], ...body, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { status: 201 },
+    );
   }),
 
-  http.put(`${API}/api/v1/admin/presets/:type/:name`, ({ params }) => {
+  http.put(`${API}/presets/:type/:name`, async ({ params, request }) => {
+    const body = (await request.json()) as Record<string, unknown>;
     const preset = presets.find((p) => p.preset_type === params.type && p.name === params.name);
-    return HttpResponse.json(preset || presets[0]);
+    return HttpResponse.json({ ...(preset || presets[0]), ...body, updated_at: new Date().toISOString() });
   }),
 
-  http.delete(`${API}/api/v1/admin/presets/:type/:name`, ({ params }) => {
-    return HttpResponse.json({ deleted: `${params.type}/${params.name}` });
-  }),
+  http.delete(`${API}/presets/:type/:name`, () => new HttpResponse(null, { status: 204 })),
 
   // Prompts
   http.get(`${API}/api/v1/admin/prompts`, ({ request }) => {

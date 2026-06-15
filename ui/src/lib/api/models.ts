@@ -1,8 +1,21 @@
 import { request } from "./client";
 
+// OpenRag model-endpoint registry (Phase 14). Mounted at `/model-endpoints`
+// (admin-only). Shapes verified against
+// openrag/api/schemas/admin/model_endpoint_schemas.py + routers/admin/model_endpoints.py:
+//   GET    /model-endpoints/                       list (bare array; optional ?model_type=)
+//   GET    /model-endpoints/{type}/{name}          get one
+//   POST   /model-endpoints/                       create → 201
+//   PUT    /model-endpoints/{type}/{name}          update
+//   DELETE /model-endpoints/{type}/{name}          delete → 204
+//   POST   /model-endpoints/{type}/{name}/set-default
+//   POST   /model-endpoints/{type}/{name}/validate → ValidateEndpointResponse (no body)
+
+export type ModelType = "embedder" | "reranker" | "llm" | "vlm";
+
 export interface ModelEndpointResponse {
   name: string;
-  model_type: string;
+  model_type: ModelType;
   endpoint: string;
   model_name: string | null;
   batch_size: number;
@@ -13,88 +26,87 @@ export interface ModelEndpointResponse {
   updated_at: string;
 }
 
-export interface ModelEndpointListResponse {
-  endpoints: ModelEndpointResponse[];
-}
-
 export interface CreateModelEndpointRequest {
   name: string;
-  model_type: string;
+  model_type: ModelType;
   endpoint: string;
-  model_name?: string;
+  model_name?: string | null;
   batch_size?: number;
   timeout?: number;
   extra?: Record<string, unknown>;
+  is_default?: boolean;
 }
 
+/** PUT body — every field optional; `name` renames the endpoint. */
 export interface UpdateModelEndpointRequest {
   name?: string;
   endpoint?: string;
-  model_name?: string;
+  model_name?: string | null;
   batch_size?: number;
   timeout?: number;
   extra?: Record<string, unknown>;
-}
-
-export interface ValidateModelEndpointRequest {
-  endpoint: string;
-  model_name?: string;
-  timeout?: number;
-  extra?: Record<string, unknown>;
+  is_default?: boolean;
 }
 
 export interface ValidateModelEndpointResponse {
   reachable: boolean;
-  detail: string | null;
+  model_found?: boolean | null;
+  models_served?: string[] | null;
+  detail?: string | null;
 }
 
-const BASE = "/api/v1/admin/model-endpoints";
+const BASE = "/model-endpoints";
+const enc = encodeURIComponent;
 
-export function listModelEndpoints(modelType?: string) {
-  const search = new URLSearchParams();
-  if (modelType) search.set("model_type", modelType);
-  const qs = search.toString();
-  return request<ModelEndpointListResponse>(`${BASE}${qs ? `?${qs}` : ""}`);
+/** List endpoints (bare array). Optionally filter by model type. */
+export function listModelEndpoints(modelType?: ModelType) {
+  const qs = modelType ? `?model_type=${enc(modelType)}` : "";
+  return request<ModelEndpointResponse[]>(`${BASE}/${qs}`);
 }
 
-export function getModelEndpoint(modelType: string, name: string) {
-  return request<ModelEndpointResponse>(`${BASE}/${modelType}/${name}`);
+export function getModelEndpoint(modelType: ModelType, name: string) {
+  return request<ModelEndpointResponse>(`${BASE}/${enc(modelType)}/${enc(name)}`);
 }
 
 export function createModelEndpoint(data: CreateModelEndpointRequest) {
-  return request<ModelEndpointResponse>(BASE, {
+  return request<ModelEndpointResponse>(`${BASE}/`, {
     method: "POST",
     body: JSON.stringify(data),
   });
 }
 
 export function updateModelEndpoint(
-  modelType: string,
+  modelType: ModelType,
   name: string,
   data: UpdateModelEndpointRequest,
 ) {
-  return request<ModelEndpointResponse>(`${BASE}/${modelType}/${name}`, {
+  return request<ModelEndpointResponse>(`${BASE}/${enc(modelType)}/${enc(name)}`, {
     method: "PUT",
     body: JSON.stringify(data),
   });
 }
 
-export function setDefaultModelEndpoint(modelType: string, name: string) {
+export function setDefaultModelEndpoint(modelType: ModelType, name: string) {
   return request<ModelEndpointResponse>(
-    `${BASE}/${modelType}/set-default/${name}`,
+    `${BASE}/${enc(modelType)}/${enc(name)}/set-default`,
     { method: "POST" },
   );
 }
 
-export function deleteModelEndpoint(modelType: string, name: string) {
-  return request<{ deleted: string }>(`${BASE}/${modelType}/${name}`, {
+export function deleteModelEndpoint(modelType: ModelType, name: string) {
+  return request<void>(`${BASE}/${enc(modelType)}/${enc(name)}`, {
     method: "DELETE",
   });
 }
 
-export function validateModelEndpoint(data: ValidateModelEndpointRequest) {
-  return request<ValidateModelEndpointResponse>(`${BASE}/validate`, {
-    method: "POST",
-    body: JSON.stringify(data),
-  });
+/**
+ * Probe a *stored* endpoint for reachability. OpenRag validates by
+ * (type, name) using the persisted endpoint config — it does NOT accept a
+ * draft body, so validation is only available after an endpoint is saved.
+ */
+export function validateModelEndpoint(modelType: ModelType, name: string) {
+  return request<ValidateModelEndpointResponse>(
+    `${BASE}/${enc(modelType)}/${enc(name)}/validate`,
+    { method: "POST" },
+  );
 }
