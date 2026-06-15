@@ -16,8 +16,6 @@ from utils.logger import get_logger
 
 SOURCE_SEPARATOR = "-" * 10 + "\n\n"
 
-# Sent to the client when the LLM produces no usable content (e.g. the whole
-# response was a [Sources: ...] tag), so it never receives an empty completion.
 # Global variables
 config = load_config()
 logger = get_logger()
