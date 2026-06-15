@@ -8,6 +8,7 @@ from typing import ClassVar
 import ray
 from components.indexer.utils.text_sanitizer import sanitize_text
 from config import load_config
+from config.fallbackanswer import EMPTY_RESPONSE_FALLBACK_MESSAGE
 from fast_langdetect import LangDetectConfig, LangDetector
 from langchain_core.documents.base import Document
 from langchain_openai import ChatOpenAI
@@ -15,6 +16,8 @@ from utils.logger import get_logger
 
 SOURCE_SEPARATOR = "-" * 10 + "\n\n"
 
+# Sent to the client when the LLM produces no usable content (e.g. the whole
+# response was a [Sources: ...] tag), so it never receives an empty completion.
 # Global variables
 config = load_config()
 logger = get_logger()
@@ -265,11 +268,16 @@ async def stream_with_source_filtering(
             filtered_json = json.dumps({"sources": filtered})
 
             def _sse(delta: dict, finish_reason: str | None = None) -> str:
-                """Build an SSE chunk from the template, overriding delta/extra."""
+                """Build an SSE chunk from the template, overriding delta/extra.
+
+                finish_reason is always set (None for content chunks): the template
+                may be the finish chunk, and a content-bearing chunk that carries a
+                finish_reason is treated as terminal by clients, which then drop its
+                delta. The separate finish chunk below emits it with an empty delta.
+                """
                 chunk = copy.deepcopy(chunk_template)
                 chunk["choices"][0]["delta"] = delta
-                if finish_reason is not None:
-                    chunk["choices"][0]["finish_reason"] = finish_reason
+                chunk["choices"][0]["finish_reason"] = finish_reason
                 chunk["extra"] = filtered_json
                 return f"data: {json.dumps(chunk)}\n\n"
 
@@ -277,7 +285,7 @@ async def stream_with_source_filtering(
                 # Response was only a [Sources: ...] tag (or empty) — send a default
                 # message so the client never receives an empty completion.
                 logger.warning("LLM and RAG response empty after source stripping, returning fallback message")
-                yield _sse({"content": "I do not have the necessary documentation in order to answer your message"})
+                yield _sse({"content": EMPTY_RESPONSE_FALLBACK_MESSAGE})
             elif chunk_template and len(final_clean) > emitted_len:
                 yield _sse({"content": final_clean[emitted_len:]})
 

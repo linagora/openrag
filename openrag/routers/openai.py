@@ -7,6 +7,7 @@ import consts
 from components.indexer.utils.text_sanitizer import sanitize_text
 from components.pipeline import RagPipeline
 from components.utils import (
+    EMPTY_RESPONSE_FALLBACK_MESSAGE,
     extract_and_strip_sources_block,
     filter_sources_by_citations,
     get_num_tokens,
@@ -367,9 +368,7 @@ async def openai_chat_completion(
         log.debug("Returning non-streaming completion chunk.")
         if not clean_content.strip():
             log.warning("LLM and RAG response empty after source stripping, returning fallback message")
-            chunk["choices"][0]["message"]["content"] = (
-                "I do not have the necessary documentation in order to answer your message"
-            )
+            chunk["choices"][0]["message"]["content"] = EMPTY_RESPONSE_FALLBACK_MESSAGE
         return JSONResponse(content=chunk)
 
 
@@ -447,7 +446,5 @@ async def openai_completion(
     log.debug("Returning completion response.")
     if not clean_text.strip():
         log.warning("LLM and RAG response empty after source stripping, returning fallback message")
-        complete_response["choices"][0]["text"] = (
-            "I do not have the necessary documentation in order to answer your message"
-        )
+        complete_response["choices"][0]["text"] = EMPTY_RESPONSE_FALLBACK_MESSAGE
     return JSONResponse(content=complete_response)

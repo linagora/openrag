@@ -1,0 +1,1 @@
+EMPTY_RESPONSE_FALLBACK_MESSAGE = "I could not generate an answer based on the retrieved documents"

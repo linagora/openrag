@@ -39,3 +39,4 @@ MULTI_QUERY_PROMPT = load_prompt("multi_query")
 
 # Short answer prompt
 SPOKEN_STYLE_ANSWER_PROMPT = load_prompt("spoken_style_answer")
+
