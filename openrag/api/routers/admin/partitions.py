@@ -65,6 +65,9 @@ async def list_existant_partitions(
     """List partitions visible to the current user."""
     if len(partitions) == 1 and partitions[0]["partition"] == "all":
         partitions = await service.list_partitions()
+    counts = await service.file_counts_by_partition()
+    for p in partitions:
+        p["document_count"] = counts.get(p.get("partition"), 0)
     logger.debug("Returned list of existing partitions.", partition_count=len(partitions))
     return JSONResponse(status_code=status.HTTP_200_OK, content={"partitions": partitions})
 

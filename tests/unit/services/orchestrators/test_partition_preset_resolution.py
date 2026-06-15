@@ -36,6 +36,7 @@ def _full_row(partition: str, **overrides) -> dict:
 class _FakePartitionRepo:
     def __init__(self, rows: list[dict] | None = None) -> None:
         self._store: dict[str, dict] = {r["partition"]: r for r in (rows or [])}
+        self._counts: dict[str, int] = {}
         self.calls: list[tuple[str, tuple]] = []
 
     async def partition_exists(self, name: str) -> bool:
@@ -62,6 +63,12 @@ class _FakePartitionRepo:
 
     async def delete_partition(self, name: str) -> bool:
         return self._store.pop(name, None) is not None
+
+    async def get_partition_file_count(self, partition: str) -> int:
+        return self._counts.get(partition, 0)
+
+    async def count_files_by_partition(self) -> dict[str, int]:
+        return dict(self._counts)
 
 
 def _settings(idx=None, ret=None):
@@ -275,12 +282,14 @@ async def test_update_partition_missing_raises_404():
 @pytest.mark.asyncio
 async def test_get_partition_config_returns_resolved_detail():
     repo = _FakePartitionRepo(rows=[_full_row("p1", description="docs")])
+    repo._counts["p1"] = 7
     svc = _make_service(repo)
 
     detail = await svc.get_partition_config("p1")
 
     assert detail["name"] == "p1"
     assert detail["description"] == "docs"
+    assert detail["document_count"] == 7
     assert detail["embedder"] == "default"
     assert detail["indexation_preset"] == "default"
     assert detail["retrieval_preset"] == "default"

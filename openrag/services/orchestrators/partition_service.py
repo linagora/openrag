@@ -130,6 +130,10 @@ class PartitionService:
     async def list_partitions(self) -> list[dict]:
         return await self._partition_repo.list_partitions()
 
+    async def file_counts_by_partition(self) -> dict[str, int]:
+        """Return a ``{partition: document_count}`` map for all partitions (one query)."""
+        return await self._partition_repo.count_files_by_partition()
+
     async def create_partition(
         self,
         partition: str,
@@ -252,7 +256,9 @@ class PartitionService:
         row = await self._partition_repo.get_partition_row(partition)
         if row is None:
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
-        return self._partition_detail(row, self.resolve_partition_row(row))
+        detail = self._partition_detail(row, self.resolve_partition_row(row))
+        detail["document_count"] = await self._partition_repo.get_partition_file_count(partition)
+        return detail
 
     async def update_partition_config(self, partition: str, **fields: object) -> dict:
         """Update a partition's preset references and return the resolved detail."""

@@ -93,6 +93,7 @@ class PartitionDetailResponse(BaseModel):
     retrieval_pipeline: dict[str, Any]
     dimension: int
     created_at: datetime
+    document_count: int = 0
 
 
 __all__ = [
