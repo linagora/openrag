@@ -90,45 +90,10 @@ export interface DocumentListResponse {
   limit: number;
 }
 
-export interface EntityItem {
-  name: string;
-  type: string;
-}
-
-export interface TopicItem {
-  tag: string;
-  confidence: number;
-}
-
-export interface ChunkResponse {
-  id: string;
-  document_id: string;
-  chunk_index: number;
-  chunk_type: string;
-  text: string;
-  content: string;
-  context: string | null;
-  header: string | null;
-  page_number: number | null;
-  token_count: number;
-  metadata: Record<string, unknown>;
-  entities: EntityItem[];
-  topics: TopicItem[];
-}
-
-export interface ChunkListResponse {
-  chunks: ChunkResponse[];
-  total: number;
-}
-
-export interface CopyDocumentRequest {
-  target_partition: string;
-}
-
-// Legacy flat-model endpoints, retained UNCHANGED so documents/detail and the
-// overview keep working until they are migrated (4b + overview slice). These
-// still target the pre-OpenRag `/api/v1/admin/documents` paths (served by the
-// retained legacy MSW handlers). Removed once their consumers are wired.
+// Legacy flat-model list, retained ONLY for the overview aggregate until the
+// overview slice is wired (it calls listDocuments() with no partition; OpenRag
+// has no cross-partition list). Targets the pre-OpenRag path served by the
+// retained legacy MSW handler. Removed when overview is migrated.
 const _LEGACY_BASE = "/api/v1/admin/documents";
 
 export function listDocuments(params?: { partition?: string; status?: string; offset?: number; limit?: number }) {
@@ -139,29 +104,4 @@ export function listDocuments(params?: { partition?: string; status?: string; of
   if (params?.limit !== undefined) search.set("limit", String(params.limit));
   const qs = search.toString();
   return request<DocumentListResponse>(`${_LEGACY_BASE}${qs ? `?${qs}` : ""}`);
-}
-
-export function getDocument(id: string) {
-  return request<DocumentResponse>(`${_LEGACY_BASE}/${id}`);
-}
-
-export function getDocumentChunks(documentId: string) {
-  return request<ChunkListResponse>(`${_LEGACY_BASE}/${documentId}/chunks`);
-}
-
-export function replaceDocument(id: string, file: File) {
-  const form = new FormData();
-  form.append("file", file);
-  return request<DocumentResponse>(`${_LEGACY_BASE}/${id}`, { method: "PUT", body: form });
-}
-
-export function copyDocument(id: string, targetPartition: string) {
-  return request<DocumentResponse>(`${_LEGACY_BASE}/${id}/copy`, {
-    method: "POST",
-    body: JSON.stringify({ target_partition: targetPartition }),
-  });
-}
-
-export function deleteDocument(id: string) {
-  return request<{ deleted: boolean; document_id: string }>(`${_LEGACY_BASE}/${id}`, { method: "DELETE" });
 }
