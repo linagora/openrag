@@ -47,7 +47,7 @@ class EmbedderConfig(ConfigMixin):
     timeout: float = Field(default=120.0, gt=0)
     # Big documents are embedded in slices of `batch_size`, at most
     # `embed_concurrency` requests in flight, to stay within the timeout above.
-    batch_size: int = Field(default=64, gt=0)
+    batch_size: int = Field(default=32, gt=0)
     embed_concurrency: int = Field(default=4, gt=0)
 
 

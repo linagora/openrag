@@ -47,7 +47,7 @@ embedder:
   api_key: EMPTY
   max_model_len: 8192
   timeout: 120.0       # per-request HTTP timeout (s); raise for slow remote endpoints
-  batch_size: 64       # chunks per embedding request (big docs are split into batches)
+  batch_size: 32       # chunks per embedding request (big docs are split into batches)
   embed_concurrency: 4 # max embedding requests in flight at once
 
 # --- Vector Database (Milvus) ---
