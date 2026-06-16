@@ -318,6 +318,8 @@ class PartitionService:
             "retrieval_pipeline": cfg.retrieval.model_dump(mode="json"),
             "dimension": row.get("dimension"),
             "created_at": row.get("created_at"),
+            "chat_history_depth": row.get("chat_history_depth") or 0,
+            "chat_llm": row.get("chat_llm"),
         }
 
     # ------------------------------------------------------------------

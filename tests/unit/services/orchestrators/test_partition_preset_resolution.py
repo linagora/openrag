@@ -296,6 +296,8 @@ async def test_get_partition_config_returns_resolved_detail():
     assert detail["dimension"] == 1024
     assert detail["retrieval_pipeline"]["top_k"] == 50
     assert "chunking" in detail["indexation_pipeline"]
+    assert "chat_history_depth" in detail
+    assert "chat_llm" in detail
 
 
 @pytest.mark.asyncio
