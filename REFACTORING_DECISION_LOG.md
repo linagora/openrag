@@ -1399,6 +1399,73 @@ All five CI jobs (Layer guard, Linting, Unit, Integration, API) are
 green on the branch after these fixes.
 
 ---
+## Phase 15 — OIDC group → partition authorization (2026-06-12)
+
+**1. Variable names uniformized onto the shipped `OIDC_*` surface; the
+strategy doc's draft names are not reintroduced.**
+- Why: `REFACTORING_STRATEGY_v1.md` §Phase 15 (and `REFACTORING_DEV_WORKFLOW.md`)
+  sketch a *stateless raw-JWT-bearer* design with its own env vocabulary
+  (`OIDC_ENABLED`, `OIDC_ISSUER_URL`, `OIDC_AUDIENCE`, `OIDC_JWKS_CACHE_TTL`,
+  `VITE_OIDC_*`). The shipped OIDC is the **session-cookie Authorization
+  Code + PKCE** flow (`docs/oidc.md`), which already reads `AUTH_MODE=oidc`,
+  `OIDC_ENDPOINT`, `OIDC_REDIRECT_URI`, … The two never coexisted in code, so
+  Phase 15 adopts the shipped names as canonical and only adds vars for the
+  one genuinely-missing half (group → partition mapping):
+  `OIDC_CLAIM_GROUPS`, `OIDC_GROUP_PREFIX`, `OIDC_GROUP_PATTERN`,
+  `OIDC_GROUP_SYNC_PRUNE`. Draft names like `OIDC_ISSUER_URL` are *not* read.
+- Alternative considered: a reconciliation note in `docs/oidc.md` pointing
+  operators at the draft↔shipped mapping. Rejected — `docs/oidc.md` is
+  operator-facing; an operator never read the internal drafts, so the note
+  was pure noise. The reconciliation lives here and in `phase15.md` §A
+  (developer-facing), not in the operator guide.
+
+**2. `OIDC_GROUP_SYNC_PRUNE` is an opt-in flag (default off), not the
+strategy doc's unconditional "remove stale".**
+- Why: the doc (provisioner step 4) says *"Keycloak is source of truth — add
+  missing, update changed, remove stale"* — i.e. delete any membership absent
+  from the token on every login. That assumes a greenfield where the IdP is
+  the *only* membership source. We're adding to a shipped system where
+  memberships are also granted manually via the `/partition/{p}/users` admin
+  API; unconditional prune would silently wipe those on the next login. So
+  sync is additive + role-update by default, and prune is behind
+  `OIDC_GROUP_SYNC_PRUNE=true` for operators who want the doc's literal
+  "sole source of truth" behavior. The var name itself is ours (not in any
+  doc); only the behavior traces to the strategy doc.
+- Alternative considered: prune-by-default to match the doc verbatim.
+  Rejected as data-loss-prone for mixed manual+SSO deployments.
+- Follow-up (mass-revocation guard): even with prune *on*, removal runs only
+  when the token actually **asserts** the groups claim. A missing claim
+  (mapper disabled, wrong `OIDC_CLAIM_GROUPS`, scope not granted, transient
+  omission) produces an empty ``desired`` that means "no signal", not "revoke
+  everything" — without the guard a single config typo would wipe every
+  synced user's access on next login (the classic directory-sync footgun). An
+  explicit empty list (``groups: []``) is a real signal and still prunes. The
+  two failure directions are asymmetric: silent mass-revocation is
+  catastrophic, a lingering stale membership is trivially fixable — so we fail
+  safe on the missing-claim case.
+
+**3. role → `is_admin` mapping (`OIDC_CLAIM_ROLES` / `OIDC_ADMIN_ROLE`)
+deferred, not implemented.**
+- Why: the strategy doc puts it in scope, but `docs/oidc.md` documents a
+  *hard* boundary — `is_admin` is never writable via claims (same whitelist
+  that blocks it in `OIDC_CLAIM_MAPPING`). Honoring the doc here would breach
+  a shipped security guarantee. Admin stays an explicit operator action.
+- Alternative considered: ship it behind a loud opt-in. Left as an open
+  decision for the maintainers rather than bundled into this phase.
+
+**4. Group sync hooks into `AuthService.handle_oidc_callback`, not the
+strategy doc's new `jwt_validator`/`oidc_mapper`/`oidc_provisioner` files
+or an `api/dependencies/auth.py` dispatch.**
+- Why: those files target the stateless-bearer path the session-cookie flow
+  obviates. Authentication already runs in `AuthMiddleware` →
+  `AuthService.handle_oidc_callback`, where the verified ID-token claims and
+  the (already-injected) `membership_repo` are in hand. The work is one pure
+  mapper (`services/auth/oidc_groups.py`) plus a `_sync_oidc_memberships`
+  step after the existing claim-mapping call — no new dispatch layer, no
+  extra IdP round-trip. An unknown partition (FK violation) is logged and
+  skipped per-membership so it can never block an otherwise-valid login.
+
+---
 ## Template for future entries
 
 ```

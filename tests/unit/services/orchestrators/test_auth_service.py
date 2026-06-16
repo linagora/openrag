@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 from core.config.auth import OIDCConfig
-from core.models.user import User
+from core.models.user import PartitionRole, User, UserPartition
 from cryptography.fernet import Fernet
 from services.auth import StateCookieSerializer, hash_session_token
 from services.auth.oidc_client import LogoutTokenClaims, TokenBundle
@@ -137,11 +137,52 @@ def _cfg(**over) -> OIDCConfig:
     return OIDCConfig(**base)
 
 
-def _service(*, user_repo=None, session_repo=None, client=None, cfg=None) -> AuthService:
+class FakeMembershipRepo:
+    """In-memory ``partition_memberships`` keyed by (user_id, partition).
+
+    ``fk_missing`` names partitions that do not exist in ``partitions`` — an
+    ``assign_partition`` against one raises, mimicking the real FK violation so
+    the sync's per-membership isolation can be exercised.
+    """
+
+    def __init__(self, *, seed=None, fk_missing=None):
+        # seed: list of (user_id, partition, role-str)
+        self._rows: dict[tuple[int, str], str] = {(uid, part): role for uid, part, role in (seed or [])}
+        self._fk_missing = set(fk_missing or [])
+        self.assigned: list[tuple[int, str, str]] = []
+        self.updated: list[tuple[int, str, str]] = []
+        self.removed: list[tuple[int, str]] = []
+
+    async def list_user_partitions(self, user_id: int):
+        return [
+            UserPartition(user_id=uid, partition=part, role=PartitionRole(role))
+            for (uid, part), role in self._rows.items()
+            if uid == user_id
+        ]
+
+    async def assign_partition(self, assignment: UserPartition):
+        if assignment.partition in self._fk_missing:
+            raise RuntimeError("insert or update violates foreign key constraint")
+        self._rows[(assignment.user_id, assignment.partition)] = assignment.role.value
+        self.assigned.append((assignment.user_id, assignment.partition, assignment.role.value))
+        return assignment
+
+    async def update_partition_role(self, user_id: int, partition: str, role: PartitionRole) -> bool:
+        self._rows[(user_id, partition)] = role.value
+        self.updated.append((user_id, partition, role.value))
+        return True
+
+    async def remove_partition(self, user_id: int, partition: str) -> bool:
+        existed = self._rows.pop((user_id, partition), None) is not None
+        self.removed.append((user_id, partition))
+        return existed
+
+
+def _service(*, user_repo=None, session_repo=None, client=None, cfg=None, membership_repo=None) -> AuthService:
     return AuthService(
         user_repo=user_repo or FakeUserRepo(),
         oidc_session_repo=session_repo or FakeSessionRepo(),
-        membership_repo=object(),
+        membership_repo=membership_repo if membership_repo is not None else object(),
         oidc_client=client,
         config=cfg or _cfg(),
     )
@@ -471,3 +512,127 @@ def test_validate_file_quota():
         AuthService.validate_file_quota({"file_count": 3, "file_quota": 5}, pending_task_count=2, default_quota=10)
     # Under the limit is fine.
     AuthService.validate_file_quota({"file_count": 1, "file_quota": 5}, pending_task_count=1, default_quota=10)
+
+
+# --------------------------------------------------------------------------- #
+# _sync_oidc_memberships (Phase 15)
+# --------------------------------------------------------------------------- #
+
+
+def _group_cfg(**over) -> OIDCConfig:
+    return _cfg(
+        claim_groups="groups",
+        group_prefix="/openrag/",
+        group_pattern=r"(.+)/(owner|editor|viewer)$",
+        **over,
+    )
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_is_noop_when_disabled():
+    repo = FakeMembershipRepo()
+    svc = _service(cfg=_cfg(), membership_repo=repo)  # claim_groups unset
+    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/owner"]})
+    assert repo.assigned == [] and repo.updated == [] and repo.removed == []
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_adds_missing():
+    repo = FakeMembershipRepo(seed=[(1, "alpha", "viewer")])
+    svc = _service(cfg=_group_cfg(), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/viewer", "/openrag/beta/editor"]})
+    # alpha unchanged (already viewer); beta added.
+    assert repo.assigned == [(1, "beta", "editor")]
+    assert repo.updated == []
+    assert repo.removed == []
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_updates_changed_role():
+    repo = FakeMembershipRepo(seed=[(1, "alpha", "viewer")])
+    svc = _service(cfg=_group_cfg(), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/owner"]})
+    assert repo.updated == [(1, "alpha", "owner")]
+    assert repo.assigned == []
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_prune_off_keeps_stale():
+    repo = FakeMembershipRepo(seed=[(1, "stale", "editor")])
+    svc = _service(cfg=_group_cfg(group_sync_prune=False), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/viewer"]})
+    assert repo.assigned == [(1, "alpha", "viewer")]
+    assert repo.removed == []  # 'stale' kept
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_prune_on_removes_stale():
+    repo = FakeMembershipRepo(seed=[(1, "stale", "editor"), (1, "alpha", "viewer")])
+    svc = _service(cfg=_group_cfg(group_sync_prune=True), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/viewer"]})
+    assert repo.removed == [(1, "stale")]  # only the one absent from the token
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_prune_skips_when_groups_claim_absent():
+    """Mass-revocation guard: a missing groups claim (mapper disabled / wrong
+    claim name) must NOT prune — that's 'no signal', not 'revoke everything'."""
+    repo = FakeMembershipRepo(seed=[(1, "alpha", "editor"), (1, "beta", "viewer")])
+    svc = _service(cfg=_group_cfg(group_sync_prune=True), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"sub": "kc-1"})  # no 'groups' key
+    assert repo.removed == []  # nothing wiped
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_prune_skips_when_groups_claim_is_null():
+    """An explicit ``groups: null`` is also treated as no assertion."""
+    repo = FakeMembershipRepo(seed=[(1, "alpha", "editor")])
+    svc = _service(cfg=_group_cfg(group_sync_prune=True), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": None})
+    assert repo.removed == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_claim", [42, {"a": 1}, 3.14, True])
+async def test_membership_sync_prune_skips_when_groups_claim_is_malformed_type(bad_claim):
+    """A present-but-malformed claim (number/dict) maps to zero groups via
+    ``_coerce_groups`` — the same misconfiguration the guard defends against,
+    so it must NOT prune. Only ``str``/``list`` count as an asserted signal."""
+    repo = FakeMembershipRepo(seed=[(1, "alpha", "editor"), (1, "beta", "viewer")])
+    svc = _service(cfg=_group_cfg(group_sync_prune=True), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": bad_claim})
+    assert repo.removed == []  # nothing wiped on a garbage claim
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_prune_runs_on_explicit_empty_group_list():
+    """``groups: []`` is a real signal (user genuinely in no groups) → prune."""
+    repo = FakeMembershipRepo(seed=[(1, "alpha", "editor"), (1, "beta", "viewer")])
+    svc = _service(cfg=_group_cfg(group_sync_prune=True), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": []})
+    assert sorted(repo.removed) == [(1, "alpha"), (1, "beta")]
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_unknown_partition_is_isolated():
+    """A group naming a non-existent partition (FK violation) is logged and
+    skipped; other valid memberships in the same token still apply."""
+    repo = FakeMembershipRepo(fk_missing=["ghost"])
+    svc = _service(cfg=_group_cfg(), membership_repo=repo)
+    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/ghost/owner", "/openrag/alpha/editor"]})
+    # ghost failed, alpha succeeded — the login is never blocked.
+    assert (1, "alpha", "editor") in repo.assigned
+    assert (1, "ghost") not in [(u, p) for (u, p, _) in repo.assigned]
+
+
+@pytest.mark.asyncio
+async def test_membership_sync_survives_list_failure():
+    class Boom(FakeMembershipRepo):
+        async def list_user_partitions(self, user_id):
+            raise RuntimeError("db down")
+
+    repo = Boom()
+    svc = _service(cfg=_group_cfg(), membership_repo=repo)
+    # Must not raise.
+    await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/owner"]})
+    assert repo.assigned == []

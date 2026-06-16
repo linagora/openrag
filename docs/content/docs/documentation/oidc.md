@@ -10,12 +10,13 @@ This guide walks you through configuring and using OpenRag's OIDC authentication
 4. [User Pre-provisioning](#user-pre-provisioning)
 5. [Claim Mapping (optional)](#claim-mapping-optional)
 6. [Auto-provisioning (optional)](#auto-provisioning-optional)
-7. [Keycloak Setup](#keycloak-setup)
-8. [LemonLDAP::NG Setup](#lemonldapng-setup)
-9. [Programmatic Access](#programmatic-access)
-10. [Back-Channel Logout](#back-channel-logout)
-11. [Troubleshooting](#troubleshooting)
-12. [Security Considerations](#security-considerations)
+7. [Group → Partition Mapping (optional)](#group--partition-mapping-optional)
+8. [Keycloak Setup](#keycloak-setup)
+9. [LemonLDAP::NG Setup](#lemonldapng-setup)
+10. [Programmatic Access](#programmatic-access)
+11. [Back-Channel Logout](#back-channel-logout)
+12. [Troubleshooting](#troubleshooting)
+13. [Security Considerations](#security-considerations)
 
 ---
 
@@ -341,6 +342,75 @@ The two flags are independent and compose cleanly:
 ### Threat Model
 
 Enabling auto-provisioning shifts the trust boundary: the IdP's user list becomes the source of truth for OpenRag accounts. Strict-whitelist deployments leave the flag unset and keep the historical `403`. There is no path to grant `is_admin=true` via OIDC claims; promotion remains an explicit admin action.
+
+---
+
+## Group → Partition Mapping (optional)
+
+By default, OIDC manages only *who* a user is; their **partition access** is still granted
+manually through the `/partition/{partition}/users` admin API. If your IdP already models access as
+**groups** (Keycloak groups, LLNG/Azure roles, …), OpenRag can read those groups from the login
+token and reconcile the user's partition memberships automatically on every login.
+
+This feature is **off** unless `OIDC_CLAIM_GROUPS` is set — existing deployments are unaffected.
+
+### How It Works
+
+Each group in the configured claim is matched as:
+
+```
+<OIDC_GROUP_PREFIX><partition>/<role>
+        e.g.  /openrag/project-alpha/editor   ->   partition "project-alpha", role "editor"
+```
+
+1. The claim named by `OIDC_CLAIM_GROUPS` is read from the **verified ID token** (no extra HTTP call).
+2. `OIDC_GROUP_PREFIX` is stripped from each group; groups without the prefix are ignored (they
+   belong to other apps).
+3. The remainder is matched against `OIDC_GROUP_PATTERN`, whose two capture groups are
+   `(partition, role)`. Roles are the usual `viewer` / `editor` / `owner`.
+4. When several groups grant the same partition, the **highest** role wins.
+5. The user's memberships are reconciled: missing ones are **added**, changed roles **updated**.
+6. If `OIDC_GROUP_SYNC_PRUNE=true`, memberships **absent** from the token are **removed** (the IdP
+   becomes the sole source of truth). Default (`false`) leaves manually-granted memberships intact.
+   **Mass-revocation guard:** prune runs only when the token actually carries the groups claim. If
+   the claim is *missing* (mapper disabled, wrong `OIDC_CLAIM_GROUPS`, scope not granted), prune is
+   skipped and a warning is logged — a misconfiguration cannot silently wipe everyone's access. An
+   explicit empty list (`groups: []`, the user is genuinely in no groups) **does** prune.
+
+A group that names a partition which does not exist yet is **skipped with a warning** — it never
+blocks the login. Create the partition first (any indexing call auto-creates it), then the next
+login will attach the membership.
+
+> **`is_admin` is never derived from groups.** Admin remains an explicit operator action
+> (`POST /users/` or `PATCH /users/{id}`), the same hard boundary as [Claim Mapping](#claim-mapping-optional).
+> The role vocabulary here is strictly the partition roles `viewer`/`editor`/`owner`.
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OIDC_CLAIM_GROUPS` | — (feature off) | Name of the token claim holding the group list (Keycloak: `groups`). |
+| `OIDC_GROUP_PREFIX` | `/openrag/` | Prefix stripped from each group before matching; non-matching groups are ignored. |
+| `OIDC_GROUP_PATTERN` | `(.+)/(owner\|editor\|viewer)$` | Regex with two capture groups: 1 = partition, 2 = role. Validated at startup. |
+| `OIDC_GROUP_SYNC_PRUNE` | `false` | `true` removes memberships not present in the token (IdP = source of truth). |
+
+```bash
+OIDC_CLAIM_GROUPS=groups
+OIDC_GROUP_PREFIX=/openrag/
+OIDC_GROUP_PATTERN=(.+)/(owner|editor|viewer)$
+OIDC_GROUP_SYNC_PRUNE=false
+```
+
+### Keycloak Setup for Groups
+
+1. **Realm** → **Groups**: create a group tree mirroring your partitions, e.g.
+   `/openrag/project-alpha/editor`, `/openrag/project-alpha/viewer`, `/openrag/project-beta/owner`.
+2. Assign users to the appropriate leaf groups (**Users** → user → **Groups** → **Join**).
+3. Add a **Group Membership** mapper so the groups land in the token:
+   **Clients** → `openrag` → **Client scopes** → `openrag-dedicated` → **Add mapper** →
+   **Group Membership**. Set **Token Claim Name** = `groups`, **Full group path** = ON, and ensure
+   **Add to ID token** = ON (OpenRag reads the ID token by default).
+4. Set `OIDC_CLAIM_GROUPS=groups` in OpenRag's `.env` and restart.
 
 ---
 
