@@ -368,6 +368,28 @@ export const handlers = [
     return HttpResponse.json({ detail: "Not found" }, { status: 404 });
   }),
 
+  // OpenRag queue / tasks (poll-based jobs)
+  http.get(`${API}/queue/info`, () =>
+    HttpResponse.json({
+      workers: { total_slots: 4, pool_size: 2, max_per_actor: 2 },
+      tasks: { active: 1, active_statuses: { CHUNKING: 1 }, total_completed: 12, total_cancelled: 0, total_failed: 1 },
+    }),
+  ),
+
+  http.get(`${API}/queue/tasks`, ({ request }) => {
+    const filter = new URL(request.url).searchParams.get("task_status");
+    const all = [
+      { task_id: "task-001", state: "COMPLETED", details: { file_id: "doc-001", partition: "legal-docs", metadata: { filename: "contract-template-2024.pdf" }, user_id: 1 }, url: "/indexer/task/task-001" },
+      { task_id: "task-002", state: "CHUNKING", details: { file_id: "doc-004", partition: "legal-docs", metadata: { filename: "quarterly-report-Q4.pdf" }, user_id: 1 }, url: "/indexer/task/task-002" },
+      { task_id: "task-003", state: "FAILED", details: { file_id: "doc-006", partition: "legal-docs", metadata: { filename: "corrupted-file.pdf" }, user_id: 1 }, url: "/indexer/task/task-003", error_url: "/indexer/task/task-003/error" },
+    ];
+    const ACTIVE = ["QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"];
+    let tasks = all;
+    if (filter === "active") tasks = all.filter((t) => ACTIVE.includes(t.state));
+    else if (filter) tasks = all.filter((t) => t.state.toLowerCase() === filter.toLowerCase());
+    return HttpResponse.json({ tasks });
+  }),
+
   // Jobs
   http.get(`${API}/api/v1/admin/jobs`, ({ request }) => {
     const url = new URL(request.url);
