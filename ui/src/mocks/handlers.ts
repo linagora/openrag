@@ -205,13 +205,6 @@ export const handlers = [
     });
   }),
 
-  http.post(`${API}/api/v1/auth/refresh`, () => {
-    return HttpResponse.json({
-      access_token: "header.eyJzdWIiOiJ1c3ItMDAxIiwidHlwZSI6ImFjY2VzcyIsImVtYWlsIjoiYWRtaW5AbWFuZHJhZ29yYS5pbyIsInJvbGUiOiJzdXBlcmFkbWluIn0=.signature",
-      token_type: "bearer",
-    });
-  }),
-
   // Single per-user API token regenerate (OpenRag model — one rotating token).
   http.post(`${API}/api/v1/user/account/regenerate-token`, () => {
     const rand = Array.from({ length: 32 }, (_, i) => "0123456789abcdef"[(i * 7 + 3) % 16]).join("");
@@ -467,22 +460,6 @@ export const handlers = [
     return HttpResponse.json({ token: `or-${rand}` });
   }),
 
-  http.post(`${API}/api/v1/admin/users/:id/api-keys`, () => {
-    return HttpResponse.json({
-      id: "key-001",
-      key_prefix: "mnd_ak_7f3b",
-      name: "dev-key",
-      is_active: true,
-      created_at: new Date().toISOString(),
-      expires_at: null,
-      raw_key: "mnd_ak_7f3b2c9e4d1a8f5b6e3c0d7a9f2b4e6c8d0a1b3e5f7c9d",
-    });
-  }),
-
-  http.delete(`${API}/api/v1/admin/users/:id/api-keys/:keyId`, () => {
-    return new HttpResponse(null, { status: 204 });
-  }),
-
   http.post(`${API}/api/v1/admin/users/:id/partitions`, () => {
     return HttpResponse.json({ user_id: "usr-001", partition: "legal-docs", role: "reader", created_at: new Date().toISOString() });
   }),
@@ -579,26 +556,6 @@ export const handlers = [
     if (partition) filtered = filtered.filter((p) => p.partition === partition);
     if (type) filtered = filtered.filter((p) => p.prompt_type === type);
     return HttpResponse.json({ prompts: filtered, offset: 0, limit: 50 });
-  }),
-
-  http.get(`${API}/api/v1/admin/prompts/:id`, ({ params }) => {
-    const prompt = prompts.find((p) => p.id === params.id);
-    if (!prompt) return HttpResponse.json({ detail: "Not found" }, { status: 404 });
-    return HttpResponse.json(prompt);
-  }),
-
-  http.post(`${API}/api/v1/admin/prompts`, async ({ request }) => {
-    const body = (await request.json()) as Record<string, unknown>;
-    return HttpResponse.json({ id: "prm-new", ...body, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
-  }),
-
-  http.patch(`${API}/api/v1/admin/prompts/:id`, ({ params }) => {
-    const prompt = prompts.find((p) => p.id === params.id);
-    return HttpResponse.json(prompt || prompts[0]);
-  }),
-
-  http.delete(`${API}/api/v1/admin/prompts/:id`, () => {
-    return new HttpResponse(null, { status: 204 });
   }),
 
   // Pipelines

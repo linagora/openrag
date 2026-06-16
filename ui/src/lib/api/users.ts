@@ -31,19 +31,6 @@ export interface UpdateUserRequest {
   is_active?: boolean;
 }
 
-export interface ApiKeyResponse {
-  id: string;
-  key_prefix: string;
-  name: string;
-  is_active: boolean;
-  created_at: string;
-  expires_at: string | null;
-}
-
-export interface ApiKeyCreatedResponse extends ApiKeyResponse {
-  raw_key: string;
-}
-
 export interface UserPartitionResponse {
   user_id: string;
   partition: string;
@@ -89,20 +76,6 @@ export function regenerateUserToken(userId: string) {
   return request<{ token: string }>(`${BASE}/${userId}/regenerate_token`, { method: "POST" });
 }
 
-// API Keys
-export function createApiKey(userId: string, name?: string) {
-  return request<ApiKeyCreatedResponse>(`${BASE}/${userId}/api-keys`, {
-    method: "POST",
-    body: JSON.stringify({ name: name || "" }),
-  });
-}
-
-export function revokeApiKey(userId: string, keyId: string) {
-  return request<void>(`${BASE}/${userId}/api-keys/${keyId}`, {
-    method: "DELETE",
-  });
-}
-
 // Partition assignments
 export function listUserPartitions(userId: string) {
   return request<UserPartitionResponse[]>(`${BASE}/${userId}/partitions`);
@@ -122,34 +95,5 @@ export function assignPartition(
 export function removePartition(userId: string, partition: string) {
   return request<void>(`${BASE}/${userId}/partitions/${partition}`, {
     method: "DELETE",
-  });
-}
-
-// Bulk import
-export interface ImportedUserRow {
-  email: string;
-  display_name: string;
-  role: string;
-  temporary_password: string;
-  partitions: string[];
-}
-
-export interface ImportErrorRow {
-  row: number;
-  email: string | null;
-  errors: string[];
-}
-
-export interface BulkImportResponse {
-  created: ImportedUserRow[];
-  count: number;
-}
-
-export function importUsers(file: File): Promise<BulkImportResponse> {
-  const form = new FormData();
-  form.append("file", file);
-  return request<BulkImportResponse>(`${BASE}/import`, {
-    method: "POST",
-    body: form,
   });
 }

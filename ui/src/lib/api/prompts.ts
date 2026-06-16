@@ -22,36 +22,11 @@ export interface PromptListResponse {
   limit: number;
 }
 
-export interface CreatePromptRequest {
-  prompt_type: string;
-  name?: string;
-  content: string;
-  is_default?: boolean;
-}
-
-export interface UpdatePromptRequest {
-  name?: string;
-  content?: string;
-  is_default?: boolean;
-}
-
-export interface PromptBriefResponse {
-  id: string;
-  name: string;
-  prompt_type: string;
-}
-
-export interface PartitionPromptMap {
-  partition: string;
-  assignments: Record<string, PromptBriefResponse | null>;
-}
-
-export interface AssignPartitionPromptRequest {
-  prompt_id: string;
-}
-
 const BASE = "/api/v1/admin/prompts";
 
+// Prompts is a dropped feature; presets only reads the prompt list (to pick a
+// chat prompt). The CRUD/partition-assignment surface was removed — re-add from
+// git history if a prompt-management page is reinstated.
 export function listPrompts(params?: {
   prompt_type?: string;
   offset?: number;
@@ -63,50 +38,4 @@ export function listPrompts(params?: {
   if (params?.limit !== undefined) search.set("limit", String(params.limit));
   const qs = search.toString();
   return request<PromptListResponse>(`${BASE}${qs ? `?${qs}` : ""}`);
-}
-
-export function getPrompt(id: string) {
-  return request<PromptResponse>(`${BASE}/${id}`);
-}
-
-export function createPrompt(data: CreatePromptRequest) {
-  return request<PromptResponse>(BASE, {
-    method: "POST",
-    body: JSON.stringify(data),
-  });
-}
-
-export function updatePrompt(id: string, data: UpdatePromptRequest) {
-  return request<PromptResponse>(`${BASE}/${id}`, {
-    method: "PATCH",
-    body: JSON.stringify(data),
-  });
-}
-
-export function deletePrompt(id: string) {
-  return request<void>(`${BASE}/${id}`, { method: "DELETE" });
-}
-
-export function setPromptDefault(id: string) {
-  return request<PromptResponse>(`${BASE}/${id}/default`, { method: "PUT" });
-}
-
-export function getPartitionPrompts(partitionName: string) {
-  return request<PartitionPromptMap>(
-    `/api/v1/admin/partitions/${encodeURIComponent(partitionName)}/prompts`
-  );
-}
-
-export function assignPartitionPrompt(partitionName: string, promptType: string, promptId: string) {
-  return request<void>(
-    `/api/v1/admin/partitions/${encodeURIComponent(partitionName)}/prompts/${promptType}`,
-    { method: "PUT", body: JSON.stringify({ prompt_id: promptId }) }
-  );
-}
-
-export function unassignPartitionPrompt(partitionName: string, promptType: string) {
-  return request<void>(
-    `/api/v1/admin/partitions/${encodeURIComponent(partitionName)}/prompts/${promptType}`,
-    { method: "DELETE" }
-  );
 }
