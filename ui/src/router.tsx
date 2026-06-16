@@ -41,7 +41,7 @@ export const router = createBrowserRouter(
         { path: "partitions", element: <PartitionListPage /> },
         { path: "partitions/:name", element: <PartitionDetailPage /> },
         { path: "documents", element: <DocumentListPage /> },
-        { path: "documents/:id", element: <DocumentDetailPage /> },
+        { path: "documents/:partition/:fileId", element: <DocumentDetailPage /> },
         { path: "jobs", element: <JobListPage /> },
         { path: "jobs/:id", element: <JobDetailPage /> },
         {

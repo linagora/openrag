@@ -252,7 +252,15 @@ export const handlers = [
     const name = params.name as string;
     const files = documents
       .filter((d) => d.partition === name)
-      .map((d) => ({ file_id: d.id, partition: name, filename: d.filename, link: `/partition/${name}/file/${d.id}` }));
+      .map((d) => ({
+        file_id: d.id,
+        partition: name,
+        filename: d.filename,
+        mimetype: d.content_type,
+        indexed_at: d.indexed_at,
+        created_at: d.created_at,
+        link: `/partition/${name}/file/${d.id}`,
+      }));
     return HttpResponse.json({ files });
   }),
 
@@ -276,6 +284,35 @@ export const handlers = [
   http.patch(`${API}/partition/:name/users/:userId`, () => new HttpResponse(null, { status: 200 })),
 
   http.delete(`${API}/partition/:name/users/:userId`, () => new HttpResponse(null, { status: 204 })),
+
+  // Indexer (write side) — OpenRag `/indexer`
+  http.get(`${API}/indexer/supported/types`, () =>
+    HttpResponse.json({
+      extensions: ["pdf", "docx", "pptx", "md", "txt", "html", "eml"],
+      mimetypes: ["application/pdf", "text/plain", "text/markdown", "text/html"],
+    }),
+  ),
+
+  http.post(`${API}/indexer/partition/:name/file/:fileId`, ({ params }) =>
+    HttpResponse.json(
+      { task_status_url: `/indexer/task/mock-${params.fileId}` },
+      { status: 201 },
+    ),
+  ),
+
+  http.put(`${API}/indexer/partition/:name/file/:fileId`, ({ params }) =>
+    HttpResponse.json({ task_status_url: `/indexer/task/mock-${params.fileId}` }, { status: 202 }),
+  ),
+
+  http.patch(`${API}/indexer/partition/:name/file/:fileId`, () =>
+    HttpResponse.json({ message: "Metadata updated" }),
+  ),
+
+  http.delete(`${API}/indexer/partition/:name/file/:fileId`, () => new HttpResponse(null, { status: 204 })),
+
+  http.post(`${API}/indexer/partition/:name/file/:fileId/copy`, () =>
+    HttpResponse.json({ message: "File copied" }, { status: 201 }),
+  ),
 
   // Documents
   http.get(`${API}/api/v1/admin/documents`, ({ request }) => {

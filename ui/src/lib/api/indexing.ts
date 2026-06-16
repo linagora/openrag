@@ -1,68 +1,111 @@
 import { request } from "./client";
 
-export interface IndexResponse {
-  document_id: string;
-  partition: string;
-  chunk_count: number;
-  status: string;
+// OpenRag indexing — the WRITE side of the per-partition file model, mounted
+// under `/indexer`. Files are addressed by a CLIENT-SUPPLIED `file_id` scoped
+// to a partition; there is no flat `/documents` collection and no batch endpoint
+// (multi-file upload is a client-side loop). Verified vs routers/admin/indexing.py:
+//   GET    /indexer/supported/types                 → { extensions, mimetypes }
+//   POST   /indexer/partition/{p}/file/{id}         upload+index (multipart) → 201 { task_status_url }
+//   PUT    /indexer/partition/{p}/file/{id}         replace (multipart)      → 202 { task_status_url }
+//   PATCH  /indexer/partition/{p}/file/{id}         update metadata only     → 200 { message }
+//   DELETE /indexer/partition/{p}/file/{id}         delete                   → 204
+//   POST   /indexer/partition/{p}/file/{id}/copy    copy from another partition (multipart) → 201
+//
+// Upload/replace are multipart: a `file` part + a `metadata` form field holding
+// a JSON string (NOT a JSON body); `workspace_ids` is an optional JSON-array string.
+
+const I = "/indexer";
+const enc = encodeURIComponent;
+
+export interface SupportedTypes {
+  extensions: string[];
+  mimetypes: string[];
 }
 
-export interface BatchJobAccepted {
-  job_id: string;
-  status: string;
-  total_documents: number;
+/** Upload and replace return a pollable task URL — feed the id to jobs.ts. */
+export interface TaskAccepted {
+  task_status_url: string;
 }
 
-export function indexDocument(file: File, partition: string) {
+export function getSupportedTypes(): Promise<SupportedTypes> {
+  return request<SupportedTypes>(`${I}/supported/types`);
+}
+
+function fileForm(file: File, metadata?: Record<string, unknown>, workspaceIds?: string[]): FormData {
   const form = new FormData();
   form.append("file", file);
-  form.append("partition", partition);
-  return request<IndexResponse>("/api/v1/admin/indexing/document", {
-    method: "POST",
-    body: form,
-  });
+  if (metadata !== undefined) form.append("metadata", JSON.stringify(metadata));
+  if (workspaceIds !== undefined) form.append("workspace_ids", JSON.stringify(workspaceIds));
+  return form;
 }
 
-export function indexBatch(files: File[], partition: string) {
-  const form = new FormData();
-  files.forEach((f) => form.append("files", f));
-  form.append("partition", partition);
-  return request<BatchJobAccepted>("/api/v1/admin/indexing/batch", {
-    method: "POST",
-    body: form,
-  });
+/** Generate a unique, URL-safe file_id for a new upload. */
+export function newFileId(): string {
+  return crypto.randomUUID();
 }
 
-export const BATCH_CHUNK_SIZE = 20;
-
-export interface BatchChunkProgress {
-  batchIndex: number;
-  totalBatches: number;
-  jobId: string;
-  jobIds: string[];
-}
-
-export async function indexBatchChunked(
-  files: File[],
+/**
+ * Upload and index a new file. `fileId` is chosen by the caller (unique within
+ * the partition; 409 if it already exists). Returns 201 + a task URL to poll.
+ */
+export function uploadFile(
   partition: string,
-  onBatchComplete?: (progress: BatchChunkProgress) => void,
-): Promise<{ jobIds: string[]; totalDocuments: number }> {
-  const chunks: File[][] = [];
-  for (let i = 0; i < files.length; i += BATCH_CHUNK_SIZE) {
-    chunks.push(files.slice(i, i + BATCH_CHUNK_SIZE));
-  }
+  fileId: string,
+  file: File,
+  metadata?: Record<string, unknown>,
+  workspaceIds?: string[],
+): Promise<TaskAccepted> {
+  return request<TaskAccepted>(`${I}/partition/${enc(partition)}/file/${enc(fileId)}`, {
+    method: "POST",
+    body: fileForm(file, metadata, workspaceIds),
+  });
+}
 
-  const jobIds: string[] = [];
-  for (let i = 0; i < chunks.length; i++) {
-    const result = await indexBatch(chunks[i], partition);
-    jobIds.push(result.job_id);
-    onBatchComplete?.({
-      batchIndex: i,
-      totalBatches: chunks.length,
-      jobId: result.job_id,
-      jobIds: [...jobIds],
-    });
-  }
+/** Replace an existing file, preserving its `file_id`. Returns 202 + task URL. */
+export function replaceFile(
+  partition: string,
+  fileId: string,
+  file: File,
+  metadata?: Record<string, unknown>,
+): Promise<TaskAccepted> {
+  return request<TaskAccepted>(`${I}/partition/${enc(partition)}/file/${enc(fileId)}`, {
+    method: "PUT",
+    body: fileForm(file, metadata),
+  });
+}
 
-  return { jobIds, totalDocuments: files.length };
+/** Update file metadata in place (no re-upload). A `partition` key MOVES the file. */
+export function updateFileMetadata(
+  partition: string,
+  fileId: string,
+  metadata: Record<string, unknown>,
+): Promise<{ message: string }> {
+  const form = new FormData();
+  form.append("metadata", JSON.stringify(metadata));
+  return request<{ message: string }>(`${I}/partition/${enc(partition)}/file/${enc(fileId)}`, {
+    method: "PATCH",
+    body: form,
+  });
+}
+
+export function deleteFile(partition: string, fileId: string): Promise<void> {
+  return request<void>(`${I}/partition/${enc(partition)}/file/${enc(fileId)}`, { method: "DELETE" });
+}
+
+/** Copy a file into `partition` as `fileId` from `sourcePartition`/`sourceFileId`. */
+export function copyFile(
+  partition: string,
+  fileId: string,
+  sourcePartition: string,
+  sourceFileId: string,
+  metadata?: Record<string, unknown>,
+): Promise<{ message: string }> {
+  const form = new FormData();
+  form.append("source_partition", sourcePartition);
+  form.append("source_file_id", sourceFileId);
+  if (metadata !== undefined) form.append("metadata", JSON.stringify(metadata));
+  return request<{ message: string }>(`${I}/partition/${enc(partition)}/file/${enc(fileId)}/copy`, {
+    method: "POST",
+    body: form,
+  });
 }
