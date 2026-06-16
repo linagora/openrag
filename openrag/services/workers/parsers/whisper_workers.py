@@ -20,7 +20,23 @@ logger = get_logger()
 
 
 def _whisper_num_gpus(config) -> float:
-    return config.loader.local_whisper.whisper_num_gpus if torch.cuda.is_available() else 0
+    """Return Whisper's Ray GPU reservation, falling back to CUDA detection.
+
+    Mirrors Marker's GPU selection (see ``_marker_num_gpus``): the
+    ``WhisperPool`` actor runs with ``num_gpus=0``, so Ray hides CUDA in its
+    process and ``torch.cuda.is_available()`` returns False even on a GPU
+    node — which would silently pin the ``WhisperActor``s to CPU. Ask whether
+    the Ray cluster has GPU capacity instead, keeping the CUDA check only as a
+    fallback for when Ray cannot report cluster resources yet.
+    """
+    requested_gpus = config.loader.local_whisper.whisper_num_gpus
+    if requested_gpus <= 0:
+        return 0
+    try:
+        return requested_gpus if ray.cluster_resources().get("GPU", 0) > 0 else 0
+    except Exception as exc:
+        logger.warning("Failed to query Ray cluster GPU resources; falling back to CUDA check", error=str(exc))
+        return requested_gpus if torch.cuda.is_available() else 0
 
 
 def whisper_actor_options(config) -> dict[str, float | int]:
