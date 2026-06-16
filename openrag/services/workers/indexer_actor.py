@@ -57,6 +57,10 @@ class IndexerWorker:
         is re-raised so the Ray task is marked as errored.
         """
         await self._tsm.set_state.remote(task_id, "SERIALIZING")
+
+        async def report_stage(stage: str) -> None:
+            await self._tsm.start_stage.remote(task_id, stage)
+
         try:
             document = _load_document(path, metadata, partition, indexation_config=indexation_config)
             row: dict[str, Any] = {
@@ -69,6 +73,7 @@ class IndexerWorker:
                 "workspace_ids": workspace_ids,
                 "indexation_config": indexation_config,
                 "embedder_name": embedder_name,
+                "stage_reporter": report_stage,
             }
             await self._pipeline.run(row)
             if self._document_repo is not None:
@@ -80,6 +85,7 @@ class IndexerWorker:
                     replace=replace,
                     indexation_config=indexation_config,
                 )
+            await self._tsm.finish_current_stage.remote(task_id)
             await self._tsm.set_state.remote(task_id, "COMPLETED")
             return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
         except Exception:

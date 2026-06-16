@@ -56,7 +56,14 @@ async def test_get_queue_info_rolls_up_states():
             "c": "COMPLETED",
             "d": "FAILED",
             "e": "CANCELLED",
-        }
+        },
+        info={
+            "a": {"state": "QUEUED", "current_stage": None, "details": {}},
+            "b": {"state": "CHUNKING", "current_stage": "EMBEDDING", "details": {}},
+            "c": {"state": "COMPLETED", "current_stage": None, "details": {}},
+            "d": {"state": "FAILED", "current_stage": "PARSING", "failed_stage": "PARSING", "details": {}},
+            "e": {"state": "CANCELLED", "current_stage": None, "details": {}},
+        },
     )
     out = await JobService(tsm).get_queue_info()
 
@@ -67,6 +74,7 @@ async def test_get_queue_info_rolls_up_states():
     assert tasks["total_completed"] == 1
     assert tasks["total_failed"] == 1
     assert tasks["total_cancelled"] == 1
+    assert tasks["active_stages"] == {"EMBEDDING": 1}
 
 
 @pytest.mark.asyncio
@@ -95,10 +103,19 @@ async def test_list_tasks_active_filter():
     info = {
         "t1": {"state": "QUEUED", "details": {}, "user": 1},
         "t2": {"state": "COMPLETED", "details": {}, "user": 1},
-        "t3": {"state": "INSERTING", "details": {}, "user": 1},
+        "t3": {
+            "state": "INSERTING",
+            "current_stage": "INSERTING",
+            "stage_durations": {"parsing_seconds": 1.2},
+            "details": {},
+            "user": 1,
+        },
     }
     rows = await JobService(FakeTSM(info=info)).list_tasks(is_admin=True, user_id=1, task_status="active")
     assert sorted(r["task_id"] for r in rows) == ["t1", "t3"]
+    inserting = next(row for row in rows if row["task_id"] == "t3")
+    assert inserting["current_stage"] == "INSERTING"
+    assert inserting["stage_durations"] == {"parsing_seconds": 1.2}
 
 
 @pytest.mark.asyncio

@@ -107,6 +107,10 @@ async def list_tasks(
             "task_id": task_id,
             "state": row["state"],
             "details": row["details"],
+            "current_stage": row.get("current_stage"),
+            "failed_stage": row.get("failed_stage"),
+            "stage_durations": row.get("stage_durations", {}),
+            "stage_history": row.get("stage_history", []),
             **(
                 {"error_url": str(request.url_for("get_task_error", task_id=task_id))}
                 if row["state"] == "FAILED"

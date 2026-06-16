@@ -63,28 +63,34 @@ class IndexingPipeline:
         vlm = self._select_vlm(config)
         contextualizer = self._select_contextualizer(config)
 
+        await _report_stage(row, "PARSING")
         await parse_stage(row, parser, timeout=self.timeouts.parse)
         if vlm is not None:
+            await _report_stage(row, "CAPTIONING")
             await caption_stage(
                 row,
                 vlm,
                 timeout=self.timeouts.caption,
                 per_image_timeout=self.timeouts.caption_per_image,
             )
+        await _report_stage(row, "CHUNKING")
         await chunk_stage(row, chunker, timeout=self.timeouts.chunk)
         if contextualizer is not None:
+            await _report_stage(row, "CONTEXTUALIZING")
             await contextualize_stage(
                 row,
                 contextualizer,
                 timeout=self.timeouts.contextualize,
                 per_chunk_timeout=self.timeouts.contextualize_per_chunk,
             )
+        await _report_stage(row, "EMBEDDING")
         await embed_stage(
             row,
             embedder,
             timeout=self.timeouts.embed,
             per_chunk_timeout=self.timeouts.embed_per_chunk,
         )
+        await _report_stage(row, "INSERTING")
         await store_stage(
             row,
             self.vector_store,
@@ -169,6 +175,13 @@ def build_indexing_pipeline(
         vlm_factory=vlm_factory,
         contextualizer_factory=contextualizer_factory,
     )
+
+
+async def _report_stage(row: MutableMapping[str, Any], stage: str) -> None:
+    reporter = row.get("stage_reporter")
+    if reporter is None:
+        return
+    await reporter(stage)
 
 
 __all__ = ["IndexingPipeline", "PipelineTimeouts", "build_indexing_pipeline"]

@@ -79,6 +79,11 @@ class IndexingDispatcher(ABC):
         ...
 
     @abstractmethod
+    async def get_task_info(self, task_id: str) -> dict | None:
+        """Full task snapshot, or ``None`` if the task is unknown."""
+        ...
+
+    @abstractmethod
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a running/queued task.
 

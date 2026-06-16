@@ -79,6 +79,9 @@ class FakeDispatcher:
     async def get_task_error(self, task_id):
         return "trace"
 
+    async def get_task_info(self, task_id):
+        return {"state": "QUEUED", "current_stage": None}
+
     async def cancel_task(self, task_id):
         self.cancelled.append(task_id)
         return self.cancel_result
@@ -379,6 +382,7 @@ async def test_task_state_and_error_passthrough():
     svc = _service()
     assert await svc.get_task_state("t1") == "QUEUED"
     assert await svc.get_task_error("t1") == "trace"
+    assert await svc.get_task_info("t1") == {"state": "QUEUED", "current_stage": None}
 
 
 @pytest.mark.asyncio

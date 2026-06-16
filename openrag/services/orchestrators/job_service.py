@@ -54,12 +54,19 @@ class JobService:
 
     async def get_queue_info(self) -> dict:
         all_states: dict = await self._call(self._tsm.get_all_states.remote(), "get_all_states")
+        all_info: dict[str, dict] = await self._call(self._tsm.get_all_info.remote(), "get_all_info")
         status_counts = Counter(all_states.values())
 
         active = {s: status_counts.get(s, 0) for s in _ACTIVE_STATES}
+        active_stages = Counter(
+            info.get("current_stage")
+            for info in all_info.values()
+            if info.get("state") in _ACTIVE_STATES and info.get("current_stage")
+        )
         task_summary = {
             "active": sum(active.values()),
             "active_statuses": active,
+            "active_stages": dict(active_stages),
             "total_cancelled": status_counts.get("CANCELLED", 0),
             "total_completed": status_counts.get("COMPLETED", 0),
             "total_failed": status_counts.get("FAILED", 0),
@@ -97,7 +104,18 @@ class JobService:
         else:
             filtered = [(tid, i) for tid, i in all_info.items() if i["state"].lower() == task_status.lower()]
 
-        return [{"task_id": tid, "state": i["state"], "details": i["details"]} for tid, i in filtered]
+        return [
+            {
+                "task_id": tid,
+                "state": i["state"],
+                "details": i["details"],
+                "current_stage": i.get("current_stage"),
+                "failed_stage": i.get("failed_stage"),
+                "stage_durations": i.get("stage_durations", {}),
+                "stage_history": i.get("stage_history", []),
+            }
+            for tid, i in filtered
+        ]
 
     async def get_user_pending_task_count(self, user_id: int | None) -> int:
         """Pending (not-yet-completed) indexing tasks for one user.

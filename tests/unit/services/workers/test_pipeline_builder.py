@@ -104,6 +104,28 @@ async def test_pipeline_runs_required_stages_in_order_and_keeps_row_object():
 
 
 @pytest.mark.asyncio
+async def test_pipeline_reports_visible_stages_in_order():
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    chunks = [Chunk(id="c1", text="hello", partition="tenant-a")]
+    observed: list[str] = []
+
+    async def report(stage: str) -> None:
+        observed.append(stage)
+
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker(chunks),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+    )
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "stage_reporter": report})
+
+    assert observed == ["PARSING", "CHUNKING", "EMBEDDING", "INSERTING"]
+
+
+@pytest.mark.asyncio
 async def test_pipeline_stops_before_later_stages_when_a_stage_fails():
     document = Document(filename="note.txt", text="hello", partition="tenant-a")
     processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])

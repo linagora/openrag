@@ -620,12 +620,22 @@ async def get_task_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task '{task_id}' not found.",
         )
+    task_info = await service.get_task_info(task_id)
 
     content: dict[str, Any] = {
         "task_id": task_id,
         "task_state": state,
-        "details": task_details,
+        "details": (task_info or {}).get("details", task_details),
     }
+    if task_info:
+        content.update(
+            {
+                "current_stage": task_info.get("current_stage"),
+                "failed_stage": task_info.get("failed_stage"),
+                "stage_durations": task_info.get("stage_durations", {}),
+                "stage_history": task_info.get("stage_history", []),
+            }
+        )
 
     if state == "FAILED":
         content["error_url"] = build_url(

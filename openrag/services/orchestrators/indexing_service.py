@@ -223,6 +223,9 @@ class IndexingService:
     async def get_task_error(self, task_id: str) -> str | None:
         return await self._dispatcher.get_task_error(task_id)
 
+    async def get_task_info(self, task_id: str) -> dict | None:
+        return await self._dispatcher.get_task_info(task_id)
+
     async def cancel_task(self, task_id: str) -> bool:
         return await self._dispatcher.cancel_task(task_id)
 

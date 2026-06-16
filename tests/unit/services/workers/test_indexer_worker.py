@@ -64,6 +64,10 @@ def _fake_tsm() -> MagicMock:
     tsm = MagicMock()
     tsm.set_state = MagicMock()
     tsm.set_state.remote = AsyncMock(return_value=None)
+    tsm.start_stage = MagicMock()
+    tsm.start_stage.remote = AsyncMock(return_value=None)
+    tsm.finish_current_stage = MagicMock()
+    tsm.finish_current_stage.remote = AsyncMock(return_value=None)
     tsm.set_failed_if_not_cancelled = MagicMock()
     tsm.set_failed_if_not_cancelled.remote = AsyncMock(return_value=True)
     return tsm
@@ -153,6 +157,13 @@ async def test_process_file_success_sets_state_and_returns_count(tmp_path: Path)
     state_calls = [call.args for call in tsm.set_state.remote.call_args_list]
     assert ("t1", "SERIALIZING") in state_calls
     assert ("t1", "COMPLETED") in state_calls
+    assert [call.args for call in tsm.start_stage.remote.call_args_list] == [
+        ("t1", "PARSING"),
+        ("t1", "CHUNKING"),
+        ("t1", "EMBEDDING"),
+        ("t1", "INSERTING"),
+    ]
+    tsm.finish_current_stage.remote.assert_called_once_with("t1")
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
 
 
@@ -186,6 +197,7 @@ async def test_process_file_pipeline_failure_sets_failed_and_reraises(tmp_path: 
         )
 
     tsm.set_state.remote.assert_called_once_with("t2", "SERIALIZING")
+    tsm.start_stage.remote.assert_called_once_with("t2", "PARSING")
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
     call_args = tsm.set_failed_if_not_cancelled.remote.call_args
     assert call_args.args[0] == "t2"

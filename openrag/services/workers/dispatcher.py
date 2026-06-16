@@ -219,6 +219,12 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=f"get_error({task_id})",
         )
 
+    async def get_task_info(self, task_id: str) -> dict | None:
+        return await self._call(
+            self._tsm.get_info.remote(task_id),
+            task_description=f"get_info({task_id})",
+        )
+
     async def cancel_task(self, task_id: str) -> bool:
         import ray
 
