@@ -64,6 +64,8 @@ export interface PartitionConfig {
   dimension: number;
   created_at: string;
   document_count: number;
+  chat_history_depth: number;
+  chat_llm: string | null;
 }
 
 export interface UpdatePartitionRequest {
@@ -206,28 +208,6 @@ export function updatePartitionMemberRole(name: string, userId: number, role: Pa
 
 export function removePartitionMember(name: string, userId: number): Promise<void> {
   return request<void>(`${P}/${enc(name)}/users/${userId}`, { method: "DELETE" });
-}
-
-// ── Compat: legacy member-list shape used by partitions/detail (pre-migration) ─
-
-export interface UserPartitionResponse {
-  user_id: string;
-  partition: string;
-  role: string;
-  created_at: string | null;
-}
-
-export interface PartitionUsersResponse {
-  partition: string;
-  users: UserPartitionResponse[];
-}
-
-export async function listPartitionUsers(partition: string): Promise<PartitionUsersResponse> {
-  const { members } = await listPartitionMembers(partition);
-  return {
-    partition,
-    users: members.map((m) => ({ user_id: String(m.user_id), partition, role: m.role, created_at: m.added_at })),
-  };
 }
 
 // Compat type aliases for the user-scoped list (overview / documents / list page).

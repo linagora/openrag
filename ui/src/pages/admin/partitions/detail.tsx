@@ -37,19 +37,20 @@ import {
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import {
-  getPartition,
+  getPartitionConfig,
   updatePartition,
-  listPartitionUsers,
+  listPartitionMembers,
+  addPartitionMember,
+  removePartitionMember,
 } from "@/lib/api/partitions";
-import type { PartitionResponse } from "@/lib/api/partitions";
-import { assignPartition, removePartition } from "@/lib/api/users";
+import type { PartitionConfig, PartitionRole } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateModelEndpoint } from "@/lib/api/models";
 import { formatDate } from "@/lib/utils";
 
 // --- General Tab ---
 
-function GeneralTab({ partition }: { partition: PartitionResponse }) {
+function GeneralTab({ partition }: { partition: PartitionConfig }) {
   const queryClient = useQueryClient();
 
   const [description, setDescription] = useState(partition.description ?? "");
@@ -158,14 +159,10 @@ function GeneralTab({ partition }: { partition: PartitionResponse }) {
               onChange={(e) => setDescription(e.target.value)}
             />
           </div>
-          <div className="grid grid-cols-4 gap-6">
+          <div className="grid grid-cols-3 gap-6">
             <div className="space-y-2">
               <Label className="text-muted-foreground">Dimension</Label>
               <p className="text-sm font-medium pt-1">{partition.dimension}</p>
-            </div>
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">Collection Name</Label>
-              <p className="text-sm font-medium pt-1">{partition.collection_name || "Auto-generated"}</p>
             </div>
             <div className="space-y-2">
               <Label className="text-muted-foreground">Embedder</Label>
@@ -254,7 +251,7 @@ function GeneralTab({ partition }: { partition: PartitionResponse }) {
 
 // --- Pipeline Config Tab ---
 
-function PipelineConfigTab({ partition }: { partition: PartitionResponse }) {
+function PipelineConfigTab({ partition }: { partition: PartitionConfig }) {
   const renderConfigValue = (value: unknown): string => {
     if (value === null || value === undefined) return "—";
     if (typeof value === "boolean") return value ? "Yes" : "No";
@@ -324,11 +321,11 @@ function UsersTab({ partitionName }: { partitionName: string }) {
 
   const usersQuery = useQuery({
     queryKey: ["partition", partitionName, "users"],
-    queryFn: () => listPartitionUsers(partitionName),
+    queryFn: () => listPartitionMembers(partitionName),
   });
 
   const addMutation = useMutation({
-    mutationFn: () => assignPartition(userId, partitionName, role),
+    mutationFn: () => addPartitionMember(partitionName, Number(userId), role as PartitionRole),
     onSuccess: () => {
       toast.success("User added to partition");
       queryClient.invalidateQueries({
@@ -336,7 +333,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
       });
       setDialogOpen(false);
       setUserId("");
-      setRole("reader");
+      setRole("viewer");
     },
     onError: (error: Error) => {
       toast.error(`Failed to add user: ${error.message}`);
@@ -344,7 +341,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
   });
 
   const removeMutation = useMutation({
-    mutationFn: (uid: string) => removePartition(uid, partitionName),
+    mutationFn: (uid: number) => removePartitionMember(partitionName, uid),
     onSuccess: () => {
       toast.success("User removed from partition");
       queryClient.invalidateQueries({
@@ -357,8 +354,8 @@ function UsersTab({ partitionName }: { partitionName: string }) {
   });
 
   const handleAddUser = () => {
-    if (!userId.trim()) {
-      toast.error("User ID is required");
+    if (!userId.trim() || Number.isNaN(Number(userId))) {
+      toast.error("A numeric user ID is required");
       return;
     }
     addMutation.mutate();
@@ -380,7 +377,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
               <Skeleton key={i} className="h-10 w-full" />
             ))}
           </div>
-        ) : usersQuery.data && usersQuery.data.users.length > 0 ? (
+        ) : usersQuery.data && usersQuery.data.members.length > 0 ? (
           <div className="rounded-md border">
             <Table>
               <TableHeader>
@@ -392,14 +389,14 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {usersQuery.data.users.map((user) => (
+                {usersQuery.data.members.map((user) => (
                   <TableRow key={user.user_id}>
                     <TableCell className="font-mono text-sm">
                       {user.user_id}
                     </TableCell>
                     <TableCell className="capitalize">{user.role}</TableCell>
                     <TableCell className="text-muted-foreground">
-                      {formatDate(user.created_at)}
+                      {formatDate(user.added_at)}
                     </TableCell>
                     <TableCell>
                       <ConfirmDialog
@@ -484,7 +481,7 @@ export default function PartitionDetailPage() {
 
   const partitionQuery = useQuery({
     queryKey: ["partition", name],
-    queryFn: () => getPartition(name!),
+    queryFn: () => getPartitionConfig(name!),
     enabled: !!name,
   });
 
