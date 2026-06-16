@@ -62,14 +62,20 @@ async def list_existant_partitions(
     partitions=Depends(partitions_with_details),
     service=Depends(get_partition_service),
 ):
-    """List partitions visible to the current user."""
+    """List partitions visible to the current user, with stored config + document_count."""
+    summaries = await service.list_partition_summaries()
     if len(partitions) == 1 and partitions[0]["partition"] == "all":
-        partitions = await service.list_partitions()
-    counts = await service.file_counts_by_partition()
-    for p in partitions:
-        p["document_count"] = counts.get(p.get("partition"), 0)
-    logger.debug("Returned list of existing partitions.", partition_count=len(partitions))
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"partitions": partitions})
+        result = list(summaries.values())
+    else:
+        result = []
+        for p in partitions:
+            name = p["partition"]
+            row = dict(summaries.get(name) or {"partition": name, "document_count": 0})
+            if p.get("role") is not None:
+                row["role"] = p["role"]
+            result.append(row)
+    logger.debug("Returned list of existing partitions.", partition_count=len(result))
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"partitions": result})
 
 
 @router.delete(

@@ -299,6 +299,23 @@ async def test_get_partition_config_returns_resolved_detail():
 
 
 @pytest.mark.asyncio
+async def test_list_partition_summaries_has_counts_and_no_pipelines():
+    repo = _FakePartitionRepo(rows=[_full_row("p1", description="docs"), _full_row("p2")])
+    repo._counts["p1"] = 4
+    svc = _make_service(repo)
+
+    summaries = await svc.list_partition_summaries()
+
+    assert set(summaries) == {"p1", "p2"}
+    assert summaries["p1"]["document_count"] == 4
+    assert summaries["p2"]["document_count"] == 0
+    assert summaries["p1"]["description"] == "docs"
+    # lightweight: stored columns only, pipelines are resolved on detail
+    assert "indexation_pipeline" not in summaries["p1"]
+    assert "retrieval_pipeline" not in summaries["p1"]
+
+
+@pytest.mark.asyncio
 async def test_get_partition_config_missing_raises_404():
     from core.utils.exceptions import PartitionNotFoundError
 

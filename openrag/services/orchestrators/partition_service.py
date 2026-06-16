@@ -134,6 +134,35 @@ class PartitionService:
         """Return a ``{partition: document_count}`` map for all partitions (one query)."""
         return await self._partition_repo.count_files_by_partition()
 
+    async def list_partition_summaries(self) -> dict[str, dict]:
+        """Per-partition stored config columns + ``document_count``, keyed by name.
+
+        Lightweight list view: returns the stored columns (description, embedder,
+        preset references, dimension, chat config) WITHOUT resolving the
+        indexation/retrieval pipelines — so this stays two queries regardless of
+        partition count. Pipeline resolution is reserved for the single-partition
+        detail (``get_partition_config``). Values are JSON-ready.
+        """
+        rows = await self._partition_repo.list_partition_rows()
+        counts = await self.file_counts_by_partition()
+        summaries: dict[str, dict] = {}
+        for r in rows:
+            name = r["partition"]
+            created = r.get("created_at")
+            summaries[name] = {
+                "partition": name,
+                "description": r.get("description") or "",
+                "embedder": r.get("embedder") or "default",
+                "indexation_preset": r.get("indexation_preset") or "default",
+                "retrieval_preset": r.get("retrieval_preset") or "default",
+                "dimension": r.get("dimension"),
+                "chat_history_depth": r.get("chat_history_depth") or 0,
+                "chat_llm": r.get("chat_llm"),
+                "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
+                "document_count": counts.get(name, 0),
+            }
+        return summaries
+
     async def create_partition(
         self,
         partition: str,
