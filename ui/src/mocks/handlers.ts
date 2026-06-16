@@ -325,34 +325,47 @@ export const handlers = [
     return HttpResponse.json({ documents: filtered, total: filtered.length, offset: 0, limit: 50 });
   }),
 
-  http.get(`${API}/api/v1/admin/documents/:id`, ({ params }) => {
-    const doc = documents.find((d) => d.id === params.id);
-    if (!doc) return HttpResponse.json({ detail: "Not found" }, { status: 404 });
-    return HttpResponse.json(doc);
+  // OpenRag per-partition file reads (documents detail + chunk viewer)
+  http.get(`${API}/partition/:name/file/:fileId`, ({ params }) => {
+    const fileId = params.fileId as string;
+    const chunks = documentChunks[fileId] ?? [];
+    const doc = documents.find((d) => d.id === fileId);
+    if (!doc && chunks.length === 0) return HttpResponse.json({ detail: "Not found" }, { status: 404 });
+    const metadata = {
+      file_id: fileId,
+      partition: params.name,
+      filename: doc?.filename,
+      mimetype: doc?.content_type,
+      indexed_at: doc?.indexed_at,
+      page: chunks[0]?.page_number,
+    };
+    return HttpResponse.json({ metadata, documents: chunks.map((c) => ({ link: `/extract/${c.id}` })) });
   }),
 
-  http.delete(`${API}/api/v1/admin/documents/:id`, ({ params }) => {
-    return HttpResponse.json({ deleted: true, document_id: params.id });
+  http.get(`${API}/partition/:name/chunks`, ({ params }) => {
+    const chunks = documents
+      .filter((d) => d.partition === params.name)
+      .flatMap((d) =>
+        (documentChunks[d.id] ?? []).map((c) => ({
+          link: `/extract/${c.id}`,
+          content: c.content,
+          metadata: { ...c.metadata, _id: c.id, file_id: d.id, filename: d.filename, mimetype: d.content_type, page: c.page_number },
+        })),
+      );
+    return HttpResponse.json({ chunks });
   }),
 
-  http.get(`${API}/api/v1/admin/documents/:id/chunks`, ({ params }) => {
-    const chunks = documentChunks[params.id as string];
-    if (!chunks) return HttpResponse.json({ chunks: [], total: 0 });
-    return HttpResponse.json({ chunks, total: chunks.length });
-  }),
-
-  http.post(`${API}/api/v1/admin/documents/:id/copy`, ({ params }) => {
-    const doc = documents.find((d) => d.id === params.id);
-    return HttpResponse.json({ ...doc, id: "doc-new-copy", partition: "hr-policies" });
-  }),
-
-  // Indexing
-  http.post(`${API}/api/v1/admin/indexing/document`, () => {
-    return HttpResponse.json({ document_id: "doc-new-001", partition: "legal-docs", chunk_count: 32, status: "success" });
-  }),
-
-  http.post(`${API}/api/v1/admin/indexing/batch`, () => {
-    return HttpResponse.json({ job_id: "job-new-001", status: "QUEUED", total_documents: 3 }, { status: 202 });
+  http.get(`${API}/extract/:id`, ({ params }) => {
+    for (const list of Object.values(documentChunks)) {
+      const c = list.find((x) => x.id === params.id);
+      if (c) {
+        return HttpResponse.json({
+          page_content: c.content,
+          metadata: { ...c.metadata, _id: c.id, file_id: c.document_id, page: c.page_number },
+        });
+      }
+    }
+    return HttpResponse.json({ detail: "Not found" }, { status: 404 });
   }),
 
   // Jobs
