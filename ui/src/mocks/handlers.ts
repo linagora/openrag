@@ -205,11 +205,20 @@ export const handlers = [
     });
   }),
 
-  // Single per-user API token regenerate (OpenRag model — one rotating token).
-  http.post(`${API}/api/v1/user/account/regenerate-token`, () => {
-    const rand = Array.from({ length: 32 }, (_, i) => "0123456789abcdef"[(i * 7 + 3) % 16]).join("");
-    return HttpResponse.json({ token: `or-${rand}` });
-  }),
+  // Current authenticated user (profile + file usage).
+  http.get(`${API}/users/info`, () =>
+    HttpResponse.json({
+      id: 1,
+      display_name: "System Admin",
+      external_user_id: null,
+      email: "admin@openrag.io",
+      is_admin: true,
+      file_quota: -1,
+      indexed_files: 42,
+      pending_files: 3,
+      total_files: 45,
+    }),
+  ),
 
   // Partitions — OpenRag `/partition` shapes
   http.get(`${API}/partition/`, () =>
