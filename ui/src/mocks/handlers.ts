@@ -62,10 +62,10 @@ const documents = [
 ];
 
 const users = [
-  { id: "usr-001", email: "admin@openrag.io", display_name: "System Admin", role: "superadmin", is_active: true, created_at: "2024-12-01T00:00:00Z", updated_at: "2025-01-10T12:00:00Z" },
-  { id: "usr-002", email: "alice@company.com", display_name: "Alice Johnson", role: "admin", is_active: true, created_at: "2025-01-05T10:00:00Z", updated_at: "2025-01-15T09:00:00Z" },
-  { id: "usr-003", email: "bob@company.com", display_name: "Bob Smith", role: "user", is_active: true, created_at: "2025-01-08T14:30:00Z", updated_at: "2025-01-08T14:30:00Z" },
-  { id: "usr-004", email: "carol@company.com", display_name: "Carol Davis", role: "user", is_active: false, created_at: "2025-01-10T08:00:00Z", updated_at: "2025-01-14T16:00:00Z" },
+  { id: 1, external_user_id: null, email: "admin@openrag.io", display_name: "System Admin", is_admin: true, file_quota: -1, file_count: 0, created_at: "2024-12-01T00:00:00Z" },
+  { id: 2, external_user_id: "kc-alice-uuid", email: "alice@company.com", display_name: "Alice Johnson", is_admin: true, file_quota: null, file_count: 12, created_at: "2025-01-05T10:00:00Z" },
+  { id: 3, external_user_id: "kc-bob-uuid", email: "bob@company.com", display_name: "Bob Smith", is_admin: false, file_quota: 100, file_count: 4, created_at: "2025-01-08T14:30:00Z" },
+  { id: 4, external_user_id: null, email: null, display_name: "ci-bot", is_admin: false, file_quota: 0, file_count: 0, created_at: "2025-01-10T08:00:00Z" },
 ];
 
 const modelEndpoints = [
@@ -429,43 +429,48 @@ export const handlers = [
     HttpResponse.json({ message: `Cancellation signal sent for task ${params.taskId}` }),
   ),
 
-  // Users
-  http.get(`${API}/api/v1/admin/users`, () => {
-    return HttpResponse.json({ users, offset: 0, limit: 50 });
-  }),
+  // Users — OpenRag `/users` (IdP-linked or token-only; integer ids)
+  http.get(`${API}/users/`, () => HttpResponse.json({ users })),
 
-  http.get(`${API}/api/v1/admin/users/:id`, ({ params }) => {
-    const user = users.find((u) => u.id === params.id);
+  http.get(`${API}/users/:id`, ({ params }) => {
+    const user = users.find((u) => u.id === Number(params.id));
     if (!user) return HttpResponse.json({ detail: "Not found" }, { status: 404 });
     return HttpResponse.json(user);
   }),
 
-  http.post(`${API}/api/v1/admin/users`, async ({ request }) => {
+  http.post(`${API}/users/`, async ({ request }) => {
     const body = (await request.json()) as Record<string, unknown>;
-    return HttpResponse.json({ id: "usr-new", ...body, is_active: true, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+    const rand = Array.from({ length: 32 }, (_, i) => "0123456789abcdef"[(i * 7 + 3) % 16]).join("");
+    return HttpResponse.json(
+      {
+        id: 999,
+        external_user_id: null,
+        email: null,
+        display_name: null,
+        is_admin: false,
+        file_quota: null,
+        file_count: 0,
+        created_at: new Date().toISOString(),
+        ...body,
+        token: `or-${rand}`,
+      },
+      { status: 201 },
+    );
   }),
 
-  http.patch(`${API}/api/v1/admin/users/:id`, ({ params }) => {
-    const user = users.find((u) => u.id === params.id);
-    return HttpResponse.json(user || users[0]);
+  http.patch(`${API}/users/:id`, async ({ params, request }) => {
+    const user = users.find((u) => u.id === Number(params.id)) ?? users[0];
+    const body = (await request.json()) as Record<string, unknown>;
+    return HttpResponse.json({ ...user, ...body });
   }),
 
-  http.delete(`${API}/api/v1/admin/users/:id`, () => {
-    return new HttpResponse(null, { status: 204 });
-  }),
+  http.delete(`${API}/users/:id`, () => new HttpResponse(null, { status: 204 })),
 
-  // Regenerate a user's single API token (admin on behalf of the user).
-  http.post(`${API}/api/v1/admin/users/:id/regenerate_token`, () => {
+  // Regenerate a user's single bearer token (shown once).
+  http.post(`${API}/users/:id/regenerate_token`, ({ params }) => {
+    const user = users.find((u) => u.id === Number(params.id)) ?? users[0];
     const rand = Array.from({ length: 32 }, (_, i) => "0123456789abcdef"[(i * 11 + 5) % 16]).join("");
-    return HttpResponse.json({ token: `or-${rand}` });
-  }),
-
-  http.post(`${API}/api/v1/admin/users/:id/partitions`, () => {
-    return HttpResponse.json({ user_id: "usr-001", partition: "legal-docs", role: "reader", created_at: new Date().toISOString() });
-  }),
-
-  http.delete(`${API}/api/v1/admin/users/:id/partitions/:partition`, () => {
-    return new HttpResponse(null, { status: 204 });
+    return HttpResponse.json({ ...user, token: `or-${rand}` });
   }),
 
   // Model Endpoints — OpenRag `/model-endpoints` (bare array, 204 delete)

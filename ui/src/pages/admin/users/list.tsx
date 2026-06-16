@@ -1,27 +1,42 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
-import { Trash2, Eye } from "lucide-react";
-import { listUsers, deleteUser } from "@/lib/api/users";
-import type { UserResponse } from "@/lib/api/users";
+import { Trash2, Eye, Plus, Copy } from "lucide-react";
+import { listUsers, deleteUser, createUser } from "@/lib/api/users";
+import type { UserResponse, UserWithToken } from "@/lib/api/users";
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatDate } from "@/lib/utils";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 
-// Users are provisioned through the IdP (OIDC/SSO), not created here — this page
-// manages existing users (roles, access, removal). See OIDC provisioning policy.
+function formatQuota(q: number | null | undefined): string {
+  if (q == null) return "Default";
+  if (q < 0) return "Unlimited";
+  return String(q);
+}
 
 export default function UserListPage() {
   const queryClient = useQueryClient();
+  const [dialogOpen, setDialogOpen] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["users"],
-    queryFn: () => listUsers(),
+    queryFn: listUsers,
   });
 
   const deleteMut = useMutation({
@@ -30,53 +45,47 @@ export default function UserListPage() {
       queryClient.invalidateQueries({ queryKey: ["users"] });
       toast.success("User deleted");
     },
-    onError: (e) => toast.error(e.message),
+    onError: (e) => toast.error((e as Error).message),
   });
-
-  const roleBadgeVariant = (r: string) => {
-    switch (r) {
-      case "superadmin": return "destructive" as const;
-      case "admin": return "default" as const;
-      default: return "secondary" as const;
-    }
-  };
 
   const columns: ColumnDef<UserResponse>[] = [
     {
-      accessorKey: "email",
-      header: ({ column }) => <SortableHeader column={column} title="Email" />,
+      accessorKey: "display_name",
+      header: ({ column }) => <SortableHeader column={column} title="Name" />,
       cell: ({ row }) => (
         <Link to={`/users/${row.original.id}`} className="text-primary hover:underline">
-          {row.original.email}
+          {row.original.display_name || `User #${row.original.id}`}
         </Link>
       ),
     },
     {
-      accessorKey: "display_name",
-      header: "Name",
-    },
-    {
-      accessorKey: "role",
-      header: "Role",
+      accessorKey: "external_user_id",
+      header: "External ID (sub)",
       cell: ({ row }) => (
-        <Badge variant={roleBadgeVariant(row.original.role)} className="capitalize">
-          {row.original.role}
-        </Badge>
+        <span className="font-mono text-xs text-muted-foreground">
+          {row.original.external_user_id || "—"}
+        </span>
       ),
     },
     {
-      accessorKey: "is_active",
-      header: "Active",
-      cell: ({ row }) => (
-        <Badge variant={row.original.is_active ? "default" : "secondary"}>
-          {row.original.is_active ? "Yes" : "No"}
-        </Badge>
-      ),
+      accessorKey: "email",
+      header: "Email",
+      cell: ({ row }) => row.original.email || <span className="text-muted-foreground">—</span>,
     },
     {
-      accessorKey: "created_at",
-      header: ({ column }) => <SortableHeader column={column} title="Created" />,
-      cell: ({ row }) => formatDate(row.original.created_at),
+      accessorKey: "is_admin",
+      header: "Admin",
+      cell: ({ row }) =>
+        row.original.is_admin ? (
+          <Badge variant="default">Admin</Badge>
+        ) : (
+          <Badge variant="secondary">User</Badge>
+        ),
+    },
+    {
+      accessorKey: "file_quota",
+      header: "File quota",
+      cell: ({ row }) => formatQuota(row.original.file_quota),
     },
     {
       id: "actions",
@@ -89,10 +98,16 @@ export default function UserListPage() {
           </Button>
           <ConfirmDialog
             title="Delete user?"
-            description={`Permanently delete "${row.original.email}"? This cannot be undone.`}
+            description={`Permanently delete "${row.original.display_name || `User #${row.original.id}`}"? This removes them from all partitions and invalidates their token.`}
             onConfirm={() => deleteMut.mutate(row.original.id)}
           >
-            <Button size="sm" variant="ghost" className="text-destructive">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-destructive"
+              disabled={row.original.id === 1}
+              title={row.original.id === 1 ? "The default admin cannot be deleted" : undefined}
+            >
               <Trash2 className="h-3 w-3" />
             </Button>
           </ConfirmDialog>
@@ -105,7 +120,12 @@ export default function UserListPage() {
     <div>
       <PageHeader
         title="Users"
-        description="Manage users provisioned through SSO — roles, access and removal"
+        description="Create SSO users (linked to an IdP identity) or token-only users (programmatic/service accounts), then manage admin rights, quota and partition roles."
+        actions={
+          <Button onClick={() => setDialogOpen(true)}>
+            <Plus className="mr-2 h-4 w-4" /> New user
+          </Button>
+        }
       />
 
       {isLoading ? (
@@ -113,6 +133,161 @@ export default function UserListPage() {
       ) : (
         <DataTable columns={columns} data={data?.users || []} />
       )}
+
+      <PreProvisionDialog open={dialogOpen} onOpenChange={setDialogOpen} />
     </div>
+  );
+}
+
+function PreProvisionDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [externalId, setExternalId] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [email, setEmail] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [quota, setQuota] = useState("");
+  const [created, setCreated] = useState<UserWithToken | null>(null);
+
+  const reset = () => {
+    setExternalId("");
+    setDisplayName("");
+    setEmail("");
+    setIsAdmin(false);
+    setQuota("");
+    setCreated(null);
+  };
+
+  const handleClose = (next: boolean) => {
+    if (!next) reset();
+    onOpenChange(next);
+  };
+
+  const createMut = useMutation({
+    mutationFn: () =>
+      createUser({
+        external_user_id: externalId.trim() || undefined,
+        display_name: displayName.trim() || undefined,
+        email: email.trim() || undefined,
+        is_admin: isAdmin,
+        file_quota: quota.trim() === "" ? null : Number(quota),
+      }),
+    onSuccess: (user) => {
+      setCreated(user);
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+      toast.success("User created");
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
+
+  const copyToken = () => {
+    if (created?.token) {
+      navigator.clipboard.writeText(created.token);
+      toast.success("Token copied to clipboard");
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={handleClose}>
+      <DialogContent>
+        {created ? (
+          <>
+            <DialogHeader>
+              <DialogTitle>User created</DialogTitle>
+              <DialogDescription>
+                {created.external_user_id
+                  ? `${created.display_name || `User #${created.id}`} can sign in via SSO. The token below is also a bearer credential for programmatic access (API/CI).`
+                  : `This is a token-only user. The bearer token below is their only credential — copy it now, it is shown only once.`}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2">
+              <Label>API token</Label>
+              <div className="flex gap-2">
+                <Input value={created.token} readOnly className="font-mono text-xs" />
+                <Button size="icon" variant="outline" onClick={copyToken}>
+                  <Copy className="h-4 w-4" />
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">Shown once — store it securely.</p>
+            </div>
+            <DialogFooter>
+              <Button onClick={() => handleClose(false)}>Done</Button>
+            </DialogFooter>
+          </>
+        ) : (
+          <>
+            <DialogHeader>
+              <DialogTitle>New user</DialogTitle>
+              <DialogDescription>
+                Provide an External User ID to link an SSO identity, or leave it empty for a
+                token-only user (service / programmatic account).
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label>
+                  External User ID (<span className="font-mono">sub</span>) — optional
+                </Label>
+                <Input
+                  value={externalId}
+                  onChange={(e) => setExternalId(e.target.value)}
+                  placeholder="e.g. kc-alice-uuid"
+                />
+                <p className="text-xs text-muted-foreground">
+                  The user&apos;s stable subject claim from your IdP — set it to enable SSO login
+                  (match is by <span className="font-mono">sub</span>). Leave empty for a token-only
+                  user.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label>Display name</Label>
+                <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>Email (optional)</Label>
+                <Input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="Metadata only — not used for login"
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label>Administrator</Label>
+                  <p className="text-xs text-muted-foreground">Full access to every partition.</p>
+                </div>
+                <Switch checked={isAdmin} onCheckedChange={setIsAdmin} />
+              </div>
+              <div className="space-y-2">
+                <Label>File quota</Label>
+                <Input
+                  type="number"
+                  value={quota}
+                  onChange={(e) => setQuota(e.target.value)}
+                  placeholder="Global default"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Empty = global default · <span className="font-mono">-1</span> = unlimited
+                </p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => handleClose(false)}>
+                Cancel
+              </Button>
+              <Button onClick={() => createMut.mutate()} disabled={createMut.isPending}>
+                {createMut.isPending ? "Creating…" : "Create user"}
+              </Button>
+            </DialogFooter>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }

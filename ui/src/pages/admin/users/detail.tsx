@@ -8,10 +8,11 @@ import {
   updateUser,
   deleteUser,
   regenerateUserToken,
-  listUserPartitions,
-  assignPartition,
-  removePartition,
+  listUserMemberships,
+  grantMembership,
+  revokeMembership,
 } from "@/lib/api/users";
+import { listPartitions, type PartitionRole } from "@/lib/api/partitions";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
@@ -48,6 +49,7 @@ import { formatDate } from "@/lib/utils";
 
 export default function UserDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const userId = Number(id);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -57,26 +59,37 @@ export default function UserDetailPage() {
     enabled: !!id,
   });
 
-  // Editable admin controls (identity itself is owned by the IdP — read-only).
+  const [displayName, setDisplayName] = useState("");
+  const [email, setEmail] = useState("");
+  const [externalId, setExternalId] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
   const [quota, setQuota] = useState("");
   const [formLoaded, setFormLoaded] = useState(false);
 
   if (user && !formLoaded) {
-    const extra = user as unknown as { is_admin?: boolean; file_quota?: number | null };
-    setIsAdmin(extra.is_admin ?? user.role === "admin");
-    setQuota(extra.file_quota == null ? "" : String(extra.file_quota));
+    setDisplayName(user.display_name ?? "");
+    setEmail(user.email ?? "");
+    setExternalId(user.external_user_id ?? "");
+    setIsAdmin(user.is_admin);
+    setQuota(user.file_quota == null ? "" : String(user.file_quota));
     setFormLoaded(true);
   }
 
   const updateMut = useMutation({
-    mutationFn: (data: Record<string, unknown>) => updateUser(id!, data),
+    mutationFn: () =>
+      updateUser(id!, {
+        display_name: displayName.trim() || undefined,
+        email: email.trim() || undefined,
+        external_user_id: externalId.trim() || undefined,
+        is_admin: isAdmin,
+        file_quota: quota.trim() === "" ? null : Number(quota),
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user", id] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
       toast.success("User updated");
     },
-    onError: (e) => toast.error(e.message),
+    onError: (e) => toast.error((e as Error).message),
   });
 
   const deleteMut = useMutation({
@@ -85,25 +98,20 @@ export default function UserDetailPage() {
       toast.success("User deleted");
       navigate("/users");
     },
-    onError: (e) => toast.error(e.message),
+    onError: (e) => toast.error((e as Error).message),
   });
-
-  const handleSave = (e: React.FormEvent) => {
-    e.preventDefault();
-    updateMut.mutate({
-      is_admin: isAdmin,
-      file_quota: quota.trim() === "" ? null : Number(quota),
-    });
-  };
 
   if (isLoading) return <Skeleton className="h-96" />;
   if (!user) return <p>User not found</p>;
 
+  const title = user.display_name || user.external_user_id || `User #${user.id}`;
+  const isSso = !!user.external_user_id;
+
   return (
     <div>
       <PageHeader
-        title={user.display_name || user.email}
-        description={user.email}
+        title={title}
+        description={isSso ? "SSO user" : "Token-only user"}
         actions={
           <div className="flex gap-2">
             <Button variant="outline" asChild>
@@ -113,10 +121,10 @@ export default function UserDetailPage() {
             </Button>
             <ConfirmDialog
               title="Delete user?"
-              description={`Permanently delete "${user.email}"?`}
+              description={`Permanently delete "${title}"? This removes them from all partitions and invalidates their token.`}
               onConfirm={() => deleteMut.mutate()}
             >
-              <Button variant="destructive">
+              <Button variant="destructive" disabled={user.id === 1}>
                 <Trash2 className="mr-2 h-4 w-4" /> Delete
               </Button>
             </ConfirmDialog>
@@ -131,41 +139,51 @@ export default function UserDetailPage() {
           <TabsTrigger value="token">API Token</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="profile" className="grid gap-4 md:grid-cols-2">
-          {/* Identity — owned by the IdP (SSO). Read-only here. */}
+        <TabsContent value="profile">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Identity</CardTitle>
+              <CardTitle className="text-base">Profile &amp; access</CardTitle>
               <CardDescription>
-                Synced from your identity provider (SSO). Manage these in the IdP, not here.
+                {isSso
+                  ? "This user signs in via SSO. If OIDC claim mapping is enabled, display name and email may be overwritten from the IdP on their next login."
+                  : "Token-only user (no linked SSO identity). Set an External User ID to enable SSO login."}
               </CardDescription>
             </CardHeader>
-            <CardContent className="grid gap-4">
-              <div className="space-y-2">
-                <Label>Email</Label>
-                <Input value={user.email} readOnly disabled />
-              </div>
-              <div className="space-y-2">
-                <Label>Display Name</Label>
-                <Input value={user.display_name || ""} readOnly disabled />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Access & limits — the genuine admin decisions. */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Access & limits</CardTitle>
-              <CardDescription>Promote to admin and set this user's file quota.</CardDescription>
-            </CardHeader>
             <CardContent>
-              <form onSubmit={handleSave} className="space-y-5">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label>Administrator</Label>
-                    <p className="text-xs text-muted-foreground">Full access to every partition and admin function.</p>
-                  </div>
-                  <Switch checked={isAdmin} onCheckedChange={setIsAdmin} />
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  updateMut.mutate();
+                }}
+                className="grid gap-5 md:grid-cols-2"
+              >
+                <div className="space-y-2">
+                  <Label>Display name</Label>
+                  <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Email</Label>
+                  <Input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="Metadata only — not used for login"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>
+                    External User ID (<span className="font-mono">sub</span>)
+                  </Label>
+                  <Input
+                    value={externalId}
+                    onChange={(e) => setExternalId(e.target.value)}
+                    placeholder="Empty = token-only user"
+                    className="font-mono text-sm"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Links this user to an IdP identity. Login matches by{" "}
+                    <span className="font-mono">sub</span>.
+                  </p>
                 </div>
                 <div className="space-y-2">
                   <Label>File quota</Label>
@@ -179,59 +197,72 @@ export default function UserDetailPage() {
                     Empty = global default · <span className="font-mono">-1</span> = unlimited
                   </p>
                 </div>
-                <Button type="submit" disabled={updateMut.isPending}>
-                  {updateMut.isPending ? "Saving..." : "Save Changes"}
-                </Button>
+                <div className="flex items-center justify-between md:col-span-2">
+                  <div>
+                    <Label>Administrator</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Full access to every partition and admin function.
+                    </p>
+                  </div>
+                  <Switch checked={isAdmin} onCheckedChange={setIsAdmin} />
+                </div>
+                <div className="md:col-span-2">
+                  <Button type="submit" disabled={updateMut.isPending}>
+                    {updateMut.isPending ? "Saving…" : "Save Changes"}
+                  </Button>
+                </div>
               </form>
             </CardContent>
           </Card>
         </TabsContent>
 
         <TabsContent value="partitions">
-          <PartitionsTab userId={id!} />
+          <PartitionsTab userId={userId} />
         </TabsContent>
 
         <TabsContent value="token">
-          <ApiTokenTab userId={id!} />
+          <ApiTokenTab userId={userId} />
         </TabsContent>
       </Tabs>
     </div>
   );
 }
 
-function PartitionsTab({ userId }: { userId: string }) {
+function PartitionsTab({ userId }: { userId: number }) {
   const queryClient = useQueryClient();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [partition, setPartition] = useState("");
-  const [role, setRole] = useState("viewer");
+  const [role, setRole] = useState<PartitionRole>("viewer");
 
-  const partitionsQuery = useQuery({
-    queryKey: ["user-partitions", userId],
-    queryFn: () => listUserPartitions(userId),
+  const membershipsQuery = useQuery({
+    queryKey: ["user-memberships", userId],
+    queryFn: () => listUserMemberships(userId),
   });
+  const memberships = membershipsQuery.data ?? [];
 
-  const assignments = partitionsQuery.data ?? [];
+  const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
+  const assigned = new Set(memberships.map((m) => m.partition));
+  const available = (partitionsQuery.data?.partitions ?? []).filter((p) => !assigned.has(p.name));
 
-  const assignMut = useMutation({
-    mutationFn: () => assignPartition(userId, partition, role),
+  const grantMut = useMutation({
+    mutationFn: () => grantMembership(partition, userId, role),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["user-partitions", userId] });
-      toast.success(`Assigned to ${partition}`);
+      queryClient.invalidateQueries({ queryKey: ["user-memberships", userId] });
+      toast.success(`Granted ${role} on ${partition}`);
       setDialogOpen(false);
       setPartition("");
       setRole("viewer");
     },
-    onError: (e) => toast.error(e.message),
+    onError: (e) => toast.error((e as Error).message),
   });
 
-  const removeMut = useMutation({
-    mutationFn: (part: string) => removePartition(userId, part),
+  const revokeMut = useMutation({
+    mutationFn: (part: string) => revokeMembership(part, userId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["user-partitions", userId] });
-      queryClient.invalidateQueries({ queryKey: ["user", userId] });
-      toast.success("Partition removed");
+      queryClient.invalidateQueries({ queryKey: ["user-memberships", userId] });
+      toast.success("Access removed");
     },
-    onError: (e) => toast.error(e.message),
+    onError: (e) => toast.error((e as Error).message),
   });
 
   return (
@@ -246,9 +277,11 @@ function PartitionsTab({ userId }: { userId: string }) {
         </Button>
       </CardHeader>
       <CardContent>
-        {assignments.length === 0 ? (
+        {membershipsQuery.isLoading ? (
+          <Skeleton className="h-24" />
+        ) : memberships.length === 0 ? (
           <p className="text-muted-foreground text-sm py-4 text-center">
-            No partition access yet. Click "Grant access" to add one.
+            No partition access yet. Click &quot;Grant access&quot; to add one.
           </p>
         ) : (
           <Table>
@@ -261,18 +294,20 @@ function PartitionsTab({ userId }: { userId: string }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {assignments.map((a) => (
-                <TableRow key={a.partition}>
-                  <TableCell>{a.partition}</TableCell>
+              {memberships.map((m) => (
+                <TableRow key={m.partition}>
+                  <TableCell>{m.partition}</TableCell>
                   <TableCell>
-                    <Badge variant="outline" className="capitalize">{a.role}</Badge>
+                    <Badge variant="outline" className="capitalize">
+                      {m.role}
+                    </Badge>
                   </TableCell>
-                  <TableCell>{formatDate(a.created_at)}</TableCell>
+                  <TableCell>{formatDate(m.added_at)}</TableCell>
                   <TableCell>
                     <ConfirmDialog
                       title="Remove access?"
-                      description={`Remove this user's access to "${a.partition}"?`}
-                      onConfirm={() => removeMut.mutate(a.partition)}
+                      description={`Remove this user's access to "${m.partition}"?`}
+                      onConfirm={() => revokeMut.mutate(m.partition)}
                     >
                       <Button size="sm" variant="ghost" className="text-destructive">
                         <Trash2 className="h-3 w-3" />
@@ -292,12 +327,29 @@ function PartitionsTab({ userId }: { userId: string }) {
             </DialogHeader>
             <div className="space-y-4">
               <div className="space-y-2">
-                <Label>Partition name</Label>
-                <Input value={partition} onChange={(e) => setPartition(e.target.value)} required />
+                <Label>Partition</Label>
+                <Select value={partition} onValueChange={setPartition}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select a partition" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {available.length === 0 ? (
+                      <div className="px-2 py-1.5 text-sm text-muted-foreground">
+                        No more partitions available
+                      </div>
+                    ) : (
+                      available.map((p) => (
+                        <SelectItem key={p.name} value={p.name}>
+                          {p.name}
+                        </SelectItem>
+                      ))
+                    )}
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-2">
                 <Label>Role</Label>
-                <Select value={role} onValueChange={setRole}>
+                <Select value={role} onValueChange={(v) => setRole(v as PartitionRole)}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
@@ -310,8 +362,8 @@ function PartitionsTab({ userId }: { userId: string }) {
               </div>
             </div>
             <DialogFooter>
-              <Button onClick={() => assignMut.mutate()} disabled={assignMut.isPending || !partition}>
-                {assignMut.isPending ? "Granting..." : "Grant access"}
+              <Button onClick={() => grantMut.mutate()} disabled={grantMut.isPending || !partition}>
+                {grantMut.isPending ? "Granting…" : "Grant access"}
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -321,7 +373,7 @@ function PartitionsTab({ userId }: { userId: string }) {
   );
 }
 
-function ApiTokenTab({ userId }: { userId: string }) {
+function ApiTokenTab({ userId }: { userId: number }) {
   const [token, setToken] = useState<string | null>(null);
 
   const regenerateMut = useMutation({
@@ -330,7 +382,7 @@ function ApiTokenTab({ userId }: { userId: string }) {
       setToken(data.token);
       toast.success("API token regenerated");
     },
-    onError: (e) => toast.error(e.message),
+    onError: (e) => toast.error((e as Error).message),
   });
 
   const copyToken = () => {
@@ -352,7 +404,9 @@ function ApiTokenTab({ userId }: { userId: string }) {
       <CardContent className="space-y-4">
         {token && (
           <div className="space-y-2">
-            <p className="text-sm text-muted-foreground">Copy this token now — it won't be shown again.</p>
+            <p className="text-sm text-muted-foreground">
+              Copy this token now — it won&apos;t be shown again.
+            </p>
             <div className="flex gap-2">
               <Input value={token} readOnly className="font-mono text-xs" />
               <Button size="icon" variant="outline" onClick={copyToken}>
@@ -368,7 +422,7 @@ function ApiTokenTab({ userId }: { userId: string }) {
         >
           <Button disabled={regenerateMut.isPending}>
             <KeyRound className="mr-2 h-4 w-4" />
-            {regenerateMut.isPending ? "Regenerating..." : "Regenerate token"}
+            {regenerateMut.isPending ? "Regenerating…" : "Regenerate token"}
           </Button>
         </ConfirmDialog>
       </CardContent>
