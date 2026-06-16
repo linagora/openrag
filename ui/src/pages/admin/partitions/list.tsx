@@ -35,12 +35,10 @@ import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import {
   listPartitions,
-  listCurrentUserPartitions,
   createPartition,
-  createUserPartition,
   deletePartition,
 } from "@/lib/api/partitions";
-import type { PartitionResponse, UserPartitionDetailResponse } from "@/lib/api/partitions";
+import type { PartitionResponse } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateModelEndpoint } from "@/lib/api/models";
 import { useAuth } from "@/lib/auth";
@@ -103,7 +101,6 @@ export default function PartitionListPage() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [embedder, setEmbedder] = useState("");
-  const [collectionName, setCollectionName] = useState("");
   const [indexationPreset, setIndexationPreset] = useState("default");
   const [retrievalPreset, setRetrievalPreset] = useState("default");
   const [chatHistoryDepth, setChatHistoryDepth] = useState("0");
@@ -115,19 +112,13 @@ export default function PartitionListPage() {
   const [sortDir, setSortDir] = useState<SortDir>(null);
   const [sortColumn, setSortColumn] = useState<"name" | "created_at">("created_at");
 
-  const adminPartitionsQuery = useQuery({
+  // `GET /partition/` is already membership-scoped server-side (admins with
+  // SUPER_ADMIN_MODE see all; regular users see their memberships), so a single
+  // query serves both — isAdmin only gates the admin-only columns/fields below.
+  const partitionsQuery = useQuery({
     queryKey: ["partitions"],
     queryFn: listPartitions,
-    enabled: isAdmin,
   });
-
-  const userPartitionsQuery = useQuery({
-    queryKey: ["user-partitions"],
-    queryFn: listCurrentUserPartitions,
-    enabled: !isAdmin,
-  });
-
-  const partitionsQuery = isAdmin ? adminPartitionsQuery : userPartitionsQuery;
 
   const { data: presetsData } = useQuery({
     queryKey: ["presets"],
@@ -182,8 +173,7 @@ export default function PartitionListPage() {
   };
 
   const filteredAndSorted = useMemo(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- admin and user responses share name/description/created_at; role-specific fields accessed via isAdmin guards
-    let items: any[] = partitionsQuery.data?.partitions ?? [];
+    let items: PartitionResponse[] = partitionsQuery.data?.partitions ?? [];
 
     // Filter by search
     if (search.trim()) {
@@ -226,27 +216,23 @@ export default function PartitionListPage() {
   };
 
   const createMutation = useMutation({
-    mutationFn: () => {
-      const data = {
+    mutationFn: () =>
+      createPartition({
         name,
         description: description || undefined,
         embedder: embedder || undefined,
-        collection_name: collectionName || undefined,
         indexation_preset: indexationPreset || undefined,
         retrieval_preset: retrievalPreset || undefined,
         chat_history_depth: parseInt(chatHistoryDepth),
         chat_llm: chatLlm === "__default__" ? null : chatLlm,
-      };
-      return isAdmin ? createPartition(data) : createUserPartition(data);
-    },
+      }),
     onSuccess: (data) => {
       toast.success(`Partition "${data.name}" created`);
-      queryClient.invalidateQueries({ queryKey: isAdmin ? ["partitions"] : ["user-partitions"] });
+      queryClient.invalidateQueries({ queryKey: ["partitions"] });
       setDialogOpen(false);
       setName("");
       setDescription("");
       setEmbedder("");
-      setCollectionName("");
       setIndexationPreset("default");
       setRetrievalPreset("default");
       setChatHistoryDepth("0");
@@ -340,7 +326,7 @@ export default function PartitionListPage() {
                         </Link>
                         {!isAdmin && (
                           <Badge variant="outline" className="text-xs capitalize">
-                            {(p as UserPartitionDetailResponse).role?.toLowerCase()}
+                            {p.role?.toLowerCase()}
                           </Badge>
                         )}
                       </div>
@@ -357,9 +343,9 @@ export default function PartitionListPage() {
                       )}
                     </TableCell>
                     <TableCell>{p.document_count}</TableCell>
-                    {isAdmin && <TableCell className="text-sm">{(p as PartitionResponse).embedder}</TableCell>}
-                    {isAdmin && <TableCell>{(p as PartitionResponse).indexation_preset}</TableCell>}
-                    {isAdmin && <TableCell>{(p as PartitionResponse).retrieval_preset}</TableCell>}
+                    {isAdmin && <TableCell className="text-sm">{p.embedder}</TableCell>}
+                    {isAdmin && <TableCell>{p.indexation_preset}</TableCell>}
+                    {isAdmin && <TableCell>{p.retrieval_preset}</TableCell>}
                     <TableCell className="text-sm text-muted-foreground">
                       {p.created_at
                         ? new Date(p.created_at).toLocaleDateString()
@@ -367,7 +353,7 @@ export default function PartitionListPage() {
                     </TableCell>
                     {isAdmin && (
                       <TableCell>
-                        <RowActions partition={p as PartitionResponse} />
+                        <RowActions partition={p} />
                       </TableCell>
                     )}
                   </TableRow>
@@ -415,30 +401,20 @@ export default function PartitionListPage() {
             </div>
             {isAdmin && (
               <>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label>Embedder *</Label>
-                    <Select value={embedder} onValueChange={setEmbedder}>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select embedder..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {(embedderEndpoints ?? []).map((ep) => (
-                          <SelectItem key={ep.name} value={ep.name}>
-                            {ep.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Collection Name</Label>
-                    <Input
-                      placeholder="Auto-generated"
-                      value={collectionName}
-                      onChange={(e) => setCollectionName(e.target.value)}
-                    />
-                  </div>
+                <div className="space-y-2">
+                  <Label>Embedder *</Label>
+                  <Select value={embedder} onValueChange={setEmbedder}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select embedder..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(embedderEndpoints ?? []).map((ep) => (
+                        <SelectItem key={ep.name} value={ep.name}>
+                          {ep.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
