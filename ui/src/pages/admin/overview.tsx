@@ -29,10 +29,11 @@ import { StatusBadge } from "@/components/shared/status-badge";
 import { listPartitions, listCurrentUserPartitions } from "@/lib/api/partitions";
 import { listDocuments } from "@/lib/api/documents";
 import { listUsers } from "@/lib/api/users";
-import { listJobs } from "@/lib/api/jobs";
+import { listTasks, isActiveState, type TaskListItem } from "@/lib/api/jobs";
 import { health } from "@/lib/api/system";
-import { formatDate } from "@/lib/utils";
 import { useAuth } from "@/lib/auth";
+
+const str = (v: unknown) => (v == null ? "" : String(v));
 
 function StatCard({
   title,
@@ -64,6 +65,79 @@ function StatCard({
   );
 }
 
+// OpenRag exposes per-file indexing tasks (not batch jobs), with no timestamp
+// or doc-count on the list row — so the table shows task/file/partition/state.
+function RecentTasks({
+  isLoading,
+  tasks,
+}: {
+  isLoading: boolean;
+  tasks: TaskListItem[];
+}) {
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle className="text-base">Recent Jobs</CardTitle>
+        <Button variant="ghost" size="sm" asChild>
+          <Link to="/jobs">
+            View all
+            <ArrowRight className="h-4 w-4 ml-1" />
+          </Link>
+        </Button>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="space-y-3">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="h-10 w-full" />
+            ))}
+          </div>
+        ) : tasks.length > 0 ? (
+          <div className="rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Task</TableHead>
+                  <TableHead>File</TableHead>
+                  <TableHead>Partition</TableHead>
+                  <TableHead>State</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {tasks.map((task) => (
+                  <TableRow key={task.task_id}>
+                    <TableCell>
+                      <Link
+                        to={`/jobs/${task.task_id}`}
+                        className="font-mono text-xs text-primary hover:underline"
+                      >
+                        {task.task_id.slice(0, 8)}
+                      </Link>
+                    </TableCell>
+                    <TableCell className="max-w-[220px] truncate">
+                      {str(task.details?.metadata?.filename) ||
+                        str(task.details?.file_id) ||
+                        "—"}
+                    </TableCell>
+                    <TableCell>{str(task.details?.partition) || "—"}</TableCell>
+                    <TableCell>
+                      <StatusBadge status={task.state} />
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground text-center py-6">
+            No jobs found.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function AdminOverview() {
   const partitionsQuery = useQuery({
     queryKey: ["partitions"],
@@ -80,9 +154,10 @@ function AdminOverview() {
     queryFn: () => listUsers(),
   });
 
-  const jobsQuery = useQuery({
-    queryKey: ["jobs", "recent"],
-    queryFn: () => listJobs({ limit: 5 }),
+  const tasksQuery = useQuery({
+    queryKey: ["tasks", "overview"],
+    queryFn: () => listTasks(),
+    refetchInterval: 5000,
   });
 
   const healthQuery = useQuery({
@@ -91,13 +166,11 @@ function AdminOverview() {
     refetchInterval: 30000,
   });
 
+  const tasks = tasksQuery.data?.tasks ?? [];
   const partitionCount = partitionsQuery.data?.partitions.length ?? 0;
   const documentTotal = documentsQuery.data?.total ?? 0;
   const userCount = usersQuery.data?.users.length ?? 0;
-  const activeJobs =
-    jobsQuery.data?.jobs.filter(
-      (j) => j.status === "PROCESSING" || j.status === "QUEUED",
-    ).length ?? 0;
+  const activeTasks = tasks.filter((t) => isActiveState(t.state)).length;
 
   return (
     <div>
@@ -128,9 +201,9 @@ function AdminOverview() {
         />
         <StatCard
           title="Active Jobs"
-          value={activeJobs}
+          value={activeTasks}
           icon={Activity}
-          isLoading={jobsQuery.isLoading}
+          isLoading={tasksQuery.isLoading}
         />
       </div>
 
@@ -236,67 +309,7 @@ function AdminOverview() {
         </Card>
       </div>
 
-      {/* Recent Jobs */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle className="text-base">Recent Jobs</CardTitle>
-          <Button variant="ghost" size="sm" asChild>
-            <Link to="/jobs">
-              View all
-              <ArrowRight className="h-4 w-4 ml-1" />
-            </Link>
-          </Button>
-        </CardHeader>
-        <CardContent>
-          {jobsQuery.isLoading ? (
-            <div className="space-y-3">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <Skeleton key={i} className="h-10 w-full" />
-              ))}
-            </div>
-          ) : jobsQuery.data && jobsQuery.data.jobs.length > 0 ? (
-            <div className="rounded-md border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Job ID</TableHead>
-                    <TableHead>Partition</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Documents</TableHead>
-                    <TableHead>Created</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {jobsQuery.data.jobs.map((job) => (
-                    <TableRow key={job.id}>
-                      <TableCell>
-                        <Link
-                          to={`/jobs/${job.id}`}
-                          className="font-mono text-xs text-primary hover:underline"
-                        >
-                          {job.id.slice(0, 8)}...
-                        </Link>
-                      </TableCell>
-                      <TableCell>{job.partition}</TableCell>
-                      <TableCell>
-                        <StatusBadge status={job.status} />
-                      </TableCell>
-                      <TableCell>{job.total_documents}</TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {formatDate(job.created_at)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground text-center py-6">
-              No jobs found.
-            </p>
-          )}
-        </CardContent>
-      </Card>
+      <RecentTasks isLoading={tasksQuery.isLoading} tasks={tasks.slice(0, 5)} />
     </div>
   );
 }
@@ -307,18 +320,20 @@ function UserOverview() {
     queryFn: listCurrentUserPartitions,
   });
 
-  const jobsQuery = useQuery({
-    queryKey: ["jobs", "recent"],
-    queryFn: () => listJobs({ limit: 5 }),
+  const tasksQuery = useQuery({
+    queryKey: ["tasks", "overview"],
+    queryFn: () => listTasks(),
+    refetchInterval: 5000,
   });
 
+  const tasks = tasksQuery.data?.tasks ?? [];
   const partitionCount = userPartitionsQuery.data?.partitions.length ?? 0;
   const documentTotal =
     userPartitionsQuery.data?.partitions.reduce(
       (sum, p) => sum + p.document_count,
       0,
     ) ?? 0;
-  const recentJobCount = jobsQuery.data?.jobs.length ?? 0;
+  const recentTaskCount = tasks.length;
 
   return (
     <div>
@@ -343,9 +358,9 @@ function UserOverview() {
         />
         <StatCard
           title="Recent Jobs"
-          value={recentJobCount}
+          value={recentTaskCount}
           icon={Activity}
-          isLoading={jobsQuery.isLoading}
+          isLoading={tasksQuery.isLoading}
         />
       </div>
 
@@ -372,67 +387,7 @@ function UserOverview() {
         </CardContent>
       </Card>
 
-      {/* Recent Jobs */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle className="text-base">Recent Jobs</CardTitle>
-          <Button variant="ghost" size="sm" asChild>
-            <Link to="/jobs">
-              View all
-              <ArrowRight className="h-4 w-4 ml-1" />
-            </Link>
-          </Button>
-        </CardHeader>
-        <CardContent>
-          {jobsQuery.isLoading ? (
-            <div className="space-y-3">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <Skeleton key={i} className="h-10 w-full" />
-              ))}
-            </div>
-          ) : jobsQuery.data && jobsQuery.data.jobs.length > 0 ? (
-            <div className="rounded-md border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Job ID</TableHead>
-                    <TableHead>Partition</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Documents</TableHead>
-                    <TableHead>Created</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {jobsQuery.data.jobs.map((job) => (
-                    <TableRow key={job.id}>
-                      <TableCell>
-                        <Link
-                          to={`/jobs/${job.id}`}
-                          className="font-mono text-xs text-primary hover:underline"
-                        >
-                          {job.id.slice(0, 8)}...
-                        </Link>
-                      </TableCell>
-                      <TableCell>{job.partition}</TableCell>
-                      <TableCell>
-                        <StatusBadge status={job.status} />
-                      </TableCell>
-                      <TableCell>{job.total_documents}</TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {formatDate(job.created_at)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground text-center py-6">
-              No recent jobs.
-            </p>
-          )}
-        </CardContent>
-      </Card>
+      <RecentTasks isLoading={tasksQuery.isLoading} tasks={tasks.slice(0, 5)} />
     </div>
   );
 }

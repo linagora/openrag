@@ -61,15 +61,6 @@ const documents = [
   { id: "doc-006", filename: "corrupted-file.pdf", content_type: "application/pdf", partition: "legal-docs", chunk_count: 0, file_size_bytes: 45000, status: "FAILED", error_message: "Unable to parse PDF: file appears to be corrupted or password-protected", job_id: "job-001", created_at: "2025-01-15T10:30:00Z", updated_at: "2025-01-15T10:31:00Z", indexed_at: null },
 ];
 
-const jobs = [
-  { id: "job-001", status: "SUCCESS", total_documents: 3, partition: "legal-docs", created_at: "2025-01-15T10:30:00Z", updated_at: "2025-01-15T10:35:00Z", started_at: "2025-01-15T10:30:05Z", completed_at: "2025-01-15T10:35:00Z" },
-  { id: "job-002", status: "SUCCESS", total_documents: 1, partition: "hr-policies", created_at: "2025-01-14T09:00:00Z", updated_at: "2025-01-14T09:12:00Z", started_at: "2025-01-14T09:00:02Z", completed_at: "2025-01-14T09:12:00Z" },
-  { id: "job-003", status: "RUNNING", total_documents: 2, partition: "technical-manuals", created_at: "2025-01-16T08:00:00Z", updated_at: "2025-01-16T08:02:00Z", started_at: "2025-01-16T08:00:10Z", completed_at: null },
-  { id: "job-004", status: "QUEUED", total_documents: 5, partition: "legal-docs", created_at: "2025-01-16T09:00:00Z", updated_at: "2025-01-16T09:00:00Z", started_at: null, completed_at: null },
-  { id: "job-005", status: "FAILED", total_documents: 1, partition: "hr-policies", created_at: "2025-01-12T16:00:00Z", updated_at: "2025-01-12T16:01:00Z", started_at: "2025-01-12T16:00:03Z", completed_at: "2025-01-12T16:01:00Z" },
-  { id: "job-006", status: "PARTIAL", total_documents: 4, partition: "legal-docs", created_at: "2025-01-13T11:00:00Z", updated_at: "2025-01-13T11:08:00Z", started_at: "2025-01-13T11:00:05Z", completed_at: "2025-01-13T11:08:00Z" },
-];
-
 const users = [
   { id: "usr-001", email: "admin@openrag.io", display_name: "System Admin", role: "superadmin", is_active: true, created_at: "2024-12-01T00:00:00Z", updated_at: "2025-01-10T12:00:00Z" },
   { id: "usr-002", email: "alice@company.com", display_name: "Alice Johnson", role: "admin", is_active: true, created_at: "2025-01-05T10:00:00Z", updated_at: "2025-01-15T09:00:00Z" },
@@ -390,55 +381,60 @@ export const handlers = [
     return HttpResponse.json({ tasks });
   }),
 
-  // Jobs
-  http.get(`${API}/api/v1/admin/jobs`, ({ request }) => {
-    const url = new URL(request.url);
-    const status = url.searchParams.get("status");
-    let filtered = jobs;
-    if (status) filtered = filtered.filter((j) => j.status === status);
-    return HttpResponse.json({ jobs: filtered, offset: 0, limit: 50 });
-  }),
-
-  http.get(`${API}/api/v1/admin/jobs/:id/events`, () => {
-    // SSE mock: emit a few chunk_stored events then job_completed
-    const encoder = new TextEncoder();
-    const events = [
-      { type: "chunk_stored", doc_id: "doc-001", filename: "contract-template-2024.pdf", chunk_index: 0, stored: true, timing: { parse_s: 12.4, caption_s: 3.2, chunk_s: 0.5 } },
-      { type: "chunk_stored", doc_id: "doc-001", filename: "contract-template-2024.pdf", chunk_index: 1, stored: true, timing: { parse_s: 12.4, caption_s: 3.2, chunk_s: 0.5, contextualize_s: 1.1, embed_s: 0.3, store_s: 0.2 } },
-      { type: "chunk_stored", doc_id: "doc-006", filename: "corrupted-file.pdf", chunk_index: 0, stored: true, timing: { parse_s: 8.1, chunk_s: 0.3 } },
-      { type: "job_completed", job_id: "job-003", status: "SUCCESS" },
-    ];
-    let index = 0;
-    const stream = new ReadableStream({
-      start(controller) {
-        const interval = setInterval(() => {
-          if (index >= events.length) {
-            clearInterval(interval);
-            controller.close();
-            return;
-          }
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(events[index])}\n\n`));
-          index++;
-        }, 1500);
-      },
-    });
-    return new HttpResponse(stream, {
-      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
-    });
-  }),
-
-  http.get(`${API}/api/v1/admin/jobs/:id`, ({ params }) => {
-    const job = jobs.find((j) => j.id === params.id);
-    if (!job) return HttpResponse.json({ detail: "Not found" }, { status: 404 });
+  // OpenRag task detail (poll-based jobs detail page)
+  http.get(`${API}/indexer/task/:taskId`, ({ params }) => {
+    const states: Record<string, string> = {
+      "task-001": "COMPLETED",
+      "task-002": "CHUNKING",
+      "task-003": "FAILED",
+    };
+    const meta: Record<string, { file_id: string; partition: string; filename: string }> = {
+      "task-001": { file_id: "doc-001", partition: "legal-docs", filename: "contract-template-2024.pdf" },
+      "task-002": { file_id: "doc-004", partition: "legal-docs", filename: "quarterly-report-Q4.pdf" },
+      "task-003": { file_id: "doc-006", partition: "legal-docs", filename: "corrupted-file.pdf" },
+    };
+    const id = String(params.taskId);
+    const state = states[id];
+    if (!state) return HttpResponse.json({ detail: `Task '${id}' not found.` }, { status: 404 });
+    const m = meta[id];
     return HttpResponse.json({
-      ...job,
-      documents: [
-        { id: "doc-001", filename: "contract-template-2024.pdf", status: "INDEXED", chunk_count: 47, error_message: null, stage_timings: { parse_s: 12.4, caption_s: 3.2, chunk_s: 0.5, contextualize_s: 8.7, embed_s: 1.2, store_s: 0.8 } },
-        { id: "doc-006", filename: "corrupted-file.pdf", status: "FAILED", chunk_count: 0, error_message: "Unable to parse PDF", stage_timings: null },
-        { id: "doc-002", filename: "employee-handbook-v3.pdf", status: "INDEXED", chunk_count: 128, error_message: null, stage_timings: { parse_s: 45.1, caption_s: 0.0, chunk_s: 1.2, contextualize_s: 32.5, embed_s: 4.8, store_s: 2.1 } },
+      task_id: id,
+      task_state: state,
+      details: { file_id: m.file_id, partition: m.partition, metadata: { filename: m.filename }, user_id: 1 },
+      ...(state === "FAILED" ? { error_url: `/indexer/task/${id}/error` } : {}),
+    });
+  }),
+
+  http.get(`${API}/indexer/task/:taskId/error`, ({ params }) => {
+    const id = String(params.taskId);
+    if (id !== "task-003") return HttpResponse.json({ detail: `No error found for task '${id}'.` }, { status: 404 });
+    return HttpResponse.json({
+      task_id: id,
+      traceback: [
+        "Traceback (most recent call last):",
+        '  File "openrag/services/workers/indexer_pool.py", line 142, in add_file',
+        "    document = serializer.serialize(path)",
+        "pypdf.errors.PdfReadError: Unable to parse PDF: EOF marker not found",
       ],
     });
   }),
+
+  http.get(`${API}/indexer/task/:taskId/logs`, ({ params }) => {
+    const id = String(params.taskId);
+    return HttpResponse.json({
+      task_id: id,
+      logs: [
+        `2024-01-15 10:32:01 | INFO | task ${id} QUEUED`,
+        `2024-01-15 10:32:03 | INFO | task ${id} SERIALIZING`,
+        `2024-01-15 10:32:09 | INFO | task ${id} CHUNKING (47 chunks)`,
+        `2024-01-15 10:32:14 | INFO | task ${id} INSERTING`,
+      ],
+    });
+  }),
+
+  http.delete(`${API}/indexer/task/:taskId`, ({ params }) =>
+    HttpResponse.json({ message: `Cancellation signal sent for task ${params.taskId}` }),
+  ),
 
   // Users
   http.get(`${API}/api/v1/admin/users`, () => {

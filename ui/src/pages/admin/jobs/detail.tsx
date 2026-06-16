@@ -1,11 +1,10 @@
 import { useParams, Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState, useCallback } from "react";
-import type { ColumnDef } from "@tanstack/react-table";
-import { ArrowLeft } from "lucide-react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, Ban } from "lucide-react";
+import { toast } from "sonner";
 
-import { DataTable } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
+import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -14,195 +13,81 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { formatDate, formatDuration } from "@/lib/utils";
-import { getJob, streamJobEvents } from "@/lib/api/jobs";
-import type {
-  JobDocumentStatus,
-  StageTiming,
-  ChunkStoredEvent,
+import {
+  getTaskStatus,
+  getTaskError,
+  getTaskLogs,
+  cancelTask,
+  isActiveState,
+  isTerminalState,
 } from "@/lib/api/jobs";
 
-function formatSeconds(val: number | undefined | null): string {
-  if (val == null) return "--";
-  if (val < 0.01) return "<0.01s";
-  return `${val.toFixed(1)}s`;
-}
-
-function totalTiming(t: StageTiming | null): number | null {
-  if (!t) return null;
-  let sum = 0;
-  let hasAny = false;
-  for (const v of Object.values(t)) {
-    if (v != null) {
-      sum += v;
-      hasAny = true;
-    }
-  }
-  return hasAny ? sum : null;
-}
-
-interface DocProgress {
-  filename: string;
-  chunks_completed: number;
-  timing: StageTiming;
-}
-
-const documentColumns: ColumnDef<JobDocumentStatus, unknown>[] = [
-  {
-    accessorKey: "filename",
-    header: "Filename",
-    cell: ({ row }) => (
-      <Link
-        to={`/documents/${row.original.id}`}
-        className="text-primary hover:underline font-medium"
-      >
-        {row.original.filename}
-      </Link>
-    ),
-  },
-  {
-    accessorKey: "status",
-    header: "Status",
-    cell: ({ row }) => <StatusBadge status={row.original.status} />,
-  },
-  {
-    accessorKey: "chunk_count",
-    header: "Chunks",
-  },
-  {
-    id: "parse",
-    header: "Parse",
-    cell: ({ row }) => formatSeconds(row.original.stage_timings?.parse_s),
-  },
-  {
-    id: "caption",
-    header: "Caption",
-    cell: ({ row }) => formatSeconds(row.original.stage_timings?.caption_s),
-  },
-  {
-    id: "chunk",
-    header: "Chunk",
-    cell: ({ row }) => formatSeconds(row.original.stage_timings?.chunk_s),
-  },
-  {
-    id: "context",
-    header: "Context",
-    cell: ({ row }) => formatSeconds(row.original.stage_timings?.contextualize_s),
-  },
-  {
-    id: "embed",
-    header: "Embed",
-    cell: ({ row }) => formatSeconds(row.original.stage_timings?.embed_s),
-  },
-  {
-    id: "store",
-    header: "Store",
-    cell: ({ row }) => formatSeconds(row.original.stage_timings?.store_s),
-  },
-  {
-    id: "total",
-    header: "Total",
-    cell: ({ row }) => formatSeconds(totalTiming(row.original.stage_timings)),
-  },
-  {
-    accessorKey: "error_message",
-    header: "Error",
-    cell: ({ row }) => {
-      const error = row.original.error_message;
-      if (!error) return <span className="text-muted-foreground">--</span>;
-      return (
-        <span className="text-destructive text-sm" title={error}>
-          {error.length > 80 ? `${error.slice(0, 80)}...` : error}
-        </span>
-      );
-    },
-  },
-];
+const str = (v: unknown) => (v == null ? "" : String(v));
 
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const [liveProgress, setLiveProgress] = useState<Map<string, DocProgress>>(
-    new Map()
-  );
-  const [sseConnected, setSseConnected] = useState(false);
-  const controllerRef = useRef<AbortController | null>(null);
+  const queryClient = useQueryClient();
 
-  const jobQuery = useQuery({
-    queryKey: ["job", id],
-    queryFn: () => getJob(id!),
+  // OpenRag has no task SSE — poll status until it reaches a terminal state.
+  const taskQuery = useQuery({
+    queryKey: ["task", id],
+    queryFn: () => getTaskStatus(id!),
     enabled: !!id,
     refetchInterval: (query) => {
-      const status = query.state.data?.status?.toUpperCase();
-      if (status === "QUEUED" || status === "RUNNING") {
-        return 3000;
-      }
-      return false;
+      const state = query.state.data?.task_state;
+      return state && isTerminalState(state) ? false : 3000;
     },
   });
 
-  const isActive =
-    jobQuery.data?.status?.toUpperCase() === "QUEUED" ||
-    jobQuery.data?.status?.toUpperCase() === "RUNNING";
+  const state = taskQuery.data?.task_state;
+  const active = !!state && isActiveState(state);
+  const failed = state === "FAILED";
 
-  const handleChunkStored = useCallback((event: ChunkStoredEvent) => {
-    setLiveProgress((prev) => {
-      const next = new Map(prev);
-      const existing = next.get(event.doc_id);
-      next.set(event.doc_id, {
-        filename: event.filename,
-        chunks_completed: (existing?.chunks_completed || 0) + 1,
-        timing: event.timing,
-      });
-      return next;
-    });
-  }, []);
+  const logsQuery = useQuery({
+    queryKey: ["task-logs", id],
+    queryFn: () => getTaskLogs(id!),
+    enabled: !!id,
+    // Keep tailing logs while the task is still running.
+    refetchInterval: active ? 3000 : false,
+  });
 
-  const handleJobCompleted = useCallback(() => {
-    setSseConnected(false);
-    jobQuery.refetch();
-  }, [jobQuery]);
+  const errorQuery = useQuery({
+    queryKey: ["task-error", id],
+    queryFn: () => getTaskError(id!),
+    enabled: !!id && failed,
+  });
 
-  const handleSseError = useCallback(() => {
-    setSseConnected(false);
-  }, []);
+  const cancelMutation = useMutation({
+    mutationFn: () => cancelTask(id!),
+    onSuccess: (res) => {
+      toast.success(res.message ?? "Cancellation signal sent");
+      queryClient.invalidateQueries({ queryKey: ["task", id] });
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (err: Error) => toast.error(`Failed to cancel: ${err.message}`),
+  });
 
-  useEffect(() => {
-    if (!id || !isActive) return;
-
-    const controller = streamJobEvents(
-      id,
-      handleChunkStored,
-      handleJobCompleted,
-      handleSseError,
-    );
-    controllerRef.current = controller;
-    setSseConnected(true);
-
-    return () => {
-      controller.abort();
-      controllerRef.current = null;
-      setSseConnected(false);
-    };
-  }, [id, isActive, handleChunkStored, handleJobCompleted, handleSseError]);
-
-  if (jobQuery.isLoading) {
+  if (taskQuery.isLoading) {
     return (
       <div className="flex items-center justify-center py-12 text-muted-foreground">
-        Loading job...
+        Loading task...
       </div>
     );
   }
 
-  if (jobQuery.isError) {
+  if (taskQuery.isError) {
     return (
       <div className="flex items-center justify-center py-12 text-destructive">
-        Failed to load job: {(jobQuery.error as Error).message}
+        Failed to load task: {(taskQuery.error as Error).message}
       </div>
     );
   }
 
-  const job = jobQuery.data;
-  if (!job) return null;
+  const task = taskQuery.data;
+  if (!task) return null;
+
+  const details = task.details;
+  const filename = str(details?.metadata?.filename) || str(details?.file_id) || "—";
 
   return (
     <div className="space-y-6">
@@ -218,102 +103,118 @@ export default function JobDetailPage() {
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">
-            Job {job.id.slice(0, 8)}...
+            Task {task.task_id.slice(0, 8)}
           </h1>
           <p className="text-muted-foreground mt-1 font-mono text-sm">
-            {job.id}
+            {task.task_id}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <StatusBadge status={job.status} />
-          {isActive && (
+        <div className="flex items-center gap-3">
+          <StatusBadge status={task.task_state} />
+          {active && (
             <span className="text-sm text-muted-foreground animate-pulse">
-              {sseConnected ? "Live" : "Auto-refreshing..."}
+              Auto-refreshing…
             </span>
+          )}
+          {active && (
+            <ConfirmDialog
+              title="Cancel Task"
+              description={`Send a cancellation signal for "${filename}"? Already-completed work is not rolled back.`}
+              onConfirm={() => cancelMutation.mutate()}
+            >
+              <Button variant="destructive" size="sm" disabled={cancelMutation.isPending}>
+                <Ban className="h-4 w-4" />
+                {cancelMutation.isPending ? "Cancelling…" : "Cancel Task"}
+              </Button>
+            </ConfirmDialog>
           )}
         </div>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>Job Summary</CardTitle>
+          <CardTitle>Task Details</CardTitle>
         </CardHeader>
         <CardContent>
           <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3 text-sm">
             <div className="flex justify-between sm:flex-col sm:gap-1">
-              <dt className="text-muted-foreground">Job ID</dt>
-              <dd className="font-mono font-medium">{job.id}</dd>
+              <dt className="text-muted-foreground">Task ID</dt>
+              <dd className="font-mono font-medium">{task.task_id}</dd>
             </div>
             <div className="flex justify-between sm:flex-col sm:gap-1">
-              <dt className="text-muted-foreground">Status</dt>
+              <dt className="text-muted-foreground">State</dt>
               <dd>
-                <StatusBadge status={job.status} />
+                <StatusBadge status={task.task_state} />
               </dd>
             </div>
             <Separator className="sm:col-span-2" />
+            <div className="flex justify-between sm:flex-col sm:gap-1">
+              <dt className="text-muted-foreground">File</dt>
+              <dd className="font-medium">
+                {details?.file_id && details?.partition ? (
+                  <Link
+                    to={`/documents/${encodeURIComponent(str(details.partition))}/${encodeURIComponent(str(details.file_id))}`}
+                    className="text-primary hover:underline"
+                  >
+                    {filename}
+                  </Link>
+                ) : (
+                  filename
+                )}
+              </dd>
+            </div>
             <div className="flex justify-between sm:flex-col sm:gap-1">
               <dt className="text-muted-foreground">Partition</dt>
-              <dd className="font-medium">{job.partition}</dd>
-            </div>
-            <div className="flex justify-between sm:flex-col sm:gap-1">
-              <dt className="text-muted-foreground">Total Documents</dt>
-              <dd className="font-medium">{job.total_documents}</dd>
+              <dd className="font-medium">{str(details?.partition) || "—"}</dd>
             </div>
             <Separator className="sm:col-span-2" />
             <div className="flex justify-between sm:flex-col sm:gap-1">
-              <dt className="text-muted-foreground">Created</dt>
-              <dd className="font-medium">{formatDate(job.created_at)}</dd>
+              <dt className="text-muted-foreground">File ID</dt>
+              <dd className="font-mono font-medium">{str(details?.file_id) || "—"}</dd>
             </div>
             <div className="flex justify-between sm:flex-col sm:gap-1">
-              <dt className="text-muted-foreground">Started</dt>
-              <dd className="font-medium">{formatDate(job.started_at)}</dd>
-            </div>
-            <Separator className="sm:col-span-2" />
-            <div className="flex justify-between sm:flex-col sm:gap-1">
-              <dt className="text-muted-foreground">Completed</dt>
-              <dd className="font-medium">{formatDate(job.completed_at)}</dd>
-            </div>
-            <div className="flex justify-between sm:flex-col sm:gap-1">
-              <dt className="text-muted-foreground">Duration</dt>
-              <dd className="font-medium">
-                {formatDuration(job.started_at, job.completed_at)}
-              </dd>
+              <dt className="text-muted-foreground">User ID</dt>
+              <dd className="font-medium">{str(details?.user_id) || "—"}</dd>
             </div>
           </dl>
         </CardContent>
       </Card>
 
-      {isActive && liveProgress.size > 0 && (
-        <Card>
+      {failed && (
+        <Card className="border-destructive/40">
           <CardHeader>
-            <CardTitle>Live Progress</CardTitle>
+            <CardTitle className="text-destructive">Error</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="space-y-2">
-              {Array.from(liveProgress.entries()).map(([docId, progress]) => (
-                <div
-                  key={docId}
-                  className="flex items-center justify-between text-sm"
-                >
-                  <span className="font-medium truncate max-w-[300px]">
-                    {progress.filename}
-                  </span>
-                  <span className="text-muted-foreground">
-                    {progress.chunks_completed} chunks stored
-                  </span>
-                </div>
-              ))}
-            </div>
+            {errorQuery.isLoading ? (
+              <p className="text-sm text-muted-foreground">Loading error…</p>
+            ) : errorQuery.data?.traceback?.length ? (
+              <pre className="overflow-x-auto rounded-md bg-muted p-4 text-xs leading-relaxed text-destructive whitespace-pre-wrap">
+                {errorQuery.data.traceback.join("\n")}
+              </pre>
+            ) : (
+              <p className="text-sm text-muted-foreground">No error details available.</p>
+            )}
           </CardContent>
         </Card>
       )}
 
       <Card>
         <CardHeader>
-          <CardTitle>Documents ({job.documents.length})</CardTitle>
+          <CardTitle>Logs</CardTitle>
         </CardHeader>
         <CardContent>
-          <DataTable columns={documentColumns} data={job.documents} />
+          {logsQuery.isLoading ? (
+            <p className="text-sm text-muted-foreground">Loading logs…</p>
+          ) : logsQuery.isError ? (
+            <p className="text-sm text-muted-foreground">No logs available for this task.</p>
+          ) : logsQuery.data?.logs?.length ? (
+            <pre className="max-h-[480px] overflow-auto rounded-md bg-muted p-4 text-xs leading-relaxed whitespace-pre-wrap">
+              {logsQuery.data.logs.join("\n")}
+            </pre>
+          ) : (
+            <p className="text-sm text-muted-foreground">No logs yet.</p>
+          )}
         </CardContent>
       </Card>
     </div>
