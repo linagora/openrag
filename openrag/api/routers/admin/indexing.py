@@ -23,12 +23,16 @@ from api.dependencies.auth import (
     require_task_owner,
 )
 from api.dependencies.files import (
+    FORBIDDEN_CHARS_IN_FILE_ID,
     save_file_to_disk,
     validate_file_format,
     validate_file_id,
     validate_metadata,
 )
 from api.routers.admin.task_logs import collect_task_logs
+from api.schemas.admin.common import BatchUploadItem, BatchUploadResponse, BatchUploadResult
+from core.indexing import validators as core_validators
+from core.utils.exceptions import OpenRAGError
 from core.utils.filename import sanitize_filename
 from core.utils.log_tail import app_log_file
 from core.utils.logging import get_logger
@@ -36,6 +40,7 @@ from di.providers import get_auth_service, get_config, get_indexing_service, get
 from fastapi import (
     APIRouter,
     Depends,
+    File,
     Form,
     HTTPException,
     Request,
@@ -44,6 +49,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError as PydanticValidationError
 
 logger = get_logger()
 
@@ -57,6 +63,104 @@ def build_url(request: Request, route_name: str, *, preferred_url_scheme: str | 
 
 
 router = APIRouter()
+
+
+def _parse_batch_upload_items(raw_items: str) -> list[BatchUploadItem]:
+    try:
+        decoded = json.loads(raw_items)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="items must be a JSON array",
+        ) from exc
+    if not isinstance(decoded, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="items must be a JSON array",
+        )
+    try:
+        return [BatchUploadItem.model_validate(item) for item in decoded]
+    except PydanticValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="items must be a JSON array of objects with file_id and optional metadata",
+        ) from exc
+
+
+async def _validate_workspace_ids(
+    workspace_ids: list[str] | None,
+    *,
+    partition: str,
+    service,
+) -> list[str] | None:
+    if workspace_ids is None:
+        return None
+    for ws_id in workspace_ids:
+        ws = await service.get_workspace(ws_id)
+        if not ws or ws["partition_name"] != partition:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Workspace '{ws_id}' not found in partition '{partition}'",
+            )
+    return workspace_ids
+
+
+def _validate_upload_format(file: UploadFile, metadata: dict, config) -> None:
+    accepted_file_formats = config.loader.file_loaders.model_dump().keys()
+    mimetypes = config.loader.mimetypes.to_dict()
+    core_validators.validate_file_format(
+        filename=file.filename,
+        accepted_formats=accepted_file_formats,
+        accepted_mimetypes=mimetypes.keys(),
+        mimetype=metadata.get("mimetype"),
+    )
+
+
+async def _queue_uploaded_file(
+    *,
+    request: Request,
+    partition: str,
+    file_id: str,
+    file: UploadFile,
+    metadata: dict,
+    workspace_ids: list[str] | None,
+    user,
+    config,
+    service,
+) -> str:
+    if await service.file_exists(file_id, partition):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"File '{file_id}' already exists in partition {partition}",
+        )
+
+    parsed_workspace_ids = await _validate_workspace_ids(
+        workspace_ids,
+        partition=partition,
+        service=service,
+    )
+
+    original_filename = file.filename
+    file.filename = sanitize_filename(file.filename)
+    file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+
+    task_id = await service.add_file(
+        file_path=str(file_path),
+        file_id=file_id,
+        partition=partition,
+        metadata=metadata,
+        sanitized_filename=file.filename,
+        original_filename=original_filename,
+        user=user,
+        workspace_ids=parsed_workspace_ids,
+    )
+
+    return build_url(
+        request,
+        "get_task_status",
+        preferred_url_scheme=config.server.preferred_url_scheme,
+        task_id=task_id,
+    )
 
 
 @router.get(
@@ -185,6 +289,97 @@ async def add_file(
             )
         },
     )
+
+
+@router.post(
+    "/partition/{partition}/files",
+    response_model=BatchUploadResponse,
+    description="""Upload and index multiple files in one request.
+
+Each file is still indexed as its own task. A failure for one item does not
+abort the whole batch; the response contains one result per file.
+
+**Request:**
+- `files`: repeated multipart file field
+- `items`: JSON array matching the uploaded file order
+
+Each `items` entry must contain `file_id` and may contain `metadata` and
+`workspace_ids`.
+""",
+)
+async def add_files(
+    request: Request,
+    partition: str,
+    files: list[UploadFile] = File(...),
+    items: str = Form(..., description="JSON array with one item per uploaded file"),
+    user=Depends(require_partition_editor),
+    _quota_check=Depends(check_user_file_quota),
+    config=Depends(get_config),
+    service=Depends(get_indexing_service),
+):
+    batch_items = _parse_batch_upload_items(items)
+    if len(batch_items) != len(files):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="items must contain exactly one entry for each uploaded file",
+        )
+
+    results: list[BatchUploadResult] = []
+    for file, item in zip(files, batch_items, strict=True):
+        raw_file_id = item.file_id
+        try:
+            file_id = core_validators.validate_file_id(raw_file_id, FORBIDDEN_CHARS_IN_FILE_ID)
+            metadata = dict(item.metadata or {})
+            _validate_upload_format(file, metadata, config)
+            task_status_url = await _queue_uploaded_file(
+                request=request,
+                partition=partition,
+                file_id=file_id,
+                file=file,
+                metadata=metadata,
+                workspace_ids=item.workspace_ids,
+                user=user,
+                config=config,
+                service=service,
+            )
+            results.append(
+                BatchUploadResult(
+                    file_id=file_id,
+                    status="accepted",
+                    task_status_url=task_status_url,
+                )
+            )
+        except HTTPException as exc:
+            results.append(
+                BatchUploadResult(
+                    file_id=raw_file_id,
+                    status="failed",
+                    detail=str(exc.detail),
+                )
+            )
+        except OpenRAGError as exc:
+            results.append(
+                BatchUploadResult(
+                    file_id=raw_file_id,
+                    status="failed",
+                    detail=exc.message,
+                )
+            )
+        except Exception as exc:
+            logger.exception("Failed to queue batch upload item.", file_id=raw_file_id, error=str(exc))
+            results.append(
+                BatchUploadResult(
+                    file_id=raw_file_id,
+                    status="failed",
+                    detail=str(exc),
+                )
+            )
+
+    accepted = sum(result.status == "accepted" for result in results)
+    failed = len(results) - accepted
+    response = BatchUploadResponse(accepted=accepted, failed=failed, results=results)
+    response_status = status.HTTP_201_CREATED if failed == 0 else status.HTTP_207_MULTI_STATUS
+    return JSONResponse(status_code=response_status, content=response.model_dump())
 
 
 @router.delete(
