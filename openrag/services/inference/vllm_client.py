@@ -186,7 +186,7 @@ class VLLMEmbedder(Embedder):
         max_model_len: int | None = None,
         dimension: int | None = None,
         timeout: float = 120.0,
-        batch_size: int = 64,
+        batch_size: int = 32,
         embed_concurrency: int = 4,
         api_key: str = "",
         **_kwargs,
@@ -251,7 +251,13 @@ class VLLMEmbedder(Embedder):
     async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         body: dict = {"model": self._model, "input": texts}
         if self._max_model_len is not None:
-            body["truncate_prompt_tokens"] = self._max_model_len
+            # Truncate one token *below* max_model_len. vLLM pooling models
+            # (e.g. Qwen3-Embedding) hang indefinitely on a request whose input
+            # is exactly max_model_len tokens long (vllm-project/vllm#29496).
+            # Any chunk >= max_model_len would otherwise be truncated straight
+            # onto that boundary, wedging the batch forever while other batches
+            # and files keep embedding.
+            body["truncate_prompt_tokens"] = max(1, self._max_model_len - 1)
         try:
             resp = await self._client.post(f"{self._endpoint}/embeddings", json=body)
             resp.raise_for_status()

@@ -344,12 +344,22 @@ class TestVLLMEmbedder:
         assert VLLMEmbedder(endpoint="http://x", model_name="m", dimension=768).dimension == 768
 
     @pytest.mark.asyncio
-    async def test_truncate_prompt_tokens_included(self):
+    async def test_truncate_prompt_tokens_is_one_below_max_model_len(self):
+        # One token below max_model_len: vLLM pooling models hang on input that
+        # is exactly max_model_len tokens long (vllm-project/vllm#29496).
         def handler(request: httpx.Request) -> httpx.Response:
-            assert json.loads(request.content)["truncate_prompt_tokens"] == 8192
+            assert json.loads(request.content)["truncate_prompt_tokens"] == 8191
             return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1]}]})
 
         await self._make_embedder(handler, max_model_len=8192).embed(["test"])
+
+    @pytest.mark.asyncio
+    async def test_truncate_prompt_tokens_floors_at_one(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert json.loads(request.content)["truncate_prompt_tokens"] == 1
+            return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1]}]})
+
+        await self._make_embedder(handler, max_model_len=1).embed(["test"])
 
     @pytest.mark.asyncio
     async def test_truncate_prompt_tokens_absent_when_none(self):
