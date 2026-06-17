@@ -4,9 +4,50 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+import httpx
 from core.models.document import Document
+from core.utils.logging import get_logger
 from services.workers.parsers.doc_serializer_bridge import INDEXATION_CONFIG_METADATA_KEY
 from services.workers.pipeline_builder import IndexingPipeline
+
+logger = get_logger()
+
+# Short client-side timeout for the best-effort indexing callback; we don't
+# retry internally if the receiver (e.g. cozy-stack) is unreachable.
+_CALLBACK_TIMEOUT = httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0)
+
+
+async def _send_indexing_callback(
+    callback_url: str | None,
+    partition: str,
+    file_id: str,
+    status: str,
+) -> None:
+    """Best-effort notification of the final indexing status to an external URL.
+
+    No-op when *callback_url* is ``None``.  Never raises — a callback failure
+    (network error, timeout, non-2xx response) must never affect the indexing
+    outcome, so any error is logged as a warning and swallowed.
+    """
+    if not callback_url:
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=_CALLBACK_TIMEOUT) as client:
+            response = await client.post(
+                callback_url,
+                json={"partition": partition, "file_id": file_id, "status": status},
+            )
+            response.raise_for_status()
+    except Exception as exc:
+        logger.warning(
+            "Failed to send indexing callback",
+            callback_url=callback_url,
+            partition=partition,
+            file_id=file_id,
+            status=status,
+            error=str(exc),
+        )
 
 
 class IndexerWorker:
@@ -49,13 +90,19 @@ class IndexerWorker:
         replace: bool = False,
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
+        callback_url: str | None = None,
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
         Returns a plain dict ``{"stored_count": int, "stage": "stored"}``
         on success.  On failure, state is set to FAILED and the exception
         is re-raised so the Ray task is marked as errored.
+
+        When *callback_url* is provided, a best-effort ``POST`` notification is
+        sent to that URL after the task reaches a terminal state (``indexed`` or
+        ``failed``).  The callback never affects the indexing outcome.
         """
+        file_id = metadata.get("file_id", "")
         await self._tsm.set_state.remote(task_id, "SERIALIZING")
         try:
             document = _load_document(path, metadata, partition, indexation_config=indexation_config)
@@ -81,10 +128,16 @@ class IndexerWorker:
                     indexation_config=indexation_config,
                 )
             await self._tsm.set_state.remote(task_id, "COMPLETED")
+            # Notify external callback (e.g. cozy-stack) that indexing succeeded.
+            # Best-effort: never raises, never affects the indexing outcome.
+            await _send_indexing_callback(callback_url, partition, file_id, "indexed")
             return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
         except Exception:
             tb = traceback.format_exc()
-            await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
+            was_failed = await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
+            # Only notify on an actual failure, not on a user-initiated cancellation.
+            if was_failed:
+                await _send_indexing_callback(callback_url, partition, file_id, "failed")
             raise
 
 

@@ -158,11 +158,16 @@ class IndexingService:
         user: dict | None,
         workspace_ids: list[str] | None = None,
         replace: bool = False,
+        callback_url: str | None = None,
     ) -> str:
         """Assemble metadata and queue an (re)indexing job; return its task id.
 
         Workspace association happens inside the worker's ``add_file``
         after a successful index — the router only pre-validates the ids.
+
+        When *callback_url* is provided it is forwarded to the worker, which
+        sends a best-effort ``POST`` notification once the task reaches a
+        terminal state.
         """
         full_metadata = self._build_metadata(
             metadata=metadata,
@@ -182,6 +187,7 @@ class IndexingService:
             replace=replace,
             indexation_config=indexation_config,
             embedder_name=embedder_name,
+            callback_url=callback_url,
         )
 
     async def delete_file(self, file_id: str, partition: str) -> None:

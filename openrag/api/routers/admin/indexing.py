@@ -122,6 +122,7 @@ async def add_file(
     file: UploadFile = Depends(validate_file_format),
     metadata: dict = Depends(validate_metadata),
     workspace_ids: str | None = Form(None, description="JSON array of workspace IDs to add the file to"),
+    callback_url: str | None = Form(None, description="Optional webhook URL notified when async indexing finishes"),
     user=Depends(require_partition_editor),
     _quota_check=Depends(check_user_file_quota),
     config=Depends(get_config),
@@ -172,6 +173,7 @@ async def add_file(
         original_filename=original_filename,
         user=user,
         workspace_ids=parsed_workspace_ids,
+        callback_url=callback_url,
     )
 
     return JSONResponse(
@@ -254,6 +256,7 @@ async def put_file(
     file_id: str = Depends(validate_file_id),
     file: UploadFile = Depends(validate_file_format),
     metadata: dict = Depends(validate_metadata),
+    callback_url: str | None = Form(None, description="Optional webhook URL notified when async indexing finishes"),
     user=Depends(require_partition_editor),
     config=Depends(get_config),
     service=Depends(get_indexing_service),
@@ -280,6 +283,7 @@ async def put_file(
         original_filename=original_filename,
         user=user,
         replace=True,
+        callback_url=callback_url,
     )
 
     return JSONResponse(

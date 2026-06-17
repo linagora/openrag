@@ -76,6 +76,7 @@ class IndexerPool:
         replace: bool = False,
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
+        callback_url: str | None = None,
     ) -> dict[str, Any]:
         await self._ensure_catalog()
         result = await self._worker.process_file(
@@ -88,6 +89,7 @@ class IndexerPool:
             replace=replace,
             indexation_config=indexation_config,
             embedder_name=embedder_name,
+            callback_url=callback_url,
         )
         file_id = metadata.get("file_id", "")
         if workspace_ids and not replace and file_id:

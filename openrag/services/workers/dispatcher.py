@@ -70,6 +70,7 @@ class WorkerDispatcher(IndexingDispatcher):
         replace: bool,
         indexation_config: dict | None = None,
         embedder_name: str | None = None,
+        callback_url: str | None = None,
     ) -> str:
         task_id = uuid.uuid4().hex
 
@@ -100,6 +101,7 @@ class WorkerDispatcher(IndexingDispatcher):
             replace=replace,
             indexation_config=indexation_config,
             embedder_name=embedder_name,
+            callback_url=callback_url,
         )
 
         await self._call(

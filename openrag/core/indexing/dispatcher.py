@@ -37,6 +37,7 @@ class IndexingDispatcher(ABC):
         replace: bool,
         indexation_config: dict | None = None,
         embedder_name: str | None = None,
+        callback_url: str | None = None,
     ) -> str:
         """Queue an (re)indexing job, register its task state, return its id."""
         ...
