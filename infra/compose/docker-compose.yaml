@@ -136,8 +136,9 @@ services:
         condition: service_started
       milvus:
         condition: service_healthy
-      vllm-gpu:
-        condition: service_healthy
+    # No hard dependency on vllm-gpu: the embedder is reached over the network at
+    # ingestion time, so external-inference deploys must not be blocked by (or pull
+    # in) the bundled vLLM. With local inference, start vllm-gpu alongside.
 
   # No GPU
   openrag-cpu:
@@ -150,8 +151,7 @@ services:
         condition: service_started
       milvus:
         condition: service_healthy
-      vllm-cpu:
-        condition: service_healthy
+    # No hard dependency on vllm-cpu (see the GPU service above).
 
   rdb:
     image: postgres:15
