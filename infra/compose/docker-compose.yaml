@@ -92,6 +92,10 @@ services:
     ports:
       - "${INDEXERUI_PORT:-3042}:3000"
     restart: unless-stopped
+    # Superseded by the admin-ui service below. Opt in with `--profile legacy-ui`
+    # (requires the extern/indexer-ui submodule); otherwise it neither builds nor
+    # runs, so the default stack needs no submodules.
+    profiles: ["legacy-ui"]
 
   # ── Admin UI (React SPA + nginx, same-origin reverse proxy to the API) ──
   admin-ui:
@@ -107,8 +111,9 @@ services:
     restart: unless-stopped
     ports:
       - "${ADMIN_UI_PORT:-8081}:80"
-    depends_on:
-      - openrag
+    # No depends_on the API: nginx resolves the `openrag` network alias (shared by
+    # the GPU and CPU API variants) at request time, so this works under any
+    # profile and starts even before the backend is ready.
 
   # GPU - default
   openrag:
