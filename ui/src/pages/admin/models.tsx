@@ -249,11 +249,13 @@ function EndpointDialog({
   const [extraJson, setExtraJson] = useState("{}");
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
+  const [validationMsg, setValidationMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) {
       setValidated(null);
       setValidating(false);
+      setValidationMsg(null);
       if (editing) {
         setName(editing.name);
         setEndpoint(editing.endpoint);
@@ -275,6 +277,7 @@ function EndpointDialog({
   // Reset validation when relevant fields change
   useEffect(() => {
     setValidated(null);
+    setValidationMsg(null);
   }, [endpoint, modelName, extraJson]);
 
   const handleValidate = async () => {
@@ -285,17 +288,36 @@ function EndpointDialog({
       return;
     }
     setValidating(true);
+    setValidationMsg(null);
     try {
       const res = await validateModelEndpoint(editing.model_type, editing.name);
-      setValidated(res.reachable);
-      if (res.reachable) {
-        toast.success(res.detail || "Endpoint is reachable");
+      if (!res.reachable) {
+        setValidated(false);
+        const msg = res.detail || "Endpoint is unreachable.";
+        setValidationMsg(msg);
+        toast.error(msg);
+      } else if (res.model_found === false) {
+        // Reachable, but the configured model isn't actually served — the common
+        // trap (a green "reachable" hides a wrong model name). Block save and
+        // show what the endpoint actually advertises.
+        setValidated(false);
+        const served = res.models_served?.length ? res.models_served.join(", ") : "none advertised";
+        const msg = `Reachable, but "${editing.model_name}" isn't served. Available: ${served}`;
+        setValidationMsg(msg);
+        toast.warning(msg);
       } else {
-        toast.error(res.detail || "Endpoint is unreachable");
+        setValidated(true);
+        const msg = res.model_found
+          ? `Reachable — "${editing.model_name}" is served.`
+          : res.detail || "Reachable (couldn't confirm the model list).";
+        setValidationMsg(msg);
+        toast.success(msg);
       }
     } catch (e) {
       setValidated(false);
-      toast.error(e instanceof Error ? e.message : "Validation failed");
+      const msg = e instanceof Error ? e.message : "Validation failed";
+      setValidationMsg(msg);
+      toast.error(msg);
     } finally {
       setValidating(false);
     }
@@ -380,6 +402,16 @@ function EndpointDialog({
               rows={4}
             />
           </div>
+          {validationMsg && (
+            <p
+              className={`text-xs ${
+                validated ? "text-muted-foreground" : "text-amber-600 dark:text-amber-500"
+              }`}
+            >
+              {validationMsg}
+            </p>
+          )}
+
           <DialogFooter className="gap-2 sm:gap-0">
             <Button
               type="button"
