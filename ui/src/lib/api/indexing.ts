@@ -41,7 +41,18 @@ function fileForm(file: File, metadata?: Record<string, unknown>, workspaceIds?:
 
 /** Generate a unique, URL-safe file_id for a new upload. */
 export function newFileId(): string {
-  return crypto.randomUUID();
+  // crypto.randomUUID() only exists in secure contexts (HTTPS/localhost); over
+  // plain HTTP it's undefined. crypto.getRandomValues works everywhere, so fall
+  // back to a manual UUID v4.
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40; // version 4
+  b[8] = (b[8] & 0x3f) | 0x80; // variant
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0"));
+  return `${h[0]}${h[1]}${h[2]}${h[3]}-${h[4]}${h[5]}-${h[6]}${h[7]}-${h[8]}${h[9]}-${h[10]}${h[11]}${h[12]}${h[13]}${h[14]}${h[15]}`;
 }
 
 /**
