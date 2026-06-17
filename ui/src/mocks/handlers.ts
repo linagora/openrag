@@ -196,15 +196,6 @@ const partitionConfig = (name: string) => {
 };
 
 export const handlers = [
-  // Auth
-  http.post(`${API}/api/v1/auth/login`, () => {
-    return HttpResponse.json({
-      access_token: "header.eyJzdWIiOiJ1c3ItMDAxIiwidHlwZSI6ImFjY2VzcyIsImVtYWlsIjoiYWRtaW5AbWFuZHJhZ29yYS5pbyIsInJvbGUiOiJzdXBlcmFkbWluIn0=.signature",
-      refresh_token: "mock-refresh-token",
-      token_type: "bearer",
-    });
-  }),
-
   // Current authenticated user (profile + file usage).
   http.get(`${API}/users/info`, () =>
     HttpResponse.json({

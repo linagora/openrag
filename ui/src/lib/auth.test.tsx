@@ -1,72 +1,71 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { renderHook } from "@testing-library/react";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { renderHook, waitFor, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { AuthProvider, useAuth } from "./auth";
 
-// Helper to create a wrapper with a real AuthProvider but pre-loaded token
-// We bypass the real login flow by injecting a fake JWT into localStorage.
-function makeJwt(payload: Record<string, string>): string {
-  const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const body = btoa(JSON.stringify(payload));
-  return `${header}.${body}.fakesig`;
-}
+// Identity is resolved from /users/info; mock that call.
+vi.mock("./api/account", () => ({ getMyInfo: vi.fn() }));
+import { getMyInfo, type MyInfo } from "./api/account";
 
-function wrapperWithRole(role: string | null) {
-  if (role !== null) {
-    localStorage.setItem("access_token", makeJwt({ sub: "1", email: "test@example.com", role }));
-  } else {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("refresh_token");
-  }
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <AuthProvider>{children}</AuthProvider>;
-  };
+const mockInfo = getMyInfo as unknown as ReturnType<typeof vi.fn>;
+const wrapper = ({ children }: { children: ReactNode }) => <AuthProvider>{children}</AuthProvider>;
+
+function user(is_admin: boolean): MyInfo {
+  return { id: 1, display_name: "Test", is_admin, file_quota: null };
 }
 
 afterEach(() => {
   localStorage.clear();
+  vi.clearAllMocks();
 });
 
-describe("useAuth role helpers", () => {
-  it("isAdmin is true when user.role is 'admin'", () => {
-    const { result } = renderHook(() => useAuth(), { wrapper: wrapperWithRole("admin") });
+describe("useAuth (token model)", () => {
+  it("isAdmin is true when /users/info reports is_admin", async () => {
+    mockInfo.mockResolvedValue(user(true));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.isAuthenticated).toBe(true);
     expect(result.current.isAdmin).toBe(true);
   });
 
-  it("isAdmin is true when user.role is 'superadmin'", () => {
-    const { result } = renderHook(() => useAuth(), { wrapper: wrapperWithRole("superadmin") });
+  it("isAdmin is false for a non-admin user", async () => {
+    mockInfo.mockResolvedValue(user(false));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.isAuthenticated).toBe(true);
+    expect(result.current.isAdmin).toBe(false);
+  });
+
+  it("is unauthenticated when /users/info rejects (no valid token/session)", async () => {
+    mockInfo.mockRejectedValue(new Error("401"));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.isAuthenticated).toBe(false);
+    expect(result.current.isAdmin).toBe(false);
+  });
+
+  it("loginWithToken stores the token and resolves identity", async () => {
+    mockInfo.mockRejectedValueOnce(new Error("401")); // initial probe: not signed in
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.isAuthenticated).toBe(false);
+
+    mockInfo.mockResolvedValueOnce(user(true)); // token accepted
+    await act(async () => {
+      await result.current.loginWithToken("or-abc123");
+    });
+    expect(localStorage.getItem("openrag_token")).toBe("or-abc123");
+    expect(result.current.isAuthenticated).toBe(true);
     expect(result.current.isAdmin).toBe(true);
   });
 
-  it("isAdmin is false when user.role is 'user'", () => {
-    const { result } = renderHook(() => useAuth(), { wrapper: wrapperWithRole("user") });
-    expect(result.current.isAdmin).toBe(false);
-  });
+  it("logout clears the token and user", async () => {
+    mockInfo.mockResolvedValue(user(true));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isAuthenticated).toBe(true));
 
-  it("isSuperadmin is true only when user.role is 'superadmin'", () => {
-    const { result } = renderHook(() => useAuth(), { wrapper: wrapperWithRole("superadmin") });
-    expect(result.current.isSuperadmin).toBe(true);
-  });
-
-  it("isSuperadmin is false when user.role is 'admin'", () => {
-    const { result } = renderHook(() => useAuth(), { wrapper: wrapperWithRole("admin") });
-    expect(result.current.isSuperadmin).toBe(false);
-  });
-
-  it("isUser is true only when user.role is 'user'", () => {
-    const { result } = renderHook(() => useAuth(), { wrapper: wrapperWithRole("user") });
-    expect(result.current.isUser).toBe(true);
-  });
-
-  it("isUser is false when user.role is 'admin'", () => {
-    const { result } = renderHook(() => useAuth(), { wrapper: wrapperWithRole("admin") });
-    expect(result.current.isUser).toBe(false);
-  });
-
-  it("all three helpers are false when user is null (unauthenticated)", () => {
-    const { result } = renderHook(() => useAuth(), { wrapper: wrapperWithRole(null) });
-    expect(result.current.isAdmin).toBe(false);
-    expect(result.current.isSuperadmin).toBe(false);
-    expect(result.current.isUser).toBe(false);
+    act(() => result.current.logout());
+    expect(localStorage.getItem("openrag_token")).toBeNull();
+    expect(result.current.isAuthenticated).toBe(false);
   });
 });

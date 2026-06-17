@@ -6,77 +6,58 @@ import {
   useEffect,
   type ReactNode,
 } from "react";
-import { login as apiLogin } from "./api/auth";
+import { getMyInfo, type MyInfo } from "./api/account";
+import { TOKEN_KEY } from "./api/client";
 
-interface AuthUser {
-  sub: string;
-  email: string;
-  role: string;
-  mustChangePassword: boolean;
-}
-
+// Identity comes from the backend, not a decoded token: /users/info resolves the
+// current principal from either a stored bearer token (AUTH_MODE=token) or the
+// same-origin OIDC session cookie. The capability layer reads `isAdmin` from here.
 interface AuthContextType {
-  user: AuthUser | null;
+  user: MyInfo | null;
   isAuthenticated: boolean;
   isAdmin: boolean;
-  isSuperadmin: boolean;
-  isUser: boolean;
-  mustChangePassword: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  isLoading: boolean;
+  /** Store a bearer token and resolve identity; throws if the token is invalid. */
+  loginWithToken: (token: string) => Promise<void>;
   logout: () => void;
-  clearMustChangePassword: () => void;
+  reload: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-function decodeJwt(token: string): AuthUser | null {
-  try {
-    const payload = JSON.parse(atob(token.split(".")[1]));
-    return {
-      sub: payload.sub,
-      email: payload.email,
-      role: payload.role,
-      mustChangePassword: payload.must_change_password ?? false,
-    };
-  } catch {
-    return null;
-  }
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(() => {
-    const token = localStorage.getItem("access_token");
-    return token ? decodeJwt(token) : null;
-  });
+  const [user, setUser] = useState<MyInfo | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    const token = localStorage.getItem("access_token");
-    if (token) {
-      const decoded = decodeJwt(token);
-      if (decoded) setUser(decoded);
-      else {
-        localStorage.removeItem("access_token");
-        localStorage.removeItem("refresh_token");
-      }
+  const load = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      setUser(await getMyInfo());
+    } catch {
+      setUser(null);
+    } finally {
+      setIsLoading(false);
     }
   }, []);
 
-  const login = useCallback(async (email: string, password: string) => {
-    const resp = await apiLogin(email, password);
-    localStorage.setItem("access_token", resp.access_token);
-    localStorage.setItem("refresh_token", resp.refresh_token);
-    const decoded = decodeJwt(resp.access_token);
-    setUser(decoded);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const loginWithToken = useCallback(async (token: string) => {
+    localStorage.setItem(TOKEN_KEY, token.trim());
+    try {
+      setUser(await getMyInfo());
+    } catch (e) {
+      localStorage.removeItem(TOKEN_KEY);
+      setUser(null);
+      throw e;
+    }
   }, []);
 
   const logout = useCallback(() => {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("refresh_token");
+    localStorage.removeItem(TOKEN_KEY);
     setUser(null);
-  }, []);
-
-  const clearMustChangePassword = useCallback(() => {
-    setUser((prev) => prev ? { ...prev, mustChangePassword: false } : null);
   }, []);
 
   return (
@@ -84,13 +65,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         user,
         isAuthenticated: !!user,
-        isAdmin: user?.role === "admin" || user?.role === "superadmin",
-        isSuperadmin: user?.role === "superadmin",
-        isUser: user?.role === "user",
-        mustChangePassword: user?.mustChangePassword ?? false,
-        login,
+        isAdmin: !!user?.is_admin,
+        isLoading,
+        loginWithToken,
         logout,
-        clearMustChangePassword,
+        reload: load,
       }}
     >
       {children}

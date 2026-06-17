@@ -21,9 +21,11 @@ export function Header() {
       <div className="flex-1" />
       {user && (
         <div className="flex items-center gap-3">
-          <span className="text-sm text-muted-foreground">{user.email}</span>
-          <Badge className="capitalize bg-primary/10 text-primary border-primary/20 hover:bg-primary/15">
-            {user.role}
+          <span className="text-sm text-muted-foreground">
+            {user.display_name || user.email || `User #${user.id}`}
+          </span>
+          <Badge className="bg-primary/10 text-primary border-primary/20 hover:bg-primary/15">
+            {user.is_admin ? "Admin" : "User"}
           </Badge>
           <Button variant="ghost" size="icon" onClick={handleLogout} className="text-muted-foreground hover:text-destructive">
             <LogOut className="h-4 w-4" />

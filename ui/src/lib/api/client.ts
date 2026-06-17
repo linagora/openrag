@@ -1,5 +1,9 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 
+// OpenRag bearer token (the user's `or-…` token). Sent as Authorization for
+// token-mode auth; in OIDC mode the same-origin session cookie is used instead.
+export const TOKEN_KEY = "openrag_token";
+
 export class ApiError extends Error {
   status: number;
   body: unknown;
@@ -29,7 +33,7 @@ export async function request<T>(
   options?: RequestInit & { noAuth?: boolean },
 ): Promise<T> {
   const { noAuth, ...fetchOptions } = options ?? {};
-  const token = localStorage.getItem("access_token");
+  const token = localStorage.getItem(TOKEN_KEY);
   const headers: Record<string, string> = {};
 
   if (token && !noAuth) {
@@ -53,35 +57,10 @@ export async function request<T>(
   });
 
   if (res.status === 401) {
-    // Try token refresh
-    const refreshToken = localStorage.getItem("refresh_token");
-    if (refreshToken && !path.includes("/auth/")) {
-      try {
-        const refreshRes = await fetch(`${API_BASE}/api/v1/auth/refresh`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ refresh_token: refreshToken }),
-        });
-        if (refreshRes.ok) {
-          const data = await refreshRes.json();
-          localStorage.setItem("access_token", data.access_token);
-          // Retry original request with new token
-          headers["Authorization"] = `Bearer ${data.access_token}`;
-          const retry = await fetch(`${API_BASE}${path}`, { ...fetchOptions, headers });
-          if (retry.ok) {
-            if (retry.status === 204) return undefined as T;
-            return retry.json();
-          }
-        }
-      } catch {
-        // refresh failed
-      }
-      localStorage.removeItem("access_token");
-      localStorage.removeItem("refresh_token");
-      // BASE_URL is "/app/" so this resolves to "/app/login" (matches the SPA
-      // basename in router.tsx; plain "/login" 404s on nginx).
-      window.location.href = `${import.meta.env.BASE_URL}login`;
-    }
+    // Stale/absent credentials. Drop any stored token so the next app load lands
+    // on the login screen (ProtectedRoute redirects unauthenticated users). The
+    // auth probe (/users/info) catches this to render the login page.
+    localStorage.removeItem(TOKEN_KEY);
     throw new ApiError(401, { detail: "Unauthorized" });
   }
 
