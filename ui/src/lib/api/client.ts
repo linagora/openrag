@@ -76,9 +76,16 @@ export async function request<T>(
 
   if (res.status === 204) return undefined as T;
 
+  // Read the body once and tolerate empty responses — several endpoints return
+  // an empty 200/201 (e.g. POST /partition/{name}), which would otherwise crash
+  // res.json() with "Unexpected end of JSON input".
+  const text = await res.text();
+  if (!text) return undefined as T;
   const contentType = res.headers.get("content-type") || "";
-  if (contentType.includes("text/")) {
-    return (await res.text()) as T;
+  if (contentType.includes("text/")) return text as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return text as T;
   }
-  return res.json();
 }
