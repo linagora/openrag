@@ -624,35 +624,43 @@ export const handlers = [
     });
   }),
 
-  // System
-  http.get(`${API}/api/v1/admin/system/health`, () => {
-    return HttpResponse.json({
-      status: "ok",
-      services: {
-        "embedder:bge-m3": true,
-        "reranker:bge-reranker-v2": true,
-        "llm:llama-3.1": true,
-        "vlm:qwen-vl": false,
-        "milvus": true,
-        "postgresql": true,
-      },
-    });
-  }),
+  // System — OpenRag ops endpoints
+  http.get(`${API}/health_check`, () => HttpResponse.json("RAG API is up.")),
 
-  http.get(`${API}/api/v1/admin/system/metrics`, () => {
+  http.get(`${API}/version`, () => HttpResponse.json({ version: "1.1.11" })),
+
+  http.get(`${API}/actors/`, () =>
+    HttpResponse.json({
+      actors: [
+        { actor_id: "a1", name: "Vectordb", class_name: "MilvusDB", state: "ALIVE", namespace: "openrag" },
+        { actor_id: "a2", name: "Indexer", class_name: "Indexer", state: "ALIVE", namespace: "openrag" },
+        { actor_id: "a3", name: "TaskStateManager", class_name: "TaskStateManager", state: "ALIVE", namespace: "openrag" },
+        { actor_id: "a4", name: "MarkerPool", class_name: "MarkerPool", state: "DEAD", namespace: "openrag" },
+      ],
+    }),
+  ),
+
+  http.post(`${API}/actors/:name/restart`, ({ params }) =>
+    HttpResponse.json({
+      message: `Actor ${params.name} restarted successfully.`,
+      actor_name: params.name,
+      actor_id: "a-new",
+    }),
+  ),
+
+  http.get(`${API}/metrics`, () => {
     return HttpResponse.text(
       `# HELP openrag_requests_total Total API requests\n# TYPE openrag_requests_total counter\nopenrag_requests_total{method="POST",endpoint="/v1/chat/completions"} 1247\nopenrag_requests_total{method="POST",endpoint="/api/v1/retrieve"} 893\nopenrag_requests_total{method="POST",endpoint="/api/v1/admin/indexing/document"} 156\n# HELP openrag_request_duration_seconds Request duration\n# TYPE openrag_request_duration_seconds histogram\nopenrag_request_duration_seconds_bucket{le="0.1"} 450\nopenrag_request_duration_seconds_bucket{le="0.5"} 1800\nopenrag_request_duration_seconds_bucket{le="1.0"} 2100\nopenrag_request_duration_seconds_bucket{le="5.0"} 2290\nopenrag_request_duration_seconds_bucket{le="+Inf"} 2296\n# HELP openrag_documents_indexed_total Total documents indexed\n# TYPE openrag_documents_indexed_total counter\nopenrag_documents_indexed_total 342\n# HELP openrag_chunks_total Total chunks in vector store\n# TYPE openrag_chunks_total gauge\nopenrag_chunks_total 18947\n`,
     );
   }),
 
-  http.get(`${API}/api/v1/admin/system/config`, () => {
+  http.get(`${API}/config`, () => {
     return HttpResponse.json({
-      api: { host: "0.0.0.0", port: 8000, cors_origins: ["http://localhost:5173"], debug: false },
-      auth: { jwt_secret: "***", token_expire_minutes: 60 },
+      auth: { auth_mode: "oidc", super_admin_mode: true },
       milvus: { host: "milvus", port: 19530, database: "openrag" },
-      ray: { address: "ray://ray-head:10001", num_workers: 4 },
+      ray: { address: "ray://ray-head:10001", pool_size: 2, max_tasks_per_worker: 2 },
       postgresql: { host: "postgres", port: 5432, database: "openrag" },
-      storage: { type: "minio", endpoint: "minio:9000", bucket: "documents" },
+      retrieval: { top_k: 20, reranker_top_k: 5 },
     });
   }),
 

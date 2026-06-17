@@ -1,66 +1,48 @@
 import { request } from "./client";
 
-export interface RayNode {
-  id: string;
-  alive: boolean;
-  address: string;
-  is_head: boolean;
-  resources: Record<string, number>;
+// OpenRag ops endpoints (admin-only except health_check/version):
+//   GET  /health_check           → "RAG API is up." (string)
+//   GET  /version                → { version }
+//   GET  /config                 → loaded settings (admin)
+//   GET  /metrics                → Prometheus text (admin)
+//   GET  /actors/                → { actors: [...] } Ray actors (admin)
+//   POST /actors/{name}/restart  → { message, actor_name, actor_id } (admin)
+
+export interface VersionResponse {
+  version: string;
 }
 
-export interface MarkerWorker {
+export interface RayActor {
+  actor_id: string;
   name: string;
-  status: string;
-  ping: string;
+  class_name: string;
+  state: string;
+  namespace: string;
 }
 
-export interface MarkerPoolSummary {
-  max_actors: number;
-  spawned: number;
-  alive: number;
+export function healthCheck() {
+  return request<string>("/health_check");
 }
 
-export interface ServeDeployment {
-  name: string;
-  status: string;
-  message: string;
+export function getVersion() {
+  return request<VersionResponse>("/version");
 }
 
-export interface RayDetail {
-  nodes: RayNode[];
-  serve_deployments: ServeDeployment[];
-  marker_pool: MarkerWorker[];
-  marker_pool_summary: MarkerPoolSummary;
+export function getConfig() {
+  return request<Record<string, unknown>>("/config");
 }
 
-export interface HealthResponse {
-  status: string;
-  services: Record<string, boolean>;
-  ray_detail: RayDetail | null;
+export function getMetrics() {
+  return request<string>("/metrics");
 }
 
-export function health() {
-  return request<HealthResponse>("/api/v1/admin/system/health");
+export function listActors() {
+  return request<{ actors: RayActor[] }>("/actors/");
 }
 
-export function config() {
-  return request<Record<string, unknown>>("/api/v1/admin/system/config");
-}
-
-export function metrics() {
-  return request<string>("/api/v1/admin/system/metrics");
-}
-
-export function restartMarkerWorker(index: number) {
-  return request<MarkerWorker>(
-    `/api/v1/admin/system/marker-worker/${index}/restart`,
-    { method: "POST" },
-  );
-}
-
-export function restartMarkerPool() {
-  return request<{ workers: MarkerWorker[] }>(
-    "/api/v1/admin/system/marker-pool/restart",
+export function restartActor(name: string) {
+  return request<{ message: string; actor_name: string; actor_id: string }>(
+    `/actors/${encodeURIComponent(name)}/restart`,
     { method: "POST" },
   );
 }

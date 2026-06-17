@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Plus, Trash2, Pencil, Circle, Star, Loader2, CheckCircle, XCircle } from "lucide-react";
+import { Plus, Trash2, Pencil, Star, Loader2, CheckCircle, XCircle } from "lucide-react";
 import {
   listModelEndpoints,
   createModelEndpoint,
@@ -16,7 +16,6 @@ import type {
   UpdateModelEndpointRequest,
   ModelType,
 } from "@/lib/api/models";
-import { health } from "@/lib/api/system";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
@@ -47,12 +46,6 @@ export default function ModelsPage() {
   const { data, isLoading } = useQuery({
     queryKey: ["model-endpoints"],
     queryFn: () => listModelEndpoints(),
-  });
-
-  const { data: healthData } = useQuery({
-    queryKey: ["system-health"],
-    queryFn: () => health(),
-    refetchInterval: 30000,
   });
 
   const createMut = useMutation({
@@ -99,11 +92,6 @@ export default function ModelsPage() {
 
   const endpoints = data ?? [];
 
-  const getHealthStatus = (type: string, name: string) => {
-    if (!healthData) return undefined;
-    return healthData.services[`${type}:${name}`];
-  };
-
   const handleOpenCreate = () => {
     setEditing(null);
     setDialogOpen(true);
@@ -148,7 +136,6 @@ export default function ModelsPage() {
                 {endpoints
                   .filter((ep) => ep.model_type === type)
                   .map((ep) => {
-                    const isHealthy = getHealthStatus(ep.model_type, ep.name);
                     const isDefault = ep.is_default;
                     return (
                       <Card key={`${ep.model_type}-${ep.name}`}>
@@ -160,11 +147,6 @@ export default function ModelsPage() {
                             <div className="flex items-center gap-1.5">
                               {isDefault && (
                                 <Badge variant="secondary" className="text-xs">Default</Badge>
-                              )}
-                              {isHealthy !== undefined && (
-                                <Circle
-                                  className={`h-3 w-3 fill-current ${isHealthy ? "text-green-500" : "text-red-500"}`}
-                                />
                               )}
                             </div>
                           </div>

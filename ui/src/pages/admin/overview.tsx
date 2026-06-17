@@ -29,7 +29,7 @@ import { StatusBadge } from "@/components/shared/status-badge";
 import { listPartitions, listCurrentUserPartitions } from "@/lib/api/partitions";
 import { listUsers } from "@/lib/api/users";
 import { listTasks, isActiveState, type TaskListItem } from "@/lib/api/jobs";
-import { health } from "@/lib/api/system";
+import { healthCheck, getVersion, listActors } from "@/lib/api/system";
 import { useAuth } from "@/lib/auth";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
@@ -156,11 +156,19 @@ function AdminOverview() {
 
   const healthQuery = useQuery({
     queryKey: ["health"],
-    queryFn: health,
+    queryFn: healthCheck,
+    refetchInterval: 30000,
+  });
+  const versionQuery = useQuery({ queryKey: ["version"], queryFn: getVersion });
+  const actorsQuery = useQuery({
+    queryKey: ["actors", "overview"],
+    queryFn: listActors,
     refetchInterval: 30000,
   });
 
   const tasks = tasksQuery.data?.tasks ?? [];
+  const actors = actorsQuery.data?.actors ?? [];
+  const actorsAlive = actors.filter((a) => a.state.toUpperCase() === "ALIVE").length;
   const partitions = partitionsQuery.data?.partitions ?? [];
   const partitionCount = partitions.length;
   const documentTotal = partitions.reduce((sum, p) => sum + p.document_count, 0);
@@ -203,68 +211,46 @@ function AdminOverview() {
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2 mb-8">
-        {/* Health Status */}
+        {/* System status */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Service Health</CardTitle>
+            <CardTitle className="text-base">System status</CardTitle>
           </CardHeader>
           <CardContent>
-            {healthQuery.isLoading ? (
-              <div className="space-y-3">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <div key={i} className="flex items-center justify-between">
-                    <Skeleton className="h-4 w-24" />
-                    <Skeleton className="h-5 w-16" />
-                  </div>
-                ))}
-              </div>
-            ) : healthQuery.data ? (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between pb-2 border-b">
-                  <span className="text-sm font-medium">Overall Status</span>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between pb-2 border-b">
+                <span className="text-sm font-medium">API</span>
+                {healthQuery.isSuccess ? (
                   <Badge
-                    variant={
-                      healthQuery.data.status === "healthy"
-                        ? "default"
-                        : "destructive"
-                    }
+                    variant="outline"
+                    className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
                   >
-                    {healthQuery.data.status.toUpperCase()}
+                    <CheckCircle2 className="h-3 w-3 mr-1" />
+                    Up
                   </Badge>
-                </div>
-                {Object.entries(healthQuery.data.services).map(
-                  ([name, healthy]) => (
-                    <div
-                      key={name}
-                      className="flex items-center justify-between"
-                    >
-                      <span className="text-sm">{name}</span>
-                      {healthy ? (
-                        <Badge
-                          variant="outline"
-                          className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-                        >
-                          <CheckCircle2 className="h-3 w-3 mr-1" />
-                          Healthy
-                        </Badge>
-                      ) : (
-                        <Badge
-                          variant="outline"
-                          className="bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
-                        >
-                          <XCircle className="h-3 w-3 mr-1" />
-                          Down
-                        </Badge>
-                      )}
-                    </div>
-                  ),
+                ) : (
+                  <Badge
+                    variant="outline"
+                    className="bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
+                  >
+                    <XCircle className="h-3 w-3 mr-1" />
+                    Down
+                  </Badge>
                 )}
               </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                Unable to fetch health status.
-              </p>
-            )}
+              <div className="flex items-center justify-between">
+                <span className="text-sm">Version</span>
+                <span className="text-sm font-mono text-muted-foreground">
+                  {versionQuery.data?.version ?? "—"}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-sm">Ray actors</span>
+                <span className="text-sm font-mono text-muted-foreground">
+                  {actorsQuery.isLoading ? "—" : `${actorsAlive}/${actors.length} alive`}
+                </span>
+              </div>
+            </div>
           </CardContent>
         </Card>
 

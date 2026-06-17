@@ -1,8 +1,16 @@
-import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Circle, ExternalLink, RotateCcw } from "lucide-react";
-import { health, config, metrics, restartMarkerWorker, restartMarkerPool, type RayDetail } from "@/lib/api/system";
+import {
+  healthCheck,
+  getVersion,
+  getConfig,
+  getMetrics,
+  listActors,
+  restartActor,
+} from "@/lib/api/system";
 import { PageHeader } from "@/components/shared/page-header";
+import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -11,12 +19,19 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 const GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || "";
 
+function actorStateColor(state: string): string {
+  const s = state.toUpperCase();
+  if (s === "ALIVE") return "text-green-500";
+  if (s === "DEAD") return "text-red-500";
+  return "text-gray-400";
+}
+
 export default function SystemPage() {
   return (
     <div>
       <PageHeader
         title="System"
-        description="Health checks, metrics, configuration, and tools"
+        description="Status, Ray actors, metrics and configuration"
         actions={
           GRAFANA_URL ? (
             <Button variant="outline" asChild>
@@ -29,15 +44,19 @@ export default function SystemPage() {
         }
       />
 
-      <Tabs defaultValue="health">
+      <Tabs defaultValue="status">
         <TabsList>
-          <TabsTrigger value="health">Health</TabsTrigger>
+          <TabsTrigger value="status">Status</TabsTrigger>
+          <TabsTrigger value="actors">Actors</TabsTrigger>
           <TabsTrigger value="metrics">Metrics</TabsTrigger>
           <TabsTrigger value="config">Config</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="health">
-          <HealthTab />
+        <TabsContent value="status">
+          <StatusTab />
+        </TabsContent>
+        <TabsContent value="actors">
+          <ActorsTab />
         </TabsContent>
         <TabsContent value="metrics">
           <MetricsTab />
@@ -50,234 +69,105 @@ export default function SystemPage() {
   );
 }
 
-function HealthTab() {
-  const { data, isLoading, refetch } = useQuery({
+function StatusTab() {
+  const healthQuery = useQuery({
     queryKey: ["system-health"],
-    queryFn: health,
+    queryFn: healthCheck,
     refetchInterval: 15000,
   });
+  const versionQuery = useQuery({ queryKey: ["system-version"], queryFn: getVersion });
 
-  if (isLoading) return <Skeleton className="h-48" />;
-  if (!data) return <p>Failed to load health data</p>;
-
-  const serviceEntries = Object.entries(data.services);
+  const apiUp = healthQuery.isSuccess;
 
   return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle className="flex items-center gap-2">
-            System Status
-            <Badge variant={data.status === "ok" ? "default" : "destructive"}>
-              {data.status.toUpperCase()}
-            </Badge>
-          </CardTitle>
-          <Button variant="outline" size="sm" onClick={() => refetch()}>
-            Refresh
-          </Button>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {serviceEntries.map(([name, healthy]) => (
-              <div
-                key={name}
-                className="flex items-center gap-3 rounded-lg border p-3"
-              >
-                <Circle
-                  className={`h-3 w-3 flex-shrink-0 fill-current ${
-                    healthy ? "text-green-500" : "text-red-500"
-                  }`}
-                />
-                <div className="min-w-0">
-                  <p className="text-sm font-medium truncate">{name}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {healthy ? "Healthy" : "Unhealthy"}
-                  </p>
-                </div>
-              </div>
-            ))}
-            {serviceEntries.length === 0 && (
-              <p className="col-span-full text-center text-muted-foreground py-4">
-                No endpoints configured
-              </p>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      {data.ray_detail && <RayDetailSection detail={data.ray_detail} />}
-    </div>
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle>API Status</CardTitle>
+        <Button variant="outline" size="sm" onClick={() => healthQuery.refetch()}>
+          Refresh
+        </Button>
+      </CardHeader>
+      <CardContent>
+        {healthQuery.isLoading ? (
+          <Skeleton className="h-16" />
+        ) : (
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
+            <div className="space-y-1">
+              <dt className="text-muted-foreground">API</dt>
+              <dd>
+                <Badge variant={apiUp ? "default" : "destructive"}>{apiUp ? "Up" : "Down"}</Badge>
+              </dd>
+            </div>
+            <div className="space-y-1">
+              <dt className="text-muted-foreground">Version</dt>
+              <dd className="font-mono font-medium">{versionQuery.data?.version ?? "—"}</dd>
+            </div>
+          </dl>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
-function RayDetailSection({ detail }: { detail: RayDetail }) {
-  const { nodes, serve_deployments, marker_pool } = detail;
+function ActorsTab() {
   const queryClient = useQueryClient();
-  const [restartingIndex, setRestartingIndex] = useState<number | null>(null);
-  const [restartingAll, setRestartingAll] = useState(false);
+  const { data, isLoading } = useQuery({
+    queryKey: ["system-actors"],
+    queryFn: listActors,
+    refetchInterval: 15000,
+  });
 
-  const handleRestartAll = async () => {
-    setRestartingAll(true);
-    try {
-      await restartMarkerPool();
-    } finally {
-      setRestartingAll(false);
-      queryClient.invalidateQueries({ queryKey: ["system-health"] });
-    }
-  };
+  const restartMut = useMutation({
+    mutationFn: (name: string) => restartActor(name),
+    onSuccess: (res) => {
+      toast.success(res.message ?? "Actor restarted");
+      queryClient.invalidateQueries({ queryKey: ["system-actors"] });
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
 
-  const handleRestart = async (index: number) => {
-    setRestartingIndex(index);
-    try {
-      await restartMarkerWorker(index);
-    } finally {
-      setRestartingIndex(null);
-      queryClient.invalidateQueries({ queryKey: ["system-health"] });
-    }
-  };
+  const actors = data?.actors ?? [];
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Ray Cluster</CardTitle>
+        <CardTitle>Ray Actors</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-6">
-        {/* Nodes */}
-        <div>
-          <h4 className="text-sm font-medium mb-2">Nodes</h4>
+      <CardContent>
+        {isLoading ? (
+          <Skeleton className="h-48" />
+        ) : actors.length === 0 ? (
+          <p className="text-muted-foreground text-center py-6">No actors found.</p>
+        ) : (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {nodes.map((node) => (
-              <div
-                key={node.id}
-                className="flex items-center gap-3 rounded-lg border p-3"
-              >
-                <Circle
-                  className={`h-3 w-3 flex-shrink-0 fill-current ${
-                    node.alive ? "text-green-500" : "text-red-500"
-                  }`}
-                />
-                <div className="min-w-0">
-                  <p className="text-sm font-medium truncate font-mono">
-                    {node.address}
-                    <Badge
-                      variant={node.is_head ? "default" : "outline"}
-                      className="ml-2 text-[10px] px-1.5 py-0"
-                    >
-                      {node.is_head ? "head" : "worker"}
-                    </Badge>
-                  </p>
+            {actors.map((a) => (
+              <div key={a.actor_id} className="flex items-center gap-3 rounded-lg border p-3">
+                <Circle className={`h-3 w-3 flex-shrink-0 fill-current ${actorStateColor(a.state)}`} />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium truncate">{a.name}</p>
                   <p className="text-xs text-muted-foreground truncate">
-                    {node.id.slice(0, 12)}
-                    {" — "}
-                    {Object.entries(node.resources)
-                      .filter(([k]) => k !== "memory" && k !== "object_store_memory")
-                      .map(([k, v]) => `${k}: ${v}`)
-                      .join(", ")}
+                    {a.class_name} · {a.state.toLowerCase()}
                   </p>
                 </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Serve Deployments */}
-        {serve_deployments.length > 0 && (
-          <div>
-            <h4 className="text-sm font-medium mb-2">Serve Deployments</h4>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {serve_deployments.map((dep) => (
-                <div
-                  key={dep.name}
-                  className="flex items-center gap-3 rounded-lg border p-3"
+                <ConfirmDialog
+                  title={`Restart ${a.name}?`}
+                  description="Kills and recreates the actor. Ongoing operations on it may be interrupted."
+                  onConfirm={() => restartMut.mutate(a.name)}
                 >
-                  <Circle
-                    className={`h-3 w-3 flex-shrink-0 fill-current ${
-                      dep.status === "HEALTHY"
-                        ? "text-green-500"
-                        : dep.status === "UPDATING"
-                          ? "text-yellow-500"
-                          : "text-red-500"
-                    }`}
-                  />
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium truncate">{dep.name}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {dep.status.toLowerCase()}
-                      {dep.message && ` — ${dep.message}`}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Marker Pool */}
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <h4 className="text-sm font-medium">
-              Marker Worker Pool
-              <span className="ml-2 text-xs font-normal text-muted-foreground">
-                {detail.marker_pool_summary.alive}/{detail.marker_pool_summary.max_actors} alive
-                {detail.marker_pool_summary.spawned === 0 &&
-                  " — actors spawn on first ingestion"}
-              </span>
-            </h4>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={restartingAll}
-              onClick={handleRestartAll}
-            >
-              <RotateCcw
-                className={`mr-2 h-3.5 w-3.5 ${restartingAll ? "animate-spin" : ""}`}
-              />
-              {restartingAll ? "Restarting…" : "Restart All"}
-            </Button>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {marker_pool.map((w, i) => {
-              const isRestarting = restartingIndex === i;
-              return (
-                <div
-                  key={w.name}
-                  className="flex items-center gap-3 rounded-lg border p-3"
-                >
-                  <Circle
-                    className={`h-3 w-3 flex-shrink-0 fill-current ${
-                      w.status === "alive"
-                        ? "text-green-500"
-                        : w.status === "dead"
-                          ? "text-red-500"
-                          : "text-gray-400"
-                    }`}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium truncate">{w.name}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {isRestarting
-                        ? "restarting…"
-                        : w.status === "idle"
-                          ? "not spawned"
-                          : `${w.status} · ping: ${w.ping}`}
-                    </p>
-                  </div>
                   <Button
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7 flex-shrink-0"
-                    disabled={isRestarting}
-                    onClick={() => handleRestart(i)}
+                    disabled={restartMut.isPending}
+                    title="Restart actor"
                   >
-                    <RotateCcw
-                      className={`h-3.5 w-3.5 ${isRestarting ? "animate-spin" : ""}`}
-                    />
+                    <RotateCcw className="h-3.5 w-3.5" />
                   </Button>
-                </div>
-              );
-            })}
+                </ConfirmDialog>
+              </div>
+            ))}
           </div>
-        </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -286,17 +176,19 @@ function RayDetailSection({ detail }: { detail: RayDetail }) {
 function MetricsTab() {
   const { data, isLoading } = useQuery({
     queryKey: ["system-metrics"],
-    queryFn: metrics,
+    queryFn: getMetrics,
     refetchInterval: 10000,
   });
 
   if (isLoading) return <Skeleton className="h-48" />;
 
-  // Parse Prometheus text format into simple metric entries
+  // Parse Prometheus text format into simple metric entries.
   const lines = (data || "").split("\n").filter((l) => l && !l.startsWith("#"));
   const parsed = lines.map((line) => {
-    const parts = line.split(" ");
-    return { name: parts[0], value: parts[1] || "0" };
+    const idx = line.lastIndexOf(" ");
+    return idx === -1
+      ? { name: line, value: "" }
+      : { name: line.slice(0, idx), value: line.slice(idx + 1) };
   });
 
   return (
@@ -327,12 +219,8 @@ function MetricsTab() {
               <tbody>
                 {parsed.map((m, i) => (
                   <tr key={i} className="border-b">
-                    <td className="py-1.5 pr-4 font-mono text-xs break-all">
-                      {m.name}
-                    </td>
-                    <td className="py-1.5 text-right font-mono text-xs">
-                      {m.value}
-                    </td>
+                    <td className="py-1.5 pr-4 font-mono text-xs break-all">{m.name}</td>
+                    <td className="py-1.5 text-right font-mono text-xs">{m.value}</td>
                   </tr>
                 ))}
               </tbody>
@@ -345,17 +233,14 @@ function MetricsTab() {
 }
 
 function ConfigTab() {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["system-config"],
-    queryFn: config,
-  });
+  const { data, isLoading, error } = useQuery({ queryKey: ["system-config"], queryFn: getConfig });
 
   if (isLoading) return <Skeleton className="h-48" />;
   if (error)
     return (
       <Card>
         <CardContent className="py-8 text-center text-muted-foreground">
-          Access denied. Only superadmins can view system configuration.
+          Access denied. Only admins can view system configuration.
         </CardContent>
       </Card>
     );
@@ -373,4 +258,3 @@ function ConfigTab() {
     </Card>
   );
 }
-
