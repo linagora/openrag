@@ -93,6 +93,23 @@ services:
       - "${INDEXERUI_PORT:-3042}:3000"
     restart: unless-stopped
 
+  # ── Admin UI (React SPA + nginx, same-origin reverse proxy to the API) ──
+  admin-ui:
+    image: linagoraai/openrag-admin-ui:latest
+    build:
+      context: ../..
+      dockerfile: infra/docker/ui.Dockerfile
+      args:
+        # Same-origin: nginx proxies the API, so the SPA uses relative calls.
+        VITE_API_BASE_URL: ""
+        VITE_BASE_PATH: "/app/"
+    container_name: openrag-admin-ui
+    restart: unless-stopped
+    ports:
+      - "${ADMIN_UI_PORT:-8081}:80"
+    depends_on:
+      - openrag
+
   # GPU - default
   openrag:
     <<: *openrag_template
