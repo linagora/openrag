@@ -49,6 +49,7 @@ class FakeDispatcher:
         replace,
         indexation_config=None,
         embedder_name=None,
+        callback_url=None,
     ):
         self.dispatched.append(
             {
@@ -60,6 +61,7 @@ class FakeDispatcher:
                 "replace": replace,
                 "indexation_config": indexation_config,
                 "embedder_name": embedder_name,
+                "callback_url": callback_url,
             }
         )
         return "task-abc"
