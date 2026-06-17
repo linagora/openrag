@@ -14,6 +14,8 @@ Design constraints (kept identical to the main-branch implementation):
 from __future__ import annotations
 
 import httpx
+from urllib.parse import urlparse
+
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -43,9 +45,11 @@ async def send_indexing_callback(
             )
             response.raise_for_status()
     except Exception as exc:
+        parsed = urlparse(callback_url)
+        safe_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
         logger.warning(
             "Failed to send indexing callback",
-            callback_url=callback_url,
+            callback_url=safe_url,
             partition=partition,
             file_id=file_id,
             status=status,
