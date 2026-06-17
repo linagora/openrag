@@ -46,7 +46,7 @@ import {
 } from "@/lib/api/partitions";
 import type { PartitionConfig, PartitionRole } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
-import { listModelEndpoints, validateModelEndpoint } from "@/lib/api/models";
+import { listModelEndpoints, validateStoredModelEndpoint } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 import { formatDate } from "@/lib/utils";
 
@@ -81,7 +81,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
       if (!ep) return;
       setLlmValidating(true);
       try {
-        const res = await validateModelEndpoint("llm", name);
+        const res = await validateStoredModelEndpoint("llm", name);
         setLlmValidated(res.reachable);
         if (!res.reachable) {
           toast.error(res.detail || "LLM endpoint is unreachable");

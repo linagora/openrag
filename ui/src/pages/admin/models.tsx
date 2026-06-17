@@ -281,34 +281,44 @@ function EndpointDialog({
   }, [endpoint, modelName, extraJson]);
 
   const handleValidate = async () => {
-    // OpenRag validates a *stored* endpoint by (type, name) — there is no
-    // draft-validation API, so this is only available when editing a saved one.
-    if (!editing) {
-      toast.error("Save the endpoint first, then validate it");
+    // Draft validation: probe the values currently in the form (before saving),
+    // so typos / unreachable hosts / wrong model names are caught pre-save.
+    if (!endpoint.trim()) {
+      toast.error("Enter an endpoint URL first");
       return;
+    }
+    let apiKey: string | undefined;
+    try {
+      apiKey = (JSON.parse(extraJson || "{}").api_key as string) || undefined;
+    } catch {
+      // invalid extra JSON is reported on save; ignore here
     }
     setValidating(true);
     setValidationMsg(null);
     try {
-      const res = await validateModelEndpoint(editing.model_type, editing.name);
+      const res = await validateModelEndpoint({
+        endpoint,
+        model_name: modelName || undefined,
+        api_key: apiKey,
+      });
       if (!res.reachable) {
         setValidated(false);
         const msg = res.detail || "Endpoint is unreachable.";
         setValidationMsg(msg);
         toast.error(msg);
       } else if (res.model_found === false) {
-        // Reachable, but the configured model isn't actually served — the common
-        // trap (a green "reachable" hides a wrong model name). Block save and
-        // show what the endpoint actually advertises.
+        // Reachable, but the typed model isn't actually served — the common trap
+        // (a green "reachable" hides a wrong model name). Block save and show
+        // what the endpoint actually advertises.
         setValidated(false);
         const served = res.models_served?.length ? res.models_served.join(", ") : "none advertised";
-        const msg = `Reachable, but "${editing.model_name}" isn't served. Available: ${served}`;
+        const msg = `Reachable, but "${modelName}" isn't served. Available: ${served}`;
         setValidationMsg(msg);
         toast.warning(msg);
       } else {
         setValidated(true);
         const msg = res.model_found
-          ? `Reachable — "${editing.model_name}" is served.`
+          ? `Reachable — "${modelName}" is served.`
           : res.detail || "Reachable (couldn't confirm the model list).";
         setValidationMsg(msg);
         toast.success(msg);
@@ -417,8 +427,7 @@ function EndpointDialog({
               type="button"
               variant="outline"
               onClick={handleValidate}
-              disabled={validating || !editing}
-              title={!editing ? "Save the endpoint first, then validate it" : undefined}
+              disabled={validating || !endpoint.trim()}
             >
               {validating ? (
                 <Loader2 className="mr-1 h-4 w-4 animate-spin" />

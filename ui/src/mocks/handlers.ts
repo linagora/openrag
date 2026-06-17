@@ -498,6 +498,18 @@ export const handlers = [
     return HttpResponse.json({ ...(ep || modelEndpoints[0]), is_default: true });
   }),
 
+  // Draft validation of form values (before save).
+  http.post(`${API}/model-endpoints/validate`, async ({ request }) => {
+    const body = (await request.json()) as { model_name?: string };
+    const served = modelEndpoints.map((m) => m.model_name);
+    return HttpResponse.json({
+      reachable: true,
+      model_found: body.model_name ? served.includes(body.model_name) : null,
+      models_served: served,
+      detail: null,
+    });
+  }),
+
   http.post(`${API}/model-endpoints/:type/:name/validate`, () =>
     HttpResponse.json({ reachable: true, model_found: true, models_served: [], detail: "Endpoint reachable (mock)" }),
   ),

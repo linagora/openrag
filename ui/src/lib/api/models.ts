@@ -99,12 +99,27 @@ export function deleteModelEndpoint(modelType: ModelType, name: string) {
   });
 }
 
+export interface ValidateModelEndpointRequest {
+  endpoint: string;
+  model_name?: string;
+  api_key?: string;
+}
+
 /**
- * Probe a *stored* endpoint for reachability. OpenRag validates by
- * (type, name) using the persisted endpoint config — it does NOT accept a
- * draft body, so validation is only available after an endpoint is saved.
+ * Probe endpoint values (reachability + whether the model is served) BEFORE
+ * saving — validates exactly what's in the form, so typos / dead endpoints are
+ * caught pre-save.
  */
-export function validateModelEndpoint(modelType: ModelType, name: string) {
+export function validateModelEndpoint(data: ValidateModelEndpointRequest) {
+  return request<ValidateModelEndpointResponse>(`${BASE}/validate`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+/** Validate an already-saved endpoint by (type, name) — used where only the
+ *  stored endpoint reference is available (e.g. a partition's chat LLM). */
+export function validateStoredModelEndpoint(modelType: ModelType, name: string) {
   return request<ValidateModelEndpointResponse>(
     `${BASE}/${enc(modelType)}/${enc(name)}/validate`,
     { method: "POST" },
