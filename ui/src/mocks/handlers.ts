@@ -307,17 +307,6 @@ export const handlers = [
     HttpResponse.json({ message: "File copied" }, { status: 201 }),
   ),
 
-  // Documents
-  http.get(`${API}/api/v1/admin/documents`, ({ request }) => {
-    const url = new URL(request.url);
-    const partition = url.searchParams.get("partition");
-    const status = url.searchParams.get("status");
-    let filtered = documents;
-    if (partition) filtered = filtered.filter((d) => d.partition === partition);
-    if (status) filtered = filtered.filter((d) => d.status === status);
-    return HttpResponse.json({ documents: filtered, total: filtered.length, offset: 0, limit: 50 });
-  }),
-
   // OpenRag per-partition file reads (documents detail + chunk viewer)
   http.get(`${API}/partition/:name/file/:fileId`, ({ params }) => {
     const fileId = params.fileId as string;

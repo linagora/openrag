@@ -27,7 +27,6 @@ import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { listPartitions, listCurrentUserPartitions } from "@/lib/api/partitions";
-import { listDocuments } from "@/lib/api/documents";
 import { listUsers } from "@/lib/api/users";
 import { listTasks, isActiveState, type TaskListItem } from "@/lib/api/jobs";
 import { health } from "@/lib/api/system";
@@ -144,11 +143,6 @@ function AdminOverview() {
     queryFn: listPartitions,
   });
 
-  const documentsQuery = useQuery({
-    queryKey: ["documents", "overview"],
-    queryFn: () => listDocuments({ limit: 1 }),
-  });
-
   const usersQuery = useQuery({
     queryKey: ["users"],
     queryFn: () => listUsers(),
@@ -167,8 +161,9 @@ function AdminOverview() {
   });
 
   const tasks = tasksQuery.data?.tasks ?? [];
-  const partitionCount = partitionsQuery.data?.partitions.length ?? 0;
-  const documentTotal = documentsQuery.data?.total ?? 0;
+  const partitions = partitionsQuery.data?.partitions ?? [];
+  const partitionCount = partitions.length;
+  const documentTotal = partitions.reduce((sum, p) => sum + p.document_count, 0);
   const userCount = usersQuery.data?.users.length ?? 0;
   const activeTasks = tasks.filter((t) => isActiveState(t.state)).length;
 
@@ -191,7 +186,7 @@ function AdminOverview() {
           title="Documents"
           value={documentTotal}
           icon={FileText}
-          isLoading={documentsQuery.isLoading}
+          isLoading={partitionsQuery.isLoading}
         />
         <StatCard
           title="Users"
