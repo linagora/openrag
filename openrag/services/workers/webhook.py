@@ -13,8 +13,9 @@ Design constraints (kept identical to the main-branch implementation):
 
 from __future__ import annotations
 
-import httpx
 from urllib.parse import urlparse
+
+import httpx
 
 from core.utils.logging import get_logger
 
