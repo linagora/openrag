@@ -41,7 +41,7 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-brand-900 via-brand-800 to-brand-950">
       <Card className="w-full max-w-sm shadow-2xl border-0">
         <CardHeader className="text-center pb-2">
-          <img src="/openrag-title.svg" alt={APP_NAME} className="mx-auto mb-4 h-10 w-auto object-contain" />
+          <img src={`${import.meta.env.BASE_URL}openrag-title.svg`} alt={APP_NAME} className="mx-auto mb-4 h-10 w-auto object-contain" />
           <CardTitle className="text-lg font-semibold text-muted-foreground">Admin Console</CardTitle>
           <CardDescription>Sign in to manage your RAG system</CardDescription>
         </CardHeader>
