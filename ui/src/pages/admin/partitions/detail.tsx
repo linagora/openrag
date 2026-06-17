@@ -39,6 +39,7 @@ import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import {
   getPartitionConfig,
   updatePartition,
+  listPartitions,
   listPartitionMembers,
   addPartitionMember,
   removePartitionMember,
@@ -46,6 +47,7 @@ import {
 import type { PartitionConfig, PartitionRole } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateModelEndpoint } from "@/lib/api/models";
+import { usePermissions } from "@/lib/permissions";
 import { formatDate } from "@/lib/utils";
 
 // --- General Tab ---
@@ -318,11 +320,19 @@ function UsersTab({ partitionName }: { partitionName: string }) {
   const [userId, setUserId] = useState("");
   const [role, setRole] = useState("viewer");
   const queryClient = useQueryClient();
+  const { canManageMembers } = usePermissions();
 
   const usersQuery = useQuery({
     queryKey: ["partition", partitionName, "users"],
     queryFn: () => listPartitionMembers(partitionName),
   });
+
+  // Only a partition owner (or a platform admin) can manage members; the caller's
+  // role comes from the membership-scoped partition list. Mirrors the server's
+  // require_partition_owner check — non-owners get a read-only view.
+  const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
+  const callerRole = partitionsQuery.data?.partitions.find((p) => p.name === partitionName)?.role;
+  const canManage = canManageMembers(callerRole);
 
   const addMutation = useMutation({
     mutationFn: () => addPartitionMember(partitionName, Number(userId), role as PartitionRole),
@@ -365,10 +375,12 @@ function UsersTab({ partitionName }: { partitionName: string }) {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">Partition Users</CardTitle>
-        <Button size="sm" onClick={() => setDialogOpen(true)}>
-          <UserPlus className="h-4 w-4" />
-          Add User
-        </Button>
+        {canManage && (
+          <Button size="sm" onClick={() => setDialogOpen(true)}>
+            <UserPlus className="h-4 w-4" />
+            Add User
+          </Button>
+        )}
       </CardHeader>
       <CardContent>
         {usersQuery.isLoading ? (
@@ -385,7 +397,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                   <TableHead>User ID</TableHead>
                   <TableHead>Role</TableHead>
                   <TableHead>Added</TableHead>
-                  <TableHead>Actions</TableHead>
+                  {canManage && <TableHead>Actions</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -398,21 +410,23 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                     <TableCell className="text-muted-foreground">
                       {formatDate(user.added_at)}
                     </TableCell>
-                    <TableCell>
-                      <ConfirmDialog
-                        title="Remove User"
-                        description={`Remove user "${user.user_id}" from this partition? They will lose access to partition data.`}
-                        onConfirm={() => removeMutation.mutate(user.user_id)}
-                      >
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={removeMutation.isPending}
+                    {canManage && (
+                      <TableCell>
+                        <ConfirmDialog
+                          title="Remove User"
+                          description={`Remove user "${user.user_id}" from this partition? They will lose access to partition data.`}
+                          onConfirm={() => removeMutation.mutate(user.user_id)}
                         >
-                          <Trash2 className="h-3 w-3 text-destructive" />
-                        </Button>
-                      </ConfirmDialog>
-                    </TableCell>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={removeMutation.isPending}
+                          >
+                            <Trash2 className="h-3 w-3 text-destructive" />
+                          </Button>
+                        </ConfirmDialog>
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>
