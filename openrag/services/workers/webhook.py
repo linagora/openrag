@@ -16,7 +16,6 @@ from __future__ import annotations
 from urllib.parse import urlparse
 
 import httpx
-
 from core.utils.logging import get_logger
 
 logger = get_logger()
