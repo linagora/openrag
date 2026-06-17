@@ -31,16 +31,15 @@ import { formatDate } from "@/lib/utils";
 import { listPartitionFiles, type PartitionFile } from "@/lib/api/documents";
 import { uploadFile, deleteFile, newFileId } from "@/lib/api/indexing";
 import { listPartitions } from "@/lib/api/partitions";
-import { useAuth } from "@/lib/auth";
+import { usePermissions } from "@/lib/permissions";
 
-const WRITE_ROLES = new Set(["editor", "owner"]);
 const fileHref = (partition: string, fileId: string) =>
   `/documents/${encodeURIComponent(partition)}/${encodeURIComponent(fileId)}`;
 const fileLabel = (f: PartitionFile) => (f.filename as string) || f.file_id;
 
 export default function DocumentListPage() {
   const queryClient = useQueryClient();
-  const { isAdmin } = useAuth();
+  const { canWrite } = usePermissions();
 
   // OpenRag has no flat/cross-partition file list — files live inside a
   // partition, so the view is partition-scoped (pick one, see its files).
@@ -55,7 +54,7 @@ export default function DocumentListPage() {
   const selected = partition || partitions[0]?.partition || "";
 
   const role = partitions.find((p) => p.partition === selected)?.role;
-  const canWrite = isAdmin || (role ? WRITE_ROLES.has(role) : false);
+  const writable = canWrite(role);
 
   const filesQuery = useQuery({
     queryKey: ["partition-files", selected],
@@ -137,7 +136,7 @@ export default function DocumentListPage() {
               <Eye className="h-3.5 w-3.5" />
             </Link>
           </Button>
-          {canWrite && (
+          {writable && (
             <ConfirmDialog
               title="Delete File"
               description={`Delete "${fileLabel(row.original)}"? This cannot be undone.`}
@@ -159,7 +158,7 @@ export default function DocumentListPage() {
         title="Documents"
         description="Files indexed in a partition"
         actions={
-          canWrite && selected ? (
+          writable && selected ? (
             <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
               <DialogTrigger asChild>
                 <Button>

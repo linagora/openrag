@@ -21,29 +21,35 @@ import {
   SidebarFooter,
 } from "@/components/ui/sidebar";
 import { APP_NAME } from "@/lib/brand";
+import { usePermissions, type Permissions } from "@/lib/permissions";
 
 interface NavItem {
   title: string;
   href: string;
   icon: React.ComponentType<{ className?: string }>;
+  // Visible to everyone if absent; otherwise only when the capability passes.
+  requires?: (p: Permissions) => boolean;
 }
 
-// Admin-only navigation — this is an admin console (chat lives in Chainlit).
-const adminItems: NavItem[] = [
+// Management nav. Partition members see the resource pages (server-scoped to
+// their memberships); platform-admin-only sections are gated by capability.
+const navItems: NavItem[] = [
   { title: "Overview", href: "/", icon: LayoutDashboard },
   { title: "Partitions", href: "/partitions", icon: Database },
   { title: "Documents", href: "/documents", icon: FileText },
   { title: "Jobs", href: "/jobs", icon: Clock },
-  { title: "Models", href: "/models", icon: Cpu },
-  { title: "Presets", href: "/presets", icon: Settings },
-  { title: "Users", href: "/users", icon: Users },
-  { title: "System", href: "/system", icon: Activity },
+  { title: "Models", href: "/models", icon: Cpu, requires: (p) => p.canManageModels },
+  { title: "Presets", href: "/presets", icon: Settings, requires: (p) => p.canManagePresets },
+  { title: "Users", href: "/users", icon: Users, requires: (p) => p.canManageUsers },
+  { title: "System", href: "/system", icon: Activity, requires: (p) => p.canViewSystem },
 ];
 
 const settingsItem: NavItem = { title: "Settings", href: "/settings", icon: UserCog };
 
 export function AppSidebar() {
   const location = useLocation();
+  const perms = usePermissions();
+  const visibleItems = navItems.filter((item) => !item.requires || item.requires(perms));
 
   const isActive = (href: string) => {
     if (href === "/") return location.pathname === "/";
@@ -90,7 +96,7 @@ export function AppSidebar() {
       <SidebarContent className="px-3 py-3 overflow-x-hidden group-data-[collapsible=icon]:px-1.5">
         <SidebarGroup>
           <SidebarGroupContent>
-            <SidebarMenu>{adminItems.map(renderItem)}</SidebarMenu>
+            <SidebarMenu>{visibleItems.map(renderItem)}</SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>

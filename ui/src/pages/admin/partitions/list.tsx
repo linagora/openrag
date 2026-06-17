@@ -41,7 +41,7 @@ import {
 import type { PartitionResponse } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateModelEndpoint } from "@/lib/api/models";
-import { useAuth } from "@/lib/auth";
+import { usePermissions } from "@/lib/permissions";
 
 type SortDir = "asc" | "desc" | null;
 
@@ -96,7 +96,7 @@ function SortButton({ label, active, direction, onClick }: { label: string; acti
 
 export default function PartitionListPage() {
   const queryClient = useQueryClient();
-  const { isAdmin } = useAuth();
+  const { canManagePartitions } = usePermissions();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -114,7 +114,7 @@ export default function PartitionListPage() {
 
   // `GET /partition/` is already membership-scoped server-side (admins with
   // SUPER_ADMIN_MODE see all; regular users see their memberships), so a single
-  // query serves both — isAdmin only gates the admin-only columns/fields below.
+  // query serves both — canManagePartitions only gates the admin-only columns/fields below.
   const partitionsQuery = useQuery({
     queryKey: ["partitions"],
     queryFn: listPartitions,
@@ -123,19 +123,19 @@ export default function PartitionListPage() {
   const { data: presetsData } = useQuery({
     queryKey: ["presets"],
     queryFn: () => listPresets(),
-    enabled: isAdmin,
+    enabled: canManagePartitions,
   });
 
   const { data: llmEndpoints } = useQuery({
     queryKey: ["model-endpoints", "llm"],
     queryFn: () => listModelEndpoints("llm"),
-    enabled: isAdmin,
+    enabled: canManagePartitions,
   });
 
   const { data: embedderEndpoints } = useQuery({
     queryKey: ["model-endpoints", "embedder"],
     queryFn: () => listModelEndpoints("embedder"),
-    enabled: isAdmin,
+    enabled: canManagePartitions,
   });
 
   const indexationPresets = presetsData?.filter((p) => p.preset_type === "indexation") ?? [];
@@ -257,7 +257,7 @@ export default function PartitionListPage() {
     <div>
       <PageHeader
         title="Partitions"
-        description={isAdmin ? "Manage document partitions and their configurations" : "Your assigned document partitions"}
+        description={canManagePartitions ? "Manage document partitions and their configurations" : "Your assigned document partitions"}
         actions={
           <Button onClick={() => setDialogOpen(true)}>
             <Plus className="mr-2 h-4 w-4" /> Create Partition
@@ -298,9 +298,9 @@ export default function PartitionListPage() {
                 </TableHead>
                 <TableHead>Description</TableHead>
                 <TableHead>Documents</TableHead>
-                {isAdmin && <TableHead>Embedder</TableHead>}
-                {isAdmin && <TableHead>Indexation Preset</TableHead>}
-                {isAdmin && <TableHead>Retrieval Preset</TableHead>}
+                {canManagePartitions && <TableHead>Embedder</TableHead>}
+                {canManagePartitions && <TableHead>Indexation Preset</TableHead>}
+                {canManagePartitions && <TableHead>Retrieval Preset</TableHead>}
                 <TableHead>
                   <SortButton
                     label="Created"
@@ -309,7 +309,7 @@ export default function PartitionListPage() {
                     onClick={() => handleSort("created_at")}
                   />
                 </TableHead>
-                {isAdmin && <TableHead>Actions</TableHead>}
+                {canManagePartitions && <TableHead>Actions</TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -324,7 +324,7 @@ export default function PartitionListPage() {
                         >
                           {p.name}
                         </Link>
-                        {!isAdmin && (
+                        {!canManagePartitions && (
                           <Badge variant="outline" className="text-xs capitalize">
                             {p.role?.toLowerCase()}
                           </Badge>
@@ -343,15 +343,15 @@ export default function PartitionListPage() {
                       )}
                     </TableCell>
                     <TableCell>{p.document_count}</TableCell>
-                    {isAdmin && <TableCell className="text-sm">{p.embedder}</TableCell>}
-                    {isAdmin && <TableCell>{p.indexation_preset}</TableCell>}
-                    {isAdmin && <TableCell>{p.retrieval_preset}</TableCell>}
+                    {canManagePartitions && <TableCell className="text-sm">{p.embedder}</TableCell>}
+                    {canManagePartitions && <TableCell>{p.indexation_preset}</TableCell>}
+                    {canManagePartitions && <TableCell>{p.retrieval_preset}</TableCell>}
                     <TableCell className="text-sm text-muted-foreground">
                       {p.created_at
                         ? new Date(p.created_at).toLocaleDateString()
                         : "--"}
                     </TableCell>
-                    {isAdmin && (
+                    {canManagePartitions && (
                       <TableCell>
                         <RowActions partition={p} />
                       </TableCell>
@@ -361,7 +361,7 @@ export default function PartitionListPage() {
               ) : (
                 <TableRow>
                   <TableCell
-                    colSpan={isAdmin ? 8 : 4}
+                    colSpan={canManagePartitions ? 8 : 4}
                     className="h-24 text-center text-muted-foreground"
                   >
                     {search.trim() ? "No partitions match your search." : "No partitions."}
@@ -399,7 +399,7 @@ export default function PartitionListPage() {
                 onChange={(e) => setDescription(e.target.value)}
               />
             </div>
-            {isAdmin && (
+            {canManagePartitions && (
               <>
                 <div className="space-y-2">
                   <Label>Embedder *</Label>
@@ -488,7 +488,7 @@ export default function PartitionListPage() {
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={createMutation.isPending || (isAdmin && (llmValidating || llmValidated === false || !embedder))}>
+              <Button type="submit" disabled={createMutation.isPending || (canManagePartitions && (llmValidating || llmValidated === false || !embedder))}>
                 {createMutation.isPending ? "Creating..." : "Create"}
               </Button>
             </DialogFooter>

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
-import { useAuth } from "@/lib/auth";
+import { usePermissions } from "@/lib/permissions";
 
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable } from "@/components/shared/data-table";
@@ -43,7 +43,7 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
 ];
 
 export default function JobListPage() {
-  const { isAdmin } = useAuth();
+  const { isAdmin } = usePermissions();
   const [statusTab, setStatusTab] = useState<string>("ALL");
 
   const tasksQuery = useQuery({
