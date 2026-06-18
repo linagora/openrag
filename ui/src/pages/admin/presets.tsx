@@ -756,12 +756,20 @@ function PresetDialog({
     queryFn: () => listModelEndpoints("vlm"),
     enabled: open && presetType === "indexation",
   });
+  const { data: rerankerData } = useQuery({
+    queryKey: ["model-endpoints", "reranker"],
+    queryFn: () => listModelEndpoints("reranker"),
+    enabled: open && presetType === "retrieval",
+  });
 
   const llms = (llmData ?? []).map((e) => e.name);
   const vlms = (vlmData ?? []).map((e) => e.name);
   const defaultLlm = pickDefaultEndpoint(llmData)?.name;
   const defaultVlm = pickDefaultEndpoint(vlmData)?.name;
-  const rerankers = options?.reranker_providers ?? [];
+  // The preset's `reranker` field is a reranker *endpoint name* (resolved by the
+  // backend's reranker factory), not a provider type — so list the configured
+  // reranker model endpoints, like the embedder/LLM pickers.
+  const rerankers = (rerankerData ?? []).map((e) => e.name);
 
   const { data: promptData } = useQuery({
     queryKey: ["prompts-for-presets"],
