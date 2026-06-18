@@ -524,11 +524,13 @@ function RetrievalPresetForm({
   onChange,
   retrievalPipelines,
   rerankers,
+  llms,
 }: {
   config: Config;
   onChange: (c: Config) => void;
   retrievalPipelines: string[];
   rerankers: string[];
+  llms: string[];
 }) {
   const set = (key: string, value: unknown) => onChange(configSet(config, key, value));
   const pipelineType: string = configGet(config, "type", "single");
@@ -550,6 +552,27 @@ function RetrievalPresetForm({
             </SelectContent>
           </Select>
         </div>
+        {pipelineType !== "single" && (
+          <div className="space-y-1.5">
+            <Label className="text-xs">Expansion LLM</Label>
+            <p className="text-[0.7rem] text-muted-foreground">
+              LLM used to expand the query for the {pipelineType} strategy. Default = the
+              pipeline's configured LLM.
+            </p>
+            <Select
+              value={configGet(config, "llm", "__none__")}
+              onValueChange={(v) => set("llm", v === "__none__" ? null : v)}
+            >
+              <SelectTrigger size="sm"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">Default</SelectItem>
+                {llms.map((m) => (
+                  <SelectItem key={m} value={m}>{m}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
         <div className="space-y-1.5">
           <Label className="text-xs">top_k (vector retrieval count)</Label>
           <Input
@@ -558,6 +581,20 @@ function RetrievalPresetForm({
             max={1000}
             value={configGet(config, "top_k", 20)}
             onChange={(e) => set("top_k", Number(e.target.value))}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label className="text-xs">Similarity threshold</Label>
+          <p className="text-[0.7rem] text-muted-foreground">
+            Minimum cosine similarity (0–1) for vector results; higher = stricter, fewer results.
+          </p>
+          <Input
+            type="number"
+            min={0}
+            max={1}
+            step={0.05}
+            value={configGet(config, "similarity_threshold", 0.6)}
+            onChange={(e) => set("similarity_threshold", Number(e.target.value))}
           />
         </div>
       </section>
@@ -599,6 +636,32 @@ function RetrievalPresetForm({
             value={configGet(config, "top_n", 10)}
             onChange={(e) => set("top_n", Number(e.target.value))}
             disabled={!configGet(config, "enable_reranker", true)}
+          />
+        </div>
+      </section>
+
+      <Separator />
+
+      {/* Result expansion */}
+      <section className="space-y-3">
+        <h4 className="text-sm font-medium">Result expansion</h4>
+        <p className="text-[0.7rem] text-muted-foreground">
+          After matching, also pull in chunks from linked files (capped per result).
+        </p>
+        <div className="flex items-center justify-between">
+          <Label className="text-xs">Include related files (same relationship)</Label>
+          <Switch
+            checked={configGet(config, "include_related", true) as boolean}
+            onCheckedChange={(on) => set("include_related", on)}
+            size="sm"
+          />
+        </div>
+        <div className="flex items-center justify-between">
+          <Label className="text-xs">Include ancestor files (parent hierarchy)</Label>
+          <Switch
+            checked={configGet(config, "include_ancestors", true) as boolean}
+            onCheckedChange={(on) => set("include_ancestors", on)}
+            size="sm"
           />
         </div>
       </section>
@@ -748,6 +811,7 @@ function PresetDialog({
               onChange={setConfig}
               retrievalPipelines={options?.retrieval_types ?? []}
               rerankers={rerankers}
+              llms={llms}
             />
           )}
 
