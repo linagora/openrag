@@ -2,11 +2,44 @@ from __future__ import annotations
 
 import sys
 from importlib import import_module
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 from core.config.root import Settings
-from di.workers import ensure_worker_bootstrap
+from di.workers import ensure_worker_bootstrap, list_ray_actors
+
+
+def _fake_actor(name: str, namespace: str):
+    return SimpleNamespace(
+        actor_id=f"id-{name}",
+        name=name,
+        class_name="SomeActor",
+        state="ALIVE",
+        ray_namespace=namespace,
+    )
+
+
+def test_list_ray_actors_filters_out_non_openrag_namespace() -> None:
+    """Ray-internal job actors live outside the ``openrag`` namespace and must be
+    hidden from the admin system view (they're dead once their job ends and
+    can't be restarted)."""
+    actors = [
+        _fake_actor("Indexer", "openrag"),
+        _fake_actor("WhisperPool", "openrag"),
+        _fake_actor("_ray_internal_job_actor_raysubmit_abc", "_ray_internal_job"),
+        _fake_actor("SomethingElse", "default"),
+    ]
+    module = ModuleType("ray.util.state")
+    module.list_actors = Mock(return_value=actors)
+    sys.modules["ray.util.state"] = module
+
+    try:
+        result = list_ray_actors()
+    finally:
+        sys.modules.pop("ray.util.state", None)
+
+    assert {a["name"] for a in result} == {"Indexer", "WhisperPool"}
+    assert all(a["namespace"] == "openrag" for a in result)
 
 
 def test_ensure_worker_bootstrap_initializes_explicitly() -> None:
