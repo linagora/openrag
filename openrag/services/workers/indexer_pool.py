@@ -53,6 +53,7 @@ class IndexerPool:
         rdb_cfg = cfg.rdb.model_copy(update={"database": f"partitions_for_collection_{cfg.vectordb.collection_name}"})
         self._catalog_store = PostgresStore(rdb_cfg, run_migrations=False)
         self._catalog_initialized = False
+        self._catalog_init_lock = asyncio.Lock()
         self._worker = IndexerWorker(
             pipeline=pipeline,
             task_state_manager=task_state_manager,
@@ -60,7 +61,11 @@ class IndexerPool:
         )
 
     async def _ensure_catalog(self) -> None:
-        if not self._catalog_initialized:
+        if self._catalog_initialized:
+            return
+        async with self._catalog_init_lock:
+            if self._catalog_initialized:
+                return
             await self._catalog_store.initialize()
             self._catalog_initialized = True
 
@@ -104,10 +109,16 @@ class IndexerPool:
 
 
 def build_indexer_pool(namespace: str = "openrag") -> Any:
+    from core.config import load_config
+
+    cfg = load_config()
+    max_concurrency = max(1, int(getattr(cfg.ray, "max_tasks_per_worker", 1)))
     return IndexerPool.options(  # type: ignore[attr-defined]
         name="IndexerPool",
         namespace=namespace,
         get_if_exists=True,
+        lifetime="detached",
+        max_concurrency=max_concurrency,
     ).remote()
 
 
