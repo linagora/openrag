@@ -15,6 +15,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { copyToClipboard } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -185,10 +186,12 @@ function PreProvisionDialog({
     onError: (e) => toast.error((e as Error).message),
   });
 
-  const copyToken = () => {
+  const copyToken = async () => {
     if (created?.token) {
-      navigator.clipboard.writeText(created.token);
-      toast.success("Token copied to clipboard");
+      const ok = await copyToClipboard(created.token);
+      toast[ok ? "success" : "error"](
+        ok ? "Token copied to clipboard" : "Couldn't copy — copy it manually",
+      );
     }
   };
 

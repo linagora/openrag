@@ -8,6 +8,7 @@ import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { copyToClipboard } from "@/lib/utils";
 
 export default function SettingsPage() {
   const [token, setToken] = useState<string | null>(null);
@@ -21,10 +22,12 @@ export default function SettingsPage() {
     onError: (e) => toast.error(e.message),
   });
 
-  const copyToken = () => {
+  const copyToken = async () => {
     if (token) {
-      navigator.clipboard.writeText(token);
-      toast.success("Token copied to clipboard");
+      const ok = await copyToClipboard(token);
+      toast[ok ? "success" : "error"](
+        ok ? "Token copied to clipboard" : "Couldn't copy — copy it manually",
+      );
     }
   };
 

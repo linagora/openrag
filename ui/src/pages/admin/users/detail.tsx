@@ -45,7 +45,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatDate } from "@/lib/utils";
+import { formatDate, copyToClipboard } from "@/lib/utils";
 
 export default function UserDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -385,10 +385,12 @@ function ApiTokenTab({ userId }: { userId: number }) {
     onError: (e) => toast.error((e as Error).message),
   });
 
-  const copyToken = () => {
+  const copyToken = async () => {
     if (token) {
-      navigator.clipboard.writeText(token);
-      toast.success("Token copied to clipboard");
+      const ok = await copyToClipboard(token);
+      toast[ok ? "success" : "error"](
+        ok ? "Token copied to clipboard" : "Couldn't copy — copy it manually",
+      );
     }
   };
 
