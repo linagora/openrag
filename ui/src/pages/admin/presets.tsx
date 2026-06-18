@@ -360,12 +360,7 @@ function IndexationPresetForm({
         <FeatureToggle
           label="Contextualization"
           enabled={configGet(config, "enable_contextualization", false)}
-          onToggle={(on) => {
-            toggleFeature("enable_contextualization", "contextualization_llm", on);
-            if (on && (!configGet(config, "contextualization_mode", "") || String(configGet(config, "contextualization_mode", "")) === "none")) {
-              set("contextualization_mode", "simple");
-            }
-          }}
+          onToggle={(on) => toggleFeature("enable_contextualization", "contextualization_llm", on)}
           modelLabel="LLM"
           modelValue={configGet(config, "contextualization_llm", "")}
           onModelChange={(v) => set("contextualization_llm", v)}
@@ -375,52 +370,6 @@ function IndexationPresetForm({
           onPromptChange={(v) => set("contextualization_prompt_name", v || null)}
           prompts={promptsByType("contextualization")}
         />
-        {(configGet(config, "enable_contextualization", false) as boolean) && (
-          <div className="pl-2 space-y-2">
-            <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">Mode</Label>
-              <Select
-                value={configGet(config, "contextualization_mode", "simple")}
-                onValueChange={(v) => set("contextualization_mode", v)}
-              >
-                <SelectTrigger size="sm">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="simple">simple</SelectItem>
-                  <SelectItem value="structured">structured</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {(configGet(config, "contextualization_mode", "simple") as string) === "structured" && (
-              <div className="space-y-1.5">
-                <div className="flex items-center gap-1">
-                  <Label className="text-xs text-muted-foreground">Structured prompt</Label>
-                  <PromptViewButton
-                    prompts={promptsByType("structured_contextualization")}
-                    selectedName={String(configGet(config, "structured_contextualization_prompt_name", "") || "")}
-                  />
-                </div>
-                <Select
-                  value={configGet(config, "structured_contextualization_prompt_name", "__active__")}
-                  onValueChange={(v) => set("structured_contextualization_prompt_name", v === "__active__" ? null : v)}
-                >
-                  <SelectTrigger size="sm">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__active__">Active prompt</SelectItem>
-                    {promptsByType("structured_contextualization").map((p) => (
-                      <SelectItem key={p.id} value={p.name}>
-                        {p.name}{p.is_default ? " (active)" : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-          </div>
-        )}
         <FeatureToggle
           label="Metadata extraction"
           enabled={configGet(config, "enable_metadata_extraction", false)}
