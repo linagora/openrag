@@ -30,9 +30,12 @@ class ParserFileSerializer(FileSerializer):
         config = load_config()
         self._dispatcher = build_parser_dispatcher(config)
         self._vlm = build_caption_vlm(config)
+        # Global gate for captioning images embedded in other documents.
+        # Standalone image files are always captioned (see ``serialize``).
+        self._image_captioning = bool(config.loader.image_captioning)
 
     async def serialize(self, path: str, metadata: dict) -> str:
-        from core.models.document import Document
+        from core.models.document import Document, DocumentType
         from services.workers.stages.caption import _caption_document
 
         metadata = dict(metadata or {})
@@ -48,7 +51,12 @@ class ParserFileSerializer(FileSerializer):
         )
 
         processed = await self._dispatcher.parse(document)
-        if self._vlm is not None and processed.images:
+        should_caption = (
+            self._vlm is not None
+            and processed.images
+            and (document.content_type is DocumentType.IMAGE or self._image_captioning)
+        )
+        if should_caption:
             processed = await _caption_document(processed, self._vlm, None)
 
         return "\n\n".join(block.text for block in processed.text_blocks if block.text)

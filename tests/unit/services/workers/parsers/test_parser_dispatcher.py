@@ -91,8 +91,14 @@ async def test_parse_dispatches_to_cached_backend() -> None:
     assert result.text_blocks[0].text == "ok"
 
 
-def test_build_caption_vlm_disabled_paths() -> None:
-    # captioning globally off
-    assert build_caption_vlm(_config(image_captioning=False, vlm_base_url="http://vlm:8000/v1")) is None
-    # no VLM endpoint configured
+def test_build_caption_vlm_requires_endpoint() -> None:
+    # No VLM endpoint configured -> unavailable, regardless of the captioning flag.
     assert build_caption_vlm(_config(image_captioning=True, vlm_base_url="")) is None
+    assert build_caption_vlm(_config(image_captioning=False, vlm_base_url="")) is None
+
+
+def test_build_caption_vlm_available_when_endpoint_set_even_if_globally_off() -> None:
+    # Availability is decoupled from the captioning policy: an endpoint is enough
+    # to build the VLM. Standalone-image captioning relies on this (the policy
+    # gate lives in the pipeline, not here).
+    assert build_caption_vlm(_config(image_captioning=False, vlm_base_url="http://vlm:8000/v1")) is not None

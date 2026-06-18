@@ -49,6 +49,7 @@ class IndexerPool:
             embedder=embedder,
             vector_store=self._vector_store,
             vlm=vlm,
+            image_captioning=cfg.loader.image_captioning,
             chunker_factory=_build_chunker_from_config,
             embedder_factory=embedder_factory,
         )

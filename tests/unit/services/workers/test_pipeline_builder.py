@@ -217,3 +217,54 @@ async def test_pipeline_row_indexation_config_selects_components():
     assert selected_vlm.calls == [b"png"]
     assert selected_contextualizer.calls[0][1:] == ("note.txt", "en")
     assert row["chunks"][0].embedding == [0.5]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_always_captions_standalone_image_even_when_globally_off():
+    # A standalone image file's caption is its only text content, so it is
+    # captioned even when global image captioning is off (legacy parity).
+    document = Document(filename="logo.png", content_type=DocumentType.IMAGE, raw_bytes=b"img")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    vlm = FakeVLM()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="caption", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        image_captioning=False,
+    )
+    row = {"document": document, "partition": "tenant-a", "filename": "logo.png"}
+
+    await pipeline.run(row)
+
+    assert vlm.calls == [b"png"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_skips_embedded_image_caption_when_globally_off():
+    # Images embedded in a non-image document stay gated by the global flag.
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    vlm = FakeVLM()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        image_captioning=False,
+    )
+    row = {"document": document, "partition": "tenant-a", "filename": "note.txt"}
+
+    await pipeline.run(row)
+
+    assert vlm.calls == []

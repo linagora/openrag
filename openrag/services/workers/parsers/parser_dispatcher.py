@@ -223,16 +223,18 @@ def build_parser_dispatcher(config: Any) -> ParserDispatcher:
 
 
 def build_caption_vlm(config: Any) -> Any | None:
-    """Build the captioning VLM, or ``None`` when captioning is off/unconfigured.
+    """Build the captioning VLM, or ``None`` when no VLM endpoint is configured.
 
-    Mirrors the legacy global gate: captioning happens only when
-    ``config.loader.image_captioning`` is on and a VLM endpoint is set.
-    Per-partition ``enable_image_captioning`` can still switch it off downstream
-    (``IndexingPipeline._select_vlm``), but cannot force it on when no VLM is
-    configured — matching the legacy loaders.
+    This only decides VLM *availability* (an endpoint must be set), not the
+    captioning *policy*, which is applied downstream:
+
+    - Standalone image files are always captioned when a VLM is available —
+      their caption is the only text content (legacy ``ImageLoader`` parity,
+      which never consulted ``image_captioning``).
+    - Images embedded in other documents are gated by the global
+      ``config.loader.image_captioning`` flag and the per-partition
+      ``enable_image_captioning`` setting (see ``IndexingPipeline``).
     """
-    if not config.loader.image_captioning:
-        return None
     vlm_cfg = config.vlm
     if not getattr(vlm_cfg, "base_url", ""):
         return None
