@@ -813,6 +813,10 @@ function PresetDialog({
   const [name, setName] = useState("");
   const [config, setConfig] = useState<Config>({});
 
+  // Intentionally sync the form to the editing target each time the dialog
+  // opens (and reset it for "create"). This is the controlled-dialog reset
+  // pattern, so the setState-in-effect warning doesn't apply here.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (open) {
       if (editing) {
@@ -824,6 +828,7 @@ function PresetDialog({
       }
     }
   }, [open, editing]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const { data: options } = useQuery({
     queryKey: ["preset-options"],
