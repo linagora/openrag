@@ -263,12 +263,12 @@ function IndexationPresetForm({
       {/* Chunking */}
       <section className="space-y-3">
         <h4 className="text-sm font-medium">Chunking</h4>
-        <div className={String(configGet(chunking as Config, "strategy", "")) !== "markdown_section" ? "grid grid-cols-[3fr_1fr_1fr] gap-3" : "max-w-xs"}>
+        <div className={String(configGet(chunking as Config, "name", "")) !== "markdown_section" ? "grid grid-cols-[3fr_1fr_1fr] gap-3" : "max-w-xs"}>
           <div className="space-y-1.5">
             <Label className="text-xs">Strategy</Label>
             <Select
-              value={configGet(chunking as Config, "strategy", "")}
-              onValueChange={(v) => setChunking("strategy", v)}
+              value={configGet(chunking as Config, "name", "")}
+              onValueChange={(v) => setChunking("name", v)}
             >
               <SelectTrigger size="sm">
                 <SelectValue placeholder="Select..." />
@@ -282,7 +282,7 @@ function IndexationPresetForm({
               </SelectContent>
             </Select>
           </div>
-          {String(configGet(chunking as Config, "strategy", "")) !== "markdown_section" && (
+          {String(configGet(chunking as Config, "name", "")) !== "markdown_section" && (
             <div className="space-y-1.5">
               <Label className="text-xs">Chunk size</Label>
               <Input
@@ -294,15 +294,18 @@ function IndexationPresetForm({
             </div>
           )}
           {!["markdown_section", "markdown_layout"].includes(
-            String(configGet(chunking as Config, "strategy", ""))
+            String(configGet(chunking as Config, "name", ""))
           ) && (
             <div className="space-y-1.5">
-              <Label className="text-xs">Chunk overlap</Label>
+              <Label className="text-xs">Overlap rate</Label>
               <Input
                 type="number"
                 min={0}
-                value={configGet(chunking as Config, "chunk_overlap", 64)}
-                onChange={(e) => setChunking("chunk_overlap", Number(e.target.value))}
+                max={1}
+                step={0.05}
+                title="Fraction of chunk size (0–1)"
+                value={configGet(chunking as Config, "chunk_overlap_rate", 0.2)}
+                onChange={(e) => setChunking("chunk_overlap_rate", Number(e.target.value))}
               />
             </div>
           )}
