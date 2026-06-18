@@ -370,16 +370,6 @@ function IndexationPresetForm({
           onPromptChange={(v) => set("contextualization_prompt_name", v || null)}
           prompts={promptsByType("contextualization")}
         />
-        <FeatureToggle
-          label="Metadata extraction"
-          enabled={configGet(config, "enable_metadata_extraction", false)}
-          onToggle={(on) => toggleFeature("enable_metadata_extraction", "metadata_extraction_llm", on)}
-          modelLabel="LLM"
-          modelValue={configGet(config, "metadata_extraction_llm", "")}
-          onModelChange={(v) => set("metadata_extraction_llm", v)}
-          models={llms}
-        />
-
       </section>
 
     </div>
