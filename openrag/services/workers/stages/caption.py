@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import MutableMapping
 from typing import Any
 
 from core.models.document import ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.vlm.vlm import VLM
+from services.inference.runtime import get_vlm_semaphore
 from services.workers.stages._common import run_with_optional_timeout, scrub_credentials, stage_timeout
+from tqdm.asyncio import tqdm
 
 
 async def caption_stage(
@@ -49,14 +52,37 @@ async def _caption_document(
     prompt: str | None,
 ) -> ProcessedDocument:
     """Return a copy of ``processed_document`` with captions materialized."""
+    images = processed_document.images
+    if not images:
+        return processed_document
+
+    async def caption_one(image: ImageBlock) -> str:
+        # Bound the fan-out cluster-wide so every indexer actor shares one VLM budget.
+        async with get_vlm_semaphore():
+            return await vlm.caption_image(image.image_bytes, prompt=prompt)
+
+    # One image failing propagates but leaves the other in-flight captions to drain
+    # (the VLM semaphore bounds them). Only a cancellation signal — task cancel on
+    # shutdown/reload — tears the siblings down, which tqdm.gather (built on
+    # as_completed) won't do on its own, so we cancel them explicitly.
+    label = processed_document.metadata.get("filename") or processed_document.document_id
+    tasks = [asyncio.ensure_future(caption_one(image)) for image in images]
+    try:
+        captions = await tqdm.gather(*tasks, desc=f"Captioning images of *{label}*")
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+    # Caption fetching fans out concurrently above; the text-block mutation
+    # below stays sequential and in image order so the markdown-ref replacement
+    # and append ordering are deterministic.
     text_blocks = list(processed_document.text_blocks)
     captioned_images: list[ImageBlock] = []
-
-    for image in processed_document.images:
-        caption = await vlm.caption_image(image.image_bytes, prompt=prompt)
+    for image, caption in zip(images, captions, strict=True):
         wrapped = wrap_caption(caption)
-        captioned_image = image.model_copy(update={"caption": caption})
-        captioned_images.append(captioned_image)
+        captioned_images.append(image.model_copy(update={"caption": caption}))
         if not _replace_markdown_ref(text_blocks, image, wrapped):
             text_blocks.append(TextBlock(text=wrapped, page_number=image.page_number))
 
