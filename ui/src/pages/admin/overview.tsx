@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/lib/auth";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -160,6 +161,15 @@ export default function OverviewPage() {
   const activeTasks = tasks.filter((t) => isActiveState(t.state)).length;
   const actorsAlive = actors.filter((a) => a.state.toUpperCase() === "ALIVE").length;
 
+  // Personal file-quota usage (from /users/info). file_quota is the *effective*
+  // quota: -1 / null = unlimited (admins always resolve to unlimited).
+  const me = useAuth().user;
+  const quota = me?.file_quota;
+  const quotaUsed = me?.total_files ?? me?.indexed_files ?? 0;
+  const quotaPending = me?.pending_files ?? 0;
+  const quotaUnlimited = quota == null || quota < 0;
+  const quotaPct = quotaUnlimited || !quota ? 0 : Math.min(100, Math.round((quotaUsed / quota) * 100));
+
   return (
     <div>
       <PageHeader title="Overview" description="Dashboard and quick actions" />
@@ -188,6 +198,41 @@ export default function OverviewPage() {
           isLoading={tasksQuery.isLoading}
         />
       </div>
+
+      {/* Personal file-quota usage — regular users only (admins bypass quota) */}
+      {me && !me.is_admin && (
+        <Card className="mb-8">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Your file quota</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {quotaUnlimited ? (
+              <p className="text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">{quotaUsed}</span> files indexed ·{" "}
+                <span className="font-medium text-foreground">Unlimited</span>
+              </p>
+            ) : (
+              <div className="space-y-2 max-w-md">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">
+                    {quotaUsed} / {quota} files
+                  </span>
+                  <span className="font-medium">{quotaPct}%</span>
+                </div>
+                <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className={quotaPct >= 100 ? "h-full rounded-full bg-destructive" : "h-full rounded-full bg-primary"}
+                    style={{ width: `${quotaPct}%` }}
+                  />
+                </div>
+                {quotaPending > 0 && (
+                  <p className="text-xs text-muted-foreground">includes {quotaPending} pending</p>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2 mb-8">
         {/* System status — platform operators only */}

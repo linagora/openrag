@@ -82,13 +82,13 @@ export function AppSidebar() {
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader className="px-5 py-5 border-b border-sidebar-border group-data-[collapsible=icon]:px-2 group-data-[collapsible=icon]:py-3">
-        <Link to="/" className="flex flex-col gap-1.5 group-data-[collapsible=icon]:items-center">
+        <Link to="/" className="flex flex-col items-center gap-1.5 group-data-[collapsible=icon]:items-center">
           <img
-            src={`${import.meta.env.BASE_URL}openrag-title.svg`}
+            src={`${import.meta.env.BASE_URL}openrag-title-white.svg`}
             alt={APP_NAME}
             className="h-7 w-auto object-contain group-data-[collapsible=icon]:h-7 group-data-[collapsible=icon]:w-7 group-data-[collapsible=icon]:object-cover group-data-[collapsible=icon]:object-left"
           />
-          <span className="text-[0.7rem] font-semibold uppercase tracking-[0.18em] text-muted-foreground group-data-[collapsible=icon]:hidden">
+          <span className="text-[0.6rem] font-semibold uppercase tracking-[0.18em] text-center text-sidebar-foreground/60 group-data-[collapsible=icon]:hidden">
             Admin Console
           </span>
         </Link>

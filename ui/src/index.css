@@ -96,7 +96,8 @@
   --chart-4: oklch(0.6 0.18 170);
   --chart-5: oklch(0.65 0.2 310);
 
-  /* Light sidebar with crimson accents (the LINAGORA wordmark is crimson) */
+  /* --- Previous WHITE sidebar — kept for easy revert: comment out the
+     deep-crimson block below and uncomment this one. ---
   --sidebar: #ffffff;
   --sidebar-foreground: oklch(0.30 0.02 260);
   --sidebar-primary: #c71f45;
@@ -105,6 +106,17 @@
   --sidebar-accent-foreground: #a51939;
   --sidebar-border: oklch(0.91 0.008 260);
   --sidebar-ring: #c71f45;
+  */
+
+  /* Deep-crimson sidebar (refined): white content, active item = brighter crimson pill */
+  --sidebar: #8f1733;
+  --sidebar-foreground: #fdeaee;
+  --sidebar-primary: #ffffff;
+  --sidebar-primary-foreground: #8f1733;
+  --sidebar-accent: #c71f45;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: oklch(1 0 0 / 14%);
+  --sidebar-ring: #ffffff;
 }
 
 .dark {
