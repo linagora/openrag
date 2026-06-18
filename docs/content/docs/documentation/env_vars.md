@@ -22,10 +22,10 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | `IMAGE_CAPTIONING_URL` | `bool` | `true` | If `true`, HTTP/HTTPS image URLs in markdown files are fetched and described by the VLM. |
 | `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing is saved. Useful for debugging and verifying the correctness of the generated markdown. |
 |`SAVE_UPLOADED_FILES`|`bool`|`false`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
-| `PDFLoader` | `str` | `MarkerLoader` | Specifies the PDF parsing engine to use. Available options: `PyMuPDFLoader`, `PyMuPDF4LLMLoader`, `MarkerLoader` and `DotsOCRLoader`.|
+| `PDFLoader` | `str` | `MarkerLoader` | Specifies the PDF parsing engine to use. Available options: `PyMuPDFLoader`, `MarkerLoader` and `DotsOCRLoader`.|
 
 :::caution
-`PyMuPDFLoader` and `PyMuPDF4LLMLoader` are lightweight pdf loaders that cannot process non-searchable (image-based) PDFs and do not extract or handle embedded images.
+`PyMuPDFLoader` is a lightweight pdf loader that cannot process non-searchable (image-based) PDFs and does not extract or handle embedded images.
 :::
 
 #### PDF Loader

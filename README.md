@@ -148,7 +148,7 @@ All supported file format parsers are pre-configured. For PDF processing, **[Mar
 <details>
 <summary>For more PDF options</summary>
 
-For CPU-only deployments or lightweight testing scenarios, you can consider switching to **`PyMuPDF4LLMLoader`** or **`PyMuPDFLoader`**. To change the loader, set the **`PDFLoader`** variable like this `PDFLoader=PyMuPDF4LLMLoader`.
+For CPU-only deployments or lightweight testing scenarios, you can consider switching to **`PyMuPDFLoader`**. To change the loader, set the **`PDFLoader`** variable like this `PDFLoader=PyMuPDFLoader`.
 
 > ⚠️ **Important**: These alternative loaders have limitations - they cannot process non-searchable (image-based) PDFs and do not extract or handle embedded images.
 </details>
