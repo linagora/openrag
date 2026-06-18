@@ -125,3 +125,16 @@ export function validateStoredModelEndpoint(modelType: ModelType, name: string) 
     { method: "POST" },
   );
 }
+
+/**
+ * Pick the endpoint a picker should pre-select: the one flagged `is_default`,
+ * or the only one if exactly one is registered, otherwise none (let the user
+ * choose). Lets selection fields show a concrete endpoint instead of sitting
+ * empty when the choice is unambiguous.
+ */
+export function pickDefaultEndpoint(
+  endpoints: ModelEndpointResponse[] | undefined | null,
+): ModelEndpointResponse | undefined {
+  if (!endpoints?.length) return undefined;
+  return endpoints.find((e) => e.is_default) ?? (endpoints.length === 1 ? endpoints[0] : undefined);
+}

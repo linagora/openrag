@@ -12,7 +12,7 @@ import {
 import type { PresetResponse, PresetType } from "@/lib/api/presets";
 import { listPrompts } from "@/lib/api/prompts";
 import type { PromptResponse } from "@/lib/api/prompts";
-import { listModelEndpoints } from "@/lib/api/models";
+import { listModelEndpoints, pickDefaultEndpoint } from "@/lib/api/models";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
@@ -224,6 +224,8 @@ function IndexationPresetForm({
   vlms,
   llms,
   prompts,
+  defaultLlm,
+  defaultVlm,
 }: {
   config: Config;
   onChange: (c: Config) => void;
@@ -231,6 +233,8 @@ function IndexationPresetForm({
   vlms: string[];
   llms: string[];
   prompts: PromptResponse[];
+  defaultLlm?: string;
+  defaultVlm?: string;
 }) {
   const set = (key: string, value: unknown) => onChange(configSet(config, key, value));
 
@@ -241,7 +245,14 @@ function IndexationPresetForm({
 
   const toggleFeature = (featureKey: string, modelKey: string, on: boolean) => {
     const next = { ...config, [featureKey]: on };
-    if (!on) delete next[modelKey];
+    if (!on) {
+      delete next[modelKey];
+    } else if (!next[modelKey]) {
+      // Default the model field to the default/only endpoint so enabling a
+      // feature doesn't leave an empty (invalid) picker.
+      const fallback = modelKey === "vlm" ? defaultVlm : defaultLlm;
+      if (fallback) next[modelKey] = fallback;
+    }
     onChange(next);
   };
 
@@ -833,6 +844,8 @@ function PresetDialog({
 
   const llms = (llmData ?? []).map((e) => e.name);
   const vlms = (vlmData ?? []).map((e) => e.name);
+  const defaultLlm = pickDefaultEndpoint(llmData)?.name;
+  const defaultVlm = pickDefaultEndpoint(vlmData)?.name;
   const rerankers = options?.reranker_providers ?? [];
 
   const { data: promptData } = useQuery({
@@ -873,6 +886,8 @@ function PresetDialog({
               vlms={vlms}
               llms={llms}
               prompts={allPrompts}
+              defaultLlm={defaultLlm}
+              defaultVlm={defaultVlm}
             />
           ) : (
             <RetrievalPresetForm

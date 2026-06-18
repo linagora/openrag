@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback } from "react";
+import { useMemo, useState, useCallback, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle, XCircle, Loader2 } from "lucide-react";
@@ -40,7 +40,7 @@ import {
 } from "@/lib/api/partitions";
 import type { PartitionResponse } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
-import { listModelEndpoints, validateStoredModelEndpoint } from "@/lib/api/models";
+import { listModelEndpoints, validateStoredModelEndpoint, pickDefaultEndpoint } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 
 type SortDir = "asc" | "desc" | null;
@@ -137,6 +137,14 @@ export default function PartitionListPage() {
     queryFn: () => listModelEndpoints("embedder"),
     enabled: canManagePartitions,
   });
+
+  // Pre-select the default (or only) embedder so the Create button is active
+  // immediately when the choice is unambiguous.
+  useEffect(() => {
+    if (embedder) return;
+    const def = pickDefaultEndpoint(embedderEndpoints);
+    if (def) setEmbedder(def.name);
+  }, [embedderEndpoints, embedder]);
 
   const indexationPresets = presetsData?.filter((p) => p.preset_type === "indexation") ?? [];
   const retrievalPresets = presetsData?.filter((p) => p.preset_type === "retrieval") ?? [];
