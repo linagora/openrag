@@ -32,6 +32,8 @@ export interface UpdatePresetRequest {
 
 export interface PresetOptionsResponse {
   chunking_strategies: string[];
+  // Optional: older backends don't return this (UI falls back to a default list).
+  parsing_strategies?: string[];
   retrieval_types: string[];
   reranker_providers: string[];
 }

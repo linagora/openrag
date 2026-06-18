@@ -221,6 +221,7 @@ function IndexationPresetForm({
   config,
   onChange,
   chunkingStrategies,
+  parsingStrategies,
   vlms,
   llms,
   prompts,
@@ -230,6 +231,7 @@ function IndexationPresetForm({
   config: Config;
   onChange: (c: Config) => void;
   chunkingStrategies: string[];
+  parsingStrategies: string[];
   vlms: string[];
   llms: string[];
   prompts: PromptResponse[];
@@ -327,8 +329,11 @@ function IndexationPresetForm({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="marker">marker</SelectItem>
-              <SelectItem value="pymupdf">pymupdf</SelectItem>
+              {parsingStrategies.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {s}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
@@ -891,6 +896,7 @@ function PresetDialog({
               config={config}
               onChange={setConfig}
               chunkingStrategies={options?.chunking_strategies ?? []}
+              parsingStrategies={options?.parsing_strategies ?? ["marker", "pymupdf"]}
               vlms={vlms}
               llms={llms}
               prompts={allPrompts}
