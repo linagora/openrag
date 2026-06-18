@@ -33,9 +33,11 @@ export function ConfirmDialog({
     <AlertDialog>
       <AlertDialogTrigger asChild>{children}</AlertDialogTrigger>
       <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>{title}</AlertDialogTitle>
-          <AlertDialogDescription>{description}</AlertDialogDescription>
+        <AlertDialogHeader className="min-w-0">
+          <AlertDialogTitle className="min-w-0 [overflow-wrap:anywhere]">{title}</AlertDialogTitle>
+          <AlertDialogDescription className="min-w-0 [overflow-wrap:anywhere]">
+            {description}
+          </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
