@@ -1,8 +1,8 @@
 """Tools routes — thin HTTP layer over :class:`ConversionService`.
 
-Phase 8E: the ``extractText`` serialization moved to
-``services.orchestrators.conversion_service.ConversionService`` (the Ray
-``DocSerializer`` actor now sits behind the ``FileSerializer`` port).
+The ``extractText`` serialization lives in
+``services.orchestrators.conversion_service.ConversionService``, which calls
+the ``FileSerializer`` port (an in-process parser-dispatcher serializer).
 This module keeps HTTP transport only: the saved-file IO + cleanup,
 tool validation/dispatch, and the 4xx/5xx error mapping whose exact
 ``{"detail": ...}`` body the legacy endpoint returned via

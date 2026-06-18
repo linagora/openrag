@@ -4,7 +4,6 @@ Imported at startup (explicitly by ``main.py``) to create the long-lived
 detached actors the request path looks up by name:
 
 * TaskStateManager  — shared task-state actor
-* DocSerializer     — loader dispatcher
 * MarkerPool / DoclingPool / WhisperPool / WhisperActor — GPU parsers
 * llmSemaphore / vlmSemaphore / audioSemaphore — cluster-wide rate limiters
 
@@ -65,12 +64,6 @@ def get_task_state_manager():
     return get_or_create_actor("TaskStateManager", TaskStateManager, lifetime="detached")
 
 
-def get_serializer():
-    from services.workers.parsers.doc_serializer import DocSerializer
-
-    return get_or_create_actor("DocSerializer", DocSerializer, lifetime="detached")
-
-
 def get_marker_pool():
     from services.workers.parsers.docling_workers import DoclingPool
     from services.workers.parsers.marker_workers import MarkerPool
@@ -78,7 +71,7 @@ def get_marker_pool():
     config = _require_settings()
     pdf_loader = config.loader.file_loaders.pdf
     match pdf_loader:
-        case "DoclingLoader2":
+        case "DoclingLoader":
             return get_or_create_actor("DoclingPool", DoclingPool, lifetime="detached")
         case "MarkerLoader":
             return get_or_create_actor("MarkerPool", MarkerPool, lifetime="detached")
@@ -146,4 +139,3 @@ def initialize_worker_bootstrap(settings: "Settings") -> None:
     init_audio_actor()
     get_marker_pool()
     get_task_state_manager()
-    get_serializer()

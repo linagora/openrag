@@ -155,7 +155,7 @@ async def lifespan(app: FastAPI):
 
     # ``ensure_worker_bootstrap`` imports ``services.workers.bootstrap``
     # for its side effect: creating the long-lived detached worker
-    # actors (TaskStateManager, DocSerializer, MarkerPool, semaphores).
+    # actors (TaskStateManager, MarkerPool, semaphores).
     # The indirection through :mod:`di.workers` keeps API code free of
     # direct ``services.workers`` imports.
     logger.info("Startup: initializing worker bootstrap")

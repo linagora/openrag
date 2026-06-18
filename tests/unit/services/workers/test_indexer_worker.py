@@ -8,7 +8,6 @@ import pytest
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from services.workers.indexer_actor import IndexerWorker, _load_document
-from services.workers.parsers.doc_serializer_bridge import INDEXATION_CONFIG_METADATA_KEY
 from services.workers.pipeline_builder import build_indexing_pipeline
 
 # ---------------------------------------------------------------------------
@@ -106,24 +105,31 @@ def test_load_document_reads_bytes_and_detects_type(tmp_path: Path) -> None:
     assert doc.content_type == DocumentType.PDF
     assert doc.partition == "tenant-a"
     assert doc.filename == "fid-1"
+    # Document.id must be the file_id (not a random uuid): the chunker derives
+    # Chunk.document_id / file_id from ProcessedDocument.document_id == document.id.
+    assert doc.id == "fid-1"
 
 
-def test_load_document_falls_back_to_filename_when_no_file_id(tmp_path: Path) -> None:
+def test_load_document_requires_file_id(tmp_path: Path) -> None:
     p = tmp_path / "note.txt"
     p.write_bytes(b"hi")
-    doc = _load_document(str(p), {}, "p")
 
-    assert doc.filename == "note.txt"
+    # file_id is force-set upstream by IndexingService._build_metadata; if it is
+    # ever missing we fail loudly rather than persist chunks under a bad id.
+    with pytest.raises(ValueError, match="file_id"):
+        _load_document(str(p), {}, "p")
 
 
-def test_load_document_attaches_internal_indexation_config(tmp_path: Path) -> None:
+def test_load_document_does_not_leak_internal_keys_into_metadata(tmp_path: Path) -> None:
     p = tmp_path / "note.txt"
     p.write_bytes(b"hi")
-    config = {"enable_image_captioning": False}
 
-    doc = _load_document(str(p), {"source": "note.txt"}, "p", indexation_config=config)
+    doc = _load_document(str(p), {"file_id": "fid", "source": "note.txt"}, "p")
 
-    assert doc.metadata[INDEXATION_CONFIG_METADATA_KEY] == config
+    # indexation_config reaches the pipeline via row["indexation_config"], never
+    # the document metadata, so it cannot leak into chunk metadata.
+    assert doc.metadata == {"file_id": "fid", "source": "note.txt"}
+    assert all(not key.startswith("_openrag") for key in doc.metadata)
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +187,7 @@ async def test_process_file_pipeline_failure_sets_failed_and_reraises(tmp_path: 
         await worker.process_file(
             task_id="t2",
             path=str(path),
-            metadata={},
+            metadata={"file_id": "f1"},
             partition="p",
         )
 
@@ -203,7 +209,7 @@ async def test_process_file_missing_path_raises_and_sets_failed() -> None:
         await worker.process_file(
             task_id="t3",
             path="/nonexistent/file.txt",
-            metadata={},
+            metadata={"file_id": "f1"},
             partition="p",
         )
 

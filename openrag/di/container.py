@@ -589,17 +589,18 @@ class ServiceContainer:
     def conversion_service(self) -> ConversionService:
         """ConversionService — lazily built, cached for the container's lifetime.
 
-        The serializer is the Ray-backed ``SerializerRayShim`` during the
-        Phase-8 shim period (Ray cleanup is Phase 9); the DocSerializer
-        actor is resolved lazily per call inside the shim.
+        The serializer is the in-process ``ParserFileSerializer`` — it runs the
+        parser dispatcher directly (GPU backends still dispatch to their pool
+        actors) and implements the ``FileSerializer`` port, so the orchestrator
+        stays decoupled from the parser/Ray infrastructure.
         """
         if self._conversion_service is None:
             from services.orchestrators.conversion_service import ConversionService
-            from services.workers.parsers.doc_serializer_adapter import from_ray_namespace
+            from services.workers.parsers.file_serializer import build_file_serializer
 
             settings = self._require_settings()
             self._conversion_service = ConversionService(
-                serializer=from_ray_namespace(),
+                serializer=build_file_serializer(),
                 vector_store=self.vector_store,
                 collection=settings.vectordb.collection_name,
             )

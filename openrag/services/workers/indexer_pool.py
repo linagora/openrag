@@ -20,12 +20,13 @@ class IndexerPool:
         from core.embeddings import embedder_registry
         from services.storage.milvus_store import MilvusVectorStore
         from services.storage.postgres_store import PostgresStore
-        from services.workers.parsers.doc_serializer_bridge import DocSerializerBridgeParser
+        from services.workers.parsers.parser_dispatcher import build_caption_vlm, build_parser_dispatcher
         from services.workers.pipeline_builder import build_indexing_pipeline
 
         cfg = load_config()
 
-        parser = DocSerializerBridgeParser(config=cfg)
+        parser = build_parser_dispatcher(cfg)
+        vlm = build_caption_vlm(cfg)
         chunker = _build_chunker(cfg)
         embedder_factory = _build_embedder_factory(cfg)
 
@@ -47,6 +48,7 @@ class IndexerPool:
             chunker=chunker,
             embedder=embedder,
             vector_store=self._vector_store,
+            vlm=vlm,
             chunker_factory=_build_chunker_from_config,
             embedder_factory=embedder_factory,
         )
