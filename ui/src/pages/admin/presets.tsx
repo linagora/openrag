@@ -86,9 +86,21 @@ export default function PresetsPage() {
 
   const presets = data ?? [];
 
+  // Config keys with no editor control behind them (inert / unimplemented on the
+  // backend) — kept out of the card summary so it reflects what's actually managed.
+  const HIDDEN_SUMMARY_KEYS = new Set<string>([
+    "enable_topic_tagging",
+    "max_topic_tags",
+    "topic_tagging_llm",
+    "enable_metadata_extraction",
+    "metadata_extraction_llm",
+    "contextualization_mode",
+    "structured_contextualization_prompt_name",
+  ]);
   const summarizeConfig = (config: Record<string, unknown>): string[] => {
     const summary: string[] = [];
     for (const [key, val] of Object.entries(config)) {
+      if (HIDDEN_SUMMARY_KEYS.has(key)) continue;
       if (val === null || val === undefined || val === "") continue;
       if (typeof val === "boolean") {
         if (val) summary.push(key);
