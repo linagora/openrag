@@ -41,14 +41,27 @@ export function getFileDetail(partition: string, fileId: string, limit?: number)
   return request<FileDetail>(`${P}/${enc(partition)}/file/${enc(fileId)}${qs}`);
 }
 
-/** All chunks in a partition, with content. Drops the (large) embedding by default. */
-export function listPartitionChunks(partition: string, includeEmbedding = false): Promise<{ chunks: PartitionChunk[] }> {
-  return request<{ chunks: PartitionChunk[] }>(`${P}/${enc(partition)}/chunks?include_embedding=${includeEmbedding}`);
+/**
+ * Chunks in a partition, with content. Drops the (large) embedding by default.
+ * Pass `fileId` to scope to a single file — the server filters it (O(file))
+ * instead of returning every chunk in the partition.
+ */
+export function listPartitionChunks(
+  partition: string,
+  includeEmbedding = false,
+  fileId?: string,
+): Promise<{ chunks: PartitionChunk[] }> {
+  const q = new URLSearchParams({ include_embedding: String(includeEmbedding) });
+  if (fileId) q.set("file_id", fileId);
+  return request<{ chunks: PartitionChunk[] }>(`${P}/${enc(partition)}/chunks?${q.toString()}`);
 }
 
-/** Chunks belonging to one file, with content — filters the partition chunk list by file_id. */
+/** Chunks belonging to one file, with content. */
 export async function listFileChunks(partition: string, fileId: string): Promise<PartitionChunk[]> {
-  const { chunks } = await listPartitionChunks(partition, false);
+  const { chunks } = await listPartitionChunks(partition, false, fileId);
+  // The server filters by file_id when it supports the param; the client-side
+  // filter is a defensive no-op there, and keeps results correct against older
+  // backends that ignore the unknown query param (and return the whole partition).
   return chunks.filter((c) => c.metadata?.file_id === fileId);
 }
 
