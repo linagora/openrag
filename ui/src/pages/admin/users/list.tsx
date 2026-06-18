@@ -25,7 +25,8 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
-function formatQuota(q: number | null | undefined): string {
+function formatQuota(q: number | null | undefined, isAdmin = false): string {
+  if (isAdmin) return "Unlimited"; // admins bypass quota checks entirely
   if (q == null) return "Default";
   if (q < 0) return "Unlimited";
   return String(q);
@@ -86,7 +87,7 @@ export default function UserListPage() {
     {
       accessorKey: "file_quota",
       header: "File quota",
-      cell: ({ row }) => formatQuota(row.original.file_quota),
+      cell: ({ row }) => formatQuota(row.original.file_quota, row.original.is_admin),
     },
     {
       id: "actions",

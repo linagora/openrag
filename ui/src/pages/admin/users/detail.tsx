@@ -192,9 +192,16 @@ export default function UserDetailPage() {
                     value={quota}
                     onChange={(e) => setQuota(e.target.value)}
                     placeholder="Global default"
+                    disabled={isAdmin}
                   />
                   <p className="text-xs text-muted-foreground">
-                    Empty = global default · <span className="font-mono">-1</span> = unlimited
+                    {isAdmin ? (
+                      "Admins bypass quota checks — this setting has no effect."
+                    ) : (
+                      <>
+                        Empty = global default · <span className="font-mono">-1</span> = unlimited
+                      </>
+                    )}
                   </p>
                 </div>
                 <div className="flex items-center justify-between md:col-span-2">
