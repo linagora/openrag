@@ -89,12 +89,15 @@ export default function PresetsPage() {
   const summarizeConfig = (config: Record<string, unknown>): string[] => {
     const summary: string[] = [];
     for (const [key, val] of Object.entries(config)) {
-      if (val !== null && val !== undefined && val !== "") {
-        if (typeof val === "boolean") {
-          if (val) summary.push(key);
-        } else {
-          summary.push(`${key}: ${String(val)}`);
-        }
+      if (val === null || val === undefined || val === "") continue;
+      if (typeof val === "boolean") {
+        if (val) summary.push(key);
+      } else if (typeof val === "object") {
+        // Nested config object (e.g. chunking) — show its strategy name, not "[object Object]".
+        const name = (val as Record<string, unknown>).name;
+        summary.push(name ? `${key}: ${String(name)}` : key);
+      } else {
+        summary.push(`${key}: ${String(val)}`);
       }
     }
     return summary.slice(0, 5);
