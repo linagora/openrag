@@ -531,28 +531,8 @@ function RetrievalPresetForm({
   rerankers: string[];
 }) {
   const set = (key: string, value: unknown) => onChange(configSet(config, key, value));
-  const pipelineType: string = configGet(config, "type", "simple");
+  const pipelineType: string = configGet(config, "type", "single");
   const [advancedOpen, setAdvancedOpen] = useState(false);
-
-  // Intent strategies helpers
-  const intentStrategies = (config.intent_strategies ?? {}) as Record<string, Record<string, unknown>>;
-  const INTENTS = ["qa", "summarization", "analytics", "enumeration"] as const;
-  const INTENT_DEFAULTS: Record<string, { pipeline: string; top_k: number; top_n: number }> = {
-    qa: { pipeline: "multiquery", top_k: 10, top_n: 5 },
-    summarization: { pipeline: "simple", top_k: 0, top_n: 0 },
-    analytics: { pipeline: "hyde", top_k: 50, top_n: 20 },
-    enumeration: { pipeline: "simple", top_k: 30, top_n: 15 },
-  };
-  const getIntentVal = (intent: string, field: string) => {
-    const s = intentStrategies[intent];
-    if (s && s[field] !== undefined) return s[field];
-    return INTENT_DEFAULTS[intent]?.[field as keyof (typeof INTENT_DEFAULTS)[string]];
-  };
-  const setIntentVal = (intent: string, field: string, value: unknown) => {
-    const current = intentStrategies[intent] ?? { ...INTENT_DEFAULTS[intent] };
-    const updated = { ...current, [field]: value };
-    onChange({ ...config, intent_strategies: { ...intentStrategies, [intent]: updated } });
-  };
 
   return (
     <div className="space-y-5">
@@ -625,23 +605,6 @@ function RetrievalPresetForm({
 
       <Separator />
 
-      {/* Planner */}
-      <section className="space-y-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <h4 className="text-sm font-medium">Query Planner</h4>
-            <p className="text-xs text-muted-foreground">Enable rule-based query planning</p>
-          </div>
-          <Switch
-            checked={configGet(config, "enable_planner", true) as boolean}
-            onCheckedChange={(on) => set("enable_planner", on)}
-            size="sm"
-          />
-        </div>
-      </section>
-
-      <Separator />
-
       {/* Advanced Pipeline Settings */}
       <section className="space-y-3">
         <button
@@ -654,80 +617,17 @@ function RetrievalPresetForm({
         </button>
 
         {advancedOpen && (
-          <div className="space-y-5 pt-2">
-            {/* Intent Strategies */}
-            <div className="space-y-3">
-              <h5 className="text-xs font-medium text-muted-foreground">Intent Strategies</h5>
-              <div className="space-y-3">
-                {INTENTS.map((intent) => (
-                  <div key={intent} className="grid grid-cols-[2fr_2fr_1fr_1fr] gap-2 items-end">
-                    <div className="space-y-1">
-                      <Label className="text-xs capitalize">{intent}</Label>
-                      <Select
-                        value={String(getIntentVal(intent, "pipeline"))}
-                        onValueChange={(v) => setIntentVal(intent, "pipeline", v)}
-                      >
-                        <SelectTrigger size="sm"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          {retrievalPipelines.map((p) => (
-                            <SelectItem key={p} value={p}>{p}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div />
-                    <div className="space-y-1">
-                      <Label className="text-xs">top_k</Label>
-                      <Input
-                        type="number" min={0} max={1000}
-                        value={getIntentVal(intent, "top_k") as number}
-                        onChange={(e) => setIntentVal(intent, "top_k", Number(e.target.value))}
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs">top_n</Label>
-                      <Input
-                        type="number" min={0} max={1000}
-                        value={getIntentVal(intent, "top_n") as number}
-                        onChange={(e) => setIntentVal(intent, "top_n", Number(e.target.value))}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <Separator />
-
-            {/* Pipeline Parameters */}
-            <div className="space-y-3">
-              <h5 className="text-xs font-medium text-muted-foreground">Pipeline Parameters</h5>
-              <div className="grid grid-cols-3 gap-3">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Entity boost</Label>
-                  <Input
-                    type="number" min={0.1} max={10} step={0.1}
-                    value={configGet(config, "entity_boost", 1.5)}
-                    onChange={(e) => set("entity_boost", Number(e.target.value))}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">RRF k</Label>
-                  <Input
-                    type="number" min={1} max={1000}
-                    value={configGet(config, "rrf_k", 60)}
-                    onChange={(e) => set("rrf_k", Number(e.target.value))}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">HyDE weight</Label>
-                  <Input
-                    type="number" min={0.1} max={10} step={0.1}
-                    value={configGet(config, "hyde_weight", 1.5)}
-                    onChange={(e) => set("hyde_weight", Number(e.target.value))}
-                  />
-                </div>
-              </div>
+          <div className="space-y-3 pt-2">
+            <div className="space-y-1.5 max-w-xs">
+              <Label className="text-xs">RRF k</Label>
+              <p className="text-[0.7rem] text-muted-foreground">
+                Reciprocal Rank Fusion constant for hybrid (dense + BM25) search.
+              </p>
+              <Input
+                type="number" min={1} max={1000}
+                value={configGet(config, "rrf_k", 60)}
+                onChange={(e) => set("rrf_k", Number(e.target.value))}
+              />
             </div>
           </div>
         )}
