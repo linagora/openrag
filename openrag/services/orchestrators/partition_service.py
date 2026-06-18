@@ -178,6 +178,17 @@ class PartitionService:
         """Drop a partition's vectors *and* relational rows (cross-cutting)."""
         await self._ensure_partition(partition)
         await self._partition_repo.delete_partition(name=partition)
+        # The shared Milvus collection is created lazily on the first insert
+        # system-wide, so on a fresh stack (nothing ever indexed) it doesn't
+        # exist; querying it would raise (e.g. DescribeCollectionException) and
+        # fail the whole delete *after* the relational rows are already gone.
+        # No collection means no chunks to clean up — skip the vector cleanup.
+        if not await self._vector_store.collection_exists(self._collection):
+            logger.info(
+                "Partition deleted; no vector collection to clean up",
+                partition=partition,
+            )
+            return
         ids = await self._vector_store.query_ids_by_filter(
             self._collection,
             {"partition": partition},

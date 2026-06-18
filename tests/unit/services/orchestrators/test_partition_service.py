@@ -75,10 +75,14 @@ class FakeDocumentRepo:
 
 
 class FakeVectorStore:
-    def __init__(self, ids=None, rows=None):
+    def __init__(self, ids=None, rows=None, exists=True):
         self._ids = ids or []
         self._rows = rows or []
+        self._exists = exists
         self.deleted_ids: list[str] = []
+
+    async def collection_exists(self, name) -> bool:
+        return self._exists
 
     async def query_ids_by_filter(self, collection, filters):
         return list(self._ids)
@@ -184,6 +188,24 @@ async def test_delete_partition_no_vectors_still_deletes_rows():
     await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
     assert vstore.deleted_ids == []
     assert prepo.deleted == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_skips_vectors_when_collection_absent():
+    """Regression for #505: on a fresh stack nothing has ever been indexed, so
+    the shared Milvus collection doesn't exist. Deleting a partition must still
+    drop the relational rows without querying (and 500-ing on) the missing
+    collection."""
+    prepo = FakePartitionRepo(existing={"p1"})
+
+    class ExplodingVectorStore(FakeVectorStore):
+        async def query_ids_by_filter(self, collection, filters):
+            raise AssertionError("must not query a collection that doesn't exist")
+
+    vstore = ExplodingVectorStore(exists=False)
+    await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
+    assert prepo.deleted == ["p1"]
+    assert vstore.deleted_ids == []
 
 
 @pytest.mark.asyncio
