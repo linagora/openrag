@@ -51,6 +51,16 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 
+def _validate_limit(limit: int | None) -> None:
+    """Reject negative ``limit`` values before they reach ``rows[:limit]``.
+
+    A negative bound would silently drop tail rows (e.g. ``-1`` returns all but
+    the last chunk) instead of capping the result, so treat it as a 422.
+    """
+    if limit is not None and limit < 0:
+        raise ValidationError("`limit` must be greater than or equal to 0.", code="INVALID_LIMIT")
+
+
 class PartitionService:
     """Partition lifecycle, membership and read-through orchestration."""
 
@@ -341,6 +351,7 @@ class PartitionService:
         The router builds the extract links and strips ``_id`` from the
         surfaced metadata, exactly as before.
         """
+        _validate_limit(limit)
         if not await self.file_exists(file_id, partition):
             raise NotFoundError(
                 f"'{file_id}' not found in partition '{partition}'",
@@ -369,6 +380,7 @@ class PartitionService:
         O(partition). ``limit`` caps the number of chunks returned (a defensive
         bound for pathologically large files).
         """
+        _validate_limit(limit)
         await self._ensure_partition(partition)
         excluded = {"text"} if include_embedding else {"text", "vector"}
         output_fields = ["*", "vector"] if include_embedding else ["*"]

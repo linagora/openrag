@@ -291,6 +291,27 @@ async def test_list_all_chunks_applies_limit():
     assert len(out) == 2
 
 
+@pytest.mark.asyncio
+async def test_list_all_chunks_rejects_negative_limit():
+    rows = [{"text": str(i), "_id": str(i)} for i in range(5)]
+    svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=FakeVectorStore(rows=rows))
+    with pytest.raises(ValidationError) as ei:
+        await svc.list_all_chunks("p", include_embedding=False, limit=-1)
+    assert ei.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_file_chunks_rejects_negative_limit():
+    rows = [{"_id": str(i), "text": "body"} for i in range(5)]
+    svc = _svc(
+        drepo=FakeDocumentRepo(files={("f", "p")}),
+        vstore=FakeVectorStore(rows=rows),
+    )
+    with pytest.raises(ValidationError) as ei:
+        await svc.get_file_chunks("p", "f", limit=-1)
+    assert ei.value.status_code == 422
+
+
 # --------------------------------------------------------------------------- #
 # membership
 # --------------------------------------------------------------------------- #

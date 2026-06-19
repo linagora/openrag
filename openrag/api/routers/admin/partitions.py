@@ -20,7 +20,7 @@ from api.dependencies.auth import (
 from api.schemas.admin.partition_schemas import PartitionDetailResponse, UpdatePartitionRequest
 from core.utils.logging import get_logger
 from di.providers import get_partition_service
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 logger = get_logger()
@@ -166,7 +166,7 @@ async def get_file(
     request: Request,
     partition: str,
     file_id: str,
-    limit: int = 2000,
+    limit: int = Query(default=2000, ge=0),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
@@ -215,7 +215,7 @@ async def list_all_chunks(
     partition: str,
     include_embedding: bool = True,
     file_id: str | None = None,
-    limit: int | None = None,
+    limit: int | None = Query(default=None, ge=0),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
