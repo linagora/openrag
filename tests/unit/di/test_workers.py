@@ -56,13 +56,17 @@ def test_ensure_worker_bootstrap_initializes_explicitly() -> None:
     """Startup calls the worker bootstrap function instead of relying on import side effects."""
     module = ModuleType("services.workers.bootstrap")
     module.initialize_worker_bootstrap = Mock()
+    previous_module = sys.modules.get("services.workers.bootstrap")
     sys.modules["services.workers.bootstrap"] = module
     settings = Settings()
 
     try:
         ensure_worker_bootstrap(settings)
     finally:
-        sys.modules.pop("services.workers.bootstrap", None)
+        if previous_module is None:
+            sys.modules.pop("services.workers.bootstrap", None)
+        else:
+            sys.modules["services.workers.bootstrap"] = previous_module
 
     module.initialize_worker_bootstrap.assert_called_once_with(settings)
 
