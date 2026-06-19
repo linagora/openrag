@@ -8,6 +8,8 @@ from typing import Any
 import ray
 from services.workers.indexer_actor import IndexerWorker
 
+from openrag.core.config.root import Settings
+
 
 @ray.remote
 class IndexerPool:
@@ -137,7 +139,7 @@ def _build_chunker_from_config(chunker_config: Any) -> Any:
     return _build_chunker(SimpleNamespace(chunker=chunker_config))
 
 
-def _build_embedder_factory(cfg: Any) -> Any:
+def _build_embedder_factory(cfg: Settings) -> Any:
     if not getattr(cfg.models, "embedder", None):
         return None
 
@@ -171,12 +173,21 @@ def _build_embedder_factory(cfg: Any) -> Any:
     return factory
 
 
-def _build_contextualizer_factory(cfg: Any) -> Any:
+def _build_contextualizer_factory(cfg: Settings) -> Any:
+    """Build a cached factory yielding ``ChunkContextualizer`` instances.
+
+    Each requested LLM name is resolved against the named-endpoint registry
+    (``cfg.models.llm``), falling back to the global ``cfg.llm`` block for the
+    ``default`` name. Returns ``None`` when no LLM is configured. Every
+    contextualizer shares the cluster-wide ``llmSemaphore`` so contextualization
+    LLM calls obey the same global concurrency limit as query-time calls.
+    """
     import services.inference.ollama_client  # noqa: F401
     import services.inference.vllm_client  # noqa: F401
     from core.indexing.contextualize import ChunkContextualizer
     from core.llm import llm_registry
     from core.prompts import load_template_by_key
+    from services.inference.distributed_semaphore import DistributedSemaphore
 
     named_llms = getattr(getattr(cfg, "models", None), "llm", {}) or {}
     fallback_cfg = _global_llm_endpoint_config(cfg)
@@ -184,6 +195,11 @@ def _build_contextualizer_factory(cfg: Any) -> Any:
         return None
 
     system_prompt = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "chunk_contextualizer")
+    # Rate-limit contextualization LLM calls with the cluster-wide "llmSemaphore"
+    # (the same one get_llm_semaphore() / bootstrap.py manage) so a large indexing
+    # job can't flood the vLLM endpoint. Built directly from config to avoid
+    # importing services.inference.runtime, which eagerly constructs a LangDetector.
+    llm_semaphore = DistributedSemaphore(name="llmSemaphore", max_concurrent_ops=cfg.semaphore.llm_semaphore)
     cache: dict[str, ChunkContextualizer] = {}
     lock = threading.Lock()
 
@@ -212,7 +228,8 @@ def _build_contextualizer_factory(cfg: Any) -> Any:
                 llm,
                 system_prompt,
                 timeout_seconds=cfg.chunker.contextualization_timeout,
-                max_concurrent=cfg.chunker.max_concurrent_contextualization,
+                batch_size=cfg.chunker.max_concurrent_contextualization,
+                llm_semaphore=llm_semaphore,
             )
             cache[name] = contextualizer
             return contextualizer
@@ -221,6 +238,11 @@ def _build_contextualizer_factory(cfg: Any) -> Any:
 
 
 def _global_llm_endpoint_config(cfg: Any) -> Any | None:
+    """Adapt the legacy/global ``cfg.llm`` block into a ``ModelEndpointConfig``.
+
+    Returns ``None`` when the global LLM endpoint or model is unset, signalling
+    that no ``default`` contextualizer can be built from the global config.
+    """
     from core.config.model_endpoints import ModelEndpointConfig
 
     llm_cfg = getattr(cfg, "llm", None)

@@ -122,6 +122,7 @@ def test_build_contextualizer_factory_uses_global_llm_fallback(tmp_path) -> None
         models=SimpleNamespace(llm={}),
         llm=SimpleNamespace(base_url="http://llm.example/v1", model="mistral", api_key="llm-key"),
         chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
+        semaphore=SimpleNamespace(llm_semaphore=7),
         paths=SimpleNamespace(prompts_dir=str(tmp_path)),
         prompts=SimpleNamespace(chunk_contextualizer="chunk_contextualizer_tmpl.txt"),
     )
@@ -136,6 +137,10 @@ def test_build_contextualizer_factory_uses_global_llm_fallback(tmp_path) -> None
     assert contextualizer._llm._endpoint == "http://llm.example/v1"
     assert contextualizer._llm._model == "mistral"
     assert contextualizer._llm._api_key == "llm-key"
+    # _batch_size drives the per-document loop; _llm.chat is gated by the
+    # injected cluster-wide "llmSemaphore".
+    assert contextualizer._semaphore._name == "llmSemaphore"
+    assert contextualizer._semaphore._max_concurrent_ops == 7
 
 
 def test_build_contextualizer_factory_uses_named_llm_endpoint(tmp_path) -> None:
@@ -144,45 +149,50 @@ def test_build_contextualizer_factory_uses_named_llm_endpoint(tmp_path) -> None:
     from services.workers.indexer_pool import _build_contextualizer_factory
 
     class FakeLLM:
-        instances = []
-
         def __init__(self, **kwargs):
             self.kwargs = kwargs
-            self.instances.append(self)
 
         async def chat(self, messages, **kwargs):
             return {"choices": [{"message": {"content": "document context"}}]}
 
     llm_registry.register("test-contextualizer-llm")(FakeLLM)
-    (tmp_path / "chunk_contextualizer_tmpl.txt").write_text("Context prompt", encoding="utf-8")
-    cfg = SimpleNamespace(
-        models=SimpleNamespace(
-            llm={
-                "ctx": ModelEndpointConfig(
-                    endpoint="http://ctx.example/v1",
-                    model_name="ctx-model",
-                    timeout=45,
-                    extra={"implementation": "test-contextualizer-llm", "api_key": "ctx-key", "temperature": 0.2},
-                )
-            }
-        ),
-        llm=SimpleNamespace(base_url="http://fallback.example/v1", model="fallback", api_key="fallback-key"),
-        chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
-        paths=SimpleNamespace(prompts_dir=str(tmp_path)),
-        prompts=SimpleNamespace(chunk_contextualizer="chunk_contextualizer_tmpl.txt"),
-    )
+    try:
+        (tmp_path / "chunk_contextualizer_tmpl.txt").write_text("Context prompt", encoding="utf-8")
+        cfg = SimpleNamespace(
+            models=SimpleNamespace(
+                llm={
+                    "ctx": ModelEndpointConfig(
+                        endpoint="http://ctx.example/v1",
+                        model_name="ctx-model",
+                        timeout=45,
+                        extra={"implementation": "test-contextualizer-llm", "api_key": "ctx-key", "temperature": 0.2},
+                    )
+                }
+            ),
+            llm=SimpleNamespace(base_url="http://fallback.example/v1", model="fallback", api_key="fallback-key"),
+            chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
+            semaphore=SimpleNamespace(llm_semaphore=7),
+            paths=SimpleNamespace(prompts_dir=str(tmp_path)),
+            prompts=SimpleNamespace(chunk_contextualizer="chunk_contextualizer_tmpl.txt"),
+        )
 
-    factory = _build_contextualizer_factory(cfg)
+        factory = _build_contextualizer_factory(cfg)
 
-    contextualizer = factory("ctx")
-    assert contextualizer is factory("ctx")
-    assert contextualizer._llm.kwargs == {
-        "endpoint": "http://ctx.example/v1",
-        "model_name": "ctx-model",
-        "timeout": 45.0,
-        "api_key": "ctx-key",
-        "temperature": 0.2,
-    }
+        contextualizer = factory("ctx")
+        assert contextualizer is factory("ctx")
+        assert contextualizer._llm.kwargs == {
+            "endpoint": "http://ctx.example/v1",
+            "model_name": "ctx-model",
+            "timeout": 45.0,
+            "api_key": "ctx-key",
+            "temperature": 0.2,
+        }
+        assert contextualizer._semaphore._name == "llmSemaphore"
+        assert contextualizer._semaphore._max_concurrent_ops == 7
+    finally:
+        # FakeLLM lives only for this test — drop it so the shared llm_registry
+        # doesn't leak into other tests in the same process.
+        llm_registry._registry.pop("test-contextualizer-llm", None)
 
 
 def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPatch) -> None:
