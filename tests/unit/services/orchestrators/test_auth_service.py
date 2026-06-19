@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 from core.config.auth import OIDCConfig
 from core.models.user import PartitionRole, User, UserPartition
+from core.utils.exceptions import OpenRAGError
 from cryptography.fernet import Fernet
 from services.auth import StateCookieSerializer, hash_session_token
 from services.auth.oidc_client import LogoutTokenClaims, TokenBundle
@@ -508,15 +509,17 @@ def test_validate_file_quota():
     # Disabled globally.
     AuthService.validate_file_quota({"file_count": 50}, pending_task_count=50, default_quota=-1)
     # Specific limit exceeded (3 indexed + 2 pending >= 5).
-    with pytest.raises(Exception):
+    with pytest.raises(OpenRAGError) as ei:
         AuthService.validate_file_quota({"file_count": 3, "file_quota": 5}, pending_task_count=2, default_quota=10)
+    assert ei.value.code == "FILE_QUOTA_EXCEEDED"
     # Under the limit is fine.
     AuthService.validate_file_quota({"file_count": 1, "file_quota": 5}, pending_task_count=1, default_quota=10)
     # Regression: a per-user limit is enforced even when the global default
     # is unlimited (-1). The negative default used to short-circuit to
     # "unlimited" and ignore the per-user quota entirely.
-    with pytest.raises(Exception):
+    with pytest.raises(OpenRAGError) as ei:
         AuthService.validate_file_quota({"file_count": 10, "file_quota": 10}, pending_task_count=0, default_quota=-1)
+    assert ei.value.code == "FILE_QUOTA_EXCEEDED"
     # ...but a user with no per-user quota still inherits the unlimited default.
     AuthService.validate_file_quota({"file_count": 999}, pending_task_count=0, default_quota=-1)
 
