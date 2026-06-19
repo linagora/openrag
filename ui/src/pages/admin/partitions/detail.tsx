@@ -46,7 +46,7 @@ import {
 } from "@/lib/api/partitions";
 import type { PartitionConfig, PartitionRole } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
-import { listModelEndpoints, validateStoredModelEndpoint } from "@/lib/api/models";
+import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 import { formatDate } from "@/lib/utils";
 
@@ -73,6 +73,11 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
   const { data: llmEndpoints } = useQuery({
     queryKey: ["model-endpoints", "llm"],
     queryFn: () => listModelEndpoints("llm"),
+  });
+
+  const { data: embedderEndpoints } = useQuery({
+    queryKey: ["model-endpoints", "embedder"],
+    queryFn: () => listModelEndpoints("embedder"),
   });
 
   const validateLlm = useCallback(
@@ -168,7 +173,9 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
             </div>
             <div className="space-y-2">
               <Label className="text-muted-foreground">Embedder</Label>
-              <p className="text-sm font-medium pt-1">{partition.embedder}</p>
+              <p className="text-sm font-medium pt-1">
+                {resolveEmbedderName(partition.embedder, embedderEndpoints)}
+              </p>
             </div>
             <div className="space-y-2">
               <Label className="text-muted-foreground">Documents</Label>

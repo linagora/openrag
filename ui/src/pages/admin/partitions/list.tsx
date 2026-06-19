@@ -40,7 +40,12 @@ import {
 } from "@/lib/api/partitions";
 import type { PartitionResponse } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
-import { listModelEndpoints, validateStoredModelEndpoint, pickDefaultEndpoint } from "@/lib/api/models";
+import {
+  listModelEndpoints,
+  validateStoredModelEndpoint,
+  pickDefaultEndpoint,
+  resolveEmbedderName,
+} from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 
 type SortDir = "asc" | "desc" | null;
@@ -367,7 +372,11 @@ export default function PartitionListPage() {
                       )}
                     </TableCell>
                     <TableCell>{p.document_count}</TableCell>
-                    {canManagePartitions && <TableCell className="text-sm">{p.embedder}</TableCell>}
+                    {canManagePartitions && (
+                      <TableCell className="text-sm">
+                        {resolveEmbedderName(p.embedder, embedderEndpoints)}
+                      </TableCell>
+                    )}
                     {canManagePartitions && <TableCell>{p.indexation_preset}</TableCell>}
                     {canManagePartitions && <TableCell>{p.retrieval_preset}</TableCell>}
                     <TableCell className="text-sm text-muted-foreground">

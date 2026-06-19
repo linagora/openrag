@@ -138,3 +138,17 @@ export function pickDefaultEndpoint(
   if (!endpoints?.length) return undefined;
   return endpoints.find((e) => e.is_default) ?? (endpoints.length === 1 ? endpoints[0] : undefined);
 }
+
+/**
+ * Display name for a partition's embedder. The backend stores the sentinel
+ * `"default"` (resolved to the `is_default` endpoint at runtime); show the real
+ * endpoint name instead — unless that endpoint is itself literally named
+ * "default", or the default can't be resolved yet (then fall back to the raw value).
+ */
+export function resolveEmbedderName(
+  value: string | null | undefined,
+  embedderEndpoints: ModelEndpointResponse[] | undefined | null,
+): string {
+  if (value !== "default") return value || "—";
+  return pickDefaultEndpoint(embedderEndpoints)?.name ?? "default";
+}
