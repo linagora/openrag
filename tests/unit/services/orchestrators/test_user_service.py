@@ -294,6 +294,7 @@ async def test_current_user_info_none_quota_falls_back_to_default():
 
 @pytest.mark.asyncio
 async def test_current_user_info_per_user_quota_overrides_negative_default():
+    """Expose an explicit per-user quota even when the default is unlimited."""
     # Regression: an explicit per-user quota is surfaced even when the global
     # default is unlimited (-1). This previously returned -1 (unlimited),
     # silently ignoring the admin-set limit.
@@ -304,6 +305,7 @@ async def test_current_user_info_per_user_quota_overrides_negative_default():
 
 @pytest.mark.asyncio
 async def test_current_user_info_negative_default_unlimited_without_override():
+    """Keep the global unlimited default for users without an override."""
     # No per-user quota → inherits the unlimited global default.
     svc = _svc(FakeUserRepo(), default_quota=-1, job_service=FakeJobService())
     out = await svc.get_current_user_info({"id": 2, "is_admin": False, "file_count": 0})

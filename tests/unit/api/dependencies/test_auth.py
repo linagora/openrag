@@ -175,6 +175,7 @@ async def test_check_user_file_quota_reads_pending_count_through_job_service():
 
 @pytest.mark.asyncio
 async def test_check_user_file_quota_skips_pending_count_when_default_is_unlimited():
+    """Skip queue I/O when the resolved quota is unlimited."""
     job_service = FakeJobService(pending_count=2)
 
     user = await check_user_file_quota(
