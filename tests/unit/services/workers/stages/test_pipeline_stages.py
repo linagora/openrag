@@ -1,4 +1,6 @@
+import asyncio
 import re
+from contextlib import asynccontextmanager
 
 import pytest
 from core.chunking.chunking_strategy import ChunkingStrategy
@@ -9,11 +11,23 @@ from core.models.document import ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
+from services.workers.stages import caption as caption_module
 from services.workers.stages.caption import caption_stage
 from services.workers.stages.chunk import chunk_stage
 from services.workers.stages.contextualize import contextualize_stage
 from services.workers.stages.embed import embed_stage
 from services.workers.stages.store import store_stage
+
+
+@pytest.fixture(autouse=True)
+def _noop_vlm_semaphore(monkeypatch):
+    """Stub the cluster-wide VLM semaphore so caption tests don't boot Ray."""
+
+    @asynccontextmanager
+    async def _noop():
+        yield
+
+    monkeypatch.setattr(caption_module, "get_vlm_semaphore", _noop)
 
 
 class FakeChunker(ChunkingStrategy):
@@ -147,6 +161,105 @@ async def test_caption_stage_appends_standalone_image_captions():
 
     assert row["processed_document"].text_blocks[-1] == TextBlock(text=wrap_caption("a diagram"), page_number=3)
     assert row["stage"] == "captioned"
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_captions_images_concurrently_and_in_order():
+    """Images fan out concurrently (bounded only by the VLM semaphore, stubbed
+    here), and each caption lands on its own image even though later images
+    finish their VLM call first."""
+
+    class TrackingVLM(VLM):
+        def __init__(self) -> None:
+            self.in_flight = 0
+            self.max_in_flight = 0
+
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            try:
+                # Earlier images sleep longer, so completion order is the
+                # reverse of submission order — a sequential loop would caption
+                # in submission order and never overlap.
+                idx = int(image_bytes.decode().rsplit("-", 1)[1])
+                await asyncio.sleep((3 - idx) * 0.01)
+                return f"caption:{image_bytes.decode()}"
+            finally:
+                self.in_flight -= 1
+
+        async def caption_images_batch(self, images: list[bytes], prompt: str | None = None) -> list[str]:
+            return [await self.caption_image(image, prompt=prompt) for image in images]
+
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        text_blocks=[TextBlock(text="body", page_number=1)],
+        images=[ImageBlock(image_bytes=f"img-{i}".encode(), page_number=1) for i in range(3)],
+    )
+    row = {"processed_document": processed}
+    vlm = TrackingVLM()
+
+    await caption_stage(row, vlm)
+
+    out = row["processed_document"]
+    assert [img.caption for img in out.images] == ["caption:img-0", "caption:img-1", "caption:img-2"]
+    # All three VLM calls were in flight simultaneously: the fan-out is real.
+    assert vlm.max_in_flight == 3
+    assert row["stage"] == "captioned"
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_cancels_sibling_captions_on_failure():
+    """Do not leave background VLM calls running after one caption fails."""
+
+    class FailingVLM(VLM):
+        def __init__(self) -> None:
+            self.started: set[bytes] = set()
+            self.cancelled: set[bytes] = set()
+            self.completed: set[bytes] = set()
+            self.all_started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            self.started.add(image_bytes)
+            if len(self.started) == 3:
+                self.all_started.set()
+
+            if image_bytes == b"fail":
+                await self.all_started.wait()
+                raise RuntimeError("caption failed")
+
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled.add(image_bytes)
+                raise
+            self.completed.add(image_bytes)
+            return image_bytes.decode()
+
+        async def caption_images_batch(self, images: list[bytes], prompt: str | None = None) -> list[str]:
+            return [await self.caption_image(image, prompt=prompt) for image in images]
+
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        text_blocks=[TextBlock(text="body", page_number=1)],
+        images=[
+            ImageBlock(image_bytes=b"slow-1", page_number=1),
+            ImageBlock(image_bytes=b"fail", page_number=1),
+            ImageBlock(image_bytes=b"slow-2", page_number=1),
+        ],
+    )
+    row = {"processed_document": processed}
+    vlm = FailingVLM()
+
+    try:
+        with pytest.raises(RuntimeError, match="caption failed"):
+            await caption_stage(row, vlm)
+
+        assert vlm.cancelled == {b"slow-1", b"slow-2"}
+        assert vlm.completed == set()
+    finally:
+        vlm.release.set()
+        await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
