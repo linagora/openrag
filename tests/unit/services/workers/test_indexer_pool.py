@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from core.config.model_endpoints import ModelEndpointConfig
 
 
 class _NativeChunker:
@@ -98,3 +99,37 @@ def test_build_indexer_pool_uses_detached_actor_with_configured_concurrency(
     assert module.build_indexer_pool() == "actor"
     assert calls["lifetime"] == "detached"
     assert calls["max_concurrency"] == 4
+
+
+def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.llm import llm_registry
+    from services.workers.indexer_pool import _build_topic_tagger_factory
+
+    class ProbeLLM:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    llm_registry.register("topic-probe")(ProbeLLM)
+    cfg = SimpleNamespace(
+        models=SimpleNamespace(
+            llm={
+                "topic-a": ModelEndpointConfig(
+                    endpoint="http://llm:8000/v1",
+                    model_name="topic-model",
+                    timeout=9.0,
+                    extra={"implementation": "topic-probe", "temperature": 0.1},
+                )
+            }
+        ),
+        llm=SimpleNamespace(base_url="", model=""),
+        paths=SimpleNamespace(prompts_dir="/tmp/prompts"),
+        prompts=SimpleNamespace(topic_tagger="topic.txt"),
+    )
+    monkeypatch.setattr("core.prompts.load_template_by_key", lambda *_args: "extract topics")
+
+    factory = _build_topic_tagger_factory(cfg)
+    tagger = factory("topic-a")
+
+    assert tagger._llm.kwargs["endpoint"] == "http://llm:8000/v1"
+    assert tagger._llm.kwargs["model_name"] == "topic-model"
+    assert tagger._llm.kwargs["temperature"] == 0.1

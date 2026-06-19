@@ -32,10 +32,12 @@ class IndexerWorker:
         pipeline: IndexingPipeline,
         task_state_manager: Any,
         document_repo: Any = None,
+        topic_tag_repo: Any = None,
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
         self._document_repo = document_repo
+        self._topic_tag_repo = topic_tag_repo
 
     async def process_file(
         self,
@@ -80,6 +82,14 @@ class IndexerWorker:
                     replace=replace,
                     indexation_config=indexation_config,
                 )
+            if self._topic_tag_repo is not None:
+                await _replace_topic_tags_if_needed(
+                    topic_tag_repo=self._topic_tag_repo,
+                    row=row,
+                    metadata=metadata,
+                    partition=partition,
+                    indexation_config=indexation_config,
+                )
             await self._tsm.set_state.remote(task_id, "COMPLETED")
             return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
         except Exception:
@@ -119,6 +129,39 @@ async def _write_catalog_record(
         relationship_id=metadata.get("relationship_id"),
         parent_id=metadata.get("parent_id"),
         **config_kwargs,
+    )
+
+
+async def _replace_topic_tags_if_needed(
+    *,
+    topic_tag_repo: Any,
+    row: dict[str, Any],
+    metadata: dict[str, Any],
+    partition: str,
+    indexation_config: dict[str, Any] | None,
+) -> None:
+    file_id = metadata.get("file_id", "")
+    if not file_id:
+        return
+
+    has_topic_tags = "topic_tags" in row
+    topic_tagging_disabled = indexation_config is not None and indexation_config.get("enable_topic_tagging") is False
+    if not has_topic_tags and not topic_tagging_disabled:
+        return
+
+    await topic_tag_repo.delete_by_document(file_id, partition=partition)
+    tags = [tag for tag in row.get("topic_tags", []) if isinstance(tag, str) and tag.strip()]
+    if not tags:
+        return
+    await topic_tag_repo.bulk_insert(
+        [
+            {
+                "document_id": file_id,
+                "partition": partition,
+                "tag": tag,
+            }
+            for tag in tags
+        ]
     )
 
 

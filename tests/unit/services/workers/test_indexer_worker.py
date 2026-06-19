@@ -92,6 +92,20 @@ class FakeDocumentRepo:
         return True
 
 
+class FakeTopicTagRepo:
+    def __init__(self) -> None:
+        self.deleted: list[tuple[str, str | None]] = []
+        self.inserted: list[list[dict[str, str]]] = []
+
+    async def delete_by_document(self, document_id: str, partition: str | None = None) -> int:
+        self.deleted.append((document_id, partition))
+        return 0
+
+    async def bulk_insert(self, tags: list[dict]) -> int:
+        self.inserted.append(tags)
+        return len(tags)
+
+
 # ---------------------------------------------------------------------------
 # Tests — _load_document helper
 # ---------------------------------------------------------------------------
@@ -388,3 +402,38 @@ async def test_process_file_catalog_failure_sets_failed_state(tmp_path: Path) ->
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
     completed_calls = [call for call in tsm.set_state.remote.call_args_list if call.args == ("t-fail", "COMPLETED")]
     assert completed_calls == []
+
+
+@pytest.mark.asyncio
+async def test_process_file_replaces_topic_tags_after_successful_pipeline(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class TaggingPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["topic_tags"] = ["finance", "risk"]
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    repo = FakeTopicTagRepo()
+    worker = IndexerWorker(
+        pipeline=TaggingPipeline(),
+        task_state_manager=_fake_tsm(),
+        topic_tag_repo=repo,
+    )
+
+    await worker.process_file(
+        task_id="t-tags",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="tenant-a",
+    )
+
+    assert repo.deleted == [("f1", "tenant-a")]
+    assert repo.inserted == [
+        [
+            {"document_id": "f1", "partition": "tenant-a", "tag": "finance"},
+            {"document_id": "f1", "partition": "tenant-a", "tag": "risk"},
+        ]
+    ]

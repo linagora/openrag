@@ -9,6 +9,7 @@ from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
+from core.indexing.topic_tags import TopicTagger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
 from services.workers.stages.caption import caption_stage
@@ -17,6 +18,7 @@ from services.workers.stages.contextualize import contextualize_stage
 from services.workers.stages.embed import embed_stage
 from services.workers.stages.parse import parse_stage
 from services.workers.stages.store import store_stage
+from services.workers.stages.topic_tag import topic_tag_stage
 
 
 @dataclass(slots=True, frozen=True)
@@ -33,6 +35,7 @@ class PipelineTimeouts:
     embed_per_chunk: float = 0.0
     store: float | None = None
     store_per_chunk: float = 0.0
+    topic_tag: float | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -45,6 +48,7 @@ class IndexingPipeline:
     vector_store: VectorStore
     vlm: VLM | None = None
     contextualizer: ChunkContextualizer | None = None
+    topic_tagger: TopicTagger | None = None
     timeouts: PipelineTimeouts = PipelineTimeouts()
     indexation_config: IndexationPipelineConfig | None = None
     parser_factory: Callable[[str], DocumentParser] | None = None
@@ -52,6 +56,7 @@ class IndexingPipeline:
     embedder_factory: Callable[[str], Embedder] | None = None
     vlm_factory: Callable[[str], VLM] | None = None
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
+    topic_tagger_factory: Callable[[str], TopicTagger] | None = None
 
     async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store."""
@@ -62,6 +67,7 @@ class IndexingPipeline:
         embedder = self._select_embedder(row)
         vlm = self._select_vlm(config)
         contextualizer = self._select_contextualizer(config)
+        topic_tagger = self._select_topic_tagger(config)
 
         await parse_stage(row, parser, timeout=self.timeouts.parse)
         if vlm is not None:
@@ -78,6 +84,14 @@ class IndexingPipeline:
                 contextualizer,
                 timeout=self.timeouts.contextualize,
                 per_chunk_timeout=self.timeouts.contextualize_per_chunk,
+            )
+        if topic_tagger is not None:
+            max_tags = config.max_topic_tags if config is not None else 7
+            await topic_tag_stage(
+                row,
+                topic_tagger,
+                max_tags=max_tags,
+                timeout=self.timeouts.topic_tag,
             )
         await embed_stage(
             row,
@@ -135,6 +149,14 @@ class IndexingPipeline:
                 return self.contextualizer_factory(config.contextualization_llm or "default")
         return self.contextualizer
 
+    def _select_topic_tagger(self, config: IndexationPipelineConfig | None) -> TopicTagger | None:
+        if config is not None:
+            if not config.enable_topic_tagging:
+                return None
+            if self.topic_tagger_factory is not None:
+                return self.topic_tagger_factory(config.topic_tagging_llm or "default")
+        return self.topic_tagger
+
 
 def build_indexing_pipeline(
     *,
@@ -144,6 +166,7 @@ def build_indexing_pipeline(
     vector_store: VectorStore,
     vlm: VLM | None = None,
     contextualizer: ChunkContextualizer | None = None,
+    topic_tagger: TopicTagger | None = None,
     timeouts: PipelineTimeouts | None = None,
     indexation_config: IndexationPipelineConfig | None = None,
     parser_factory: Callable[[str], DocumentParser] | None = None,
@@ -151,6 +174,7 @@ def build_indexing_pipeline(
     embedder_factory: Callable[[str], Embedder] | None = None,
     vlm_factory: Callable[[str], VLM] | None = None,
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None,
+    topic_tagger_factory: Callable[[str], TopicTagger] | None = None,
 ) -> IndexingPipeline:
     """Build the default sequential indexing pipeline."""
 
@@ -161,6 +185,7 @@ def build_indexing_pipeline(
         vector_store=vector_store,
         vlm=vlm,
         contextualizer=contextualizer,
+        topic_tagger=topic_tagger,
         timeouts=timeouts or PipelineTimeouts(),
         indexation_config=indexation_config,
         parser_factory=parser_factory,
@@ -168,6 +193,7 @@ def build_indexing_pipeline(
         embedder_factory=embedder_factory,
         vlm_factory=vlm_factory,
         contextualizer_factory=contextualizer_factory,
+        topic_tagger_factory=topic_tagger_factory,
     )
 
 
