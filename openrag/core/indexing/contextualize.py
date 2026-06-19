@@ -66,7 +66,8 @@ class ChunkContextualizer:
         )
         async with self._semaphore:
             try:
-                return await asyncio.wait_for(self._llm.chat(messages), timeout=self._timeout)
+                response = await asyncio.wait_for(self._llm.chat(messages), timeout=self._timeout)
+                return _chat_response_text(response)
             except TimeoutError:
                 logger.warning("LLM timeout contextualizing chunk (filename=%s)", filename)
                 return ""
@@ -136,3 +137,23 @@ class ChunkContextualizer:
         except (TimeoutError, OSError, RuntimeError, ValueError) as exc:
             logger.warning("Error contextualizing chunks from %s: %s", filename, exc)
             return chunks
+
+
+def _chat_response_text(response: object) -> str:
+    if isinstance(response, str):
+        return response
+    if not isinstance(response, dict):
+        return ""
+
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            message = first.get("message")
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                return message["content"]
+            if isinstance(first.get("text"), str):
+                return first["text"]
+
+    content = response.get("content")
+    return content if isinstance(content, str) else ""
