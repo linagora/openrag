@@ -136,6 +136,52 @@ async def test_seed_defaults_retrieval_enables_reranker_when_available():
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_default_indexation_inherits_contextual_retrieval_disabled():
+    from core.config.root import Settings
+
+    settings = Settings(chunker={"contextual_retrieval": False})
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    default_idx = repo._store[("default", "indexation")]["config"]
+    assert default_idx["enable_contextualization"] is False
+    # Named presets keep their explicit seed value regardless of the global flag.
+    assert repo._store[("legal", "indexation")]["config"]["enable_contextualization"] is True
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_default_indexation_inherits_contextual_retrieval_enabled():
+    from core.config.root import Settings
+
+    settings = Settings(chunker={"contextual_retrieval": True})
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    default_idx = repo._store[("default", "indexation")]["config"]
+    assert default_idx["enable_contextualization"] is True
+    # finance preset explicitly disables it and must stay off.
+    assert repo._store[("finance", "indexation")]["config"]["enable_contextualization"] is False
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_preserves_existing_default_indexation_admin_choice():
+    from core.config.root import Settings
+
+    current = _make_row("default", "indexation", {**_VALID_IDX_CONFIG, "enable_contextualization": False})
+    repo = _FakePresetRepo(rows=[current])
+    settings = Settings(chunker={"contextual_retrieval": True})
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    assert repo._store[("default", "indexation")]["config"]["enable_contextualization"] is False
+    upserts = [c for c in repo.calls if c[0] == "upsert"]
+    assert all(args[1] != "indexation" for _, args in upserts)
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_skips_type_when_rows_exist():
     existing = _make_row("default", "indexation")
     repo = _FakePresetRepo(rows=[existing])
