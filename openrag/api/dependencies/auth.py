@@ -239,8 +239,9 @@ async def check_user_file_quota(
     default_file_quota = config.rdb.default_file_quota
     if user.get("is_admin", False):
         return user
-    if default_file_quota < 0:
-        return user
+    # A per-user quota takes precedence; the global default is only the
+    # fallback for users with no override (resolved in validate_file_quota).
+    # An explicit per-user ``< 0`` means unlimited.
     user_quota = user.get("file_quota")
     if user_quota is not None and user_quota < 0:
         return user

@@ -512,6 +512,13 @@ def test_validate_file_quota():
         AuthService.validate_file_quota({"file_count": 3, "file_quota": 5}, pending_task_count=2, default_quota=10)
     # Under the limit is fine.
     AuthService.validate_file_quota({"file_count": 1, "file_quota": 5}, pending_task_count=1, default_quota=10)
+    # Regression: a per-user limit is enforced even when the global default
+    # is unlimited (-1). The negative default used to short-circuit to
+    # "unlimited" and ignore the per-user quota entirely.
+    with pytest.raises(Exception):
+        AuthService.validate_file_quota({"file_count": 10, "file_quota": 10}, pending_task_count=0, default_quota=-1)
+    # ...but a user with no per-user quota still inherits the unlimited default.
+    AuthService.validate_file_quota({"file_count": 999}, pending_task_count=0, default_quota=-1)
 
 
 # --------------------------------------------------------------------------- #
