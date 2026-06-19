@@ -25,6 +25,10 @@ export interface Permissions {
   canManageModels: boolean;
   canManagePresets: boolean;
   canManagePartitions: boolean;
+  // Any authenticated user may create (and thereby own) a partition — the backend's
+  // POST /partition/{name} has no admin guard. Distinct from canManagePartitions,
+  // which gates admin-only config of *all* partitions.
+  canCreatePartition: boolean;
   // Partition-scoped — pass the caller's role on the partition in question.
   canRead: (role: Role) => boolean;
   canWrite: (role: Role) => boolean;
@@ -41,6 +45,7 @@ export function usePermissions(): Permissions {
     canManageModels: isAdmin,
     canManagePresets: isAdmin,
     canManagePartitions: isAdmin,
+    canCreatePartition: true,
     canRead: (role) => isAdmin || !!role,
     canWrite: (role) => isAdmin || (role ? WRITE_ROLES.has(role) : false),
     canManageMembers: (role) => isAdmin || role === "owner",

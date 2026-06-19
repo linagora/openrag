@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback, useEffect } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -98,6 +98,22 @@ export default function PartitionListPage() {
   const queryClient = useQueryClient();
   const { canManagePartitions } = usePermissions();
   const [dialogOpen, setDialogOpen] = useState(false);
+
+  // Open the create dialog directly when arriving from the Overview quick action
+  // (/partitions?create=1), then strip the param so refresh/back doesn't reopen it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    if (searchParams.has("create")) {
+      setDialogOpen(true);
+      setSearchParams(
+        (prev) => {
+          prev.delete("create");
+          return prev;
+        },
+        { replace: true },
+      );
+    }
+  }, [searchParams, setSearchParams]);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [embedder, setEmbedder] = useState("");

@@ -11,10 +11,14 @@ import {
   listUserMemberships,
   grantMembership,
   revokeMembership,
+  effectiveQuota,
 } from "@/lib/api/users";
+import type { UserResponse } from "@/lib/api/users";
+import { getConfig } from "@/lib/api/system";
 import { listPartitions, type PartitionRole } from "@/lib/api/partitions";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { QuotaUsageMeter } from "@/components/shared/quota-usage-meter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -63,7 +67,6 @@ export default function UserDetailPage() {
   const [email, setEmail] = useState("");
   const [externalId, setExternalId] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
-  const [quota, setQuota] = useState("");
   const [formLoaded, setFormLoaded] = useState(false);
 
   if (user && !formLoaded) {
@@ -71,7 +74,6 @@ export default function UserDetailPage() {
     setEmail(user.email ?? "");
     setExternalId(user.external_user_id ?? "");
     setIsAdmin(user.is_admin);
-    setQuota(user.file_quota == null ? "" : String(user.file_quota));
     setFormLoaded(true);
   }
 
@@ -82,7 +84,6 @@ export default function UserDetailPage() {
         email: email.trim() || undefined,
         external_user_id: externalId.trim() || undefined,
         is_admin: isAdmin,
-        file_quota: quota.trim() === "" ? null : Number(quota),
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user", id] });
@@ -140,6 +141,7 @@ export default function UserDetailPage() {
         </TabsList>
 
         <TabsContent value="profile">
+          <div className="grid items-start gap-6 lg:grid-cols-2">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Profile &amp; access</CardTitle>
@@ -155,7 +157,7 @@ export default function UserDetailPage() {
                   e.preventDefault();
                   updateMut.mutate();
                 }}
-                className="grid gap-5 md:grid-cols-2"
+                className="grid gap-5"
               >
                 <div className="space-y-2">
                   <Label>Display name</Label>
@@ -185,25 +187,6 @@ export default function UserDetailPage() {
                     <span className="font-mono">sub</span>.
                   </p>
                 </div>
-                <div className="space-y-2">
-                  <Label>File quota</Label>
-                  <Input
-                    type="number"
-                    value={quota}
-                    onChange={(e) => setQuota(e.target.value)}
-                    placeholder="Global default"
-                    disabled={isAdmin}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {isAdmin ? (
-                      "Admins bypass quota checks — this setting has no effect."
-                    ) : (
-                      <>
-                        Empty = global default · <span className="font-mono">-1</span> = unlimited
-                      </>
-                    )}
-                  </p>
-                </div>
                 <div className="flex items-center justify-between md:col-span-2">
                   <div>
                     <Label>Administrator</Label>
@@ -221,6 +204,9 @@ export default function UserDetailPage() {
               </form>
             </CardContent>
           </Card>
+
+          <StorageQuotaCard user={user} />
+          </div>
         </TabsContent>
 
         <TabsContent value="partitions">
@@ -375,6 +361,108 @@ function PartitionsTab({ userId }: { userId: number }) {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+      </CardContent>
+    </Card>
+  );
+}
+
+function StorageQuotaCard({ user }: { user: UserResponse }) {
+  const queryClient = useQueryClient();
+  const [quota, setQuota] = useState(user.file_quota == null ? "" : String(user.file_quota));
+
+  // Global default so a null per-user quota resolves to a real number.
+  const { data: config } = useQuery({ queryKey: ["system-config"], queryFn: getConfig });
+  const globalDefault =
+    (config?.rdb as { default_file_quota?: number } | undefined)?.default_file_quota ?? null;
+
+  const saveMut = useMutation({
+    mutationFn: () =>
+      updateUser(String(user.id), { file_quota: quota.trim() === "" ? null : Number(quota) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["user", String(user.id)] });
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+      toast.success("Quota updated");
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
+
+  const isAdmin = user.is_admin;
+  const title = user.display_name || user.external_user_id || `User #${user.id}`;
+  const fileCount = user.file_count ?? 0;
+  const eff = effectiveQuota(user.file_quota, isAdmin, globalDefault);
+
+  // Typed value (drives the lower-than-usage warning + confirm).
+  const quotaNum = quota.trim() === "" ? null : Number(quota);
+  const overLimit =
+    quotaNum != null && Number.isFinite(quotaNum) && quotaNum >= 0 && fileCount > quotaNum;
+  const toRemove = quotaNum != null ? fileCount - quotaNum : 0;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Storage &amp; quota</CardTitle>
+        <CardDescription>
+          Indexed-file usage and the per-user upload cap.{" "}
+          {isAdmin
+            ? "Admins bypass quota checks."
+            : "Lowering a quota never deletes existing files — it only blocks new uploads until the user is back under the limit."}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        <QuotaUsageMeter fileCount={fileCount} quota={eff} />
+
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            saveMut.mutate();
+          }}
+          className="space-y-2"
+        >
+          <Label>File quota</Label>
+          <Input
+            type="number"
+            value={quota}
+            onChange={(e) => setQuota(e.target.value)}
+            placeholder="Global default"
+            disabled={isAdmin}
+          />
+          <p className="text-xs text-muted-foreground">
+            {isAdmin ? (
+              "Admins bypass quota checks — this setting has no effect."
+            ) : (
+              <>
+                Empty = global default · <span className="font-mono">-1</span> = unlimited
+              </>
+            )}
+          </p>
+          {!isAdmin && overLimit && (
+            <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
+              ⚠️ <span className="font-medium">
+                {title} already has {fileCount} indexed files.
+              </span>{" "}
+              A quota of {quotaNum} puts them over their limit — they can&apos;t upload until they
+              remove {toRemove}+ file{toRemove === 1 ? "" : "s"}. Existing files are kept.
+            </div>
+          )}
+          <div className="pt-1">
+            {!isAdmin && overLimit ? (
+              <ConfirmDialog
+                title="Set quota below current usage?"
+                description={`${title} currently has ${fileCount} indexed files. Setting the quota to ${quotaNum} leaves them over their limit — uploads are blocked until they drop below ${quotaNum}. Existing files are not removed.`}
+                destructive={false}
+                onConfirm={() => saveMut.mutate()}
+              >
+                <Button type="button" disabled={saveMut.isPending}>
+                  {saveMut.isPending ? "Saving…" : "Save quota"}
+                </Button>
+              </ConfirmDialog>
+            ) : (
+              <Button type="submit" disabled={saveMut.isPending || isAdmin}>
+                {saveMut.isPending ? "Saving…" : "Save quota"}
+              </Button>
+            )}
+          </div>
+        </form>
       </CardContent>
     </Card>
   );

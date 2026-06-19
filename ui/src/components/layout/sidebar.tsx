@@ -89,7 +89,7 @@ export function AppSidebar() {
             className="h-7 w-auto object-contain group-data-[collapsible=icon]:h-7 group-data-[collapsible=icon]:w-7 group-data-[collapsible=icon]:object-cover group-data-[collapsible=icon]:object-left"
           />
           <span className="text-[0.6rem] font-semibold uppercase tracking-[0.18em] text-center text-sidebar-foreground/60 group-data-[collapsible=icon]:hidden">
-            Admin Console
+            {perms.isAdmin ? "Admin Console" : "Console"}
           </span>
         </Link>
       </SidebarHeader>

@@ -13,6 +13,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { QuotaUsageMeter } from "@/components/shared/quota-usage-meter";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -123,7 +124,7 @@ function RecentTasks({ isLoading, tasks }: { isLoading: boolean; tasks: TaskList
 }
 
 export default function OverviewPage() {
-  const { canManageUsers, canViewSystem, canManagePartitions } = usePermissions();
+  const { canManageUsers, canViewSystem, canCreatePartition } = usePermissions();
 
   // `GET /partition/` and `/queue/tasks` are membership-scoped server-side, so the
   // same queries serve admins and partition members. Platform-only data is gated.
@@ -162,13 +163,11 @@ export default function OverviewPage() {
   const actorsAlive = actors.filter((a) => a.state.toUpperCase() === "ALIVE").length;
 
   // Personal file-quota usage (from /users/info). file_quota is the *effective*
-  // quota: -1 / null = unlimited (admins always resolve to unlimited).
+  // quota the backend already resolved: -1 / null = unlimited.
   const me = useAuth().user;
-  const quota = me?.file_quota;
-  const quotaUsed = me?.total_files ?? me?.indexed_files ?? 0;
-  const quotaPending = me?.pending_files ?? 0;
-  const quotaUnlimited = quota == null || quota < 0;
-  const quotaPct = quotaUnlimited || !quota ? 0 : Math.min(100, Math.round((quotaUsed / quota) * 100));
+  const quotaIndexed = me?.file_count ?? 0;
+  const quotaEff: number | "unlimited" =
+    me?.file_quota == null || me.file_quota < 0 ? "unlimited" : me.file_quota;
 
   return (
     <div>
@@ -198,41 +197,6 @@ export default function OverviewPage() {
           isLoading={tasksQuery.isLoading}
         />
       </div>
-
-      {/* Personal file-quota usage — regular users only (admins bypass quota) */}
-      {me && !me.is_admin && (
-        <Card className="mb-8">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Your file quota</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {quotaUnlimited ? (
-              <p className="text-sm text-muted-foreground">
-                <span className="font-medium text-foreground">{quotaUsed}</span> files indexed ·{" "}
-                <span className="font-medium text-foreground">Unlimited</span>
-              </p>
-            ) : (
-              <div className="space-y-2 max-w-md">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">
-                    {quotaUsed} / {quota} files
-                  </span>
-                  <span className="font-medium">{quotaPct}%</span>
-                </div>
-                <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                  <div
-                    className={quotaPct >= 100 ? "h-full rounded-full bg-destructive" : "h-full rounded-full bg-primary"}
-                    style={{ width: `${quotaPct}%` }}
-                  />
-                </div>
-                {quotaPending > 0 && (
-                  <p className="text-xs text-muted-foreground">includes {quotaPending} pending</p>
-                )}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
 
       <div className="grid gap-6 lg:grid-cols-2 mb-8">
         {/* System status — platform operators only */}
@@ -280,6 +244,19 @@ export default function OverviewPage() {
           </Card>
         )}
 
+        {/* Your file quota — regular users only; occupies the System-status slot
+            so the dashboard layout stays consistent with the admin view. */}
+        {me && !me.is_admin && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Your file quota</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <QuotaUsageMeter fileCount={quotaIndexed} quota={quotaEff} />
+            </CardContent>
+          </Card>
+        )}
+
         {/* Quick Actions */}
         <Card>
           <CardHeader>
@@ -287,9 +264,9 @@ export default function OverviewPage() {
           </CardHeader>
           <CardContent>
             <div className="grid gap-3">
-              {canManagePartitions && (
+              {canCreatePartition && (
                 <Button variant="outline" className="justify-start h-auto py-3" asChild>
-                  <Link to="/partitions">
+                  <Link to="/partitions?create=1">
                     <Plus className="h-4 w-4 mr-2" />
                     <div className="text-left">
                       <div className="font-medium">Create Partition</div>

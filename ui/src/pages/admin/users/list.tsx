@@ -4,8 +4,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 import { Trash2, Eye, Plus, Copy } from "lucide-react";
-import { listUsers, deleteUser, createUser } from "@/lib/api/users";
+import { listUsers, deleteUser, createUser, effectiveQuota } from "@/lib/api/users";
 import type { UserResponse, UserWithToken } from "@/lib/api/users";
+import { getConfig } from "@/lib/api/system";
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
@@ -25,11 +26,19 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
-function formatQuota(q: number | null | undefined, isAdmin = false): string {
-  if (isAdmin) return "Unlimited"; // admins bypass quota checks entirely
-  if (q == null) return "Default";
-  if (q < 0) return "Unlimited";
-  return String(q);
+// "indexed / effective-quota", e.g. "11 / 200". ∞ for unlimited; `over` flags
+// users at or past their cap (shown in red) so admins spot blocked uploaders.
+function formatUsage(
+  fileCount: number | null | undefined,
+  fileQuota: number | null | undefined,
+  isAdmin: boolean,
+  globalDefault: number | null | undefined,
+): { text: string; over: boolean } {
+  const count = fileCount ?? 0;
+  const eff = effectiveQuota(fileQuota, isAdmin, globalDefault);
+  if (eff === "unlimited") return { text: `${count} / ∞`, over: false };
+  if (eff === "unknown") return { text: `${count} / default`, over: false };
+  return { text: `${count} / ${eff}`, over: count > eff };
 }
 
 export default function UserListPage() {
@@ -40,6 +49,12 @@ export default function UserListPage() {
     queryKey: ["users"],
     queryFn: listUsers,
   });
+
+  // Global default quota (DEFAULT_FILE_QUOTA) so `null` per-user quotas resolve
+  // to a real number in the Usage column. Shared cache with the System page.
+  const { data: config } = useQuery({ queryKey: ["system-config"], queryFn: getConfig });
+  const globalDefault =
+    (config?.rdb as { default_file_quota?: number } | undefined)?.default_file_quota ?? null;
 
   const deleteMut = useMutation({
     mutationFn: deleteUser,
@@ -85,9 +100,21 @@ export default function UserListPage() {
         ),
     },
     {
-      accessorKey: "file_quota",
-      header: "File quota",
-      cell: ({ row }) => formatQuota(row.original.file_quota, row.original.is_admin),
+      id: "usage",
+      header: "Usage",
+      cell: ({ row }) => {
+        const u = formatUsage(
+          row.original.file_count,
+          row.original.file_quota,
+          row.original.is_admin,
+          globalDefault,
+        );
+        return (
+          <span className={u.over ? "font-medium text-destructive" : "tabular-nums"} title="Indexed files / effective quota">
+            {u.text}
+          </span>
+        );
+      },
     },
     {
       id: "actions",

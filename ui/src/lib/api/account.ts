@@ -8,6 +8,7 @@ export interface MyInfo {
   display_name: string | null;
   is_admin: boolean;
   file_quota: number | null;
+  file_count?: number;
   indexed_files?: number;
   pending_files?: number;
   total_files?: number;

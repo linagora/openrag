@@ -42,6 +42,24 @@ export interface UserCreateRequest {
 
 export type UserUpdateRequest = UserCreateRequest;
 
+/**
+ * Resolve a user's *effective* file quota from the raw `file_quota` column,
+ * mirroring the backend rule: admins are unlimited; `null` inherits the global
+ * default (`DEFAULT_FILE_QUOTA`, from GET /config); a resolved value `< 0` is
+ * unlimited. Returns `"unknown"` when the global default hasn't loaded yet.
+ */
+export function effectiveQuota(
+  fileQuota: number | null | undefined,
+  isAdmin: boolean,
+  globalDefault: number | null | undefined,
+): number | "unlimited" | "unknown" {
+  if (isAdmin) return "unlimited";
+  let q: number | null = fileQuota ?? null;
+  if (q == null) q = globalDefault ?? null;
+  if (q == null) return "unknown";
+  return q < 0 ? "unlimited" : q;
+}
+
 const BASE = "/users";
 
 export function listUsers() {
