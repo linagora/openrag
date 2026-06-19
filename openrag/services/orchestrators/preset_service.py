@@ -28,12 +28,16 @@ logger = get_logger()
 _VALID_PRESET_TYPES = frozenset({"indexation", "retrieval"})
 
 _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
+    # ``enable_contextualization`` is intentionally omitted from the ``default``
+    # indexation preset below — it is injected at seed time from the global
+    # ``chunker.contextual_retrieval`` (``CONTEXTUAL_RETRIEVAL``) toggle in
+    # _finalize_seed, so the env flag still drives contextualization on fresh
+    # deployments. Named presets (legal/finance) keep their explicit choice.
     "indexation": {
         "default": {
             "chunking": {"name": "recursive_splitter", "chunk_size": 512, "chunk_overlap_rate": 0.2},
             "parsing_strategy": "marker",
             "enable_image_captioning": True,
-            "enable_contextualization": False,
             "enable_entity_extraction": True,
             "enable_topic_tagging": True,
         },
@@ -105,20 +109,52 @@ class PresetService:
             if existing:
                 continue
             for name, config in presets.items():
-                await self._repo.upsert(name, preset_type, self._finalize_seed(preset_type, config))
+                await self._repo.upsert(name, preset_type, self._finalize_seed(name, preset_type, config))
                 logger.info(f"Seeded default {preset_type} preset '{name}'.")
 
-    def _finalize_seed(self, preset_type: str, config: dict[str, Any]) -> dict[str, Any]:
-        """Overlay env-derived values onto a static default seed.
+    def _finalize_seed(self, name: str, preset_type: str, config: dict[str, Any]) -> dict[str, Any]:
+        """Overlay env-derived global toggles onto a static default seed.
 
-        Default retrieval presets inherit the global reranker kill-switch
-        (``reranker.enabled``): when no reranker is available the default
-        presets ship with ``enable_reranker=False`` so partition resolution
-        never tries to build a reranker against a missing/unreachable endpoint.
+        Two top-level kill-switches are folded into the seeded presets so a
+        fresh deployment honours the env flags without admin action:
+
+        * every retrieval preset inherits ``reranker.enabled`` (``enable_reranker``)
+          so a deployment without a reranker never builds one against a
+          missing/unreachable endpoint;
+        * the ``default`` indexation preset inherits ``chunker.contextual_retrieval``
+          (``CONTEXTUAL_RETRIEVAL``) as ``enable_contextualization`` so the global
+          toggle still drives contextualization. Named presets keep the explicit
+          value carried in the seed.
         """
         if preset_type == "retrieval":
             return {**config, "enable_reranker": self._config.reranker.enabled}
+        if preset_type == "indexation" and name == "default":
+            return {**config, "enable_contextualization": self._config.chunker.contextual_retrieval}
         return config
+
+    async def sync_env_toggles(self) -> None:
+        """Re-apply env-derived global toggles onto the ``default`` preset.
+
+        Runs on every boot (unlike :meth:`seed_defaults`, which only fires
+        against an empty table), so a changed ``CONTEXTUAL_RETRIEVAL`` env flag
+        takes effect after a restart without manual edits. Only the ``default``
+        indexation preset's ``enable_contextualization`` is touched, and only
+        when it actually differs — named presets (legal/finance) keep their
+        explicit values. ``load_all``/``load_partitions`` run afterwards in the
+        startup sequence, so the refreshed value reaches the in-memory caches.
+        """
+        row = await self._repo.get("default", "indexation")
+        if row is None:
+            return
+        desired = self._config.chunker.contextual_retrieval
+        config = row["config"]
+        if config.get("enable_contextualization") == desired:
+            return
+        await self._repo.upsert("default", "indexation", {**config, "enable_contextualization": desired})
+        logger.info(
+            "Synced 'default' indexation preset to CONTEXTUAL_RETRIEVAL env.",
+            enable_contextualization=desired,
+        )
 
     async def load_all(self) -> None:
         """Fetch all presets from DB, rebuild config.presets dicts atomically.

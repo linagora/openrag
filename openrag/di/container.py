@@ -187,6 +187,7 @@ class ServiceContainer:
             await self._initialize_step("seeding model endpoints", self.model_endpoint_service.seed_defaults)
             await self._initialize_step("loading model endpoints", self.model_endpoint_service.load_all)
             await self._initialize_step("seeding pipeline presets", self.preset_service.seed_defaults)
+            await self._initialize_step("syncing preset env toggles", self.preset_service.sync_env_toggles)
             await self._initialize_step("loading pipeline presets", self.preset_service.load_all)
             await self._initialize_step("ensuring default partition", self.partition_service.seed_default_partition)
             await self._initialize_step("loading partition configs", self.partition_service.load_partitions)
