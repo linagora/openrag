@@ -43,6 +43,7 @@ import {
   listPartitionMembers,
   addPartitionMember,
   removePartitionMember,
+  updatePartitionMemberRole,
 } from "@/lib/api/partitions";
 import type { PartitionConfig, PartitionRole } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
@@ -370,6 +371,18 @@ function UsersTab({ partitionName }: { partitionName: string }) {
     },
   });
 
+  const roleMutation = useMutation({
+    mutationFn: ({ uid, newRole }: { uid: number; newRole: PartitionRole }) =>
+      updatePartitionMemberRole(partitionName, uid, newRole),
+    onSuccess: () => {
+      toast.success("Role updated");
+      queryClient.invalidateQueries({ queryKey: ["partition", partitionName, "users"] });
+    },
+    onError: (error: Error) => {
+      toast.error(`Failed to update role: ${error.message}`);
+    },
+  });
+
   const handleAddUser = () => {
     if (!userId.trim() || Number.isNaN(Number(userId))) {
       toast.error("A numeric user ID is required");
@@ -413,7 +426,28 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                     <TableCell className="font-mono text-sm">
                       {user.user_id}
                     </TableCell>
-                    <TableCell className="capitalize">{user.role}</TableCell>
+                    <TableCell>
+                      {canManage ? (
+                        <Select
+                          value={String(user.role)}
+                          onValueChange={(v) => {
+                            if (v !== user.role)
+                              roleMutation.mutate({ uid: user.user_id, newRole: v as PartitionRole });
+                          }}
+                        >
+                          <SelectTrigger className="h-8 w-32 capitalize" disabled={roleMutation.isPending}>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="viewer">Viewer</SelectItem>
+                            <SelectItem value="editor">Editor</SelectItem>
+                            <SelectItem value="owner">Owner</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <span className="capitalize">{user.role}</span>
+                      )}
+                    </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDate(user.added_at)}
                     </TableCell>

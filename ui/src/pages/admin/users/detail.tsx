@@ -11,6 +11,7 @@ import {
   listUserMemberships,
   grantMembership,
   revokeMembership,
+  changeMembershipRole,
   effectiveQuota,
 } from "@/lib/api/users";
 import type { UserResponse } from "@/lib/api/users";
@@ -21,7 +22,6 @@ import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { QuotaUsageMeter } from "@/components/shared/quota-usage-meter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -258,6 +258,16 @@ function PartitionsTab({ userId }: { userId: number }) {
     onError: (e) => toast.error((e as Error).message),
   });
 
+  const roleMut = useMutation({
+    mutationFn: ({ part, newRole }: { part: string; newRole: PartitionRole }) =>
+      changeMembershipRole(part, userId, newRole),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["user-memberships", userId] });
+      toast.success("Role updated");
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
@@ -291,9 +301,22 @@ function PartitionsTab({ userId }: { userId: number }) {
                 <TableRow key={m.partition}>
                   <TableCell>{m.partition}</TableCell>
                   <TableCell>
-                    <Badge variant="outline" className="capitalize">
-                      {m.role}
-                    </Badge>
+                    <Select
+                      value={m.role}
+                      onValueChange={(v) => {
+                        if (v !== m.role)
+                          roleMut.mutate({ part: m.partition, newRole: v as PartitionRole });
+                      }}
+                    >
+                      <SelectTrigger className="h-8 w-32 capitalize" disabled={roleMut.isPending}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="viewer">Viewer</SelectItem>
+                        <SelectItem value="editor">Editor</SelectItem>
+                        <SelectItem value="owner">Owner</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </TableCell>
                   <TableCell>{formatDate(m.added_at)}</TableCell>
                   <TableCell>
