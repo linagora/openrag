@@ -31,12 +31,16 @@ def test_list_ray_actors_filters_out_non_openrag_namespace() -> None:
     ]
     module = ModuleType("ray.util.state")
     module.list_actors = Mock(return_value=actors)
+    previous_module = sys.modules.get("ray.util.state")
     sys.modules["ray.util.state"] = module
 
     try:
         result = list_ray_actors()
     finally:
-        sys.modules.pop("ray.util.state", None)
+        if previous_module is None:
+            sys.modules.pop("ray.util.state", None)
+        else:
+            sys.modules["ray.util.state"] = previous_module
 
     assert {a["name"] for a in result} == {"Indexer", "WhisperPool"}
     assert all(a["namespace"] == "openrag" for a in result)
