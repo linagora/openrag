@@ -550,12 +550,16 @@ class PgDocumentRepository(DocumentRepository):
         key flattened in). Used by the shim's pass-through calls.
         """
         metadata = row["file_metadata"] or {}
+        created_at = row["created_at"]
         return {
             "partition": row["partition_name"],
             "file_id": row["file_id"],
             "relationship_id": row["relationship_id"],
             "parent_id": row["parent_id"],
             **metadata,
+            # Indexation timestamp lives on the row, not in file_metadata;
+            # placed after the spread so the column value always wins.
+            "created_at": created_at.isoformat() if created_at else None,
         }
 
     @staticmethod
