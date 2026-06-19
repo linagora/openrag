@@ -118,6 +118,7 @@ export default function UserListPage() {
     },
     {
       id: "actions",
+      header: "Actions",
       cell: ({ row }) => (
         <div className="flex gap-1">
           <Button size="sm" variant="ghost" asChild>
