@@ -17,6 +17,12 @@ def list_ray_actors() -> list[dict[str, str | None]]:
     ``_ray_internal_job_actor_raysubmit_*`` job supervisors, which appear dead
     once their job finishes and have no creation function to restart) don't show
     up in the admin system view.
+
+    The namespace is filtered server-side via ``list_actors(filters=...)`` so
+    that Ray's default ``limit=100`` applies *within* the ``openrag`` namespace
+    rather than across all namespaces — otherwise accumulated dead Ray-internal
+    job actors could push OpenRag's own actors out of the result window. The
+    in-comprehension check is kept as cheap defense-in-depth.
     """
     from ray.util.state import list_actors
 
@@ -28,7 +34,7 @@ def list_ray_actors() -> list[dict[str, str | None]]:
             "state": actor.state,
             "namespace": actor.ray_namespace,
         }
-        for actor in list_actors()
+        for actor in list_actors(filters=[("ray_namespace", "=", OPENRAG_NAMESPACE)])
         if actor.ray_namespace == OPENRAG_NAMESPACE
     ]
 

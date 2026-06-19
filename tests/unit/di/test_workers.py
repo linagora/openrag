@@ -29,8 +29,9 @@ def test_list_ray_actors_filters_out_non_openrag_namespace() -> None:
         _fake_actor("_ray_internal_job_actor_raysubmit_abc", "_ray_internal_job"),
         _fake_actor("SomethingElse", "default"),
     ]
+    list_actors_mock = Mock(return_value=actors)
     module = ModuleType("ray.util.state")
-    module.list_actors = Mock(return_value=actors)
+    module.list_actors = list_actors_mock
     previous_module = sys.modules.get("ray.util.state")
     sys.modules["ray.util.state"] = module
 
@@ -42,6 +43,11 @@ def test_list_ray_actors_filters_out_non_openrag_namespace() -> None:
         else:
             sys.modules["ray.util.state"] = previous_module
 
+    # Namespace is filtered server-side so Ray's default limit=100 applies within
+    # the openrag namespace rather than across all namespaces.
+    list_actors_mock.assert_called_once_with(filters=[("ray_namespace", "=", "openrag")])
+    # Defense-in-depth: even if the mock ignores the filter, non-openrag actors
+    # are dropped by the in-comprehension guard.
     assert {a["name"] for a in result} == {"Indexer", "WhisperPool"}
     assert all(a["namespace"] == "openrag" for a in result)
 
