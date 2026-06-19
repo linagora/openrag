@@ -112,7 +112,7 @@ def build_indexer_pool(namespace: str = "openrag") -> Any:
     from core.config import load_config
 
     cfg = load_config()
-    max_concurrency = max(1, int(getattr(cfg.ray, "max_tasks_per_worker", 1)))
+    max_concurrency = max(1, cfg.ray.max_tasks_per_worker)
     return IndexerPool.options(  # type: ignore[attr-defined]
         name="IndexerPool",
         namespace=namespace,
