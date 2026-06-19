@@ -1,5 +1,7 @@
 """Admin routes for the Phase 14 pipeline preset registry."""
 
+from typing import get_args
+
 from api.dependencies.auth import require_admin
 from api.schemas.admin.preset_schemas import (
     CreatePresetRequest,
@@ -9,6 +11,7 @@ from api.schemas.admin.preset_schemas import (
     UpdatePresetRequest,
 )
 from core.chunking import chunking_registry
+from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.rerankers.registry import reranker_registry
 from core.retrieval import retriever_registry
 from di.providers import get_preset_service
@@ -17,6 +20,10 @@ from fastapi import APIRouter, Depends, Response, status
 router = APIRouter(dependencies=[Depends(require_admin)])
 
 _DEFAULT_RERANKER_PROVIDERS = ["infinity", "openai"]
+
+# Derived from the validated Literal so the exposed options can never drift from
+# what IndexationPipelineConfig actually accepts.
+_PARSING_STRATEGIES = list(get_args(IndexationPipelineConfig.model_fields["parsing_strategy"].annotation))
 
 
 def _registered_or_default(registered: list[str], defaults: list[str]) -> list[str]:
@@ -29,6 +36,7 @@ async def get_preset_options():
     """Return available preset strategy choices."""
     return PresetOptionsResponse(
         chunking_strategies=chunking_registry.list_registered(),
+        parsing_strategies=_PARSING_STRATEGIES,
         retrieval_types=retriever_registry.list_registered(),
         reranker_providers=_registered_or_default(
             reranker_registry.list_registered(),
