@@ -208,6 +208,61 @@ async def test_caption_stage_captions_images_concurrently_and_in_order():
 
 
 @pytest.mark.asyncio
+async def test_caption_stage_cancels_sibling_captions_on_failure():
+    """Do not leave background VLM calls running after one caption fails."""
+
+    class FailingVLM(VLM):
+        def __init__(self) -> None:
+            self.started: set[bytes] = set()
+            self.cancelled: set[bytes] = set()
+            self.completed: set[bytes] = set()
+            self.all_started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            self.started.add(image_bytes)
+            if len(self.started) == 3:
+                self.all_started.set()
+
+            if image_bytes == b"fail":
+                await self.all_started.wait()
+                raise RuntimeError("caption failed")
+
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled.add(image_bytes)
+                raise
+            self.completed.add(image_bytes)
+            return image_bytes.decode()
+
+        async def caption_images_batch(self, images: list[bytes], prompt: str | None = None) -> list[str]:
+            return [await self.caption_image(image, prompt=prompt) for image in images]
+
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        text_blocks=[TextBlock(text="body", page_number=1)],
+        images=[
+            ImageBlock(image_bytes=b"slow-1", page_number=1),
+            ImageBlock(image_bytes=b"fail", page_number=1),
+            ImageBlock(image_bytes=b"slow-2", page_number=1),
+        ],
+    )
+    row = {"processed_document": processed}
+    vlm = FailingVLM()
+
+    try:
+        with pytest.raises(RuntimeError, match="caption failed"):
+            await caption_stage(row, vlm)
+
+        assert vlm.cancelled == {b"slow-1", b"slow-2"}
+        assert vlm.completed == set()
+    finally:
+        vlm.release.set()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
 async def test_chunk_stage_mutates_row_and_scrubs_credentials():
     processed = ProcessedDocument(document_id="doc-1", text_blocks=[TextBlock(text="hello")])
     chunks = [Chunk(id="c1", text="hello", partition="p1")]

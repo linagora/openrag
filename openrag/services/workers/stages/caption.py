@@ -61,18 +61,18 @@ async def _caption_document(
         async with get_vlm_semaphore():
             return await vlm.caption_image(image.image_bytes, prompt=prompt)
 
-    # One image failing propagates but leaves the other in-flight captions to drain
-    # (the VLM semaphore bounds them). Only a cancellation signal — task cancel on
-    # shutdown/reload — tears the siblings down, which tqdm.gather (built on
-    # as_completed) won't do on its own, so we cancel them explicitly.
+    # tqdm.gather is built on as_completed, so a failing child does not clean up
+    # sibling tasks for us. Drain them explicitly so failed documents do not keep
+    # using the shared VLM semaphore in the background.
     label = processed_document.metadata.get("filename") or processed_document.document_id
     tasks = [asyncio.ensure_future(caption_one(image)) for image in images]
     try:
         captions = await tqdm.gather(*tasks, desc=f"Captioning images of *{label}*")
     except asyncio.CancelledError:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await _cancel_and_drain(tasks)
+        raise
+    except Exception:
+        await _cancel_and_drain(tasks)
         raise
 
     # Caption fetching fans out concurrently above; the text-block mutation
@@ -92,6 +92,13 @@ async def _caption_document(
             "images": captioned_images,
         }
     )
+
+
+async def _cancel_and_drain(tasks: list[asyncio.Task[str]]) -> None:
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _replace_markdown_ref(text_blocks: list[TextBlock], image: ImageBlock, wrapped_caption: str) -> bool:
