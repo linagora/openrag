@@ -199,13 +199,22 @@ async def test_delete_partition_skips_vectors_when_collection_absent():
     prepo = FakePartitionRepo(existing={"p1"})
 
     class ExplodingVectorStore(FakeVectorStore):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.delete_called = False
+
         async def query_ids_by_filter(self, collection, filters):
             raise AssertionError("must not query a collection that doesn't exist")
+
+        async def delete(self, ids, collection="default") -> int:
+            self.delete_called = True
+            raise AssertionError("must not delete vectors when collection doesn't exist")
 
     vstore = ExplodingVectorStore(exists=False)
     await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
     assert prepo.deleted == ["p1"]
     assert vstore.deleted_ids == []
+    assert vstore.delete_called is False
 
 
 @pytest.mark.asyncio
