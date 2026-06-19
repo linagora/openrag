@@ -132,30 +132,6 @@ class PresetService:
             return {**config, "enable_contextualization": self._config.chunker.contextual_retrieval}
         return config
 
-    async def sync_env_toggles(self) -> None:
-        """Re-apply env-derived global toggles onto the ``default`` preset.
-
-        Runs on every boot (unlike :meth:`seed_defaults`, which only fires
-        against an empty table), so a changed ``CONTEXTUAL_RETRIEVAL`` env flag
-        takes effect after a restart without manual edits. Only the ``default``
-        indexation preset's ``enable_contextualization`` is touched, and only
-        when it actually differs — named presets (legal/finance) keep their
-        explicit values. ``load_all``/``load_partitions`` run afterwards in the
-        startup sequence, so the refreshed value reaches the in-memory caches.
-        """
-        row = await self._repo.get("default", "indexation")
-        if row is None:
-            return
-        desired = self._config.chunker.contextual_retrieval
-        config = row["config"]
-        if config.get("enable_contextualization") == desired:
-            return
-        await self._repo.upsert("default", "indexation", {**config, "enable_contextualization": desired})
-        logger.info(
-            "Synced 'default' indexation preset to CONTEXTUAL_RETRIEVAL env.",
-            enable_contextualization=desired,
-        )
-
     async def load_all(self) -> None:
         """Fetch all presets from DB, rebuild config.presets dicts atomically.
 

@@ -241,7 +241,6 @@ class TestCatalogStoreWiring:
         )
         c._preset_service = SimpleNamespace(
             seed_defaults=lambda: _async_call(calls, "preset.seed"),
-            sync_env_toggles=lambda: _async_call(calls, "preset.sync"),
             load_all=lambda: _async_call(calls, "preset.load"),
         )
         c._partition_service = SimpleNamespace(
@@ -257,7 +256,6 @@ class TestCatalogStoreWiring:
             "endpoint.seed",
             "endpoint.load",
             "preset.seed",
-            "preset.sync",
             "preset.load",
             "partition.seed",
             "partition.load",
@@ -671,10 +669,6 @@ class TestPhase14ServiceWiring:
                 """Record preset seeding."""
                 calls.append("preset.seed")
 
-            async def sync_env_toggles(self):
-                """Record preset env re-sync."""
-                calls.append("preset.sync")
-
             async def load_all(self):
                 """Record preset loading."""
                 calls.append("preset.load")
@@ -705,7 +699,6 @@ class TestPhase14ServiceWiring:
             "endpoint.seed",
             "endpoint.load",
             "preset.seed",
-            "preset.sync",
             "preset.load",
             "partition.seed",
             "partition.load",

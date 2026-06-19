@@ -166,37 +166,19 @@ async def test_seed_defaults_default_indexation_inherits_contextual_retrieval_en
 
 
 @pytest.mark.asyncio
-async def test_sync_env_toggles_resyncs_default_indexation_from_env():
+async def test_seed_defaults_preserves_existing_default_indexation_admin_choice():
     from core.config.root import Settings
 
-    # Existing (stale) default preset seeded with contextualization OFF, plus a
-    # named preset that explicitly enables it.
-    stale_default = _make_row("default", "indexation", {**_VALID_IDX_CONFIG, "enable_contextualization": False})
-    legal = _make_row("legal", "indexation", {**_VALID_IDX_CONFIG, "enable_contextualization": True})
-    repo = _FakePresetRepo(rows=[stale_default, legal])
-    settings = Settings(chunker={"contextual_retrieval": True})
-    svc = _make_service(repo, settings=settings)
-
-    await svc.sync_env_toggles()
-
-    assert repo._store[("default", "indexation")]["config"]["enable_contextualization"] is True
-    # Named preset is never touched by the env re-sync.
-    assert repo._store[("legal", "indexation")]["config"]["enable_contextualization"] is True
-
-
-@pytest.mark.asyncio
-async def test_sync_env_toggles_noop_when_already_matching():
-    from core.config.root import Settings
-
-    current = _make_row("default", "indexation", {**_VALID_IDX_CONFIG, "enable_contextualization": True})
+    current = _make_row("default", "indexation", {**_VALID_IDX_CONFIG, "enable_contextualization": False})
     repo = _FakePresetRepo(rows=[current])
     settings = Settings(chunker={"contextual_retrieval": True})
     svc = _make_service(repo, settings=settings)
 
-    await svc.sync_env_toggles()
+    await svc.seed_defaults()
 
-    # No upsert when the stored value already matches the env flag.
-    assert not [c for c in repo.calls if c[0] == "upsert"]
+    assert repo._store[("default", "indexation")]["config"]["enable_contextualization"] is False
+    upserts = [c for c in repo.calls if c[0] == "upsert"]
+    assert all(args[1] != "indexation" for _, args in upserts)
 
 
 @pytest.mark.asyncio
