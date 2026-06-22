@@ -83,6 +83,7 @@ class PresetOptionsResponse(BaseModel):
     """Response body listing allowed preset option values."""
 
     chunking_strategies: list[str]
+    parsing_strategies: list[str]
     retrieval_types: list[str]
     reranker_providers: list[str]
 

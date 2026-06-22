@@ -41,6 +41,25 @@ class TestPartitionCRUD:
         response = api_client.delete(f"/partition/{test_partition_name}")
         assert response.status_code in [200, 204]
 
+    def test_delete_empty_partition_succeeds(self, api_client, test_partition_name):
+        """Regression for #505: deleting an empty partition must not 500.
+
+        Partitions are a Postgres concept; the shared Milvus collection is
+        created lazily on the first insert system-wide. An empty partition has
+        no chunks to clean up, so the delete must drop the relational rows and
+        return success instead of failing on the (possibly absent) collection.
+        """
+        create = api_client.post(f"/partition/{test_partition_name}")
+        assert create.status_code in [200, 201], create.text
+
+        response = api_client.delete(f"/partition/{test_partition_name}")
+        assert response.status_code in [200, 204], response.text
+
+        # The partition is actually gone.
+        listing = api_client.get("/partition/")
+        partitions = [p["partition"] for p in listing.json()["partitions"]]
+        assert test_partition_name not in partitions
+
     def test_list_partition_files_empty(self, api_client, created_partition):
         """Test listing files in empty partition."""
         response = api_client.get(f"/partition/{created_partition}")

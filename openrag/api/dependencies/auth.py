@@ -239,10 +239,9 @@ async def check_user_file_quota(
     default_file_quota = config.rdb.default_file_quota
     if user.get("is_admin", False):
         return user
-    if default_file_quota < 0:
-        return user
     user_quota = user.get("file_quota")
-    if user_quota is not None and user_quota < 0:
+    effective_quota = default_file_quota if user_quota is None else user_quota
+    if effective_quota < 0:
         return user
 
     user_id = user.get("id")

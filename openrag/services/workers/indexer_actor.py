@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import traceback
 from pathlib import Path
 from typing import Any
@@ -31,10 +32,12 @@ class IndexerWorker:
         pipeline: IndexingPipeline,
         task_state_manager: Any,
         document_repo: Any = None,
+        topic_tag_repo: Any = None,
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
         self._document_repo = document_repo
+        self._topic_tag_repo = topic_tag_repo
 
     async def process_file(
         self,
@@ -57,11 +60,11 @@ class IndexerWorker:
         """
         await self._tsm.set_state.remote(task_id, "SERIALIZING")
         try:
-            document = _load_document(path, metadata, partition)
+            document = await _load_document(path, metadata, partition)
             row: dict[str, Any] = {
                 "document": document,
                 "partition": partition,
-                "filename": Path(path).name,
+                "filename": document.filename,
                 "language": metadata.get("language", "en"),
                 "replace": replace,
                 "user": user,
@@ -77,6 +80,14 @@ class IndexerWorker:
                     partition=partition,
                     user=user,
                     replace=replace,
+                    indexation_config=indexation_config,
+                )
+            if self._topic_tag_repo is not None:
+                await _replace_topic_tags_if_needed(
+                    topic_tag_repo=self._topic_tag_repo,
+                    row=row,
+                    metadata=metadata,
+                    partition=partition,
                     indexation_config=indexation_config,
                 )
             await self._tsm.set_state.remote(task_id, "COMPLETED")
@@ -121,7 +132,44 @@ async def _write_catalog_record(
     )
 
 
-def _load_document(
+async def _replace_topic_tags_if_needed(
+    *,
+    topic_tag_repo: Any,
+    row: dict[str, Any],
+    metadata: dict[str, Any],
+    partition: str,
+    indexation_config: dict[str, Any] | None,
+) -> None:
+    file_id = metadata.get("file_id", "")
+    if not file_id:
+        return
+
+    has_topic_tags = "topic_tags" in row
+    topic_tagging_disabled = indexation_config is not None and indexation_config.get("enable_topic_tagging") is False
+    if not has_topic_tags and not topic_tagging_disabled:
+        return
+
+    raw_tags = row.get("topic_tags", [])
+    if not isinstance(raw_tags, list):
+        raise TypeError("topic_tags must be a list of strings")
+
+    tags = [tag for tag in raw_tags if isinstance(tag, str) and tag.strip()]
+    await topic_tag_repo.delete_by_document(file_id, partition=partition)
+    if not tags:
+        return
+    await topic_tag_repo.bulk_insert(
+        [
+            {
+                "document_id": file_id,
+                "partition": partition,
+                "tag": tag,
+            }
+            for tag in tags
+        ]
+    )
+
+
+async def _load_document(
     path: str,
     metadata: dict[str, Any],
     partition: str,
@@ -143,14 +191,25 @@ def _load_document(
     # Per-partition indexation_config reaches the pipeline via ``row["indexation_config"]``
     # (see IndexerWorker.process_file); it is intentionally not stamped into the
     # document metadata so it never leaks into chunk metadata.
+    filename = _display_filename(path, metadata)
+    raw_bytes = await asyncio.to_thread(p.read_bytes)
     return Document(
         id=file_id,
-        filename=file_id,
-        raw_bytes=p.read_bytes(),
-        content_type=Document.detect_content_type(p.name),
+        filename=filename,
+        raw_bytes=raw_bytes,
+        content_type=Document.detect_content_type(filename),
         partition=partition,
         metadata=dict(metadata),
     )
+
+
+def _display_filename(path: str, metadata: dict[str, Any]) -> str:
+    """Return the user-facing filename while falling back to the stored path."""
+
+    filename = metadata.get("original_filename") or metadata.get("filename")
+    if filename:
+        return str(filename)
+    return Path(path).name
 
 
 __all__ = ["IndexerWorker"]

@@ -8,6 +8,8 @@ from typing import Any
 import ray
 from services.workers.indexer_actor import IndexerWorker
 
+from openrag.core.config.root import Settings
+
 
 @ray.remote
 class IndexerPool:
@@ -29,6 +31,8 @@ class IndexerPool:
         vlm = build_caption_vlm(cfg)
         chunker = _build_chunker(cfg)
         embedder_factory = _build_embedder_factory(cfg)
+        contextualizer_factory = _build_contextualizer_factory(cfg)
+        topic_tagger_factory = _build_topic_tagger_factory(cfg)
 
         embed_cfg = cfg.embedder
         embedder = embedder_registry.create(
@@ -52,18 +56,26 @@ class IndexerPool:
             image_captioning=cfg.loader.image_captioning,
             chunker_factory=_build_chunker_from_config,
             embedder_factory=embedder_factory,
+            contextualizer_factory=contextualizer_factory,
+            topic_tagger_factory=topic_tagger_factory,
         )
         rdb_cfg = cfg.rdb.model_copy(update={"database": f"partitions_for_collection_{cfg.vectordb.collection_name}"})
         self._catalog_store = PostgresStore(rdb_cfg, run_migrations=False)
         self._catalog_initialized = False
+        self._catalog_init_lock = asyncio.Lock()
         self._worker = IndexerWorker(
             pipeline=pipeline,
             task_state_manager=task_state_manager,
             document_repo=self._catalog_store.document_repo,
+            topic_tag_repo=self._catalog_store.topic_tag_repo,
         )
 
     async def _ensure_catalog(self) -> None:
-        if not self._catalog_initialized:
+        if self._catalog_initialized:
+            return
+        async with self._catalog_init_lock:
+            if self._catalog_initialized:
+                return
             await self._catalog_store.initialize()
             self._catalog_initialized = True
 
@@ -107,10 +119,16 @@ class IndexerPool:
 
 
 def build_indexer_pool(namespace: str = "openrag") -> Any:
+    from core.config import load_config
+
+    cfg = load_config()
+    max_concurrency = max(1, cfg.ray.max_tasks_per_worker)
     return IndexerPool.options(  # type: ignore[attr-defined]
         name="IndexerPool",
         namespace=namespace,
         get_if_exists=True,
+        lifetime="detached",
+        max_concurrency=max_concurrency,
     ).remote()
 
 
@@ -127,7 +145,7 @@ def _build_chunker_from_config(chunker_config: Any) -> Any:
     return _build_chunker(SimpleNamespace(chunker=chunker_config))
 
 
-def _build_embedder_factory(cfg: Any) -> Any:
+def _build_embedder_factory(cfg: Settings) -> Any:
     if not getattr(cfg.models, "embedder", None):
         return None
 
@@ -159,6 +177,143 @@ def _build_embedder_factory(cfg: Any) -> Any:
             return instance
 
     return factory
+
+
+def _build_contextualizer_factory(cfg: Settings) -> Any:
+    """Build a cached factory yielding ``ChunkContextualizer`` instances.
+
+    Each requested LLM name is resolved against the named-endpoint registry
+    (``cfg.models.llm``), falling back to the global ``cfg.llm`` block for the
+    ``default`` name. Returns ``None`` when no LLM is configured. Every
+    contextualizer shares the cluster-wide ``llmSemaphore`` so contextualization
+    LLM calls obey the same global concurrency limit as query-time calls.
+    """
+    import services.inference.ollama_client  # noqa: F401
+    import services.inference.vllm_client  # noqa: F401
+    from core.indexing.contextualize import ChunkContextualizer
+    from core.llm import llm_registry
+    from core.prompts import load_template_by_key
+    from services.inference.distributed_semaphore import DistributedSemaphore
+
+    named_llms = getattr(getattr(cfg, "models", None), "llm", {}) or {}
+    fallback_cfg = _global_llm_endpoint_config(cfg)
+    if not named_llms and fallback_cfg is None:
+        return None
+
+    system_prompt = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "chunk_contextualizer")
+    # Rate-limit contextualization LLM calls with the cluster-wide "llmSemaphore"
+    # (the same one get_llm_semaphore() / bootstrap.py manage) so a large indexing
+    # job can't flood the vLLM endpoint. Built directly from config to avoid
+    # importing services.inference.runtime, which eagerly constructs a LangDetector.
+    llm_semaphore = DistributedSemaphore(name="llmSemaphore", max_concurrent_ops=cfg.semaphore.llm_semaphore)
+    cache: dict[str, ChunkContextualizer] = {}
+    lock = threading.Lock()
+
+    def factory(name: str = "default") -> ChunkContextualizer:
+        if name in cache:
+            return cache[name]
+        with lock:
+            if name in cache:
+                return cache[name]
+            model_cfg = named_llms.get(name)
+            if model_cfg is None:
+                if name == "default" and fallback_cfg is not None:
+                    model_cfg = fallback_cfg
+                else:
+                    raise KeyError(f"Unknown llm '{name}'. Available: {list(named_llms)}")
+            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
+            impl = model_cfg.extra.get("implementation", "vllm")
+            llm = llm_registry.create(
+                impl,
+                endpoint=model_cfg.endpoint,
+                model_name=model_cfg.model_name,
+                timeout=model_cfg.timeout,
+                **impl_kwargs,
+            )
+            contextualizer = ChunkContextualizer(
+                llm,
+                system_prompt,
+                timeout_seconds=cfg.chunker.contextualization_timeout,
+                batch_size=cfg.chunker.max_concurrent_contextualization,
+                llm_semaphore=llm_semaphore,
+            )
+            cache[name] = contextualizer
+            return contextualizer
+
+    return factory
+
+
+def _build_topic_tagger_factory(cfg: Settings) -> Any:
+    """Build a cached factory yielding ``TopicTagger`` instances."""
+    import services.inference.ollama_client  # noqa: F401
+    import services.inference.vllm_client  # noqa: F401
+    from core.indexing.topic_tags import TopicTagger
+    from core.llm import llm_registry
+    from core.prompts import load_template_by_key
+
+    named_llms = getattr(getattr(cfg, "models", None), "llm", {}) or {}
+    fallback_cfg = _global_llm_endpoint_config(cfg)
+    if not named_llms and fallback_cfg is None:
+        return None
+
+    system_prompt = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "topic_tagger")
+    cache: dict[str, TopicTagger] = {}
+    lock = threading.Lock()
+
+    def factory(name: str = "default") -> TopicTagger:
+        if name in cache:
+            return cache[name]
+        with lock:
+            if name in cache:
+                return cache[name]
+            model_cfg = named_llms.get(name)
+            if model_cfg is None:
+                if name == "default" and fallback_cfg is not None:
+                    model_cfg = fallback_cfg
+                else:
+                    raise KeyError(f"Unknown llm '{name}'. Available: {list(named_llms)}")
+            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
+            impl = model_cfg.extra.get("implementation", "vllm")
+            llm = llm_registry.create(
+                impl,
+                endpoint=model_cfg.endpoint,
+                model_name=model_cfg.model_name,
+                timeout=model_cfg.timeout,
+                **impl_kwargs,
+            )
+            tagger = TopicTagger(llm, system_prompt, timeout_seconds=model_cfg.timeout)
+            cache[name] = tagger
+            return tagger
+
+    return factory
+
+
+def _global_llm_endpoint_config(cfg: Any) -> Any | None:
+    """Adapt the legacy/global ``cfg.llm`` block into a ``ModelEndpointConfig``.
+
+    Returns ``None`` when the global LLM endpoint or model is unset, signalling
+    that no ``default`` contextualizer can be built from the global config.
+    """
+    from core.config.model_endpoints import ModelEndpointConfig
+
+    llm_cfg = getattr(cfg, "llm", None)
+    endpoint = getattr(llm_cfg, "base_url", "")
+    model_name = getattr(llm_cfg, "model", "")
+    if not endpoint or not model_name:
+        return None
+    extra = {
+        "implementation": "vllm",
+        "api_key": getattr(llm_cfg, "api_key", ""),
+        "temperature": getattr(llm_cfg, "temperature", 0.1),
+        "max_retries": getattr(llm_cfg, "max_retries", 2),
+        "logprobs": getattr(llm_cfg, "logprobs", True),
+    }
+    return ModelEndpointConfig(
+        endpoint=endpoint,
+        model_name=model_name,
+        timeout=getattr(llm_cfg, "timeout", 60),
+        extra=extra,
+    )
 
 
 __all__ = ["IndexerPool", "build_indexer_pool"]

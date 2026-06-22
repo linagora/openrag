@@ -491,13 +491,13 @@ class AuthService:
     ) -> None:
         """Pure quota check (the pending-task count is supplied by the caller).
 
-        Quota semantics are unchanged from ``check_user_file_quota``:
-        admins bypass; ``default_quota < 0`` disables; ``file_quota`` of
-        ``None`` falls back to the default; ``< 0`` means unlimited.
+        Quota semantics (shared with ``check_user_file_quota``): admins
+        bypass; a per-user ``file_quota`` of ``None`` falls back to the
+        global default; a *resolved* quota ``< 0`` means unlimited. So a
+        negative global default only disables quotas for users without a
+        per-user override — an explicit per-user limit is always honored.
         """
         if cls._uget(user, "is_admin", False):
-            return
-        if default_quota < 0:
             return
 
         user_quota = cls._uget(user, "file_quota")

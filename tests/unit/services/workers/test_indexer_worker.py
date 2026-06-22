@@ -91,45 +91,77 @@ class FakeDocumentRepo:
         return True
 
 
+class FakeTopicTagRepo:
+    def __init__(self) -> None:
+        self.deleted: list[tuple[str, str]] = []
+        self.inserted: list[list[dict[str, str]]] = []
+
+    async def delete_by_document(self, document_id: str, partition: str) -> int:
+        self.deleted.append((document_id, partition))
+        return 0
+
+    async def bulk_insert(self, tags: list[dict]) -> int:
+        self.inserted.append(tags)
+        return len(tags)
+
+
 # ---------------------------------------------------------------------------
 # Tests — _load_document helper
 # ---------------------------------------------------------------------------
 
 
-def test_load_document_reads_bytes_and_detects_type(tmp_path: Path) -> None:
-    p = tmp_path / "report.pdf"
+@pytest.mark.asyncio
+async def test_load_document_reads_bytes_and_detects_type_from_original_filename(tmp_path: Path) -> None:
+    p = tmp_path / "upload-without-extension"
     p.write_bytes(b"%PDF-1.4")
-    doc = _load_document(str(p), {"file_id": "fid-1"}, "tenant-a")
+    doc = await _load_document(
+        str(p),
+        {"file_id": "fid-1", "filename": "safe-name", "original_filename": "report.pdf"},
+        "tenant-a",
+    )
 
     assert doc.raw_bytes == b"%PDF-1.4"
     assert doc.content_type == DocumentType.PDF
     assert doc.partition == "tenant-a"
-    assert doc.filename == "fid-1"
+    assert doc.filename == "report.pdf"
     # Document.id must be the file_id (not a random uuid): the chunker derives
     # Chunk.document_id / file_id from ProcessedDocument.document_id == document.id.
     assert doc.id == "fid-1"
 
 
-def test_load_document_requires_file_id(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_load_document_requires_file_id(tmp_path: Path) -> None:
     p = tmp_path / "note.txt"
     p.write_bytes(b"hi")
 
     # file_id is force-set upstream by IndexingService._build_metadata; if it is
     # ever missing we fail loudly rather than persist chunks under a bad id.
     with pytest.raises(ValueError, match="file_id"):
-        _load_document(str(p), {}, "p")
+        await _load_document(str(p), {}, "p")
 
 
-def test_load_document_does_not_leak_internal_keys_into_metadata(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_load_document_does_not_leak_internal_keys_into_metadata(tmp_path: Path) -> None:
     p = tmp_path / "note.txt"
     p.write_bytes(b"hi")
 
-    doc = _load_document(str(p), {"file_id": "fid", "source": "note.txt"}, "p")
+    doc = await _load_document(str(p), {"file_id": "fid", "source": "note.txt"}, "p")
 
     # indexation_config reaches the pipeline via row["indexation_config"], never
     # the document metadata, so it cannot leak into chunk metadata.
     assert doc.metadata == {"file_id": "fid", "source": "note.txt"}
     assert all(not key.startswith("_openrag") for key in doc.metadata)
+
+
+@pytest.mark.asyncio
+async def test_load_document_falls_back_to_stored_path_name(tmp_path: Path) -> None:
+    p = tmp_path / "audio.flac"
+    p.write_bytes(b"flac")
+
+    doc = await _load_document(str(p), {"file_id": "fid"}, "p")
+
+    assert doc.filename == "audio.flac"
+    assert doc.content_type == DocumentType.AUDIO
 
 
 # ---------------------------------------------------------------------------
@@ -222,14 +254,23 @@ async def test_process_file_passes_partition_and_filename_to_row(tmp_path: Path)
     path.write_bytes(b"hello")
 
     seen_partitions: list[str] = []
+    seen_documents: list[Document] = []
 
     class TrackingChunker:
         def chunk(self, document: ProcessedDocument, partition: str = "default") -> list[Chunk]:
             seen_partitions.append(partition)
             return [Chunk(id="c1", text="hello", partition=partition)]
 
+    class TrackingParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            seen_documents.append(document)
+            return ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="hello")])
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.TEXT.value]
+
     pipeline = build_indexing_pipeline(
-        parser=FakeParser(ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="hello")])),
+        parser=TrackingParser(),
         chunker=TrackingChunker(),
         embedder=FakeEmbedder(),
         vector_store=FakeVectorStore(),
@@ -239,11 +280,12 @@ async def test_process_file_passes_partition_and_filename_to_row(tmp_path: Path)
     await worker.process_file(
         task_id="t4",
         path=str(path),
-        metadata={"file_id": "fid"},
+        metadata={"file_id": "fid", "original_filename": "original-note.txt"},
         partition="tenant-b",
     )
 
     assert seen_partitions == ["tenant-b"]
+    assert seen_documents[0].filename == "original-note.txt"
 
 
 @pytest.mark.asyncio
@@ -394,3 +436,101 @@ async def test_process_file_catalog_failure_sets_failed_state(tmp_path: Path) ->
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
     completed_calls = [call for call in tsm.set_state.remote.call_args_list if call.args == ("t-fail", "COMPLETED")]
     assert completed_calls == []
+
+
+@pytest.mark.asyncio
+async def test_process_file_replaces_topic_tags_after_successful_pipeline(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class TaggingPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["topic_tags"] = ["finance", "risk"]
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    repo = FakeTopicTagRepo()
+    worker = IndexerWorker(
+        pipeline=TaggingPipeline(),
+        task_state_manager=_fake_tsm(),
+        topic_tag_repo=repo,
+    )
+
+    await worker.process_file(
+        task_id="t-tags",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="tenant-a",
+    )
+
+    assert repo.deleted == [("f1", "tenant-a")]
+    assert repo.inserted == [
+        [
+            {"document_id": "f1", "partition": "tenant-a", "tag": "finance"},
+            {"document_id": "f1", "partition": "tenant-a", "tag": "risk"},
+        ]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_file_deletes_topic_tags_when_tagging_is_disabled(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class UntaggedPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    repo = FakeTopicTagRepo()
+    worker = IndexerWorker(
+        pipeline=UntaggedPipeline(),
+        task_state_manager=_fake_tsm(),
+        topic_tag_repo=repo,
+    )
+
+    await worker.process_file(
+        task_id="t-disabled-tags",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="tenant-a",
+        indexation_config={"enable_topic_tagging": False},
+    )
+
+    assert repo.deleted == [("f1", "tenant-a")]
+    assert repo.inserted == []
+
+
+@pytest.mark.asyncio
+async def test_process_file_rejects_malformed_topic_tags_before_delete(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    tsm = _fake_tsm()
+
+    class BrokenTaggingPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["topic_tags"] = "finance"
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    repo = FakeTopicTagRepo()
+    worker = IndexerWorker(
+        pipeline=BrokenTaggingPipeline(),
+        task_state_manager=tsm,
+        topic_tag_repo=repo,
+    )
+
+    with pytest.raises(TypeError, match="topic_tags"):
+        await worker.process_file(
+            task_id="t-bad-tags",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="tenant-a",
+        )
+
+    assert repo.deleted == []
+    assert repo.inserted == []
+    tsm.set_failed_if_not_cancelled.remote.assert_called_once()

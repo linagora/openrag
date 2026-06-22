@@ -39,13 +39,14 @@ _AUDIO_BACKENDS: dict[str, str] = {
 }
 
 # Attachment ext (lowercased, no dot) → DocumentType, used to wire the EML
-# parser's per-attachment sub-parsers. ``eml`` is intentionally excluded to
-# avoid recursive .eml-in-.eml dispatch.
+# parser's per-attachment sub-parsers.
+_MAX_EML_ATTACHMENT_DEPTH = 3
 _EML_ATTACHMENT_TYPES: dict[str, DocumentType] = {
     "txt": DocumentType.TEXT,
     "md": DocumentType.MARKDOWN,
     "html": DocumentType.HTML,
     "htm": DocumentType.HTML,
+    "eml": DocumentType.EML,
     "docx": DocumentType.DOCX,
     "doc": DocumentType.DOC,
     "pptx": DocumentType.PPTX,
@@ -135,10 +136,15 @@ class ParserDispatcher(DocumentParser):
 
     # ----- backend builders (lazy heavy imports live inside these) -----
 
-    def _build_eml(self) -> DocumentParser:
+    def _build_eml(self, attachment_depth: int = 0) -> DocumentParser:
         attachment_parsers: dict[str, DocumentParser] = {}
         for ext, dtype in _EML_ATTACHMENT_TYPES.items():
             try:
+                if dtype is DocumentType.EML:
+                    if attachment_depth >= _MAX_EML_ATTACHMENT_DEPTH:
+                        continue
+                    attachment_parsers[ext] = self._build_eml(attachment_depth + 1)
+                    continue
                 attachment_parsers[ext] = self._get(self._resolve_backend(dtype, ext))
             except Exception as exc:  # a missing backend must not break .eml parsing
                 logger.warning(f"EML attachment parser for '.{ext}' unavailable: {exc}")

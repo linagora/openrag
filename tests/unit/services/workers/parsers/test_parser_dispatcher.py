@@ -106,3 +106,18 @@ def test_build_caption_vlm_available_when_endpoint_set_even_if_globally_off() ->
     # to build the VLM. Standalone-image captioning relies on this (the policy
     # gate lives in the pipeline, not here).
     assert build_caption_vlm(_config(image_captioning=False, vlm_base_url="http://vlm:8000/v1")) is not None
+
+
+def test_build_eml_wires_nested_email_parser_with_depth_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    disp = ParserDispatcher(_config())
+    fallback_parser = _FakeParser()
+    monkeypatch.setattr(disp, "_get", lambda name: fallback_parser)
+
+    parser = disp._build_eml()
+
+    assert parser._attachment_parsers["txt"] is fallback_parser
+    assert "eml" in parser._attachment_parsers
+    nested_1 = parser._attachment_parsers["eml"]
+    nested_2 = nested_1._attachment_parsers["eml"]
+    nested_3 = nested_2._attachment_parsers["eml"]
+    assert "eml" not in nested_3._attachment_parsers
