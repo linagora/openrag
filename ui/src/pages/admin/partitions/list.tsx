@@ -48,6 +48,7 @@ import {
 } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 import { intOr } from "@/lib/utils";
+import { partitionDetailPath } from "@/lib/routes";
 
 type SortDir = "asc" | "desc" | null;
 
@@ -68,7 +69,7 @@ function RowActions({ partition }: { partition: PartitionResponse }) {
   return (
     <div className="flex items-center gap-1">
       <Button variant="ghost" size="sm" asChild>
-        <Link to={`/partitions/${encodeURIComponent(partition.name)}`}>
+        <Link to={partitionDetailPath(partition.name)}>
           <Pencil className="h-3 w-3" />
         </Link>
       </Button>
@@ -349,7 +350,7 @@ export default function PartitionListPage() {
                     <TableCell>
                       <div className="flex items-center gap-2">
                         <Link
-                          to={`/partitions/${encodeURIComponent(p.name)}`}
+                          to={partitionDetailPath(p.name)}
                           className="font-medium text-primary hover:underline"
                         >
                           {p.name}
