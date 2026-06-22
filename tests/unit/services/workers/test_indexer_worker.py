@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -50,8 +51,8 @@ class FakeVectorStore:
         self.calls: list[tuple] = []
         self.ensure_calls: list[tuple[str, int]] = []
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default") -> int:
-        self.calls.append((chunks, collection))
+    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+        self.calls.append((chunks, collection, indexed_at))
         return len(chunks)
 
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
@@ -309,17 +310,43 @@ async def test_process_file_creates_catalog_record_after_successful_pipeline(tmp
         user={"id": 42},
     )
 
-    assert repo.add_calls == [
-        {
-            "file_id": "f1",
-            "partition": "p",
-            "file_metadata": {"file_id": "f1", "relationship_id": "rel", "parent_id": "parent"},
-            "user_id": 42,
-            "relationship_id": "rel",
-            "parent_id": "parent",
-        }
-    ]
+    assert len(repo.add_calls) == 1
+    add_call = repo.add_calls[0]
+    assert isinstance(add_call.pop("indexed_at"), datetime)
+    assert add_call == {
+        "file_id": "f1",
+        "partition": "p",
+        "file_metadata": {"file_id": "f1", "relationship_id": "rel", "parent_id": "parent"},
+        "user_id": 42,
+        "relationship_id": "rel",
+        "parent_id": "parent",
+    }
     assert repo.update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_process_file_shares_one_indexed_at_between_store_and_catalog(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    store = FakeVectorStore()
+    repo = FakeDocumentRepo()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker(chunks),
+        embedder=FakeEmbedder(),
+        vector_store=store,
+    )
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=_fake_tsm(), document_repo=repo)
+
+    await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p", user={"id": 1})
+
+    store_indexed_at = store.calls[0][2]
+    catalog_indexed_at = repo.add_calls[0]["indexed_at"]
+    assert isinstance(store_indexed_at, datetime)
+    # The store and the catalog must receive the very same timestamp object/value.
+    assert store_indexed_at == catalog_indexed_at
 
 
 @pytest.mark.asyncio
@@ -369,15 +396,16 @@ async def test_process_file_updates_catalog_record_on_replace(tmp_path: Path) ->
         replace=True,
     )
 
-    assert repo.update_calls == [
-        {
-            "file_id": "f1",
-            "partition": "p",
-            "file_metadata": {"file_id": "f1"},
-            "relationship_id": None,
-            "parent_id": None,
-        }
-    ]
+    assert len(repo.update_calls) == 1
+    update_call = repo.update_calls[0]
+    assert isinstance(update_call.pop("indexed_at"), datetime)
+    assert update_call == {
+        "file_id": "f1",
+        "partition": "p",
+        "file_metadata": {"file_id": "f1"},
+        "relationship_id": None,
+        "parent_id": None,
+    }
     assert repo.add_calls == []
 
 

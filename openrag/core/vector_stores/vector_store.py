@@ -3,17 +3,30 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openrag.core.models.chunk import Chunk
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 class VectorStore(ABC):
     """Base class for vector database backends."""
 
     @abstractmethod
-    async def upsert(self, chunks: list[Chunk], collection: str = "default") -> int:
-        """Insert or update chunks. Returns count of upserted items."""
+    async def upsert(
+        self,
+        chunks: list[Chunk],
+        collection: str = "default",
+        *,
+        indexed_at: datetime | None = None,
+    ) -> int:
+        """Insert or update chunks. Returns count of upserted items.
+
+        ``indexed_at`` optionally pins the indexation timestamp stamped on the
+        chunks so it can match the catalog row; ``None`` means "use now".
+        """
         ...
 
     @abstractmethod

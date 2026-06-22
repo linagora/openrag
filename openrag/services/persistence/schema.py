@@ -139,6 +139,12 @@ files = Table(
     ),
     Column("relationship_id", String, nullable=True, index=True),
     Column("parent_id", String, nullable=True, index=True),
+    Column(
+        "indexed_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+    ),
     UniqueConstraint("file_id", "partition_name", name="uix_file_id_partition"),
     Index("ix_partition_file", "partition_name", "file_id"),
     Index("ix_relationship_partition", "relationship_id", "partition_name"),
