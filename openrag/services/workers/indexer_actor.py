@@ -149,8 +149,12 @@ async def _replace_topic_tags_if_needed(
     if not has_topic_tags and not topic_tagging_disabled:
         return
 
+    raw_tags = row.get("topic_tags", [])
+    if not isinstance(raw_tags, list):
+        raise TypeError("topic_tags must be a list of strings")
+
+    tags = [tag for tag in raw_tags if isinstance(tag, str) and tag.strip()]
     await topic_tag_repo.delete_by_document(file_id, partition=partition)
-    tags = [tag for tag in row.get("topic_tags", []) if isinstance(tag, str) and tag.strip()]
     if not tags:
         return
     await topic_tag_repo.bulk_insert(

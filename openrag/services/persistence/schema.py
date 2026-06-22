@@ -297,6 +297,7 @@ __all__ = [
     "metadata",
     "model_endpoints",
     "pipeline_presets",
+    "topic_tags",
     "partitions",
     "files",
     "users",

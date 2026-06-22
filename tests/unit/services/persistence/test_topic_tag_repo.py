@@ -73,6 +73,22 @@ async def test_get_by_document_returns_rows_ordered_by_tag():
 
 
 @pytest.mark.asyncio
+async def test_delete_by_document_returns_affected_count():
+    from services.persistence.topic_tag_repo import PgTopicTagRepository
+
+    pool = _FakePool()
+    repo = PgTopicTagRepository(pool_getter=lambda: pool)
+
+    count = await repo.delete_by_document("file-1", partition="tenant-a")
+
+    assert count == 2
+    query, params = pool.executed[0]
+    assert "DELETE FROM topic_tags" in query
+    assert "WHERE document_id = $1 AND partition = $2" in query
+    assert params == ("file-1", "tenant-a")
+
+
+@pytest.mark.asyncio
 async def test_search_is_partition_scoped_and_case_insensitive():
     from services.persistence.topic_tag_repo import PgTopicTagRepository
 

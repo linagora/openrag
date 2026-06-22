@@ -124,19 +124,20 @@ class UserService:
 
         ``user`` is the request-state dict the auth middleware set (no DB
         fetch — identical to the legacy ``/users/info`` handler). Quota
-        rule, byte-for-byte: admins and a negative global default mean
-        unlimited; a ``None`` per-user quota falls back to the global
-        default; a negative per-user quota means unlimited. ``file_quota``
-        is surfaced as ``-1`` when unlimited.
+        rule: admins are unlimited; a per-user quota of ``None`` falls back
+        to the global default; a resolved quota ``< 0`` means unlimited (so
+        a negative *global default* only makes users unlimited when they
+        have no per-user override). ``file_quota`` is surfaced as ``-1``
+        when unlimited.
         """
         is_admin = user.get("is_admin", False)
-        if is_admin or self._default_file_quota < 0:
+        if is_admin:
             user_quota: float | int = float("inf")
         else:
             user_quota = user.get("file_quota", None)
             if user_quota is None:
                 user_quota = self._default_file_quota
-            elif user_quota < 0:
+            if user_quota < 0:
                 user_quota = float("inf")
 
         file_count = user.get("file_count", 0)

@@ -94,10 +94,10 @@ class FakeDocumentRepo:
 
 class FakeTopicTagRepo:
     def __init__(self) -> None:
-        self.deleted: list[tuple[str, str | None]] = []
+        self.deleted: list[tuple[str, str]] = []
         self.inserted: list[list[dict[str, str]]] = []
 
-    async def delete_by_document(self, document_id: str, partition: str | None = None) -> int:
+    async def delete_by_document(self, document_id: str, partition: str) -> int:
         self.deleted.append((document_id, partition))
         return 0
 
@@ -437,3 +437,66 @@ async def test_process_file_replaces_topic_tags_after_successful_pipeline(tmp_pa
             {"document_id": "f1", "partition": "tenant-a", "tag": "risk"},
         ]
     ]
+
+
+@pytest.mark.asyncio
+async def test_process_file_deletes_topic_tags_when_tagging_is_disabled(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class UntaggedPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    repo = FakeTopicTagRepo()
+    worker = IndexerWorker(
+        pipeline=UntaggedPipeline(),
+        task_state_manager=_fake_tsm(),
+        topic_tag_repo=repo,
+    )
+
+    await worker.process_file(
+        task_id="t-disabled-tags",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="tenant-a",
+        indexation_config={"enable_topic_tagging": False},
+    )
+
+    assert repo.deleted == [("f1", "tenant-a")]
+    assert repo.inserted == []
+
+
+@pytest.mark.asyncio
+async def test_process_file_rejects_malformed_topic_tags_before_delete(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    tsm = _fake_tsm()
+
+    class BrokenTaggingPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["topic_tags"] = "finance"
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    repo = FakeTopicTagRepo()
+    worker = IndexerWorker(
+        pipeline=BrokenTaggingPipeline(),
+        task_state_manager=tsm,
+        topic_tag_repo=repo,
+    )
+
+    with pytest.raises(TypeError, match="topic_tags"):
+        await worker.process_file(
+            task_id="t-bad-tags",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="tenant-a",
+        )
+
+    assert repo.deleted == []
+    assert repo.inserted == []
+    tsm.set_failed_if_not_cancelled.remote.assert_called_once()

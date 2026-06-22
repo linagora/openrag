@@ -20,7 +20,7 @@ from api.dependencies.auth import (
 from api.schemas.admin.partition_schemas import PartitionDetailResponse, UpdatePartitionRequest
 from core.utils.logging import get_logger
 from di.providers import get_partition_service
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 logger = get_logger()
@@ -166,7 +166,7 @@ async def get_file(
     request: Request,
     partition: str,
     file_id: str,
-    limit: int = 2000,
+    limit: int = Query(default=2000, ge=0),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
@@ -188,11 +188,14 @@ async def get_file(
 
 @router.get(
     "/{partition}/chunks",
-    description="""List all document chunks in a partition.
+    description="""List document chunks in a partition.
 
 **Parameters:**
 - `partition`: The partition name
 - `include_embedding`: Include vector embeddings in response (default: true)
+- `file_id`: Restrict to a single file's chunks (filtered server-side; recommended
+  for the document detail view to avoid loading the whole partition)
+- `limit`: Maximum number of chunks to return (default: unbounded)
 
 **Response:**
 Returns all chunks with:
@@ -211,11 +214,18 @@ async def list_all_chunks(
     request: Request,
     partition: str,
     include_embedding: bool = True,
+    file_id: str | None = None,
+    limit: int | None = Query(default=None, ge=0),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
-    """List all chunks in a partition."""
-    items = await service.list_all_chunks(partition=partition, include_embedding=include_embedding)
+    """List chunks in a partition, optionally scoped to a single file."""
+    items = await service.list_all_chunks(
+        partition=partition,
+        include_embedding=include_embedding,
+        file_id=file_id,
+        limit=limit,
+    )
     chunks = [
         {
             "link": str(request.url_for("get_extract", extract_id=it["metadata"]["_id"])),

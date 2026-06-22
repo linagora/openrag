@@ -63,42 +63,25 @@ class PgTopicTagRepository(TopicTagRepository):
             [row["normalized_tag"] for row in rows],
         )
 
-    async def get_by_document(self, document_id: str, partition: str | None = None) -> list[dict]:
-        if partition is None:
-            rows = await self.pool.fetch(
-                """
-                SELECT document_id, partition, tag, created_at
-                FROM topic_tags
-                WHERE document_id = $1
-                ORDER BY normalized_tag
-                """,
-                document_id,
-            )
-        else:
-            rows = await self.pool.fetch(
-                """
-                SELECT document_id, partition, tag, created_at
-                FROM topic_tags
-                WHERE document_id = $1 AND partition = $2
-                ORDER BY normalized_tag
-                """,
-                document_id,
-                partition,
-            )
+    async def get_by_document(self, document_id: str, partition: str) -> list[dict]:
+        rows = await self.pool.fetch(
+            """
+            SELECT document_id, partition, tag, created_at
+            FROM topic_tags
+            WHERE document_id = $1 AND partition = $2
+            ORDER BY normalized_tag
+            """,
+            document_id,
+            partition,
+        )
         return [self._row_to_dict(row) for row in rows]
 
-    async def delete_by_document(self, document_id: str, partition: str | None = None) -> int:
-        if partition is None:
-            result = await self.pool.execute(
-                "DELETE FROM topic_tags WHERE document_id = $1",
-                document_id,
-            )
-        else:
-            result = await self.pool.execute(
-                "DELETE FROM topic_tags WHERE document_id = $1 AND partition = $2",
-                document_id,
-                partition,
-            )
+    async def delete_by_document(self, document_id: str, partition: str) -> int:
+        result = await self.pool.execute(
+            "DELETE FROM topic_tags WHERE document_id = $1 AND partition = $2",
+            document_id,
+            partition,
+        )
         return _delete_count(result)
 
     async def search(self, partition: str, tag: str, top_k: int = 10) -> list[dict]:

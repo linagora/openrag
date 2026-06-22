@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
+from contextlib import AbstractAsyncContextManager, nullcontext
 
 from tqdm.asyncio import tqdm
 
@@ -27,7 +28,7 @@ from ..prompts.contextualization_builder import build_messages, wrap_chunk_with_
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
-DEFAULT_MAX_CONCURRENT = 4
+DEFAULT_BATCH_SIZE = 4
 
 
 class ChunkContextualizer:
@@ -39,14 +40,17 @@ class ChunkContextualizer:
         system_prompt: str,
         *,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
-        max_concurrent: int = DEFAULT_MAX_CONCURRENT,
-        semaphore: asyncio.Semaphore | None = None,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        llm_semaphore: AbstractAsyncContextManager[object] | None = None,
     ):
         self._llm = llm
         self._system_prompt = system_prompt
         self._timeout = timeout_seconds
-        self._batch_size = max(1, max_concurrent)
-        self._semaphore = semaphore or asyncio.Semaphore(self._batch_size)
+        self._batch_size = max(1, batch_size)
+        # Optional cluster-wide LLM gate, injected by the caller (e.g. the Ray
+        # "llmSemaphore"); wraps each chat call so contextualization shares the
+        # global LLM concurrency budget. No-op when not supplied.
+        self._semaphore = llm_semaphore or nullcontext()
 
     async def _generate_context(
         self,
@@ -66,7 +70,8 @@ class ChunkContextualizer:
         )
         async with self._semaphore:
             try:
-                return await asyncio.wait_for(self._llm.chat(messages), timeout=self._timeout)
+                response = await asyncio.wait_for(self._llm.chat(messages), timeout=self._timeout)
+                return _chat_response_text(response)
             except TimeoutError:
                 logger.warning("LLM timeout contextualizing chunk (filename=%s)", filename)
                 return ""
@@ -136,3 +141,29 @@ class ChunkContextualizer:
         except (TimeoutError, OSError, RuntimeError, ValueError) as exc:
             logger.warning("Error contextualizing chunks from %s: %s", filename, exc)
             return chunks
+
+
+def _chat_response_text(response: object) -> str:
+    """Extract the assistant text from an LLM ``chat`` result.
+
+    Accepts a raw string or an OpenAI-style response dict
+    (``choices[0].message.content``, ``choices[0].text``, or a top-level
+    ``content``); returns ``""`` for any unrecognized shape.
+    """
+    if isinstance(response, str):
+        return response
+    if not isinstance(response, dict):
+        return ""
+
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            message = first.get("message")
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                return message["content"]
+            if isinstance(first.get("text"), str):
+                return first["text"]
+
+    content = response.get("content")
+    return content if isinstance(content, str) else ""

@@ -42,6 +42,8 @@ class TopicTagger:
         chunks = list(chunks)
         if not chunks:
             return []
+        if max_tags <= 0:
+            return []
 
         try:
             messages = _build_messages(
@@ -52,7 +54,11 @@ class TopicTagger:
                 lang=lang,
             )
             operation = self._llm.chat(messages)
-            response = await asyncio.wait_for(operation, timeout=self._timeout) if self._timeout else await operation
+            response = (
+                await asyncio.wait_for(operation, timeout=self._timeout)
+                if self._timeout is not None
+                else await operation
+            )
             return _parse_topic_tags(_chat_response_text(response), max_tags=max_tags)
         except (TimeoutError, OSError, RuntimeError, ValueError, TypeError) as exc:
             logger.warning("Error extracting topic tags for %s: %s", filename, exc)
@@ -110,7 +116,7 @@ def _load_json_array(text: str) -> list[object] | None:
     try:
         value = json.loads(text)
     except json.JSONDecodeError:
-        match = re.search(r"\[[\s\S]*\]", text)
+        match = re.search(r"\[[\s\S]*?\]", text)
         if not match:
             return None
         try:

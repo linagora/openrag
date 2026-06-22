@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from core.indexing.topic_tags import TopicTagger
 from core.models.chunk import Chunk
@@ -36,3 +38,32 @@ async def test_topic_tagger_falls_back_to_empty_list_on_bad_response():
     tagger = TopicTagger(llm, "extract topics")
 
     assert await tagger.tag([Chunk(id="c1", text="hello")], max_tags=5) == []
+
+
+@pytest.mark.asyncio
+async def test_topic_tagger_returns_empty_when_max_tags_is_not_positive():
+    llm = FakeLLM('["finance"]')
+    tagger = TopicTagger(llm, "extract topics")
+
+    assert await tagger.tag([Chunk(id="c1", text="hello")], max_tags=0) == []
+    assert llm.messages == []
+
+
+@pytest.mark.asyncio
+async def test_topic_tagger_timeout_zero_uses_timeout_path():
+    class SlowLLM:
+        async def chat(self, messages: list[dict[str, str]], **kwargs):
+            await asyncio.sleep(0)
+            return {"choices": [{"message": {"content": '["finance"]'}}]}
+
+    tagger = TopicTagger(SlowLLM(), "extract topics", timeout_seconds=0)
+
+    assert await tagger.tag([Chunk(id="c1", text="hello")], max_tags=5) == []
+
+
+@pytest.mark.asyncio
+async def test_topic_tagger_parses_json_array_before_bracket_suffix():
+    llm = FakeLLM('["finance"] [Sources: 1]')
+    tagger = TopicTagger(llm, "extract topics")
+
+    assert await tagger.tag([Chunk(id="c1", text="hello")], max_tags=5) == ["finance"]

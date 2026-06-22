@@ -10,7 +10,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from schema_helpers import index_exists, table_exists, unique_constraint_exists
+from schema_helpers import index_exists, table_exists
 
 # revision identifiers, used by Alembic.
 revision: str = "b7c8d9e0f1a2"
@@ -54,12 +54,6 @@ def upgrade() -> None:
         op.create_index("ix_topic_tags_document_id", "topic_tags", ["document_id"])
     if not index_exists("topic_tags", "ix_topic_tags_partition_tag"):
         op.create_index("ix_topic_tags_partition_tag", "topic_tags", ["partition", "normalized_tag"])
-    if not unique_constraint_exists("topic_tags", "uix_topic_tags_document_partition_tag"):
-        op.create_unique_constraint(
-            "uix_topic_tags_document_partition_tag",
-            "topic_tags",
-            ["document_id", "partition", "normalized_tag"],
-        )
 
 
 def downgrade() -> None:
