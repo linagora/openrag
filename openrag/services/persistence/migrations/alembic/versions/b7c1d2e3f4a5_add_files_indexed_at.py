@@ -1,7 +1,7 @@
 """add files.indexed_at
 
 Revision ID: b7c1d2e3f4a5
-Revises: 06dd2101ea3a
+Revises: b7c8d9e0f1a2
 Create Date: 2026-06-19 00:00:00.000000
 
 """
@@ -14,7 +14,7 @@ from schema_helpers import column_exists
 
 # revision identifiers, used by Alembic.
 revision: str = "b7c1d2e3f4a5"
-down_revision: str | Sequence[str] | None = "06dd2101ea3a"
+down_revision: str | Sequence[str] | None = "b7c8d9e0f1a2"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
