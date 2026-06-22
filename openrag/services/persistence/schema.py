@@ -23,6 +23,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -142,6 +143,32 @@ files = Table(
     Index("ix_partition_file", "partition_name", "file_id"),
     Index("ix_relationship_partition", "relationship_id", "partition_name"),
     Index("ix_parent_partition", "parent_id", "partition_name"),
+)
+
+
+topic_tags = Table(
+    "topic_tags",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("document_id", String, nullable=False),
+    Column("partition", String, nullable=False, index=True),
+    Column("tag", String, nullable=False),
+    Column("normalized_tag", String, nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+    ),
+    ForeignKeyConstraint(
+        ["document_id", "partition"],
+        ["files.file_id", "files.partition_name"],
+        ondelete="CASCADE",
+        name="fk_topic_tags_file",
+    ),
+    UniqueConstraint("document_id", "partition", "normalized_tag", name="uix_topic_tags_document_partition_tag"),
+    Index("ix_topic_tags_document_id", "document_id"),
+    Index("ix_topic_tags_partition_tag", "partition", "normalized_tag"),
 )
 
 
@@ -270,6 +297,7 @@ __all__ = [
     "metadata",
     "model_endpoints",
     "pipeline_presets",
+    "topic_tags",
     "partitions",
     "files",
     "users",

@@ -72,6 +72,23 @@ class FakeContextualizer:
         return [chunk.model_copy(update={"text": f"ctx {chunk.text}", "context": "ctx"}) for chunk in chunks]
 
 
+class FakeTopicTagger:
+    def __init__(self, tags: list[str] | None = None) -> None:
+        self.tags = tags or ["finance", "risk"]
+        self.calls: list[tuple[list[Chunk], str, int, str]] = []
+
+    async def tag(
+        self,
+        chunks,
+        *,
+        filename: str = "",
+        max_tags: int = 7,
+        lang: str = "en",
+    ) -> list[str]:
+        self.calls.append((list(chunks), filename, max_tags, lang))
+        return self.tags
+
+
 @pytest.mark.asyncio
 async def test_pipeline_runs_required_stages_in_order_and_keeps_row_object():
     document = Document(filename="note.txt", text="hello", partition="tenant-a")
@@ -173,11 +190,13 @@ async def test_pipeline_row_indexation_config_selects_components():
     selected_embedder = FakeEmbedder([[0.5]])
     selected_vlm = FakeVLM()
     selected_contextualizer = FakeContextualizer()
+    selected_topic_tagger = FakeTopicTagger(["portfolio"])
     parser_calls: list[str] = []
     chunker_calls: list[object] = []
     embedder_calls: list[str] = []
     vlm_calls: list[str] = []
     contextualizer_calls: list[str] = []
+    topic_tagger_calls: list[str] = []
 
     pipeline = build_indexing_pipeline(
         parser=FakeParser(default_processed),
@@ -189,6 +208,7 @@ async def test_pipeline_row_indexation_config_selects_components():
         embedder_factory=lambda name: embedder_calls.append(name) or selected_embedder,
         vlm_factory=lambda name: vlm_calls.append(name) or selected_vlm,
         contextualizer_factory=lambda name: contextualizer_calls.append(name) or selected_contextualizer,
+        topic_tagger_factory=lambda name: topic_tagger_calls.append(name) or selected_topic_tagger,
     )
     row = {
         "document": document,
@@ -202,6 +222,9 @@ async def test_pipeline_row_indexation_config_selects_components():
             "vlm": "vlm-fast",
             "enable_contextualization": True,
             "contextualization_llm": "llm-context",
+            "enable_topic_tagging": True,
+            "topic_tagging_llm": "llm-topic",
+            "max_topic_tags": 3,
         },
     }
 
@@ -212,8 +235,35 @@ async def test_pipeline_row_indexation_config_selects_components():
     assert embedder_calls == ["embed-fast"]
     assert vlm_calls == ["vlm-fast"]
     assert contextualizer_calls == ["llm-context"]
+    assert topic_tagger_calls == ["llm-topic"]
     assert selected_parser.calls == [document]
     assert selected_chunker.calls == [(row["processed_document"], "tenant-a")]
     assert selected_vlm.calls == [b"png"]
     assert selected_contextualizer.calls[0][1:] == ("note.txt", "en")
+    assert selected_topic_tagger.calls == [
+        ([row["chunks"][0].model_copy(update={"embedding": None})], "note.txt", 3, "en")
+    ]
+    assert row["topic_tags"] == ["portfolio"]
     assert row["chunks"][0].embedding == [0.5]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_indexation_config_disables_topic_tagging():
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    chunks = [Chunk(id="c1", text="hello", partition="tenant-a")]
+    topic_tagger = FakeTopicTagger()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker(chunks),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        topic_tagger=topic_tagger,
+        indexation_config=IndexationPipelineConfig(enable_topic_tagging=False),
+    )
+
+    row = {"document": document, "partition": "tenant-a", "filename": "note.txt"}
+    await pipeline.run(row)
+
+    assert topic_tagger.calls == []
+    assert row.get("topic_tags") is None

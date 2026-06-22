@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from core.config.model_endpoints import ModelEndpointConfig
 
 
 class _NativeChunker:
@@ -98,6 +99,40 @@ def test_build_indexer_pool_uses_detached_actor_with_configured_concurrency(
     assert module.build_indexer_pool() == "actor"
     assert calls["lifetime"] == "detached"
     assert calls["max_concurrency"] == 4
+
+
+def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.llm import llm_registry
+    from services.workers.indexer_pool import _build_topic_tagger_factory
+
+    class ProbeLLM:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    llm_registry.register("topic-probe")(ProbeLLM)
+    cfg = SimpleNamespace(
+        models=SimpleNamespace(
+            llm={
+                "topic-a": ModelEndpointConfig(
+                    endpoint="http://llm:8000/v1",
+                    model_name="topic-model",
+                    timeout=9.0,
+                    extra={"implementation": "topic-probe", "temperature": 0.1},
+                )
+            }
+        ),
+        llm=SimpleNamespace(base_url="", model=""),
+        paths=SimpleNamespace(prompts_dir="/tmp/prompts"),
+        prompts=SimpleNamespace(topic_tagger="topic.txt"),
+    )
+    monkeypatch.setattr("core.prompts.load_template_by_key", lambda *_args: "extract topics")
+
+    factory = _build_topic_tagger_factory(cfg)
+    tagger = factory("topic-a")
+
+    assert tagger._llm.kwargs["endpoint"] == "http://llm:8000/v1"
+    assert tagger._llm.kwargs["model_name"] == "topic-model"
+    assert tagger._llm.kwargs["temperature"] == 0.1
 
 
 def test_build_contextualizer_factory_returns_none_without_llm_config(tmp_path) -> None:
@@ -206,6 +241,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
 
     captured = {}
     contextualizer_factory = object()
+    topic_tagger_factory = object()
 
     class RDBConfig:
         def model_copy(self, *, update):
@@ -227,6 +263,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
 
     class Store:
         document_repo = object()
+        topic_tag_repo = object()
 
     class Worker:
         def __init__(self, **kwargs):
@@ -240,15 +277,26 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(module, "_build_chunker", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_embedder_factory", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_contextualizer_factory", lambda _cfg: contextualizer_factory)
+    monkeypatch.setattr(module, "_build_topic_tagger_factory", lambda _cfg: topic_tagger_factory)
     monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
     monkeypatch.setattr(milvus_store, "MilvusVectorStore", lambda _cfg: object())
     monkeypatch.setattr(postgres_store, "PostgresStore", lambda *args, **kwargs: Store())
     monkeypatch.setattr(parser_bridge, "DocSerializerBridgeParser", lambda **kwargs: object())
     monkeypatch.setattr(pipeline_builder, "build_indexing_pipeline", fake_build_pipeline)
-    monkeypatch.setattr(module.ray, "get_actor", lambda *args, **kwargs: object())
+    actor_calls = []
+
+    def fake_get_actor(*args, **kwargs):
+        actor_calls.append((args, kwargs))
+        return object()
+
+    monkeypatch.setattr(module.ray, "get_actor", fake_get_actor)
     monkeypatch.setattr(module, "IndexerWorker", Worker)
 
     actor_class = module.IndexerPool.__ray_metadata__.modified_class
     actor_class()
 
+    assert actor_calls
+    assert actor_calls[0][0][0] == "TaskStateManager"
+    assert actor_calls[0][1].get("namespace") == "openrag"
     assert captured["contextualizer_factory"] is contextualizer_factory
+    assert captured["topic_tagger_factory"] is topic_tagger_factory
