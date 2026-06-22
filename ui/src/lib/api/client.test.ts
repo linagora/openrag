@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { request, TOKEN_KEY } from "./client";
+import { request, ApiError, TOKEN_KEY } from "./client";
 
 // Build a minimal Response-like object covering exactly what `request` reads.
 function fakeResponse({
@@ -63,5 +63,28 @@ describe("api client", () => {
   it("tolerates an empty 200 body (resolves undefined, no JSON parse crash)", async () => {
     fetchMock.mockResolvedValue(fakeResponse({ status: 200, body: "" }));
     await expect(request("/partition/x")).resolves.toBeUndefined();
+  });
+});
+
+describe("ApiError message parsing", () => {
+  it("uses the FastAPI {detail} envelope", () => {
+    expect(new ApiError(422, { detail: "bad input" }).message).toBe("bad input");
+  });
+
+  it("uses the domain {error:{message}} envelope", () => {
+    expect(new ApiError(500, { error: { message: "boom", type: "x" } }).message).toBe("boom");
+  });
+
+  it("falls back to 'HTTP <status>' for unrecognized / non-object bodies", () => {
+    expect(new ApiError(503, { something: "else" }).message).toBe("HTTP 503");
+    expect(new ApiError(503, null).message).toBe("HTTP 503");
+    expect(new ApiError(503, "plain string").message).toBe("HTTP 503");
+  });
+
+  it("retains status, body and name", () => {
+    const e = new ApiError(404, { detail: "nope" });
+    expect(e.status).toBe(404);
+    expect(e.body).toEqual({ detail: "nope" });
+    expect(e.name).toBe("ApiError");
   });
 });
