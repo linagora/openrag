@@ -10,8 +10,14 @@ export function Header() {
   const navigate = useNavigate();
 
   const handleLogout = () => {
-    logout();
-    navigate("/login");
+    const wasOidcSession = logout();
+    if (wasOidcSession) {
+      // Full-page navigation to the backend's RP-initiated logout: it revokes
+      // the server session, clears the cookie, and redirects on to the IdP.
+      window.location.assign("/auth/logout");
+    } else {
+      navigate("/login");
+    }
   };
 
   return (

@@ -19,7 +19,12 @@ interface AuthContextType {
   isLoading: boolean;
   /** Store a bearer token and resolve identity; throws if the token is invalid. */
   loginWithToken: (token: string) => Promise<void>;
-  logout: () => void;
+  /**
+   * Clear local auth state. Returns `true` when this was an OIDC/SSO session
+   * (no stored bearer token) — the caller must then redirect to the backend's
+   * `/auth/logout` to revoke the httpOnly session cookie, which JS cannot clear.
+   */
+  logout: () => boolean;
   reload: () => Promise<void>;
 }
 
@@ -56,8 +61,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
+    // A stored bearer token means token-mode auth: clearing it IS the full
+    // logout. With no token, identity came from the OIDC `openrag_session`
+    // cookie — signal the caller to hand off to the backend RP-initiated logout
+    // so the server revokes the session (and ends the IdP SSO session).
+    const wasOidcSession = !localStorage.getItem(TOKEN_KEY);
     localStorage.removeItem(TOKEN_KEY);
     setUser(null);
+    return wasOidcSession;
   }, []);
 
   return (
