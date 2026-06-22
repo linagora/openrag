@@ -326,6 +326,60 @@ class QueryService:
         return payload, docs
 
     # ------------------------------------------------------------------
+    # Message sanitization
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sanitize_messages(messages: list[dict]) -> list[dict]:
+        """Sanitize the message list before forwarding to the LLM.
+
+        Two passes in order:
+
+        1. DROP — removes ``role="assistant"`` messages whose content is
+           absent or whitespace-only.  These arise from upstream bugs (e.g.
+           a streaming response that ended without a final content chunk, or
+           client-side history persistence dropping the content).  Logged at
+           ERROR level so the root cause is traceable.
+
+        2. MERGE — consecutive messages sharing the same role are collapsed
+           into one, with their contents joined by ``"\\n\\n"``.  Non-content
+           keys are taken from the first message in the group.  This restores
+           the strict user/assistant alternation required by the Mistral
+           Jinja chat template; without it a DROP that creates adjacent
+           ``role="user"`` messages would raise a vLLM ``TemplateError``.
+        """
+        # --- DROP ---
+        filtered = [m for m in messages if not (m.get("role") == "assistant" and not (m.get("content") or "").strip())]
+        dropped_count = len(messages) - len(filtered)
+        if dropped_count:
+            logger.error(
+                "Dropped empty assistant message(s) before LLM call — "
+                "this should never happen, investigate upstream "
+                "(streaming response code or client-side history persistence)",
+                dropped_count=dropped_count,
+            )
+
+        # --- MERGE ---
+        merged: list[dict] = []
+        merge_count = 0
+        for msg in filtered:
+            if merged and merged[-1].get("role") == msg.get("role"):
+                prev_content = merged[-1].get("content") or ""
+                new_content = msg.get("content") or ""
+                merged[-1] = {**merged[-1], "content": f"{prev_content}\n\n{new_content}"}
+                merge_count += 1
+            else:
+                merged.append(dict(msg))
+        if merge_count:
+            logger.warning(
+                "Merged consecutive same-role messages after sanitization "
+                "(restored strict role alternation required by Mistral chat template)",
+                merge_count=merge_count,
+            )
+
+        return merged
+
+    # ------------------------------------------------------------------
     # Public API (router = transport)
     # ------------------------------------------------------------------
 
@@ -345,6 +399,7 @@ class QueryService:
             payload, docs, web_results = await self._prepare_chat(partitions, payload)
         sources = prepare_sources(docs, web_results)
 
+        payload["messages"] = self._sanitize_messages(payload["messages"])
         chunk = await self._llm.chat(payload["messages"], **_sampling(payload))
         chunk["model"] = model_name
         content = chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
@@ -369,6 +424,7 @@ class QueryService:
             payload, docs, web_results = await self._prepare_chat(partitions, payload)
         sources = prepare_sources(docs, web_results)
 
+        payload["messages"] = self._sanitize_messages(payload["messages"])
         llm_stream = self._llm.stream_chat(payload["messages"], **_sampling(payload))
         async for sse_line in stream_with_source_filtering(llm_stream, sources, model_name):
             yield sse_line
