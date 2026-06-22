@@ -28,6 +28,7 @@ This guide explains how to deploy the **OpenRAG** stack on a Kubernetes cluster 
 
    - Edit the `env.config` and `env.secrets` sections in your `values.yaml`.
    - Secrets (API keys, tokens, Hugging Face credentials, etc.) will be mounted into the cluster as Kubernetes secrets.
+   - For managed PostgreSQL, point the `POSTGRES_*` values at the external database and disable database auto-creation.
 
 3. **Install or upgrade the release from GHCR**:
 
@@ -54,3 +55,12 @@ This guide explains how to deploy the **OpenRAG** stack on a Kubernetes cluster 
 
 - Ensure your GPU nodes have the correct NVIDIA drivers and `nvidia` `RuntimeClass` configured.
 
+## Managed PostgreSQL
+
+The chart can run against a database that is provisioned outside OpenRAG, which is the recommended setup on OpenShift or cloud-managed PostgreSQL.
+
+Pre-create the database before installing the release. If `POSTGRES_DATABASE` is not set, OpenRAG uses `partitions_for_collection_<VDB_COLLECTION_NAME>`. The app role does not need `CREATEDB` or superuser rights; it needs to connect to that database and own, or be allowed to create objects in, the target schema.
+
+In `values.yaml`, disable the bundled PostgreSQL chart, set `postgresProvisioning.autoCreateDatabase` to `false`, set `postgresProvisioning.runMigrationsInApp` to `false`, and enable `postgresProvisioning.migrationJob`. Then provide the managed database connection through `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and optionally `POSTGRES_DATABASE`.
+
+With this setup, Helm runs the migration Job before install and upgrade. The OpenRAG API then starts against an already-created and already-migrated database.

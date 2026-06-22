@@ -39,6 +39,8 @@ class RDBConfig(ConfigMixin):
     # by the caller wiring the catalog store. The connection manager raises if
     # this is still None at initialize() time.
     database: str | None = None
+    auto_create_database: bool = True
+    run_migrations: bool = True
     pool_min_size: int = 5
     pool_max_size: int = 20
     command_timeout: int = 30

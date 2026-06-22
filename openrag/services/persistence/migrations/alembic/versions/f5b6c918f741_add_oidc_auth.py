@@ -22,8 +22,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     """Upgrade schema: add users.email column and create oidc_sessions table.
 
-    Idempotent: Base.metadata.create_all() at app startup may have already
-    created these on older deployments.
+    Idempotent: older deployments may already contain these objects.
     """
     # users.email (nullable, unique, indexed)
     if not column_exists("users", "email"):

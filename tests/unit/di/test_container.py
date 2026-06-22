@@ -302,6 +302,28 @@ class TestRepositoriesFactory:
         store = create_catalog_store(_settings(), run_migrations=False)
         assert store._run_migrations is False
 
+    def test_run_migrations_defaults_to_rdb_config(self):
+        """Use the RDB config migration policy when no override is provided."""
+        settings = Settings(
+            rdb=RDBConfig(password="x", run_migrations=False),
+            vectordb=VectorDBConfig(collection_name="vdb_test"),
+        )
+
+        store = create_catalog_store(settings)
+
+        assert store._run_migrations is False
+
+    def test_run_migrations_argument_overrides_rdb_config(self):
+        """Keep explicit factory overrides for tests and one-off callers."""
+        settings = Settings(
+            rdb=RDBConfig(password="x", run_migrations=False),
+            vectordb=VectorDBConfig(collection_name="vdb_test"),
+        )
+
+        store = create_catalog_store(settings, run_migrations=True)
+
+        assert store._run_migrations is True
+
     def test_does_not_mutate_input_settings(self):
         """Leave caller-owned settings unchanged when deriving defaults."""
         s = _settings(database=None, collection="abc")

@@ -3,10 +3,8 @@
 Defines the same 7 tables that ``components/indexer/vectordb/models.py`` declares
 with the SQLAlchemy ORM, but as :class:`sqlalchemy.Table` objects bound to a
 single :class:`sqlalchemy.MetaData`. The new persistence layer talks to
-Postgres through ``asyncpg`` with raw SQL; this module exists solely so that
-Alembic's autogenerate has a metadata target to diff against, and so the
-on-startup ``metadata.create_all()`` path keeps working until phase 9 retires
-the legacy actor.
+Postgres through ``asyncpg`` with raw SQL; this module exists so that Alembic's
+autogenerate has a metadata target to diff against.
 
 Column types, defaults, foreign keys, unique constraints, check constraints
 and indexes must stay identical to the ORM models — Alembic will treat any

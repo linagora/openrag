@@ -44,6 +44,8 @@ It will create a new migration script in the `openrag/services/persistence/migra
 
 Once you've reviewed the generated migration script and confirmed it looks correct, apply it to your database.
 
+For managed PostgreSQL, apply migrations before starting the API and set `POSTGRES_RUN_MIGRATIONS=false` on the app deployment. This keeps the API role least-privileged and makes schema changes an explicit deployment step. OpenRAG also provides the module `services.persistence.migrations.run` for migration Jobs and init steps; it uses the normal OpenRAG database configuration but does not try to create the database.
+
 #### Option A: Docker (production)
 
 Rebuilds the image to ensure the migration runs against the exact code being deployed:
