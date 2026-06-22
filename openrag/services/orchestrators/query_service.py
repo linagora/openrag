@@ -348,8 +348,16 @@ class QueryService:
            Jinja chat template; without it a DROP that creates adjacent
            ``role="user"`` messages would raise a vLLM ``TemplateError``.
         """
+
+        def _is_empty_str(value: object) -> bool:
+            return isinstance(value, str) and not value.strip()
+
         # --- DROP ---
-        filtered = [m for m in messages if not (m.get("role") == "assistant" and not (m.get("content") or "").strip())]
+        filtered = [
+            m
+            for m in messages
+            if not (m.get("role") == "assistant" and (m.get("content") is None or _is_empty_str(m.get("content"))))
+        ]
         dropped_count = len(messages) - len(filtered)
         if dropped_count:
             logger.error(
@@ -364,9 +372,13 @@ class QueryService:
         merge_count = 0
         for msg in filtered:
             if merged and merged[-1].get("role") == msg.get("role"):
-                prev_content = merged[-1].get("content") or ""
-                new_content = msg.get("content") or ""
-                merged[-1] = {**merged[-1], "content": f"{prev_content}\n\n{new_content}"}
+                prev_content = merged[-1].get("content")
+                new_content = msg.get("content")
+                if isinstance(prev_content, str) and isinstance(new_content, str):
+                    merged[-1] = {**merged[-1], "content": f"{prev_content}\n\n{new_content}"}
+                else:
+                    merged.append(dict(msg))
+                    continue
                 merge_count += 1
             else:
                 merged.append(dict(msg))
