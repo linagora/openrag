@@ -262,6 +262,48 @@ async def test_validate_model_endpoint_uses_stored_api_key(async_client_factory)
 
 
 @pytest.mark.asyncio
+async def test_validate_endpoint_draft_forwards_body_without_lookup(async_client_factory):
+    """The draft-validate route probes arbitrary *unsaved* values: it forwards the
+    request body straight to the service with no prior endpoint lookup/persist."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post(
+            "/model-endpoints/validate",
+            json={
+                "endpoint": "http://candidate:8000/v1",
+                "model_name": "mistral-small",
+                "api_key": "draft-key",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["reachable"] is True
+    assert model_service.calls == [
+        ("validate", {"url": "http://candidate:8000/v1", "model_name": "mistral-small", "api_key": "draft-key"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_draft_defaults_optional_fields(async_client_factory):
+    """``model_name`` and ``api_key`` are optional in the draft body."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post(
+            "/model-endpoints/validate",
+            json={"endpoint": "http://candidate:8000/v1"},
+        )
+
+    assert response.status_code == 200
+    assert model_service.calls == [
+        ("validate", {"url": "http://candidate:8000/v1", "model_name": None, "api_key": None}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_set_default_model_endpoint_returns_promoted_endpoint(async_client_factory):
     """Default promotion should return the promoted endpoint row."""
     model_service = FakeModelEndpointService()
