@@ -624,13 +624,23 @@ class MilvusVectorStore(VectorStore):
     # VectorStore ABC — writes
     # ------------------------------------------------------------------
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default") -> int:
+    async def upsert(
+        self,
+        chunks: list[Chunk],
+        collection: str = "default",
+        *,
+        indexed_at: datetime | None = None,
+    ) -> int:
         """Insert pre-embedded chunks into the backing Milvus collection.
 
         ``chunk.partition`` is authoritative — the ``collection`` argument is
         accepted for ABC compatibility but does not override per-chunk
         partition values. Every chunk MUST carry a populated ``embedding``;
         embedding is an upstream pipeline concern, not a store concern.
+
+        ``indexed_at`` lets the caller pin a single indexation timestamp so the
+        Milvus chunks and the Postgres ``files`` row agree; when omitted it
+        defaults to the current time (legacy behaviour).
         """
         self._resolve_collection(collection)
         if not chunks:
@@ -643,7 +653,7 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             )
 
-        indexed_at = datetime.now(UTC).isoformat()
+        indexed_at = (indexed_at or datetime.now(UTC)).isoformat()
         order_metadata = self._gen_chunk_order_metadata(len(chunks))
         entities = [
             self._chunk_to_entity(c, indexed_at=indexed_at, order=o)

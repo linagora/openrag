@@ -29,6 +29,8 @@ from core.models.catalog import DocumentRecord, DocumentStatus
 from core.ports.document_repo import DocumentRepository
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     import asyncpg
 
 # Note on JSON: ``ConnectionManager.initialize`` registers a json/jsonb codec
@@ -271,11 +273,15 @@ class PgDocumentRepository(DocumentRepository):
         relationship_id: str | None = None,
         parent_id: str | None = None,
         indexation_config: dict | None = None,
+        indexed_at: datetime | None = None,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
         Creates the partition row on first use (legacy behaviour). Returns
         ``False`` if a row with the same (file_id, partition) already exists.
+
+        ``indexed_at`` pins the indexation timestamp so it matches the Milvus
+        chunks; when ``None`` the ``files.indexed_at`` server default applies.
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -311,12 +317,16 @@ class PgDocumentRepository(DocumentRepository):
                         user_id,
                     )
 
-                await conn.execute(
-                    """
-                    INSERT INTO files (file_id, partition_name, file_metadata,
-                                       indexation_config, created_by, relationship_id, parent_id)
-                    VALUES ($1, $2, $3::json, $4::jsonb, $5, $6, $7)
-                    """,
+                columns = [
+                    "file_id",
+                    "partition_name",
+                    "file_metadata",
+                    "indexation_config",
+                    "created_by",
+                    "relationship_id",
+                    "parent_id",
+                ]
+                values: list[Any] = [
                     file_id,
                     partition,
                     file_metadata or {},
@@ -324,6 +334,17 @@ class PgDocumentRepository(DocumentRepository):
                     user_id,
                     relationship_id,
                     parent_id,
+                ]
+                # Omit indexed_at to let the server default fire (legacy path).
+                if indexed_at is not None:
+                    columns.append("indexed_at")
+                    values.append(indexed_at)
+                # file_metadata is JSON, indexation_config is JSONB; the rest bind directly.
+                casts = {"file_metadata": "::json", "indexation_config": "::jsonb"}
+                placeholders = ", ".join(f"${i}{casts.get(col, '')}" for i, col in enumerate(columns, start=1))
+                await conn.execute(
+                    f"INSERT INTO files ({', '.join(columns)}) VALUES ({placeholders})",
+                    *values,
                 )
                 if user_id is not None:
                     await conn.execute(
@@ -393,12 +414,16 @@ class PgDocumentRepository(DocumentRepository):
         relationship_id: object = _UNSET,
         parent_id: object = _UNSET,
         indexation_config: object = _UNSET,
+        indexed_at: datetime | None = None,
     ) -> bool:
         """TODO(phase-9): remove. PUT-style in-place update.
 
         Preserves the underlying ``files.id`` so workspace FK rows stay
         valid. Pass ``relationship_id=None`` / ``parent_id=None``
         explicitly to clear; omit the kwarg to leave the column alone.
+
+        ``indexed_at`` refreshes the indexation timestamp on re-index so it
+        matches the freshly re-upserted Milvus chunks; ``None`` leaves it.
         """
         sets: list[str] = []
         params: list[Any] = []
@@ -414,6 +439,9 @@ class PgDocumentRepository(DocumentRepository):
         if indexation_config is not self._UNSET:
             params.append(indexation_config)
             sets.append(f"indexation_config = ${len(params)}::jsonb")
+        if indexed_at is not None:
+            params.append(indexed_at)
+            sets.append(f"indexed_at = ${len(params)}")
         if not sets:
             # Match legacy: report whether the row exists at all.
             return await self.file_exists_in_partition(file_id, partition)
