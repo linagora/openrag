@@ -80,6 +80,7 @@ class FakeVectorStore:
         self._rows = rows or []
         self._exists = exists
         self.deleted_ids: list[str] = []
+        self.last_chunk_filters: dict | None = None
 
     async def collection_exists(self, name) -> bool:
         return self._exists
@@ -92,6 +93,7 @@ class FakeVectorStore:
         return len(ids)
 
     async def query_chunks_by_filter(self, collection, filters, output_fields=None):
+        self.last_chunk_filters = dict(filters)
         return list(self._rows)
 
 
@@ -293,6 +295,52 @@ async def test_list_all_chunks_stringifies_vector_when_included():
     svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=FakeVectorStore(rows=rows))
     out = await svc.list_all_chunks("p", include_embedding=True)
     assert isinstance(out[0]["metadata"]["vector"], str)
+
+
+@pytest.mark.asyncio
+async def test_list_all_chunks_without_file_id_filters_partition_only():
+    vstore = FakeVectorStore(rows=[{"text": "t", "_id": "1"}])
+    svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=vstore)
+    await svc.list_all_chunks("p", include_embedding=False)
+    assert vstore.last_chunk_filters == {"partition": "p"}
+
+
+@pytest.mark.asyncio
+async def test_list_all_chunks_scopes_to_file_id_when_given():
+    """file_id is pushed down to the vector store so the detail view is O(file)."""
+    vstore = FakeVectorStore(rows=[{"text": "t", "_id": "1"}])
+    svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=vstore)
+    await svc.list_all_chunks("p", include_embedding=False, file_id="f-123")
+    assert vstore.last_chunk_filters == {"partition": "p", "file_id": "f-123"}
+
+
+@pytest.mark.asyncio
+async def test_list_all_chunks_applies_limit():
+    rows = [{"text": str(i), "_id": str(i)} for i in range(5)]
+    svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=FakeVectorStore(rows=rows))
+    out = await svc.list_all_chunks("p", include_embedding=False, limit=2)
+    assert len(out) == 2
+
+
+@pytest.mark.asyncio
+async def test_list_all_chunks_rejects_negative_limit():
+    rows = [{"text": str(i), "_id": str(i)} for i in range(5)]
+    svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=FakeVectorStore(rows=rows))
+    with pytest.raises(ValidationError) as ei:
+        await svc.list_all_chunks("p", include_embedding=False, limit=-1)
+    assert ei.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_file_chunks_rejects_negative_limit():
+    rows = [{"_id": str(i), "text": "body"} for i in range(5)]
+    svc = _svc(
+        drepo=FakeDocumentRepo(files={("f", "p")}),
+        vstore=FakeVectorStore(rows=rows),
+    )
+    with pytest.raises(ValidationError) as ei:
+        await svc.get_file_chunks("p", "f", limit=-1)
+    assert ei.value.status_code == 422
 
 
 # --------------------------------------------------------------------------- #

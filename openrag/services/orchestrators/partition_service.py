@@ -51,6 +51,16 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 
+def _validate_limit(limit: int | None) -> None:
+    """Reject negative ``limit`` values before they reach ``rows[:limit]``.
+
+    A negative bound would silently drop tail rows (e.g. ``-1`` returns all but
+    the last chunk) instead of capping the result, so treat it as a 422.
+    """
+    if limit is not None and limit < 0:
+        raise ValidationError("`limit` must be greater than or equal to 0.", code="INVALID_LIMIT")
+
+
 class PartitionService:
     """Partition lifecycle, membership and read-through orchestration."""
 
@@ -352,6 +362,7 @@ class PartitionService:
         The router builds the extract links and strips ``_id`` from the
         surfaced metadata, exactly as before.
         """
+        _validate_limit(limit)
         if not await self.file_exists(file_id, partition):
             raise NotFoundError(
                 f"'{file_id}' not found in partition '{partition}'",
@@ -366,16 +377,34 @@ class PartitionService:
             rows = rows[:limit]
         return [{k: v for k, v in row.items() if k != "text"} for row in rows]
 
-    async def list_all_chunks(self, partition: str, include_embedding: bool = True) -> list[dict]:
-        """Return ``{"content", "metadata"}`` dicts for every chunk."""
+    async def list_all_chunks(
+        self,
+        partition: str,
+        include_embedding: bool = True,
+        file_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """Return ``{"content", "metadata"}`` dicts for chunks in a partition.
+
+        ``file_id`` scopes the query to a single file, pushing the filter down
+        to the vector store so the document detail view costs O(file) instead of
+        O(partition). ``limit`` caps the number of chunks returned (a defensive
+        bound for pathologically large files).
+        """
+        _validate_limit(limit)
         await self._ensure_partition(partition)
         excluded = {"text"} if include_embedding else {"text", "vector"}
         output_fields = ["*", "vector"] if include_embedding else ["*"]
+        filters: dict[str, Any] = {"partition": partition}
+        if file_id is not None:
+            filters["file_id"] = file_id
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
-            {"partition": partition},
+            filters,
             output_fields=output_fields,
         )
+        if limit is not None and len(rows) > limit:
+            rows = rows[:limit]
 
         def _meta(row: dict[str, Any]) -> dict[str, Any]:
             meta: dict[str, Any] = {}
