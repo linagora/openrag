@@ -275,7 +275,7 @@ def rec_logger(monkeypatch):
 
 
 def test_sanitize_valid_alternating_unchanged(rec_logger):
-    """Case a: valid alternating history → identical output, no logs."""
+    """Valid alternating history → identical output, no logs."""
     msgs = [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
@@ -284,74 +284,58 @@ def test_sanitize_valid_alternating_unchanged(rec_logger):
     out = QueryService._sanitize_messages(msgs)
     assert out == msgs
     assert rec_logger.errors == []
-    assert rec_logger.warnings == []
 
 
-def test_sanitize_drops_empty_assistant_and_merges_adjacent_users(rec_logger):
-    """Case b: empty assistant between two users → dropped and both users merged."""
+def test_sanitize_empty_content_replaced_with_placeholder(rec_logger):
+    """Empty assistant content → replaced with NO_CONTENT, alternation preserved."""
     msgs = [
         {"role": "user", "content": "first"},
         {"role": "assistant", "content": ""},
         {"role": "user", "content": "second"},
     ]
     out = QueryService._sanitize_messages(msgs)
-    assert len(out) == 1
-    assert out[0]["role"] == "user"
-    assert out[0]["content"] == "first\n\nsecond"
+    assert len(out) == 3
+    assert out[1]["role"] == "assistant"
+    assert out[1]["content"] == "NO_CONTENT"
     assert len(rec_logger.errors) == 1
-    assert rec_logger.errors[0]["dropped_count"] == 1
-    assert len(rec_logger.warnings) == 1
-    assert rec_logger.warnings[0]["merge_count"] == 1
+    assert rec_logger.errors[0]["patched_count"] == 1
 
 
-def test_sanitize_whitespace_only_assistant_dropped(rec_logger):
-    """Case c: assistant with whitespace-only content → dropped."""
+def test_sanitize_whitespace_only_replaced(rec_logger):
+    """Whitespace-only assistant content → replaced with NO_CONTENT."""
     msgs = [
         {"role": "user", "content": "q"},
         {"role": "assistant", "content": "   "},
     ]
     out = QueryService._sanitize_messages(msgs)
-    assert len(out) == 1
-    assert out[0]["role"] == "user"
-    assert rec_logger.errors[0]["dropped_count"] == 1
-    assert rec_logger.warnings == []
+    assert len(out) == 2
+    assert out[1]["content"] == "NO_CONTENT"
+    assert rec_logger.errors[0]["patched_count"] == 1
 
 
-def test_sanitize_assistant_without_content_key_dropped(rec_logger):
-    """Case d: assistant message with no 'content' key → dropped."""
+def test_sanitize_no_content_key_replaced(rec_logger):
+    """Assistant with no 'content' key → replaced with NO_CONTENT, other keys kept."""
     msgs = [
         {"role": "user", "content": "q"},
-        {"role": "assistant"},
+        {"role": "assistant", "name": "bot"},
     ]
     out = QueryService._sanitize_messages(msgs)
-    assert len(out) == 1
-    assert out[0]["role"] == "user"
-    assert rec_logger.errors[0]["dropped_count"] == 1
+    assert len(out) == 2
+    assert out[1]["content"] == "NO_CONTENT"
+    assert out[1]["name"] == "bot"
+    assert rec_logger.errors[0]["patched_count"] == 1
 
 
-def test_sanitize_empty_user_not_dropped(rec_logger):
-    """Case e: user message with empty content → kept (filter is assistant-only)."""
+def test_sanitize_empty_user_not_touched(rec_logger):
+    """User message with empty content → kept as-is (only assistant is patched)."""
     msgs = [{"role": "user", "content": ""}]
     out = QueryService._sanitize_messages(msgs)
     assert out == msgs
     assert rec_logger.errors == []
 
 
-def test_sanitize_consecutive_users_without_prior_drop_merged(rec_logger):
-    """Case f: two consecutive users in input → merge applied, warning emitted."""
-    msgs = [
-        {"role": "user", "content": "a"},
-        {"role": "user", "content": "b"},
-    ]
-    out = QueryService._sanitize_messages(msgs)
-    assert len(out) == 1
-    assert out[0]["content"] == "a\n\nb"
-    assert rec_logger.errors == []
-    assert rec_logger.warnings[0]["merge_count"] == 1
-
-
-def test_sanitize_multiple_empty_assistants_all_dropped(rec_logger):
-    """Case g: multiple empty assistants → all dropped, dropped_count accurate."""
+def test_sanitize_multiple_empty_assistants_all_patched(rec_logger):
+    """Multiple empty assistants → all replaced, patched_count accurate, alternation intact."""
     msgs = [
         {"role": "user", "content": "u1"},
         {"role": "assistant", "content": ""},
@@ -360,37 +344,32 @@ def test_sanitize_multiple_empty_assistants_all_dropped(rec_logger):
         {"role": "user", "content": "u3"},
     ]
     out = QueryService._sanitize_messages(msgs)
-    assert rec_logger.errors[0]["dropped_count"] == 2
-    assert len(out) == 1
-    assert out[0]["role"] == "user"
-    assert out[0]["content"] == "u1\n\nu2\n\nu3"
+    assert len(out) == 5
+    assert out[1]["content"] == "NO_CONTENT"
+    assert out[3]["content"] == "NO_CONTENT"
+    assert rec_logger.errors[0]["patched_count"] == 2
 
 
-def test_sanitize_three_consecutive_users_merged_into_one(rec_logger):
-    """Case h: three users after two drops → merged into single message, merge_count=2."""
+def test_sanitize_multimodal_content_untouched(rec_logger):
+    """Non-string content (multimodal list) → never replaced."""
     msgs = [
-        {"role": "user", "content": "a"},
-        {"role": "assistant", "content": ""},
-        {"role": "user", "content": "b"},
-        {"role": "assistant", "content": ""},
-        {"role": "user", "content": "c"},
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "desc"}]},
     ]
     out = QueryService._sanitize_messages(msgs)
-    assert len(out) == 1
-    assert out[0]["content"] == "a\n\nb\n\nc"
-    assert rec_logger.warnings[0]["merge_count"] == 2
+    assert out == msgs
+    assert rec_logger.errors == []
 
 
 def test_sanitize_empty_list(rec_logger):
-    """Case i: empty input → empty output, no logs."""
+    """Empty input → empty output, no logs."""
     out = QueryService._sanitize_messages([])
     assert out == []
     assert rec_logger.errors == []
-    assert rec_logger.warnings == []
 
 
 def test_sanitize_system_message_preserved(rec_logger):
-    """Case j: system message in head → preserved, not merged with adjacent messages."""
+    """System message in head → preserved untouched."""
     msgs = [
         {"role": "system", "content": "You are an assistant."},
         {"role": "user", "content": "hello"},
@@ -399,4 +378,3 @@ def test_sanitize_system_message_preserved(rec_logger):
     out = QueryService._sanitize_messages(msgs)
     assert out == msgs
     assert rec_logger.errors == []
-    assert rec_logger.warnings == []

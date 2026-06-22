@@ -333,61 +333,32 @@ class QueryService:
     def _sanitize_messages(messages: list[dict]) -> list[dict]:
         """Sanitize the message list before forwarding to the LLM.
 
-        Two passes in order:
+        Replaces ``role="assistant"`` messages whose content is absent or
+        whitespace-only with the placeholder ``"NO_CONTENT"``.  This preserves
+        role alternation (no consecutive same-role messages are created) while
+        acting as a defensive guard against upstream bugs (broken streaming
+        response or client-side history persistence).  Logged at ERROR level so
+        the root cause is traceable.
 
-        1. DROP — removes ``role="assistant"`` messages whose content is
-           absent or whitespace-only.  These arise from upstream bugs (e.g.
-           a streaming response that ended without a final content chunk, or
-           client-side history persistence dropping the content).  Logged at
-           ERROR level so the root cause is traceable.
-
-        2. MERGE — consecutive messages sharing the same role are collapsed
-           into one, with their contents joined by ``"\\n\\n"``.  Non-content
-           keys are taken from the first message in the group.  This restores
-           the strict user/assistant alternation required by the Mistral
-           Jinja chat template; without it a DROP that creates adjacent
-           ``role="user"`` messages would raise a vLLM ``TemplateError``.
+        Non-string content (e.g. multimodal list) is never replaced.
         """
-
-        def _is_empty_str(value: object) -> bool:
-            return isinstance(value, str) and not value.strip()
-
-        # --- DROP ---
-        filtered = [
-            m
-            for m in messages
-            if not (m.get("role") == "assistant" and (m.get("content") is None or _is_empty_str(m.get("content"))))
-        ]
-        dropped_count = len(messages) - len(filtered)
-        if dropped_count:
+        result = []
+        patched_count = 0
+        for msg in messages:
+            content = msg.get("content")
+            if msg.get("role") == "assistant" and (content is None or (isinstance(content, str) and not content.strip())):
+                result.append({**msg, "content": "NO_CONTENT"})
+                patched_count += 1
+            else:
+                result.append(msg)
+        if patched_count:
             logger.error(
-                "Dropped empty assistant message(s) before LLM call — "
+                "Replaced empty assistant message(s) with NO_CONTENT placeholder before LLM call — "
                 "this should never happen, investigate upstream "
                 "(streaming response code or client-side history persistence)",
-                dropped_count=dropped_count,
+                patched_count=patched_count,
             )
-
-        # --- MERGE ---
-        merged: list[dict] = []
-        merge_count = 0
-        for msg in filtered:
-            if merged and merged[-1].get("role") == msg.get("role"):
-                prev_content = merged[-1].get("content")
-                new_content = msg.get("content")
-                if isinstance(prev_content, str) and isinstance(new_content, str):
-                    merged[-1] = {**merged[-1], "content": f"{prev_content}\n\n{new_content}"}
-                else:
-                    merged.append(dict(msg))
-                    continue
-                merge_count += 1
-            else:
-                merged.append(dict(msg))
-        if merge_count:
-            logger.warning(
-                "Merged consecutive same-role messages after sanitization "
-                "(restored strict role alternation required by Mistral chat template)",
-                merge_count=merge_count,
-            )
+        return result
 
         return merged
 
