@@ -16,7 +16,6 @@ import { Separator } from "@/components/ui/separator";
 import {
   getTaskStatus,
   getTaskError,
-  getTaskLogs,
   cancelTask,
   isActiveState,
   isTerminalState,
@@ -42,14 +41,6 @@ export default function JobDetailPage() {
   const state = taskQuery.data?.task_state;
   const active = !!state && isActiveState(state);
   const failed = state === "FAILED";
-
-  const logsQuery = useQuery({
-    queryKey: ["task-logs", id],
-    queryFn: () => getTaskLogs(id!),
-    enabled: !!id,
-    // Keep tailing logs while the task is still running.
-    refetchInterval: active ? 3000 : false,
-  });
 
   const errorQuery = useQuery({
     queryKey: ["task-error", id],
@@ -198,25 +189,6 @@ export default function JobDetailPage() {
           </CardContent>
         </Card>
       )}
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Logs</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {logsQuery.isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading logs…</p>
-          ) : logsQuery.isError ? (
-            <p className="text-sm text-muted-foreground">No logs available for this task.</p>
-          ) : logsQuery.data?.logs?.length ? (
-            <pre className="max-h-[480px] overflow-auto rounded-md bg-muted p-4 text-xs leading-relaxed whitespace-pre-wrap">
-              {logsQuery.data.logs.join("\n")}
-            </pre>
-          ) : (
-            <p className="text-sm text-muted-foreground">No logs yet.</p>
-          )}
-        </CardContent>
-      </Card>
     </div>
   );
 }
