@@ -140,7 +140,7 @@ files = Table(
     Column("relationship_id", String, nullable=True, index=True),
     Column("parent_id", String, nullable=True, index=True),
     Column(
-        "created_at",
+        "indexed_at",
         DateTime(timezone=True),
         server_default=text("now()"),
         nullable=False,

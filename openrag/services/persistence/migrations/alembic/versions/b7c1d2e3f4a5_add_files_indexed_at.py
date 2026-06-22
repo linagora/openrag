@@ -1,4 +1,4 @@
-"""add files.created_at
+"""add files.indexed_at
 
 Revision ID: b7c1d2e3f4a5
 Revises: 06dd2101ea3a
@@ -27,12 +27,15 @@ def upgrade() -> None:
 
     Existing rows have no recorded index time, so the ``server_default`` backfills
     them to the migration run time; newly indexed files get their true insert time.
+
+    Named ``indexed_at`` (not ``created_at``) because ``created_at`` is the
+    reserved client-supplied temporal field stored in ``file_metadata``.
     """
-    if not column_exists("files", "created_at"):
+    if not column_exists("files", "indexed_at"):
         op.add_column(
             "files",
             sa.Column(
-                "created_at",
+                "indexed_at",
                 sa.DateTime(timezone=True),
                 nullable=False,
                 server_default=sa.text("now()"),
@@ -42,5 +45,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema."""
-    if column_exists("files", "created_at"):
-        op.drop_column("files", "created_at")
+    if column_exists("files", "indexed_at"):
+        op.drop_column("files", "indexed_at")
