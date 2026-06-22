@@ -346,7 +346,9 @@ class QueryService:
         patched_count = 0
         for msg in messages:
             content = msg.get("content")
-            if msg.get("role") == "assistant" and (content is None or (isinstance(content, str) and not content.strip())):
+            if msg.get("role") == "assistant" and (
+                content is None or (isinstance(content, str) and not content.strip())
+            ):
                 result.append({**msg, "content": "NO_CONTENT"})
                 patched_count += 1
             else:
