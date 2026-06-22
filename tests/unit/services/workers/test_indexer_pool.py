@@ -283,11 +283,20 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(postgres_store, "PostgresStore", lambda *args, **kwargs: Store())
     monkeypatch.setattr(parser_bridge, "DocSerializerBridgeParser", lambda **kwargs: object())
     monkeypatch.setattr(pipeline_builder, "build_indexing_pipeline", fake_build_pipeline)
-    monkeypatch.setattr(module.ray, "get_actor", lambda *args, **kwargs: object())
+    actor_calls = []
+
+    def fake_get_actor(*args, **kwargs):
+        actor_calls.append((args, kwargs))
+        return object()
+
+    monkeypatch.setattr(module.ray, "get_actor", fake_get_actor)
     monkeypatch.setattr(module, "IndexerWorker", Worker)
 
     actor_class = module.IndexerPool.__ray_metadata__.modified_class
     actor_class()
 
+    assert actor_calls
+    assert actor_calls[0][0][0] == "TaskStateManager"
+    assert actor_calls[0][1].get("namespace") == "openrag"
     assert captured["contextualizer_factory"] is contextualizer_factory
     assert captured["topic_tagger_factory"] is topic_tagger_factory
