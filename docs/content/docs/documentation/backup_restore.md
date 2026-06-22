@@ -3,6 +3,17 @@ title: How to backup or restore OpenRag partition/data ?
 ---
 
 # How to backup partitions?
+
+## Storage lifecycle
+
+Docker Compose uses named volumes for OpenRAG state by default: app data, logs, model cache, PostgreSQL, Milvus, etcd, and MinIO. This makes local deployments closer to Kubernetes/PVC behavior and avoids writing runtime data into the repository tree.
+
+Use `docker compose down` to stop the stack while keeping data. Use `docker compose down -v` only when you intentionally want to remove the named volumes and start from a clean state.
+
+If you need host-mounted storage, set the matching volume variable in `.env` (`DATA_VOLUME`, `DB_VOLUME`, `MILVUS_VOLUME`, `ETCD_VOLUME`, `MINIO_VOLUME`, `LOG_VOLUME`, or `MODEL_WEIGHTS_VOLUME`). In that case, lifecycle and permissions are managed by the host path owner.
+
+For Kubernetes and OpenShift, the Helm chart stores state in PVCs. Treat PVC snapshots or storage-provider backups as infrastructure backups, and use the OpenRAG backup commands below when you need a portable partition-level export.
+
 ## Backup one partition
 
 :::caution

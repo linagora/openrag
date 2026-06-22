@@ -1,0 +1,8 @@
+services:
+  openrag:
+    volumes:
+      - ../../openrag:/app/openrag
+
+  openrag-cpu:
+    volumes:
+      - ../../openrag:/app/openrag
