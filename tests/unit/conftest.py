@@ -51,7 +51,7 @@ class MockVectorStore(VectorStore):
         self.collections: dict[str, dict[str, Any]] = {}
         self.search_results: list[dict[str, Any]] = []
 
-    async def upsert(self, chunks: list[Any], collection: str = "default") -> int:
+    async def upsert(self, chunks: list[Any], collection: str = "default", *, indexed_at=None) -> int:
         store = self.collections.setdefault(collection, {})
         for chunk in chunks:
             store[getattr(chunk, "id", id(chunk))] = chunk

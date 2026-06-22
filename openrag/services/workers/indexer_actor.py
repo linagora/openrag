@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,8 @@ class IndexerWorker:
         await self._tsm.set_state.remote(task_id, "SERIALIZING")
         try:
             document = _load_document(path, metadata, partition, indexation_config=indexation_config)
+            # One indexation timestamp for this file, shared by the Milvus chunks
+            # (via the store stage) and the Postgres catalog row, so they agree.
             row: dict[str, Any] = {
                 "document": document,
                 "partition": partition,
@@ -72,7 +75,9 @@ class IndexerWorker:
                 "indexation_config": indexation_config,
                 "embedder_name": embedder_name,
             }
-            await self._pipeline.run(row)
+            row = await self._pipeline.run(row)
+            indexed_at = row.get("indexed_at")
+
             if self._document_repo is not None:
                 await _write_catalog_record(
                     doc_repo=self._document_repo,
@@ -81,6 +86,7 @@ class IndexerWorker:
                     user=user,
                     replace=replace,
                     indexation_config=indexation_config,
+                    indexed_at=indexed_at,
                 )
             if self._topic_tag_repo is not None:
                 await _replace_topic_tags_if_needed(
@@ -106,6 +112,7 @@ async def _write_catalog_record(
     user: dict[str, Any] | None,
     replace: bool,
     indexation_config: dict[str, Any] | None,
+    indexed_at: datetime | None = None,
 ) -> None:
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
@@ -117,6 +124,7 @@ async def _write_catalog_record(
             file_metadata=file_metadata,
             relationship_id=metadata.get("relationship_id"),
             parent_id=metadata.get("parent_id"),
+            indexed_at=indexed_at,
             **config_kwargs,
         )
         return
@@ -128,6 +136,7 @@ async def _write_catalog_record(
         user_id=user.get("id") if user else None,
         relationship_id=metadata.get("relationship_id"),
         parent_id=metadata.get("parent_id"),
+        indexed_at=indexed_at,
         **config_kwargs,
     )
 

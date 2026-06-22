@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import MutableMapping
+from datetime import UTC, datetime
 from typing import Any
 
 from core.models.chunk import Chunk
@@ -32,8 +33,15 @@ async def store_stage(
             await vector_store.ensure_collection("default", len(embedding))
 
         effective_timeout = stage_timeout(timeout, len(chunks), per_item_timeout=per_chunk_timeout)
+        # One indexation timestamp shared by the Milvus chunks (via the upsert
+        # arg below) and the Postgres catalog row (read back from the row in the
+        # orchestrator). Keep it a ``datetime``: the catalog write binds it to a
+        # ``timestamptz`` column and asyncpg rejects a pre-stringified value.
+        indexed_at = datetime.now(UTC)
+        row["indexed_at"] = indexed_at
+
         row["stored_count"] = await run_with_optional_timeout(
-            lambda: vector_store.upsert(chunks),
+            lambda: vector_store.upsert(chunks, indexed_at=indexed_at),
             effective_timeout,
         )
         row["stage"] = "stored"
