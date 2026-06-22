@@ -1,15 +1,15 @@
-"""Transitional port for the document-serialization operation.
+"""Port for the document-serialization operation (file → raw text).
 
-``ConversionService`` (Phase 8E) exposes the ``extractText`` tool —
-serialize an uploaded file to raw text. The work runs in the
-``DocSerializer`` Ray actor; defining it on a dedicated port keeps the
-orchestrator Ray-free (8H: no Ray import / remote call under
-``services/orchestrators/``). A small shim in ``services/storage/``
-adapts the actor to this interface during the shim period; Phase 9
-swaps it for a direct serializer call and deletes the shim.
+``ConversionService`` exposes the ``extractText`` tool / ``/extract`` route —
+serialize an uploaded file to raw text. Defining the operation on a dedicated
+port keeps the orchestrator decoupled from the parser/Ray infrastructure
+(no Ray import / remote call under ``services/orchestrators/``); the
+composition root injects the concrete implementation
+(``services/workers/parsers/file_serializer.py::ParserFileSerializer``, which
+runs the parser dispatcher in-process).
 
-No Ray / LangChain types leak across this boundary — the serialized
-document is returned as its plain text content.
+No Ray / LangChain types leak across this boundary — the serialized document
+is returned as its plain text content.
 """
 
 from __future__ import annotations

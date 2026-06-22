@@ -10,6 +10,7 @@ from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.topic_tags import TopicTagger
+from core.models.document import Document, DocumentType
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
 from services.workers.stages.caption import caption_stage
@@ -47,6 +48,10 @@ class IndexingPipeline:
     embedder: Embedder
     vector_store: VectorStore
     vlm: VLM | None = None
+    # Global gate for captioning images *embedded* in other documents
+    # (mirrors ``config.loader.image_captioning``). Standalone image files are
+    # always captioned when a VLM is available, regardless of this flag.
+    image_captioning: bool = True
     contextualizer: ChunkContextualizer | None = None
     topic_tagger: TopicTagger | None = None
     timeouts: PipelineTimeouts = PipelineTimeouts()
@@ -65,18 +70,19 @@ class IndexingPipeline:
         parser = self._select_parser(config)
         chunker = self._select_chunker(config)
         embedder = self._select_embedder(row)
-        vlm = self._select_vlm(config)
         contextualizer = self._select_contextualizer(config)
         topic_tagger = self._select_topic_tagger(config)
 
         await parse_stage(row, parser, timeout=self.timeouts.parse)
-        if vlm is not None:
-            await caption_stage(
-                row,
-                vlm,
-                timeout=self.timeouts.caption,
-                per_image_timeout=self.timeouts.caption_per_image,
-            )
+        if self._should_caption(row, config):
+            vlm = self._select_vlm(config)
+            if vlm is not None:
+                await caption_stage(
+                    row,
+                    vlm,
+                    timeout=self.timeouts.caption,
+                    per_image_timeout=self.timeouts.caption_per_image,
+                )
         await chunk_stage(row, chunker, timeout=self.timeouts.chunk)
         if contextualizer is not None:
             await contextualize_stage(
@@ -134,12 +140,25 @@ class IndexingPipeline:
         return self.embedder
 
     def _select_vlm(self, config: IndexationPipelineConfig | None) -> VLM | None:
-        if config is not None:
-            if not config.enable_image_captioning:
-                return None
-            if self.vlm_factory is not None:
-                return self.vlm_factory(config.vlm or "default")
+        """Pick the captioning VLM instance (availability only — policy is in
+        ``_should_caption``)."""
+        if config is not None and self.vlm_factory is not None:
+            return self.vlm_factory(config.vlm or "default")
         return self.vlm
+
+    def _should_caption(self, row: MutableMapping[str, Any], config: IndexationPipelineConfig | None) -> bool:
+        """Decide whether to caption this document's images.
+
+        A standalone image file's caption is its only text content, so it is
+        always captioned when a VLM is available (legacy ``ImageLoader``
+        parity). Images embedded in other documents are gated by the global
+        ``image_captioning`` flag and the per-partition setting.
+        """
+        document = row.get("document")
+        if isinstance(document, Document) and document.content_type is DocumentType.IMAGE:
+            return True
+        per_partition = config.enable_image_captioning if config is not None else True
+        return self.image_captioning and per_partition
 
     def _select_contextualizer(self, config: IndexationPipelineConfig | None) -> ChunkContextualizer | None:
         if config is not None:
@@ -165,6 +184,7 @@ def build_indexing_pipeline(
     embedder: Embedder,
     vector_store: VectorStore,
     vlm: VLM | None = None,
+    image_captioning: bool = True,
     contextualizer: ChunkContextualizer | None = None,
     topic_tagger: TopicTagger | None = None,
     timeouts: PipelineTimeouts | None = None,
@@ -184,6 +204,7 @@ def build_indexing_pipeline(
         embedder=embedder,
         vector_store=vector_store,
         vlm=vlm,
+        image_captioning=image_captioning,
         contextualizer=contextualizer,
         topic_tagger=topic_tagger,
         timeouts=timeouts or PipelineTimeouts(),

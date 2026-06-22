@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from core.models.document import Document
-from services.workers.parsers.doc_serializer_bridge import INDEXATION_CONFIG_METADATA_KEY
 from services.workers.pipeline_builder import IndexingPipeline
 
 
@@ -61,13 +61,13 @@ class IndexerWorker:
         """
         await self._tsm.set_state.remote(task_id, "SERIALIZING")
         try:
-            document = _load_document(path, metadata, partition, indexation_config=indexation_config)
+            document = await _load_document(path, metadata, partition)
             # One indexation timestamp for this file, shared by the Milvus chunks
             # (via the store stage) and the Postgres catalog row, so they agree.
             row: dict[str, Any] = {
                 "document": document,
                 "partition": partition,
-                "filename": Path(path).name,
+                "filename": document.filename,
                 "language": metadata.get("language", "en"),
                 "replace": replace,
                 "user": user,
@@ -178,24 +178,47 @@ async def _replace_topic_tags_if_needed(
     )
 
 
-def _load_document(
+async def _load_document(
     path: str,
     metadata: dict[str, Any],
     partition: str,
-    *,
-    indexation_config: dict[str, Any] | None = None,
 ) -> Document:
     p = Path(path)
-    document_metadata = dict(metadata)
-    if indexation_config is not None:
-        document_metadata[INDEXATION_CONFIG_METADATA_KEY] = dict(indexation_config)
+    file_id = metadata.get("file_id")
+    if not file_id:
+        # file_id is a required route path param, force-set by
+        # IndexingService._build_metadata. Missing here means a broken upstream
+        # contract — fail loudly rather than silently persisting chunks under a
+        # non-queryable id (e.g. the temp upload's basename).
+        raise ValueError("_load_document requires metadata['file_id']")
+    # ``Document.id`` is the file's identity, not a random uuid: parsers set
+    # ``ProcessedDocument.document_id = document.id`` and the chunker uses that as
+    # ``Chunk.document_id`` / ``file_id``. If this defaulted to uuid4, chunks would
+    # persist under an id the ``/partition/{partition}/file/{file_id}`` lookup
+    # never queries by (zero chunks found).
+    #
+    # Per-partition indexation_config reaches the pipeline via ``row["indexation_config"]``
+    # (see IndexerWorker.process_file); it is intentionally not stamped into the
+    # document metadata so it never leaks into chunk metadata.
+    filename = _display_filename(path, metadata)
+    raw_bytes = await asyncio.to_thread(p.read_bytes)
     return Document(
-        filename=metadata.get("file_id") or p.name,
-        raw_bytes=p.read_bytes(),
-        content_type=Document.detect_content_type(p.name),
+        id=file_id,
+        filename=filename,
+        raw_bytes=raw_bytes,
+        content_type=Document.detect_content_type(filename),
         partition=partition,
-        metadata=document_metadata,
+        metadata=dict(metadata),
     )
+
+
+def _display_filename(path: str, metadata: dict[str, Any]) -> str:
+    """Return the user-facing filename while falling back to the stored path."""
+
+    filename = metadata.get("original_filename") or metadata.get("filename")
+    if filename:
+        return str(filename)
+    return Path(path).name
 
 
 __all__ = ["IndexerWorker"]

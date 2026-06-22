@@ -9,7 +9,6 @@ import pytest
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from services.workers.indexer_actor import IndexerWorker, _load_document
-from services.workers.parsers.doc_serializer_bridge import INDEXATION_CONFIG_METADATA_KEY
 from services.workers.pipeline_builder import build_indexing_pipeline
 
 # ---------------------------------------------------------------------------
@@ -112,33 +111,58 @@ class FakeTopicTagRepo:
 # ---------------------------------------------------------------------------
 
 
-def test_load_document_reads_bytes_and_detects_type(tmp_path: Path) -> None:
-    p = tmp_path / "report.pdf"
+@pytest.mark.asyncio
+async def test_load_document_reads_bytes_and_detects_type_from_original_filename(tmp_path: Path) -> None:
+    p = tmp_path / "upload-without-extension"
     p.write_bytes(b"%PDF-1.4")
-    doc = _load_document(str(p), {"file_id": "fid-1"}, "tenant-a")
+    doc = await _load_document(
+        str(p),
+        {"file_id": "fid-1", "filename": "safe-name", "original_filename": "report.pdf"},
+        "tenant-a",
+    )
 
     assert doc.raw_bytes == b"%PDF-1.4"
     assert doc.content_type == DocumentType.PDF
     assert doc.partition == "tenant-a"
-    assert doc.filename == "fid-1"
+    assert doc.filename == "report.pdf"
+    # Document.id must be the file_id (not a random uuid): the chunker derives
+    # Chunk.document_id / file_id from ProcessedDocument.document_id == document.id.
+    assert doc.id == "fid-1"
 
 
-def test_load_document_falls_back_to_filename_when_no_file_id(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_load_document_requires_file_id(tmp_path: Path) -> None:
     p = tmp_path / "note.txt"
     p.write_bytes(b"hi")
-    doc = _load_document(str(p), {}, "p")
 
-    assert doc.filename == "note.txt"
+    # file_id is force-set upstream by IndexingService._build_metadata; if it is
+    # ever missing we fail loudly rather than persist chunks under a bad id.
+    with pytest.raises(ValueError, match="file_id"):
+        await _load_document(str(p), {}, "p")
 
 
-def test_load_document_attaches_internal_indexation_config(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_load_document_does_not_leak_internal_keys_into_metadata(tmp_path: Path) -> None:
     p = tmp_path / "note.txt"
     p.write_bytes(b"hi")
-    config = {"enable_image_captioning": False}
 
-    doc = _load_document(str(p), {"source": "note.txt"}, "p", indexation_config=config)
+    doc = await _load_document(str(p), {"file_id": "fid", "source": "note.txt"}, "p")
 
-    assert doc.metadata[INDEXATION_CONFIG_METADATA_KEY] == config
+    # indexation_config reaches the pipeline via row["indexation_config"], never
+    # the document metadata, so it cannot leak into chunk metadata.
+    assert doc.metadata == {"file_id": "fid", "source": "note.txt"}
+    assert all(not key.startswith("_openrag") for key in doc.metadata)
+
+
+@pytest.mark.asyncio
+async def test_load_document_falls_back_to_stored_path_name(tmp_path: Path) -> None:
+    p = tmp_path / "audio.flac"
+    p.write_bytes(b"flac")
+
+    doc = await _load_document(str(p), {"file_id": "fid"}, "p")
+
+    assert doc.filename == "audio.flac"
+    assert doc.content_type == DocumentType.AUDIO
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +220,7 @@ async def test_process_file_pipeline_failure_sets_failed_and_reraises(tmp_path: 
         await worker.process_file(
             task_id="t2",
             path=str(path),
-            metadata={},
+            metadata={"file_id": "f1"},
             partition="p",
         )
 
@@ -218,7 +242,7 @@ async def test_process_file_missing_path_raises_and_sets_failed() -> None:
         await worker.process_file(
             task_id="t3",
             path="/nonexistent/file.txt",
-            metadata={},
+            metadata={"file_id": "f1"},
             partition="p",
         )
 
@@ -231,14 +255,23 @@ async def test_process_file_passes_partition_and_filename_to_row(tmp_path: Path)
     path.write_bytes(b"hello")
 
     seen_partitions: list[str] = []
+    seen_documents: list[Document] = []
 
     class TrackingChunker:
         def chunk(self, document: ProcessedDocument, partition: str = "default") -> list[Chunk]:
             seen_partitions.append(partition)
             return [Chunk(id="c1", text="hello", partition=partition)]
 
+    class TrackingParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            seen_documents.append(document)
+            return ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="hello")])
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.TEXT.value]
+
     pipeline = build_indexing_pipeline(
-        parser=FakeParser(ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="hello")])),
+        parser=TrackingParser(),
         chunker=TrackingChunker(),
         embedder=FakeEmbedder(),
         vector_store=FakeVectorStore(),
@@ -248,11 +281,12 @@ async def test_process_file_passes_partition_and_filename_to_row(tmp_path: Path)
     await worker.process_file(
         task_id="t4",
         path=str(path),
-        metadata={"file_id": "fid"},
+        metadata={"file_id": "fid", "original_filename": "original-note.txt"},
         partition="tenant-b",
     )
 
     assert seen_partitions == ["tenant-b"]
+    assert seen_documents[0].filename == "original-note.txt"
 
 
 @pytest.mark.asyncio

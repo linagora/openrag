@@ -11,7 +11,7 @@ OpenRAG is an open source Retrieval Augmented Generation (RAG) solution. This gu
 ### Prerequisites
 - [Docker](https://www.docker.com/get-started) and **Docker Compose**
 - Your hardware should meet these specifications:
-  - **CPU deployment**: Minimum **13 GiB** RAM for light PDF parsers (**`PyMuPDF4LLMLoader`, `PyMuPDFLoader`**), or **23 GiB** RAM for heavier parsers like **`MarkerLoader`** (refer to [this section](/openrag/getting_started/quickstart/#3-file-parser-configuration) for details)
+  - **CPU deployment**: Minimum **13 GiB** RAM for light PDF parsers (**`PyMuPDFLoader`**), or **23 GiB** RAM for heavier parsers like **`MarkerLoader`** (refer to [this section](/openrag/getting_started/quickstart/#3-file-parser-configuration) for details)
   - **GPU deployment**: **16 GB** GPU memory recommended (for systems with separate CPU and GPU memory)
 
 ### Installation and Configuration
@@ -37,7 +37,7 @@ Here is a brief overview of key environment variables to configure:
 All supported file format parsers are pre-configured. For PDF processing, **[MarkerLoader](https://github.com/datalab-to/marker)** serves as the default parser, offering comprehensive support for OCR-scanned documents, complex layouts, tables, and embedded images. MarkerLoader operates efficiently on both GPU and CPU environments.
 
 :::note 
-For **`CPU-only deployments`** or lightweight testing scenarios, you can consider switching to **`PyMuPDF4LLMLoader`** or **`PyMuPDFLoader`**. To change the loader, set the **`PDFLoader`** variable like this `PDFLoader=PyMuPDF4LLMLoader`.
+For **`CPU-only deployments`** or lightweight testing scenarios, you can consider switching to **`PyMuPDFLoader`**. To change the loader, set the **`PDFLoader`** variable like this `PDFLoader=PyMuPDFLoader`.
 :::caution[Important]
 These alternative loaders have limitations - they cannot process non-searchable (image-based) PDFs and do not extract or handle embedded images.
 :::

@@ -4,9 +4,9 @@ Business logic extracted from ``routers/tools.py`` (the ``extractText``
 tool) and ``routers/extract.py`` (chunk-by-id lookup). Both were thin
 wrappers; this service keeps them Ray-free:
 
-- serialization runs in the ``DocSerializer`` Ray actor, reached through
-  the :class:`~core.indexing.serializer.FileSerializer` port (the
-  container injects the ``SerializerRayShim`` during the shim period);
+- serialization goes through the :class:`~core.indexing.serializer.FileSerializer`
+  port (the container injects the in-process ``ParserFileSerializer``, which runs
+  the parser dispatcher directly — GPU backends still dispatch to their pools);
 - chunk lookup goes through the clean :class:`VectorStore` port
   (``query_chunks_by_filter`` on the Milvus ``_id``), mirroring how
   PartitionService reads chunks — no LangChain ``Document`` leaks out.

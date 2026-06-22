@@ -236,7 +236,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     import services.storage.milvus_store as milvus_store
     import services.storage.postgres_store as postgres_store
     import services.workers.indexer_pool as module
-    import services.workers.parsers.doc_serializer_bridge as parser_bridge
+    import services.workers.parsers.parser_dispatcher as parser_dispatcher
     import services.workers.pipeline_builder as pipeline_builder
 
     captured = {}
@@ -257,6 +257,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
             batch_size=32,
             embed_concurrency=2,
         ),
+        loader=SimpleNamespace(image_captioning=True),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )
@@ -281,7 +282,8 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
     monkeypatch.setattr(milvus_store, "MilvusVectorStore", lambda _cfg: object())
     monkeypatch.setattr(postgres_store, "PostgresStore", lambda *args, **kwargs: Store())
-    monkeypatch.setattr(parser_bridge, "DocSerializerBridgeParser", lambda **kwargs: object())
+    monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg: object())
+    monkeypatch.setattr(parser_dispatcher, "build_caption_vlm", lambda _cfg: object())
     monkeypatch.setattr(pipeline_builder, "build_indexing_pipeline", fake_build_pipeline)
     actor_calls = []
 
