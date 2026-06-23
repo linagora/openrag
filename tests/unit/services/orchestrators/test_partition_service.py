@@ -154,6 +154,7 @@ async def test_create_partition_rejects_reserved_name(name):
     with pytest.raises(ValidationError) as ei:
         await _svc(prepo=prepo).create_partition(name, 1)
     assert ei.value.status_code == 400
+    assert ei.value.code == "RESERVED_PARTITION_NAME"
     assert prepo.created == []
 
 
