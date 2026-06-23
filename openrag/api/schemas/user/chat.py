@@ -28,7 +28,9 @@ class OpenAIChatCompletionRequest(BaseModel):
     response_format: dict[str, Any] | None = Field(
         None,
         description="OpenAI response_format, e.g. {'type': 'json_object'} or "
-        "{'type': 'json_schema', 'json_schema': {...}}. Forwarded to the LLM.",
+        "{'type': 'json_schema', 'json_schema': {...}}. Forwarded to the LLM. "
+        "Note: forcing JSON output on a partition (RAG) query suppresses the "
+        "inline [Sources: N] citations, so all retrieved sources are returned.",
     )
     metadata: dict[str, Any] | None = Field(
         {

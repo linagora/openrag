@@ -71,6 +71,17 @@ def test_chat_request_passes_through_extra_openai_params():
     assert dump["seed"] == 42
 
 
+def test_completion_request_omits_unset_nulls():
+    """The /completions router dumps with exclude_none=True (matching chat), so
+    optional params left unset are not sent as explicit null to strict providers
+    """
+    request = OpenAICompletionRequest(prompt="hi")
+    dump = request.model_dump(exclude_none=True)
+
+    for unset in ("seed", "stop", "logit_bias", "logprobs"):
+        assert unset not in dump
+
+
 def test_search_schema_preserves_existing_defaults():
     request = SearchRequest(query="hello")
 

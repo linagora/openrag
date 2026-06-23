@@ -398,7 +398,7 @@ async def openai_completion(
 
     resp = await service.complete(
         partitions=partitions,
-        payload=request.model_dump(),
+        payload=request.model_dump(exclude_none=True),
         prepare_sources=lambda docs, _web: __prepare_sources(request2, docs),
     )
     log.debug("Returning completion response.")
