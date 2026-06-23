@@ -107,7 +107,6 @@ services:
         # Same-origin: nginx proxies the API, so the SPA uses relative calls.
         VITE_API_BASE_URL: ""
         VITE_BASE_PATH: "/app/"
-    container_name: openrag-admin-ui
     restart: unless-stopped
     ports:
       - "${ADMIN_UI_PORT:-8081}:80"
