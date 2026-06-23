@@ -1,5 +1,5 @@
 include:
-  - milvus/milvus.yaml
+  - ${MILVUS_COMPOSE:-milvus/milvus.yaml}
   - ${CHAINLIT_DATALAYER_COMPOSE:-../../extern/dummy.yaml}
   - ../../extern/reranker/${RERANKER_PROVIDER:-infinity}.yaml
   - ${TRANSCRIBER_COMPOSE:-../../extern/dummy.yaml}
@@ -21,11 +21,12 @@ x-openrag: &openrag_template
     # shadowed for other users.
     - "host.docker.internal:host-gateway"
   volumes:
-    - ${DATA_VOLUME:-appdata}:/app/data
+    - ${DATA_VOLUME:-../../data}:/app/data
     - ../../i8n:/app/openrag/.chainlit/translations
-    - ${MODEL_WEIGHTS_VOLUME:-modelweights}:/app/model_weights # Model weights for RAG
+    - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
+    - ../../openrag:/app/openrag # For dev mode
     - /$SHARED_ENV:/ray_mount/.env # Shared environment variables
-    - ${LOG_VOLUME:-logs}:/app/logs
+    - ${LOG_VOLUME:-../../logs}:/app/logs # For dev mode
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
     - ${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
@@ -52,7 +53,7 @@ x-vllm: &vllm_template
     <<: *vllm_env
   ipc: "host"
   volumes:
-    - ${VLLM_CACHE:-modelweights}:/root/.cache/huggingface # Set VLLM_CACHE to a host path if you want to reuse a local Hugging Face cache.
+    - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface # put ./vllm_cache if you want to have the weights on the vllm_cache folder in your project
   command: >
     --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
     --trust-remote-code
@@ -136,7 +137,7 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-root_password}
       - POSTGRES_USER=${POSTGRES_USER:-root}
     volumes:
-      - ${DB_VOLUME:-pgdata}:/var/lib/postgresql/data
+      - ${DB_VOLUME:-../../db}:/var/lib/postgresql/data
       - ../../scripts/postgres-init:/docker-entrypoint-initdb.d:ro
     expose:
       - 5432

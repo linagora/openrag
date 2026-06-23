@@ -197,20 +197,22 @@ The PostgreSQL database is configured using the following environment variables:
 
 ### Compose Storage Volumes
 
-The main Docker Compose stack uses named volumes by default. Set these variables only when you intentionally want to bind data to a host path or a custom volume name.
+The main Docker Compose stack keeps the historical host-path defaults. Set these variables when you want to move state elsewhere, including Docker named volumes.
 
-For live source-code mounting during local development, include `infra/compose/docker-compose.dev.yaml` when starting the stack.
+For an opt-in named-volume profile, copy the values from `infra/compose/.env.named-volumes.example` into your `.env`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATA_VOLUME` | `appdata` | OpenRAG uploaded files and app data mounted at `/app/data`. |
-| `LOG_VOLUME` | `logs` | OpenRAG logs mounted at `/app/logs`. |
-| `MODEL_WEIGHTS_VOLUME` | `modelweights` | Model cache mounted at `/app/model_weights`. |
-| `VLLM_CACHE` | `modelweights` | Hugging Face cache used by vLLM, reranker, and transcriber services. Set this to a host path only when you intentionally want to reuse a local model cache. |
-| `DB_VOLUME` | `pgdata` | PostgreSQL data mounted at `/var/lib/postgresql/data`. |
-| `ETCD_VOLUME` | `etcd` | Milvus etcd data mounted at `/etcd`. |
-| `MINIO_VOLUME` | `minio` | Milvus object storage data mounted at `/minio_data`. |
-| `MILVUS_VOLUME` | `milvus` | Milvus data mounted at `/var/lib/milvus`. |
+| `DATA_VOLUME` | `../../data` | OpenRAG uploaded files and app data mounted at `/app/data`. |
+| `LOG_VOLUME` | `../../logs` | OpenRAG logs mounted at `/app/logs`. |
+| `MODEL_WEIGHTS_VOLUME` | `~/.cache/huggingface` | Model cache mounted at `/app/model_weights`. |
+| `VLLM_CACHE` | `/root/.cache/huggingface` | Hugging Face cache used by vLLM, reranker, and transcriber services. |
+| `DB_VOLUME` | `../../db` | PostgreSQL data mounted at `/var/lib/postgresql/data`. |
+| `MILVUS_VOLUME_DIRECTORY` | `./volumes` | Parent directory for Milvus, etcd, and MinIO host-path storage. |
+| `MILVUS_COMPOSE` | `milvus/milvus.yaml` | Milvus compose include. Use `milvus/milvus.named-volumes.yaml` for the named-volume profile. |
+| `ETCD_VOLUME` | `etcd` | Milvus etcd named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
+| `MINIO_VOLUME` | `minio` | Milvus object storage named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
+| `MILVUS_VOLUME` | `milvus` | Milvus named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
 
 ## Chat Pipeline
 ### LLM & VLM Configuration

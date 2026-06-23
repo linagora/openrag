@@ -16,7 +16,7 @@ services:
       - VLLM_MAX_AUDIO_CLIP_FILESIZE_MB=10000
     ipc: "host"
     volumes:
-      - ${VLLM_CACHE:-modelweights}:/root/.cache/huggingface
+      - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface
     command: >
       --model ${TRANSCRIBER_MODEL:-openai/whisper-large-v3-turbo}
       --trust-remote-code

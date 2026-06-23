@@ -13,7 +13,7 @@ x-reranker: &reranker_template
     - VLLM_SLEEP_WHEN_IDLE=1  # Avoid 100% CPU usage when idle
   ipc: "host"
   volumes:
-    - ${VLLM_CACHE:-modelweights}:/root/.cache/huggingface
+    - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface
   command: >
     --model ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
     --trust-remote-code

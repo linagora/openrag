@@ -4,7 +4,7 @@ x-reranker: &reranker_template
       aliases:
         - reranker
   volumes:
-    - ${VLLM_CACHE:-modelweights}:/app/.cache/huggingface # Model weights for RAG
+    - ${VLLM_CACHE:-/root/.cache/huggingface}:/app/.cache/huggingface # Model weights for RAG
   # ports:
   #   - ${RERANKER_PORT:-7997}:7997
 
