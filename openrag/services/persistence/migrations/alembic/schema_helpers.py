@@ -1,8 +1,8 @@
 """Shared inspection helpers for idempotent Alembic migrations.
 
-Needed because `Base.metadata.create_all()` at app startup may create the
-current-model schema directly on fresh (or older) deployments — so migrations
-must tolerate objects already existing.
+Needed because older deployments may already contain some objects when a
+newer release applies migrations. Migration scripts should tolerate objects
+already existing.
 """
 
 from alembic import op

@@ -57,6 +57,8 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("POSTGRES_PASSWORD", "rdb.password", str),
     ("DEFAULT_FILE_QUOTA", "rdb.default_file_quota", int),
     ("POSTGRES_DATABASE", "rdb.database", str),
+    ("POSTGRES_AUTO_CREATE_DB", "rdb.auto_create_database", bool),
+    ("POSTGRES_RUN_MIGRATIONS", "rdb.run_migrations", bool),
     ("POSTGRES_POOL_MIN_SIZE", "rdb.pool_min_size", int),
     ("POSTGRES_POOL_MAX_SIZE", "rdb.pool_max_size", int),
     ("POSTGRES_COMMAND_TIMEOUT", "rdb.command_timeout", int),

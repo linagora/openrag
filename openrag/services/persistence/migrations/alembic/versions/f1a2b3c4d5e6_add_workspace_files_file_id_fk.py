@@ -28,9 +28,8 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     """Migrate workspace_files.file_id from string to integer FK referencing files.id.
 
-    Idempotent: Base.metadata.create_all() at app startup may have already
-    created workspace_files with file_id as INTEGER on older deployments — in
-    which case the conversion is a no-op.
+    Idempotent: older deployments may already have workspace_files with
+    file_id as INTEGER, in which case the conversion is a no-op.
     """
     if column_type_is("workspace_files", "file_id", sa.Integer):
         return

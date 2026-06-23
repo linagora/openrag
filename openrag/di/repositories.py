@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 def create_catalog_store(
     settings: Settings,
     *,
-    run_migrations: bool = True,
+    run_migrations: bool | None = None,
 ) -> CatalogStore:
     """Build the relational catalog store from the root settings.
 
@@ -43,6 +43,8 @@ def create_catalog_store(
                 "database": f"partitions_for_collection_{settings.vectordb.collection_name}",
             },
         )
+    if run_migrations is None:
+        run_migrations = rdb.run_migrations
     return PostgresStore(rdb, run_migrations=run_migrations)
 
 

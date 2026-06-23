@@ -63,13 +63,26 @@ vectordb:
   schema_version: 1 # Increment when the collection schema changes and a migration is required
 
 # --- Relational Database (PostgreSQL) ---
-# Env: POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD, DEFAULT_FILE_QUOTA
+# Env: POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD,
+#      POSTGRES_DATABASE, POSTGRES_AUTO_CREATE_DB, POSTGRES_RUN_MIGRATIONS,
+#      DEFAULT_FILE_QUOTA, POSTGRES_POOL_MIN_SIZE, POSTGRES_POOL_MAX_SIZE,
+#      POSTGRES_COMMAND_TIMEOUT
 rdb:
   host: rdb
   port: 5432
   user: root
   password: "root_password"
   default_file_quota: -1
+  # Leave unset to derive partitions_for_collection_<VDB_COLLECTION_NAME>.
+  database: null
+  # Compose/dev convenience. Managed Postgres deployments should pre-create
+  # the database and set POSTGRES_AUTO_CREATE_DB=false.
+  auto_create_database: true
+  # Disable in the app when migrations run as a separate Job/init step.
+  run_migrations: true
+  pool_min_size: 5
+  pool_max_size: 20
+  command_timeout: 30
 
 # --- Reranker ---
 # Env: RERANKER_PROVIDER, RERANKER_ENABLED, RERANKER_MODEL, RERANKER_TOP_K, RERANKER_BASE_URL, RERANKER_API_KEY, RERANKER_TIMEOUT, RERANKER_SEMAPHORE

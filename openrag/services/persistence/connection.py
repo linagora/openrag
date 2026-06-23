@@ -86,6 +86,7 @@ class ConnectionManager:
         self._min_size = config.pool_min_size
         self._max_size = config.pool_max_size
         self._command_timeout = config.command_timeout
+        self._auto_create_database = config.auto_create_database
         self._pool: asyncpg.Pool | None = None
 
     @property
@@ -105,7 +106,10 @@ class ConnectionManager:
         if self._pool is not None:
             return
 
-        await asyncio.to_thread(self._ensure_database_exists)
+        if self._auto_create_database:
+            await asyncio.to_thread(self._ensure_database_exists)
+        else:
+            logger.info(f"Skipping Postgres database auto-creation for {self._dsn_log}")
 
         last_exc: Exception | None = None
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
