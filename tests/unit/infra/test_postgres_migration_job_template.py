@@ -18,9 +18,20 @@ def test_postgres_migration_job_uses_secret_ref_instead_of_literal_secret_values
     assert 'value: "{{ $value }}"' not in template
 
 
-def test_postgres_migration_job_keeps_migration_specific_overrides() -> None:
+def test_postgres_migration_job_sets_uv_cache_dir() -> None:
     template = MIGRATION_JOB_TEMPLATE.read_text(encoding="utf-8")
 
-    assert "name: POSTGRES_AUTO_CREATE_DB" in template
-    assert "name: POSTGRES_RUN_MIGRATIONS" in template
     assert "name: UV_CACHE_DIR" in template
+
+
+def test_postgres_migration_job_omits_flags_the_runner_ignores() -> None:
+    """The migration runner never reads these, so they must not be set here.
+
+    ``services.persistence.migrations.run`` always runs migrations and never
+    opens the app pool, so ``POSTGRES_AUTO_CREATE_DB`` / ``POSTGRES_RUN_MIGRATIONS``
+    have no effect on it. Setting them on the Job only misleads readers.
+    """
+    template = MIGRATION_JOB_TEMPLATE.read_text(encoding="utf-8")
+
+    assert "name: POSTGRES_AUTO_CREATE_DB" not in template
+    assert "name: POSTGRES_RUN_MIGRATIONS" not in template

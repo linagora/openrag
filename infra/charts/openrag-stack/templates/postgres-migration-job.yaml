@@ -6,8 +6,9 @@ This is a Helm *hook*, not a regular chart resource. The
 automatically before the OpenRAG Deployment on every `helm install` /
 `helm upgrade`, and wait for it to complete before continuing. It applies the
 Alembic migrations (`python -m services.persistence.migrations.run`) against the
-externally provisioned database — it migrates the schema but does not create the
-database (auto-creation is intentionally disabled here).
+externally provisioned database — it always migrates the schema and never
+creates the database (the runner does not open the app pool, so it ignores
+`POSTGRES_AUTO_CREATE_DB` / `POSTGRES_RUN_MIGRATIONS`).
 
 Disabled by default via `postgresProvisioning.migrationJob.enabled`. Enable it
 for managed Postgres and pair it with `runMigrationsInApp: false` so the app no
@@ -51,10 +52,10 @@ spec:
             - secretRef:
                 name: rag-env-secrets
           env:
-            - name: POSTGRES_AUTO_CREATE_DB
-              value: "false"
-            - name: POSTGRES_RUN_MIGRATIONS
-              value: "true"
+            # The runner (services.persistence.migrations.run) always runs
+            # migrations and never auto-creates the database, so it ignores
+            # POSTGRES_AUTO_CREATE_DB / POSTGRES_RUN_MIGRATIONS — no need to set
+            # them here. UV_CACHE_DIR points uv at the writable emptyDir below.
             - name: UV_CACHE_DIR
               value: /tmp/uv-cache
           volumeMounts:
