@@ -4,17 +4,7 @@ title: How to backup or restore OpenRag partition/data ?
 
 # How to backup partitions?
 
-## Storage lifecycle
-
-Docker Compose keeps the historical host-path storage layout by default: app data, logs, model cache, PostgreSQL, and Milvus state stay in the same local paths as before. This avoids moving existing local deployments unexpectedly.
-
-If you want Docker named volumes instead, copy the values from `infra/compose/.env.named-volumes.example` into your `.env`. That profile is useful when you want a storage layout closer to Kubernetes/OpenShift PVC behavior.
-
-No migration is required unless you choose to switch an existing deployment from host paths to named volumes. In that case, stop the stack, copy the existing data into the new volumes, then restart the stack and verify partitions before removing the old host directories.
-
-Use `docker compose down` to stop the stack while keeping data. Use `docker compose down -v` only when you intentionally want to remove Docker named volumes and start from a clean state.
-
-For Kubernetes and OpenShift, the Helm chart stores state in PVCs. Treat PVC snapshots or storage-provider backups as infrastructure backups, and use the OpenRAG backup commands below when you need a portable partition-level export.
+> Storage layout (host paths vs. named volumes) and migrating data between storage modes are documented in [Deploying OpenRAG on OpenShift](/openrag/documentation/openshift_deployment/).
 
 ## Backup one partition
 

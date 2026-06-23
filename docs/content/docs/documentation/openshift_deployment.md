@@ -34,6 +34,8 @@ This profile makes Docker manage the storage volumes instead of writing state in
 
 The default Compose stack still uses the historical host paths. This is intentional so existing local deployments keep using their current data.
 
+Use `docker compose down` to stop the stack while keeping data. Use `docker compose down -v` only when you intentionally want to remove the named volumes and start from a clean state.
+
 ## Migration note
 
 Switching an existing deployment from host paths to named volumes or PVC-backed storage changes where OpenRAG reads its data from.
@@ -45,6 +47,28 @@ The old files are not deleted, but the new deployment will not see them unless t
 3. Copy the data into the target volume or PVC.
 4. Start OpenRAG with the new storage configuration.
 5. Verify partitions and indexed files before removing the old storage.
+
+### Docker Compose: copy host paths into named volumes
+
+Stop the stack (`docker compose down`, **not** `down -v`), then copy each host directory into its named volume. Set `REPO` to your repository root and `PROJECT` to the name you start the stack with (`docker compose -p <project>`):
+
+```bash
+# Copy a host directory into a named volume (preserves permissions and dotfiles)
+copy() { docker run --rm -v "$1":/from:ro -v "$2":/to alpine sh -c 'cp -a /from/. /to/'; }
+
+REPO=/path/to/openrag     # repository root
+PROJECT=openrag           # your `docker compose -p <project>` name
+
+copy $REPO/data                                 ${PROJECT}_appdata
+copy $REPO/logs                                 ${PROJECT}_logs
+copy $HOME/.cache/huggingface                   ${PROJECT}_modelweights   # optional: cache, can be re-downloaded
+copy $REPO/db                                   ${PROJECT}_pgdata
+copy $REPO/infra/compose/milvus/volumes/etcd    ${PROJECT}_etcd
+copy $REPO/infra/compose/milvus/volumes/minio   ${PROJECT}_minio
+copy $REPO/infra/compose/milvus/volumes/milvus  ${PROJECT}_milvus
+```
+
+Copy PostgreSQL and all three Milvus volumes (`etcd`, `minio`, `milvus`) as one set — a partial copy leaves the metadata and vector segments inconsistent. To reverse the migration (named volumes → host paths), swap the two `-v` mounts in `copy`.
 
 ## Helm deployment
 
