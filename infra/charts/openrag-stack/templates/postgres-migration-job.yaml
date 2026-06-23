@@ -1,3 +1,19 @@
+{{/*
+PostgreSQL schema-migration Job (managed-Postgres provisioning).
+
+This is a Helm *hook*, not a regular chart resource. The
+`helm.sh/hook: pre-install,pre-upgrade` annotation makes Helm run it
+automatically before the OpenRAG Deployment on every `helm install` /
+`helm upgrade`, and wait for it to complete before continuing. It applies the
+Alembic migrations (`python -m services.persistence.migrations.run`) against the
+externally provisioned database — it migrates the schema but does not create the
+database (auto-creation is intentionally disabled here).
+
+Disabled by default via `postgresProvisioning.migrationJob.enabled`. Enable it
+for managed Postgres and pair it with `runMigrationsInApp: false` so the app no
+longer migrates at startup. When disabled, the application runs migrations
+itself during startup instead.
+*/}}
 {{- if .Values.postgresProvisioning.migrationJob.enabled }}
 apiVersion: batch/v1
 kind: Job
