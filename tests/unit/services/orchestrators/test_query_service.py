@@ -135,6 +135,15 @@ def test_resolve_chat_history_depth_none_and_unknown_use_default():
     assert svc._resolve_chat_history_depth(["missing"]) == 4
 
 
+def test_resolve_chat_history_depth_all_sentinel_uses_default():
+    # "all" (openrag-all) reaches this layer un-expanded and is not a real
+    # partition name → cross-partition query uses the global default, never a
+    # per-partition value.
+    svc = _svc()  # global default = 4
+    svc._config.partitions = {"a": SimpleNamespace(chat_history_depth=10)}
+    assert svc._resolve_chat_history_depth(["all"]) == 4
+
+
 def test_resolve_chat_history_depth_multi_partition_takes_max_explicit():
     svc = _svc()
     svc._config.partitions = {

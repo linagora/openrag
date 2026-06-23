@@ -138,17 +138,23 @@ class QueryService:
         Honors a partition's configured ``chat_history_depth`` (set via the
         admin API) over the global default. A partition value of ``0`` means
         "inherit the global default" — it never reaches the ``messages[-depth:]``
-        slice, where ``0`` would otherwise select the *entire* history. For
-        multi-partition queries (e.g. ``openrag-all``) there is no single owning
-        partition, so the largest explicit value wins, falling back to the
-        global default when none is set.
+        slice, where ``0`` would otherwise select the *entire* history.
+
+        The ``"all"`` sentinel (``openrag-all``) reaches this layer un-expanded
+        (retrieval resolves it to concrete partitions downstream) and is a
+        cross-partition query with no single owning partition, so it uses the
+        global default. A request scoped to one or more named partitions takes
+        the largest explicit (>0) value among them.
         """
-        explicit = [
-            cfg.chat_history_depth
-            for name in (partition or [])
-            if (cfg := self._config.partitions.get(name)) is not None and cfg.chat_history_depth > 0
-        ]
-        return max(explicit) if explicit else self._default_chat_history_depth
+        if partition and "all" not in partition:
+            explicit = [
+                cfg.chat_history_depth
+                for name in partition
+                if (cfg := self._config.partitions.get(name)) is not None and cfg.chat_history_depth > 0
+            ]
+            if explicit:
+                return max(explicit)
+        return self._default_chat_history_depth
 
     # ------------------------------------------------------------------
     # Query generation (was RagPipeline.generate_query — no LangChain)
