@@ -331,34 +331,46 @@ class QueryService:
 
     @staticmethod
     def _sanitize_messages(messages: list[dict]) -> list[dict]:
-        """Sanitize the message list before forwarding to the LLM.
+        """Replace empty-content ``role="assistant"`` messages with a placeholder.
 
-        Replaces ``role="assistant"`` messages whose content is absent or
-        whitespace-only with the placeholder ``"NO_CONTENT"``.  This preserves
-        role alternation (no consecutive same-role messages are created) while
-        acting as a defensive guard against upstream bugs (broken streaming
-        response or client-side history persistence).  Logged at ERROR level so
-        the root cause is traceable.
+        Some LLMs reject an assistant turn with no content. Substituting a
+        placeholder preserves role alternation (no consecutive same-role
+        messages are created). This should normally never happen, but we do it
+        as a safeguard against a client sending a malformed history.
 
-        Non-string content (e.g. multimodal list) is never replaced.
+        An assistant message carrying ``tool_calls`` / ``function_call`` is
+        legitimately content-free and is left untouched.
         """
+
+        def _is_empty_content(content: object) -> bool:
+            if content is None:
+                return True
+            if isinstance(content, str):
+                return not content.strip()
+            if isinstance(content, list):
+                return not content
+            return False
+
         result = []
-        patched_count = 0
+        replaced_count = 0
         for msg in messages:
-            content = msg.get("content")
-            if msg.get("role") == "assistant" and (
-                content is None or (isinstance(content, str) and not content.strip())
-            ):
+            should_replace_msg = (
+                msg.get("role") == "assistant"
+                and not msg.get("tool_calls")
+                and not msg.get("function_call")
+                and _is_empty_content(msg.get("content"))
+            )
+            if should_replace_msg:
                 result.append({**msg, "content": "NO_CONTENT"})
-                patched_count += 1
+                replaced_count += 1
             else:
                 result.append(msg)
-        if patched_count:
-            logger.error(
+        if replaced_count:
+            logger.warning(
                 "Replaced empty assistant message(s) with NO_CONTENT placeholder before LLM call — "
-                "this should never happen, investigate upstream "
-                "(streaming response code or client-side history persistence)",
-                patched_count=patched_count,
+                "this should normally never happen; likely a client-side history persistence "
+                "or streaming response issue",
+                replaced_count=replaced_count,
             )
         return result
 

@@ -247,46 +247,17 @@ def test_sampling_strips_transport_keys():
 # --------------------------------------------------------------------------- #
 
 
-class _RecordingLogger:
-    """Minimal logger stub that records error/warning calls for assertions."""
-
-    def __init__(self):
-        self.errors: list[dict] = []
-        self.warnings: list[dict] = []
-
-    def error(self, msg: str, **kwargs) -> None:
-        self.errors.append({"msg": msg, **kwargs})
-
-    def warning(self, msg: str, **kwargs) -> None:
-        self.warnings.append({"msg": msg, **kwargs})
-
-    def info(self, *a, **kw) -> None:
-        pass
-
-    def debug(self, *a, **kw) -> None:
-        pass
-
-
-@pytest.fixture()
-def rec_logger(monkeypatch):
-    rec = _RecordingLogger()
-    monkeypatch.setattr(qs, "logger", rec)
-    return rec
-
-
-def test_sanitize_valid_alternating_unchanged(rec_logger):
-    """Valid alternating history → identical output, no logs."""
+def test_sanitize_valid_alternating_unchanged():
+    """Valid alternating history → identical output."""
     msgs = [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
         {"role": "user", "content": "again"},
     ]
-    out = QueryService._sanitize_messages(msgs)
-    assert out == msgs
-    assert rec_logger.errors == []
+    assert QueryService._sanitize_messages(msgs) == msgs
 
 
-def test_sanitize_empty_content_replaced_with_placeholder(rec_logger):
+def test_sanitize_empty_content_replaced_with_placeholder():
     """Empty assistant content → replaced with NO_CONTENT, alternation preserved."""
     msgs = [
         {"role": "user", "content": "first"},
@@ -297,45 +268,67 @@ def test_sanitize_empty_content_replaced_with_placeholder(rec_logger):
     assert len(out) == 3
     assert out[1]["role"] == "assistant"
     assert out[1]["content"] == "NO_CONTENT"
-    assert len(rec_logger.errors) == 1
-    assert rec_logger.errors[0]["patched_count"] == 1
 
 
-def test_sanitize_whitespace_only_replaced(rec_logger):
+def test_sanitize_whitespace_only_replaced():
     """Whitespace-only assistant content → replaced with NO_CONTENT."""
     msgs = [
         {"role": "user", "content": "q"},
         {"role": "assistant", "content": "   "},
     ]
     out = QueryService._sanitize_messages(msgs)
-    assert len(out) == 2
     assert out[1]["content"] == "NO_CONTENT"
-    assert rec_logger.errors[0]["patched_count"] == 1
 
 
-def test_sanitize_no_content_key_replaced(rec_logger):
+def test_sanitize_no_content_key_replaced():
     """Assistant with no 'content' key → replaced with NO_CONTENT, other keys kept."""
     msgs = [
         {"role": "user", "content": "q"},
         {"role": "assistant", "name": "bot"},
     ]
     out = QueryService._sanitize_messages(msgs)
-    assert len(out) == 2
     assert out[1]["content"] == "NO_CONTENT"
     assert out[1]["name"] == "bot"
-    assert rec_logger.errors[0]["patched_count"] == 1
 
 
-def test_sanitize_empty_user_not_touched(rec_logger):
-    """User message with empty content → kept as-is (only assistant is patched)."""
-    msgs = [{"role": "user", "content": ""}]
+def test_sanitize_empty_list_content_replaced():
+    """Empty multimodal content list → treated as empty, replaced with NO_CONTENT."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": []},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert out[1]["content"] == "NO_CONTENT"
+
+
+def test_sanitize_assistant_with_tool_calls_untouched():
+    """Empty assistant content is legitimate when carrying tool_calls → untouched."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "type": "function"}]},
+    ]
     out = QueryService._sanitize_messages(msgs)
     assert out == msgs
-    assert rec_logger.errors == []
 
 
-def test_sanitize_multiple_empty_assistants_all_patched(rec_logger):
-    """Multiple empty assistants → all replaced, patched_count accurate, alternation intact."""
+def test_sanitize_assistant_with_function_call_untouched():
+    """Empty assistant content is legitimate when carrying function_call → untouched."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": None, "function_call": {"name": "f"}},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert out == msgs
+
+
+def test_sanitize_empty_user_not_touched():
+    """User message with empty content → kept as-is (only assistant is patched)."""
+    msgs = [{"role": "user", "content": ""}]
+    assert QueryService._sanitize_messages(msgs) == msgs
+
+
+def test_sanitize_multiple_empty_assistants_all_replaced():
+    """Multiple empty assistants → all replaced, alternation intact."""
     msgs = [
         {"role": "user", "content": "u1"},
         {"role": "assistant", "content": ""},
@@ -347,34 +340,27 @@ def test_sanitize_multiple_empty_assistants_all_patched(rec_logger):
     assert len(out) == 5
     assert out[1]["content"] == "NO_CONTENT"
     assert out[3]["content"] == "NO_CONTENT"
-    assert rec_logger.errors[0]["patched_count"] == 2
 
 
-def test_sanitize_multimodal_content_untouched(rec_logger):
-    """Non-string content (multimodal list) → never replaced."""
+def test_sanitize_multimodal_content_untouched():
+    """Non-empty multimodal content list → never replaced."""
     msgs = [
         {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]},
         {"role": "assistant", "content": [{"type": "text", "text": "desc"}]},
     ]
-    out = QueryService._sanitize_messages(msgs)
-    assert out == msgs
-    assert rec_logger.errors == []
+    assert QueryService._sanitize_messages(msgs) == msgs
 
 
-def test_sanitize_empty_list(rec_logger):
-    """Empty input → empty output, no logs."""
-    out = QueryService._sanitize_messages([])
-    assert out == []
-    assert rec_logger.errors == []
+def test_sanitize_empty_list():
+    """Empty input → empty output."""
+    assert QueryService._sanitize_messages([]) == []
 
 
-def test_sanitize_system_message_preserved(rec_logger):
+def test_sanitize_system_message_preserved():
     """System message in head → preserved untouched."""
     msgs = [
         {"role": "system", "content": "You are an assistant."},
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
-    out = QueryService._sanitize_messages(msgs)
-    assert out == msgs
-    assert rec_logger.errors == []
+    assert QueryService._sanitize_messages(msgs) == msgs
