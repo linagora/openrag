@@ -38,7 +38,7 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatDate } from "@/lib/utils";
+import { formatDate, intOr, numOr } from "@/lib/utils";
 
 const PRESET_TYPES = ["indexation", "retrieval"] as const;
 
@@ -306,7 +306,7 @@ function IndexationPresetForm({
                 type="number"
                 min={1}
                 value={configGet(chunking as Config, "chunk_size", 512)}
-                onChange={(e) => setChunking("chunk_size", Number(e.target.value))}
+                onChange={(e) => setChunking("chunk_size", intOr(e.target.value, 512))}
               />
             </div>
           )}
@@ -322,7 +322,7 @@ function IndexationPresetForm({
                 step={0.05}
                 title="Fraction of chunk size (0–1)"
                 value={configGet(chunking as Config, "chunk_overlap_rate", 0.2)}
-                onChange={(e) => setChunking("chunk_overlap_rate", Number(e.target.value))}
+                onChange={(e) => setChunking("chunk_overlap_rate", numOr(e.target.value, 0.2))}
               />
             </div>
           )}
@@ -594,8 +594,8 @@ function RetrievalPresetForm({
             type="number"
             min={1}
             max={1000}
-            value={configGet(config, "top_k", 20)}
-            onChange={(e) => set("top_k", Number(e.target.value))}
+            value={configGet(config, "top_k", 50)}
+            onChange={(e) => set("top_k", intOr(e.target.value, 50))}
           />
         </div>
         <div className="space-y-1.5">
@@ -609,7 +609,7 @@ function RetrievalPresetForm({
             max={1}
             step={0.05}
             value={configGet(config, "similarity_threshold", 0.6)}
-            onChange={(e) => set("similarity_threshold", Number(e.target.value))}
+            onChange={(e) => set("similarity_threshold", numOr(e.target.value, 0.6))}
           />
         </div>
       </section>
@@ -649,7 +649,7 @@ function RetrievalPresetForm({
             min={1}
             max={1000}
             value={configGet(config, "top_n", 10)}
-            onChange={(e) => set("top_n", Number(e.target.value))}
+            onChange={(e) => set("top_n", intOr(e.target.value, 10))}
             disabled={!configGet(config, "enable_reranker", true)}
           />
         </div>
@@ -704,7 +704,7 @@ function RetrievalPresetForm({
               <Input
                 type="number" min={1} max={1000}
                 value={configGet(config, "rrf_k", 60)}
-                onChange={(e) => set("rrf_k", Number(e.target.value))}
+                onChange={(e) => set("rrf_k", intOr(e.target.value, 60))}
               />
             </div>
           </div>
