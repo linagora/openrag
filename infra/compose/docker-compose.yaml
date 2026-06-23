@@ -1,5 +1,5 @@
 include:
-  - milvus/milvus.yaml
+  - ${MILVUS_COMPOSE:-milvus/milvus.yaml}
   - ${CHAINLIT_DATALAYER_COMPOSE:-../../extern/dummy.yaml}
   - ../../extern/reranker/${RERANKER_PROVIDER:-infinity}.yaml
   - ${TRANSCRIBER_COMPOSE:-../../extern/dummy.yaml}
@@ -26,7 +26,7 @@ x-openrag: &openrag_template
     - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
     - ../../openrag:/app/openrag # For dev mode
     - /$SHARED_ENV:/ray_mount/.env # Shared environment variables
-    - ../../logs:/app/logs # For dev mode
+    - ${LOG_VOLUME:-../../logs}:/app/logs # For dev mode
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
     - ${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
@@ -184,3 +184,9 @@ services:
     # For details see https://github.com/vllm-project/vllm/issues/21179
     profiles:
       - "cpu"
+
+volumes:
+  appdata:
+  logs:
+  modelweights:
+  pgdata:

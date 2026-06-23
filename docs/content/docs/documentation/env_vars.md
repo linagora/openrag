@@ -195,6 +195,25 @@ The PostgreSQL database is configured using the following environment variables:
 | `POSTGRES_USER` | str | root | Username for database authentication |
 | `POSTGRES_PASSWORD` | str | root_password | Password for database authentication |
 
+### Compose Storage Volumes
+
+The main Docker Compose stack keeps the historical host-path defaults. Set these variables when you want to move state elsewhere, including Docker named volumes.
+
+For an opt-in named-volume profile, copy the values from `infra/compose/.env.named-volumes.example` into your `.env`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATA_VOLUME` | `../../data` | OpenRAG uploaded files and app data mounted at `/app/data`. |
+| `LOG_VOLUME` | `../../logs` | OpenRAG logs mounted at `/app/logs`. |
+| `MODEL_WEIGHTS_VOLUME` | `~/.cache/huggingface` | Model cache mounted at `/app/model_weights`. |
+| `VLLM_CACHE` | `/root/.cache/huggingface` | Hugging Face cache used by vLLM, reranker, and transcriber services. |
+| `DB_VOLUME` | `../../db` | PostgreSQL data mounted at `/var/lib/postgresql/data`. |
+| `MILVUS_VOLUME_DIRECTORY` | `./volumes` | Parent directory for Milvus, etcd, and MinIO host-path storage. |
+| `MILVUS_COMPOSE` | `milvus/milvus.yaml` | Milvus compose include. Use `milvus/milvus.named-volumes.yaml` for the named-volume profile. |
+| `ETCD_VOLUME` | `etcd` | Milvus etcd named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
+| `MINIO_VOLUME` | `minio` | Milvus object storage named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
+| `MILVUS_VOLUME` | `milvus` | Milvus named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
+
 ## Chat Pipeline
 ### LLM & VLM Configuration
 The system uses two types of language models:
