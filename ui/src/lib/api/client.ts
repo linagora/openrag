@@ -1,4 +1,8 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+// Default to same-origin (empty base → relative fetch, proxied by nginx). A
+// missing env must fail closed: never fall back to an absolute host, which would
+// send the bearer token cross-origin. To target a remote API in dev, set
+// VITE_API_BASE_URL explicitly.
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
 // OpenRag bearer token (the user's `or-…` token). Sent as Authorization for
 // token-mode auth; in OIDC mode the same-origin session cookie is used instead.

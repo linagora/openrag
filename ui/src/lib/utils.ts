@@ -20,6 +20,22 @@ export function formatBytes(bytes: number | null | undefined): string {
 }
 
 /**
+ * Parse an integer from a form-field string, falling back to `fallback` when the
+ * field is empty or non-numeric. Guards against `parseInt("")` → `NaN`, which
+ * `JSON.stringify` would serialize as `null` and send to the API.
+ */
+export function intOr(value: string, fallback: number): number {
+  const n = parseInt(value, 10);
+  return Number.isNaN(n) ? fallback : n;
+}
+
+/** Float counterpart of {@link intOr} — never yields `NaN`. */
+export function numOr(value: string, fallback: number): number {
+  const n = parseFloat(value);
+  return Number.isNaN(n) ? fallback : n;
+}
+
+/**
  * Copy text to the clipboard, working outside secure contexts too.
  * navigator.clipboard is only available over HTTPS/localhost; over plain HTTP
  * it's undefined, so fall back to a hidden textarea + execCommand("copy").

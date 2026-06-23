@@ -47,6 +47,8 @@ import {
   resolveEmbedderName,
 } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
+import { intOr } from "@/lib/utils";
+import { partitionDetailPath } from "@/lib/routes";
 
 type SortDir = "asc" | "desc" | null;
 
@@ -67,7 +69,7 @@ function RowActions({ partition }: { partition: PartitionResponse }) {
   return (
     <div className="flex items-center gap-1">
       <Button variant="ghost" size="sm" asChild>
-        <Link to={`/partitions/${partition.name}`}>
+        <Link to={partitionDetailPath(partition.name)}>
           <Pencil className="h-3 w-3" />
         </Link>
       </Button>
@@ -252,7 +254,7 @@ export default function PartitionListPage() {
         embedder: embedder || undefined,
         indexation_preset: indexationPreset || undefined,
         retrieval_preset: retrievalPreset || undefined,
-        chat_history_depth: parseInt(chatHistoryDepth),
+        chat_history_depth: intOr(chatHistoryDepth, 0),
         chat_llm: chatLlm === "__default__" ? null : chatLlm,
       }),
     onSuccess: (data) => {
@@ -348,7 +350,7 @@ export default function PartitionListPage() {
                     <TableCell>
                       <div className="flex items-center gap-2">
                         <Link
-                          to={`/partitions/${p.name}`}
+                          to={partitionDetailPath(p.name)}
                           className="font-medium text-primary hover:underline"
                         >
                           {p.name}

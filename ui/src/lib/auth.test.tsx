@@ -68,4 +68,35 @@ describe("useAuth (token model)", () => {
     expect(localStorage.getItem("openrag_token")).toBeNull();
     expect(result.current.isAuthenticated).toBe(false);
   });
+
+  it("logout returns false in token mode (a bearer token is stored)", async () => {
+    localStorage.setItem("openrag_token", "or-abc123");
+    mockInfo.mockResolvedValue(user(true));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isAuthenticated).toBe(true));
+
+    let wasOidc: boolean | undefined;
+    act(() => {
+      wasOidc = result.current.logout();
+    });
+    // Token mode: clearing the local token IS the full logout — no server redirect.
+    expect(wasOidc).toBe(false);
+    expect(localStorage.getItem("openrag_token")).toBeNull();
+    expect(result.current.isAuthenticated).toBe(false);
+  });
+
+  it("logout returns true for an OIDC session (no stored token) so the caller revokes it server-side", async () => {
+    // No token in localStorage → identity came from the OIDC `openrag_session`
+    // cookie, which JS can't clear; the header must hand off to GET /auth/logout.
+    mockInfo.mockResolvedValue(user(true));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isAuthenticated).toBe(true));
+
+    let wasOidc: boolean | undefined;
+    act(() => {
+      wasOidc = result.current.logout();
+    });
+    expect(wasOidc).toBe(true);
+    expect(result.current.isAuthenticated).toBe(false);
+  });
 });

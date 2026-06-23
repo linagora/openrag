@@ -49,7 +49,7 @@ import type { PartitionConfig, PartitionRole } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
-import { formatDate } from "@/lib/utils";
+import { formatDate, intOr } from "@/lib/utils";
 
 // --- General Tab ---
 
@@ -126,7 +126,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
     mutationFn: () =>
       updatePartition(partition.name, {
         description: description || undefined,
-        chat_history_depth: parseInt(chatHistoryDepth),
+        chat_history_depth: intOr(chatHistoryDepth, 0),
         indexation_preset: indexationPreset,
         retrieval_preset: retrievalPreset,
         chat_llm: chatLlm === "__default__" ? null : chatLlm,

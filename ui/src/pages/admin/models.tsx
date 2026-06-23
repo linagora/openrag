@@ -33,7 +33,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatDate } from "@/lib/utils";
+import { formatDate, intOr, numOr } from "@/lib/utils";
 
 const MODEL_TYPES = ["embedder", "reranker", "llm", "vlm"] as const;
 
@@ -347,8 +347,8 @@ function EndpointDialog({
       const updateData: UpdateModelEndpointRequest = {
         endpoint,
         model_name: modelName || undefined,
-        batch_size: parseInt(batchSize),
-        timeout: parseFloat(timeout),
+        batch_size: intOr(batchSize, 32),
+        timeout: numOr(timeout, 30),
         extra,
       };
       if (name !== editing.name) {
@@ -361,8 +361,8 @@ function EndpointDialog({
         model_type: activeTab as ModelType,
         endpoint,
         model_name: modelName || undefined,
-        batch_size: parseInt(batchSize),
-        timeout: parseFloat(timeout),
+        batch_size: intOr(batchSize, 32),
+        timeout: numOr(timeout, 30),
         extra,
       });
     }
