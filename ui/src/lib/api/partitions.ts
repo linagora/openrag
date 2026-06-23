@@ -148,7 +148,16 @@ export async function createPartition(data: CreatePartitionRequest): Promise<Par
   const { name } = data;
   await request<void>(`${P}/${enc(name)}`, { method: "POST" });
   const hasConfig = _PATCH_FIELDS.some((k) => data[k] !== undefined && data[k] !== "");
-  return hasConfig ? updatePartition(name, data) : getPartitionConfig(name);
+  if (!hasConfig) return getPartitionConfig(name);
+  try {
+    return await updatePartition(name, data);
+  } catch (e) {
+    // The partition was created empty above; if applying its config fails, roll it
+    // back so we don't leave an orphaned, half-configured partition (which would
+    // also 409 on retry). Best-effort delete — surface the original error.
+    await deletePartition(name).catch(() => {});
+    throw e;
+  }
 }
 
 /** Compat alias — OpenRag has no separate user-partition create path. */
