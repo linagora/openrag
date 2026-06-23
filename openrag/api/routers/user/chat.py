@@ -311,7 +311,7 @@ async def openai_chat_completion(
             try:
                 async for sse_line in service.chat_stream(
                     partitions=partitions,
-                    payload=request.model_dump(),
+                    payload=request.model_dump(exclude_none=True),
                     prepare_sources=prep,
                     model_name=model_name,
                 ):
@@ -330,7 +330,7 @@ async def openai_chat_completion(
 
     chunk = await service.chat(
         partitions=partitions,
-        payload=request.model_dump(),
+        payload=request.model_dump(exclude_none=True),
         prepare_sources=prep,
         model_name=model_name,
     )

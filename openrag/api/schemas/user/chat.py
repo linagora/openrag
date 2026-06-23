@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def default_max_tokens():
@@ -15,6 +15,9 @@ class OpenAIMessage(BaseModel):
 
 
 class OpenAIChatCompletionRequest(BaseModel):
+    # Accept and forward vendor-specific OpenAI params
+    model_config = ConfigDict(extra="allow")
+
     model: str | None = Field(None, description="model name")
     messages: list[OpenAIMessage]
     temperature: float | None = Field(0.3)
@@ -22,6 +25,11 @@ class OpenAIChatCompletionRequest(BaseModel):
     stream: bool | None = Field(False)
     max_tokens: int | None = Field(default_factory=default_max_tokens)
     logprobs: int | None = Field(None)
+    response_format: dict[str, Any] | None = Field(
+        None,
+        description="OpenAI response_format, e.g. {'type': 'json_object'} or "
+        "{'type': 'json_schema', 'json_schema': {...}}. Forwarded to the LLM.",
+    )
     metadata: dict[str, Any] | None = Field(
         {
             "use_map_reduce": False,
