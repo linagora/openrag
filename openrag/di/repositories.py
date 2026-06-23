@@ -44,7 +44,7 @@ def create_catalog_store(
             },
         )
     if run_migrations is None:
-        run_migrations = getattr(rdb, "run_migrations", True)
+        run_migrations = rdb.run_migrations
     return PostgresStore(rdb, run_migrations=run_migrations)
 
 

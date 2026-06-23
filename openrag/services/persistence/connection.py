@@ -86,7 +86,7 @@ class ConnectionManager:
         self._min_size = config.pool_min_size
         self._max_size = config.pool_max_size
         self._command_timeout = config.command_timeout
-        self._auto_create_database = getattr(config, "auto_create_database", True)
+        self._auto_create_database = config.auto_create_database
         self._pool: asyncpg.Pool | None = None
 
     @property
