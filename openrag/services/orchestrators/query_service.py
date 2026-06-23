@@ -113,8 +113,12 @@ class QueryService:
         self._web = web_search_service
         self._workspace = workspace_service
 
+        # Keep a live reference so per-partition config (resolved into
+        # ``config.partitions`` and refreshed on every preset change) can be
+        # read at request time, not snapshotted once at startup.
+        self._config = config
         self._rag_mode = config.rag.mode
-        self._chat_history_depth = config.rag.chat_history_depth
+        self._default_chat_history_depth = config.rag.chat_history_depth
         self._max_contextualized_query_len = config.rag.max_contextualized_query_len
         self._max_context_tokens = config.reranker.top_k * config.chunker.chunk_size
 
@@ -127,6 +131,24 @@ class QueryService:
         self._query_contextualizer_prompt = load_template_by_key(prompts_dir, mapping, "query_contextualizer")
         self._spoken_style_answer_prompt = load_template_by_key(prompts_dir, mapping, "spoken_style_answer")
         self._sys_prompt_tmplt = load_template_by_key(prompts_dir, mapping, "sys_prompt")
+
+    def _resolve_chat_history_depth(self, partition: list[str] | None) -> int:
+        """Effective chat-history depth for this request.
+
+        Honors a partition's configured ``chat_history_depth`` (set via the
+        admin API) over the global default. A partition value of ``0`` means
+        "inherit the global default" — it never reaches the ``messages[-depth:]``
+        slice, where ``0`` would otherwise select the *entire* history. For
+        multi-partition queries (e.g. ``openrag-all``) there is no single owning
+        partition, so the largest explicit value wins, falling back to the
+        global default when none is set.
+        """
+        explicit = [
+            cfg.chat_history_depth
+            for name in (partition or [])
+            if (cfg := self._config.partitions.get(name)) is not None and cfg.chat_history_depth > 0
+        ]
+        return max(explicit) if explicit else self._default_chat_history_depth
 
     # ------------------------------------------------------------------
     # Query generation (was RagPipeline.generate_query — no LangChain)
@@ -219,7 +241,7 @@ class QueryService:
     # ------------------------------------------------------------------
 
     async def _prepare_chat(self, partition: list[str] | None, payload: dict):
-        messages = payload["messages"][-self._chat_history_depth :]
+        messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
         queries = await self.generate_query(messages)
 
         metadata = payload.get("metadata") or {}

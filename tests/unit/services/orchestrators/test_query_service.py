@@ -95,6 +95,7 @@ def _config(mode="SimpleRag"):
         map_reduce=SimpleNamespace(initial_batch_size=2, expansion_batch_size=2, max_total_documents=4),
         paths=_PROMPT_CFG.paths,
         prompts=_PROMPT_CFG.prompts,
+        partitions={},
     )
 
 
@@ -106,6 +107,42 @@ def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag") -> QueryServic
         web_search_service=web or FakeWeb(),
         workspace_service=FakeWorkspace(),
     )
+
+
+# --------------------------------------------------------------------------- #
+# chat history depth resolution (per-partition override of the global default)
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_chat_history_depth_uses_partition_value():
+    svc = _svc()  # global default = 4
+    svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=10)}
+    assert svc._resolve_chat_history_depth(["p"]) == 10
+
+
+def test_resolve_chat_history_depth_zero_inherits_global_default():
+    # 0 means "inherit" — never reaches the messages[-depth:] slice (where 0
+    # would select the entire history).
+    svc = _svc()
+    svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=0)}
+    assert svc._resolve_chat_history_depth(["p"]) == 4
+
+
+def test_resolve_chat_history_depth_none_and_unknown_use_default():
+    svc = _svc()
+    svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=9)}
+    assert svc._resolve_chat_history_depth(None) == 4
+    assert svc._resolve_chat_history_depth(["missing"]) == 4
+
+
+def test_resolve_chat_history_depth_multi_partition_takes_max_explicit():
+    svc = _svc()
+    svc._config.partitions = {
+        "a": SimpleNamespace(chat_history_depth=6),
+        "b": SimpleNamespace(chat_history_depth=2),
+        "c": SimpleNamespace(chat_history_depth=0),  # inherits → ignored
+    }
+    assert svc._resolve_chat_history_depth(["a", "b", "c"]) == 6
 
 
 # --------------------------------------------------------------------------- #
