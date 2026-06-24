@@ -25,7 +25,6 @@ import warnings
 from contextlib import asynccontextmanager
 from enum import Enum
 from importlib.metadata import version as get_package_version
-from pathlib import Path
 
 import ray
 import uvicorn
@@ -50,6 +49,7 @@ from api.routers.admin.workspaces import router as workspaces_router
 from api.routers.auth.oidc import router as auth_router
 from api.routers.user.chat import prime_max_model_tokens
 from api.routers.user.chat import router as openai_router
+from api.routers.user.download import router as download_router
 from api.routers.user.extract import router as extract_router
 from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
@@ -63,7 +63,6 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
 
 # pydub 0.25.1 ships invalid-escape regex literals; the warning is upstream.
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
@@ -75,7 +74,6 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
 
 logger = get_logger()
 settings = load_config()
-DATA_DIR = Path(settings.paths.data_dir)
 CONTAINER_STARTUP_TIMEOUT = float(
     os.getenv("OPENRAG_CONTAINER_STARTUP_TIMEOUT", max(60, settings.rdb.command_timeout * 4))
 )
@@ -296,9 +294,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory=DATA_DIR.resolve(), check_dir=True), name="static")
-
-
 @app.get("/", include_in_schema=False)
 def root_redirect():
     """Root handler — sends authenticated users to the indexer-ui (if
@@ -330,6 +325,8 @@ def get_config():
 app.include_router(health_router, tags=[Tags.MONITORING])
 app.include_router(indexer_router, prefix="/indexer", tags=[Tags.INDEXER])
 app.include_router(extract_router, prefix="/extract", tags=[Tags.EXTRACT])
+# Authorized, partition-checked source-file download (served under /static).
+app.include_router(download_router, tags=[Tags.EXTRACT])
 app.include_router(search_router, prefix="/search", tags=[Tags.SEARCH])
 app.include_router(partition_router, prefix="/partition", tags=[Tags.PARTITION])
 app.include_router(model_endpoints_router, prefix="/model-endpoints", tags=[Tags.MODEL_ENDPOINTS])

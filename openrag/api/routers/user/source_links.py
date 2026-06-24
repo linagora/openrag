@@ -17,20 +17,22 @@ def build_document_source_link(
 ) -> dict:
     """Build the response dict for one document source.
 
-    ``file_url`` is emitted only when the metadata yields a non-empty
-    filename, so a missing/empty ``source`` never produces a static URL with
-    an empty path. The static URL is percent-encoded.
+    ``file_url`` is emitted only when the chunk has a non-empty ``source``
+    filename, so a chunk with no source never produces a download URL. The URL
+    is keyed by the chunk id (``_id``): the download is authorized server-side
+    by partition membership, so it never exposes a raw, unguarded filesystem
+    path. The URL is percent-encoded.
 
     Args:
         doc_metadata: The chunk metadata (must contain ``_id``).
-        static_url_builder: Maps a filename to its static file URL.
+        static_url_builder: Maps an extract id to its authorized download URL.
         chunk_url_builder: Maps an extract id to its chunk URL.
     """
     source = doc_metadata.get("source") or ""
     filename = Path(source).name
     encoded_url = None
     if filename:
-        encoded_url = quote(static_url_builder(filename), safe=":/")
+        encoded_url = quote(static_url_builder(doc_metadata["_id"]), safe=":/")
     return {
         "source_type": "document",
         **({"file_url": encoded_url} if encoded_url else {}),

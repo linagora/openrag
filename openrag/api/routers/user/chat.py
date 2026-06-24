@@ -113,8 +113,10 @@ async def list_models(
 
 
 def __prepare_sources(request: Request, docs: list, web_results: list | None = None):
-    def static_url(filename: str) -> str:
-        return str(request.url_for("static", path=filename))
+    def static_url(extract_id) -> str:
+        # Authorized, partition-checked download keyed by chunk id (replaces the
+        # open /static mount). The file is resolved server-side from the chunk.
+        return str(request.url_for("download_source", extract_id=extract_id))
 
     def chunk_url(extract_id) -> str:
         return str(request.url_for("get_extract", extract_id=extract_id))
