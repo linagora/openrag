@@ -50,6 +50,12 @@ if TYPE_CHECKING:
 
 logger = get_logger()
 
+# Names reserved as cross-partition sentinels (e.g. ``openrag-all`` /
+# ``?partitions=all``). A real partition named ``all`` collides with the sentinel
+# and the admin partition-list route would expand it to *every* partition — see
+# ``list_existant_partitions``. Matched case-insensitively.
+_RESERVED_PARTITION_NAMES = frozenset({"all"})
+
 
 def _validate_limit(limit: int | None) -> None:
     """Reject negative ``limit`` values before they reach ``rows[:limit]``.
@@ -153,6 +159,12 @@ class PartitionService:
         fast and atomically), the non-default config columns are persisted,
         and the in-memory partition cache is re-resolved.
         """
+        if partition.strip().lower() in _RESERVED_PARTITION_NAMES:
+            raise ValidationError(
+                f"Partition name '{partition}' is reserved.",
+                status_code=400,
+                code="RESERVED_PARTITION_NAME",
+            )
         if await self._partition_repo.partition_exists(name=partition):
             raise ValidationError(
                 f"Partition '{partition}' already exists.",
