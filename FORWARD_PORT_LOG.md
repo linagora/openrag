@@ -65,6 +65,8 @@ docs last.
 | `221f8ed8` | EML attachment fan-out cap (M8) | `core/indexing/parsers/eml_parser.py` (+ test). eml-depth already bounded by the dispatcher; docx/pptx/pdf caps N/A (docling/marker delegate). |
 | `67ec4199` | authorize source-file downloads by partition | new `api/routers/user/download.py` (replaces the open `/static` mount), `api/main.py`, `chat.py`/`source_links.py` rekeyed to chunk id (+ tests) |
 | `761f47a0` | validate copy-endpoint source_file_id (#477) | `api/routers/admin/indexing.py` + `docs/assets/compose_linux_gpu.yaml` |
+| `74de8232` | Starlette>=0.47.2 / FastAPI>=0.116.1 (CVE-2025-54121) | `pyproject.toml` + `uv.lock` regen (starlette 0.46.2->0.47.3, fastapi->0.116.2, chainlit->2.11.1) |
+| `0e6e7836` + `4d8bca01` | path-tiered rate limiting (M6) | new `api/middleware/rate_limit.py` (registered before AuthMiddleware), `limits>=3.6` dep, `.env.example`, API-test compose disable (+ tests). Refactor never had slowapi, so the 4d8bca01 swap is folded in. |
 
 ### Skipped (already present / superseded on refactor)
 
@@ -83,19 +85,14 @@ docs last.
 
 ### Remaining (TODO — not yet ported)
 
-**Batch 4 — RAG / retrieval / loaders / OpenAI: ✅ COMPLETE** (all ported or obviated).
+**Batches 1 (infra core), 2 (deps), 3 (auth/OIDC), 4 (RAG/retrieval): ✅ COMPLETE.**
+All security-relevant package code and dependencies are ported or obviated.
 
-**Batch 2 — deps:** `74de8232` Starlette/FastAPI bump, `4d8bca01` `limits` not slowapi, `0e6e7836` rate-limit module + tests. Need `uv.lock` regen.
-
-**Deferred (user-requested, do last):** `4bbefd41` compose non-root rework, `701fcf9e` + `8849fe7d` docs moves, `563907ad` doc trim, final ruff pass.
-
-**Batch 2 — deps:** `74de8232` Starlette/FastAPI bump, `4d8bca01` `limits` not slowapi, `0e6e7836` rate-limit module + tests. Need `uv.lock` regen.
-
-**Deferred (user-requested, do last):** `4bbefd41` compose non-root rework, `701fcf9e` + `8849fe7d` docs moves, `563907ad` doc trim, final ruff pass.
-
-**Batch 2 — deps:** `74de8232` Starlette/FastAPI bump, `4d8bca01` `limits` not slowapi, `0e6e7836` rate-limit module + tests (`pyproject.toml`, `uv.lock`, new `openrag/...rate_limit`, `.env.example`).
-
-**Deferred (user-requested, do last):** `4bbefd41` compose non-root rework (init-perms + per-service `user:` — needs careful adaptation to `infra/compose/` paths), `701fcf9e` + `8849fe7d` docs moves, `563907ad` doc comment trim, plus a final `ruff format`/`check` pass.
+**Deferred (user-requested, do last — the ONLY remaining work):**
+- `4bbefd41` compose non-root rework (init-perms bootstrap container + per-service `user:` mappings — needs careful adaptation to the `infra/compose/` volume paths)
+- `701fcf9e` docs: Chainlit on CHAINLIT_PORT under Ray Serve
+- `8849fe7d` docs: move OIDC/SSO quick-start guides into the docs site
+- `563907ad` doc comment trim, plus a final `ruff format`/`check` pass.
 
 > Note: the suite shows one pre-existing **false-alarm** failure,
 > `test_seed_defaults_preserves_endpoint_api_keys` — `seed_defaults` reads
