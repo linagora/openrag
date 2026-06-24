@@ -163,19 +163,28 @@ class VectorStoreSearcher(RetrievalSearcher):
         return [_dict_to_chunk(r) for r in rows[:limit]]
 
     async def _fetch_surrounding(self, chunks: list[Chunk]) -> list[Chunk]:
-        section_ids = [
-            sid
-            for c in chunks
-            for sid in (c.metadata.get("prev_section_id"), c.metadata.get("next_section_id"))
-            if sid is not None
-        ]
-        if not section_ids:
+        # section_id is only unique within a partition, so the lookup MUST be
+        # scoped to each source chunk's partition; otherwise a neighbouring
+        # section_id could resolve to another tenant's chunk (cross-tenant leak,
+        # N6). Group section_ids by partition and query each partition
+        # separately; drop refs whose source chunk has no partition.
+        by_partition: dict[str, list] = {}
+        for c in chunks:
+            if not c.partition:
+                continue
+            for sid in (c.metadata.get("prev_section_id"), c.metadata.get("next_section_id")):
+                if sid is not None:
+                    by_partition.setdefault(c.partition, []).append(sid)
+        if not by_partition:
             return []
-        rows = await self._store.query_chunks_by_filter(
-            self._collection,
-            {"section_id": section_ids},
-        )
-        return [_dict_to_chunk(r) for r in rows]
+        results: list[Chunk] = []
+        for partition, section_ids in by_partition.items():
+            rows = await self._store.query_chunks_by_filter(
+                self._collection,
+                {"section_id": section_ids, "partition": partition},
+            )
+            results.extend(_dict_to_chunk(r) for r in rows)
+        return results
 
 
 __all__ = ["VectorStoreSearcher"]
