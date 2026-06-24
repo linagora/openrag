@@ -22,8 +22,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     """Upgrade schema.
 
-    Idempotent: Base.metadata.create_all() at app startup may have already
-    created these tables on older deployments.
+    Idempotent: older deployments may already contain these tables.
     """
     if not table_exists("workspaces"):
         op.create_table(

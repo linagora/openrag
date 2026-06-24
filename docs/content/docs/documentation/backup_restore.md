@@ -3,6 +3,9 @@ title: How to backup or restore OpenRag partition/data ?
 ---
 
 # How to backup partitions?
+
+> Storage layout (host paths vs. named volumes) and migrating data between storage modes are documented in [Deploying OpenRAG on OpenShift](/openrag/documentation/openshift_deployment/).
+
 ## Backup one partition
 
 :::caution

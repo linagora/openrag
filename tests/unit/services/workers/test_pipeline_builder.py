@@ -248,6 +248,61 @@ async def test_pipeline_row_indexation_config_selects_components():
 
 
 @pytest.mark.asyncio
+async def test_pipeline_skips_contextualization_when_llm_unresolvable():
+    # An enabled contextualization LLM the factory can't resolve must NOT fail the
+    # whole file — the stage is skipped and indexing completes.
+    def _raise(name: str):
+        raise KeyError(f"Unknown llm '{name}'. Available: []")
+
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(ProcessedDocument(document_id="d", text_blocks=[TextBlock(text="t")])),
+        chunker=FakeChunker([Chunk(id="c", text="t", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        contextualizer_factory=_raise,
+    )
+    row = {
+        "document": Document(filename="note.txt", text="hello", partition="tenant-a"),
+        "partition": "tenant-a",
+        "filename": "note.txt",
+        "indexation_config": {
+            "enable_contextualization": True,
+            "contextualization_llm": "missing-endpoint",
+        },
+    }
+    result = await pipeline.run(row)  # must not raise
+    assert result is row
+
+
+@pytest.mark.asyncio
+async def test_pipeline_propagates_non_keyerror_contextualizer_factory_error():
+    # Only an unresolvable-endpoint KeyError is skipped. A different factory
+    # error (e.g. a broken prompt/client config) is a real fault and must
+    # surface, not be silently swallowed (the file should fail loudly).
+    def _raise(name: str):
+        raise ValueError("prompt template failed to load")
+
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(ProcessedDocument(document_id="d", text_blocks=[TextBlock(text="t")])),
+        chunker=FakeChunker([Chunk(id="c", text="t", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        contextualizer_factory=_raise,
+    )
+    row = {
+        "document": Document(filename="note.txt", text="hello", partition="tenant-a"),
+        "partition": "tenant-a",
+        "filename": "note.txt",
+        "indexation_config": {
+            "enable_contextualization": True,
+            "contextualization_llm": "ctx",
+        },
+    }
+    with pytest.raises(ValueError, match="prompt template"):
+        await pipeline.run(row)
+
+
+@pytest.mark.asyncio
 async def test_pipeline_always_captions_standalone_image_even_when_globally_off():
     # A standalone image file's caption is its only text content, so it is
     # captioned even when global image captioning is off (legacy parity).

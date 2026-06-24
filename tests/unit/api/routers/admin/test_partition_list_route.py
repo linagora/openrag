@@ -43,8 +43,19 @@ class _FakeService:
         return self._summaries
 
 
-def _build_app(service: _FakeService, principal_partitions: list[dict]) -> FastAPI:
+def _build_app(
+    service: _FakeService,
+    principal_partitions: list[dict],
+    *,
+    is_admin: bool = False,
+) -> FastAPI:
     app = FastAPI()
+
+    @app.middleware("http")
+    async def _set_user(request, call_next):
+        request.state.user = {"id": 1, "is_admin": is_admin}
+        return await call_next(request)
+
     app.include_router(partitions.router, prefix="/partition")
     app.dependency_overrides[partitions_with_details] = lambda: principal_partitions
     app.dependency_overrides[get_partition_service] = lambda: service
@@ -78,10 +89,11 @@ async def test_list_returns_only_the_callers_partitions(async_client_factory):
 
 @pytest.mark.asyncio
 async def test_super_admin_all_sentinel_lists_every_partition(async_client_factory):
-    """The ``"all"`` sentinel (super-admin) returns every partition's summary."""
+    """The ``"all"`` sentinel returns every partition's summary — but only for an
+    admin caller, since the all-expansion is gated on ``is_admin``."""
     summaries = {n: _summary(n) for n in ("legal", "hr", "secret")}
     principal = [{"partition": "all", "role": "owner"}]
-    app = _build_app(_FakeService(summaries), principal)
+    app = _build_app(_FakeService(summaries), principal, is_admin=True)
     async with async_client_factory(app) as client:
         resp = await client.get("/partition/")
 

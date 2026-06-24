@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from api.dependencies.auth import require_partition_owner, require_partition_viewer
+from api.dependencies.auth import (
+    partitions_with_details,
+    require_partition_owner,
+    require_partition_viewer,
+)
 from api.routers.admin import partitions
 from di.providers import get_partition_service
 from fastapi import FastAPI
@@ -56,6 +60,58 @@ def _build_app(service) -> FastAPI:
     app.dependency_overrides[require_partition_viewer] = lambda: {"id": "admin", "is_admin": True}
     app.dependency_overrides[get_partition_service] = lambda: service
     return app
+
+
+class FakeListService:
+    """Service double whose summaries cover the full set of partitions."""
+
+    async def list_partitions(self) -> list[dict[str, Any]]:
+        """Return every partition (the admin all-expansion target)."""
+        return [{"partition": "p1"}, {"partition": "p2"}]
+
+    async def list_partition_summaries(self) -> dict[str, dict[str, Any]]:
+        """Summaries keyed by name — the admin-UI enrichment source the
+        list route reads from for the all-expansion."""
+        return {
+            "p1": {"partition": "p1", "document_count": 0},
+            "p2": {"partition": "p2", "document_count": 0},
+        }
+
+
+def _build_list_app(*, is_admin: bool) -> FastAPI:
+    """App for the list route, with a regular user whose sole membership is ``all``."""
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _set_user(request, call_next):
+        request.state.user = {"id": 1, "is_admin": is_admin}
+        return await call_next(request)
+
+    app.include_router(partitions.router, prefix="/partition")
+    app.dependency_overrides[partitions_with_details] = lambda: [{"partition": "all"}]
+    app.dependency_overrides[get_partition_service] = lambda: FakeListService()
+    return app
+
+
+@pytest.mark.asyncio
+async def test_list_partitions_expands_all_only_for_admin(async_client_factory):
+    """An admin's ``all`` sentinel expands to every partition."""
+    app = _build_list_app(is_admin=True)
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/")
+    assert response.status_code == 200
+    assert [p["partition"] for p in response.json()["partitions"]] == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_list_partitions_does_not_expand_all_for_non_admin(async_client_factory):
+    """A regular user whose only membership is a partition named ``all`` must not
+    receive every partition — the all-expansion is gated on is_admin."""
+    app = _build_list_app(is_admin=False)
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/")
+    assert response.status_code == 200
+    assert [p["partition"] for p in response.json()["partitions"]] == ["all"]
 
 
 @pytest.mark.asyncio

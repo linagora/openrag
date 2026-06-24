@@ -11,6 +11,7 @@ from services.orchestrators.user_service import UserService
 class FakeUserRepo:
     def __init__(self, existing: set[int] | None = None):
         self._existing = existing if existing is not None else set()
+        self.events: list[str] = []
         self.created: list[dict] = []
         self.deleted: list[int] = []
         self.regenerated: list[int] = []
@@ -46,12 +47,37 @@ class FakeUserRepo:
         return True
 
     async def regenerate_user_token(self, user_id: int):
+        self.events.append("regenerate")
         self.regenerated.append(user_id)
         return self.regen_results.get(user_id)
 
-    async def update_user(self, user_id: int, **fields):
-        self.updated.append((user_id, fields))
+    async def get_user(self, user_id: int):
         return self._users.get(user_id)
+
+    async def update_user(self, user_id: int, **fields):
+        self.events.append("update")
+        self.updated.append((user_id, fields))
+        user = self._users.get(user_id)
+        if user is None:
+            return None
+        for key, value in fields.items():
+            setattr(user, key, value)
+        return user
+
+
+class FakeAuthService:
+    def __init__(self, events: list[str] | None = None, *, fail_revoke: bool = False):
+        self.events = events
+        self.fail_revoke = fail_revoke
+        self.revoked_users: list[int] = []
+
+    async def revoke_oidc_sessions_by_user(self, user_id: int) -> int:
+        if self.events is not None:
+            self.events.append("revoke")
+        if self.fail_revoke:
+            raise RuntimeError("revocation failed")
+        self.revoked_users.append(user_id)
+        return 2
 
 
 class FakePartitionService:
@@ -83,6 +109,7 @@ class FakeJobService:
 def _svc(
     repo: FakeUserRepo,
     *,
+    auth_service: FakeAuthService | None = None,
     default_quota: int = 10,
     partition_service: FakePartitionService | None = None,
     membership_repo: FakeMembershipRepo | None = None,
@@ -90,7 +117,7 @@ def _svc(
 ) -> UserService:
     return UserService(
         user_repo=repo,
-        auth_service=object(),
+        auth_service=auth_service or FakeAuthService(),
         default_file_quota=default_quota,
         partition_service=partition_service or FakePartitionService(),
         membership_repo=membership_repo or FakeMembershipRepo(),
@@ -225,6 +252,31 @@ async def test_regenerate_token_success():
 
 
 @pytest.mark.asyncio
+async def test_regenerate_token_revokes_oidc_sessions():
+    repo = FakeUserRepo(existing={3})
+    repo.regen_results[3] = {"id": 3, "token": "or-new"}
+    auth = FakeAuthService(repo.events)
+
+    await _svc(repo, auth_service=auth).regenerate_token(3)
+
+    assert auth.revoked_users == [3]
+    assert repo.events == ["revoke", "regenerate"]
+
+
+@pytest.mark.asyncio
+async def test_regenerate_token_does_not_rotate_when_oidc_revocation_fails():
+    repo = FakeUserRepo(existing={3})
+    repo.regen_results[3] = {"id": 3, "token": "or-new"}
+    auth = FakeAuthService(repo.events, fail_revoke=True)
+
+    with pytest.raises(RuntimeError, match="revocation failed"):
+        await _svc(repo, auth_service=auth).regenerate_token(3)
+
+    assert repo.regenerated == []
+    assert repo.events == ["revoke"]
+
+
+@pytest.mark.asyncio
 async def test_update_user_missing_404():
     repo = FakeUserRepo(existing=set())
     with pytest.raises(UserNotFoundError):
@@ -255,6 +307,44 @@ async def test_update_user_validates_email():
     repo = FakeUserRepo(existing={2})
     with pytest.raises(ValidationError):
         await _svc(repo).update_user(2, UserUpdate(email="bogus"))
+
+
+@pytest.mark.asyncio
+async def test_update_user_revokes_oidc_sessions_when_admin_is_demoted():
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="Admin", is_admin=True)
+    auth = FakeAuthService(repo.events)
+
+    out = await _svc(repo, auth_service=auth).update_user(2, UserUpdate(is_admin=False))
+
+    assert out["is_admin"] is False
+    assert auth.revoked_users == [2]
+    assert repo.events == ["revoke", "update"]
+
+
+@pytest.mark.asyncio
+async def test_update_user_does_not_demote_admin_when_oidc_revocation_fails():
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="Admin", is_admin=True)
+    auth = FakeAuthService(repo.events, fail_revoke=True)
+
+    with pytest.raises(RuntimeError, match="revocation failed"):
+        await _svc(repo, auth_service=auth).update_user(2, UserUpdate(is_admin=False))
+
+    assert repo.updated == []
+    assert repo._users[2].is_admin is True
+    assert repo.events == ["revoke"]
+
+
+@pytest.mark.asyncio
+async def test_update_user_does_not_revoke_oidc_sessions_for_regular_profile_update():
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="Admin", is_admin=True)
+    auth = FakeAuthService()
+
+    await _svc(repo, auth_service=auth).update_user(2, UserUpdate(display_name="Renamed"))
+
+    assert auth.revoked_users == []
 
 
 # --------------------------------------------------------------------------- #

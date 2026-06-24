@@ -6,11 +6,9 @@ and the Phase 7C shim consume through the ``CatalogStore`` ABC.
 
 The store owns the lifecycle:
 
-* :meth:`initialize` opens the asyncpg pool, then runs Alembic migrations to
-  ``head``. The order matters — the legacy ORM's ``Base.metadata.create_all``
-  used to fast-forward the schema before migrations ran, which is why every
-  Alembic revision is idempotent (see ``CLAUDE.md`` "Alembic Migration
-  Idempotency"). The new store keeps that contract.
+* :meth:`initialize` opens the asyncpg pool, then optionally runs Alembic
+  migrations to ``head``. Migrations stay idempotent so they can be run either
+  during app startup or as a separate deployment step.
 * :meth:`shutdown` closes the pool. Repositories share the pool via a
   ``pool_getter`` callable, so the pool can be reinitialised in tests without
   rebuilding the repos.
@@ -113,11 +111,9 @@ class PostgresStore(CatalogStore):
         ``command.upgrade``, which under concurrent load starves the Postgres
         pool and surfaces as 500s.
 
-        Order matters: the pool must exist before Alembic runs because the
-        legacy ``PartitionFileManager`` bootstrapped tables synchronously via
-        ``Base.metadata.create_all`` *before* migrations. The Phase 7
-        migrations therefore guard every DDL with an inspector check, which
-        keeps re-runs safe regardless of pool state.
+        Migrations are still idempotent because the same revision can be
+        applied from app startup in local/dev or from a deployment job in
+        managed environments.
         """
         if self._initialized:
             return

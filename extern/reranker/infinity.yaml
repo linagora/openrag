@@ -40,4 +40,3 @@ services:
       --port 7997
     profiles:
       - 'cpu'
-

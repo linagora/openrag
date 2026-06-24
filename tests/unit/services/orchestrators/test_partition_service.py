@@ -145,6 +145,20 @@ async def test_create_partition_success():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["all", "ALL", "All", "  all  "])
+async def test_create_partition_rejects_reserved_name(name):
+    # ``all`` is the cross-partition sentinel — a real partition with that name
+    # would leak every partition to its owner. Rejected (400) before the row is
+    # written, case-insensitively and after trimming, even when it doesn't exist.
+    prepo = FakePartitionRepo()
+    with pytest.raises(ValidationError) as ei:
+        await _svc(prepo=prepo).create_partition(name, 1)
+    assert ei.value.status_code == 400
+    assert ei.value.code == "RESERVED_PARTITION_NAME"
+    assert prepo.created == []
+
+
+@pytest.mark.asyncio
 async def test_delete_partition_missing_raises_404():
     with pytest.raises(PartitionNotFoundError):
         await _svc(prepo=FakePartitionRepo(existing=set())).delete_partition("ghost")

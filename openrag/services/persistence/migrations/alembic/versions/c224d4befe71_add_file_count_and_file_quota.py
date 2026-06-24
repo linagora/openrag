@@ -22,8 +22,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     """Upgrade schema.
 
-    Idempotent: Base.metadata.create_all() at app startup may have already
-    added these columns/indexes from the SQLAlchemy models on older deployments.
+    Idempotent: older deployments may already contain these columns/indexes.
     """
     if not column_exists("users", "file_quota"):
         op.add_column("users", sa.Column("file_quota", sa.Integer(), nullable=True))

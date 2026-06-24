@@ -59,12 +59,19 @@ Returns a list of partitions you have access to, including:
 """,
 )
 async def list_existant_partitions(
+    request: Request,
     partitions=Depends(partitions_with_details),
     service=Depends(get_partition_service),
 ):
     """List partitions visible to the current user, with stored config + document_count."""
+    # The ``all`` entry is the admin/SUPER_ADMIN_MODE sentinel from
+    # partitions_with_details. Gate the all-expansion on the caller actually being
+    # an admin, so a (legacy) partition literally named ``all`` owned by a regular
+    # user cannot leak every partition. New ``all`` partitions are already rejected
+    # at creation (_RESERVED_PARTITION_NAMES).
+    is_admin = bool(request.state.user.get("is_admin"))
     summaries = await service.list_partition_summaries()
-    if len(partitions) == 1 and partitions[0]["partition"] == "all":
+    if is_admin and len(partitions) == 1 and partitions[0]["partition"] == "all":
         result = list(summaries.values())
     else:
         result = []

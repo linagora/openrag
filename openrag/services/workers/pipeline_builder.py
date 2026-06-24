@@ -11,6 +11,7 @@ from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType
+from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
 from services.workers.stages.caption import caption_stage
@@ -20,6 +21,8 @@ from services.workers.stages.embed import embed_stage
 from services.workers.stages.parse import parse_stage
 from services.workers.stages.store import store_stage
 from services.workers.stages.topic_tag import topic_tag_stage
+
+logger = get_logger()
 
 
 @dataclass(slots=True, frozen=True)
@@ -165,7 +168,16 @@ class IndexingPipeline:
             if not config.enable_contextualization:
                 return None
             if self.contextualizer_factory is not None:
-                return self.contextualizer_factory(config.contextualization_llm or "default")
+                name = config.contextualization_llm or "default"
+                try:
+                    return self.contextualizer_factory(name)
+                except KeyError as exc:
+                    # Only an unresolvable endpoint name (the factory raises KeyError)
+                    # is skipped — contextualization is an enhancement and must not fail
+                    # the file over a missing/typo'd LLM. Any other factory error (prompt
+                    # load, bad client config, ...) is a real fault and is left to surface.
+                    logger.warning(f"Skipping contextualization: cannot resolve LLM '{name}' ({exc})")
+                    return None
         return self.contextualizer
 
     def _select_topic_tagger(self, config: IndexationPipelineConfig | None) -> TopicTagger | None:
@@ -173,7 +185,14 @@ class IndexingPipeline:
             if not config.enable_topic_tagging:
                 return None
             if self.topic_tagger_factory is not None:
-                return self.topic_tagger_factory(config.topic_tagging_llm or "default")
+                name = config.topic_tagging_llm or "default"
+                try:
+                    return self.topic_tagger_factory(name)
+                except KeyError as exc:
+                    # Only an unresolvable endpoint name (KeyError) is skipped; any other
+                    # factory error is a real fault and is left to surface, not masked.
+                    logger.warning(f"Skipping topic tagging: cannot resolve LLM '{name}' ({exc})")
+                    return None
         return self.topic_tagger
 
 

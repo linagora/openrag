@@ -194,6 +194,31 @@ The PostgreSQL database is configured using the following environment variables:
 | `POSTGRES_PORT` | int | 5432 | Port on which the PostgreSQL database listens |
 | `POSTGRES_USER` | str | root | Username for database authentication |
 | `POSTGRES_PASSWORD` | str | root_password | Password for database authentication |
+| `POSTGRES_DATABASE` | str | `partitions_for_collection_<VDB_COLLECTION_NAME>` | Database used for OpenRAG relational metadata. If unset, OpenRAG derives the historical name from the vector collection. |
+| `POSTGRES_AUTO_CREATE_DB` | bool | true | Creates the database automatically when it is missing. Keep this for local compose; set it to `false` for managed Postgres where the app role has no `CREATEDB`. |
+| `POSTGRES_RUN_MIGRATIONS` | bool | true | Runs Alembic migrations during app startup. Set it to `false` when migrations are applied by a deployment Job or init step. |
+| `POSTGRES_POOL_MIN_SIZE` | int | 5 | Minimum size of the async PostgreSQL connection pool. |
+| `POSTGRES_POOL_MAX_SIZE` | int | 20 | Maximum size of the async PostgreSQL connection pool. |
+| `POSTGRES_COMMAND_TIMEOUT` | int | 30 | Timeout in seconds for PostgreSQL commands issued through the async pool. |
+
+### Compose Storage Volumes
+
+The main Docker Compose stack keeps the historical host-path defaults. Set these variables when you want to move state elsewhere, including Docker named volumes.
+
+For an opt-in named-volume profile, copy the values from `infra/compose/.env.named-volumes.example` into your `.env`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATA_VOLUME` | `../../data` | OpenRAG uploaded files and app data mounted at `/app/data`. |
+| `LOG_VOLUME` | `../../logs` | OpenRAG logs mounted at `/app/logs`. |
+| `MODEL_WEIGHTS_VOLUME` | `~/.cache/huggingface` | Model cache mounted at `/app/model_weights`. |
+| `VLLM_CACHE` | `/root/.cache/huggingface` | Hugging Face cache used by vLLM, reranker, and transcriber services. |
+| `DB_VOLUME` | `../../db` | PostgreSQL data mounted at `/var/lib/postgresql/data`. |
+| `MILVUS_VOLUME_DIRECTORY` | `./volumes` | Parent directory for Milvus, etcd, and MinIO host-path storage. |
+| `MILVUS_COMPOSE` | `milvus/milvus.yaml` | Milvus compose include. Use `milvus/milvus.named-volumes.yaml` for the named-volume profile. |
+| `ETCD_VOLUME` | `etcd` | Milvus etcd named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
+| `MINIO_VOLUME` | `minio` | Milvus object storage named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
+| `MILVUS_VOLUME` | `milvus` | Milvus named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
 
 ## Chat Pipeline
 ### LLM & VLM Configuration
