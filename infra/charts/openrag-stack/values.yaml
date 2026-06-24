@@ -27,7 +27,10 @@ postgresql:
   enabled: true
   auth:
     username: &pgUser root
-    password: &pgPass root_password
+    # MUST be overridden at install time, e.g.
+    #   --set postgresql.auth.password=$(openssl rand -hex 16)
+    # Shipping a known password is a usable default credential.
+    password: &pgPass "CHANGE_ME_STRONG_PASSWORD"
   primary:
     persistence:
       enabled: true
@@ -301,7 +304,8 @@ env:
     POSTGRES_HOST: "{{ .Release.Name }}-postgresql"
     POSTGRES_PORT: *pgPort
     POSTGRES_USER: *pgUser
-    POSTGRES_PASSWORD: *pgPass
+    # POSTGRES_PASSWORD is a secret — defined under env.secrets, not here in the
+    # (world-readable) ConfigMap.
     POSTGRES_AUTO_CREATE_DB: "{{ .Values.postgresProvisioning.autoCreateDatabase }}"
     POSTGRES_RUN_MIGRATIONS: "{{ .Values.postgresProvisioning.runMigrationsInApp }}"
 
@@ -347,3 +351,6 @@ env:
     TRANSCRIBER_API_KEY: "EMPTY"
     AUTH_TOKEN: "sk-xxxx" # API KEY for OpenRAG
     HF_TOKEN: "hf_xxxx" # HuggingFace token
+    # DB password lives in the Secret (not the ConfigMap). Reuses the same
+    # value as postgresql.auth.password via the *pgPass anchor.
+    POSTGRES_PASSWORD: *pgPass
