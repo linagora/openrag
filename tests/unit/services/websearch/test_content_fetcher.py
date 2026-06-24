@@ -1,4 +1,5 @@
 import asyncio
+import socket
 
 import httpx
 import pytest
@@ -304,3 +305,39 @@ def test_fetch_verify_ssl_default_is_true():
 
     cfg = StaanWebSearchConfig()
     assert cfg.fetch_verify_ssl is True
+
+
+# ---------------------------------------------------------------------------
+# _guard_request — DNS-resolution-time SSRF guard + verify_ssl default
+# ---------------------------------------------------------------------------
+
+
+class TestGuardRequest:
+    @pytest.mark.asyncio
+    async def test_blocks_host_resolving_to_private_ip(self, fetcher, monkeypatch):
+        # A public-looking hostname that resolves to an internal IP must be blocked.
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))]
+
+        monkeypatch.setattr(
+            "services.websearch.content_fetcher.socket.getaddrinfo", fake_getaddrinfo
+        )
+        req = httpx.Request("GET", "http://internal.example.com/")
+        with pytest.raises(httpx.RequestError):
+            await fetcher._guard_request(req)
+
+    @pytest.mark.asyncio
+    async def test_allows_host_resolving_to_public_ip(self, fetcher, monkeypatch):
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr(
+            "services.websearch.content_fetcher.socket.getaddrinfo", fake_getaddrinfo
+        )
+        req = httpx.Request("GET", "http://example.com/")
+        await fetcher._guard_request(req)  # must not raise
+
+
+def test_verify_ssl_defaults_to_true():
+    # Fetched content feeds the LLM; default to verifying TLS to prevent MITM.
+    assert ContentFetcher().verify_ssl is True

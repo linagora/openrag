@@ -1,5 +1,6 @@
 import asyncio
 import ipaddress
+import socket
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -93,7 +94,7 @@ class ContentFetcher:
         max_results: int = 3,
         timeout: float = 1.0,
         max_tokens_per_page: int = 500,
-        verify_ssl: bool = False,
+        verify_ssl: bool = True,
     ):
         self.max_results = max_results
         self.timeout = timeout
@@ -111,6 +112,34 @@ class ContentFetcher:
         if last_space > max_chars * 0.8:
             truncated = truncated[:last_space]
         return truncated.rstrip() + " [...]"
+
+    @staticmethod
+    async def _guard_request(request: httpx.Request) -> None:
+        """httpx request hook: block requests whose host *resolves* to a
+        non-global IP.
+
+        ``_is_safe_url`` only inspects the literal host, so a public-looking
+        hostname that resolves to an internal address (DNS-rebinding-style
+        SSRF) would otherwise slip through. This hook resolves the host and
+        rejects any non-global resolved IP. It runs for the initial request
+        and every manually-followed redirect hop.
+        """
+        host = request.url.host
+        if not host:
+            raise httpx.RequestError("Blocked request with no host", request=request)
+        try:
+            infos = await asyncio.to_thread(socket.getaddrinfo, host, None)
+        except socket.gaierror as e:
+            raise httpx.RequestError(f"DNS resolution failed for {host}", request=request) from e
+        for info in infos:
+            ip = info[4][0]
+            try:
+                addr = ipaddress.ip_address(ip)
+            except ValueError as e:
+                raise httpx.RequestError(f"Unparseable address for {host}", request=request) from e
+            if _is_blocked_address(addr):
+                logger.warning("Blocked SSRF attempt to non-global address", host=host, ip=ip)
+                raise httpx.RequestError(f"Blocked non-global address {ip} for {host}", request=request)
 
     async def _fetch_single(self, client: httpx.AsyncClient, url: str) -> str | None:
         """Fetch a single URL and extract text. Returns None on any failure.
@@ -199,7 +228,10 @@ class ContentFetcher:
                 pool=self.timeout,
             )
             async with httpx.AsyncClient(
-                timeout=timeout, verify=self.verify_ssl, headers={"User-Agent": _USER_AGENT}
+                timeout=timeout,
+                verify=self.verify_ssl,
+                headers={"User-Agent": _USER_AGENT},
+                event_hooks={"request": [self._guard_request]},
             ) as client:
                 tasks = [self._fetch_single(client, r.url) for r in to_fetch]
                 contents = await asyncio.gather(*tasks)
