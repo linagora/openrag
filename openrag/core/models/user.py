@@ -23,11 +23,13 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    model_config = ConfigDict(extra="allow")
+    # Reject unknown fields so callers cannot smuggle extra column names.
+    model_config = ConfigDict(extra="ignore")
 
 
 class UserUpdate(UserBase):
-    model_config = ConfigDict(extra="allow")
+    # Reject unknown fields; UserService additionally whitelists writable columns.
+    model_config = ConfigDict(extra="ignore")
 
 
 class UserPublic(UserBase):

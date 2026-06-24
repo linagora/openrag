@@ -42,6 +42,15 @@ logger = get_logger()
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _MAX_DISPLAY_NAME = 255
 
+# Fields a caller may set via update_user. Excludes identity/privilege and
+# security-sensitive columns (token, file_count, id, created_at) so they can
+# never be overwritten through the user-update payload (mass assignment). The
+# repo's update_user accepts token/file_count for internal callers (token
+# rotation, quota tracking), so the boundary whitelist lives here.
+_UPDATABLE_USER_FIELDS = frozenset(
+    {"display_name", "external_user_id", "email", "is_admin", "file_quota"}
+)
+
 
 class UserService:
     """User account CRUD — validation + repo delegation."""
@@ -193,6 +202,9 @@ class UserService:
     async def update_user(self, user_id: int, body: UserUpdate) -> dict:
         await self._ensure_exists(user_id)
         updates = body.model_dump(exclude_unset=True)
+        # Whitelist writable profile fields: never allow token, file_count or id
+        # to be set through the user-update payload (mass assignment).
+        updates = {k: v for k, v in updates.items() if k in _UPDATABLE_USER_FIELDS}
         self._validate_profile(updates.get("display_name"), updates.get("email"))
 
         user = await self._user_repo.update_user(user_id, **updates)
