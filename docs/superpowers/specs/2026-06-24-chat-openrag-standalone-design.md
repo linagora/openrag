@@ -133,11 +133,16 @@ openRAG is **stateless**: no `conversation_id`. The adapter sends the **full
 `messages[]` array** on every request (openRAG keeps only the last N per
 `chat_history_depth`).
 
+**Sources display:** same in-chat rendering as `cozy-search` today. When a
+source has a link, link to it. Showing the source content inside the app (PDF,
+TXT, etc.) when no external link is defined is **deferred to later** (post-v1).
+
 ### Model / partition selection
 
-`GET /v1/models` lists partitions (`openrag-<partition>` / `openrag-all`). This
+`GET /v1/models` lists the partitions the user's token grants access to. This
 feeds a selector reusing the "assistant selection" UI slot (without the Cozy
-logic). **Default partition: `openrag-all`** (to confirm).
+logic). **Default partition: the first one returned** when the user has access
+to several (no hardcoded default).
 
 ## Theming (v1)
 
@@ -172,18 +177,20 @@ OIDC/SSO mode already exists and is wired in v2.
 ## Risks & open questions
 
 1. **Source normalization** — openRAG's source shape differs from the current
-   one (no Cozy `doctype`). The `Sources` component may need a small display
-   variant (document vs web).
+   one (no Cozy `doctype`). The adapter normalizes it so the `Sources` component
+   renders sources the same way `cozy-search` does today, linking to the source
+   when a link is defined. In-app source content viewing (PDF/TXT/…) when no
+   external link exists is deferred (post-v1).
 2. **MUI v4 standalone via rspack** — to validate (expected fine with
    `babel-preset-cozy-app`).
 3. **`twake-i18n` standalone setup** — provide locales without the Cozy app
    context.
 4. **`cozy-search` decoupling** — the real refactor effort: identify every point
    in the views touching `cozy-client` / `cozy-realtime`.
-5. **Default partition & `/v1/models` mapping** — confirm partition ↔ "assistant"
-   semantics and the default selection.
-6. **Cross-repo dev loop** — developing `chat-openrag` against a not-yet-published
-   decoupled `cozy-search`; use local linking until published.
+5. **Cross-repo dev loop (resolved)** — `chat-openrag` is developed against a
+   locally linked, not-yet-published decoupled `cozy-search`
+   (`yarn link` or `file:` dependency) until a version exposing the decoupled
+   views is published. Standard approach, accepted.
 
 ## Path to v2 (informational, not part of this spec)
 
