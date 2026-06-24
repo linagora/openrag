@@ -174,7 +174,7 @@ class ParserDispatcher(DocumentParser):
             ocfg.model,
             ocfg.api_key,
             ocfg.timeout,
-            getattr(ocfg, "enable_thinking", None),
+            ocfg.enable_thinking,
         )
         client = DotsOCRPdfClient(vlm, concurrency_limit=ocfg.concurrency_limit)
         return _create("core.indexing.parsers.pdf.client_based", "pdf_client", client=client)
@@ -262,7 +262,7 @@ def build_caption_vlm(config: Any) -> Any | None:
         vlm_cfg.model,
         vlm_cfg.api_key,
         vlm_cfg.timeout,
-        getattr(vlm_cfg, "enable_thinking", None),
+        vlm_cfg.enable_thinking,
     )
 
 
