@@ -182,12 +182,37 @@ async def backchannel_logout(
 # ---------------------------------------------------------------------------
 
 
+def _is_csrf_safe_navigation(request: Request) -> bool:
+    """Reject the silent logout-CSRF vector while keeping the redirect-based UX.
+
+    Logout must remain reachable via top-level GET navigation (the OIDC
+    RP-initiated logout redirects the browser to the IdP), so we can't simply
+    require POST. Instead we use the Fetch Metadata headers: a forged request
+    from ``<img>``/``<script>``/cross-site ``fetch`` is a cross-site
+    *non-navigation* request and is blocked; genuine top-level navigations
+    (Sec-Fetch-Mode: navigate) and same-origin requests pass. Browsers that
+    don't send these headers (older) fall through as allowed.
+    """
+    site = request.headers.get("sec-fetch-site")
+    mode = request.headers.get("sec-fetch-mode")
+    if site == "cross-site" and mode not in (None, "navigate"):
+        return False
+    return True
+
+
 @router.get("/auth/logout", include_in_schema=False)
 async def logout(
     request: Request,
     _oidc: None = Depends(_require_oidc_mode),
     service=Depends(get_auth_service),
 ):
+    if not _is_csrf_safe_navigation(request):
+        logger.warning("Blocked cross-site non-navigation request to /auth/logout (CSRF)")
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": "Cross-site logout requests are not allowed"},
+        )
+
     redirect_target = await service.logout(request.cookies.get(SESSION_COOKIE_NAME))
 
     if redirect_target:
