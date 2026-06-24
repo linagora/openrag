@@ -29,7 +29,10 @@ x-openrag: &openrag_template
     - ${LOG_VOLUME:-../../logs}:/app/logs # For dev mode
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
-    - ${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
+    # Bind the Ray dashboard to localhost only: it has no authentication and
+    # its job-submission API allows arbitrary code execution on the cluster,
+    # so it must never be reachable from outside the host.
+    - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
     - ${CHAINLIT_PORT:-8090}:${CHAINLIT_PORT:-8090}
   networks:
     default:
