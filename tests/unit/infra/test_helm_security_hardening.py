@@ -46,6 +46,8 @@ def test_secret_template_fails_on_required_or_placeholder_secrets() -> None:
 
     assert "fail" in template
     assert "requiredSecrets" in template
+    assert "hasKey $secrets $requiredKey" in template
+    assert "range $requiredKey := $requiredSecrets" in template
     assert "AUTH_TOKEN" in template
     assert "POSTGRES_PASSWORD" in template
     assert "sk-xxxx" in template
