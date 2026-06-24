@@ -62,6 +62,9 @@ docs last.
 | `d66cf029` | cap partitions per non-admin user (M13) | `services/orchestrators/partition_service.py`, `api/routers/admin/partitions.py`, `.env.example` (+ tests) |
 | `8ecbc781` | web-search SSRF/MITM deltas (verify_ssl default True + DNS-resolution guard hook) | `services/websearch/content_fetcher.py` (+ tests). The refactor already had per-hop redirect revalidation (#383). |
 | `8ea723ca` | explicit cairosvg `unsafe=False` (SSRF/XXE) | `core/indexing/parsers/image_parser.py` |
+| `221f8ed8` | EML attachment fan-out cap (M8) | `core/indexing/parsers/eml_parser.py` (+ test). eml-depth already bounded by the dispatcher; docx/pptx/pdf caps N/A (docling/marker delegate). |
+| `67ec4199` | authorize source-file downloads by partition | new `api/routers/user/download.py` (replaces the open `/static` mount), `api/main.py`, `chat.py`/`source_links.py` rekeyed to chunk id (+ tests) |
+| `761f47a0` | validate copy-endpoint source_file_id (#477) | `api/routers/admin/indexing.py` + `docs/assets/compose_linux_gpu.yaml` |
 
 ### Skipped (already present / superseded on refactor)
 
@@ -80,10 +83,7 @@ docs last.
 
 ### Remaining (TODO — not yet ported)
 
-**Batch 4 — RAG / retrieval / loaders / OpenAI (3 left):**
-- `221f8ed8` parser DoS caps (M8). Applies *partially* to the refactor's different parser architecture: the clear surface is `core/indexing/parsers/eml_parser.py` (uncapped attachment fan-out via `msg.walk()` + potential nested-`.eml` recursion through the DI attachment dispatch) → add `max_attachments` + an eml-depth guard + `core/config/indexation.py` keys. The docx/pptx/pdf caps target the *legacy* loaders' manual zip/page iteration, which the refactor delegates to docling/marker (no equivalent manual-iteration memory-bomb surface) — verify per worker before porting.
-- `67ec4199` source-download authz (partial — open `/static` mount already gone in the refactor) → confirm `api/routers/user/source_links.py` authorizes chunk/file downloads by partition membership.
-- `761f47a0` copy-endpoint `source_file_id` validation (#477) → `api/routers/admin/indexing.py` copy endpoint; likely largely covered now that `validate_file_id` is allowlist-based — confirm the copy endpoint runs it.
+**Batch 4 — RAG / retrieval / loaders / OpenAI: ✅ COMPLETE** (all ported or obviated).
 
 **Batch 2 — deps:** `74de8232` Starlette/FastAPI bump, `4d8bca01` `limits` not slowapi, `0e6e7836` rate-limit module + tests. Need `uv.lock` regen.
 
