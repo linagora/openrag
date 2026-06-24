@@ -147,7 +147,7 @@ async def search_multiple_partitions(
 
     log = logger.bind(
         partitions=partitions,
-        query=search_params.text,
+        query_len=len(search_params.text),
         top_k=search_params.top_k,
         workspace=workspace,
         include_related=related_params.include_related,
@@ -233,7 +233,7 @@ async def search_one_partition(
 ):
     log = logger.bind(
         partition=partition,
-        query=search_params.text,
+        query_len=len(search_params.text),
         top_k=search_params.top_k,
         workspace=workspace,
         include_related=related_params.include_related,
@@ -310,7 +310,9 @@ async def search_file(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_retrieval_service),
 ):
-    log = logger.bind(partition=partition, file_id=file_id, query=search_params.text, top_k=search_params.top_k)
+    log = logger.bind(
+        partition=partition, file_id=file_id, query_len=len(search_params.text), top_k=search_params.top_k
+    )
 
     filter = "file_id == {_file_id}" + (f" AND {search_params.filter}" if search_params.filter else "")
     params = {"_file_id": file_id}
