@@ -416,7 +416,19 @@ Controls the maximum number of concurrent operations for different indexer tasks
 | `RAY_SEMAPHORE_CONCURRENCY` | int | 100000 | Global concurrency limit for Ray semaphore operations |
 
 #### Ray Serve Configuration
-Ray Serve enables deployment of the FastAPI as a scalable service. For simple deployment, without the intend to scale, one can usage the [uvicorn deployment mode](/openrag/documentation/env_vars/#ray-serve-configuration)
+
+Ray Serve enables deployment of the FastAPI app as a horizontally scalable service.
+
+By default (`ENABLE_RAY_SERVE=false`) OpenRAG runs under **uvicorn with a single worker**. This is intentional: the app initializes Ray and its named actors (`Indexer`, `Vectordb`, `TaskStateManager`, …) at import time, so a second uvicorn worker would start its **own isolated Ray cluster** with duplicate actors, fragmenting task state and vector-DB access. Concurrency within the single worker comes from the async app and from Ray itself — **not** from multiple uvicorn workers (there is intentionally no `API_NUM_WORKERS` knob).
+
+**To scale the HTTP layer, enable Ray Serve** — it runs `RAY_SERVE_NUM_REPLICAS` replicas inside one shared Ray cluster:
+
+```bash
+ENABLE_RAY_SERVE=true
+RAY_SERVE_NUM_REPLICAS=4
+```
+
+For multi-node distributed deployments, see [Distributed Deployment in a Ray Cluster](/openrag/documentation/deploy_ray_cluster/).
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -512,7 +524,6 @@ The following environment variables configure the FastAPI server and control acc
 | `AUTH_TOKEN` | `string` | `EMPTY` | An authentication token is required to access protected API endpoints. By default, this token corresponds to the API key of the created admin (see [Admin Bootstrapping](/openrag/documentation/user_auth/#2-admin-bootstrapping)). If left empty, authentication is disabled. |
 | `SUPER_ADMIN_MODE` | `boolean` | `false` | Enables super admin privileges when set to `true`, [granting unrestricted access](/openrag/documentation/data_model/#access-control) to all operations and bypassing standard access controls. This is for debugging |
 | `DEFAULT_FILE_QUOTA` | `int` | `-1` | Default per-user file quota. `<0` disables quotas globally; `>=0` sets the default limit when a user has no explicit quota. |
-|`API_NUM_WORKERS`|`int`|1|Number of uvicorn workers|
 | `PREFERRED_URL_SCHEME` | `string` | `null` | URL scheme (`http` or `https`) used when generating URLs in API responses (e.g., `task_status_url`). When running behind a reverse proxy that terminates SSL, set this to `https` to ensure generated URLs use the correct scheme. If unset, the scheme from the incoming request is used. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
 

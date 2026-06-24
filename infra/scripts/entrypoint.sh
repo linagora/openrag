@@ -9,15 +9,20 @@ if [[ "${ENABLE_RAY_SERVE}" == "true" ]]; then
   uv run "${ENV_ARGS[@]}" -m api.main
 else
   echo "🚀 Starting with Uvicorn..."
-  # --reload is a development feature (watches/auto-imports source on change)
-  # and is incompatible with multiple workers. Enable it only with
-  # UVICORN_RELOAD=true for local dev; production runs without it.
+  # This path always runs a SINGLE uvicorn worker. The app initializes Ray and
+  # its named actors (Indexer, Vectordb, TaskStateManager, ...) at import time,
+  # so each extra worker would be a separate process starting its own isolated
+  # Ray cluster with duplicate actors — fragmenting task state and the vector
+  # DB. Concurrency comes from the async app + Ray, not from uvicorn workers.
+  # To scale the HTTP layer horizontally, use Ray Serve (ENABLE_RAY_SERVE=true,
+  # RAY_SERVE_NUM_REPLICAS=N), which runs N replicas inside one Ray cluster.
+  if [[ -n "${API_NUM_WORKERS}" && "${API_NUM_WORKERS}" != "1" ]]; then
+    echo "⚠️  API_NUM_WORKERS=${API_NUM_WORKERS} is ignored: this app runs a single uvicorn worker (Ray provides concurrency). To scale, set ENABLE_RAY_SERVE=true with RAY_SERVE_NUM_REPLICAS." >&2
+  fi
+  # --reload is dev-only (set UVICORN_RELOAD=true); it also forces a single worker.
   RELOAD_ARGS=()
-  WORKERS="${API_NUM_WORKERS:-1}"
   if [[ "${UVICORN_RELOAD}" == "true" ]]; then
     RELOAD_ARGS+=("--reload")
-    # uvicorn rejects --reload together with multiple workers; force single worker.
-    WORKERS="1"
   fi
-  uv run --no-dev "${ENV_ARGS[@]}" uvicorn api.main:app --host 0.0.0.0 --port "${APP_iPORT:-8080}" "${RELOAD_ARGS[@]}" --workers "${WORKERS}"
+  uv run --no-dev "${ENV_ARGS[@]}" uvicorn api.main:app --host 0.0.0.0 --port "${APP_iPORT:-8080}" "${RELOAD_ARGS[@]}" --workers 1
 fi

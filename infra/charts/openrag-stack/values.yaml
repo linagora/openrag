@@ -288,7 +288,8 @@ env:
 
     WITH_CHAINLIT_UI: "false"
     SAVE_UPLOADED_FILES: "false"
-    API_NUM_WORKERS: "8"
+    # HTTP scaling is handled by Ray Serve above (ENABLE_RAY_SERVE +
+    # RAY_SERVE_NUM_REPLICAS), not uvicorn workers — see entrypoint.sh.
     INDEXERUI_URL: "http://indexer-ui:3042"
 
     # Vector DB
