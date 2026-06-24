@@ -168,9 +168,7 @@ class TestBuildFilterExpr:
         # A viewer-supplied filter with `or` must stay contained within the
         # partition predicate: `and` binds tighter than `or` in Milvus, so
         # without parentheses this would read another tenant's chunks.
-        expr = store._build_filter_expr(
-            {"partition": "p1", "expr": 'text != "" or partition == "other"'}
-        )
+        expr = store._build_filter_expr({"partition": "p1", "expr": 'text != "" or partition == "other"'})
         assert expr == '(partition == "p1") and (text != "" or partition == "other")'
 
 

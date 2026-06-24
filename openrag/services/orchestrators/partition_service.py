@@ -179,9 +179,7 @@ class PartitionService:
         # acceptable for a DoS cap.
         if max_owned is not None and max_owned >= 0:
             owned = sum(
-                1
-                for up in await self._membership_repo.list_user_partitions(user_id)
-                if up.role == PartitionRole.OWNER
+                1 for up in await self._membership_repo.list_user_partitions(user_id) if up.role == PartitionRole.OWNER
             )
             if owned >= max_owned:
                 raise ValidationError(

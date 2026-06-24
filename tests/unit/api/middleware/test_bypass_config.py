@@ -240,9 +240,7 @@ async def test_dev_bypass_resolves_admin_when_allow_no_auth_set(monkeypatch) -> 
         captured["user"] = req.state.user
         return Response("ok")
 
-    middleware = AuthMiddleware(
-        lambda scope, receive, send: None, get_auth_service=lambda _r: svc
-    )
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
     response = await middleware.dispatch(_request(), call_next)
 
     assert response.status_code == 200
@@ -267,9 +265,7 @@ async def test_dev_bypass_does_not_fail_open_without_flag(monkeypatch) -> None:
     async def call_next(req):
         return Response("ok")
 
-    middleware = AuthMiddleware(
-        lambda scope, receive, send: None, get_auth_service=lambda _r: svc
-    )
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
     response = await middleware.dispatch(_request(), call_next)
 
     # No token + no opt-in → not authenticated, never resolves to admin.

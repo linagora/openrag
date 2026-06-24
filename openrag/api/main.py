@@ -299,6 +299,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/", include_in_schema=False)
 def root_redirect():
     """Root handler — sends authenticated users to the indexer-ui (if
