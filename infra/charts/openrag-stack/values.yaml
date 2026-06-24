@@ -27,7 +27,7 @@ postgresql:
   enabled: true
   auth:
     username: &pgUser root
-    password: &pgPass root_password
+    password: &pgPass ""
   primary:
     persistence:
       enabled: true
@@ -85,6 +85,19 @@ vllm:
   llmModelName: &llmModel "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
   servingEngineSpec:
     enableEngine: true
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 10001
+      runAsGroup: 10001
+      fsGroup: 10001
+      seccompProfile:
+        type: RuntimeDefault
+    containerSecurityContext:
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
     modelSpec:
       - name: "embedder"
         repository: "vllm/vllm-openai"
@@ -259,13 +272,31 @@ openrag:
   replicas: 1
 
 ingress:
-  enabled: true
+  enabled: false
   className: "nginx"
   host: ""
+  tls:
+    enabled: false
+    secretName: ""
 
   paths:
     openrag:
       enabled: true
+
+security:
+  automountServiceAccountToken: false
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
 
 # === Shared env (config + secrets) ===
 env:
@@ -300,7 +331,6 @@ env:
     POSTGRES_HOST: "{{ .Release.Name }}-postgresql"
     POSTGRES_PORT: *pgPort
     POSTGRES_USER: *pgUser
-    POSTGRES_PASSWORD: *pgPass
     POSTGRES_AUTO_CREATE_DB: "{{ .Values.postgresProvisioning.autoCreateDatabase }}"
     POSTGRES_RUN_MIGRATIONS: "{{ .Values.postgresProvisioning.runMigrationsInApp }}"
 
@@ -340,9 +370,10 @@ env:
     UV_CACHE_DIR: "/tmp/uv-cache"
 
   secrets:
-    API_KEY: "sk-xxxx" # LLM API KEY
-    VLM_API_KEY: "sk-xxxx" # VLM API KEY
+    API_KEY: "" # LLM API KEY
+    VLM_API_KEY: "" # VLM API KEY
     EMBEDDER_API_KEY: "EMPTY"
     TRANSCRIBER_API_KEY: "EMPTY"
-    AUTH_TOKEN: "sk-xxxx" # API KEY for OpenRAG
-    HF_TOKEN: "hf_xxxx" # HuggingFace token
+    POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
+    AUTH_TOKEN: "" # API KEY for OpenRAG
+    HF_TOKEN: "" # HuggingFace token

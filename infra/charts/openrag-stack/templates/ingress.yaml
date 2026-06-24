@@ -10,8 +10,17 @@ metadata:
 
 spec:
   ingressClassName: {{ .Values.ingress.className | quote }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ required "ingress.host must be set when ingress.tls.enabled=true" .Values.ingress.host | quote }}
+      {{- with .Values.ingress.tls.secretName }}
+      secretName: {{ . | quote }}
+      {{- end }}
+  {{- end }}
   rules:
-    - http:
+    - host: {{ required "ingress.host must be set when ingress.enabled=true" .Values.ingress.host | quote }}
+      http:
         paths:
           {{- if .Values.ingress.paths.openrag.enabled }}
           - path: /(.*)
@@ -22,7 +31,4 @@ spec:
                 port:
                   number: {{ .Values.env.config.RAY_SERVE_PORT }}
           {{- end }}
-      {{- with .Values.ingress.host }}
-      host: {{ . | quote }}
-      {{- end }}
 {{- end }}
