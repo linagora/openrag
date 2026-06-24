@@ -104,7 +104,7 @@
             dest: "{{ project_path }}/.env"
             owner: "{{ project_user }}"
             group: "{{ project_user }}"
-            mode: "0644"
+            mode: "0600"
           when:
             - not env_file.stat.exists
             - local_env_file.stat.exists
@@ -124,8 +124,11 @@
     - name: Setup Python environment
       block:
         - name: Install uv (Python package manager)
-          shell: curl -LsSf https://astral.sh/uv/install.sh | sh
+          shell: |
+            set -euo pipefail
+            curl -LsSf https://astral.sh/uv/0.5.11/install.sh | sh
           args:
+            executable: /bin/bash
             creates: "/home/{{ project_user }}/.cargo/bin/uv"
 
         - name: Add uv to PATH in .bashrc
