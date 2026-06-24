@@ -152,15 +152,26 @@ class TestBuildFilterExpr:
         assert expr == "created_at > ISO '2025-01-01'"
 
     def test_raw_expr_combined_with_partition(self, store: MilvusVectorStore) -> None:
+        # Multiple predicates are each parenthesised so the raw user expr cannot
+        # escape the partition scope via operator precedence.
         expr = store._build_filter_expr({"partition": "p1", "expr": "page > 5"})
-        assert expr == 'partition == "p1" and page > 5'
+        assert expr == '(partition == "p1") and (page > 5)'
 
     def test_partition_and_field_joined_with_and(self, store: MilvusVectorStore) -> None:
         expr = store._build_filter_expr({"partition": "p1", "file_id": "f1"})
-        assert expr == 'partition == "p1" and file_id == "f1"'
+        assert expr == '(partition == "p1") and (file_id == "f1")'
 
     def test_int_value_passes_through(self, store: MilvusVectorStore) -> None:
         assert store._build_filter_expr({"page": 7}) == "page == 7"
+
+    def test_user_expr_with_or_cannot_escape_partition_scope(self, store: MilvusVectorStore) -> None:
+        # A viewer-supplied filter with `or` must stay contained within the
+        # partition predicate: `and` binds tighter than `or` in Milvus, so
+        # without parentheses this would read another tenant's chunks.
+        expr = store._build_filter_expr(
+            {"partition": "p1", "expr": 'text != "" or partition == "other"'}
+        )
+        assert expr == '(partition == "p1") and (text != "" or partition == "other")'
 
 
 # ---------------------------------------------------------------------------
