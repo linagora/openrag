@@ -32,8 +32,9 @@ services:
   milvus:
     image: milvusdb/milvus:v2.6.11
     command: ["milvus", "run", "standalone"]
-    security_opt:
-    - seccomp:unconfined
+    # Run under Docker's default seccomp profile (do not disable syscall
+    # filtering). If a specific kernel needs a wider profile, supply a vetted
+    # custom profile rather than seccomp:unconfined.
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
