@@ -372,8 +372,8 @@ env:
   secrets:
     API_KEY: "" # LLM API KEY
     VLM_API_KEY: "" # VLM API KEY
-    EMBEDDER_API_KEY: "EMPTY"
-    TRANSCRIBER_API_KEY: "EMPTY"
+    EMBEDDER_API_KEY: ""
+    TRANSCRIBER_API_KEY: ""
     POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
     AUTH_TOKEN: "" # API KEY for OpenRAG
     HF_TOKEN: "" # HuggingFace token

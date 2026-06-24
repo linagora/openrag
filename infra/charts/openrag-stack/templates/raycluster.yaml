@@ -107,7 +107,7 @@ spec:
             {{- toYaml $.Values.security.podSecurityContext | nindent 12 }}
           initContainers:
             - name: init-venv
-              image: ghcr.io/linagora/openrag:dev-latest
+              image: {{ $.Values.ray.image.repository }}:{{ $.Values.ray.image.tag }}
               securityContext:
                 {{- toYaml $.Values.security.containerSecurityContext | nindent 16 }}
               command:

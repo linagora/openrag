@@ -30,8 +30,15 @@ def test_helm_defaults_do_not_ship_known_placeholder_secrets() -> None:
     assert values["env"]["config"].get("POSTGRES_PASSWORD") is None
     assert secrets["POSTGRES_PASSWORD"] == "{{ .Values.postgresql.auth.password }}"
 
-    for key in ("API_KEY", "VLM_API_KEY", "AUTH_TOKEN", "HF_TOKEN"):
-        assert secrets[key] in ("", "EMPTY", None)
+    for key in (
+        "API_KEY",
+        "VLM_API_KEY",
+        "EMBEDDER_API_KEY",
+        "TRANSCRIBER_API_KEY",
+        "AUTH_TOKEN",
+        "HF_TOKEN",
+    ):
+        assert secrets[key] in ("", None)
 
 
 def test_secret_template_fails_on_required_or_placeholder_secrets() -> None:
@@ -44,11 +51,13 @@ def test_secret_template_fails_on_required_or_placeholder_secrets() -> None:
     assert "sk-xxxx" in template
     assert "hf_xxxx" in template
     assert "CHANGE_ME_STRONG_PASSWORD" in template
+    assert "EMPTY" in template
 
 
 def test_chart_workloads_apply_restricted_security_contexts() -> None:
     values = _values()
     security = values["security"]
+    raycluster = _template("raycluster.yaml")
 
     assert security["automountServiceAccountToken"] is False
     assert security["podSecurityContext"]["runAsNonRoot"] is True
@@ -61,6 +70,8 @@ def test_chart_workloads_apply_restricted_security_contexts() -> None:
     assert templates.count("automountServiceAccountToken:") >= 5
     assert templates.count(".Values.security.podSecurityContext") >= 5
     assert templates.count(".Values.security.containerSecurityContext") >= 7
+    assert "ghcr.io/linagora/openrag:dev-latest" not in raycluster
+    assert "image: {{ $.Values.ray.image.repository }}:{{ $.Values.ray.image.tag }}" in raycluster
 
 
 def test_ingress_is_not_exposed_by_default_and_supports_tls() -> None:
