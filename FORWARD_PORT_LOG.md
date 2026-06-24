@@ -59,6 +59,7 @@ docs last.
 | `e3c7eac2` + `81bccf08` | control-token neutralizer (H8, #487) | `core/utils/text.py` `neutralize_prompt_control_tokens`, `core/prompts/chat_prompt_builder.py` (+ tests) |
 | `818d5446` | stop leaking stack traces / FS paths (M7) | `api/routers/admin/indexing.py` (generic save error; admin-gated traceback) |
 | `54165900` | token limit in RAG mode + bound n/best_of (M12) | `api/routers/user/chat.py`, `api/schemas/user/chat.py` (+ tests) |
+| `d66cf029` | cap partitions per non-admin user (M13) | `services/orchestrators/partition_service.py`, `api/routers/admin/partitions.py`, `.env.example` (+ tests) |
 
 ### Skipped (already present / superseded on refactor)
 
@@ -76,8 +77,8 @@ docs last.
 
 ### Remaining (TODO — not yet ported)
 
-**Batch 4 — RAG / retrieval / loaders / OpenAI (7 left):**
-`8ecbc781` web-search SSRF/MITM → `services/websearch/content_fetcher.py` (DNS-resolution-time IP guard, block non-HTTP(S)/literal-private IPs, verify_ssl default); `63a857af` image-URL SSRF on captioning → parsers/base + a fetch-as-data-uri guard; `8ea723ca` explicit SVG external-fetch guard (cairosvg `unsafe=False`) → image parser; `221f8ed8` parser DoS caps (M8: max attachments/eml-depth/archive-entries/pdf-pages) → `core/config/indexation.py` + parsers; `d66cf029` cap partitions per user (M13) → `.env` + partition_service/router; `67ec4199` source-download authz (partial — `/static` mount already gone) → `api/routers/user/source_links.py`; `761f47a0` copy-endpoint source_file_id validation (#477) → `api/routers/admin/indexing.py`.
+**Batch 4 — RAG / retrieval / loaders / OpenAI (5 left, the most complex/multi-file):**
+`8ecbc781` web-search SSRF/MITM → `services/websearch/content_fetcher.py` (DNS-resolution-time IP guard, block non-HTTP(S)/literal-private IPs, verify_ssl default) — note the refactor already has `url_safety`/`test_url_safety.py`, so check what's already mitigated; `63a857af` image-URL SSRF on captioning → parsers/base + a fetch-as-data-uri guard; `8ea723ca` explicit SVG external-fetch guard (cairosvg `unsafe=False`) → image parser; `221f8ed8` parser DoS caps (M8: max attachments/eml-depth/archive-entries/pdf-pages) → `core/config/indexation.py` + parsers; `67ec4199` source-download authz (partial — `/static` mount already gone) → `api/routers/user/source_links.py`; `761f47a0` copy-endpoint source_file_id validation (#477) → `api/routers/admin/indexing.py` (likely largely covered now that `validate_file_id` is allowlist-based).
 
 **Batch 2 — deps:** `74de8232` Starlette/FastAPI bump, `4d8bca01` `limits` not slowapi, `0e6e7836` rate-limit module + tests. Need `uv.lock` regen.
 
