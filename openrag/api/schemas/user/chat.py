@@ -39,7 +39,7 @@ class OpenAIChatCompletionRequest(BaseModel):
             "websearch": False,
             "llm_override": None,
         },
-        description="Extra custom parameters. Supports 'llm_override' object with optional 'base_url', 'api_key', and 'model' to override the downstream LLM endpoint.",
+        description="Extra custom parameters. Supports 'llm_override' object with an optional 'model' to override the downstream model name. The LLM endpoint and credentials are fixed by server configuration and cannot be overridden by the client.",
     )
 
 

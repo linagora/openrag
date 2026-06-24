@@ -189,7 +189,7 @@ class TestVLLMClientOverrides:
         assert model == "default-model"
         assert headers is None
 
-    def test_llm_override_in_metadata(self):
+    def test_llm_override_model_applied_endpoint_and_key_ignored(self):
         client = self._make_client()
         original_metadata = {
             "llm_override": {
@@ -200,10 +200,10 @@ class TestVLLMClientOverrides:
         }
         kwargs: dict = {"metadata": original_metadata}
         base_url, model, headers = client._resolve_overrides(kwargs)
-        assert base_url == "http://custom:9000/v1"
+        # Only `model` is honored; endpoint and credentials stay server-side.
         assert model == "custom-model"
-        assert headers is not None
-        assert headers["Authorization"] == "Bearer custom-key"
+        assert base_url == "http://default:8000/v1"
+        assert headers is None
         # kwargs must not be mutated — retries depend on llm_override surviving.
         assert kwargs["metadata"] is original_metadata
         assert "llm_override" in kwargs["metadata"]
@@ -225,11 +225,23 @@ class TestVLLMClientOverrides:
             "use_map_reduce": True,
         }
 
-    def test_trailing_slash_stripped(self):
+    def test_client_base_url_and_api_key_override_ignored(self):
+        # SSRF / key-exfiltration guard: a client-supplied base_url/api_key
+        # must never be honored.
         client = self._make_client()
-        kwargs: dict = {"metadata": {"llm_override": {"base_url": "http://custom:9000/v1///"}}}
-        base_url, _, _ = client._resolve_overrides(kwargs)
-        assert base_url == "http://custom:9000/v1"
+        kwargs: dict = {
+            "metadata": {
+                "llm_override": {
+                    "base_url": "http://169.254.169.254/latest/meta-data",
+                    "api_key": "attacker-key",
+                    "model": "custom-model",
+                }
+            }
+        }
+        base_url, model, headers = client._resolve_overrides(kwargs)
+        assert model == "custom-model"
+        assert base_url == "http://default:8000/v1"
+        assert headers is None
 
 
 # ---------------------------------------------------------------------------
