@@ -80,6 +80,15 @@ class FakeJobService:
         return self._pending
 
 
+class FakeAuthService:
+    def __init__(self):
+        self.revoked_user_sessions: list[int] = []
+
+    async def revoke_user_oidc_sessions(self, user_id: int) -> int:
+        self.revoked_user_sessions.append(user_id)
+        return 0
+
+
 def _svc(
     repo: FakeUserRepo,
     *,
@@ -87,10 +96,11 @@ def _svc(
     partition_service: FakePartitionService | None = None,
     membership_repo: FakeMembershipRepo | None = None,
     job_service: FakeJobService | None = None,
+    auth_service: FakeAuthService | None = None,
 ) -> UserService:
     return UserService(
         user_repo=repo,
-        auth_service=object(),
+        auth_service=auth_service or FakeAuthService(),
         default_file_quota=default_quota,
         partition_service=partition_service or FakePartitionService(),
         membership_repo=membership_repo or FakeMembershipRepo(),
@@ -219,9 +229,12 @@ async def test_regenerate_token_repo_returns_none_404():
 async def test_regenerate_token_success():
     repo = FakeUserRepo(existing={3})
     repo.regen_results[3] = {"id": 3, "token": "or-new"}
-    out = await _svc(repo).regenerate_token(3)
+    auth = FakeAuthService()
+    out = await _svc(repo, auth_service=auth).regenerate_token(3)
     assert out == {"id": 3, "token": "or-new"}
     assert repo.regenerated == [3]
+    # Rotating the token must revoke the user's active OIDC sessions.
+    assert auth.revoked_user_sessions == [3]
 
 
 @pytest.mark.asyncio

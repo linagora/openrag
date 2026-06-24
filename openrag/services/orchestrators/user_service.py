@@ -194,6 +194,9 @@ class UserService:
         user = await self._user_repo.regenerate_user_token(user_id)
         if user is None:
             raise UserNotFoundError(f"User '{user_id}' not found")
+        # Rotating the API token also invalidates the user's active OIDC browser
+        # sessions so they can't outlive the rotation.
+        await self._auth_service.revoke_user_oidc_sessions(user_id)
         logger.info("Regenerated user token", user_id=user_id)
         return user
 

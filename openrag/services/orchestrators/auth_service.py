@@ -293,6 +293,14 @@ class AuthService:
         )
         return 0
 
+    async def revoke_user_oidc_sessions(self, user_id: int) -> int:
+        """Revoke all active OIDC sessions for a user.
+
+        Used when the user's API token is rotated so their browser sessions
+        can't outlive the rotation.
+        """
+        return await self._oidc_session_repo.revoke_by_user(user_id)
+
     async def logout(self, session_cookie_value: str | None) -> str | None:
         """Revoke the local session and build the IdP end-session redirect.
 
