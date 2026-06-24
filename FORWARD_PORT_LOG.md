@@ -60,6 +60,8 @@ docs last.
 | `818d5446` | stop leaking stack traces / FS paths (M7) | `api/routers/admin/indexing.py` (generic save error; admin-gated traceback) |
 | `54165900` | token limit in RAG mode + bound n/best_of (M12) | `api/routers/user/chat.py`, `api/schemas/user/chat.py` (+ tests) |
 | `d66cf029` | cap partitions per non-admin user (M13) | `services/orchestrators/partition_service.py`, `api/routers/admin/partitions.py`, `.env.example` (+ tests) |
+| `8ecbc781` | web-search SSRF/MITM deltas (verify_ssl default True + DNS-resolution guard hook) | `services/websearch/content_fetcher.py` (+ tests). The refactor already had per-hop redirect revalidation (#383). |
+| `8ea723ca` | explicit cairosvg `unsafe=False` (SSRF/XXE) | `core/indexing/parsers/image_parser.py` |
 
 ### Skipped (already present / superseded on refactor)
 
@@ -74,11 +76,18 @@ docs last.
 | `cdb3edc9` | test-only follow-up to M9 on main's `test_oidc_client.py` (no equivalent file); subsumed by the new replay test which carries exp. |
 | `199424bf` | empty-stream 502 (#363): obviated by the refactor architecture — non-streaming uses `self._llm.chat()`/`.generate()` (materialized dicts, not a stream's first chunk), and the inference client already raises `InferenceError(status_code=502)` on invalid upstream responses. No `__anext__`/`StopAsyncIteration` path remains. |
 | `70a2db36` | CustomDocLoader page accumulation (#376): obviated — the parser-shim removal deleted `CustomDocLoader`; `.doc` now goes through the docling/marker workers, which produce whole-document markdown and have no single-page-overwrite bug. |
+| `63a857af` | image-URL SSRF on captioning (H2): obviated — the refactor captions extracted image *bytes* (`vlm.caption_image(image_bytes)`); a document's remote `![](http://…)` becomes an `ImageBlock(source_url=…)` with empty bytes that nothing fetches, and the URL is never forwarded to the VLM. No SSRF gadget. (`image_captioning_url` is a dormant unread knob.) The SVG sub-fix is ported separately as `8ea723ca`. |
 
 ### Remaining (TODO — not yet ported)
 
-**Batch 4 — RAG / retrieval / loaders / OpenAI (5 left, the most complex/multi-file):**
-`8ecbc781` web-search SSRF/MITM → `services/websearch/content_fetcher.py` (DNS-resolution-time IP guard, block non-HTTP(S)/literal-private IPs, verify_ssl default) — note the refactor already has `url_safety`/`test_url_safety.py`, so check what's already mitigated; `63a857af` image-URL SSRF on captioning → parsers/base + a fetch-as-data-uri guard; `8ea723ca` explicit SVG external-fetch guard (cairosvg `unsafe=False`) → image parser; `221f8ed8` parser DoS caps (M8: max attachments/eml-depth/archive-entries/pdf-pages) → `core/config/indexation.py` + parsers; `67ec4199` source-download authz (partial — `/static` mount already gone) → `api/routers/user/source_links.py`; `761f47a0` copy-endpoint source_file_id validation (#477) → `api/routers/admin/indexing.py` (likely largely covered now that `validate_file_id` is allowlist-based).
+**Batch 4 — RAG / retrieval / loaders / OpenAI (3 left):**
+- `221f8ed8` parser DoS caps (M8). Applies *partially* to the refactor's different parser architecture: the clear surface is `core/indexing/parsers/eml_parser.py` (uncapped attachment fan-out via `msg.walk()` + potential nested-`.eml` recursion through the DI attachment dispatch) → add `max_attachments` + an eml-depth guard + `core/config/indexation.py` keys. The docx/pptx/pdf caps target the *legacy* loaders' manual zip/page iteration, which the refactor delegates to docling/marker (no equivalent manual-iteration memory-bomb surface) — verify per worker before porting.
+- `67ec4199` source-download authz (partial — open `/static` mount already gone in the refactor) → confirm `api/routers/user/source_links.py` authorizes chunk/file downloads by partition membership.
+- `761f47a0` copy-endpoint `source_file_id` validation (#477) → `api/routers/admin/indexing.py` copy endpoint; likely largely covered now that `validate_file_id` is allowlist-based — confirm the copy endpoint runs it.
+
+**Batch 2 — deps:** `74de8232` Starlette/FastAPI bump, `4d8bca01` `limits` not slowapi, `0e6e7836` rate-limit module + tests. Need `uv.lock` regen.
+
+**Deferred (user-requested, do last):** `4bbefd41` compose non-root rework, `701fcf9e` + `8849fe7d` docs moves, `563907ad` doc trim, final ruff pass.
 
 **Batch 2 — deps:** `74de8232` Starlette/FastAPI bump, `4d8bca01` `limits` not slowapi, `0e6e7836` rate-limit module + tests. Need `uv.lock` regen.
 
