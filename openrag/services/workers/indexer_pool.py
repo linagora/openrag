@@ -96,6 +96,7 @@ class IndexerPool:
         self._model_endpoint_service: Any = None
         self._registry_loaded_at: float | None = None
         self._last_miss_reload_at: float | None = None
+        self._last_miss_reload_key: tuple[tuple[str, tuple[str, ...]], ...] | None = None
         self._registry_lock = asyncio.Lock()
         self._registry_reload_task: asyncio.Task[None] | None = None
         self._worker = IndexerWorker(
@@ -160,6 +161,7 @@ class IndexerPool:
             self._registry_loaded_at = now
             if decision == "miss":
                 self._last_miss_reload_at = now
+                self._last_miss_reload_key = _required_model_names_key(required_model_names)
 
     def _reload_decision(self, required_model_names: dict[str, list[str]] | list[str]) -> str | None:
         models = getattr(self._cfg, "models", None)
@@ -174,6 +176,8 @@ class IndexerPool:
         return _registry_reload_decision(
             loaded_at=self._registry_loaded_at,
             last_miss_at=self._last_miss_reload_at,
+            last_miss_key=getattr(self, "_last_miss_reload_key", None),
+            missing_key=_required_model_names_key(required_model_names),
             now=time.monotonic(),
             ttl=_MODEL_REGISTRY_TTL_SECONDS,
             missing=missing,
@@ -271,6 +275,13 @@ def _normalise_required_model_names(required: dict[str, list[str]] | list[str]) 
     return required
 
 
+def _required_model_names_key(required: dict[str, list[str]] | list[str]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    normalised = _normalise_required_model_names(required)
+    return tuple(
+        (model_type, tuple(sorted(set(names)))) for model_type, names in sorted(normalised.items()) if names
+    )
+
+
 def _has_default_fallback(pool: Any, model_type: str) -> bool:
     fallbacks = getattr(pool, "_has_default_fallbacks", None)
     if fallbacks is not None:
@@ -284,6 +295,8 @@ def _registry_reload_decision(
     *,
     loaded_at: float | None,
     last_miss_at: float | None,
+    last_miss_key: tuple[tuple[str, tuple[str, ...]], ...] | None = None,
+    missing_key: tuple[tuple[str, tuple[str, ...]], ...] | None = None,
     now: float,
     ttl: float,
     missing: bool,
@@ -301,7 +314,11 @@ def _registry_reload_decision(
     """
     if loaded_at is None:
         return "initial"
-    if missing and (last_miss_at is None or now - last_miss_at >= ttl):
+    if missing and (
+        last_miss_at is None
+        or last_miss_key != missing_key
+        or now - last_miss_at >= ttl
+    ):
         return "miss"
     if now - loaded_at >= ttl:
         return "ttl"

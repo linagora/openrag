@@ -414,6 +414,39 @@ def test_registry_reload_decision_guards() -> None:
     assert _registry_reload_decision(loaded_at=100.0, last_miss_at=150.0, now=200.0, ttl=60.0, missing=True) == "ttl"
 
 
+def test_registry_reload_decision_rate_limits_only_same_missing_signature() -> None:
+    from services.workers.indexer_pool import _registry_reload_decision
+
+    previous_missing = (("embedder", ("missing-a",)),)
+    same_missing = (("embedder", ("missing-a",)),)
+    different_missing = (("embedder", ("missing-b",)),)
+
+    assert (
+        _registry_reload_decision(
+            loaded_at=100.0,
+            last_miss_at=105.0,
+            last_miss_key=previous_missing,
+            missing_key=same_missing,
+            now=120.0,
+            ttl=60.0,
+            missing=True,
+        )
+        is None
+    )
+    assert (
+        _registry_reload_decision(
+            loaded_at=100.0,
+            last_miss_at=105.0,
+            last_miss_key=previous_missing,
+            missing_key=different_missing,
+            now=120.0,
+            ttl=60.0,
+            missing=True,
+        )
+        == "miss"
+    )
+
+
 def test_reload_decision_treats_default_global_fallback_as_resolvable() -> None:
     # "default" resolves via the global cfg.llm fallback even when the registry
     # has no is_default row → it must NOT be treated as missing, otherwise we'd
