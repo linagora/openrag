@@ -169,7 +169,13 @@ class ParserDispatcher(DocumentParser):
         from services.inference.parsers.dotsocr import DotsOCRPdfClient
 
         ocfg = self._config.loader.openai
-        vlm = _build_vlm(ocfg.base_url, ocfg.model, ocfg.api_key, ocfg.timeout)
+        vlm = _build_vlm(
+            ocfg.base_url,
+            ocfg.model,
+            ocfg.api_key,
+            ocfg.timeout,
+            ocfg.enable_thinking,
+        )
         client = DotsOCRPdfClient(vlm, concurrency_limit=ocfg.concurrency_limit)
         return _create("core.indexing.parsers.pdf.client_based", "pdf_client", client=client)
 
@@ -215,12 +221,19 @@ def _suffix(filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
 
-def _build_vlm(base_url: str, model: str, api_key: str, timeout: float) -> Any:
+def _build_vlm(base_url: str, model: str, api_key: str, timeout: float, enable_thinking: bool | None = None) -> Any:
     """Construct a vLLM-backed VLM client for VLM-OCR / captioning."""
     import services.inference.vllm_client  # noqa: F401 - registers "vllm"
     from core.vlm import vlm_registry
 
-    return vlm_registry.create("vllm", endpoint=base_url, model_name=model, api_key=api_key, timeout=timeout)
+    return vlm_registry.create(
+        "vllm",
+        endpoint=base_url,
+        model_name=model,
+        api_key=api_key,
+        timeout=timeout,
+        enable_thinking=enable_thinking,
+    )
 
 
 def build_parser_dispatcher(config: Any) -> ParserDispatcher:
@@ -244,7 +257,13 @@ def build_caption_vlm(config: Any) -> Any | None:
     vlm_cfg = config.vlm
     if not getattr(vlm_cfg, "base_url", ""):
         return None
-    return _build_vlm(vlm_cfg.base_url, vlm_cfg.model, vlm_cfg.api_key, vlm_cfg.timeout)
+    return _build_vlm(
+        vlm_cfg.base_url,
+        vlm_cfg.model,
+        vlm_cfg.api_key,
+        vlm_cfg.timeout,
+        vlm_cfg.enable_thinking,
+    )
 
 
 __all__ = ["ParserDispatcher", "build_parser_dispatcher", "build_caption_vlm"]

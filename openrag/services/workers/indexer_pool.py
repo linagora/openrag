@@ -496,6 +496,9 @@ def _global_llm_endpoint_config(cfg: Any) -> Any | None:
         "max_retries": getattr(llm_cfg, "max_retries", 2),
         "logprobs": getattr(llm_cfg, "logprobs", True),
     }
+    enable_thinking = getattr(llm_cfg, "enable_thinking", None)
+    if enable_thinking is not None:
+        extra["enable_thinking"] = enable_thinking
     return ModelEndpointConfig(
         endpoint=endpoint,
         model_name=model_name,

@@ -13,7 +13,13 @@ from services.workers.parsers.parser_dispatcher import (
 
 
 def _config(
-    *, pdf="MarkerLoader", audio="LocalWhisperLoader", image_captioning=True, vlm_base_url=""
+    *,
+    pdf="MarkerLoader",
+    audio="LocalWhisperLoader",
+    image_captioning=True,
+    vlm_base_url="",
+    vlm_enable_thinking=None,
+    openai_loader_enable_thinking=None,
 ) -> SimpleNamespace:
     file_loaders = SimpleNamespace(
         pdf=pdf,
@@ -22,8 +28,22 @@ def _config(
         flac=audio,
         mp4=audio,
     )
-    loader = SimpleNamespace(file_loaders=file_loaders, image_captioning=image_captioning)
-    vlm = SimpleNamespace(base_url=vlm_base_url, model="m", api_key="k", timeout=60)
+    openai = SimpleNamespace(
+        base_url="http://openai:8000/v1",
+        model="dotsocr-model",
+        api_key="k",
+        timeout=60,
+        concurrency_limit=20,
+        enable_thinking=openai_loader_enable_thinking,
+    )
+    loader = SimpleNamespace(file_loaders=file_loaders, image_captioning=image_captioning, openai=openai)
+    vlm = SimpleNamespace(
+        base_url=vlm_base_url,
+        model="m",
+        api_key="k",
+        timeout=60,
+        enable_thinking=vlm_enable_thinking,
+    )
     return SimpleNamespace(loader=loader, vlm=vlm)
 
 
@@ -106,6 +126,35 @@ def test_build_caption_vlm_available_when_endpoint_set_even_if_globally_off() ->
     # to build the VLM. Standalone-image captioning relies on this (the policy
     # gate lives in the pipeline, not here).
     assert build_caption_vlm(_config(image_captioning=False, vlm_base_url="http://vlm:8000/v1")) is not None
+
+
+def test_build_caption_vlm_preserves_enable_thinking() -> None:
+    vlm = build_caption_vlm(
+        _config(
+            image_captioning=False,
+            vlm_base_url="http://vlm:8000/v1",
+            vlm_enable_thinking=False,
+        )
+    )
+
+    assert vlm._enable_thinking is False
+
+
+def test_build_pdf_client_preserves_openai_loader_enable_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakePdfClient:
+        def __init__(self, vlm, concurrency_limit):
+            self.vlm = vlm
+            self.concurrency_limit = concurrency_limit
+
+    import services.inference.parsers.dotsocr as dotsocr
+    import services.workers.parsers.parser_dispatcher as dispatcher
+
+    monkeypatch.setattr(dotsocr, "DotsOCRPdfClient", FakePdfClient)
+    monkeypatch.setattr(dispatcher, "_create", lambda _module, _name, **kwargs: kwargs["client"])
+
+    parser = ParserDispatcher(_config(pdf="DotsOCRLoader", openai_loader_enable_thinking=False))._build_pdf_client()
+
+    assert parser.vlm._enable_thinking is False
 
 
 def test_build_eml_wires_nested_email_parser_with_depth_limit(monkeypatch: pytest.MonkeyPatch) -> None:

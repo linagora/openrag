@@ -58,6 +58,7 @@ class OpenAILoaderConfig(ConfigMixin):
     max_retries: int = 2
     top_p: float = 0.9
     concurrency_limit: int = 20
+    enable_thinking: bool | None = None
 
 
 # ---------------------------------------------------------------------------
