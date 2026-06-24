@@ -376,6 +376,10 @@ async def copy_file_between_partitions(
     auth_service=Depends(get_auth_service),
     partition_service=Depends(get_partition_service),
 ):
+    # source_file_id arrives as a form field (not a path param with the
+    # validate_file_id dependency), so validate it here against the same safe
+    # identifier allowlist before it reaches a Milvus filter expression.
+    await validate_file_id(source_file_id)
     # Make sure user has access to the source partition
     await ensure_partition_role(
         partition=source_partition,
