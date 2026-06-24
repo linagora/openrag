@@ -184,10 +184,11 @@ class UserService:
 
     async def regenerate_token(self, user_id: int) -> dict:
         await self._ensure_exists(user_id)
+        revoked = await self._auth_service.revoke_oidc_sessions_by_user(user_id)
         user = await self._user_repo.regenerate_user_token(user_id)
         if user is None:
             raise UserNotFoundError(f"User '{user_id}' not found")
-        logger.info("Regenerated user token", user_id=user_id)
+        logger.info("Regenerated user token", user_id=user_id, revoked_oidc_sessions=revoked)
         return user
 
     async def update_user(self, user_id: int, body: UserUpdate) -> dict:
@@ -195,10 +196,18 @@ class UserService:
         updates = body.model_dump(exclude_unset=True)
         self._validate_profile(updates.get("display_name"), updates.get("email"))
 
+        existing_user = await self._user_repo.get_user(user_id)
+        if existing_user is None:
+            raise UserNotFoundError(f"User '{user_id}' not found")
+        demotes_admin = existing_user.is_admin and updates.get("is_admin") is False
+
+        revoked = 0
+        if demotes_admin:
+            revoked = await self._auth_service.revoke_oidc_sessions_by_user(user_id)
         user = await self._user_repo.update_user(user_id, **updates)
         if user is None:
             raise UserNotFoundError(f"User '{user_id}' not found")
-        logger.info("Updated user info", user_id=user_id)
+        logger.info("Updated user info", user_id=user_id, revoked_oidc_sessions=revoked)
         return {
             "id": user.id,
             "display_name": user.display_name,

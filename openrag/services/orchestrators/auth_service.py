@@ -364,6 +364,12 @@ class AuthService:
     async def revoke_oidc_session_by_id_for_request(self, session_id: int) -> None:
         await self._oidc_session_repo.revoke_session(session_id)
 
+    async def revoke_oidc_sessions_by_user(self, user_id: int) -> int:
+        """Revoke every active OIDC browser session for a user."""
+        count = await self._oidc_session_repo.revoke_by_user(user_id)
+        logger.info("Revoked OIDC sessions by user", user_id=user_id, count=count)
+        return count
+
     async def refresh_session_if_needed(self, *, session: dict[str, Any], enc_key: str) -> dict[str, Any] | None:
         """Refresh the IdP access token when it is near expiry.
 
