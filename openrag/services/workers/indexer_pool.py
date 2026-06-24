@@ -277,9 +277,7 @@ def _normalise_required_model_names(required: dict[str, list[str]] | list[str]) 
 
 def _required_model_names_key(required: dict[str, list[str]] | list[str]) -> tuple[tuple[str, tuple[str, ...]], ...]:
     normalised = _normalise_required_model_names(required)
-    return tuple(
-        (model_type, tuple(sorted(set(names)))) for model_type, names in sorted(normalised.items()) if names
-    )
+    return tuple((model_type, tuple(sorted(set(names)))) for model_type, names in sorted(normalised.items()) if names)
 
 
 def _has_default_fallback(pool: Any, model_type: str) -> bool:
@@ -314,11 +312,7 @@ def _registry_reload_decision(
     """
     if loaded_at is None:
         return "initial"
-    if missing and (
-        last_miss_at is None
-        or last_miss_key != missing_key
-        or now - last_miss_at >= ttl
-    ):
+    if missing and (last_miss_at is None or last_miss_key != missing_key or now - last_miss_at >= ttl):
         return "miss"
     if now - loaded_at >= ttl:
         return "ttl"
