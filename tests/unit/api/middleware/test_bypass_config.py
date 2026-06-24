@@ -216,6 +216,67 @@ def test_is_bypass_path_bypass_config_is_keyword_only() -> None:
         is_bypass_path("/docs", AuthBypassConfig())  # type: ignore[misc]
 
 
+# ---------------------------------------------------------------------------
+# Dev bypass (AUTH_MODE=token, AUTH_TOKEN unset) requires ALLOW_NO_AUTH=true
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dev_bypass_resolves_admin_when_allow_no_auth_set(monkeypatch) -> None:
+    """With ALLOW_NO_AUTH=true the no-token bypass resolves admin user 1."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ALLOW_NO_AUTH", "true")
+
+    svc = type("S", (), {})()
+    svc.get_user_for_request = AsyncMock(return_value={"id": 1, "display_name": "Admin"})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+
+    captured = {}
+
+    async def call_next(req):
+        captured["user"] = req.state.user
+        return Response("ok")
+
+    middleware = AuthMiddleware(
+        lambda scope, receive, send: None, get_auth_service=lambda _r: svc
+    )
+    response = await middleware.dispatch(_request(), call_next)
+
+    assert response.status_code == 200
+    svc.get_user_for_request.assert_awaited_with(1)
+    assert captured["user"] == {"id": 1, "display_name": "Admin"}
+
+
+@pytest.mark.asyncio
+async def test_dev_bypass_does_not_fail_open_without_flag(monkeypatch) -> None:
+    """Without ALLOW_NO_AUTH a missing AUTH_TOKEN must NOT fail open to admin."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ALLOW_NO_AUTH", raising=False)
+
+    svc = type("S", (), {})()
+    svc.get_user_for_request = AsyncMock()
+    svc.list_user_partitions_for_request = AsyncMock()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+
+    async def call_next(req):
+        return Response("ok")
+
+    middleware = AuthMiddleware(
+        lambda scope, receive, send: None, get_auth_service=lambda _r: svc
+    )
+    response = await middleware.dispatch(_request(), call_next)
+
+    # No token + no opt-in → not authenticated, never resolves to admin.
+    assert response.status_code in (401, 403)
+    svc.get_user_for_request.assert_not_awaited()
+
+
 def test_request_object_is_unused_by_helpers() -> None:
     """Sanity: ``is_ui_path`` / ``is_bypass_path`` are pure functions
     over the string path, so a FastAPI ``Request`` is never required
