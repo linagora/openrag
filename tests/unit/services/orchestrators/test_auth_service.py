@@ -444,6 +444,32 @@ async def test_backchannel_logout_sidless_is_noop_200():
 
 
 @pytest.mark.asyncio
+async def test_backchannel_logout_rejects_replayed_jti():
+    import time as _time
+
+    from services.orchestrators import auth_service as _as
+
+    _as._seen_logout_jti.clear()
+    srepo = FakeSessionRepo()
+    claims = LogoutTokenClaims(
+        iss="i",
+        aud="openrag",
+        sub="s",
+        sid="sess-9",
+        iat=0,
+        jti="jti-replay-1",
+        exp=int(_time.time()) + 120,
+    )
+    svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
+    # First processing succeeds and revokes the session(s).
+    assert await svc.handle_backchannel_logout("tok") == 3
+    # Re-processing the same jti is rejected as a replay.
+    with pytest.raises(OIDCFlowError) as ei:
+        await svc.handle_backchannel_logout("tok")
+    assert ei.value.error_description == "logout_token replayed"
+
+
+@pytest.mark.asyncio
 async def test_logout_revokes_and_builds_end_session_url():
     # Seed a real session via the callback path so the stored id_token is
     # encrypted with the configured key.

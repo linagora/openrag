@@ -50,6 +50,7 @@ class LogoutTokenClaims:
     sid: str | None
     iat: int
     jti: str | None
+    exp: int = 0
 
 
 class OIDCClient:
@@ -351,8 +352,15 @@ class OIDCClient:
 
         if "iat" not in decoded:
             raise ValueError("logout_token missing iat claim")
-        if int(decoded.get("exp", now + 1)) < now:
+        # exp is REQUIRED by the OIDC back-channel logout spec; do not default
+        # it, or an absent exp would make the token never expire.
+        if "exp" not in decoded:
+            raise ValueError("logout_token missing exp claim")
+        if int(decoded["exp"]) < now:
             raise ValueError("logout_token has expired")
+        # jti is REQUIRED and is what enables replay detection by the caller.
+        if not decoded.get("jti"):
+            raise ValueError("logout_token missing jti claim")
 
         events = decoded.get("events") or {}
         if "http://schemas.openid.net/event/backchannel-logout" not in events:
@@ -371,6 +379,7 @@ class OIDCClient:
             sid=decoded.get("sid"),
             iat=int(decoded["iat"]),
             jti=decoded.get("jti"),
+            exp=int(decoded["exp"]),
         )
 
     # ------------------------------------------------------------------

@@ -18,6 +18,7 @@ come from ``services.auth`` — the infrastructure adapters for OIDC.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -66,6 +67,27 @@ class OIDCFlowError(OpenRAGError):
     ) -> None:
         super().__init__(message, code="OIDC_FLOW_ERROR", status_code=status_code)
         self.error_description = error_description
+
+
+# In-process replay cache for back-channel logout token jti values, mapping
+# jti -> token exp. A logout token may only be consumed once (OIDC spec). This
+# is per-worker; with multiple workers a replay could still reach a different
+# worker, but back-channel logout is idempotent (re-revoking sessions is a
+# no-op), so this is a defence-in-depth guard, not the sole protection.
+_seen_logout_jti: dict[str, int] = {}
+
+
+def _logout_jti_is_replay(jti: str, exp: int) -> bool:
+    """Record a logout-token jti and report whether it was already seen."""
+    now = int(time.time())
+    # Prune expired entries to bound memory.
+    for old_jti, old_exp in list(_seen_logout_jti.items()):
+        if old_exp < now:
+            del _seen_logout_jti[old_jti]
+    if jti in _seen_logout_jti:
+        return True
+    _seen_logout_jti[jti] = exp
+    return False
 
 
 @dataclass
@@ -252,6 +274,11 @@ class AuthService:
         except Exception as e:
             logger.warning(f"Back-channel logout token verification failed: {e}")
             raise OIDCFlowError("invalid_request") from e
+
+        # Reject replays: a given logout token (jti) must only be processed once.
+        if claims.jti and _logout_jti_is_replay(claims.jti, claims.exp):
+            logger.warning(f"Replayed back-channel logout token ignored — jti={claims.jti!r}")
+            raise OIDCFlowError("logout_token replayed", error_description="logout_token replayed")
 
         if claims.sid:
             count = await self._oidc_session_repo.revoke_by_sid(claims.sid)
