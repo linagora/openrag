@@ -9,6 +9,7 @@ whose exact non-bracketed ``{"detail": ...}`` body the endpoints return
 via ``HTTPException``.
 """
 
+import os
 from typing import Literal
 from urllib.parse import quote
 
@@ -275,8 +276,14 @@ async def create_partition(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Partition '{partition}' already exists.",
         )
-    user_id = request.state.user["id"]
-    await service.create_partition(partition=partition, user_id=user_id)
+    user = request.state.user
+    user_id = user["id"]
+    # Cap how many partitions a non-admin may own so an authenticated user can't
+    # exhaust storage/metadata. None bypasses the cap (admins); a negative
+    # MAX_PARTITIONS_PER_USER also disables it. The service raises a 403
+    # (PARTITION_LIMIT_EXCEEDED) when the cap is reached.
+    max_owned = None if user.get("is_admin", False) else int(os.environ.get("MAX_PARTITIONS_PER_USER", "100"))
+    await service.create_partition(partition=partition, user_id=user_id, max_owned=max_owned)
     return Response(status_code=status.HTTP_201_CREATED)
 
 

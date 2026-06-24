@@ -32,6 +32,7 @@ from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
 from core.models.preset import PartitionConfig
+from core.models.user import PartitionRole
 from core.utils.exceptions import (
     ConfigError,
     NotFoundError,
@@ -142,6 +143,7 @@ class PartitionService:
         partition: str,
         user_id: int,
         *,
+        max_owned: int | None = None,
         description: str = "",
         embedder: str = "default",
         indexation_preset: str = "default",
@@ -170,6 +172,23 @@ class PartitionService:
                 code="RESERVED_PARTITION_NAME",
             )
         validate_partition_name(partition)
+        # Cap how many partitions a non-admin may own so any authenticated user
+        # can't exhaust storage/metadata by creating partitions without bound.
+        # ``max_owned`` None (admins) or a negative value disables the cap. This
+        # is a check-then-create (small race window under heavy concurrency);
+        # acceptable for a DoS cap.
+        if max_owned is not None and max_owned >= 0:
+            owned = sum(
+                1
+                for up in await self._membership_repo.list_user_partitions(user_id)
+                if up.role == PartitionRole.OWNER
+            )
+            if owned >= max_owned:
+                raise ValidationError(
+                    f"Partition limit reached ({max_owned}). Contact an administrator.",
+                    status_code=403,
+                    code="PARTITION_LIMIT_EXCEEDED",
+                )
         if await self._partition_repo.partition_exists(name=partition):
             raise ValidationError(
                 f"Partition '{partition}' already exists.",
