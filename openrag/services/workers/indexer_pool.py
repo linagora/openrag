@@ -18,8 +18,13 @@ _MODEL_REGISTRY_TTL_SECONDS = 60.0
 
 
 @ray.remote
-class IndexerPool:
-    """Thin Ray actor wrapper around ``IndexerWorker``."""
+class IndexerWorkerActor:
+    """Thin Ray actor wrapping ``IndexerWorker`` — one instance per pool slot.
+
+    A worker runs up to ``ray.indexer.max_tasks_per_worker`` files concurrently
+    (its Ray ``max_concurrency``). ``IndexerPool`` holds ``ray.indexer.pool_size``
+    of these and load-balances across them.
+    """
 
     def __init__(self) -> None:
         import services.inference.ollama_client  # noqa: F401
@@ -213,18 +218,71 @@ class IndexerPool:
         return result
 
 
-def build_indexer_pool(namespace: str = "openrag") -> Any:
+class IndexerPool:
+    """Client-side pool of ``IndexerWorkerActor`` handles.
+
+    Holds ``ray.indexer.pool_size`` worker actors and dispatches each file to
+    the least-loaded one (fewest in-flight files). ``submit`` returns the Ray
+    ``ObjectRef`` unchanged so the dispatcher keeps per-task cancellation
+    (``ray.cancel``) and state tracking — this is why the pool is a plain
+    client object rather than ``ray.util.ActorPool``, which hides the ref.
+
+    In-flight counts are mutated only on the event-loop thread (``submit``
+    and the release callback), so no lock is needed.
+    """
+
+    def __init__(self, workers: list[Any]) -> None:
+        if not workers:
+            raise ValueError("IndexerPool requires at least one worker actor")
+        self._workers = list(workers)
+        self._inflight = [0] * len(self._workers)
+        self._release_tasks: set[asyncio.Task[Any]] = set()
+
+    @property
+    def size(self) -> int:
+        return len(self._workers)
+
+    def submit(self, **kwargs: Any) -> Any:
+        """Dispatch ``process_file`` to the least-loaded worker.
+
+        Must be called from within the event loop. Returns the worker's
+        Ray ``ObjectRef``; in-flight bookkeeping is released when the task
+        settles (success, failure, or cancellation).
+        """
+        idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
+        self._inflight[idx] += 1
+        ref = self._workers[idx].process_file.remote(**kwargs)
+        task = asyncio.get_running_loop().create_task(self._release(idx, ref))
+        # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
+        self._release_tasks.add(task)
+        task.add_done_callback(self._release_tasks.discard)
+        return ref
+
+    async def _release(self, idx: int, ref: Any) -> None:
+        try:
+            # return_exceptions=True so a failed/cancelled task still decrements.
+            await asyncio.gather(ref, return_exceptions=True)
+        finally:
+            self._inflight[idx] -= 1
+
+
+def build_indexer_pool(namespace: str = "openrag") -> IndexerPool:
     from core.config import load_config
 
     cfg = load_config()
-    max_concurrency = max(1, cfg.ray.max_tasks_per_worker)
-    return IndexerPool.options(  # type: ignore[attr-defined]
-        name="IndexerPool",
-        namespace=namespace,
-        get_if_exists=True,
-        lifetime="detached",
-        max_concurrency=max_concurrency,
-    ).remote()
+    pool_size = cfg.ray.indexer.pool_size
+    max_concurrency = cfg.ray.indexer.max_tasks_per_worker
+    workers = [
+        IndexerWorkerActor.options(  # type: ignore[attr-defined]
+            name=f"IndexerWorker-{i}",
+            namespace=namespace,
+            get_if_exists=True,
+            lifetime="detached",
+            max_concurrency=max_concurrency,
+        ).remote()
+        for i in range(pool_size)
+    ]
+    return IndexerPool(workers)
 
 
 def _required_llm_names(indexation_config: dict[str, Any] | None) -> list[str]:
@@ -507,4 +565,4 @@ def _global_llm_endpoint_config(cfg: Any) -> Any | None:
     )
 
 
-__all__ = ["IndexerPool", "build_indexer_pool"]
+__all__ = ["IndexerPool", "IndexerWorkerActor", "build_indexer_pool"]

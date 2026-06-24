@@ -180,6 +180,7 @@ The vector database stores embeddings and is configured using the following envi
 | `VDB_COLLECTION_NAME` | str | vdb_test | Name of the collection storing embeddings |
 |`VDB_HYBRID_SEARCH`| `bool` | true |To activate hybrid search (semantic similarity + Keyword search)|
 | `VDB_ENABLE_INSERTION` | bool | true | Enable or disable vector database insertion. When disabled, documents are processed but not inserted into Milvus. Useful for testing. |
+| `VDB_TIMEOUT` | float | 120.0 | Per-request timeout (seconds) applied to the Milvus sync and async clients |
 
 These variables can be overridden when using an external vector database service.
 
@@ -375,8 +376,8 @@ Ray is used for distributed task processing and parallel execution in the RAG pi
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `RAY_POOL_SIZE` | `int` | 1 | Number of serializer actor instances (typically 1 actor per cluster node) |
-| `RAY_MAX_TASKS_PER_WORKER` | `int` | 8 | Maximum number of concurrent tasks (serialization tasks) per serializer actor instance |
+| `RAY_POOL_SIZE` | `int` | 1 | Number of indexer worker actors in the pool. Total indexing capacity = `RAY_POOL_SIZE` × `RAY_MAX_TASKS_PER_WORKER`. |
+| `RAY_MAX_TASKS_PER_WORKER` | `int` | 8 | Maximum number of files processed concurrently per indexer worker actor |
 | `RAY_DASHBOARD_PORT` | `int` | 8265 | Ray Dashboard port used for monitoring. In production, [comment out this line](https://github.com/linagora/openrag/blob/ee732ea8e080dcde0107d62d12703a7525f810cd/docker-compose.yaml#L21C1-L22C1) to avoid exposing the port, as it may introduce security vulnerabilities. |
 
 :::danger[Attention]
@@ -395,22 +396,8 @@ The following environment variables control Ray's logging behavior, task retry s
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `RAY_MAX_TASK_RETRIES` | int | 2 | Number of retry attempts for failed tasks |
-| `INDEXER_SERIALIZE_TIMEOUT` | int | 36000 | Timeout in seconds for serialization operations (10 hours) |
-
-#### Indexer Concurrency Groups
-
-Controls the maximum number of concurrent operations for different indexer tasks:
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `INDEXER_DEFAULT_CONCURRENCY` | int | 1000 | Default concurrency limit for general operations |
-| `INDEXER_UPDATE_CONCURRENCY` | int | 100 | Maximum concurrent document update operations |
-| `INDEXER_SERIALIZE_CONCURRENCY` | int | 50 | Maximum concurrent serialization operations |
-| `INDEXER_SEARCH_CONCURRENCY` | int | 100 | Maximum concurrent search/retrieval operations |
-| `INDEXER_DELETE_CONCURRENCY` | int | 100 | Maximum concurrent document deletion operations |
-| `INDEXER_CHUNK_CONCURRENCY` | int | 1000 | Maximum concurrent document chunking operations |
-| `INDEXER_INSERT_CONCURRENCY` | int | 10 | Maximum concurrent document insertion operations |
+| `RAY_POOL_SIZE` | int | 1 | Number of indexer worker actors created to handle indexation tasks |
+| `RAY_MAX_TASKS_PER_WORKER` | int | 50 | Files each indexer worker processes concurrently (total concurrency = `RAY_POOL_SIZE × RAY_MAX_TASKS_PER_WORKER`) |
 
 #### Semaphore Configuration
 

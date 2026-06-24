@@ -90,7 +90,7 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=f"set_details({task_id})",
         )
 
-        task = self._pool.process_file.remote(
+        task = self._pool.submit(
             task_id=task_id,
             path=path,
             metadata=metadata,

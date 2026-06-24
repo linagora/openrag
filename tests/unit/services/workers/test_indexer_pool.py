@@ -52,9 +52,9 @@ def test_build_chunker_rejects_non_callable_chunk_attr(monkeypatch: pytest.Monke
 
 @pytest.mark.asyncio
 async def test_catalog_initialization_is_single_flight() -> None:
-    from services.workers.indexer_pool import IndexerPool
+    from services.workers.indexer_pool import IndexerWorkerActor
 
-    actor_class = IndexerPool.__ray_metadata__.modified_class
+    actor_class = IndexerWorkerActor.__ray_metadata__.modified_class
     pool = actor_class.__new__(actor_class)
 
     class Store:
@@ -76,29 +76,40 @@ async def test_catalog_initialization_is_single_flight() -> None:
     assert pool._catalog_initialized is True
 
 
-def test_build_indexer_pool_uses_detached_actor_with_configured_concurrency(
+def test_build_indexer_pool_spawns_pool_size_detached_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import core.config
     import services.workers.indexer_pool as module
 
-    calls = {}
+    calls = []
 
     class Options:
+        def __init__(self, kwargs):
+            self._kwargs = kwargs
+
         def remote(self):
-            return "actor"
+            return f"actor-{self._kwargs['name']}"
 
     def fake_options(**kwargs):
-        calls.update(kwargs)
-        return Options()
+        calls.append(kwargs)
+        return Options(kwargs)
 
-    cfg = SimpleNamespace(ray=SimpleNamespace(max_tasks_per_worker=4))
+    cfg = SimpleNamespace(ray=SimpleNamespace(indexer=SimpleNamespace(pool_size=3, max_tasks_per_worker=4)))
     monkeypatch.setattr(core.config, "load_config", lambda: cfg)
-    monkeypatch.setattr(module.IndexerPool, "options", fake_options)
+    monkeypatch.setattr(module.IndexerWorkerActor, "options", fake_options)
 
-    assert module.build_indexer_pool() == "actor"
-    assert calls["lifetime"] == "detached"
-    assert calls["max_concurrency"] == 4
+    pool = module.build_indexer_pool()
+
+    # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
+    assert isinstance(pool, module.IndexerPool)
+    assert pool.size == 3
+    assert {c["name"] for c in calls} == {"IndexerWorker-0", "IndexerWorker-1", "IndexerWorker-2"}
+    for c in calls:
+        assert c["lifetime"] == "detached"
+        assert c["max_concurrency"] == 4
+        assert c["get_if_exists"] is True
+        assert c["namespace"] == "openrag"
 
 
 def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -244,9 +255,9 @@ def test_reload_decision_treats_default_global_fallback_as_resolvable() -> None:
     # block-reload every window forever without converging.
     import time as _time
 
-    from services.workers.indexer_pool import IndexerPool
+    from services.workers.indexer_pool import IndexerWorkerActor
 
-    actor_class = IndexerPool.__ray_metadata__.modified_class
+    actor_class = IndexerWorkerActor.__ray_metadata__.modified_class
 
     def _pool(has_fallback: bool):
         pool = actor_class.__new__(actor_class)
@@ -266,9 +277,9 @@ def test_reload_decision_treats_default_global_fallback_as_resolvable() -> None:
 
 @pytest.mark.asyncio
 async def test_ensure_registry_fresh_is_single_flight() -> None:
-    from services.workers.indexer_pool import IndexerPool
+    from services.workers.indexer_pool import IndexerWorkerActor
 
-    actor_class = IndexerPool.__ray_metadata__.modified_class
+    actor_class = IndexerWorkerActor.__ray_metadata__.modified_class
     pool = actor_class.__new__(actor_class)
 
     class Service:
@@ -299,9 +310,9 @@ async def test_ttl_refresh_runs_in_background_without_blocking() -> None:
     # the reload runs in the background.
     import time as _time
 
-    from services.workers.indexer_pool import _MODEL_REGISTRY_TTL_SECONDS, IndexerPool
+    from services.workers.indexer_pool import _MODEL_REGISTRY_TTL_SECONDS, IndexerWorkerActor
 
-    actor_class = IndexerPool.__ray_metadata__.modified_class
+    actor_class = IndexerWorkerActor.__ray_metadata__.modified_class
     pool = actor_class.__new__(actor_class)
 
     started = asyncio.Event()
@@ -520,6 +531,76 @@ def test_build_contextualizer_factory_uses_named_llm_endpoint(tmp_path) -> None:
         llm_registry._registry.pop("test-contextualizer-llm", None)
 
 
+class _FakeWorker:
+    """Stand-in for an ``IndexerWorkerActor`` handle.
+
+    ``process_file.remote(**kwargs)`` returns an ``asyncio.Future`` that
+    plays the role of a Ray ``ObjectRef`` (``asyncio.gather`` accepts both),
+    so tests can drive task completion deterministically.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.futures: list[asyncio.Future] = []
+        self.process_file = SimpleNamespace(remote=self._remote)
+
+    def _remote(self, **kwargs):
+        fut = asyncio.get_running_loop().create_future()
+        self.calls.append(kwargs)
+        self.futures.append(fut)
+        return fut
+
+
+def test_pool_requires_at_least_one_worker() -> None:
+    from services.workers.indexer_pool import IndexerPool
+
+    with pytest.raises(ValueError):
+        IndexerPool([])
+
+
+@pytest.mark.asyncio
+async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
+    from services.workers.indexer_pool import IndexerPool
+
+    workers = [_FakeWorker(), _FakeWorker()]
+    pool = IndexerPool(workers)
+
+    ref0 = pool.submit(task_id="a")  # tie -> worker 0
+    pool.submit(task_id="b")  # worker 0 busy -> worker 1
+    pool.submit(task_id="c")  # tie (1 each) -> worker 0
+
+    assert len(workers[0].calls) == 2
+    assert len(workers[1].calls) == 1
+    # The ObjectRef is passed straight through (dispatcher needs it for ray.cancel).
+    assert ref0 is workers[0].futures[0]
+
+
+@pytest.mark.asyncio
+async def test_pool_releases_inflight_when_task_settles() -> None:
+    from services.workers.indexer_pool import IndexerPool
+
+    workers = [_FakeWorker(), _FakeWorker()]
+    pool = IndexerPool(workers)
+
+    pool.submit(task_id="a")  # worker 0
+    pool.submit(task_id="b")  # worker 1
+    assert pool._inflight == [1, 1]
+
+    # One success, one failure — both must decrement the in-flight count.
+    workers[0].futures[0].set_result({"ok": True})
+    workers[1].futures[0].set_exception(RuntimeError("boom"))
+
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if pool._inflight == [0, 0]:
+            break
+    assert pool._inflight == [0, 0]
+
+    # Freed workers are eligible again on the next dispatch.
+    pool.submit(task_id="c")
+    assert pool._inflight[0] == 1
+
+
 def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPatch) -> None:
     import core.config
     import core.embeddings
@@ -584,7 +665,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(module.ray, "get_actor", fake_get_actor)
     monkeypatch.setattr(module, "IndexerWorker", Worker)
 
-    actor_class = module.IndexerPool.__ray_metadata__.modified_class
+    actor_class = module.IndexerWorkerActor.__ray_metadata__.modified_class
     actor_class()
 
     assert actor_calls

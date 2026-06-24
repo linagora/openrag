@@ -55,7 +55,7 @@ embedder:
 
 # --- Vector Database (Milvus) ---
 # Env: VDB_HOST, VDB_PORT, VDB_CONNECTOR_NAME, VDB_COLLECTION_NAME, VDB_HYBRID_SEARCH,
-#      VDB_ENABLE_INSERTION
+#      VDB_ENABLE_INSERTION, VDB_TIMEOUT
 vectordb:
   host: milvus
   port: 19530
@@ -63,6 +63,7 @@ vectordb:
   collection_name: vdb_test
   hybrid_search: true
   enable: true
+  timeout: 120.0 # per-request timeout (s) for the Milvus sync/async clients
   schema_version: 1 # Increment when the collection schema changes and a migration is required
 
 # --- Relational Database (PostgreSQL) ---
@@ -257,29 +258,11 @@ loader:
 
 # --- Ray ---
 ray:
-  # Env: RAY_NUM_GPUS, RAY_POOL_SIZE, RAY_MAX_TASKS_PER_WORKER
-  num_gpus: 0.01
-  pool_size: 1
-  max_tasks_per_worker: 8
-
   indexer:
-    # Env: RAY_MAX_TASK_RETRIES, INDEXER_SERIALIZE_TIMEOUT, VECTORDB_TIMEOUT
-    max_task_retries: 2
-    serialize_timeout: 3600
-    vectordb_timeout: 30
-    concurrency_groups:
-      # Env: INDEXER_DEFAULT_CONCURRENCY, INDEXER_UPDATE_CONCURRENCY, etc.
-      default: 1000
-      update: 100
-      search: 100
-      delete: 100
-      serialize: 50
-      chunk: 1000
-      insert: 100
-
-  semaphore:
-    # Env: RAY_SEMAPHORE_CONCURRENCY
-    concurrency: 100000
+    # Env: RAY_POOL_SIZE, RAY_MAX_TASKS_PER_WORKER
+    # Indexing capacity = pool_size (worker actors) × max_tasks_per_worker (files per worker).
+    pool_size: 1
+    max_tasks_per_worker: 50
 
   serve:
     # Env: ENABLE_RAY_SERVE, RAY_SERVE_NUM_REPLICAS, RAY_SERVE_HOST,

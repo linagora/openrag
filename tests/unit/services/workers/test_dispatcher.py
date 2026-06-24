@@ -14,8 +14,8 @@ def _remote_mock(return_value: Any = None) -> MagicMock:
 
 def _pool_with_ref(ref: object) -> MagicMock:
     pool = MagicMock()
-    pool.process_file = MagicMock()
-    pool.process_file.remote = MagicMock(return_value=ref)
+    # IndexerPool.submit() picks the least-loaded worker and returns its ObjectRef.
+    pool.submit = MagicMock(return_value=ref)
     return pool
 
 
@@ -131,7 +131,7 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         metadata={"filename": "report.txt"},
         user_id=42,
     )
-    pool.process_file.remote.assert_called_once_with(
+    pool.submit.assert_called_once_with(
         task_id="task-1",
         path="/data/report.txt",
         metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},

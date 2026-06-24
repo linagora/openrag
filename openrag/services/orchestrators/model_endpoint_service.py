@@ -96,25 +96,28 @@ class ModelEndpointService:
             logger.info(f"Seeded default {model_type} endpoint '{row.name}'.")
 
     def _build_default_seeds(self) -> dict[str, dict[str, Any]]:
-        """Build seed data from env overrides + existing Settings fallbacks."""
+        """Build seed data from env overrides + existing Settings fallbacks.
+
+        The ``*_ENDPOINT`` / ``*_MODEL`` env vars below are seed-specific names
+        the config loader does NOT map onto ``Settings``, so they are read here
+        directly. The api-key env vars (``API_KEY``, ``EMBEDDER_API_KEY``, ...)
+        ARE mapped by the loader (loader.py), so ``s.<type>.api_key`` already
+        reflects any env override — reading them via ``os.getenv`` again would
+        be redundant double-handling (and non-deterministic when a local .env is
+        loaded into the process via ``load_dotenv``).
+        """
         s = self._config
         return {
             "embedder": {
                 "endpoint": os.getenv("EMBEDDER_ENDPOINT", s.embedder.base_url),
                 "model_name": os.getenv("EMBEDDING_MODEL", s.embedder.model_name),
-                "extra": _with_api_key(
-                    {"implementation": "vllm"},
-                    os.getenv("EMBEDDER_API_KEY", s.embedder.api_key),
-                ),
+                "extra": _with_api_key({"implementation": "vllm"}, s.embedder.api_key),
             },
             "llm": {
                 "endpoint": os.getenv("LLM_ENDPOINT", s.llm.base_url),
                 "model_name": os.getenv("LLM_MODEL", s.llm.model),
                 "extra": _with_enable_thinking(
-                    _with_api_key(
-                        {"implementation": "vllm"},
-                        os.getenv("API_KEY", s.llm.api_key),
-                    ),
+                    _with_api_key({"implementation": "vllm"}, s.llm.api_key),
                     s.llm.enable_thinking,
                 ),
             },
@@ -122,10 +125,7 @@ class ModelEndpointService:
                 "endpoint": os.getenv("VLM_ENDPOINT", s.vlm.base_url),
                 "model_name": os.getenv("VLM_MODEL", s.vlm.model),
                 "extra": _with_enable_thinking(
-                    _with_api_key(
-                        {"implementation": "vllm"},
-                        os.getenv("VLM_API_KEY", s.vlm.api_key),
-                    ),
+                    _with_api_key({"implementation": "vllm"}, s.vlm.api_key),
                     s.vlm.enable_thinking,
                 ),
             },
@@ -138,10 +138,7 @@ class ModelEndpointService:
                 # remains available for per-partition opt-in.
                 "endpoint": os.getenv("RERANKER_ENDPOINT", s.reranker.base_url),
                 "model_name": os.getenv("RERANKER_MODEL", s.reranker.model_name),
-                "extra": _with_api_key(
-                    {"implementation": s.reranker.provider},
-                    os.getenv("RERANKER_API_KEY", s.reranker.api_key),
-                ),
+                "extra": _with_api_key({"implementation": s.reranker.provider}, s.reranker.api_key),
             },
         }
 
