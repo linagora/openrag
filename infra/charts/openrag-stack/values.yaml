@@ -32,7 +32,8 @@ ray:
     gpu-role: serving
   image:
     repository: ghcr.io/linagora/openrag-ray
-    tag: latest
+    # Pin to a release tag (ideally a digest) for reproducible deploys.
+    tag: "1.1.13"
 
 # === PostgreSQL (bitnami) ===
 postgresql:
@@ -100,6 +101,9 @@ vllm:
   llmModelName: &llmModel "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
   servingEngineSpec:
     enableEngine: true
+    # NOTE: the per-model `tag: "latest"` entries below are operator-supplied
+    # serving images — pin each to a specific vLLM release tag (or digest)
+    # before production use for reproducible deploys (see vlm, pinned to v0.11.2).
     modelSpec:
       - name: "embedder"
         repository: "vllm/vllm-openai"
@@ -210,6 +214,8 @@ reranker:
   servicePort: &rerankerPort 7997
   image:
     repository: michaelf34/infinity
+    # Operator-supplied serving image: pin to a specific infinity release tag
+    # (or digest) before production use rather than tracking latest.
     tag: latest
   nodeSelector:
     gpu-role: serving
@@ -237,7 +243,7 @@ reranker:
 indexerUi:
   enabled: true
 
-  image: "linagoraai/indexer-ui:latest"
+  image: "linagoraai/indexer-ui:1.1.13"
   imagePullPolicy: IfNotPresent
 
   replicaCount: 1
@@ -260,7 +266,8 @@ indexerUi:
 openrag:
   image:
     repository: linagoraai/openrag
-    tag: latest
+    # Pin to a release tag (ideally a digest) for reproducible deploys.
+    tag: "1.1.13"
   service:
     type: ClusterIP
     port: 8080

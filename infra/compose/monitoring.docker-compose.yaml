@@ -1,6 +1,6 @@
 services:
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.54.1
     container_name: openrag-prometheus
     ports:
       # Localhost only: the Prometheus API is unauthenticated.
@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.2.2
     container_name: openrag-grafana
     ports:
       - "3000:3000"
@@ -36,7 +36,7 @@ services:
     restart: unless-stopped
 
   node-exporter:
-    image: prom/node-exporter:latest
+    image: prom/node-exporter:v1.8.2
     container_name: openrag-node-exporter
     ports:
       # Localhost only: Prometheus scrapes it over the compose network by name,
