@@ -136,6 +136,10 @@ docker compose up -d
 
 Once running, **OpenRAG will auto-connect** to the Ray cluster using `RAY_ADDRESS` from `.env`.
 
+:::note
+When `RAY_ADDRESS` is set, the app **attaches** to the external cluster and does **not** start its own embedded Ray dashboard — the head node owns it (started above via `--dashboard-host 0.0.0.0 --dashboard-port ${RAY_DASHBOARD_PORT:-8265}`). The app-side `RAY_DASHBOARD_HOST` setting is only used in embedded (single-node) mode, where it defaults to `127.0.0.1` because the dashboard API is unauthenticated ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)).
+:::
+
 ---
 
 With this setup, your app is now fully distributed and ready to handle concurrent tasks across your Ray cluster.
