@@ -35,7 +35,9 @@ def test_compose_defaults_preserve_existing_host_paths() -> None:
     assert "${DATA_VOLUME:-../../data}:/app/data" in openrag_volumes
     assert "${LOG_VOLUME:-../../logs}:/app/logs" in openrag_volumes
     assert "${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights" in openrag_volumes
-    assert "../../openrag:/app/openrag" in openrag_volumes
+    # N8: the ../../openrag source bind-mount is commented out by default
+    # (dev-only) so production never lets host changes override the running code.
+    assert "../../openrag:/app/openrag" not in openrag_volumes
     assert "${DB_VOLUME:-../../db}:/var/lib/postgresql/data" in rdb_volumes
 
     assert {"appdata", "logs", "modelweights", "pgdata"} <= top_level_volumes
