@@ -48,6 +48,11 @@ docs last.
 | `2b34a0d1` | clock-skew leeway + nbf (crypto) | `services/auth/oidc_client.py` |
 | `c2fde135` | logout CSRF Fetch-Metadata guard (N3) | `api/routers/auth/oidc.py` (+ tests) |
 | `9a73200a` | revoke OIDC sessions on token regen (#361, #486) | `services/orchestrators/{auth_service,user_service}.py` (startup-rotation guard + revoke_by_user already present) |
+| `714f2a84` | streaming finish_reason not on content chunk | `core/utils/source_filtering.py` (+ test) |
+| `0bc6157e` | stop logging raw query text (#481) | `api/routers/user/search.py` (query_len) |
+| `52be26f1` | non-empty RAG answer body | `openrag/prompts/templates/sys_prompt_tmpl.txt` |
+| `6bc898e9` | surrounding-chunk partition scope (N6) | `services/storage/vector_store_searcher.py` (+ tests) |
+| `86c9b51d` | ensure_partition_role fail-open → 404 | `api/dependencies/auth.py` (+ tests) |
 
 ### Skipped (already present / superseded on refactor)
 
@@ -60,11 +65,12 @@ docs last.
 | `47b8cd32` | refactor already fail-fasts on missing CHAINLIT_AUTH_SECRET (stricter, #380/`b63a9825`, with a regression test). 47b8cd32 only re-adds an ALLOW_NO_AUTH-gated default-secret fallback — a loosening intentionally NOT ported. |
 | `73acb1c9` | both halves already present: `sanitize_next_url` rejects CR/LF/NUL + the `/\` protocol-relative vector (#360 regression test), and the callback already verifies userinfo.sub == id_token.sub (OIDC Core §5.3.2). |
 | `cdb3edc9` | test-only follow-up to M9 on main's `test_oidc_client.py` (no equivalent file); subsumed by the new replay test which carries exp. |
+| `199424bf` | empty-stream 502 (#363): obviated by the refactor architecture — non-streaming uses `self._llm.chat()`/`.generate()` (materialized dicts, not a stream's first chunk), and the inference client already raises `InferenceError(status_code=502)` on invalid upstream responses. No `__anext__`/`StopAsyncIteration` path remains. |
 
 ### Remaining (TODO — not yet ported)
 
-**Batch 4 — RAG / retrieval / loaders / OpenAI (~21 commits):**
-`714f2a84` streaming finish_reason → `core/utils/source_filtering.py`; `bf4ae134` + `f079efa5` Milvus filter-injection guards → `services/storage/*`, `api/routers/*` + `api/dependencies`; `db92875d` llm_override credential strip → `services/inference/vllm_client.py` + `api/schemas/user/chat.py`; `67ec4199` source-download authz (partial — `/static` mount already gone) → `api/routers/user/source_links.py`; `86c9b51d` ensure_partition_role fail-open → `api/dependencies/auth.py`; `8ecbc781` web-search SSRF/MITM → `services/websearch/content_fetcher.py`; `e3c7eac2` + `81bccf08` control-token neutralizer → `core/utils/` + sources-tag parser; `818d5446` stack-trace leak → `api/routers/admin/indexing.py`; `54165900` token-limit + n/best_of bounds → `api/schemas/user/chat.py` + `api/routers/user/chat.py`; `6bc898e9` surrounding-chunk partition scope → `services/storage/vector_store_searcher.py`; `63a857af` image-URL SSRF → parsers; `8ea723ca` SVG external-fetch guard → image parser; `70a2db36` CustomDocLoader page accumulation (#376) → `services/workers/parsers/legacy_loaders/`; `199424bf` empty-stream 502 (#363) → `api/routers/user/chat.py`; `0bc6157e` stop logging raw query (#481) → `api/routers/user/search.py`; `761f47a0` copy-endpoint source_file_id validation (#477); `221f8ed8` parser DoS caps (M8) → `core/config/indexation.py` + parsers; `d66cf029` cap partitions per user (M13); `52be26f1` non-empty RAG answer → `openrag/prompts/templates/`.
+**Batch 4 — RAG / retrieval / loaders / OpenAI (~14 left):**
+`bf4ae134` + `f079efa5` Milvus filter-injection guards → `services/storage/*` (`_build_filter_expr`/`_format_value`), `api/routers/*` + `api/dependencies`; `db92875d` llm_override credential strip → `services/inference/vllm_client.py` (`_resolve_overrides`) + `api/schemas/user/chat.py`; `67ec4199` source-download authz (partial — `/static` mount already gone) → `api/routers/user/source_links.py`; `8ecbc781` web-search SSRF/MITM → `services/websearch/content_fetcher.py`; `e3c7eac2` + `81bccf08` control-token neutralizer → `core/utils/` + sources-tag parser; `818d5446` stack-trace leak → `api/routers/admin/indexing.py`; `54165900` token-limit + n/best_of bounds (note: `check_tokens_limit` already wired in `/completions`; verify `/chat/completions` + n/best_of) → `api/schemas/user/chat.py` + `api/routers/user/chat.py`; `63a857af` image-URL SSRF → parsers; `8ea723ca` SVG external-fetch guard → image parser; `70a2db36` CustomDocLoader page accumulation (#376) → `services/workers/parsers/legacy_loaders/`; `761f47a0` copy-endpoint source_file_id validation (#477); `221f8ed8` parser DoS caps (M8) → `core/config/indexation.py` + parsers; `d66cf029` cap partitions per user (M13).
 
 **Batch 2 — deps:** `74de8232` Starlette/FastAPI bump, `4d8bca01` `limits` not slowapi, `0e6e7836` rate-limit module + tests (`pyproject.toml`, `uv.lock`, new `openrag/...rate_limit`, `.env.example`).
 
