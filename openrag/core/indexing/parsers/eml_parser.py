@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 
 _IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"}
 
+# Parser-bomb cap: bound the attachments processed per email so a small message
+# with thousands of attachments can't exhaust CPU/memory during ingestion. (The
+# nested .eml-in-.eml recursion is bounded separately at parser-tree build time
+# via _MAX_EML_ATTACHMENT_DEPTH in the parser_dispatcher.)
+_MAX_EML_ATTACHMENTS = 50
+
 
 @parser_registry.register("eml")
 class EmlParser(DocumentParser):
@@ -131,6 +137,11 @@ class EmlParser(DocumentParser):
             disposition = part.get_content_disposition()
 
             if disposition in ("attachment", "inline"):
+                # Enforce the per-email cap BEFORE decoding the payload so a
+                # malicious message with thousands of attachments can't make us
+                # decode them all just to discard the overflow.
+                if len(attachments) >= _MAX_EML_ATTACHMENTS:
+                    continue
                 filename = part.get_filename()
                 payload = part.get_payload(decode=True)
                 if filename and payload:
