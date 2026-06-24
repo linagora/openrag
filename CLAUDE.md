@@ -454,4 +454,4 @@ New table `oidc_sessions`:
   - **OIDC mode** → `401 {"detail": "Unauthenticated"}` (no usable session/bearer and the path isn't a UI redirect target).
 - Programmatic access: Bearer `users.token` accepted in both modes
 
-**See Also**: Full configuration and troubleshooting guide at `docs/oidc.md`.
+**See Also**: Full configuration and troubleshooting guide at `docs/content/docs/documentation/oidc.md` (quick start: `docs/content/docs/documentation/sso-quickstart.md`).

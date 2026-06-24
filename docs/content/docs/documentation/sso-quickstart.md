@@ -1,4 +1,6 @@
-# SSO Quick Start (OIDC)
+---
+title: SSO Quick Start (OIDC)
+---
 
 Configure OpenRag to delegate authentication to your corporate SSO (LemonLDAP::NG, Keycloak, Auth0, Azure AD, Okta…) in five steps.
 
@@ -127,7 +129,7 @@ By default OpenRag reads the claims from the verified ID token (`OIDC_CLAIM_SOUR
 If your IdP models access as groups (e.g. Keycloak groups like `/openrag/project-alpha/editor`),
 OpenRag can map them to partition memberships automatically on every login — set
 `OIDC_CLAIM_GROUPS` and friends. See `docs/oidc.md` →
-[Group → Partition Mapping](./oidc.md#group--partition-mapping-optional). (`is_admin` is never
+[Group → Partition Mapping](/openrag/documentation/oidc/#group--partition-mapping-optional). (`is_admin` is never
 derived from groups.)
 
 ---
@@ -136,7 +138,7 @@ derived from groups.)
 
 By default, OpenRag **does not auto-create users** on first login. Each user must exist in the database with their OIDC `sub` stored in `external_user_id`.
 
-> **Skip this step entirely** by setting `OIDC_AUTO_PROVISION_LOGIN=true` in your `.env`. The callback then creates a non-admin user from the ID-token claims on first login and keeps `display_name` + `email` in sync with the IdP on every subsequent login. The trade-off: your IdP's user list becomes the source of truth for OpenRag accounts. See `docs/oidc.md` → [Auto-provisioning](./oidc.md#auto-provisioning-optional) for the full trust-model.
+> **Skip this step entirely** by setting `OIDC_AUTO_PROVISION_LOGIN=true` in your `.env`. The callback then creates a non-admin user from the ID-token claims on first login and keeps `display_name` + `email` in sync with the IdP on every subsequent login. The trade-off: your IdP's user list becomes the source of truth for OpenRag accounts. See `docs/oidc.md` → [Auto-provisioning](/openrag/documentation/oidc/#auto-provisioning-optional) for the full trust-model.
 
 Ask the IdP admin for each user's `sub` claim value (stable identifier, NOT the username). Then create the user via the OpenRag admin API — you'll need an admin `AUTH_TOKEN` for this:
 
@@ -174,7 +176,7 @@ docker compose logs openrag --tail 50 | grep -i OIDC
 
 Open your browser at `https://rag.mycorp.com/` → it redirects to your SSO → you log in → you come back authenticated.
 
-If something goes wrong, see the full **[troubleshooting section in `docs/oidc.md`](./oidc.md#troubleshooting)**. Most issues fall into one of three categories:
+If something goes wrong, see the full **[troubleshooting section in `docs/oidc.md`](/openrag/documentation/oidc/#troubleshooting)**. Most issues fall into one of three categories:
 
 1. **Issuer mismatch** (Step 2 — trailing slash).
 2. **Invalid redirect URI** (Step 1 — must match byte-for-byte).
