@@ -20,7 +20,8 @@ auth:
 
 head_start_ray_commands:
     - uv run ray stop
-    - uv run ray start --head --dashboard-host 0.0.0.0 --dashboard-port ${RAY_DASHBOARD_PORT:-8265} --node-ip-address ${HEAD_NODE_IP} --autoscaling-config=~/ray_bootstrap_config.yaml
+    # Dashboard/Jobs API is unauthenticated (CVE-2023-48022); bind to localhost by default and front with an auth proxy if remote access is needed.
+    - uv run ray start --head --dashboard-host ${RAY_DASHBOARD_HOST:-127.0.0.1} --dashboard-port ${RAY_DASHBOARD_PORT:-8265} --node-ip-address ${HEAD_NODE_IP} --autoscaling-config=~/ray_bootstrap_config.yaml
 worker_start_ray_commands:
     - uv run ray stop
     - uv run ray start --address ${HEAD_NODE_IP:-10.0.0.1}:6379

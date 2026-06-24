@@ -16,7 +16,7 @@ x-openrag: &openrag_template
     # - ./logs:/app/logs
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
-    - ${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
+    - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265 # Localhost only: Ray dashboard/Jobs API is unauthenticated. Disable when in cluster mode
   networks:
     default:
       aliases:

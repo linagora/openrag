@@ -150,7 +150,14 @@ async def lifespan(app: FastAPI):
     """
     if not ray.is_initialized():
         logger.info("Startup: initializing Ray")
-        ray.init(dashboard_host="0.0.0.0", ignore_reinit_error=True)
+        # Bind the Ray dashboard to localhost by default; the dashboard / Jobs
+        # API is unauthenticated (CVE-2023-48022 "ShadowRay") so it must never
+        # listen on a routable interface. Operators that front it with an auth
+        # proxy can override via RAY_DASHBOARD_HOST.
+        ray.init(
+            dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "127.0.0.1"),
+            ignore_reinit_error=True,
+        )
     logger.info("Startup: Ray is initialized")
 
     # ``ensure_worker_bootstrap`` imports ``services.workers.bootstrap``

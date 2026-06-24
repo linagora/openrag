@@ -77,7 +77,12 @@ def _service():
 async def _startup() -> None:
     global _container
     if not ray.is_initialized():
-        ray.init(dashboard_host="0.0.0.0", ignore_reinit_error=True)
+        # Bind the Ray dashboard to localhost by default; it is unauthenticated
+        # (CVE-2023-48022). Override via RAY_DASHBOARD_HOST behind an auth proxy.
+        ray.init(
+            dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "127.0.0.1"),
+            ignore_reinit_error=True,
+        )
     ensure_worker_bootstrap()
     container = ServiceContainer(config)
     try:

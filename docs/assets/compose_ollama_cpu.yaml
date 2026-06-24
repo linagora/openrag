@@ -7,7 +7,8 @@ x-openrag: &openrag_template
     - ./ray_mount/logs:/app/logs
   ports:
     - 8090:8080
-    - 8265:8265 # Disable when in cluster mode
+    # Localhost only: Ray dashboard/Jobs API is unauthenticated (CVE-2023-48022). Disable when in cluster mode
+    - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265
   networks:
     default:
       aliases:
