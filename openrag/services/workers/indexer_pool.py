@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,6 +10,11 @@ import ray
 from services.workers.indexer_actor import IndexerWorker
 
 from openrag.core.config.root import Settings
+
+# The indexer reloads the DB-backed model-endpoint registry at most once per
+# this window (and on a miss), bounding both staleness and DB load regardless
+# of indexing throughput.
+_MODEL_REGISTRY_TTL_SECONDS = 60.0
 
 
 @ray.remote
@@ -20,6 +26,7 @@ class IndexerPool:
         import services.inference.vllm_client  # noqa: F401
         from core.config import load_config
         from core.embeddings import embedder_registry
+        from core.utils.logging import get_logger
         from services.storage.milvus_store import MilvusVectorStore
         from services.storage.postgres_store import PostgresStore
         from services.workers.parsers.parser_dispatcher import build_caption_vlm, build_parser_dispatcher
@@ -63,6 +70,27 @@ class IndexerPool:
         self._catalog_store = PostgresStore(rdb_cfg, run_migrations=False)
         self._catalog_initialized = False
         self._catalog_init_lock = asyncio.Lock()
+        # Model-endpoint registry hydration. Unlike the API process, the indexer
+        # never runs ModelEndpointService at startup, so cfg.models starts empty
+        # and named endpoints (registered via the admin UI) can't resolve here.
+        # We hydrate cfg.models from the DB lazily on first use — see
+        # _ensure_registry_fresh. The factories above hold a live reference to
+        # cfg.models.* so in-place hydration becomes visible to them.
+        # Instance-level logger: kept off the module so Ray's by-value pickling
+        # of this actor class never drags in loguru's enqueue SimpleQueue (a
+        # module-global logger referenced by a method makes the class
+        # unpicklable). Created here, in the actor process, it is never pickled.
+        self._logger = get_logger()
+        self._cfg = cfg
+        # Whether "default" resolves via the global cfg.llm fallback (static —
+        # cfg.llm doesn't change). Lets _reload_decision avoid a perpetual
+        # reload-on-miss for "default" when no is_default row exists in the DB.
+        self._has_default_fallback = _global_llm_endpoint_config(cfg) is not None
+        self._model_endpoint_service: Any = None
+        self._registry_loaded_at: float | None = None
+        self._last_miss_reload_at: float | None = None
+        self._registry_lock = asyncio.Lock()
+        self._registry_reload_task: asyncio.Task[None] | None = None
         self._worker = IndexerWorker(
             pipeline=pipeline,
             task_state_manager=task_state_manager,
@@ -79,6 +107,72 @@ class IndexerPool:
             await self._catalog_store.initialize()
             self._catalog_initialized = True
 
+    async def _ensure_registry_fresh(self, required_llm_names: list[str]) -> None:
+        """Hydrate ``cfg.models`` from the DB so named endpoints resolve here.
+
+        The hit path is lock-free and does no I/O. A reload happens only on first
+        use (``initial``), once the registry goes stale (``ttl``), or when a
+        requested name is missing (``miss``, rate-limited to once per window so a
+        deleted/typo'd name can't storm the DB). Reloads are single-flight via
+        ``_registry_lock``.
+
+        Latency: ``ttl`` refreshes run **in the background** — the current
+        registry is still valid, so no file waits on the DB. Only ``initial`` and
+        ``miss`` block, because the triggering file needs an endpoint that isn't
+        loaded yet; both are rare and rate-limited.
+        """
+        decision = self._reload_decision(required_llm_names)
+        if decision is None:
+            return
+        if decision == "ttl":
+            if self._registry_reload_task is None or self._registry_reload_task.done():
+                self._registry_reload_task = asyncio.create_task(self._reload_registry(required_llm_names))
+            return
+        await self._reload_registry(required_llm_names)
+
+    async def _reload_registry(self, required_llm_names: list[str]) -> None:
+        """Single-flight reload of the model-endpoint registry from the DB."""
+        async with self._registry_lock:
+            decision = self._reload_decision(required_llm_names)
+            if decision is None:  # another reload refreshed it while we waited
+                return
+            try:
+                if self._model_endpoint_service is None:
+                    from services.orchestrators.model_endpoint_service import ModelEndpointService
+
+                    self._model_endpoint_service = ModelEndpointService(
+                        model_endpoint_repo=self._catalog_store.model_endpoint_repo,
+                        config=self._cfg,
+                    )
+                await self._model_endpoint_service.load_all()
+            except Exception as exc:  # noqa: BLE001 - a reload must never fail (or crash) a file
+                self._logger.warning(f"Model endpoint registry reload failed ({decision}): {exc}")
+            # Stamp the clock even on failure so a persistent error degrades to
+            # one retry per window rather than one attempt per file.
+            now = time.monotonic()
+            self._registry_loaded_at = now
+            if decision == "miss":
+                self._last_miss_reload_at = now
+
+    def _reload_decision(self, required_llm_names: list[str]) -> str | None:
+        models = getattr(self._cfg, "models", None)
+        llm_registry = getattr(models, "llm", {}) if models is not None else {}
+        # The factory also resolves "default" via the global cfg.llm fallback, even
+        # when no is_default row puts a "default" alias in the registry. Treating it
+        # as missing in that case would block-reload every window forever without
+        # ever converging, so mirror the factory's fallback here.
+        missing = any(
+            name not in llm_registry and not (name == "default" and self._has_default_fallback)
+            for name in required_llm_names
+        )
+        return _registry_reload_decision(
+            loaded_at=self._registry_loaded_at,
+            last_miss_at=self._last_miss_reload_at,
+            now=time.monotonic(),
+            ttl=_MODEL_REGISTRY_TTL_SECONDS,
+            missing=missing,
+        )
+
     async def process_file(
         self,
         *,
@@ -93,6 +187,7 @@ class IndexerPool:
         embedder_name: str | None = None,
     ) -> dict[str, Any]:
         await self._ensure_catalog()
+        await self._ensure_registry_fresh(_required_llm_names(indexation_config))
         result = await self._worker.process_file(
             task_id=task_id,
             path=path,
@@ -130,6 +225,50 @@ def build_indexer_pool(namespace: str = "openrag") -> Any:
         lifetime="detached",
         max_concurrency=max_concurrency,
     ).remote()
+
+
+def _required_llm_names(indexation_config: dict[str, Any] | None) -> list[str]:
+    """LLM endpoint names this file will request, for the reload-on-miss check.
+
+    Mirrors the pipeline's selection logic: contextualization and topic tagging
+    each resolve their configured endpoint name (falling back to ``default``).
+    """
+    if indexation_config is None:
+        return []
+    names: list[str] = []
+    if indexation_config.get("enable_contextualization"):
+        names.append(indexation_config.get("contextualization_llm") or "default")
+    if indexation_config.get("enable_topic_tagging", True):
+        names.append(indexation_config.get("topic_tagging_llm") or "default")
+    return names
+
+
+def _registry_reload_decision(
+    *,
+    loaded_at: float | None,
+    last_miss_at: float | None,
+    now: float,
+    ttl: float,
+    missing: bool,
+) -> str | None:
+    """Decide whether (and why) to reload the model-endpoint registry.
+
+    Returns ``"initial"`` / ``"ttl"`` / ``"miss"``, or ``None`` for the hit path
+    (no reload). The ``miss`` branch is rate-limited to once per ``ttl`` so an
+    unresolvable name cannot trigger a reload on every file.
+
+    ``miss`` is checked before ``ttl``: a missing required endpoint must trigger
+    a *blocking* reload so the current file can resolve it, even when the
+    registry is also stale (otherwise the stale-registry ``ttl`` path would
+    schedule a background refresh and the file would skip the LLM stage).
+    """
+    if loaded_at is None:
+        return "initial"
+    if missing and (last_miss_at is None or now - last_miss_at >= ttl):
+        return "miss"
+    if now - loaded_at >= ttl:
+        return "ttl"
+    return None
 
 
 def _build_chunker(cfg: Any) -> Any:
@@ -182,11 +321,19 @@ def _build_embedder_factory(cfg: Settings) -> Any:
 def _build_contextualizer_factory(cfg: Settings) -> Any:
     """Build a cached factory yielding ``ChunkContextualizer`` instances.
 
-    Each requested LLM name is resolved against the named-endpoint registry
-    (``cfg.models.llm``), falling back to the global ``cfg.llm`` block for the
-    ``default`` name. Returns ``None`` when no LLM is configured. Every
-    contextualizer shares the cluster-wide ``llmSemaphore`` so contextualization
-    LLM calls obey the same global concurrency limit as query-time calls.
+    Each requested LLM name is resolved at call time against the named-endpoint
+    registry (``cfg.models.llm``), falling back to the global ``cfg.llm`` block
+    for the ``default`` name. The registry is hydrated from the DB lazily by the
+    indexer actor *after* this factory is built, so we hold a live reference to
+    ``cfg.models.llm`` rather than a snapshot. A name with no entry and no
+    fallback raises ``KeyError`` — the pipeline catches it and skips the stage.
+    One client is cached per name and rebuilt when that endpoint's full config
+    (URL, model, or any ``extra`` such as the api_key) changes, so an edit yields
+    a fresh client after the registry reloads. The superseded client is dropped
+    from the cache but not explicitly closed — acceptable since endpoint edits
+    are rare and the actor reclaims it on exit. Every contextualizer shares the
+    cluster-wide ``llmSemaphore`` so contextualization LLM calls obey the same
+    global concurrency limit as query-time calls.
     """
     import services.inference.ollama_client  # noqa: F401
     import services.inference.vllm_client  # noqa: F401
@@ -195,32 +342,46 @@ def _build_contextualizer_factory(cfg: Settings) -> Any:
     from core.prompts import load_template_by_key
     from services.inference.distributed_semaphore import DistributedSemaphore
 
-    named_llms = getattr(getattr(cfg, "models", None), "llm", {}) or {}
+    models = getattr(cfg, "models", None)
+    named_llms = models.llm if models is not None else {}
     fallback_cfg = _global_llm_endpoint_config(cfg)
-    if not named_llms and fallback_cfg is None:
-        return None
 
-    system_prompt = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "chunk_contextualizer")
-    # Rate-limit contextualization LLM calls with the cluster-wide "llmSemaphore"
-    # (the same one get_llm_semaphore() / bootstrap.py manage) so a large indexing
-    # job can't flood the vLLM endpoint. Built directly from config to avoid
-    # importing services.inference.runtime, which eagerly constructs a LangDetector.
-    llm_semaphore = DistributedSemaphore(name="llmSemaphore", max_concurrent_ops=cfg.semaphore.llm_semaphore)
-    cache: dict[str, ChunkContextualizer] = {}
+    # name -> (endpoint-identity, instance). Bounded to one entry per name; a
+    # changed identity replaces (not accumulates) the cached client.
+    cache: dict[str, tuple[str, ChunkContextualizer]] = {}
+    # Prompt + semaphore are built lazily on first successful resolve so a pool
+    # with no resolvable LLM does no startup work (and an unknown name raises
+    # before touching them).
+    shared: dict[str, Any] = {}
     lock = threading.Lock()
 
     def factory(name: str = "default") -> ChunkContextualizer:
-        if name in cache:
-            return cache[name]
+        model_cfg = named_llms.get(name)
+        if model_cfg is None:
+            if name == "default" and fallback_cfg is not None:
+                model_cfg = fallback_cfg
+            else:
+                raise KeyError(f"Unknown llm '{name}'. Available: {list(named_llms)}")
+        identity = _endpoint_identity(model_cfg)
+        entry = cache.get(name)
+        if entry is not None and entry[0] == identity:
+            return entry[1]
         with lock:
-            if name in cache:
-                return cache[name]
-            model_cfg = named_llms.get(name)
-            if model_cfg is None:
-                if name == "default" and fallback_cfg is not None:
-                    model_cfg = fallback_cfg
-                else:
-                    raise KeyError(f"Unknown llm '{name}'. Available: {list(named_llms)}")
+            entry = cache.get(name)
+            if entry is not None and entry[0] == identity:
+                return entry[1]
+            if "system_prompt" not in shared:
+                # Build both before publishing to `shared` so a failure can't
+                # leave it half-initialised (which would later raise a stray
+                # KeyError on the missing key, misread as an unresolvable LLM).
+                system_prompt = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "chunk_contextualizer")
+                # Built directly from config to avoid importing
+                # services.inference.runtime, which eagerly constructs a LangDetector.
+                llm_semaphore = DistributedSemaphore(
+                    name="llmSemaphore", max_concurrent_ops=cfg.semaphore.llm_semaphore
+                )
+                shared["system_prompt"] = system_prompt
+                shared["llm_semaphore"] = llm_semaphore
             impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
             impl = model_cfg.extra.get("implementation", "vllm")
             llm = llm_registry.create(
@@ -232,46 +393,57 @@ def _build_contextualizer_factory(cfg: Settings) -> Any:
             )
             contextualizer = ChunkContextualizer(
                 llm,
-                system_prompt,
+                shared["system_prompt"],
                 timeout_seconds=cfg.chunker.contextualization_timeout,
                 batch_size=cfg.chunker.max_concurrent_contextualization,
-                llm_semaphore=llm_semaphore,
+                llm_semaphore=shared["llm_semaphore"],
             )
-            cache[name] = contextualizer
+            cache[name] = (identity, contextualizer)
             return contextualizer
 
     return factory
 
 
 def _build_topic_tagger_factory(cfg: Settings) -> Any:
-    """Build a cached factory yielding ``TopicTagger`` instances."""
+    """Build a cached factory yielding ``TopicTagger`` instances.
+
+    Mirrors :func:`_build_contextualizer_factory`: a live reference to the
+    DB-hydrated ``cfg.models.llm`` registry, global fallback for ``default``,
+    a ``KeyError`` on an unresolvable name (skipped by the pipeline), a
+    one-entry-per-name client cache replaced on endpoint change, and a lazily
+    loaded prompt.
+    """
     import services.inference.ollama_client  # noqa: F401
     import services.inference.vllm_client  # noqa: F401
     from core.indexing.topic_tags import TopicTagger
     from core.llm import llm_registry
     from core.prompts import load_template_by_key
 
-    named_llms = getattr(getattr(cfg, "models", None), "llm", {}) or {}
+    models = getattr(cfg, "models", None)
+    named_llms = models.llm if models is not None else {}
     fallback_cfg = _global_llm_endpoint_config(cfg)
-    if not named_llms and fallback_cfg is None:
-        return None
 
-    system_prompt = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "topic_tagger")
-    cache: dict[str, TopicTagger] = {}
+    cache: dict[str, tuple[str, TopicTagger]] = {}
+    shared: dict[str, Any] = {}
     lock = threading.Lock()
 
     def factory(name: str = "default") -> TopicTagger:
-        if name in cache:
-            return cache[name]
+        model_cfg = named_llms.get(name)
+        if model_cfg is None:
+            if name == "default" and fallback_cfg is not None:
+                model_cfg = fallback_cfg
+            else:
+                raise KeyError(f"Unknown llm '{name}'. Available: {list(named_llms)}")
+        identity = _endpoint_identity(model_cfg)
+        entry = cache.get(name)
+        if entry is not None and entry[0] == identity:
+            return entry[1]
         with lock:
-            if name in cache:
-                return cache[name]
-            model_cfg = named_llms.get(name)
-            if model_cfg is None:
-                if name == "default" and fallback_cfg is not None:
-                    model_cfg = fallback_cfg
-                else:
-                    raise KeyError(f"Unknown llm '{name}'. Available: {list(named_llms)}")
+            entry = cache.get(name)
+            if entry is not None and entry[0] == identity:
+                return entry[1]
+            if "system_prompt" not in shared:
+                shared["system_prompt"] = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "topic_tagger")
             impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
             impl = model_cfg.extra.get("implementation", "vllm")
             llm = llm_registry.create(
@@ -281,11 +453,27 @@ def _build_topic_tagger_factory(cfg: Settings) -> Any:
                 timeout=model_cfg.timeout,
                 **impl_kwargs,
             )
-            tagger = TopicTagger(llm, system_prompt, timeout_seconds=model_cfg.timeout)
-            cache[name] = tagger
+            tagger = TopicTagger(llm, shared["system_prompt"], timeout_seconds=model_cfg.timeout)
+            cache[name] = (identity, tagger)
             return tagger
 
     return factory
+
+
+def _endpoint_identity(model_cfg: Any) -> str:
+    """Stable identity of a resolved endpoint config for client-cache keying.
+
+    Covers the full config — endpoint, model **and** every ``extra`` key
+    (``api_key``, ``temperature``, ...) — so any edit (including an api-key
+    rotation that keeps the same URL/model) yields a new identity and rebuilds
+    the cached client on the next reload, matching the API process's
+    invalidate-on-any-change behaviour.
+    """
+    import hashlib
+    import json
+
+    payload = json.dumps(model_cfg.model_dump(mode="json"), sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _global_llm_endpoint_config(cfg: Any) -> Any | None:
