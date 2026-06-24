@@ -103,6 +103,20 @@ class TestVLLMClient:
         assert 'data: {"choices":[{"delta":{"content":" world"}}]}' in lines
 
     @pytest.mark.asyncio
+    async def test_stream_chat_sends_enable_thinking_as_chat_template_kwargs_when_configured(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert body["stream"] is True
+            assert body["chat_template_kwargs"] == {"enable_thinking": False}
+            assert "enable_thinking" not in body
+            return httpx.Response(200, text="data: [DONE]\n")
+
+        client = self._make_client(handler, enable_thinking=False)
+        lines = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
+
+        assert lines == ["data: [DONE]"]
+
+    @pytest.mark.asyncio
     async def test_stream_chat_error_raises(self):
         client = self._make_client(lambda req: httpx.Response(503, text="unavailable"))
         with pytest.raises(InferenceError):
@@ -141,6 +155,47 @@ class TestVLLMClient:
 
         await self._make_client(capture).chat([{"role": "user", "content": "hi"}])
         assert captured["temperature"] == 0.3
+
+    @pytest.mark.asyncio
+    async def test_enable_thinking_is_sent_as_chat_template_kwargs_when_configured(self):
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture, enable_thinking=False).chat([{"role": "user", "content": "hi"}])
+
+        assert captured["chat_template_kwargs"] == {"enable_thinking": False}
+        assert "enable_thinking" not in captured
+
+    @pytest.mark.asyncio
+    async def test_enable_thinking_merges_with_existing_chat_template_kwargs(self):
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(
+            capture,
+            enable_thinking=False,
+            chat_template_kwargs={"custom": "value"},
+        ).chat([{"role": "user", "content": "hi"}])
+
+        assert captured["chat_template_kwargs"] == {"custom": "value", "enable_thinking": False}
+
+    @pytest.mark.asyncio
+    async def test_chat_template_kwargs_omitted_by_default(self):
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture).chat([{"role": "user", "content": "hi"}])
+
+        assert "chat_template_kwargs" not in captured
 
     @pytest.mark.asyncio
     async def test_per_request_kwargs_override_defaults(self):
@@ -460,6 +515,37 @@ class TestVLLMVision:
             return _chat_response("ok")
 
         await self._make_vision(handler, max_tokens=512).caption_image(b"img")
+
+    @pytest.mark.asyncio
+    async def test_caption_image_sends_enable_thinking_as_chat_template_kwargs_when_configured(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert body["chat_template_kwargs"] == {"enable_thinking": False}
+            assert "enable_thinking" not in body
+            return _chat_response("ok")
+
+        await self._make_vision(handler, enable_thinking=False).caption_image(b"img")
+
+    @pytest.mark.asyncio
+    async def test_caption_image_merges_enable_thinking_with_existing_chat_template_kwargs(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert body["chat_template_kwargs"] == {"custom": "value", "enable_thinking": False}
+            return _chat_response("ok")
+
+        await self._make_vision(
+            handler,
+            enable_thinking=False,
+            chat_template_kwargs={"custom": "value"},
+        ).caption_image(b"img")
+
+    @pytest.mark.asyncio
+    async def test_caption_image_omits_chat_template_kwargs_by_default(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "chat_template_kwargs" not in json.loads(request.content)
+            return _chat_response("ok")
+
+        await self._make_vision(handler).caption_image(b"img")
 
     @pytest.mark.asyncio
     async def test_caption_connection_error(self):

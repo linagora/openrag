@@ -155,7 +155,12 @@ def test_build_contextualizer_factory_uses_global_llm_fallback(tmp_path) -> None
     (tmp_path / "chunk_contextualizer_tmpl.txt").write_text("Context prompt", encoding="utf-8")
     cfg = SimpleNamespace(
         models=SimpleNamespace(llm={}),
-        llm=SimpleNamespace(base_url="http://llm.example/v1", model="mistral", api_key="llm-key"),
+        llm=SimpleNamespace(
+            base_url="http://llm.example/v1",
+            model="mistral",
+            api_key="llm-key",
+            enable_thinking=False,
+        ),
         chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
         semaphore=SimpleNamespace(llm_semaphore=7),
         paths=SimpleNamespace(prompts_dir=str(tmp_path)),
@@ -172,6 +177,7 @@ def test_build_contextualizer_factory_uses_global_llm_fallback(tmp_path) -> None
     assert contextualizer._llm._endpoint == "http://llm.example/v1"
     assert contextualizer._llm._model == "mistral"
     assert contextualizer._llm._api_key == "llm-key"
+    assert contextualizer._llm._enable_thinking is False
     # _batch_size drives the per-document loop; _llm.chat is gated by the
     # injected cluster-wide "llmSemaphore".
     assert contextualizer._semaphore._name == "llmSemaphore"

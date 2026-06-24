@@ -14,6 +14,7 @@ class LLMParamsConfig(ConfigMixin):
     timeout: int = 60
     max_retries: int = 2
     logprobs: bool = True
+    enable_thinking: bool | None = None
 
 
 class LLMConfig(LLMParamsConfig):
