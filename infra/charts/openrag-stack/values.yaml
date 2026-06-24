@@ -1,3 +1,15 @@
+# === Network isolation ===
+# Default-deny ingress for all pods in the release namespace, allowing only
+# intra-namespace traffic plus the public HTTP ports below. This isolates the
+# unauthenticated Ray dashboard (8265), GCS (6379), Postgres, Milvus, etc. from
+# outside the namespace. Disable only if you manage isolation elsewhere.
+networkPolicy:
+  enabled: true
+  # Ports reachable from outside the namespace (e.g. via the Ingress controller).
+  externalPorts:
+    - 8080  # openrag API/UI
+    - 3000  # indexer-ui
+
 # === Global shared persistence ===
 persistence:
   enabled: true
