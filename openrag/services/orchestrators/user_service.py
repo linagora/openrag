@@ -47,9 +47,7 @@ _MAX_DISPLAY_NAME = 255
 # never be overwritten through the user-update payload (mass assignment). The
 # repo's update_user accepts token/file_count for internal callers (token
 # rotation, quota tracking), so the boundary whitelist lives here.
-_UPDATABLE_USER_FIELDS = frozenset(
-    {"display_name", "external_user_id", "email", "is_admin", "file_quota"}
-)
+_UPDATABLE_USER_FIELDS = frozenset({"display_name", "external_user_id", "email", "is_admin", "file_quota"})
 
 
 class UserService:

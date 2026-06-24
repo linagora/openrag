@@ -2641,7 +2641,7 @@ wheels = [
 
 [[package]]
 name = "openrag"
-version = "1.1.11"
+version = "1.1.13"
 source = { editable = "." }
 dependencies = [
     { name = "aiobreaker" },
