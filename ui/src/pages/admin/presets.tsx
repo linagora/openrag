@@ -89,9 +89,6 @@ export default function PresetsPage() {
   // Config keys with no editor control behind them (inert / unimplemented on the
   // backend) — kept out of the card summary so it reflects what's actually managed.
   const HIDDEN_SUMMARY_KEYS = new Set<string>([
-    "enable_topic_tagging",
-    "max_topic_tags",
-    "topic_tagging_llm",
     "enable_metadata_extraction",
     "metadata_extraction_llm",
     "contextualization_mode",
@@ -385,6 +382,20 @@ function IndexationPresetForm({
           onPromptChange={(v) => set("contextualization_prompt_name", v || null)}
           prompts={promptsByType("contextualization")}
         />
+        <FeatureToggle
+          label="Topic tagging"
+          enabled={configGet(config, "enable_topic_tagging", true)}
+          onToggle={(on) => toggleFeature("enable_topic_tagging", "topic_tagging_llm", on)}
+          modelLabel="LLM"
+          modelValue={configGet(config, "topic_tagging_llm", "")}
+          onModelChange={(v) => set("topic_tagging_llm", v)}
+          models={llms}
+          numberLabel="Max tags"
+          numberValue={configGet(config, "max_topic_tags", 7)}
+          onNumberChange={(v) => set("max_topic_tags", v)}
+          numberMin={1}
+          numberMax={50}
+        />
       </section>
 
     </div>
@@ -446,6 +457,11 @@ function FeatureToggle({
   promptValue,
   onPromptChange,
   prompts,
+  numberLabel,
+  numberValue,
+  onNumberChange,
+  numberMin,
+  numberMax,
 }: {
   label: string;
   enabled: boolean;
@@ -458,6 +474,11 @@ function FeatureToggle({
   promptValue?: string;
   onPromptChange?: (v: string) => void;
   prompts?: PromptResponse[];
+  numberLabel?: string;
+  numberValue?: number;
+  onNumberChange?: (v: number) => void;
+  numberMin?: number;
+  numberMax?: number;
 }) {
   const handleToggle = (on: boolean) => {
     onToggle(on);
@@ -502,6 +523,18 @@ function FeatureToggle({
               </SelectContent>
             </Select>
           </div>
+          {numberLabel && onNumberChange && (
+            <div>
+              <Label className="text-xs text-muted-foreground">{numberLabel}</Label>
+              <Input
+                type="number"
+                min={numberMin}
+                max={numberMax}
+                value={numberValue ?? ""}
+                onChange={(e) => onNumberChange(intOr(e.target.value, numberValue ?? 0))}
+              />
+            </div>
+          )}
           {prompts && prompts.length > 0 && onPromptChange && (
             <div>
               <div className="flex items-center gap-1">
