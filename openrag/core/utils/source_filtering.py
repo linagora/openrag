@@ -106,6 +106,10 @@ async def stream_with_source_filtering(
             if chunk_template and len(final_clean) > emitted_len:
                 tail_chunk = copy.deepcopy(chunk_template)
                 tail_chunk["choices"][0]["delta"] = {"content": final_clean[emitted_len:]}
+                # Content chunk must not carry finish_reason (template may be the
+                # finish chunk); clients treat such a chunk as terminal and drop its
+                # delta. The separate finish chunk below emits it with an empty delta.
+                tail_chunk["choices"][0]["finish_reason"] = None
                 tail_chunk["extra"] = filtered_json
                 yield f"data: {json.dumps(tail_chunk)}\n\n"
 

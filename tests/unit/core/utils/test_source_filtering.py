@@ -252,6 +252,29 @@ class TestStreamWithSourceFiltering:
         assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
 
     @pytest.mark.asyncio
+    async def test_content_tail_chunk_has_null_finish_reason(self):
+        """The content-bearing tail chunk must not carry finish_reason — the
+        upstream finish chunk becomes the template, and a spec-compliant client
+        treats a finish_reason!=null chunk as terminal and drops its delta."""
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_chunk("\n[Sources: 1, 3]"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        tail = None
+        for line in result:
+            if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+                continue
+            data = json.loads(line[len("data: ") :])
+            choice = data.get("choices", [{}])[0]
+            if choice.get("delta", {}).get("content") and data.get("extra"):
+                tail = choice
+        assert tail is not None, "no content-bearing tail chunk with sources was emitted"
+        assert tail["finish_reason"] is None
+
+    @pytest.mark.asyncio
     async def test_case2_llm_says_sources_none(self):
         """Case 2: LLM says [Sources: none] → no sources returned."""
         lines = [
