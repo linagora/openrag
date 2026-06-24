@@ -290,8 +290,11 @@ async def openai_chat_completion(
 
     log.debug("Received chat completion request with messages: {}", truncate(str(request.messages)))
 
+    # Bound the caller's input size in every mode. RAG-injected context is added
+    # server-side and separately capped (max_context_tokens), but the user's own
+    # messages must be limited regardless of direct-LLM vs RAG.
+    check_tokens_limit(request, log, config)
     if is_direct_llm_model(request, config):
-        check_tokens_limit(request, log, config)
         partitions = None
     else:
         partitions = await get_partition_name(
@@ -385,8 +388,9 @@ async def openai_completion(
             detail="Streaming is not supported for this endpoint",
         )
 
+    # Bound the caller's input size in every mode (RAG context is capped separately).
+    check_tokens_limit(request, log, config)
     if is_direct_llm_model(request, config):
-        check_tokens_limit(request, log, config)
         partitions = None
     else:
         partitions = await get_partition_name(

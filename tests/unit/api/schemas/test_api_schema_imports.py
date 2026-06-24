@@ -116,3 +116,11 @@ def test_add_files_request_accepts_id_list():
 def test_tool_info_schema():
     info = ToolInfo(name="extractText", description="Extract text from a file")
     assert info.name == "extractText"
+
+
+def test_completion_request_bounds_n_and_best_of():
+    # M12: n / best_of each multiply generation cost — reject out-of-range values.
+    assert OpenAICompletionRequest(prompt="x", n=8, best_of=8).n == 8
+    for bad in ({"n": 0}, {"n": 9}, {"best_of": 0}, {"best_of": 9}):
+        with pytest.raises(ValidationError):
+            OpenAICompletionRequest(prompt="x", **bad)

@@ -46,13 +46,15 @@ class OpenAIChatCompletionRequest(BaseModel):
 class OpenAICompletionRequest(BaseModel):
     model: str | None = Field(None, description="model name")
     prompt: str
-    best_of: int | None = Field(1)
+    # Bound n/best_of: each multiplies generation cost, so leaving them unbounded
+    # lets one request fan out into a resource-exhaustion amplifier.
+    best_of: int | None = Field(1, ge=1, le=8)
     echo: bool | None = Field(False)
     frequency_penalty: float | None = Field(0.0)
     logit_bias: dict | None = Field(None)
     logprobs: int | None = Field(None)
     max_tokens: int | None = Field(default_factory=default_max_tokens)
-    n: int | None = Field(1)
+    n: int | None = Field(1, ge=1, le=8)
     presence_penalty: float | None = Field(0.0)
     seed: int | None = Field(None)
     stop: list[str] | None = Field(None)
