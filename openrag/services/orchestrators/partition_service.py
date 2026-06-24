@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
+from core.indexing.validators import validate_partition_name
 from core.models.preset import PartitionConfig
 from core.utils.exceptions import (
     ConfigError,
@@ -159,12 +160,16 @@ class PartitionService:
         fast and atomically), the non-default config columns are persisted,
         and the in-memory partition cache is re-resolved.
         """
+        # Reserved-name check first so a name that normalises to a reserved
+        # sentinel (e.g. "  all  ") returns the specific RESERVED_PARTITION_NAME
+        # error rather than the generic identifier-allowlist rejection.
         if partition.strip().lower() in _RESERVED_PARTITION_NAMES:
             raise ValidationError(
                 f"Partition name '{partition}' is reserved.",
                 status_code=400,
                 code="RESERVED_PARTITION_NAME",
             )
+        validate_partition_name(partition)
         if await self._partition_repo.partition_exists(name=partition):
             raise ValidationError(
                 f"Partition '{partition}' already exists.",

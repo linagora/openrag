@@ -16,6 +16,7 @@ from api.dependencies.auth import (
     require_partition_viewer,
     require_partitions_viewer,
 )
+from api.dependencies.files import validate_file_id
 from core.utils.logging import get_logger
 from di.providers import get_retrieval_service, get_workspace_service
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -305,8 +306,8 @@ Find specific information within a single document using semantic search.
 async def search_file(
     request: Request,
     partition: str,
-    file_id: str,
     search_params: Annotated[CommonSearchParams, Depends()],
+    file_id: str = Depends(validate_file_id),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_retrieval_service),
 ):

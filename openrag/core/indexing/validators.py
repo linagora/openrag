@@ -8,12 +8,19 @@ handler convert raised ``ValidationError`` instances into HTTP responses.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from typing import Any
 
 from ..utils.exceptions import ValidationError
 
 DEFAULT_FORBIDDEN_CHARS_IN_FILE_ID: frozenset[str] = frozenset("/")
+
+# Identifiers (file_id, partition name) are interpolated into Milvus filter
+# expression strings (e.g. ``file_id == "..."``). Even though the store escapes
+# values, restrict identifiers to a safe allowlist as defence-in-depth and input
+# hygiene so quotes / brackets / operators can never reach a filter literal.
+_VALID_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9._:\-]+")
 
 
 def parse_metadata(raw: Any | None) -> dict:
@@ -45,13 +52,28 @@ def validate_file_id(
     file_id = file_id.strip()
     if not file_id:
         raise ValidationError("File ID cannot be empty.", status_code=400)
-    forbidden = frozenset(forbidden_chars)
-    if any(c in file_id for c in forbidden):
+    # ``forbidden_chars`` is retained for backward compatibility, but the safe
+    # identifier allowlist below is the primary (and stricter) gate.
+    if _VALID_IDENTIFIER_RE.fullmatch(file_id) is None:
         raise ValidationError(
-            f"File ID contains forbidden characters: {', '.join(sorted(forbidden))}",
+            "File ID may only contain letters, digits, '.', '_', ':' and '-'.",
             status_code=400,
         )
     return file_id
+
+
+def validate_partition_name(partition: str) -> str:
+    """Return ``partition`` if it is a safe identifier, else raise ``ValidationError``.
+
+    Used on partition creation and on every partition-scoped operation so a
+    crafted name can never reach a Milvus filter expression string.
+    """
+    if not isinstance(partition, str) or not partition or _VALID_IDENTIFIER_RE.fullmatch(partition) is None:
+        raise ValidationError(
+            "Partition name may only contain letters, digits, '.', '_', ':' and '-'.",
+            status_code=400,
+        )
+    return partition
 
 
 def validate_file_format(

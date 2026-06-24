@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import pytest
-from core.indexing.validators import parse_metadata, validate_file_format, validate_file_id
+from core.indexing.validators import (
+    parse_metadata,
+    validate_file_format,
+    validate_file_id,
+    validate_partition_name,
+)
 from core.utils.exceptions import ValidationError
 
 
@@ -46,10 +51,25 @@ class TestValidateFileId:
             with pytest.raises(ValidationError):
                 validate_file_id(bad)
 
-    def test_custom_forbidden_chars(self):
-        with pytest.raises(ValidationError):
-            validate_file_id("hello?world", forbidden_chars="?")
-        assert validate_file_id("hello/world", forbidden_chars="?") == "hello/world"
+    def test_allowlist_rejects_injection_characters(self):
+        # Quotes / brackets / operators / spaces could break out of a Milvus
+        # filter literal — the safe-identifier allowlist rejects them.
+        for bad in ('x" or partition=="other', "a b", "a[b]", "a'b", "a/b"):
+            with pytest.raises(ValidationError):
+                validate_file_id(bad)
+
+    def test_allowlist_allows_safe_identifier_chars(self):
+        assert validate_file_id("File.1_2:3-4") == "File.1_2:3-4"
+
+
+class TestValidatePartitionName:
+    def test_valid(self):
+        assert validate_partition_name("my-partition.1") == "my-partition.1"
+
+    def test_rejects_empty_and_injection(self):
+        for bad in ("", '"', "a b", 'p" or partition=="other'):
+            with pytest.raises(ValidationError):
+                validate_partition_name(bad)
 
 
 class TestValidateFileFormat:

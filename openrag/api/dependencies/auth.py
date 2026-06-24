@@ -1,5 +1,6 @@
 import os
 
+from core.indexing.validators import validate_partition_name
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from di.providers import get_auth_service, get_config, get_job_service, get_partition_service
@@ -62,6 +63,8 @@ async def ensure_partition_role(
     partition_service,
 ):
     """Ensure the user has at least `required_role` for the partition."""
+    # Reject crafted partition names before they reach any filter expression.
+    validate_partition_name(partition)
     if SUPER_ADMIN_MODE and user.get("is_admin"):
         return True
 

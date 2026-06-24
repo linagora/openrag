@@ -17,6 +17,7 @@ from api.dependencies.auth import (
     require_partition_owner,
     require_partition_viewer,
 )
+from api.dependencies.files import validate_file_id
 from api.schemas.admin.partition_schemas import PartitionDetailResponse, UpdatePartitionRequest
 from core.utils.logging import get_logger
 from di.providers import get_partition_service
@@ -172,8 +173,8 @@ Returns file information including:
 async def get_file(
     request: Request,
     partition: str,
-    file_id: str,
     limit: int = Query(default=2000, ge=0),
+    file_id: str = Depends(validate_file_id),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
@@ -534,8 +535,8 @@ For email threads with parallel branches, each branch has its own ancestor path.
 )
 async def get_file_ancestors(
     partition: str,
-    file_id: str,
     max_ancestor_depth: int | None = None,
+    file_id: str = Depends(validate_file_id),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
