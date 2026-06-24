@@ -29,6 +29,59 @@ def test_openai_schemas_preserve_existing_defaults():
     assert completion.best_of == 1
 
 
+def test_chat_request_forwards_response_format():
+    """response_format is a declared field and must survive model_dump so the
+    router forwards it to the LLM (e.g. for JSON / structured outputs)
+    """
+    request = OpenAIChatCompletionRequest(
+        messages=[OpenAIMessage(role="user", content="hi")],
+        response_format={"type": "json_object"},
+    )
+    dump = request.model_dump(exclude_none=True)
+
+    assert request.response_format == {"type": "json_object"}
+    assert dump["response_format"] == {"type": "json_object"}
+
+
+def test_chat_request_omits_response_format_when_unset():
+    """With exclude_none, an unset response_format must NOT be emitted as null.
+    Strict downstream providers reject an explicit response_format: null
+    """
+    request = OpenAIChatCompletionRequest(messages=[OpenAIMessage(role="user", content="hi")])
+    dump = request.model_dump(exclude_none=True)
+
+    assert request.response_format is None
+    assert "response_format" not in dump
+
+
+def test_chat_request_passes_through_extra_openai_params():
+    """extra='allow' keeps vendor params (tools, seed, ...) that are not declared
+    on the model, so any OpenAI-compatible field reaches the downstream LLM
+    """
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+            "seed": 42,
+        }
+    )
+    dump = request.model_dump(exclude_none=True)
+
+    assert dump["tools"] == [{"type": "function", "function": {"name": "f"}}]
+    assert dump["seed"] == 42
+
+
+def test_completion_request_omits_unset_nulls():
+    """The /completions router dumps with exclude_none=True (matching chat), so
+    optional params left unset are not sent as explicit null to strict providers
+    """
+    request = OpenAICompletionRequest(prompt="hi")
+    dump = request.model_dump(exclude_none=True)
+
+    for unset in ("seed", "stop", "logit_bias", "logprobs"):
+        assert unset not in dump
+
+
 def test_search_schema_preserves_existing_defaults():
     request = SearchRequest(query="hello")
 
