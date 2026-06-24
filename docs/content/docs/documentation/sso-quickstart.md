@@ -11,13 +11,15 @@ Configure OpenRag to delegate authentication to your corporate SSO (LemonLDAP::N
 Give them the following information.
 
 > ⚠ **Point the IdP at the _front door_ that serves your UI AND reaches the backend's `/auth/callback`.**
-> The OIDC callback and back-channel-logout endpoints are hosted **only** on the backend (the container running `openrag/api.py`). So the redirect target must either *be* the backend, or be a **reverse proxy that forwards `/auth/*` to it**:
+> The OIDC callback and back-channel-logout endpoints are hosted **only** on the OpenRag API backend container. So the redirect target must either *be* the backend, or be a **reverse proxy that forwards `/auth/*` to it**:
 >
 > - **Bundled admin-ui (nginx)** or any reverse proxy → use **its** host/port. It serves the UI *and* proxies `/auth/callback` to the backend, so it is correct — and it's where you must land after login (the post-login redirect is relative). For the admin-ui that's `http://<host>:<ADMIN_UI_PORT>/auth/callback`.
 > - **Backend directly** (e.g. it serves the Chainlit UI on `APP_PORT`) → use the backend host + `APP_PORT`.
 > - **A _static_ UI front with no proxy** (a bare SPA) → ❌ **never.** It has no `/auth/callback`, so you get an **infinite redirect loop** (404 → "not authenticated" → new OIDC flow → back to the front → …).
 >
 > Common pitfall: pointing at the **bare backend port** when a separate proxy serves your UI. Login *completes* (the backend has the callback) but the relative post-login redirect drops you on the backend port, which doesn't serve the UI — a **silent** landing on a blank page. Match the redirect URI to the origin that serves the UI.
+>
+> **Back-channel logout is different.** Unlike the redirect URI (a *browser* redirect that must land on the UI), `/auth/backchannel-logout` is called **server-to-server by the IdP**, never by the browser. It therefore has no UI requirement — it just needs to reach the backend's logout endpoint. Reusing the same proxy origin is fine *as long as that origin forwards `/auth/backchannel-logout` to the backend and is reachable from the IdP server*; otherwise point it straight at the backend.
 
 | Field                         | Value to give                                                  |
 | ----------------------------- | -------------------------------------------------------------- |
@@ -25,7 +27,7 @@ Give them the following information.
 | **Grant type**                | `authorization_code`                                           |
 | **Response type**             | `code`                                                         |
 | **Valid redirect URIs**       | `<front-door-host>/auth/callback` _(the UI's proxy or the backend — see warning)_ |
-| **Back-channel logout URI**   | `<front-door-host>/auth/backchannel-logout` _(same origin as above)_ |
+| **Back-channel logout URI**   | `<host>/auth/backchannel-logout` _(server-to-server from the IdP — must reach the backend; see warning)_ |
 | **Post-logout redirect URIs** | an optional URL **outside** OpenRag (see §Step 4 below)        |
 | **Allowed scopes**            | `openid`, `email`, `profile`, `offline_access`                 |
 | **Include `sid` in tokens**   | ✅ enabled (required for back-channel logout)                  |

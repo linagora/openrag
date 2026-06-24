@@ -129,19 +129,19 @@ Pick the value by deployment shape:
 
 - **Bundled admin-ui (nginx) is the front door** — it serves the React SPA at `/app/` and proxies `/auth`, `/v1`, … to the backend. Use the **admin-ui port** (`ADMIN_UI_PORT`), **not** `APP_PORT`. Both ports host a working `/auth/callback`, but only the admin-ui port *also* serves `/app/`, so only it lands you back on the UI:
 
-  ```
+  ```bash
   OIDC_REDIRECT_URI=http://<ip_addr>:<ADMIN_UI_PORT>/auth/callback
   ```
 
 - **Backend is the front door** — it serves the Chainlit UI itself on `APP_PORT`. Address the backend directly:
 
-  ```
+  ```bash
   OIDC_REDIRECT_URI=http://<ip_addr>:<APP_PORT>/auth/callback
   ```
 
 - **Reverse proxy / single public hostname** (production, TLS terminated): the proxy serves the UI and forwards `/auth/*` to the backend, so use the public hostname:
 
-  ```
+  ```bash
   OIDC_REDIRECT_URI=https://openrag.example.com/auth/callback
   ```
 
@@ -843,6 +843,14 @@ Server logs record the attempted `sub` at `WARNING` level so admins can copy it 
 - Keycloak: Ensure `offline_access` scope is mapped to the client
   - **Clients** → `openrag` → **Client scopes** → Verify `offline_access` is in the assigned scopes
 - LemonLDAP::NG: Check the OIDC relying party configuration includes `offline_access`
+
+### 8. Login succeeds but lands on a blank / 404 / JSON page
+
+**Error**: The IdP login completes without error, but the browser ends up on an empty page, a 404, or raw JSON instead of the UI. No error is shown — this is a **silent** failure.
+
+**Cause**: `OIDC_REDIRECT_URI` points at an origin that *can* reach `/auth/callback` but does **not** serve the UI. The classic case is pointing at the bare backend `APP_PORT` when a separate front door (the admin-ui nginx, or a reverse proxy) actually serves the UI. The callback runs, but the post-login redirect is **relative** (e.g. `/app/`), so the browser resolves it against the backend origin — which has no `/app/` — and lands nowhere useful.
+
+**Solution**: Set `OIDC_REDIRECT_URI` to the origin that serves your UI *and* reaches `/auth/callback` (for the bundled admin-ui that's `http://<host>:<ADMIN_UI_PORT>/auth/callback`, **not** `APP_PORT`). See [Choosing `OIDC_REDIRECT_URI`](#choosing-oidc_redirect_uri).
 
 ---
 
