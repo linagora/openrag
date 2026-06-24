@@ -92,6 +92,8 @@ services:
       - VLM_API_KEY=EMPTY
       - VLM_MODEL=mock-vlm-model
       - RERANKER_ENABLED=false
+      # The API test suite issues request bursts; disable the rate limiter.
+      - RATE_LIMIT_ENABLED=false
       - WITH_CHAINLIT_UI=false
       - WITH_OPENAI_API=true
       - IMAGE_CAPTIONING=false

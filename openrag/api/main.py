@@ -33,6 +33,7 @@ from api.error_handlers import register_error_handlers
 from api.middleware import (
     AuthMiddleware,
     InstrumentationMiddleware,
+    RateLimitMiddleware,
     RequestIdMiddleware,
     RequestTimeoutMiddleware,
 )
@@ -265,6 +266,10 @@ app.openapi = custom_openapi
 # and Instrumentation captures the full request duration including the
 # auth check. CORS is added later and ends up outside this stack so
 # preflights short-circuit before any instrumentation runs.
+# RateLimitMiddleware is registered BEFORE AuthMiddleware so it executes AFTER
+# it (registration is reverse of execution), letting it key limits on the
+# authenticated user id that AuthMiddleware just put on request.state.
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     AuthMiddleware,
     get_auth_service=lambda request: request.app.state.container.auth_service,
