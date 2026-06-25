@@ -1,0 +1,19 @@
+/* cozy-ui ships CSS variables (--primaryColor, etc.) + u-* utilities.
+   Importing its stylesheet yields the default Cozy/Twake light theme with
+   no stack. */
+@import 'cozy-ui/transpiled/react/stylesheet.css';
+
+@font-face {
+  font-family: 'Lato';
+  font-style: normal;
+  font-weight: 400;
+  src: local('Lato');
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  font-family: 'Lato', sans-serif;
+}
