@@ -6,7 +6,7 @@ fi
 
 if [[ "${ENABLE_RAY_SERVE}" == "true" ]]; then
   echo "🔁 Starting with Ray Serve..."
-  uv run "${ENV_ARGS[@]}" -m api.main
+  uv run --no-dev "${ENV_ARGS[@]}" -m api.main
 else
   echo "🚀 Starting with Uvicorn..."
   # This path always runs a SINGLE uvicorn worker. The app initializes Ray and

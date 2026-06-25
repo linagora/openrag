@@ -131,6 +131,7 @@ class EmlParser(DocumentParser):
     def _walk_parts(msg: email.message.Message) -> tuple[str, list[dict]]:
         body = ""
         attachments: list[dict] = []
+        attachment_candidates = 0
 
         for part in msg.walk():
             content_type = part.get_content_type()
@@ -140,8 +141,9 @@ class EmlParser(DocumentParser):
                 # Enforce the per-email cap BEFORE decoding the payload so a
                 # malicious message with thousands of attachments can't make us
                 # decode them all just to discard the overflow.
-                if len(attachments) >= _MAX_EML_ATTACHMENTS:
+                if attachment_candidates >= _MAX_EML_ATTACHMENTS:
                     continue
+                attachment_candidates += 1
                 filename = part.get_filename()
                 payload = part.get_payload(decode=True)
                 if filename and payload:

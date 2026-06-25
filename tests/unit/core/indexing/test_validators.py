@@ -61,6 +61,10 @@ class TestValidateFileId:
     def test_allowlist_allows_safe_identifier_chars(self):
         assert validate_file_id("File.1_2:3-4") == "File.1_2:3-4"
 
+    def test_custom_forbidden_chars_are_still_enforced(self):
+        with pytest.raises(ValidationError):
+            validate_file_id("File:1", forbidden_chars={":"})
+
 
 class TestValidatePartitionName:
     def test_valid(self):

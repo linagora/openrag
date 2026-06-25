@@ -48,7 +48,7 @@ spec:
               - "ray"
               - "start"
               - "--head"
-              - "--dashboard-host=0.0.0.0"
+              - "--dashboard-host={{ .Values.ray.dashboardHost }}"
               - "--dashboard-agent-listen-port=52365"
               - "--metrics-export-port=8080"
               - "--block"

@@ -70,6 +70,19 @@ class FakeListService:
         return [{"partition": "p1"}, {"partition": "p2"}]
 
 
+class FakeCreatePartitionService:
+    """Service double for create-partition route tests."""
+
+    def __init__(self) -> None:
+        self.created: list[dict[str, Any]] = []
+
+    async def partition_exists(self, partition: str) -> bool:
+        return False
+
+    async def create_partition(self, **kwargs: Any) -> None:
+        self.created.append(kwargs)
+
+
 def _build_list_app(*, is_admin: bool) -> FastAPI:
     """App for the list route, with a regular user whose sole membership is ``all``."""
     app = FastAPI()
@@ -82,6 +95,20 @@ def _build_list_app(*, is_admin: bool) -> FastAPI:
     app.include_router(partitions.router, prefix="/partition")
     app.dependency_overrides[partitions_with_details] = lambda: [{"partition": "all"}]
     app.dependency_overrides[get_partition_service] = lambda: FakeListService()
+    return app
+
+
+def _build_create_app(service, *, is_admin: bool = False) -> FastAPI:
+    """App for create route tests with a current user in request state."""
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _set_user(request, call_next):
+        request.state.user = {"id": 1, "is_admin": is_admin}
+        return await call_next(request)
+
+    app.include_router(partitions.router, prefix="/partition")
+    app.dependency_overrides[get_partition_service] = lambda: service
     return app
 
 
@@ -166,3 +193,18 @@ async def test_partition_config_routes_return_501_until_service_methods_exist(as
     assert patch_response.json()["detail"] == "update_partition_config is not available."
     assert get_response.status_code == 501
     assert get_response.json()["detail"] == "get_partition_config is not available."
+
+
+@pytest.mark.asyncio
+async def test_create_partition_rejects_malformed_limit_before_writing(async_client_factory, monkeypatch):
+    """A bad deployment env value should fail cleanly before creating a partition."""
+    monkeypatch.setenv("MAX_PARTITIONS_PER_USER", "not-an-int")
+    service = FakeCreatePartitionService()
+    app = _build_create_app(service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post("/partition/legal")
+
+    assert response.status_code == 500
+    assert "MAX_PARTITIONS_PER_USER" in response.json()["detail"]
+    assert service.created == []

@@ -47,6 +47,21 @@ def _require_service_method(service, method_name: str):
     return method
 
 
+def _max_partitions_for_user(user: dict) -> int | None:
+    """Return the non-admin owned-partition cap, or None when it is disabled."""
+    if user.get("is_admin", False):
+        return None
+    raw_limit = os.environ.get("MAX_PARTITIONS_PER_USER", "100")
+    try:
+        return int(raw_limit)
+    except (TypeError, ValueError) as exc:
+        logger.error("Invalid MAX_PARTITIONS_PER_USER value", value=raw_limit)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="MAX_PARTITIONS_PER_USER must be an integer.",
+        ) from exc
+
+
 @router.get(
     "/",
     description="""List all accessible partitions.
@@ -282,7 +297,7 @@ async def create_partition(
     # exhaust storage/metadata. None bypasses the cap (admins); a negative
     # MAX_PARTITIONS_PER_USER also disables it. The service raises a 403
     # (PARTITION_LIMIT_EXCEEDED) when the cap is reached.
-    max_owned = None if user.get("is_admin", False) else int(os.environ.get("MAX_PARTITIONS_PER_USER", "100"))
+    max_owned = _max_partitions_for_user(user)
     await service.create_partition(partition=partition, user_id=user_id, max_owned=max_owned)
     return Response(status_code=status.HTTP_201_CREATED)
 

@@ -52,13 +52,13 @@ def validate_file_id(
     file_id = file_id.strip()
     if not file_id:
         raise ValidationError("File ID cannot be empty.", status_code=400)
-    # ``forbidden_chars`` is retained for backward compatibility, but the safe
-    # identifier allowlist below is the primary (and stricter) gate.
     if _VALID_IDENTIFIER_RE.fullmatch(file_id) is None:
         raise ValidationError(
             "File ID may only contain letters, digits, '.', '_', ':' and '-'.",
             status_code=400,
         )
+    if any(char in file_id for char in forbidden_chars):
+        raise ValidationError("File ID contains forbidden characters.", status_code=400)
     return file_id
 
 

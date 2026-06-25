@@ -54,7 +54,7 @@ class LogoutTokenClaims:
     sid: str | None
     iat: int
     jti: str | None
-    exp: int = 0
+    exp: int
 
 
 class OIDCClient:

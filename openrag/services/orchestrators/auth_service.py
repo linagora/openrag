@@ -36,6 +36,7 @@ from services.auth import (
     hash_session_token,
     issue_session_token,
 )
+from services.auth.oidc_client import _CLOCK_SKEW_LEEWAY
 from services.auth.oidc_groups import extract_partition_roles
 
 if TYPE_CHECKING:
@@ -80,13 +81,14 @@ _seen_logout_jti: dict[str, int] = {}
 def _logout_jti_is_replay(jti: str, exp: int) -> bool:
     """Record a logout-token jti and report whether it was already seen."""
     now = int(time.time())
+    replay_expires_at = exp + _CLOCK_SKEW_LEEWAY
     # Prune expired entries to bound memory.
     for old_jti, old_exp in list(_seen_logout_jti.items()):
         if old_exp < now:
             del _seen_logout_jti[old_jti]
     if jti in _seen_logout_jti:
         return True
-    _seen_logout_jti[jti] = exp
+    _seen_logout_jti[jti] = replay_expires_at
     return False
 
 

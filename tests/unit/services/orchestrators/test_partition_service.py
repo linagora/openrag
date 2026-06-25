@@ -161,6 +161,24 @@ async def test_create_partition_enforces_owned_cap():
 
 
 @pytest.mark.asyncio
+async def test_create_partition_zero_cap_blocks_regular_user():
+    prepo = FakePartitionRepo(existing=set())
+    mrepo = FakeMembershipRepo(owned={7: 0})
+    with pytest.raises(ValidationError) as exc:
+        await _svc(prepo=prepo, mrepo=mrepo).create_partition("new", 7, max_owned=0)
+    assert exc.value.status_code == 403
+    assert prepo.created == []
+
+
+@pytest.mark.asyncio
+async def test_create_partition_negative_cap_disables_limit():
+    prepo = FakePartitionRepo(existing=set())
+    mrepo = FakeMembershipRepo(owned={7: 999})
+    await _svc(prepo=prepo, mrepo=mrepo).create_partition("new", 7, max_owned=-1)
+    assert "new" in prepo._existing
+
+
+@pytest.mark.asyncio
 async def test_create_partition_under_cap_succeeds():
     prepo = FakePartitionRepo(existing=set())
     mrepo = FakeMembershipRepo(owned={7: 1})

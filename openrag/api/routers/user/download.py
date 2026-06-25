@@ -12,6 +12,8 @@ from pathlib import Path
 
 from api.dependencies.auth import current_user_or_admin_partitions_list
 from core.config import load_config
+from core.indexing.validators import validate_file_id
+from core.utils.exceptions import ValidationError
 from core.utils.logging import get_logger
 from di.providers import get_conversion_service
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -32,6 +34,10 @@ async def download_source(
 ):
     """Download the source document a chunk came from, authorized by partition."""
     log = logger.bind(extract_id=extract_id)
+    try:
+        extract_id = validate_file_id(extract_id)
+    except ValidationError as exc:
+        raise HTTPException(status_code=exc.status_code or status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     chunk = await service.get_chunk(extract_id)
     if chunk is None:

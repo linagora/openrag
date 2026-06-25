@@ -11,8 +11,8 @@ to the cutover re-implementation queue.
 
 ## `main` → `refactor/hexagonal` security forward-port (2026-06-24)
 
-Working branch: `forward-port/main-to-hexagonal` (off `origin/refactor/hexagonal`,
-local only). Porting the 68 non-merge commits that landed on `main` after the
+Working branch: `forward-port/main-to-hexagonal` (off `origin/refactor/hexagonal`).
+Porting the 68 non-merge commits that landed on `main` after the
 merge-base (`c9d53cc0`, 2026-05-21) — mostly a one-shot security-hardening audit
 plus loader/OpenAI fixes, deploy hardening, deps and release chores. Each port is
 one commit carrying the original subject/body + a `Forward-ported from <hash>`
@@ -90,8 +90,8 @@ docs last.
 
 **Batches 1 (infra core), 2 (deps), 3 (auth/OIDC), 4 (RAG/retrieval), docs, final
 ruff pass: ✅ COMPLETE.** All security-relevant package code, dependencies and
-docs are ported or obviated. `ruff check` + `ruff format --check` clean,
-layer-import guard OK, `tests/unit/` green (1355 passed).
+docs are ported or obviated. Targeted security/infra tests, ruff and diff checks
+are clean on the forward-port branch.
 
 **Not ported — one item, by deliberate choice:**
 - `4bbefd41` **compose non-root rework** (init-perms bootstrap container + per-service
@@ -107,12 +107,6 @@ layer-import guard OK, `tests/unit/` green (1355 passed).
   `infra/compose/milvus/milvus.yaml`, `extern/reranker/*.yaml`, `infra/quick_start`.
 - `563907ad` (doc comment trim) — cosmetic; the ported comments are already condensed and
   differ from main's verbose originals, so the trim doesn't map cleanly. Skipped.
-
-> Note: the suite shows one pre-existing **false-alarm** failure,
-> `test_seed_defaults_preserves_endpoint_api_keys` — `seed_defaults` reads
-> `os.getenv("API_KEY", ...)` and this worktree is nested under the main checkout,
-> so `load_dotenv()` walks up and picks up the real `.env`. Not caused by this
-> port (passes from a checkout outside the main tree). Everything else: 1317 pass.
 
 ---
 

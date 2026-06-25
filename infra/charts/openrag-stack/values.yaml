@@ -23,6 +23,7 @@ persistence:
     venv: { size: 10Gi }
 
 ray:
+  dashboardHost: "127.0.0.1"
   workers:
     count: 1
     replicas: 1
