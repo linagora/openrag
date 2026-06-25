@@ -9,7 +9,7 @@ import {
   getSortedRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, ArrowUpDown } from "lucide-react";
 import {
   Table,
@@ -34,6 +34,7 @@ export function DataTable<TData, TValue>({
 }: DataTableProps<TData, TValue>) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
+  const [pagination, setPagination] = useState({ pageIndex: 0, pageSize });
 
   const table = useReactTable({
     data,
@@ -44,9 +45,23 @@ export function DataTable<TData, TValue>({
     getFilteredRowModel: getFilteredRowModel(),
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
-    state: { sorting, columnFilters },
-    initialState: { pagination: { pageSize } },
+    onPaginationChange: setPagination,
+    // Keep the user on their current page when the rows change underneath them
+    // (e.g. deleting a row refetches the list). TanStack resets pageIndex to 0
+    // on every data change by default, which bounced the user back to page 1.
+    autoResetPageIndex: false,
+    state: { sorting, columnFilters, pagination },
   });
+
+  // If the current page no longer exists after the data shrank — e.g. the last
+  // remaining row on the last page was deleted — fall back to the last valid
+  // page instead of stranding the user on an empty "No results" page.
+  const pageCount = table.getPageCount();
+  useEffect(() => {
+    if (pagination.pageIndex > 0 && pagination.pageIndex > pageCount - 1) {
+      setPagination((prev) => ({ ...prev, pageIndex: Math.max(0, pageCount - 1) }));
+    }
+  }, [pageCount, pagination.pageIndex]);
 
   return (
     <div>
