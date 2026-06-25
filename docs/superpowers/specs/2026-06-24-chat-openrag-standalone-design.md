@@ -194,12 +194,91 @@ OIDC/SSO mode already exists and is wired in v2.
 
 ## Path to v2 (informational, not part of this spec)
 
-- Embed `chat-openrag` via iframe into Cozy apps using the existing
-  `cozy-external-bridge-container` / `cozy-external-bridge` (Comlink over
-  postMessage, origin-pinned).
-- Authenticate the user via openRAG's OIDC/SSO mode (Twake Mail / Visio pattern):
-  the embedded app does its own SSO login; the Cozy host can expose scoped Cozy
-  capabilities over the bridge if needed (capability RPC, never a token).
+v2 embeds `chat-openrag` via iframe into a Cozy "shell" app within Twake, with
+silent SSO and a capability bridge for Cozy-native actions. The two topics below
+were researched and validated; they are recorded here so the v2 effort starts
+from facts, not assumptions.
+
+### Embedding & shell
+
+- Embed `chat-openrag` via iframe into a thin Cozy shell app, reusing the
+  existing `cozy-external-bridge-container` (parent) / `cozy-external-bridge`
+  (iframe) packages — Comlink RPC over postMessage, origin-pinned via the
+  `requestParentOrigin` / `answerParentOrigin` handshake.
+- This mirrors Twake Mail / La Suite Visio exactly: the Cozy shell authenticates
+  to the stack normally, frames an arbitrary URL (from a feature flag), and
+  passes **no token** across the boundary. The embedded app runs its own session
+  on its own origin.
+
+### Authentication — silent SSO (shared IdP)
+
+Decided: openRAG and Twake share the **same IdP**; the chat authenticates via a
+**silent SSO session** (`prompt=none`) inside the iframe. The Cozy side imposes
+no auth contract — all the work is on openRAG's side. Audit of the openRAG repo
+(`/home/paul/dev/linagora/server/openrag`) found **no structural blocker** but
+**three concrete gaps to close**:
+
+1. **Cookie `SameSite=Lax` → must become `None; Secure`** *(blocking)*.
+   `openrag/api/routers/auth/oidc.py:104` (state cookie) and `:140` (session
+   cookie) hardcode `samesite="lax"`. A `Lax` cookie is not sent in a cross-site
+   iframe, so the session would never stick. Needs `SameSite=None; Secure`, ideally
+   plus `Partitioned` (CHIPS) for Chrome's third-party-cookie phase-out. The
+   `Secure` flag is already conditionally correct behind a properly-configured
+   proxy (`proxy_headers` + `forwarded_allow_ips`, see `api/main.py:367-381`).
+2. **No `prompt=none` (silent SSO) support** *(blocking for the silent scenario)*.
+   `openrag/services/auth/oidc_client.py` `build_authorization_url` builds the
+   authorization params **without `prompt`**. Add `prompt=none` and handle the
+   IdP's `login_required` / `interaction_required` error response → fall back to
+   a popup/new-tab interactive login.
+3. **No `Content-Security-Policy: frame-ancestors`** *(recommended)*. openRAG
+   emits no CSP and no `X-Frame-Options` (so framing works by default today), but
+   v2 should set `frame-ancestors <twake/cozy origin>` explicitly and verify no
+   production proxy injects a blocking `X-Frame-Options`.
+
+CORS is largely fine: `api/main.py:277` sets `allow_credentials=True` with a
+configurable `allow_origins`, and since the chat is **served by openRAG** (same
+origin as its API), chat→API calls are same-origin.
+
+Target silent flow once the gaps are closed: the shell (or the chat) loads
+openRAG `/auth/login?prompt=none` in a hidden iframe → the user already has an
+IdP session (entered Twake via SSO) → the IdP redirects silently to
+`/auth/callback` → session cookie set → chat authenticated with nothing shown.
+No IdP session → `login_required` → popup fallback. A full-page interactive OIDC
+redirect inside the iframe will **not** work (IdPs set `X-Frame-Options: DENY`).
+
+### Cozy-native actions — intents via parent-broker
+
+Need: trigger Cozy-native actions from the chat (e.g. a Drive file picker via a
+`PICK io.cozy.files` intent). Researched against the stack intents doc and
+`cozy-interapp` / `cozy-ui-plus` source. Conclusions:
+
+- **The chat iframe cannot start a Cozy intent directly.** Starting an intent
+  requires `POST /intents` via an authenticated `cozy-client` (stack token) and a
+  postMessage handshake that validates Cozy origins. The chat is on the openRAG
+  origin with no token, so it fails on both counts. Confirmed.
+- **No iframe-in-iframe.** Although stack intents do support nesting (`compose`),
+  the correct pattern here is the **parent-broker**: the chat calls a bridge
+  method (e.g. `pickFile()` / `startIntent(action, doctype, data)`); the Cozy
+  shell — which holds `cozy-client` and runs on the Cozy origin — is the real
+  intent client. It runs `client.intents.create('PICK','io.cozy.files').start(el)`,
+  injecting the **Drive service iframe into the PARENT's DOM** (a host node /
+  modal overlay in the shell, exactly like `cozy-ui-plus`'s `IntentIframe`), then
+  returns the picked `io.cozy.files` document (plain JSON) to the chat over the
+  bridge. The shell hosts two sibling iframes (chat + transient intent service),
+  never nested.
+- **Consistent with the existing bridge.** `cozy-external-bridge-container`
+  already exposes scoped methods (`getContacts`, `createDocs`, `updateDocs`,
+  `search`, `getFlag`, …) over Comlink and holds `client` on the Cozy origin.
+  Adding `pickFile()` / `startIntent(...)` is the natural extension; the child
+  side's `CozyBridge.availableMethods` type list must be extended too. To handle:
+  render an intent-host DOM node in the shell and manage its modal
+  visibility/lifecycle (the `start()` Promise injects/removes the service iframe).
+- Note: the relevant intent system is **stack intents** (`cozy-interapp` +
+  `cozy-ui-plus/Intent`), NOT the `cozy-intent` package (a React-Native↔webview
+  bridge, unrelated).
+
+### Remaining v2 items
+
 - Add a theming handoff (URL param at load for first paint + Comlink `getTheme`
   + live `onThemeChange`) to match instance accent color / dark mode.
 - Migrate conversation persistence from IndexedDB to openRAG.
