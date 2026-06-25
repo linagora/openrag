@@ -243,7 +243,12 @@ class _PdfStrategyParser(DocumentParser):
 # under ``pdf/``) or injected dependencies (pooled/client/eml). Everything else
 # is built by convention in ``ParserDispatcher._build``.
 _BUILDERS: dict[str, Any] = {
-    "pymupdf": lambda d: _create("core.indexing.parsers.pdf.pymupdf", "pymupdf"),
+    # Text mode: the lightweight, fast PDF backend — plain per-page text, no
+    # image rendering. Markdown mode embeds every image as a base64 data URI in
+    # the text (300 DPI), which bloats chunks (and can blow past Milvus's gRPC
+    # message limit) unless captioning strips them; pymupdf's role is fast text,
+    # so images/captioning are the job of marker/docling.
+    "pymupdf": lambda d: _create("core.indexing.parsers.pdf.pymupdf", "pymupdf", mode="text"),
     "eml": lambda d: d._build_eml(),
     "marker": lambda d: d._build_marker(),
     "docling": lambda d: d._build_docling(),

@@ -141,6 +141,14 @@ def test_for_pdf_strategy_rejects_unknown_strategy() -> None:
         ParserDispatcher(_config()).for_pdf_strategy("nope")
 
 
+def test_pymupdf_backend_builds_in_text_mode() -> None:
+    """The lightweight pymupdf backend must build in text mode: plain per-page
+    text, no image embedding — so it stays fast and never inlines base64 images
+    into chunk text (which bloats chunks and breaks Milvus inserts)."""
+    parser = ParserDispatcher(_config(pdf="PyMuPDFLoader"))._get("pymupdf")
+    assert getattr(parser, "_mode", None) == "text"
+
+
 def test_build_caption_vlm_requires_endpoint() -> None:
     # No VLM endpoint configured -> unavailable, regardless of the captioning flag.
     assert build_caption_vlm(_config(image_captioning=True, vlm_base_url="")) is None
