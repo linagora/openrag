@@ -119,10 +119,11 @@ class MCPAuthContextMiddleware(BaseHTTPMiddleware):
     """Resolve the bearer-token principal and set the MCP auth context.
 
     Mirrors the token-mode contract of ``api.middleware.AuthMiddleware``:
-    when ``AUTH_TOKEN`` is unset the server runs in dev mode and every call
-    acts as admin user 1; otherwise a valid ``Authorization: Bearer`` is
-    required. Allowed partitions follow ``current_user_or_admin_partitions_list``
-    (``["all"]`` for admins under ``SUPER_ADMIN_MODE``).
+    when ``AUTH_TOKEN`` is unset and ``ALLOW_NO_AUTH=true`` the server runs in
+    dev mode and every call acts as admin user 1; otherwise a valid
+    ``Authorization: Bearer`` is required. Allowed partitions follow
+    ``current_user_or_admin_partitions_list`` (``["all"]`` for admins under
+    ``SUPER_ADMIN_MODE``).
     """
 
     async def _resolve_principal(self, request: Request) -> tuple[int | None, bool, list[str] | None]:
@@ -135,7 +136,12 @@ class MCPAuthContextMiddleware(BaseHTTPMiddleware):
         # In OIDC mode AUTH_TOKEN is commonly unset; without this gate the MCP
         # endpoint would silently treat every caller as admin (auth bypass), so
         # a valid bearer (users.token) is always required there.
-        if auth_mode == "token" and auth_token is None:
+        allow_no_auth = os.getenv("ALLOW_NO_AUTH", "false").strip().lower() == "true"
+        if auth_mode == "token" and auth_token is None and allow_no_auth:
+            logger.warning(
+                "ALLOW_NO_AUTH=true and AUTH_TOKEN is unset: MCP authentication is DISABLED — "
+                "every request is treated as admin user 1. Never use this in production."
+            )
             user = await auth_service.get_user_for_request(1)
         else:
             header = request.headers.get("authorization", "")
