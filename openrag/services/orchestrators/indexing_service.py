@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from core.utils.exceptions import PartitionNotFoundError, ValidationError
+from core.utils.exceptions import AuthError, PartitionNotFoundError, ValidationError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
@@ -123,7 +123,10 @@ class IndexingService:
         members = await self._partition_service.list_members(partition)
         membership = next((m for m in members if m.get("user_id") == user.get("id")), None)
         if membership is None or _ROLE_HIERARCHY.get(membership.get("role", ""), 0) < _ROLE_HIERARCHY["editor"]:
-            raise PermissionError(f"Editor role required for partition: {partition}")
+            # AuthError (status 403) so the global handler returns a clean
+            # Forbidden; a builtin PermissionError would fall through to the
+            # catch-all handler and surface as a 500.
+            raise AuthError(f"Editor role required for partition: {partition}")
 
     def _resolve_indexation_dispatch_config(self, partition: str) -> tuple[dict | None, str | None]:
         partitions = self._partition_configs()

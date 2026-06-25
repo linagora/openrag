@@ -6,7 +6,7 @@ import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.preset import PartitionConfig
-from core.utils.exceptions import PartitionNotFoundError, ValidationError
+from core.utils.exceptions import AuthError, PartitionNotFoundError, ValidationError
 from services.orchestrators.indexing_service import IndexingService
 
 
@@ -418,7 +418,7 @@ async def test_add_file_rejects_partition_exists_race_without_membership(tmp_pat
     psvc = RaceLostPartitionService(config, grant_owner=False)
     svc = _service(disp=disp, config=config, partition_service=psvc)
 
-    with pytest.raises(PermissionError, match="Editor role required"):
+    with pytest.raises(AuthError, match="Editor role required") as exc_info:
         await svc.add_file(
             file_path=str(f),
             file_id="f1",
@@ -429,6 +429,8 @@ async def test_add_file_rejects_partition_exists_race_without_membership(tmp_pat
             user={"id": 7},
         )
 
+    # Maps to a clean 403 Forbidden, not the catch-all 500.
+    assert exc_info.value.status_code == 403
     assert disp.dispatched == []
 
 
