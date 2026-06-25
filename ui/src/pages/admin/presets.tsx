@@ -335,7 +335,13 @@ function IndexationPresetForm({
           <Label className="text-xs">Strategy</Label>
           <Select
             value={configGet(config, "parsing_strategy", "marker")}
-            onValueChange={(v) => set("parsing_strategy", v)}
+            onValueChange={(v) => {
+              // pymupdf is text-only (no images), so captioning can't apply —
+              // turn it off when switching to it (see the disabled toggle below).
+              let next = configSet(config, "parsing_strategy", v);
+              if (v === "pymupdf") next = configSet(next, "enable_image_captioning", false);
+              onChange(next);
+            }}
           >
             <SelectTrigger size="sm">
               <SelectValue />
@@ -360,6 +366,8 @@ function IndexationPresetForm({
           label="Image captioning"
           enabled={configGet(config, "enable_image_captioning", false)}
           onToggle={(on) => toggleFeature("enable_image_captioning", "vlm", on)}
+          disabled={configGet<string>(config, "parsing_strategy", "marker") === "pymupdf"}
+          disabledHint="pymupdf extracts text only — use marker or docling for image captioning."
           modelLabel="VLM"
           modelValue={configGet(config, "vlm", "")}
           onModelChange={(v) => set("vlm", v)}
@@ -462,6 +470,8 @@ function FeatureToggle({
   onNumberChange,
   numberMin,
   numberMax,
+  disabled = false,
+  disabledHint,
 }: {
   label: string;
   enabled: boolean;
@@ -479,6 +489,8 @@ function FeatureToggle({
   onNumberChange?: (v: number) => void;
   numberMin?: number;
   numberMax?: number;
+  disabled?: boolean;
+  disabledHint?: string;
 }) {
   const handleToggle = (on: boolean) => {
     onToggle(on);
@@ -504,9 +516,12 @@ function FeatureToggle({
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <Label className="text-sm">{label}</Label>
-        <Switch checked={enabled} onCheckedChange={handleToggle} size="sm" />
+        <Switch checked={enabled && !disabled} onCheckedChange={handleToggle} size="sm" disabled={disabled} />
       </div>
-      {enabled && (
+      {disabled && disabledHint && (
+        <p className="pl-2 text-xs text-muted-foreground">{disabledHint}</p>
+      )}
+      {enabled && !disabled && (
         <div className="pl-2 space-y-2">
           <div>
             <Label className="text-xs text-muted-foreground">{modelLabel}</Label>
