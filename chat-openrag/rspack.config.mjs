@@ -8,7 +8,10 @@ export default {
     alias: {
       react: new URL('./node_modules/react', import.meta.url).pathname,
       'react-dom': new URL('./node_modules/react-dom', import.meta.url).pathname,
-      '@assistant-ui/react': new URL('./node_modules/@assistant-ui/react', import.meta.url).pathname
+      '@assistant-ui/react': new URL('./node_modules/@assistant-ui/react', import.meta.url).pathname,
+      'twake-i18n': new URL('./node_modules/twake-i18n', import.meta.url).pathname,
+      'cozy-ui': new URL('./node_modules/cozy-ui', import.meta.url).pathname,
+      'cozy-ui-plus': new URL('./node_modules/cozy-ui-plus', import.meta.url).pathname
     }
   },
   module: {
