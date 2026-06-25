@@ -53,7 +53,10 @@ def test_secret_template_fails_on_required_or_placeholder_secrets() -> None:
     assert "sk-xxxx" in template
     assert "hf_xxxx" in template
     assert "CHANGE_ME_STRONG_PASSWORD" in template
-    assert "EMPTY" in template
+    # "EMPTY" must NOT be a forbidden placeholder: it is the documented value
+    # for EMBEDDER_API_KEY/TRANSCRIBER_API_KEY against local OpenAI-compatible
+    # servers (see .env.example), so the chart must accept it.
+    assert "EMPTY" not in template
 
 
 def test_chart_workloads_apply_restricted_security_contexts() -> None:
