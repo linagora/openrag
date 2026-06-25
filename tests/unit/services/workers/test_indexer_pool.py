@@ -601,6 +601,27 @@ async def test_pool_releases_inflight_when_task_settles() -> None:
     assert pool._inflight[0] == 1
 
 
+@pytest.mark.asyncio
+async def test_pool_rolls_back_inflight_when_submission_raises() -> None:
+    # If process_file.remote raises (e.g. unserializable args or a dead actor),
+    # the in-flight count must be rolled back so the worker isn't seen as busy.
+    from services.workers.indexer_pool import IndexerPool
+
+    class _RaisingWorker:
+        def __init__(self) -> None:
+            def _boom(**_kwargs):
+                raise RuntimeError("remote submission failed")
+
+            self.process_file = SimpleNamespace(remote=_boom)
+
+    pool = IndexerPool([_RaisingWorker()])
+
+    with pytest.raises(RuntimeError, match="remote submission failed"):
+        pool.submit(task_id="a")
+
+    assert pool._inflight == [0]
+
+
 def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPatch) -> None:
     import core.config
     import core.embeddings

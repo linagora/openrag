@@ -251,7 +251,13 @@ class IndexerPool:
         """
         idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
         self._inflight[idx] += 1
-        ref = self._workers[idx].process_file.remote(**kwargs)
+        try:
+            ref = self._workers[idx].process_file.remote(**kwargs)
+        except Exception:
+            # Submission failed before a ref exists (e.g. unserializable args or
+            # a dead actor); roll back so load balancing stays accurate.
+            self._inflight[idx] -= 1
+            raise
         task = asyncio.get_running_loop().create_task(self._release(idx, ref))
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
         self._release_tasks.add(task)
