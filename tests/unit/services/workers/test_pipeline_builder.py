@@ -548,3 +548,45 @@ async def test_pipeline_indexation_config_disables_topic_tagging():
 
     assert topic_tagger.calls == []
     assert row.get("topic_tags") is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_logs_per_stage_timings(monkeypatch):
+    """run() emits one structured line per file with per-stage durations so a
+    slow backend/stage (e.g. docling vs marker parse) is visible in the logs."""
+    import services.workers.pipeline_builder as pb
+
+    class _RecordingLogger:
+        def __init__(self) -> None:
+            self.bound: dict | None = None
+            self.message: str | None = None
+
+        def bind(self, **kwargs):
+            self.bound = kwargs
+            return self
+
+        def info(self, message: str) -> None:
+            self.message = message
+
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(pb, "logger", recorder)
+
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0, 0.0]]),
+        vector_store=FakeVectorStore(),
+    )
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "note.txt"})
+
+    assert recorder.message == "indexing stage timings (ms)"
+    assert recorder.bound is not None
+    for key in ("ms_parse", "ms_chunk", "ms_embed", "ms_store", "ms_total"):
+        assert key in recorder.bound
+    # Optional stages weren't configured, so they aren't timed.
+    assert "ms_caption" not in recorder.bound
+    assert recorder.bound["n_chunks"] == 1
+    assert recorder.bound["filename"] == "note.txt"
