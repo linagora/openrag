@@ -1,6 +1,7 @@
 import {
   type ColumnDef,
   type ColumnFiltersState,
+  type RowSelectionState,
   type SortingState,
   flexRender,
   getCoreRowModel,
@@ -9,8 +10,8 @@ import {
   getSortedRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, ArrowUpDown } from "lucide-react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { ChevronLeft, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -20,25 +21,78 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+
+export interface BulkActionContext<TData> {
+  /** Rows currently selected (across all pages). */
+  selected: TData[];
+  /** Total selectable rows in the table (all pages). */
+  total: number;
+  /** Whether every row (all pages) is selected. */
+  allSelected: boolean;
+  /** Select every row across all pages. */
+  selectAll: () => void;
+  /** Clear the selection. */
+  clear: () => void;
+}
 
 interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[];
   data: TData[];
   pageSize?: number;
+  initialSorting?: SortingState;
+  /** Render a leading checkbox column + a contextual bulk-action bar. */
+  enableSelection?: boolean;
+  /** Stable row id (e.g. file_id) so selection survives a data refetch. */
+  getRowId?: (row: TData) => string;
+  /** Bulk-action bar content, shown above the table while rows are selected. */
+  renderBulkActions?: (ctx: BulkActionContext<TData>) => ReactNode;
 }
 
 export function DataTable<TData, TValue>({
   columns,
   data,
   pageSize = 10,
+  initialSorting = [],
+  enableSelection = false,
+  getRowId,
+  renderBulkActions,
 }: DataTableProps<TData, TValue>) {
-  const [sorting, setSorting] = useState<SortingState>([]);
+  const [sorting, setSorting] = useState<SortingState>(initialSorting);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [pagination, setPagination] = useState({ pageIndex: 0, pageSize });
+  const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+
+  // Prepend a checkbox column when selection is enabled.
+  const tableColumns = useMemo<ColumnDef<TData, TValue>[]>(() => {
+    if (!enableSelection) return columns;
+    const selectColumn: ColumnDef<TData, TValue> = {
+      id: "__select",
+      enableSorting: false,
+      header: ({ table }) => (
+        <Checkbox
+          checked={
+            table.getIsAllPageRowsSelected() ||
+            (table.getIsSomePageRowsSelected() && "indeterminate")
+          }
+          onCheckedChange={(value) => table.toggleAllPageRowsSelected(!!value)}
+          aria-label="Select all rows on this page"
+        />
+      ),
+      cell: ({ row }) => (
+        <Checkbox
+          checked={row.getIsSelected()}
+          onCheckedChange={(value) => row.toggleSelected(!!value)}
+          aria-label="Select row"
+        />
+      ),
+    };
+    return [selectColumn, ...columns];
+  }, [columns, enableSelection]);
 
   const table = useReactTable({
     data,
-    columns,
+    columns: tableColumns,
     getCoreRowModel: getCoreRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
     getSortedRowModel: getSortedRowModel(),
@@ -46,11 +100,14 @@ export function DataTable<TData, TValue>({
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     onPaginationChange: setPagination,
+    onRowSelectionChange: setRowSelection,
+    enableRowSelection: enableSelection,
+    getRowId,
     // Keep the user on their current page when the rows change underneath them
     // (e.g. deleting a row refetches the list). TanStack resets pageIndex to 0
     // on every data change by default, which bounced the user back to page 1.
     autoResetPageIndex: false,
-    state: { sorting, columnFilters, pagination },
+    state: { sorting, columnFilters, pagination, rowSelection },
   });
 
   // If the current page no longer exists after the data shrank — e.g. the last
@@ -63,8 +120,22 @@ export function DataTable<TData, TValue>({
     }
   }, [pageCount, pagination.pageIndex]);
 
+  const selectedRows = table.getSelectedRowModel().rows;
+  const columnCount = table.getAllLeafColumns().length;
+
   return (
     <div>
+      {enableSelection && renderBulkActions && selectedRows.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border bg-primary/5 px-4 py-2.5">
+          {renderBulkActions({
+            selected: selectedRows.map((r) => r.original),
+            total: table.getFilteredRowModel().rows.length,
+            allSelected: table.getIsAllRowsSelected(),
+            selectAll: () => table.toggleAllRowsSelected(true),
+            clear: () => table.resetRowSelection(),
+          })}
+        </div>
+      )}
       <div className="rounded-md border">
         <Table>
           <TableHeader>
@@ -86,7 +157,10 @@ export function DataTable<TData, TValue>({
           <TableBody>
             {table.getRowModel().rows.length ? (
               table.getRowModel().rows.map((row) => (
-                <TableRow key={row.id}>
+                <TableRow
+                  key={row.id}
+                  data-state={row.getIsSelected() ? "selected" : undefined}
+                >
                   {row.getVisibleCells().map((cell) => (
                     <TableCell key={cell.id}>
                       {flexRender(
@@ -100,7 +174,7 @@ export function DataTable<TData, TValue>({
             ) : (
               <TableRow>
                 <TableCell
-                  colSpan={columns.length}
+                  colSpan={columnCount}
                   className="h-24 text-center text-muted-foreground"
                 >
                   No results.
@@ -140,7 +214,7 @@ export function DataTable<TData, TValue>({
   );
 }
 
-// Helper to create sortable header
+// Helper to create a sortable, direction-aware column header.
 export function SortableHeader({
   column,
   title,
@@ -148,15 +222,17 @@ export function SortableHeader({
   column: { toggleSorting: (desc: boolean) => void; getIsSorted: () => false | "asc" | "desc" };
   title: string;
 }) {
+  const sorted = column.getIsSorted();
+  const Icon = sorted === "asc" ? ArrowUp : sorted === "desc" ? ArrowDown : ArrowUpDown;
   return (
     <Button
       variant="ghost"
       size="sm"
       className="-ml-3 h-8"
-      onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
+      onClick={() => column.toggleSorting(sorted === "asc")}
     >
       {title}
-      <ArrowUpDown className="ml-2 h-3 w-3" />
+      <Icon className="ml-2 h-3 w-3" />
     </Button>
   );
 }

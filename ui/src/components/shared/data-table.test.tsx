@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import type { ColumnDef } from "@tanstack/react-table";
 
-import { DataTable } from "./data-table";
+import { DataTable, SortableHeader } from "./data-table";
 
 type Row = { id: number };
 
@@ -45,5 +45,54 @@ describe("DataTable pagination", () => {
     rerender(<DataTable columns={columns} data={makeRows(10)} />);
     expect(await screen.findByText("row-1")).toBeTruthy();
     expect(screen.queryByText("row-11")).toBeNull();
+  });
+});
+
+describe("DataTable sorting", () => {
+  const sortableColumns: ColumnDef<Row, unknown>[] = [
+    {
+      id: "id",
+      accessorFn: (r) => r.id,
+      header: ({ column }) => <SortableHeader column={column} title="ID" />,
+      cell: ({ row }) => `row-${row.original.id}`,
+    },
+  ];
+  const renderedOrder = () => screen.getAllByText(/^row-\d+$/).map((e) => e.textContent);
+
+  it("honors initialSorting and toggles direction on header click", () => {
+    render(<DataTable columns={sortableColumns} data={makeRows(3)} initialSorting={[{ id: "id", desc: true }]} />);
+    expect(renderedOrder()).toEqual(["row-3", "row-2", "row-1"]);
+
+    fireEvent.click(screen.getByRole("button", { name: /ID/ }));
+    expect(renderedOrder()).toEqual(["row-1", "row-2", "row-3"]);
+  });
+});
+
+describe("DataTable selection", () => {
+  it("renders bulk actions for the selected rows and clears them", () => {
+    render(
+      <DataTable
+        columns={columns}
+        data={makeRows(3)}
+        enableSelection
+        getRowId={(r) => String(r.id)}
+        renderBulkActions={({ selected, clear }) => (
+          <div>
+            <span>{selected.length} selected</span>
+            <button onClick={clear}>clear-sel</button>
+          </div>
+        )}
+      />,
+    );
+
+    // No bulk bar until something is selected.
+    expect(screen.queryByText(/selected/)).toBeNull();
+
+    // Header checkbox is the first checkbox; it selects every row on the page.
+    fireEvent.click(screen.getAllByRole("checkbox")[0]);
+    expect(screen.getByText("3 selected")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("clear-sel"));
+    expect(screen.queryByText(/selected/)).toBeNull();
   });
 });
