@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def default_max_tokens():
@@ -46,6 +46,18 @@ class OpenAIChatCompletionRequest(BaseModel):
         },
         description="Extra custom parameters. Supports 'llm_override' object with optional 'base_url', 'api_key', and 'model' to override the downstream LLM endpoint.",
     )
+
+    @model_validator(mode="after")
+    def _ignore_top_logprobs_without_logprobs(self) -> "OpenAIChatCompletionRequest":
+        # OpenAI semantics: `top_logprobs` only applies when `logprobs` is
+        # enabled. Mirror that by silently dropping it otherwise (rather than
+        # raising) — stays OpenAI-compatible while never forwarding an invalid
+        # pair to strict downstream providers that reject `top_logprobs` unless
+        # `logprobs` is true. Dropped to None so model_dump(exclude_none=True)
+        # omits it entirely.
+        if self.top_logprobs is not None and not self.logprobs:
+            self.top_logprobs = None
+        return self
 
 
 class OpenAICompletionRequest(BaseModel):

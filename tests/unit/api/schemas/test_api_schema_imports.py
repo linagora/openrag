@@ -67,6 +67,24 @@ def test_chat_request_logprobs_opt_in_is_boolean_and_forwarded():
     assert dump["top_logprobs"] == 5
 
 
+def test_chat_request_drops_top_logprobs_when_logprobs_not_enabled():
+    """top_logprobs only applies when logprobs is enabled. Mirroring OpenAI, an
+    unsolicited top_logprobs (logprobs false/omitted) is silently dropped — not
+    rejected — so it never reaches strict downstream providers that would error.
+    """
+    omitted = OpenAIChatCompletionRequest.model_validate(
+        {"messages": [{"role": "user", "content": "hi"}], "top_logprobs": 5}
+    )
+    explicit_false = OpenAIChatCompletionRequest.model_validate(
+        {"messages": [{"role": "user", "content": "hi"}], "logprobs": False, "top_logprobs": 5}
+    )
+
+    for request in (omitted, explicit_false):
+        dump = request.model_dump(exclude_none=True)
+        assert request.top_logprobs is None
+        assert "top_logprobs" not in dump
+
+
 def test_chat_request_omits_logprobs_when_unset():
     """An unset logprobs must not be emitted — the server never requests it on the
     client's behalf (sending it unsolicited can break streaming on some backends).
