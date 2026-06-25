@@ -13,7 +13,11 @@ class LLMParamsConfig(ConfigMixin):
     temperature: float = 0.1
     timeout: int = 60
     max_retries: int = 2
-    logprobs: bool = True
+    # Default OFF: OpenRAG doesn't consume logprobs, and requesting them
+    # unsolicited breaks streaming on some OpenAI-compatible backends (e.g. a
+    # LiteLLM proxy crashes serializing the final chunk's ChoiceLogprobs). API
+    # clients that want logprobs opt in per request (see OpenAIChatCompletionRequest).
+    logprobs: bool = False
     enable_thinking: bool | None = None
 
 

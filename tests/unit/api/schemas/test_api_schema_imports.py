@@ -54,6 +54,31 @@ def test_chat_request_omits_response_format_when_unset():
     assert "response_format" not in dump
 
 
+def test_chat_request_logprobs_opt_in_is_boolean_and_forwarded():
+    """logprobs is off by default (server) but a client can opt in. For chat
+    completions it's a boolean and must reach the LLM as `true`, not coerced int.
+    """
+    request = OpenAIChatCompletionRequest.model_validate(
+        {"messages": [{"role": "user", "content": "hi"}], "logprobs": True, "top_logprobs": 5}
+    )
+    dump = request.model_dump(exclude_none=True)
+
+    assert dump["logprobs"] is True
+    assert dump["top_logprobs"] == 5
+
+
+def test_chat_request_omits_logprobs_when_unset():
+    """An unset logprobs must not be emitted — the server never requests it on the
+    client's behalf (sending it unsolicited can break streaming on some backends).
+    """
+    request = OpenAIChatCompletionRequest(messages=[OpenAIMessage(role="user", content="hi")])
+    dump = request.model_dump(exclude_none=True)
+
+    assert request.logprobs is None
+    assert "logprobs" not in dump
+    assert "top_logprobs" not in dump
+
+
 def test_chat_request_passes_through_extra_openai_params():
     """extra='allow' keeps vendor params (tools, seed, ...) that are not declared
     on the model, so any OpenAI-compatible field reaches the downstream LLM

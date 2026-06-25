@@ -24,7 +24,12 @@ class OpenAIChatCompletionRequest(BaseModel):
     top_p: float | None = Field(1.0)
     stream: bool | None = Field(False)
     max_tokens: int | None = Field(default_factory=default_max_tokens)
-    logprobs: int | None = Field(None)
+    # Client-controlled and forwarded as-is to the downstream model; the server
+    # default is off (see LLMParamsConfig.logprobs). For chat completions
+    # `logprobs` is a boolean — `top_logprobs` carries the count — unlike the
+    # legacy /completions endpoint where `logprobs` is an integer.
+    logprobs: bool | None = Field(None)
+    top_logprobs: int | None = Field(None)
     response_format: dict[str, Any] | None = Field(
         None,
         description="OpenAI response_format, e.g. {'type': 'json_object'} or "

@@ -13,7 +13,9 @@ _llm_params: &llm_params
   temperature: 0.1
   timeout: 60
   max_retries: 2
-  logprobs: true
+  # Default off — API clients opt in per request. Requesting logprobs
+  # unsolicited can break streaming on some OpenAI-compatible backends.
+  logprobs: false
   # null omits chat_template_kwargs; set false for Qwen-style models when
   # reasoning traces should be disabled. Leave unset for Mistral tokenizers.
   enable_thinking: null
