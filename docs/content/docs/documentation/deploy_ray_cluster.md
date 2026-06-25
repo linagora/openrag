@@ -58,7 +58,7 @@ Total indexing concurrency is `RAY_POOL_SIZE × RAY_MAX_TASKS_PER_WORKER` — e.
 :::
 
 :::caution
-If other GPU-intensive services are running on your nodes (e.g. vLLM, the RAG API), make sure to **reserve enough GPU memory** for them and subtract that from your total when calculating the safe pool size.
+`RAY_POOL_SIZE` and `RAY_MAX_TASKS_PER_WORKER` size **indexing throughput**, not GPU reservation — the indexer workers don't claim GPU memory. GPU on each node is consumed by the model servers (e.g. vLLM) and by the GPU-accelerated parsers, so budget GPU memory through **`MARKER_NUM_GPUS`** / **`MARKER_POOL_SIZE`** (and the Docling equivalents) and the model-server settings rather than through the indexer pool size.
 :::
 
 ---
