@@ -87,6 +87,8 @@ class ModelEndpointService:
                 model_type=model_type,
                 endpoint=endpoint,
                 model_name=model_name or None,
+                batch_size=data.get("batch_size", 32),
+                timeout=data.get("timeout", 30.0),
                 extra=data.get("extra", {}),
                 is_default=True,
                 created_at=now,
@@ -111,11 +113,14 @@ class ModelEndpointService:
             "embedder": {
                 "endpoint": os.getenv("EMBEDDER_ENDPOINT", s.embedder.base_url),
                 "model_name": os.getenv("EMBEDDING_MODEL", s.embedder.model_name),
+                "batch_size": s.embedder.batch_size,
+                "timeout": s.embedder.timeout,
                 "extra": _with_api_key({"implementation": "vllm"}, s.embedder.api_key),
             },
             "llm": {
                 "endpoint": os.getenv("LLM_ENDPOINT", s.llm.base_url),
                 "model_name": os.getenv("LLM_MODEL", s.llm.model),
+                "timeout": s.llm.timeout,
                 "extra": _with_enable_thinking(
                     _with_api_key({"implementation": "vllm"}, s.llm.api_key),
                     s.llm.enable_thinking,
@@ -124,6 +129,7 @@ class ModelEndpointService:
             "vlm": {
                 "endpoint": os.getenv("VLM_ENDPOINT", s.vlm.base_url),
                 "model_name": os.getenv("VLM_MODEL", s.vlm.model),
+                "timeout": s.vlm.timeout,
                 "extra": _with_enable_thinking(
                     _with_api_key({"implementation": "vllm"}, s.vlm.api_key),
                     s.vlm.enable_thinking,
@@ -138,6 +144,7 @@ class ModelEndpointService:
                 # remains available for per-partition opt-in.
                 "endpoint": os.getenv("RERANKER_ENDPOINT", s.reranker.base_url),
                 "model_name": os.getenv("RERANKER_MODEL", s.reranker.model_name),
+                "timeout": s.reranker.timeout,
                 "extra": _with_api_key({"implementation": s.reranker.provider}, s.reranker.api_key),
             },
         }

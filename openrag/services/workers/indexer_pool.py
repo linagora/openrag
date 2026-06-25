@@ -43,6 +43,7 @@ class IndexerWorkerActor:
         vlm = build_caption_vlm(cfg)
         chunker = _build_chunker(cfg)
         embedder_factory = _build_embedder_factory(cfg)
+        vlm_factory = _build_vlm_factory(cfg)
         contextualizer_factory = _build_contextualizer_factory(cfg)
         topic_tagger_factory = _build_topic_tagger_factory(cfg)
 
@@ -68,6 +69,7 @@ class IndexerWorkerActor:
             image_captioning=cfg.loader.image_captioning,
             chunker_factory=_build_chunker_from_config,
             embedder_factory=embedder_factory,
+            vlm_factory=vlm_factory,
             contextualizer_factory=contextualizer_factory,
             topic_tagger_factory=topic_tagger_factory,
         )
@@ -87,13 +89,19 @@ class IndexerWorkerActor:
         # unpicklable). Created here, in the actor process, it is never pickled.
         self._logger = get_logger()
         self._cfg = cfg
-        # Whether "default" resolves via the global cfg.llm fallback (static —
-        # cfg.llm doesn't change). Lets _reload_decision avoid a perpetual
-        # reload-on-miss for "default" when no is_default row exists in the DB.
-        self._has_default_fallback = _global_llm_endpoint_config(cfg) is not None
+        # Whether "default" resolves via global env/config fallbacks. This keeps
+        # reload-on-miss from looping forever when no is_default row exists for a
+        # type but the legacy config block can still serve the default endpoint.
+        self._has_default_fallbacks = {
+            "embedder": _global_embedder_endpoint_config(cfg) is not None,
+            "llm": _global_llm_endpoint_config(cfg) is not None,
+            "vlm": _global_vlm_endpoint_config(cfg) is not None,
+        }
+        self._has_default_fallback = self._has_default_fallbacks["llm"]
         self._model_endpoint_service: Any = None
         self._registry_loaded_at: float | None = None
         self._last_miss_reload_at: float | None = None
+        self._last_miss_reload_key: tuple[tuple[str, tuple[str, ...]], ...] | None = None
         self._registry_lock = asyncio.Lock()
         self._registry_reload_task: asyncio.Task[None] | None = None
         self._worker = IndexerWorker(
@@ -112,7 +120,7 @@ class IndexerWorkerActor:
             await self._catalog_store.initialize()
             self._catalog_initialized = True
 
-    async def _ensure_registry_fresh(self, required_llm_names: list[str]) -> None:
+    async def _ensure_registry_fresh(self, required_model_names: dict[str, list[str]] | list[str]) -> None:
         """Hydrate ``cfg.models`` from the DB so named endpoints resolve here.
 
         The hit path is lock-free and does no I/O. A reload happens only on first
@@ -126,19 +134,19 @@ class IndexerWorkerActor:
         ``miss`` block, because the triggering file needs an endpoint that isn't
         loaded yet; both are rare and rate-limited.
         """
-        decision = self._reload_decision(required_llm_names)
+        decision = self._reload_decision(required_model_names)
         if decision is None:
             return
         if decision == "ttl":
             if self._registry_reload_task is None or self._registry_reload_task.done():
-                self._registry_reload_task = asyncio.create_task(self._reload_registry(required_llm_names))
+                self._registry_reload_task = asyncio.create_task(self._reload_registry(required_model_names))
             return
-        await self._reload_registry(required_llm_names)
+        await self._reload_registry(required_model_names)
 
-    async def _reload_registry(self, required_llm_names: list[str]) -> None:
+    async def _reload_registry(self, required_model_names: dict[str, list[str]] | list[str]) -> None:
         """Single-flight reload of the model-endpoint registry from the DB."""
         async with self._registry_lock:
-            decision = self._reload_decision(required_llm_names)
+            decision = self._reload_decision(required_model_names)
             if decision is None:  # another reload refreshed it while we waited
                 return
             try:
@@ -158,21 +166,23 @@ class IndexerWorkerActor:
             self._registry_loaded_at = now
             if decision == "miss":
                 self._last_miss_reload_at = now
+                self._last_miss_reload_key = _required_model_names_key(required_model_names)
 
-    def _reload_decision(self, required_llm_names: list[str]) -> str | None:
+    def _reload_decision(self, required_model_names: dict[str, list[str]] | list[str]) -> str | None:
         models = getattr(self._cfg, "models", None)
-        llm_registry = getattr(models, "llm", {}) if models is not None else {}
-        # The factory also resolves "default" via the global cfg.llm fallback, even
-        # when no is_default row puts a "default" alias in the registry. Treating it
-        # as missing in that case would block-reload every window forever without
-        # ever converging, so mirror the factory's fallback here.
-        missing = any(
-            name not in llm_registry and not (name == "default" and self._has_default_fallback)
-            for name in required_llm_names
-        )
+        required = _normalise_required_model_names(required_model_names)
+        missing = False
+        for model_type, names in required.items():
+            registry = getattr(models, model_type, {}) if models is not None else {}
+            has_fallback = _has_default_fallback(self, model_type)
+            if any(name not in registry and not (name == "default" and has_fallback) for name in names):
+                missing = True
+                break
         return _registry_reload_decision(
             loaded_at=self._registry_loaded_at,
             last_miss_at=self._last_miss_reload_at,
+            last_miss_key=getattr(self, "_last_miss_reload_key", None),
+            missing_key=_required_model_names_key(required_model_names),
             now=time.monotonic(),
             ttl=_MODEL_REGISTRY_TTL_SECONDS,
             missing=missing,
@@ -192,7 +202,7 @@ class IndexerWorkerActor:
         embedder_name: str | None = None,
     ) -> dict[str, Any]:
         await self._ensure_catalog()
-        await self._ensure_registry_fresh(_required_llm_names(indexation_config))
+        await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
         result = await self._worker.process_file(
             task_id=task_id,
             path=path,
@@ -335,10 +345,48 @@ def _required_llm_names(indexation_config: dict[str, Any] | None) -> list[str]:
     return names
 
 
+def _required_model_endpoint_names(
+    indexation_config: dict[str, Any] | None,
+    embedder_name: str | None,
+) -> dict[str, list[str]]:
+    names: dict[str, list[str]] = {
+        "embedder": [],
+        "llm": _required_llm_names(indexation_config),
+        "vlm": [],
+    }
+    if embedder_name:
+        names["embedder"].append(embedder_name)
+    if indexation_config is not None and indexation_config.get("vlm"):
+        names["vlm"].append(str(indexation_config["vlm"]))
+    return names
+
+
+def _normalise_required_model_names(required: dict[str, list[str]] | list[str]) -> dict[str, list[str]]:
+    if isinstance(required, list):
+        return {"llm": required}
+    return required
+
+
+def _required_model_names_key(required: dict[str, list[str]] | list[str]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    normalised = _normalise_required_model_names(required)
+    return tuple((model_type, tuple(sorted(set(names)))) for model_type, names in sorted(normalised.items()) if names)
+
+
+def _has_default_fallback(pool: Any, model_type: str) -> bool:
+    fallbacks = getattr(pool, "_has_default_fallbacks", None)
+    if fallbacks is not None:
+        return bool(fallbacks.get(model_type, False))
+    if model_type == "llm":
+        return bool(getattr(pool, "_has_default_fallback", False))
+    return False
+
+
 def _registry_reload_decision(
     *,
     loaded_at: float | None,
     last_miss_at: float | None,
+    last_miss_key: tuple[tuple[str, tuple[str, ...]], ...] | None = None,
+    missing_key: tuple[tuple[str, tuple[str, ...]], ...] | None = None,
     now: float,
     ttl: float,
     missing: bool,
@@ -356,7 +404,7 @@ def _registry_reload_decision(
     """
     if loaded_at is None:
         return "initial"
-    if missing and (last_miss_at is None or now - last_miss_at >= ttl):
+    if missing and (last_miss_at is None or last_miss_key != missing_key or now - last_miss_at >= ttl):
         return "miss"
     if now - loaded_at >= ttl:
         return "ttl"
@@ -377,23 +425,30 @@ def _build_chunker_from_config(chunker_config: Any) -> Any:
 
 
 def _build_embedder_factory(cfg: Settings) -> Any:
-    if not getattr(cfg.models, "embedder", None):
-        return None
-
     from core.embeddings import embedder_registry
 
-    cache: dict[str, Any] = {}
+    models = getattr(cfg, "models", None)
+    named_embedders = models.embedder if models is not None else {}
+    fallback_cfg = _global_embedder_endpoint_config(cfg)
+
+    cache: dict[str, tuple[str, Any]] = {}
     lock = threading.Lock()
 
     def factory(name: str = "default") -> Any:
-        if name in cache:
-            return cache[name]
+        model_cfg = named_embedders.get(name)
+        if model_cfg is None:
+            if name == "default" and fallback_cfg is not None:
+                model_cfg = fallback_cfg
+            else:
+                raise KeyError(f"Unknown embedder '{name}'. Available: {list(named_embedders)}")
+        identity = _endpoint_identity(model_cfg)
+        entry = cache.get(name)
+        if entry is not None and entry[0] == identity:
+            return entry[1]
         with lock:
-            if name in cache:
-                return cache[name]
-            model_cfg = cfg.models.embedder.get(name)
-            if model_cfg is None:
-                raise KeyError(f"Unknown embedder '{name}'. Available: {list(cfg.models.embedder)}")
+            entry = cache.get(name)
+            if entry is not None and entry[0] == identity:
+                return entry[1]
             impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
             impl = model_cfg.extra.get("implementation", "vllm")
             instance = embedder_registry.create(
@@ -404,7 +459,48 @@ def _build_embedder_factory(cfg: Settings) -> Any:
                 timeout=model_cfg.timeout,
                 **impl_kwargs,
             )
-            cache[name] = instance
+            cache[name] = (identity, instance)
+            return instance
+
+    return factory
+
+
+def _build_vlm_factory(cfg: Settings) -> Any:
+    import services.inference.vllm_client  # noqa: F401
+    from core.vlm import vlm_registry
+
+    models = getattr(cfg, "models", None)
+    named_vlms = models.vlm if models is not None else {}
+    fallback_cfg = _global_vlm_endpoint_config(cfg)
+
+    cache: dict[str, tuple[str, Any]] = {}
+    lock = threading.Lock()
+
+    def factory(name: str = "default") -> Any:
+        model_cfg = named_vlms.get(name)
+        if model_cfg is None:
+            if name == "default" and fallback_cfg is not None:
+                model_cfg = fallback_cfg
+            else:
+                raise KeyError(f"Unknown vlm '{name}'. Available: {list(named_vlms)}")
+        identity = _endpoint_identity(model_cfg)
+        entry = cache.get(name)
+        if entry is not None and entry[0] == identity:
+            return entry[1]
+        with lock:
+            entry = cache.get(name)
+            if entry is not None and entry[0] == identity:
+                return entry[1]
+            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
+            impl = model_cfg.extra.get("implementation", "vllm")
+            instance = vlm_registry.create(
+                impl,
+                endpoint=model_cfg.endpoint,
+                model_name=model_cfg.model_name,
+                timeout=model_cfg.timeout,
+                **impl_kwargs,
+            )
+            cache[name] = (identity, instance)
             return instance
 
     return factory
@@ -595,6 +691,51 @@ def _global_llm_endpoint_config(cfg: Any) -> Any | None:
         endpoint=endpoint,
         model_name=model_name,
         timeout=getattr(llm_cfg, "timeout", 60),
+        extra=extra,
+    )
+
+
+def _global_embedder_endpoint_config(cfg: Any) -> Any | None:
+    from core.config.model_endpoints import ModelEndpointConfig
+
+    embed_cfg = getattr(cfg, "embedder", None)
+    endpoint = getattr(embed_cfg, "base_url", "")
+    model_name = getattr(embed_cfg, "model_name", "")
+    if not endpoint or not model_name:
+        return None
+    return ModelEndpointConfig(
+        endpoint=endpoint,
+        model_name=model_name,
+        batch_size=getattr(embed_cfg, "batch_size", 32),
+        timeout=getattr(embed_cfg, "timeout", 120),
+        extra={
+            "implementation": "vllm",
+            "api_key": getattr(embed_cfg, "api_key", ""),
+            "max_model_len": getattr(embed_cfg, "max_model_len", None),
+            "embed_concurrency": getattr(embed_cfg, "embed_concurrency", 4),
+        },
+    )
+
+
+def _global_vlm_endpoint_config(cfg: Any) -> Any | None:
+    from core.config.model_endpoints import ModelEndpointConfig
+
+    vlm_cfg = getattr(cfg, "vlm", None)
+    endpoint = getattr(vlm_cfg, "base_url", "")
+    model_name = getattr(vlm_cfg, "model", "")
+    if not endpoint or not model_name:
+        return None
+    extra = {
+        "implementation": "vllm",
+        "api_key": getattr(vlm_cfg, "api_key", ""),
+    }
+    enable_thinking = getattr(vlm_cfg, "enable_thinking", None)
+    if enable_thinking is not None:
+        extra["enable_thinking"] = enable_thinking
+    return ModelEndpointConfig(
+        endpoint=endpoint,
+        model_name=model_name,
+        timeout=getattr(vlm_cfg, "timeout", 60),
         extra=extra,
     )
 

@@ -181,6 +181,37 @@ async def test_seed_defaults_preserves_endpoint_api_keys(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_preserves_endpoint_timeouts_and_batch_size(monkeypatch):
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    settings = Settings(
+        embedder={
+            "base_url": "http://embedder:8000/v1",
+            "model_name": "embed-model",
+            "batch_size": 64,
+            "timeout": 180,
+        },
+        llm={"base_url": "http://llm:8000/v1", "model": "mistral", "timeout": 45},
+        vlm={"base_url": "http://vlm:8000/v1", "model": "pixtral", "timeout": 75},
+        reranker={"provider": "infinity", "timeout": 25},
+    )
+    repo = _FakeEndpointRepo()
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    rows = {row.model_type: row for row in repo._store.values()}
+    assert rows["embedder"].batch_size == 64
+    assert rows["embedder"].timeout == 180
+    assert rows["llm"].timeout == 45
+    assert rows["vlm"].timeout == 75
+    assert rows["reranker"].timeout == 25
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_preserves_llm_and_vlm_enable_thinking(monkeypatch):
     from core.config.root import Settings
 

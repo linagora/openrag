@@ -176,6 +176,74 @@ async def test_pipeline_indexation_config_disables_caption_and_contextualization
 
 
 @pytest.mark.asyncio
+async def test_pipeline_falls_back_to_existing_vlm_when_default_registry_vlm_is_missing():
+    def _missing_default(_name: str):
+        raise KeyError("Unknown vlm 'default'")
+
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    chunks = [Chunk(id="c1", text="hello", partition="tenant-a")]
+    vlm = FakeVLM()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker(chunks),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        vlm_factory=_missing_default,
+    )
+    row = {
+        "document": document,
+        "partition": "tenant-a",
+        "filename": "note.txt",
+        "indexation_config": {
+            "enable_image_captioning": True,
+        },
+    }
+
+    await pipeline.run(row)
+
+    assert vlm.calls == [b"png"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_fails_when_explicit_named_vlm_is_missing():
+    def _missing_named(name: str):
+        raise KeyError(f"Unknown vlm '{name}'")
+
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=FakeVLM(),
+        vlm_factory=_missing_named,
+    )
+    row = {
+        "document": document,
+        "partition": "tenant-a",
+        "filename": "note.txt",
+        "indexation_config": {
+            "enable_image_captioning": True,
+            "vlm": "missing-vlm",
+        },
+    }
+
+    with pytest.raises(KeyError, match="missing-vlm"):
+        await pipeline.run(row)
+
+
+@pytest.mark.asyncio
 async def test_pipeline_row_indexation_config_selects_components():
     document = Document(filename="note.txt", text="hello", partition="tenant-a")
     default_processed = ProcessedDocument(document_id="default", text_blocks=[TextBlock(text="default")])
@@ -245,6 +313,113 @@ async def test_pipeline_row_indexation_config_selects_components():
     ]
     assert row["topic_tags"] == ["portfolio"]
     assert row["chunks"][0].embedding == [0.5]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_uses_named_embedder_and_vlm_hydrated_after_factory_build():
+    from core.config.model_endpoints import ModelEndpointConfig
+    from core.embeddings import embedder_registry
+    from core.vlm import vlm_registry
+    from services.workers.indexer_pool import _build_embedder_factory, _build_vlm_factory
+
+    class ProbeEmbedder:
+        instances = []
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.calls: list[list[str]] = []
+            self.instances.append(self)
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            self.calls.append(texts)
+            return [[0.25] for _ in texts]
+
+    class ProbeVLM:
+        instances = []
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.calls: list[bytes] = []
+            self.instances.append(self)
+
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            self.calls.append(image_bytes)
+            return "named caption"
+
+    embedder_registry.register("e2e-probe-embedder")(ProbeEmbedder)
+    vlm_registry.register("e2e-probe-vlm")(ProbeVLM)
+    try:
+        embedder_endpoints: dict = {}
+        vlm_endpoints: dict = {}
+        cfg = type(
+            "Cfg",
+            (),
+            {
+                "models": type("Models", (), {"embedder": embedder_endpoints, "vlm": vlm_endpoints})(),
+                "embedder": type("EmbedderCfg", (), {"base_url": "", "model_name": "", "api_key": ""})(),
+                "vlm": type(
+                    "VLMCfg",
+                    (),
+                    {"base_url": "", "model": "", "api_key": "", "timeout": 60, "enable_thinking": None},
+                )(),
+            },
+        )()
+
+        embedder_factory = _build_embedder_factory(cfg)
+        vlm_factory = _build_vlm_factory(cfg)
+
+        embedder_endpoints["named-embedder"] = ModelEndpointConfig(
+            endpoint="http://embedder.example/v1",
+            model_name="embed-model",
+            extra={"implementation": "e2e-probe-embedder"},
+        )
+        vlm_endpoints["named-vlm"] = ModelEndpointConfig(
+            endpoint="http://vlm.example/v1",
+            model_name="vlm-model",
+            extra={"implementation": "e2e-probe-vlm"},
+        )
+
+        document = Document(filename="note.txt", text="hello", partition="tenant-a")
+        processed = ProcessedDocument(
+            document_id=document.id,
+            text_blocks=[TextBlock(text="hello")],
+            images=[ImageBlock(image_bytes=b"png")],
+        )
+        default_embedder = FakeEmbedder([[9.9]])
+        default_vlm = FakeVLM()
+        pipeline = build_indexing_pipeline(
+            parser=FakeParser(processed),
+            chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+            embedder=default_embedder,
+            vector_store=FakeVectorStore(),
+            vlm=default_vlm,
+            embedder_factory=embedder_factory,
+            vlm_factory=vlm_factory,
+        )
+        row = {
+            "document": document,
+            "partition": "tenant-a",
+            "filename": "note.txt",
+            "embedder_name": "named-embedder",
+            "indexation_config": {
+                "enable_image_captioning": True,
+                "vlm": "named-vlm",
+                "enable_topic_tagging": False,
+            },
+        }
+
+        await pipeline.run(row)
+
+        assert default_embedder.calls == []
+        assert default_vlm.calls == []
+        assert ProbeEmbedder.instances[0].calls == [["hello"]]
+        assert ProbeVLM.instances[0].calls == [b"png"]
+        assert ProbeEmbedder.instances[0].kwargs["endpoint"] == "http://embedder.example/v1"
+        assert ProbeVLM.instances[0].kwargs["endpoint"] == "http://vlm.example/v1"
+        assert row["chunks"][0].embedding == [0.25]
+    finally:
+        embedder_registry._registry.pop("e2e-probe-embedder", None)
+        vlm_registry._registry.pop("e2e-probe-vlm", None)
 
 
 @pytest.mark.asyncio

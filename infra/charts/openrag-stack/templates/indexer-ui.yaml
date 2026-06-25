@@ -18,10 +18,15 @@ spec:
         app.kubernetes.io/name: indexer-ui
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      automountServiceAccountToken: {{ .Values.security.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
       containers:
         - name: indexer-ui
           image: {{ .Values.indexerUi.image }}
           imagePullPolicy: {{ .Values.indexerUi.imagePullPolicy }}
+          securityContext:
+            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
           env:
             {{- range $key, $value := .Values.indexerUi.env }}
             - name: {{ $key }}
