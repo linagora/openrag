@@ -76,10 +76,50 @@ async def test_catalog_initialization_is_single_flight() -> None:
     assert pool._catalog_initialized is True
 
 
-def test_build_indexer_pool_spawns_pool_size_detached_workers(
+def test_build_indexer_pool_creates_single_detached_dispatcher(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import core.config
+    import services.workers.indexer_pool as module
+
+    options_calls = []
+    remote_calls = []
+
+    class Options:
+        def __init__(self, kwargs):
+            self._kwargs = kwargs
+
+        def remote(self, **rkwargs):
+            remote_calls.append(rkwargs)
+            return "dispatcher-actor"
+
+    def fake_options(**kwargs):
+        options_calls.append(kwargs)
+        return Options(kwargs)
+
+    cfg = SimpleNamespace(ray=SimpleNamespace(indexer=SimpleNamespace(pool_size=3, max_tasks_per_worker=4)))
+    monkeypatch.setattr(core.config, "load_config", lambda: cfg)
+    monkeypatch.setattr(module.IndexerPool, "options", fake_options)
+
+    pool = module.build_indexer_pool()
+
+    # A single shared dispatcher actor — not one client object per replica.
+    assert pool == "dispatcher-actor"
+    assert len(options_calls) == 1
+    opts = options_calls[0]
+    assert opts["name"] == "IndexerPool"
+    assert opts["namespace"] == "openrag"
+    assert opts["get_if_exists"] is True
+    assert opts["lifetime"] == "detached"
+    # max_concurrency bounds concurrent submit() calls → whole-fleet capacity.
+    assert opts["max_concurrency"] == 12
+    # pool_size / max_tasks_per_worker are passed to the actor constructor.
+    assert remote_calls == [{"pool_size": 3, "max_tasks_per_worker": 4, "namespace": "openrag"}]
+
+
+def test_indexer_pool_actor_spawns_pool_size_detached_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import services.workers.indexer_pool as module
 
     calls = []
@@ -95,15 +135,13 @@ def test_build_indexer_pool_spawns_pool_size_detached_workers(
         calls.append(kwargs)
         return Options(kwargs)
 
-    cfg = SimpleNamespace(ray=SimpleNamespace(indexer=SimpleNamespace(pool_size=3, max_tasks_per_worker=4)))
-    monkeypatch.setattr(core.config, "load_config", lambda: cfg)
     monkeypatch.setattr(module.IndexerWorkerActor, "options", fake_options)
 
-    pool = module.build_indexer_pool()
+    actor_class = module.IndexerPool.__ray_metadata__.modified_class
+    pool = actor_class(pool_size=3, max_tasks_per_worker=4)
 
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
-    assert isinstance(pool, module.IndexerPool)
-    assert pool.size == 3
+    assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {"IndexerWorker-0", "IndexerWorker-1", "IndexerWorker-2"}
     for c in calls:
         assert c["lifetime"] == "detached"
@@ -551,39 +589,54 @@ class _FakeWorker:
         return fut
 
 
-def test_pool_requires_at_least_one_worker() -> None:
+def _bare_pool(workers: list) -> object:
+    """An ``IndexerPool`` actor instance with ``__init__`` bypassed.
+
+    The dispatch/release logic under test lives on the actor class; we set the
+    fields it touches directly so tests can inject fake workers instead of
+    spawning real Ray actors.
+    """
     from services.workers.indexer_pool import IndexerPool
 
+    actor_class = IndexerPool.__ray_metadata__.modified_class
+    pool = actor_class.__new__(actor_class)
+    pool._workers = list(workers)
+    pool._inflight = [0] * len(workers)
+    pool._release_tasks = set()
+    return pool
+
+
+def test_pool_requires_positive_pool_size() -> None:
+    from services.workers.indexer_pool import IndexerPool
+
+    actor_class = IndexerPool.__ray_metadata__.modified_class
     with pytest.raises(ValueError):
-        IndexerPool([])
+        actor_class(pool_size=0, max_tasks_per_worker=4)
 
 
 @pytest.mark.asyncio
 async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
-    from services.workers.indexer_pool import IndexerPool
-
     workers = [_FakeWorker(), _FakeWorker()]
-    pool = IndexerPool(workers)
+    pool = _bare_pool(workers)
 
-    ref0 = pool.submit(task_id="a")  # tie -> worker 0
-    pool.submit(task_id="b")  # worker 0 busy -> worker 1
-    pool.submit(task_id="c")  # tie (1 each) -> worker 0
+    ref0 = await pool.submit(task_id="a")  # tie -> worker 0
+    await pool.submit(task_id="b")  # worker 0 busy -> worker 1
+    await pool.submit(task_id="c")  # tie (1 each) -> worker 0
 
     assert len(workers[0].calls) == 2
     assert len(workers[1].calls) == 1
-    # The ObjectRef is passed straight through (dispatcher needs it for ray.cancel).
-    assert ref0 is workers[0].futures[0]
+    # The ObjectRef is passed through wrapped in a one-element list (the
+    # dispatcher unwraps it; the wrapper stops Ray auto-dereferencing the ref).
+    assert ref0 == [workers[0].futures[0]]
 
 
 @pytest.mark.asyncio
 async def test_pool_releases_inflight_when_task_settles() -> None:
-    from services.workers.indexer_pool import IndexerPool
-
     workers = [_FakeWorker(), _FakeWorker()]
-    pool = IndexerPool(workers)
+    pool = _bare_pool(workers)
 
-    pool.submit(task_id="a")  # worker 0
-    pool.submit(task_id="b")  # worker 1
+    await pool.submit(task_id="a")  # worker 0
+    await pool.submit(task_id="b")  # worker 1
     assert pool._inflight == [1, 1]
 
     # One success, one failure — both must decrement the in-flight count.
@@ -597,7 +650,7 @@ async def test_pool_releases_inflight_when_task_settles() -> None:
     assert pool._inflight == [0, 0]
 
     # Freed workers are eligible again on the next dispatch.
-    pool.submit(task_id="c")
+    await pool.submit(task_id="c")
     assert pool._inflight[0] == 1
 
 
@@ -605,8 +658,6 @@ async def test_pool_releases_inflight_when_task_settles() -> None:
 async def test_pool_rolls_back_inflight_when_submission_raises() -> None:
     # If process_file.remote raises (e.g. unserializable args or a dead actor),
     # the in-flight count must be rolled back so the worker isn't seen as busy.
-    from services.workers.indexer_pool import IndexerPool
-
     class _RaisingWorker:
         def __init__(self) -> None:
             def _boom(**_kwargs):
@@ -614,10 +665,12 @@ async def test_pool_rolls_back_inflight_when_submission_raises() -> None:
 
             self.process_file = SimpleNamespace(remote=_boom)
 
-    pool = IndexerPool([_RaisingWorker()])
+    pool = _bare_pool([_RaisingWorker()])
 
     with pytest.raises(RuntimeError, match="remote submission failed"):
-        pool.submit(task_id="a")
+        await pool.submit(task_id="a")
+
+    assert pool._inflight == [0]
 
     assert pool._inflight == [0]
 

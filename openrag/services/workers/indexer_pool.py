@@ -218,36 +218,58 @@ class IndexerWorkerActor:
         return result
 
 
+@ray.remote
 class IndexerPool:
-    """Client-side pool of ``IndexerWorkerActor`` handles.
+    """Single detached dispatcher actor over a fleet of ``IndexerWorkerActor``.
 
-    Holds ``ray.indexer.pool_size`` worker actors and dispatches each file to
-    the least-loaded one (fewest in-flight files). ``submit`` returns the Ray
-    ``ObjectRef`` unchanged so the dispatcher keeps per-task cancellation
-    (``ray.cancel``) and state tracking — this is why the pool is a plain
-    client object rather than ``ray.util.ActorPool``, which hides the ref.
+    Exactly **one** instance exists cluster-wide — it is created named, detached
+    and with ``get_if_exists=True`` (see :func:`build_indexer_pool`). Every API
+    process and every Ray Serve replica therefore shares the *same* dispatcher,
+    so the least-loaded view is global. A per-replica client object would keep
+    its own ``_inflight`` counters, and since Ray Serve runs each replica as a
+    separate actor/process, those views would diverge and unbalance dispatch
+    across the shared workers under bursts.
 
-    In-flight counts are mutated only on the event-loop thread (``submit``
-    and the release callback), so no lock is needed.
+    It holds ``ray.indexer.pool_size`` worker actors and dispatches each file to
+    the least-loaded one (fewest in-flight files). ``submit`` returns the
+    worker's Ray ``ObjectRef`` wrapped in a one-element list, so the caller keeps
+    per-task cancellation (``ray.cancel``) and task-state tracking. The wrapper
+    matters: a *bare* returned ``ObjectRef`` may be auto-dereferenced by Ray
+    (blocking ``ray.get`` until the file finishes indexing), whereas a ref nested
+    inside a container is returned unresolved — see Ray's nested-task semantics.
+
+    This is an async Ray actor, so ``submit`` and the release callbacks run on a
+    single event loop; ``_inflight`` is mutated from that one thread only and
+    needs no lock.
     """
 
-    def __init__(self, workers: list[Any]) -> None:
-        if not workers:
-            raise ValueError("IndexerPool requires at least one worker actor")
-        self._workers = list(workers)
+    def __init__(self, pool_size: int, max_tasks_per_worker: int, namespace: str = "openrag") -> None:
+        if pool_size < 1:
+            raise ValueError("IndexerPool requires pool_size >= 1")
+        # The workers are themselves named + detached + get_if_exists, so they
+        # are shared singletons too; only this dispatcher creates them.
+        self._workers = [
+            IndexerWorkerActor.options(  # type: ignore[attr-defined]
+                name=f"IndexerWorker-{i}",
+                namespace=namespace,
+                get_if_exists=True,
+                lifetime="detached",
+                max_concurrency=max_tasks_per_worker,
+            ).remote()
+            for i in range(pool_size)
+        ]
         self._inflight = [0] * len(self._workers)
         self._release_tasks: set[asyncio.Task[Any]] = set()
 
-    @property
-    def size(self) -> int:
+    async def size(self) -> int:
         return len(self._workers)
 
-    def submit(self, **kwargs: Any) -> Any:
+    async def submit(self, **kwargs: Any) -> list[Any]:
         """Dispatch ``process_file`` to the least-loaded worker.
 
-        Must be called from within the event loop. Returns the worker's
-        Ray ``ObjectRef``; in-flight bookkeeping is released when the task
-        settles (success, failure, or cancellation).
+        Returns ``[worker_ref]`` (the worker's Ray ``ObjectRef`` in a
+        one-element list — see the class docstring); in-flight bookkeeping is
+        released when the task settles (success, failure, or cancellation).
         """
         idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
         self._inflight[idx] += 1
@@ -262,7 +284,7 @@ class IndexerPool:
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
         self._release_tasks.add(task)
         task.add_done_callback(self._release_tasks.discard)
-        return ref
+        return [ref]
 
     async def _release(self, idx: int, ref: Any) -> None:
         try:
@@ -272,23 +294,29 @@ class IndexerPool:
             self._inflight[idx] -= 1
 
 
-def build_indexer_pool(namespace: str = "openrag") -> IndexerPool:
+def build_indexer_pool(namespace: str = "openrag") -> Any:
     from core.config import load_config
 
     cfg = load_config()
     pool_size = cfg.ray.indexer.pool_size
-    max_concurrency = cfg.ray.indexer.max_tasks_per_worker
-    workers = [
-        IndexerWorkerActor.options(  # type: ignore[attr-defined]
-            name=f"IndexerWorker-{i}",
-            namespace=namespace,
-            get_if_exists=True,
-            lifetime="detached",
-            max_concurrency=max_concurrency,
-        ).remote()
-        for i in range(pool_size)
-    ]
-    return IndexerPool(workers)
+    max_tasks_per_worker = cfg.ray.indexer.max_tasks_per_worker
+    # One detached dispatcher actor shared by all API / Serve replicas via
+    # get_if_exists. Its own max_concurrency only bounds concurrent submit()
+    # calls (each returns promptly without awaiting the worker), so size it to
+    # the whole fleet's capacity. The constructor args are honoured only on the
+    # first creation; later get_if_exists calls reuse the existing dispatcher
+    # and ignore them — which is correct, since every replica loads the same cfg.
+    return IndexerPool.options(  # type: ignore[attr-defined]
+        name="IndexerPool",
+        namespace=namespace,
+        get_if_exists=True,
+        lifetime="detached",
+        max_concurrency=max(1, pool_size * max_tasks_per_worker),
+    ).remote(
+        pool_size=pool_size,
+        max_tasks_per_worker=max_tasks_per_worker,
+        namespace=namespace,
+    )
 
 
 def _required_llm_names(indexation_config: dict[str, Any] | None) -> list[str]:
