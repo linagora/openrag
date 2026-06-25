@@ -12,10 +12,15 @@ spec:
     serviceType: ClusterIP
     template:
       spec:
+        automountServiceAccountToken: {{ .Values.security.automountServiceAccountToken }}
+        securityContext:
+          {{- toYaml .Values.security.podSecurityContext | nindent 10 }}
         nodeSelector: {{- toYaml .Values.ray.nodeSelector | nindent 12 }}
         initContainers:
           - name: init-venv-sync
             image: {{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}
+            securityContext:
+              {{- toYaml .Values.security.containerSecurityContext | nindent 14 }}
             command:
               - sh
               - -c
@@ -35,6 +40,8 @@ spec:
         containers:
           - name: ray-head
             image: {{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}
+            securityContext:
+              {{- toYaml .Values.security.containerSecurityContext | nindent 14 }}
             command: ["uv"]
             args:
               - "run"
@@ -95,9 +102,14 @@ spec:
       maxReplicas: {{ $.Values.ray.workers.maxReplicas }}
       template:
         spec:
+          automountServiceAccountToken: {{ $.Values.security.automountServiceAccountToken }}
+          securityContext:
+            {{- toYaml $.Values.security.podSecurityContext | nindent 12 }}
           initContainers:
             - name: init-venv
-              image: ghcr.io/linagora/openrag:dev-latest
+              image: {{ $.Values.ray.image.repository }}:{{ $.Values.ray.image.tag }}
+              securityContext:
+                {{- toYaml $.Values.security.containerSecurityContext | nindent 16 }}
               command:
                 - sh
                 - -c
@@ -113,6 +125,8 @@ spec:
           containers:
             - name: ray-worker
               image: {{ $.Values.ray.image.repository }}:{{ $.Values.ray.image.tag }}
+              securityContext:
+                {{- toYaml $.Values.security.containerSecurityContext | nindent 16 }}
               command: ["/bin/bash", "-lc", "--"]
               args:
                 - uv run $KUBERAY_GEN_RAY_START_CMD
