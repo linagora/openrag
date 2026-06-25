@@ -21,7 +21,7 @@ const db = (): Promise<IDBPDatabase> => {
 
 const touch = (c: ConversationSummary): ConversationSummary => ({
   ...c,
-  cozyMetadata: { updatedAt: new Date().toISOString() }
+  cozyMetadata: { ...c.cozyMetadata, updatedAt: new Date().toISOString() }
 })
 
 export const localDb = {

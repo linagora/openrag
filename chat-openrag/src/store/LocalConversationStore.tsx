@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 import type {
   ConversationStore,
@@ -12,56 +12,63 @@ export interface LocalStore extends ConversationStore {
   appendMessages: (id: string, msgs: StoredMessage[]) => Promise<void>
 }
 
-// Module-level version bumped on every write so all useConversations()
-// consumers re-read after a mutation (no realtime backend here).
 let version = 0
+let idCounter = 0
 const listeners = new Set<() => void>()
 const bump = (): void => {
   version++
   listeners.forEach(l => l())
 }
 
-export const useLocalConversationStore = (): LocalStore => {
-  const useConversations: ConversationStore['useConversations'] = () => {
-    const [conversations, setConversations] = useState<ConversationSummary[]>([])
-    const [isLoading, setLoading] = useState(true)
-    const reload = useCallback(() => {
+function useConversations(): ReturnType<ConversationStore['useConversations']> {
+  const [conversations, setConversations] = useState<ConversationSummary[]>([])
+  const [isLoading, setLoading] = useState(true)
+  useEffect(() => {
+    let active = true
+    const reload = (): void => {
       localDb.listConversations().then(c => {
+        if (!active) return
         setConversations(c)
         setLoading(false)
       })
-    }, [])
-    useEffect(() => {
-      reload()
-      listeners.add(reload)
-      return () => {
-        listeners.delete(reload)
-      }
-    }, [reload])
-    return { conversations, hasMore: false, isLoading, fetchMore: () => {} }
-  }
+    }
+    reload()
+    listeners.add(reload)
+    return () => {
+      active = false
+      listeners.delete(reload)
+    }
+  }, [])
+  return { conversations, hasMore: false, isLoading, fetchMore: () => {} }
+}
 
-  const useConversationMessages: ConversationStore['useConversationMessages'] = (
-    conversationId: string
-  ) => {
-    const [messages, setMessages] = useState<StoredMessage[]>([])
-    const [isLoading, setLoading] = useState(true)
-    useEffect(() => {
-      let active = true
+function useConversationMessages(
+  conversationId: string
+): ReturnType<ConversationStore['useConversationMessages']> {
+  const [messages, setMessages] = useState<StoredMessage[]>([])
+  const [isLoading, setLoading] = useState(true)
+  useEffect(() => {
+    let active = true
+    const reload = (): void => {
       localDb.getConversation(conversationId).then(c => {
         if (!active) return
         setMessages(c?.messages || [])
         setLoading(false)
       })
-      return () => {
-        active = false
-      }
-    }, [conversationId])
-    return { messages, isLoading }
-  }
+    }
+    reload()
+    listeners.add(reload)
+    return () => {
+      active = false
+      listeners.delete(reload)
+    }
+  }, [conversationId])
+  return { messages, isLoading }
+}
 
+export const useLocalConversationStore = (): LocalStore => {
   const createConversation = useCallback(async () => {
-    const id = `conv-${version}-${Date.now()}`
+    const id = `conv-${Date.now()}-${idCounter++}`
     await localDb.putConversation({ _id: id })
     bump()
     return id
@@ -83,15 +90,12 @@ export const useLocalConversationStore = (): LocalStore => {
     bump()
   }, [])
 
-  return useMemo(
-    () => ({
-      useConversations,
-      useConversationMessages,
-      createConversation,
-      deleteConversation,
-      renameConversation,
-      appendMessages
-    }),
-    [createConversation, deleteConversation, renameConversation, appendMessages]
-  )
+  return {
+    useConversations,
+    useConversationMessages,
+    createConversation,
+    deleteConversation,
+    renameConversation,
+    appendMessages
+  }
 }
