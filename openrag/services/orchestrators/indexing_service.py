@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from core.utils.exceptions import PartitionNotFoundError
+from core.utils.exceptions import PartitionNotFoundError, ValidationError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
@@ -32,6 +32,7 @@ logger = get_logger()
 
 # Client-supplied datetime fields lifted into queryable metadata.
 TEMPORAL_FIELDS = ["created_at"]
+_ROLE_HIERARCHY: dict[str, int] = {"viewer": 1, "editor": 2, "owner": 3}
 
 
 def _human_readable_size(size_bytes: int) -> str:
@@ -116,6 +117,14 @@ class IndexingService:
             return {}
         return getattr(self._config, "partitions", {}) or {}
 
+    async def _ensure_editor_access_after_create_race(self, partition: str, user: dict | None) -> None:
+        if user is None:
+            return
+        members = await self._partition_service.list_members(partition)
+        membership = next((m for m in members if m.get("user_id") == user.get("id")), None)
+        if membership is None or _ROLE_HIERARCHY.get(membership.get("role", ""), 0) < _ROLE_HIERARCHY["editor"]:
+            raise PermissionError(f"Editor role required for partition: {partition}")
+
     def _resolve_indexation_dispatch_config(self, partition: str) -> tuple[dict | None, str | None]:
         partitions = self._partition_configs()
         if not partitions:
@@ -145,12 +154,19 @@ class IndexingService:
             return
         user_id = (user or {}).get("id") or 1
         cap_user = user if user is not None else {"id": user_id, "is_admin": True}
-        await self._partition_service.create_partition(
-            partition,
-            user_id=user_id,
-            max_owned=max_partitions_for_user(cap_user),
-        )
-        logger.bind(partition=partition, user_id=user_id).info("Auto-created partition on index.")
+        try:
+            await self._partition_service.create_partition(
+                partition,
+                user_id=user_id,
+                max_owned=max_partitions_for_user(cap_user),
+            )
+        except ValidationError as exc:
+            if exc.code != "PARTITION_EXISTS":
+                raise
+            await self._partition_service.load_partitions()
+            await self._ensure_editor_access_after_create_race(partition, user)
+        else:
+            logger.bind(partition=partition, user_id=user_id).info("Auto-created partition on index.")
 
     async def add_file(
         self,

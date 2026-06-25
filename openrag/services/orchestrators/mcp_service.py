@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from core.utils.exceptions import ValidationError
 from core.utils.log_tail import collect_task_logs
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
@@ -186,7 +187,11 @@ class MCPService:
         if await self._partitions.partition_exists(partition):
             return allowed_partitions  # exists but no membership → access check raises
         cap_user = {"id": user_id, "is_admin": is_admin} if user_id is not None else {"id": 1, "is_admin": True}
-        await self._partitions.create_partition(partition, user_id, max_owned=max_partitions_for_user(cap_user))
+        try:
+            await self._partitions.create_partition(partition, user_id, max_owned=max_partitions_for_user(cap_user))
+        except ValidationError as exc:
+            if exc.code != "PARTITION_EXISTS":
+                raise
         return [*allowed_partitions, partition]
 
     # ------------------------------------------------------------------

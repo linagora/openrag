@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from core.utils.exceptions import ValidationError
 from services.orchestrators.mcp_service import MCPService
 
 # ---------------------------------------------------------------------------
@@ -72,6 +73,17 @@ class FakePartitions:
         # Mirror PgPartitionRepository: the creator is granted owner.
         self.created.append((partition, user_id, max_owned))
         self._members.append({"user_id": user_id, "role": "owner"})
+
+
+class RaceLostPartitions(FakePartitions):
+    async def create_partition(self, partition, user_id, *, max_owned=None):
+        self.created.append((partition, user_id, max_owned))
+        self._members.append({"user_id": user_id, "role": "owner"})
+        raise ValidationError(
+            f"Partition '{partition}' already exists.",
+            status_code=409,
+            code="PARTITION_EXISTS",
+        )
 
 
 class FakeIndexing:
@@ -695,6 +707,30 @@ async def test_index_url_admin_auto_create_bypasses_partition_cap(monkeypatch):
 
     assert parts.created == [("adminpart", 1, None)]
     assert indexing.added[0]["user"] == {"id": 1, "is_admin": True}
+
+
+@pytest.mark.asyncio
+async def test_index_url_treats_partition_exists_race_as_success(monkeypatch):
+    parts = RaceLostPartitions(exists=False, partition_exists=False)
+    indexing = FakeIndexing()
+    svc = _service(partitions=parts, indexing=indexing)
+
+    async def fake_download(url, dest):
+        dest.write_bytes(b"data")
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    out = await svc.index_url(
+        url="https://example.com/report.pdf",
+        partition="newpart",
+        file_id="f1",
+        allowed_partitions=["other"],
+        user_id=7,
+    )
+
+    assert parts.created == [("newpart", 7, 100)]
+    assert indexing.added[0]["partition"] == "newpart"
+    assert out["task_id"] == "task-123"
 
 
 @pytest.mark.asyncio

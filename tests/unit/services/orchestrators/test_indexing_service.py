@@ -6,7 +6,7 @@ import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.preset import PartitionConfig
-from core.utils.exceptions import PartitionNotFoundError
+from core.utils.exceptions import PartitionNotFoundError, ValidationError
 from services.orchestrators.indexing_service import IndexingService
 
 
@@ -112,6 +112,7 @@ class FakePartitionService:
     def __init__(self, config, *, db_partitions: set[str] | None = None):
         self._config = config
         self._db = db_partitions or set()
+        self._members: dict[str, list[dict]] = {}
         self.created: list[tuple[str, int]] = []
         self.create_kwargs: list[dict] = []
         self.loaded = 0
@@ -131,6 +132,7 @@ class FakePartitionService:
         self.created.append((partition, user_id))
         self.create_kwargs.append(dict(_))
         self._db.add(partition)
+        self._members.setdefault(partition, []).append({"user_id": user_id, "role": "owner"})
         # Mimic create_partition + load_partitions populating the cache.
         self._config.partitions[partition] = self._cfg(partition)
 
@@ -139,6 +141,27 @@ class FakePartitionService:
         # Mimic the cache being rebuilt from all DB rows.
         for name in self._db:
             self._config.partitions.setdefault(name, self._cfg(name))
+
+    async def list_members(self, partition: str) -> list[dict]:
+        return list(self._members.get(partition, []))
+
+
+class RaceLostPartitionService(FakePartitionService):
+    def __init__(self, config, *, grant_owner: bool = True):
+        super().__init__(config)
+        self.grant_owner = grant_owner
+
+    async def create_partition(self, partition: str, *, user_id: int, **_) -> None:
+        self.created.append((partition, user_id))
+        self.create_kwargs.append(dict(_))
+        self._db.add(partition)
+        if self.grant_owner:
+            self._members.setdefault(partition, []).append({"user_id": user_id, "role": "owner"})
+        raise ValidationError(
+            f"Partition '{partition}' already exists.",
+            status_code=409,
+            code="PARTITION_EXISTS",
+        )
 
 
 def _service(*, doc=None, ws=None, disp=None, config=None, partition_service=None):
@@ -359,6 +382,54 @@ async def test_add_file_refreshes_cache_when_partition_row_exists(tmp_path):
     assert psvc.created == []
     assert psvc.loaded == 1
     assert disp.dispatched[0]["partition"] == "tenant-new"
+
+
+@pytest.mark.asyncio
+async def test_add_file_treats_partition_exists_race_as_success(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    disp = FakeDispatcher()
+    config = _config_with_partition("tenant-a")
+    psvc = RaceLostPartitionService(config)
+    svc = _service(disp=disp, config=config, partition_service=psvc)
+
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="tenant-new",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user={"id": 7},
+    )
+
+    assert psvc.created == [("tenant-new", 7)]
+    assert psvc.create_kwargs == [{"max_owned": 100}]
+    assert psvc.loaded == 1
+    assert disp.dispatched[0]["partition"] == "tenant-new"
+
+
+@pytest.mark.asyncio
+async def test_add_file_rejects_partition_exists_race_without_membership(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    disp = FakeDispatcher()
+    config = _config_with_partition("tenant-a")
+    psvc = RaceLostPartitionService(config, grant_owner=False)
+    svc = _service(disp=disp, config=config, partition_service=psvc)
+
+    with pytest.raises(PermissionError, match="Editor role required"):
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="tenant-new",
+            metadata={},
+            sanitized_filename="doc.txt",
+            original_filename="doc.txt",
+            user={"id": 7},
+        )
+
+    assert disp.dispatched == []
 
 
 @pytest.mark.asyncio
