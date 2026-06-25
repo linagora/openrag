@@ -28,7 +28,9 @@ def get_num_tokens():
             from langchain_openai import ChatOpenAI
 
             config = load_config()
-            llm = ChatOpenAI(**config.llm.model_dump())
+            llm_kwargs = config.llm.model_dump()
+            llm_kwargs.pop("enable_thinking", None)
+            llm = ChatOpenAI(**llm_kwargs)
             _cached_length_function = llm.get_num_tokens
         except Exception as exc:
             import tiktoken

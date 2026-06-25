@@ -27,10 +27,12 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("BASE_URL", "llm.base_url", str),
     ("MODEL", "llm.model", str),
     ("API_KEY", "llm.api_key", str),
+    ("LLM_ENABLE_THINKING", "llm.enable_thinking", bool),
     # VLM
     ("VLM_BASE_URL", "vlm.base_url", str),
     ("VLM_MODEL", "vlm.model", str),
     ("VLM_API_KEY", "vlm.api_key", str),
+    ("VLM_ENABLE_THINKING", "vlm.enable_thinking", bool),
     # Semaphore
     ("LLM_SEMAPHORE", "semaphore.llm_semaphore", int),
     ("VLM_SEMAPHORE", "semaphore.vlm_semaphore", int),
@@ -123,6 +125,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("OPENAI_LOADER_MAX_RETRIES", "loader.openai.max_retries", int),
     ("OPENAI_LOADER_TOP_P", "loader.openai.top_p", float),
     ("OPENAI_LOADER_CONCURRENCY_LIMIT", "loader.openai.concurrency_limit", int),
+    ("OPENAI_LOADER_ENABLE_THINKING", "loader.openai.enable_thinking", bool),
     # Ray
     ("RAY_NUM_GPUS", "ray.num_gpus", float),
     ("RAY_POOL_SIZE", "ray.pool_size", int),

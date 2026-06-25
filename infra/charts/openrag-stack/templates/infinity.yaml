@@ -17,11 +17,16 @@ spec:
         app.kubernetes.io/name: reranker
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      automountServiceAccountToken: {{ .Values.security.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
       runtimeClassName: {{ .Values.reranker.runtimeClassName }}
       nodeSelector: {{- toYaml .Values.reranker.nodeSelector | nindent 8 }}
       containers:
         - name: reranker
           image: "{{ .Values.reranker.image.repository }}:{{ .Values.reranker.image.tag }}"
+          securityContext:
+            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
           args:
             - "v2"
             - "--model-id"

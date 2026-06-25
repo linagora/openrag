@@ -68,6 +68,7 @@ The parameters below configure how the OCR loader communicates with the model se
 | `OPENAI_LOADER_MAX_RETRIES` | `int` | `2` | Number of retry attempts for failed OCR requests. |
 | `OPENAI_LOADER_TOP_P` | `float` | `0.9` | Nucleus sampling parameter that limits generation to the top-p probability mass. |
 | `OPENAI_LOADER_CONCURRENCY_LIMIT` | `int` | `20` | Maximum number of OCR requests processed concurrently. Useful for multi-page PDF workloads. |
+| `OPENAI_LOADER_ENABLE_THINKING` | `bool` | unset | Optional chat-template control for OCR VLM models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces. |
 
 :::note[Information]
 This feature is currently experimental. Docker server configurations are available in [extern/ocr_vlm_servers](https://github.com/linagora/openrag/tree/main/extern/ocr_vlm_servers) and can be deployed using standard Docker Compose commands.
@@ -235,6 +236,7 @@ These are external services to provide !!!
 | `BASE_URL` | str | Base URL of the LLM API endpoint |
 | `MODEL` | str | Model identifier for the LLM |
 | `API_KEY` | str | API key for authenticating with the LLM service |
+| `LLM_ENABLE_THINKING` | bool | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
 | `LLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the LLM service |
 | `MAX_LLM_CONTEXT_SIZE` | `int` | `8192` | Fallback maximum token limit for chat/completion requests. At startup, the `/v1/models` endpoint is queried for the model's `max_model_len`; if that query fails this value is used instead. Requests whose total token count (prompt + `max_tokens`) exceeds the limit are rejected with a **413** error. |
 
@@ -245,6 +247,7 @@ These are external services to provide !!!
 | `VLM_BASE_URL` | str | Base URL of the VLM API endpoint |
 | `VLM_MODEL` | str | Model identifier for the VLM |
 | `VLM_API_KEY` | str | API key for authenticating with the VLM service |
+| `VLM_ENABLE_THINKING` | bool | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
 | `VLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the VLM service |
 
 ### Retriever Configuration

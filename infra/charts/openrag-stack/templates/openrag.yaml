@@ -17,9 +17,14 @@ spec:
         app.kubernetes.io/name: openrag
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      automountServiceAccountToken: {{ .Values.security.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
       initContainers:
         - name: init-venv
           image: "{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
+          securityContext:
+            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
           command:
             - sh
             - -c
@@ -35,6 +40,8 @@ spec:
       containers:
         - name: openrag
           image: "{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
+          securityContext:
+            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
           ports:
             - containerPort: {{ .Values.openrag.service.port }}
           resources:

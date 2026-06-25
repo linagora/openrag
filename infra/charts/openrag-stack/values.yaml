@@ -40,10 +40,8 @@ postgresql:
   enabled: true
   auth:
     username: &pgUser root
-    # MUST be overridden at install time, e.g.
-    #   --set postgresql.auth.password=$(openssl rand -hex 16)
-    # Shipping a known password is a usable default credential.
-    password: &pgPass "CHANGE_ME_STRONG_PASSWORD"
+    # Must be supplied at install time; templates fail closed if it is empty.
+    password: &pgPass ""
   primary:
     persistence:
       enabled: true
@@ -101,6 +99,19 @@ vllm:
   llmModelName: &llmModel "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
   servingEngineSpec:
     enableEngine: true
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 10001
+      runAsGroup: 10001
+      fsGroup: 10001
+      seccompProfile:
+        type: RuntimeDefault
+    containerSecurityContext:
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
     # NOTE: the per-model `tag: "latest"` entries below are operator-supplied
     # serving images — pin each to a specific vLLM release tag (or digest)
     # before production use for reproducible deploys (see vlm, pinned to v0.11.2).
@@ -281,13 +292,31 @@ openrag:
   replicas: 1
 
 ingress:
-  enabled: true
+  enabled: false
   className: "nginx"
   host: ""
+  tls:
+    enabled: false
+    secretName: ""
 
   paths:
     openrag:
       enabled: true
+
+security:
+  automountServiceAccountToken: false
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
 
 # === Shared env (config + secrets) ===
 env:
@@ -364,12 +393,10 @@ env:
     UV_CACHE_DIR: "/tmp/uv-cache"
 
   secrets:
-    API_KEY: "sk-xxxx" # LLM API KEY
-    VLM_API_KEY: "sk-xxxx" # VLM API KEY
-    EMBEDDER_API_KEY: "EMPTY"
-    TRANSCRIBER_API_KEY: "EMPTY"
-    AUTH_TOKEN: "sk-xxxx" # API KEY for OpenRAG
-    HF_TOKEN: "hf_xxxx" # HuggingFace token
-    # DB password lives in the Secret (not the ConfigMap). Reuses the same
-    # value as postgresql.auth.password via the *pgPass anchor.
-    POSTGRES_PASSWORD: *pgPass
+    API_KEY: "" # LLM API KEY
+    VLM_API_KEY: "" # VLM API KEY
+    EMBEDDER_API_KEY: ""
+    TRANSCRIBER_API_KEY: ""
+    POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
+    AUTH_TOKEN: "" # API KEY for OpenRAG
+    HF_TOKEN: "" # HuggingFace token

@@ -76,6 +76,7 @@ class FakeSessionRepo:
         self.created = []
         self.revoked_ids: list[int] = []
         self.revoked_sids: list[str] = []
+        self.revoked_users: list[int] = []
         self._by_hash = {}
 
     async def create_session(self, session):
@@ -93,6 +94,10 @@ class FakeSessionRepo:
     async def revoke_by_sid(self, sid: str) -> int:
         self.revoked_sids.append(sid)
         return 3
+
+    async def revoke_by_user(self, user_id: int) -> int:
+        self.revoked_users.append(user_id)
+        return 2
 
 
 class FakeOIDCClient:
@@ -467,6 +472,15 @@ async def test_backchannel_logout_rejects_replayed_jti():
     with pytest.raises(OIDCFlowError) as ei:
         await svc.handle_backchannel_logout("tok")
     assert ei.value.error_description == "logout_token replayed"
+
+
+@pytest.mark.asyncio
+async def test_revoke_oidc_sessions_by_user_delegates_to_repo():
+    srepo = FakeSessionRepo()
+    svc = _service(session_repo=srepo)
+
+    assert await svc.revoke_oidc_sessions_by_user(42) == 2
+    assert srepo.revoked_users == [42]
 
 
 @pytest.mark.asyncio

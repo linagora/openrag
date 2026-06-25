@@ -37,6 +37,13 @@ def _with_api_key(extra: dict[str, Any], api_key: str | None) -> dict[str, Any]:
     return extra
 
 
+def _with_enable_thinking(extra: dict[str, Any], enable_thinking: bool | None) -> dict[str, Any]:
+    """Add chat-template thinking control only when explicitly configured."""
+    if enable_thinking is None:
+        return extra
+    return {**extra, "enable_thinking": enable_thinking}
+
+
 class ModelEndpointService:
     """CRUD and lifecycle management for named model endpoints."""
 
@@ -80,6 +87,8 @@ class ModelEndpointService:
                 model_type=model_type,
                 endpoint=endpoint,
                 model_name=model_name or None,
+                batch_size=data.get("batch_size", 32),
+                timeout=data.get("timeout", 30.0),
                 extra=data.get("extra", {}),
                 is_default=True,
                 created_at=now,
@@ -95,6 +104,8 @@ class ModelEndpointService:
             "embedder": {
                 "endpoint": os.getenv("EMBEDDER_ENDPOINT", s.embedder.base_url),
                 "model_name": os.getenv("EMBEDDING_MODEL", s.embedder.model_name),
+                "batch_size": s.embedder.batch_size,
+                "timeout": s.embedder.timeout,
                 "extra": _with_api_key(
                     {"implementation": "vllm"},
                     os.getenv("EMBEDDER_API_KEY", s.embedder.api_key),
@@ -103,17 +114,25 @@ class ModelEndpointService:
             "llm": {
                 "endpoint": os.getenv("LLM_ENDPOINT", s.llm.base_url),
                 "model_name": os.getenv("LLM_MODEL", s.llm.model),
-                "extra": _with_api_key(
-                    {"implementation": "vllm"},
-                    os.getenv("API_KEY", s.llm.api_key),
+                "timeout": s.llm.timeout,
+                "extra": _with_enable_thinking(
+                    _with_api_key(
+                        {"implementation": "vllm"},
+                        os.getenv("API_KEY", s.llm.api_key),
+                    ),
+                    s.llm.enable_thinking,
                 ),
             },
             "vlm": {
                 "endpoint": os.getenv("VLM_ENDPOINT", s.vlm.base_url),
                 "model_name": os.getenv("VLM_MODEL", s.vlm.model),
-                "extra": _with_api_key(
-                    {"implementation": "vllm"},
-                    os.getenv("VLM_API_KEY", s.vlm.api_key),
+                "timeout": s.vlm.timeout,
+                "extra": _with_enable_thinking(
+                    _with_api_key(
+                        {"implementation": "vllm"},
+                        os.getenv("VLM_API_KEY", s.vlm.api_key),
+                    ),
+                    s.vlm.enable_thinking,
                 ),
             },
             "reranker": {
@@ -125,6 +144,7 @@ class ModelEndpointService:
                 # remains available for per-partition opt-in.
                 "endpoint": os.getenv("RERANKER_ENDPOINT", s.reranker.base_url),
                 "model_name": os.getenv("RERANKER_MODEL", s.reranker.model_name),
+                "timeout": s.reranker.timeout,
                 "extra": _with_api_key(
                     {"implementation": s.reranker.provider},
                     os.getenv("RERANKER_API_KEY", s.reranker.api_key),

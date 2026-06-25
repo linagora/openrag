@@ -135,7 +135,11 @@ def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.Monke
     assert tagger._llm.kwargs["temperature"] == 0.1
 
 
-def test_build_contextualizer_factory_returns_none_without_llm_config(tmp_path) -> None:
+def test_build_contextualizer_factory_returns_factory_for_later_hydration(tmp_path) -> None:
+    # With no LLM configured at build time the factory is still returned (the
+    # registry is hydrated from the DB later) — resolving an unknown name raises
+    # KeyError, which the pipeline catches and skips. It must raise *before*
+    # touching the prompt/semaphore, so neither is needed in this cfg.
     from services.workers.indexer_pool import _build_contextualizer_factory
 
     cfg = SimpleNamespace(
@@ -146,7 +150,496 @@ def test_build_contextualizer_factory_returns_none_without_llm_config(tmp_path) 
         prompts=SimpleNamespace(chunk_contextualizer="chunk_contextualizer_tmpl.txt"),
     )
 
-    assert _build_contextualizer_factory(cfg) is None
+    factory = _build_contextualizer_factory(cfg)
+    assert factory is not None
+    with pytest.raises(KeyError):
+        factory("default")
+
+
+def test_contextualizer_factory_reads_live_registry(tmp_path) -> None:
+    # The factory holds a live reference to cfg.models.llm: a name added to the
+    # registry AFTER the factory is built (mimicking the indexer's lazy DB
+    # hydration) must resolve without rebuilding the factory.
+    from core.config.model_endpoints import ModelEndpointConfig
+    from core.llm import llm_registry
+    from services.workers.indexer_pool import _build_contextualizer_factory
+
+    class ProbeLLM:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    llm_registry.register("live-probe-llm")(ProbeLLM)
+    try:
+        (tmp_path / "ctx.txt").write_text("Context prompt", encoding="utf-8")
+        registry: dict = {}
+        cfg = SimpleNamespace(
+            models=SimpleNamespace(llm=registry),
+            llm=SimpleNamespace(base_url="", model="", api_key=""),
+            chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
+            semaphore=SimpleNamespace(llm_semaphore=4),
+            paths=SimpleNamespace(prompts_dir=str(tmp_path)),
+            prompts=SimpleNamespace(chunk_contextualizer="ctx.txt"),
+        )
+
+        factory = _build_contextualizer_factory(cfg)
+        with pytest.raises(KeyError):
+            factory("late")
+
+        # Hydration mutates the same dict in place (dict.clear()+update()).
+        registry["late"] = ModelEndpointConfig(
+            endpoint="http://late.example/v1",
+            model_name="late-model",
+            extra={"implementation": "live-probe-llm"},
+        )
+
+        contextualizer = factory("late")
+        assert contextualizer._llm.kwargs["endpoint"] == "http://late.example/v1"
+        assert contextualizer._llm.kwargs["model_name"] == "late-model"
+    finally:
+        llm_registry._registry.pop("live-probe-llm", None)
+
+
+def test_embedder_factory_reads_live_registry() -> None:
+    from core.embeddings import embedder_registry
+    from services.workers.indexer_pool import _build_embedder_factory
+
+    class ProbeEmbedder:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    embedder_registry.register("live-probe-embedder")(ProbeEmbedder)
+    try:
+        registry: dict = {}
+        cfg = SimpleNamespace(
+            models=SimpleNamespace(embedder=registry),
+            embedder=SimpleNamespace(base_url="", model_name="", api_key=""),
+        )
+
+        factory = _build_embedder_factory(cfg)
+        assert factory is not None
+        with pytest.raises(KeyError):
+            factory("late")
+
+        registry["late"] = ModelEndpointConfig(
+            endpoint="http://embed.example/v1",
+            model_name="embed-model",
+            timeout=13,
+            batch_size=7,
+            extra={"implementation": "live-probe-embedder", "api_key": "embed-key", "max_model_len": 2047},
+        )
+
+        embedder = factory("late")
+        assert embedder.kwargs["endpoint"] == "http://embed.example/v1"
+        assert embedder.kwargs["model_name"] == "embed-model"
+        assert embedder.kwargs["batch_size"] == 7
+        assert embedder.kwargs["timeout"] == 13
+        assert embedder.kwargs["api_key"] == "embed-key"
+        assert embedder.kwargs["max_model_len"] == 2047
+    finally:
+        embedder_registry._registry.pop("live-probe-embedder", None)
+
+
+def test_embedder_factory_rebuilds_on_api_key_rotation() -> None:
+    from core.embeddings import embedder_registry
+    from services.workers.indexer_pool import _build_embedder_factory
+
+    class ProbeEmbedder:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    embedder_registry.register("key-probe-embedder")(ProbeEmbedder)
+    try:
+        registry = {
+            "ep": ModelEndpointConfig(
+                endpoint="http://embed.example/v1",
+                model_name="embed-model",
+                extra={"implementation": "key-probe-embedder", "api_key": "k1"},
+            )
+        }
+        cfg = SimpleNamespace(
+            models=SimpleNamespace(embedder=registry),
+            embedder=SimpleNamespace(base_url="", model_name="", api_key=""),
+        )
+
+        factory = _build_embedder_factory(cfg)
+        first = factory("ep")
+
+        registry["ep"] = ModelEndpointConfig(
+            endpoint="http://embed.example/v1",
+            model_name="embed-model",
+            extra={"implementation": "key-probe-embedder", "api_key": "k2"},
+        )
+        second = factory("ep")
+
+        assert second is not first
+        assert second.kwargs["api_key"] == "k2"
+    finally:
+        embedder_registry._registry.pop("key-probe-embedder", None)
+
+
+def test_vlm_factory_reads_live_registry() -> None:
+    from core.vlm import vlm_registry
+    from services.workers.indexer_pool import _build_vlm_factory
+
+    class ProbeVLM:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    vlm_registry.register("live-probe-vlm")(ProbeVLM)
+    try:
+        registry: dict = {}
+        cfg = SimpleNamespace(
+            models=SimpleNamespace(vlm=registry),
+            vlm=SimpleNamespace(base_url="", model="", api_key="", timeout=60, enable_thinking=None),
+        )
+
+        factory = _build_vlm_factory(cfg)
+        with pytest.raises(KeyError):
+            factory("late")
+
+        registry["late"] = ModelEndpointConfig(
+            endpoint="http://vlm.example/v1",
+            model_name="vlm-model",
+            timeout=17,
+            extra={"implementation": "live-probe-vlm", "api_key": "vlm-key", "enable_thinking": False},
+        )
+
+        vlm = factory("late")
+        assert vlm.kwargs["endpoint"] == "http://vlm.example/v1"
+        assert vlm.kwargs["model_name"] == "vlm-model"
+        assert vlm.kwargs["timeout"] == 17
+        assert vlm.kwargs["api_key"] == "vlm-key"
+        assert vlm.kwargs["enable_thinking"] is False
+    finally:
+        vlm_registry._registry.pop("live-probe-vlm", None)
+
+
+def test_vlm_factory_rebuilds_on_endpoint_edit() -> None:
+    from core.vlm import vlm_registry
+    from services.workers.indexer_pool import _build_vlm_factory
+
+    class ProbeVLM:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    vlm_registry.register("edit-probe-vlm")(ProbeVLM)
+    try:
+        registry = {
+            "ep": ModelEndpointConfig(
+                endpoint="http://vlm-v1.example/v1",
+                model_name="vlm-v1",
+                extra={"implementation": "edit-probe-vlm"},
+            )
+        }
+        cfg = SimpleNamespace(
+            models=SimpleNamespace(vlm=registry),
+            vlm=SimpleNamespace(base_url="", model="", api_key="", timeout=60, enable_thinking=None),
+        )
+
+        factory = _build_vlm_factory(cfg)
+        first = factory("ep")
+
+        registry["ep"] = ModelEndpointConfig(
+            endpoint="http://vlm-v2.example/v1",
+            model_name="vlm-v2",
+            extra={"implementation": "edit-probe-vlm"},
+        )
+        second = factory("ep")
+
+        assert second is not first
+        assert second.kwargs["endpoint"] == "http://vlm-v2.example/v1"
+        assert second.kwargs["model_name"] == "vlm-v2"
+    finally:
+        vlm_registry._registry.pop("edit-probe-vlm", None)
+
+
+def test_required_llm_names_mirrors_pipeline_selection() -> None:
+    from services.workers.indexer_pool import _required_llm_names
+
+    assert _required_llm_names(None) == []
+    # Topic tagging defaults on, contextualization defaults off.
+    assert _required_llm_names({}) == ["default"]
+    assert _required_llm_names({"enable_topic_tagging": False}) == []
+    assert _required_llm_names(
+        {
+            "enable_contextualization": True,
+            "contextualization_llm": "ctx",
+            "enable_topic_tagging": True,
+            "topic_tagging_llm": "tags",
+        }
+    ) == ["ctx", "tags"]
+
+
+def test_required_model_endpoint_names_include_embedder_and_vlm() -> None:
+    from services.workers.indexer_pool import _required_model_endpoint_names
+
+    required = _required_model_endpoint_names(
+        {
+            "enable_image_captioning": True,
+            "vlm": "vlm-fast",
+            "enable_contextualization": True,
+            "contextualization_llm": "ctx",
+            "enable_topic_tagging": True,
+            "topic_tagging_llm": "tags",
+        },
+        embedder_name="embed-fast",
+    )
+
+    assert required == {
+        "embedder": ["embed-fast"],
+        "llm": ["ctx", "tags"],
+        "vlm": ["vlm-fast"],
+    }
+
+
+def test_registry_reload_decision_guards() -> None:
+    from services.workers.indexer_pool import _registry_reload_decision
+
+    # First use always loads.
+    assert _registry_reload_decision(loaded_at=None, last_miss_at=None, now=100.0, ttl=60.0, missing=False) == "initial"
+    # Hit path: fresh and nothing missing → no reload, no I/O.
+    assert _registry_reload_decision(loaded_at=100.0, last_miss_at=None, now=110.0, ttl=60.0, missing=False) is None
+    # TTL expiry refreshes (catches edits to existing endpoints).
+    assert _registry_reload_decision(loaded_at=100.0, last_miss_at=None, now=161.0, ttl=60.0, missing=False) == "ttl"
+    # A missing name within the window triggers one reload...
+    assert _registry_reload_decision(loaded_at=100.0, last_miss_at=None, now=110.0, ttl=60.0, missing=True) == "miss"
+    # ...but is rate-limited: a still-missing name can't reload again until the
+    # next window, so a deleted/typo'd name can't storm the DB.
+    assert _registry_reload_decision(loaded_at=100.0, last_miss_at=105.0, now=120.0, ttl=60.0, missing=True) is None
+    # A missing name takes priority over a stale registry: it must block ("miss"),
+    # not fall through to a background "ttl" refresh that would skip the stage.
+    assert _registry_reload_decision(loaded_at=100.0, last_miss_at=None, now=200.0, ttl=60.0, missing=True) == "miss"
+    # Rate-limited miss while ALSO stale → still refresh the stale registry in the
+    # background ("ttl") rather than nothing.
+    assert _registry_reload_decision(loaded_at=100.0, last_miss_at=150.0, now=200.0, ttl=60.0, missing=True) == "ttl"
+
+
+def test_registry_reload_decision_rate_limits_only_same_missing_signature() -> None:
+    from services.workers.indexer_pool import _registry_reload_decision
+
+    previous_missing = (("embedder", ("missing-a",)),)
+    same_missing = (("embedder", ("missing-a",)),)
+    different_missing = (("embedder", ("missing-b",)),)
+
+    assert (
+        _registry_reload_decision(
+            loaded_at=100.0,
+            last_miss_at=105.0,
+            last_miss_key=previous_missing,
+            missing_key=same_missing,
+            now=120.0,
+            ttl=60.0,
+            missing=True,
+        )
+        is None
+    )
+    assert (
+        _registry_reload_decision(
+            loaded_at=100.0,
+            last_miss_at=105.0,
+            last_miss_key=previous_missing,
+            missing_key=different_missing,
+            now=120.0,
+            ttl=60.0,
+            missing=True,
+        )
+        == "miss"
+    )
+
+
+def test_reload_decision_treats_default_global_fallback_as_resolvable() -> None:
+    # "default" resolves via the global cfg.llm fallback even when the registry
+    # has no is_default row → it must NOT be treated as missing, otherwise we'd
+    # block-reload every window forever without converging.
+    import time as _time
+
+    from services.workers.indexer_pool import IndexerPool
+
+    actor_class = IndexerPool.__ray_metadata__.modified_class
+
+    def _pool(has_fallback: bool):
+        pool = actor_class.__new__(actor_class)
+        pool._cfg = SimpleNamespace(models=SimpleNamespace(llm={}))  # registry lacks "default"
+        pool._has_default_fallback = has_fallback
+        pool._registry_loaded_at = _time.monotonic()  # fresh, not stale
+        pool._last_miss_reload_at = None
+        return pool
+
+    # Fallback present → "default" resolvable → hit path, no reload.
+    assert _pool(True)._reload_decision(["default"]) is None
+    # No fallback and not in registry → genuinely missing → reload.
+    assert _pool(False)._reload_decision(["default"]) == "miss"
+    # A *named* endpoint (not "default") is never covered by the fallback.
+    assert _pool(True)._reload_decision(["acme-llm"]) == "miss"
+
+
+@pytest.mark.asyncio
+async def test_ensure_registry_fresh_is_single_flight() -> None:
+    from services.workers.indexer_pool import IndexerPool
+
+    actor_class = IndexerPool.__ray_metadata__.modified_class
+    pool = actor_class.__new__(actor_class)
+
+    class Service:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def load_all(self) -> None:
+            self.calls += 1
+            await asyncio.sleep(0)
+
+    pool._cfg = SimpleNamespace(models=SimpleNamespace(llm={}))
+    pool._model_endpoint_service = Service()
+    pool._registry_loaded_at = None
+    pool._last_miss_reload_at = None
+    pool._registry_lock = asyncio.Lock()
+    pool._registry_reload_task = None
+
+    await asyncio.gather(*(pool._ensure_registry_fresh([]) for _ in range(20)))
+
+    assert pool._model_endpoint_service.calls == 1
+    assert pool._registry_loaded_at is not None
+
+
+@pytest.mark.asyncio
+async def test_ttl_refresh_runs_in_background_without_blocking() -> None:
+    # A periodic TTL refresh must not sit on a file's critical path: the current
+    # registry is still valid, so _ensure_registry_fresh returns immediately and
+    # the reload runs in the background.
+    import time as _time
+
+    from services.workers.indexer_pool import _MODEL_REGISTRY_TTL_SECONDS, IndexerPool
+
+    actor_class = IndexerPool.__ray_metadata__.modified_class
+    pool = actor_class.__new__(actor_class)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def load_all(self) -> None:
+            self.calls += 1
+            started.set()
+            await release.wait()
+
+    pool._cfg = SimpleNamespace(models=SimpleNamespace(llm={"default": object()}))
+    pool._model_endpoint_service = SlowService()
+    pool._registry_loaded_at = _time.monotonic() - _MODEL_REGISTRY_TTL_SECONDS - 1  # stale → "ttl"
+    pool._last_miss_reload_at = None
+    pool._registry_lock = asyncio.Lock()
+    pool._registry_reload_task = None
+
+    # Returns promptly even though load_all is still blocked.
+    await asyncio.wait_for(pool._ensure_registry_fresh(["default"]), timeout=0.5)
+    await asyncio.wait_for(started.wait(), timeout=0.5)
+    assert pool._registry_reload_task is not None and not pool._registry_reload_task.done()
+
+    release.set()
+    await pool._registry_reload_task
+    assert pool._model_endpoint_service.calls == 1
+
+
+def test_contextualizer_factory_rebuilds_on_endpoint_edit(tmp_path) -> None:
+    # An edited endpoint (changed identity) must yield a fresh client; the cache
+    # holds one entry per name (replaced, not accumulated), so it can't leak a
+    # stale client per edit over the long-lived actor.
+    from core.config.model_endpoints import ModelEndpointConfig
+    from core.llm import llm_registry
+    from services.workers.indexer_pool import _build_contextualizer_factory
+
+    class ProbeLLM:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    llm_registry.register("edit-probe-llm")(ProbeLLM)
+    try:
+        (tmp_path / "ctx.txt").write_text("Context prompt", encoding="utf-8")
+        registry = {
+            "ep": ModelEndpointConfig(
+                endpoint="http://v1.example/v1", model_name="m1", extra={"implementation": "edit-probe-llm"}
+            )
+        }
+        cfg = SimpleNamespace(
+            models=SimpleNamespace(llm=registry),
+            llm=SimpleNamespace(base_url="", model="", api_key=""),
+            chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
+            semaphore=SimpleNamespace(llm_semaphore=4),
+            paths=SimpleNamespace(prompts_dir=str(tmp_path)),
+            prompts=SimpleNamespace(chunk_contextualizer="ctx.txt"),
+        )
+
+        factory = _build_contextualizer_factory(cfg)
+        first = factory("ep")
+        assert factory("ep") is first  # unchanged identity → cached
+
+        # Edit the endpoint in place (mimicking a registry reload after a change).
+        registry["ep"] = ModelEndpointConfig(
+            endpoint="http://v2.example/v1", model_name="m2", extra={"implementation": "edit-probe-llm"}
+        )
+        second = factory("ep")
+        assert second is not first
+        assert second._llm.kwargs["endpoint"] == "http://v2.example/v1"
+    finally:
+        llm_registry._registry.pop("edit-probe-llm", None)
+
+
+def test_endpoint_identity_covers_full_config() -> None:
+    # The cache identity must change for ANY config edit — including an
+    # extra-only change like an api-key rotation (same URL + model) — so the
+    # client is rebuilt after a reload, matching the API's invalidate-on-change.
+    from core.config.model_endpoints import ModelEndpointConfig
+    from services.workers.indexer_pool import _endpoint_identity
+
+    base = ModelEndpointConfig(endpoint="http://e/v1", model_name="m", extra={"api_key": "k1"})
+    same = ModelEndpointConfig(endpoint="http://e/v1", model_name="m", extra={"api_key": "k1"})
+    rotated_key = ModelEndpointConfig(endpoint="http://e/v1", model_name="m", extra={"api_key": "k2"})
+
+    assert _endpoint_identity(base) == _endpoint_identity(same)
+    assert _endpoint_identity(base) != _endpoint_identity(rotated_key)
+
+
+def test_contextualizer_factory_rebuilds_on_api_key_rotation(tmp_path) -> None:
+    # Same endpoint + model, only the api_key changes → the cached client must
+    # still be rebuilt (the old key would otherwise persist until restart).
+    from core.config.model_endpoints import ModelEndpointConfig
+    from core.llm import llm_registry
+    from services.workers.indexer_pool import _build_contextualizer_factory
+
+    class ProbeLLM:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    llm_registry.register("key-probe-llm")(ProbeLLM)
+    try:
+        (tmp_path / "ctx.txt").write_text("Context prompt", encoding="utf-8")
+        registry = {
+            "ep": ModelEndpointConfig(
+                endpoint="http://e/v1", model_name="m", extra={"implementation": "key-probe-llm", "api_key": "k1"}
+            )
+        }
+        cfg = SimpleNamespace(
+            models=SimpleNamespace(llm=registry),
+            llm=SimpleNamespace(base_url="", model="", api_key=""),
+            chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
+            semaphore=SimpleNamespace(llm_semaphore=4),
+            paths=SimpleNamespace(prompts_dir=str(tmp_path)),
+            prompts=SimpleNamespace(chunk_contextualizer="ctx.txt"),
+        )
+
+        factory = _build_contextualizer_factory(cfg)
+        first = factory("ep")
+
+        registry["ep"] = ModelEndpointConfig(
+            endpoint="http://e/v1", model_name="m", extra={"implementation": "key-probe-llm", "api_key": "k2"}
+        )
+        second = factory("ep")
+        assert second is not first
+        assert second._llm.kwargs["api_key"] == "k2"
+    finally:
+        llm_registry._registry.pop("key-probe-llm", None)
 
 
 def test_build_contextualizer_factory_uses_global_llm_fallback(tmp_path) -> None:
@@ -155,7 +648,12 @@ def test_build_contextualizer_factory_uses_global_llm_fallback(tmp_path) -> None
     (tmp_path / "chunk_contextualizer_tmpl.txt").write_text("Context prompt", encoding="utf-8")
     cfg = SimpleNamespace(
         models=SimpleNamespace(llm={}),
-        llm=SimpleNamespace(base_url="http://llm.example/v1", model="mistral", api_key="llm-key"),
+        llm=SimpleNamespace(
+            base_url="http://llm.example/v1",
+            model="mistral",
+            api_key="llm-key",
+            enable_thinking=False,
+        ),
         chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
         semaphore=SimpleNamespace(llm_semaphore=7),
         paths=SimpleNamespace(prompts_dir=str(tmp_path)),
@@ -172,6 +670,7 @@ def test_build_contextualizer_factory_uses_global_llm_fallback(tmp_path) -> None
     assert contextualizer._llm._endpoint == "http://llm.example/v1"
     assert contextualizer._llm._model == "mistral"
     assert contextualizer._llm._api_key == "llm-key"
+    assert contextualizer._llm._enable_thinking is False
     # _batch_size drives the per-document loop; _llm.chat is gated by the
     # injected cluster-wide "llmSemaphore".
     assert contextualizer._semaphore._name == "llmSemaphore"
@@ -242,6 +741,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     captured = {}
     contextualizer_factory = object()
     topic_tagger_factory = object()
+    vlm_factory = object()
 
     class RDBConfig:
         def model_copy(self, *, update):
@@ -277,6 +777,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(core.config, "load_config", lambda: cfg)
     monkeypatch.setattr(module, "_build_chunker", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_embedder_factory", lambda _cfg: object())
+    monkeypatch.setattr(module, "_build_vlm_factory", lambda _cfg: vlm_factory)
     monkeypatch.setattr(module, "_build_contextualizer_factory", lambda _cfg: contextualizer_factory)
     monkeypatch.setattr(module, "_build_topic_tagger_factory", lambda _cfg: topic_tagger_factory)
     monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
@@ -302,3 +803,4 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     assert actor_calls[0][1].get("namespace") == "openrag"
     assert captured["contextualizer_factory"] is contextualizer_factory
     assert captured["topic_tagger_factory"] is topic_tagger_factory
+    assert captured["vlm_factory"] is vlm_factory

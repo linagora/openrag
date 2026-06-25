@@ -64,11 +64,13 @@ class VLLMClient(LLM):
         *,
         api_key: str = "",
         timeout: float = 240.0,
+        enable_thinking: bool | None = None,
         **kwargs,
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._model = model_name
         self._api_key = api_key
+        self._enable_thinking = enable_thinking
         self._defaults: dict = kwargs
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if api_key:
@@ -98,6 +100,15 @@ class VLLMClient(LLM):
 
         return base_url, model, override_headers
 
+    def _chat_payload_kwargs(self, kwargs: dict) -> dict:
+        payload_kwargs = {**self._defaults, **kwargs}
+        enable_thinking = payload_kwargs.pop("enable_thinking", self._enable_thinking)
+        if enable_thinking is not None:
+            chat_template_kwargs = dict(payload_kwargs.get("chat_template_kwargs") or {})
+            chat_template_kwargs.setdefault("enable_thinking", enable_thinking)
+            payload_kwargs["chat_template_kwargs"] = chat_template_kwargs
+        return payload_kwargs
+
     @with_circuit_breaker("llm")
     @with_retry(max_attempts=3)
     async def generate(self, prompt: str, **kwargs) -> dict:
@@ -123,7 +134,7 @@ class VLLMClient(LLM):
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> dict:
         base_url, model, headers = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
-        payload = {**self._defaults, **kwargs, "model": model, "messages": messages, "stream": False}
+        payload = {**self._chat_payload_kwargs(kwargs), "model": model, "messages": messages, "stream": False}
         try:
             resp = await self._client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
             resp.raise_for_status()
@@ -141,7 +152,7 @@ class VLLMClient(LLM):
     async def stream_chat(self, messages: list[dict[str, str]], **kwargs) -> AsyncIterator[str]:
         base_url, model, headers = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
-        payload = {**self._defaults, **kwargs, "model": model, "messages": messages, "stream": True}
+        payload = {**self._chat_payload_kwargs(kwargs), "model": model, "messages": messages, "stream": True}
         try:
             async with self._client.stream(
                 "POST", f"{base_url}/chat/completions", json=payload, headers=headers
@@ -354,10 +365,16 @@ class VLLMVision(VLLMClient, VLM):
                 ],
             }
         ]
+        payload: dict = {
+            **self._chat_payload_kwargs({}),
+            "model": self._model,
+            "messages": messages,
+            "max_tokens": self._max_tokens,
+        }
         try:
             resp = await self._client.post(
                 f"{self._endpoint}/chat/completions",
-                json={"model": self._model, "messages": messages, "max_tokens": self._max_tokens},
+                json=payload,
             )
             resp.raise_for_status()
         except httpx.ConnectError as exc:
