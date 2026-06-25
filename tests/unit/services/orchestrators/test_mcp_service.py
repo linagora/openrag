@@ -47,7 +47,7 @@ class FakePartitions:
         self._chunks = chunks if chunks is not None else []
         self._members = members if members is not None else []
         self._partition_exists = partition_exists
-        self.created: list[tuple[str, int | None]] = []
+        self.created: list[tuple[str, int | None, int | None]] = []
 
     async def list_partitions(self):
         return list(self._partitions)
@@ -68,9 +68,9 @@ class FakePartitions:
     async def partition_exists(self, partition):
         return self._partition_exists
 
-    async def create_partition(self, partition, user_id):
+    async def create_partition(self, partition, user_id, *, max_owned=None):
         # Mirror PgPartitionRepository: the creator is granted owner.
-        self.created.append((partition, user_id))
+        self.created.append((partition, user_id, max_owned))
         self._members.append({"user_id": user_id, "role": "owner"})
 
 
@@ -193,6 +193,12 @@ async def test_search_all_request_resolves_to_allowed():
         query="hi", partitions=["all"], top_k=None, allowed_partitions=["a", "b"]
     )
     assert retrieval.calls[0]["partitions"] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_search_all_with_empty_allowed_partitions_fails_closed():
+    with pytest.raises(PermissionError, match="No accessible partitions"):
+        await _service().search_documents(query="hi", partitions=["all"], top_k=None, allowed_partitions=[])
 
 
 @pytest.mark.asyncio
@@ -378,17 +384,26 @@ async def test_task_status_admin_bypasses_owner():
 
 
 @pytest.mark.asyncio
-async def test_task_status_failed_includes_error():
+async def test_task_status_failed_redacts_error_for_non_admin():
     jobs = FakeJobs(details={"user_id": 1})
     out = await _service(jobs=jobs, indexing=FakeIndexing(state="FAILED", error="kaboom")).get_task_status(
         task_id="t1", user_id=1, is_admin=False
     )
     assert out["task_state"] == "FAILED"
+    assert out["error"] == "Task failed. Contact an administrator for details."
+
+
+@pytest.mark.asyncio
+async def test_task_status_failed_includes_raw_error_for_admin():
+    jobs = FakeJobs(details={"user_id": 1})
+    out = await _service(jobs=jobs, indexing=FakeIndexing(state="FAILED", error="kaboom")).get_task_status(
+        task_id="t1", user_id=1, is_admin=True
+    )
     assert out["error"] == "kaboom"
 
 
 @pytest.mark.asyncio
-async def test_list_my_tasks_forwards_scope_and_decorates_failed():
+async def test_list_my_tasks_forwards_scope_and_redacts_failed_for_non_admin():
     jobs = FakeJobs(
         tasks=[
             {"task_id": "t1", "state": "FAILED", "details": {}},
@@ -400,9 +415,18 @@ async def test_list_my_tasks_forwards_scope_and_decorates_failed():
     )
     assert jobs.last == {"is_admin": False, "user_id": 5, "task_status": "failed"}
     failed = next(t for t in out["tasks"] if t["task_id"] == "t1")
-    assert failed["error"] == "why"
+    assert failed["error"] == "Task failed. Contact an administrator for details."
     completed = next(t for t in out["tasks"] if t["task_id"] == "t2")
     assert "error" not in completed
+
+
+@pytest.mark.asyncio
+async def test_list_my_tasks_keeps_raw_failed_error_for_admin():
+    jobs = FakeJobs(tasks=[{"task_id": "t1", "state": "FAILED", "details": {}}])
+    out = await _service(jobs=jobs, indexing=FakeIndexing(error="why")).list_my_tasks(
+        user_id=5, is_admin=True, task_status="failed"
+    )
+    assert out["tasks"][0]["error"] == "why"
 
 
 @pytest.mark.asyncio
@@ -638,7 +662,7 @@ async def test_index_url_auto_creates_partition_and_indexes(monkeypatch):
         extra_metadata={"author": "me", "created_by": 999},  # created_by must be stripped
     )
     # auto-created the missing partition, owned by the caller
-    assert parts.created == [("newpart", 7)]
+    assert parts.created == [("newpart", 7, 100)]
     added = indexing.added[0]
     assert added["file_id"] == "f1"
     assert added["partition"] == "newpart"

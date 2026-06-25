@@ -101,6 +101,11 @@ async def get_partition_name(
             detail=f"Access to model `{model_name}` is forbidden for the current user",
         )
     if partition == "all" and not (is_admin and SUPER_ADMIN_MODE):
+        if not user_partitions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No accessible partitions",
+            )
         return user_partitions
     return [partition]
 

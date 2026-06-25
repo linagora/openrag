@@ -182,7 +182,7 @@ async def test_create_partition_negative_cap_disables_limit():
     prepo = FakePartitionRepo(existing=set(), owned_count=999)
     mrepo = FakeMembershipRepo(owned={7: 999})
     await _svc(prepo=prepo, mrepo=mrepo).create_partition("new", 7, max_owned=-1)
-    assert "new" in prepo._existing
+    assert prepo.created == [("new", 7)]
 
 
 @pytest.mark.asyncio

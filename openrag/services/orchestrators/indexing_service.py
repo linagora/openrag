@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from core.utils.exceptions import PartitionNotFoundError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
+from core.utils.partition_limits import max_partitions_for_user
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -143,7 +144,12 @@ class IndexingService:
             await self._partition_service.load_partitions()
             return
         user_id = (user or {}).get("id") or 1
-        await self._partition_service.create_partition(partition, user_id=user_id)
+        cap_user = user if user is not None else {"id": user_id, "is_admin": True}
+        await self._partition_service.create_partition(
+            partition,
+            user_id=user_id,
+            max_owned=max_partitions_for_user(cap_user),
+        )
         logger.bind(partition=partition, user_id=user_id).info("Auto-created partition on index.")
 
     async def add_file(

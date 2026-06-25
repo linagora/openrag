@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 
 import pytest
-from api.dependencies.auth import check_user_file_quota, ensure_partition_role, require_task_owner
+from api.dependencies.auth import (
+    check_user_file_quota,
+    ensure_partition_role,
+    require_partitions_viewer,
+    require_task_owner,
+)
 from core.utils.exceptions import AuthError
 from fastapi import HTTPException
 
@@ -145,6 +150,21 @@ async def test_ensure_partition_role_forbids_existing_partition_without_membersh
 
     assert exc.value.status_code == 403
     assert exc.value.detail == "Access to partition 'existing' forbidden"
+
+
+@pytest.mark.asyncio
+async def test_require_partitions_viewer_fails_closed_for_all_scope_without_memberships():
+    with pytest.raises(HTTPException) as exc:
+        await require_partitions_viewer(
+            partitions=["all"],
+            user={"id": 1, "is_admin": False},
+            user_partitions=[],
+            auth_service=FakeAuthService,
+            partition_service=FakePartitionService(existing=set()),
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "No accessible partitions"
 
 
 @pytest.mark.asyncio

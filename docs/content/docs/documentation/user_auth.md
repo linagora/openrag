@@ -10,8 +10,9 @@ It covers admin behavior, user tokens, and partition-level permissions.
 ## **1. Authentication Activation**
 
 ### `AUTH_TOKEN`
-- The presence of the environment variable **`AUTH_TOKEN`** activates authentication.  
-- If **`AUTH_TOKEN`** is **absent**, the middleware **bypasses all authentication checks**, allowing open access (useful for local or testing environments).
+- **`AUTH_TOKEN`** is the token used to bootstrap the admin user and authenticate protected API calls.
+- If **`AUTH_TOKEN`** is absent, OpenRAG fails closed by default.
+- Local open mode requires **`ALLOW_NO_AUTH=true`** together with `AUTH_MODE=token`. This should never be used in production.
 
 :::danger[Attention !!!]
 **`SUPER_ADMIN_MODE=true`** must be activated if you want admin users to access all existing partitions, not just the admin's own partitions.
@@ -105,8 +106,8 @@ Role-based restrictions are enforced via dependency guards:
 ## **7. Authorization Flow Summary**
 
 1. Request arrives with optional `Authorization: Bearer <token>`.
-2. If `AUTH_TOKEN` is **unset**, authentication is skipped (open mode).  
-3. If set:
+2. If `AUTH_TOKEN` is **unset**, authentication is rejected unless `ALLOW_NO_AUTH=true` is explicitly enabled for local development.
+3. If a token is configured:
    - Middleware hashes the token.
    - Looks up the user by hash.
    - Loads their partition memberships.
@@ -156,4 +157,3 @@ Role-based restrictions are enforced via dependency guards:
 - Configurable **`SUPER_ADMIN_MODE`** for system-wide debugging or admin override.
 
 ---
-

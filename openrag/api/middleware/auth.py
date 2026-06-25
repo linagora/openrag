@@ -30,6 +30,7 @@ and deleted the ``components/auth/middleware.py`` shim.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
@@ -38,6 +39,9 @@ from core.config.auth import AuthBypassConfig
 from core.utils.logging import get_logger
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from limits import parse
+from limits.aio.storage import MemoryStorage
+from limits.aio.strategies import MovingWindowRateLimiter
 from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = get_logger()
@@ -91,6 +95,44 @@ def _allow_no_auth() -> bool:
     return os.getenv("ALLOW_NO_AUTH", "false").strip().lower() == "true"
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+class AuthFailureRateLimiter:
+    """Limit failed authentication attempts by client IP."""
+
+    def __init__(self) -> None:
+        self.enabled = _env_flag("RATE_LIMIT_ENABLED", True)
+        self._limiter = MovingWindowRateLimiter(MemoryStorage())
+        self._limit = parse(os.environ.get("RATE_LIMIT_AUTH_FAILURE", os.environ.get("RATE_LIMIT_AUTH", "20/minute")))
+
+    @staticmethod
+    def _identity(request: Request) -> str:
+        client = request.client
+        return f"ip:{client.host}" if client else "ip:unknown"
+
+    async def response_if_limited(self, request: Request) -> JSONResponse | None:
+        if not self.enabled:
+            return None
+        identity = self._identity(request)
+        tier = "auth-failure"
+        allowed = await self._limiter.hit(self._limit, tier, identity)
+        if allowed:
+            return None
+        stats = await self._limiter.get_window_stats(self._limit, tier, identity)
+        retry_after = max(1, int(stats.reset_time - time.time()))
+        logger.warning("Auth failure rate limit exceeded", path=request.url.path, identity=identity)
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Please retry later.", "extra": {}},
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """FastAPI middleware enforcing authentication for both token and oidc modes.
 
@@ -110,6 +152,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self._get_auth_service = get_auth_service
         self._bypass_config = bypass_config or AuthBypassConfig()
+        self._auth_failure_limiter = AuthFailureRateLimiter()
+
+    async def _auth_failure(self, request: Request, *, status_code: int, detail: str) -> JSONResponse:
+        limited = await self._auth_failure_limiter.response_if_limited(request)
+        if limited is not None:
+            return limited
+        return JSONResponse(status_code=status_code, content={"detail": detail})
 
     async def dispatch(self, request: Request, call_next):
         # Read env lazily so tests can flip AUTH_MODE per-test.
@@ -239,10 +288,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     user = await auth_service.get_user_by_token_for_request(token)
                     if not user and auth_mode == "token":
                         # Legacy test contract: robot suite asserts 403 + "Invalid token".
-                        return JSONResponse(status_code=403, content={"detail": "Invalid token"})
+                        return await self._auth_failure(request, status_code=403, detail="Invalid token")
             elif auth_mode == "token":
                 # Token mode: no cookie + no bearer → legacy 403 "Missing token".
-                return JSONResponse(status_code=403, content={"detail": "Missing token"})
+                return await self._auth_failure(request, status_code=403, detail="Missing token")
 
         # --- 3) Unauthenticated: redirect UI in oidc mode, else 401 JSON.
         if user is None:
@@ -254,7 +303,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     url=f"/auth/login?next={quote(next_path, safe='')}",
                     status_code=302,
                 )
-            return JSONResponse(status_code=401, content={"detail": "Unauthenticated"})
+            return await self._auth_failure(request, status_code=401, detail="Unauthenticated")
 
         # --- Happy path: user resolved.
         request.state.user = user

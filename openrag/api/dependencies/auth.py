@@ -169,6 +169,11 @@ async def require_partitions_viewer(
     if SUPER_ADMIN_MODE and user.get("is_admin"):
         return user
     if isinstance(partitions, list) and len(partitions) == 1 and partitions[0] == "all":
+        if not user_partitions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No accessible partitions",
+            )
         return user
     for partition in partitions:
         await ensure_partition_role(

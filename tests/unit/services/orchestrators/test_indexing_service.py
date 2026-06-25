@@ -113,6 +113,7 @@ class FakePartitionService:
         self._config = config
         self._db = db_partitions or set()
         self.created: list[tuple[str, int]] = []
+        self.create_kwargs: list[dict] = []
         self.loaded = 0
 
     def _cfg(self, partition: str) -> PartitionConfig:
@@ -128,6 +129,7 @@ class FakePartitionService:
 
     async def create_partition(self, partition: str, *, user_id: int, **_) -> None:
         self.created.append((partition, user_id))
+        self.create_kwargs.append(dict(_))
         self._db.add(partition)
         # Mimic create_partition + load_partitions populating the cache.
         self._config.partitions[partition] = self._cfg(partition)
@@ -285,6 +287,7 @@ async def test_add_file_auto_creates_unknown_partition_when_service_wired(tmp_pa
 
     # Partition was created with the uploader as owner, then the file dispatched.
     assert psvc.created == [("tenant-new", 7)]
+    assert psvc.create_kwargs == [{"max_owned": 100}]
     assert disp.dispatched[0]["partition"] == "tenant-new"
 
 
@@ -307,6 +310,7 @@ async def test_add_file_auto_create_defaults_to_admin_when_user_missing(tmp_path
     )
 
     assert psvc.created == [("tenant-new", 1)]
+    assert psvc.create_kwargs == [{"max_owned": None}]
 
 
 @pytest.mark.asyncio

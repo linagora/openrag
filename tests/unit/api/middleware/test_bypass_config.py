@@ -273,6 +273,26 @@ async def test_dev_bypass_does_not_fail_open_without_flag(monkeypatch) -> None:
     svc.get_user_for_request.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_failed_token_auth_is_rate_limited_by_ip(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+
+    async def call_next(req):
+        return Response("ok")
+
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: None)
+
+    first = await middleware.dispatch(_request(), call_next)
+    second = await middleware.dispatch(_request(), call_next)
+
+    assert first.status_code == 403
+    assert second.status_code == 429
+    assert second.headers.get("Retry-After")
+
+
 def test_request_object_is_unused_by_helpers() -> None:
     """Sanity: ``is_ui_path`` / ``is_bypass_path`` are pure functions
     over the string path, so a FastAPI ``Request`` is never required

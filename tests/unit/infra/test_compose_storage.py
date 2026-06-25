@@ -92,6 +92,16 @@ def test_quick_start_milvus_uses_current_minio_root_env_names() -> None:
     assert milvus_env["MINIO_SECRET_ACCESS_KEY"] == "${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in your .env}"
 
 
+def test_ollama_cpu_milvus_uses_matching_minio_credentials() -> None:
+    compose = _load_yaml(ROOT / "docs" / "assets" / "compose_ollama_cpu.yaml")
+
+    minio_env = compose["services"]["minio"]["environment"]
+    milvus_env = compose["services"]["milvus"]["environment"]
+
+    assert milvus_env["MINIO_ACCESS_KEY_ID"] == minio_env["MINIO_ACCESS_KEY"]
+    assert milvus_env["MINIO_SECRET_ACCESS_KEY"] == minio_env["MINIO_SECRET_KEY"]
+
+
 def test_model_serving_cache_preserves_host_path_default_with_named_volume_opt_in() -> None:
     compose = _load_yaml(COMPOSE_DIR / "docker-compose.yaml")
     infinity = _load_yaml(EXTERN_DIR / "reranker" / "infinity.yaml")

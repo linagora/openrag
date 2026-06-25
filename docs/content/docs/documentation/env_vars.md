@@ -206,6 +206,8 @@ The PostgreSQL database is configured using the following environment variables:
 
 The main Docker Compose stack keeps the historical host-path defaults. Set these variables when you want to move state elsewhere, including Docker named volumes.
 
+When using host paths with the non-root API image, make sure the mounted directories are writable by the container user. If that is not practical for your deployment, use the named-volume profile instead.
+
 For an opt-in named-volume profile, copy the values from `infra/compose/.env.named-volumes.example` into your `.env`.
 
 | Variable | Default | Description |
@@ -526,7 +528,8 @@ The following environment variables configure the FastAPI server and control acc
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `APP_PORT` | `number` | `8000` | Port number on which the FastAPI application listens for incoming requests. |
-| `AUTH_TOKEN` | `string` | `EMPTY` | An authentication token is required to access protected API endpoints. By default, this token corresponds to the API key of the created admin (see [Admin Bootstrapping](/openrag/documentation/user_auth/#2-admin-bootstrapping)). If left empty, authentication is disabled. |
+| `AUTH_TOKEN` | `string` | `EMPTY` | Authentication token used to bootstrap the admin user and access protected API endpoints. If it is empty, the API fails closed unless `ALLOW_NO_AUTH=true` is explicitly set for local development. |
+| `ALLOW_NO_AUTH` | `boolean` | `false` | Enables the no-auth local development bypass when `AUTH_MODE=token` and `AUTH_TOKEN` is unset. Never enable this in production. |
 | `SUPER_ADMIN_MODE` | `boolean` | `false` | Enables super admin privileges when set to `true`, [granting unrestricted access](/openrag/documentation/data_model/#access-control) to all operations and bypassing standard access controls. This is for debugging |
 | `DEFAULT_FILE_QUOTA` | `int` | `-1` | Default per-user file quota. `<0` disables quotas globally; `>=0` sets the default limit when a user has no explicit quota. |
 | `PREFERRED_URL_SCHEME` | `string` | `null` | URL scheme (`http` or `https`) used when generating URLs in API responses (e.g., `task_status_url`). When running behind a reverse proxy that terminates SSL, set this to `https` to ensure generated URLs use the correct scheme. If unset, the scheme from the incoming request is used. |

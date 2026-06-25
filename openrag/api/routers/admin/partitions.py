@@ -9,7 +9,6 @@ whose exact non-bracketed ``{"detail": ...}`` body the endpoints return
 via ``HTTPException``.
 """
 
-import os
 from typing import Literal
 from urllib.parse import quote
 
@@ -20,7 +19,9 @@ from api.dependencies.auth import (
 )
 from api.dependencies.files import validate_file_id
 from api.schemas.admin.partition_schemas import PartitionDetailResponse, UpdatePartitionRequest
+from core.utils.exceptions import ConfigError
 from core.utils.logging import get_logger
+from core.utils.partition_limits import max_partitions_for_user
 from di.providers import get_partition_service
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -45,21 +46,6 @@ def _require_service_method(service, method_name: str):
             detail=f"{method_name} is not available.",
         )
     return method
-
-
-def _max_partitions_for_user(user: dict) -> int | None:
-    """Return the non-admin owned-partition cap, or None when it is disabled."""
-    if user.get("is_admin", False):
-        return None
-    raw_limit = os.environ.get("MAX_PARTITIONS_PER_USER", "100")
-    try:
-        return int(raw_limit)
-    except (TypeError, ValueError) as exc:
-        logger.error("Invalid MAX_PARTITIONS_PER_USER value", value=raw_limit)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="MAX_PARTITIONS_PER_USER must be an integer.",
-        ) from exc
 
 
 @router.get(
@@ -297,7 +283,14 @@ async def create_partition(
     # exhaust storage/metadata. None bypasses the cap (admins); a negative
     # MAX_PARTITIONS_PER_USER also disables it. The service raises a 403
     # (PARTITION_LIMIT_EXCEEDED) when the cap is reached.
-    max_owned = _max_partitions_for_user(user)
+    try:
+        max_owned = max_partitions_for_user(user)
+    except ConfigError as exc:
+        logger.error("Invalid MAX_PARTITIONS_PER_USER value")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=exc.message,
+        ) from exc
     await service.create_partition(partition=partition, user_id=user_id, max_owned=max_owned)
     return Response(status_code=status.HTTP_201_CREATED)
 
