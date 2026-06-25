@@ -9,11 +9,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint --ext ts,tsx src"
   },
-  "overrides": {
-    "@assistant-ui/store": "0.2.20"
-  },
   "dependencies": {
-    "@assistant-ui/react": "^0.12.5",
+    "@assistant-ui/react": "0.12.5",
     "@linagora/twake-icons": "^2.6.6",
     "classnames": "^2.5.1",
     "cozy-client": "^60.28.0",
@@ -45,6 +42,7 @@
     "jest": "30.3.0",
     "jest-environment-jsdom": "30.3.0",
     "path-browserify": "^1.0.1",
+    "process": "^0.11.10",
     "stylus": "^0.64.0",
     "stylus-loader": "^8.1.0",
     "typescript": "5.5.2"

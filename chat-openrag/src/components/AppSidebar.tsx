@@ -23,17 +23,19 @@ const AppSidebar = (): JSX.Element => {
   }
 
   return (
-    <nav className="u-flex u-flex-column u-p-1 u-bdr-right" aria-label="Conversations">
-      <button type="button" className="u-mb-1" onClick={onNew}>
-        New conversation
+    <nav className="app-sidebar" aria-label="Conversations">
+      <button type="button" className="app-new-btn" onClick={onNew}>
+        + New conversation
       </button>
-      <ul className="u-list-unstyled u-m-0 u-p-0">
+      <div className="app-sidebar-header">Recent chats</div>
+      <ul className="app-sidebar-list">
         {conversations.map(c => (
           <li key={c._id}>
             <button
               type="button"
               aria-current={c._id === conversationId ? 'page' : undefined}
-              className="u-w-100 u-ta-left"
+              className="app-conv-btn"
+              title={conversationTitle(c)}
               onClick={() => navigate(`/assistant/${c._id}`)}
             >
               {conversationTitle(c)}

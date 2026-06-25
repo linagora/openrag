@@ -26,7 +26,8 @@ export default {
     // Browser fallbacks for Node core modules pulled in by cozy-search's
     // transitive deps (vfile, replace-ext, mime-types).
     fallback: {
-      path: new URL('./node_modules/path-browserify', import.meta.url).pathname
+      path: new URL('./node_modules/path-browserify', import.meta.url).pathname,
+      process: new URL('./node_modules/process/browser.js', import.meta.url).pathname
     }
   },
   module: {
@@ -51,11 +52,17 @@ export default {
   plugins: [
     new rspack.HtmlRspackPlugin({ template: './src/index.html' }),
     new rspack.CssExtractRspackPlugin({}),
+    // cozy-ui / twake-i18n / cozy-client transitively reference the Node
+    // `process` global, which the browser lacks. Provide a browser shim.
+    new rspack.ProvidePlugin({
+      process: new URL('./node_modules/process/browser.js', import.meta.url).pathname
+    }),
     new rspack.DefinePlugin({
       'process.env.OPENRAG_BASE_URL': JSON.stringify(
         process.env.OPENRAG_BASE_URL || 'http://localhost:8080'
       ),
-      'process.env.OPENRAG_TOKEN': JSON.stringify(process.env.OPENRAG_TOKEN || '')
+      'process.env.OPENRAG_TOKEN': JSON.stringify(process.env.OPENRAG_TOKEN || ''),
+      'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development')
     })
   ],
   devServer: { port: 3042, historyApiFallback: true, hot: true }

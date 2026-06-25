@@ -1,7 +1,11 @@
-/* cozy-ui ships CSS variables (--primaryColor, etc.) + u-* utilities.
-   Importing its stylesheet yields the default Cozy/Twake light theme with
-   no stack. */
-@import 'cozy-ui/transpiled/react/stylesheet.css';
+/* cozy-ui ships its theme CSS variables (--primaryColor, etc.) on the `html`
+   selector in the dist bundle — cozy-ui's CozyTheme reads these off
+   document.documentElement at runtime to build the MUI palette, so they MUST
+   be defined on html (the transpiled/react/stylesheet.css scopes them under
+   .TwakeTheme--light only, leaving the palette empty → augmentColor crash).
+   cozy-ui.min.css = component styles + theme vars; utils = the u-* utilities. */
+@import 'cozy-ui/dist/cozy-ui.min.css';
+@import 'cozy-ui/dist/cozy-ui.utils.min.css';
 
 @font-face {
   font-family: 'Lato';
@@ -16,4 +20,89 @@ body,
   height: 100%;
   margin: 0;
   font-family: 'Lato', sans-serif;
+  color: var(--textPrimaryColor, #32363f);
+}
+
+/* ---- App shell layout (sidebar + main) ---- */
+.app-shell {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+.app-sidebar {
+  flex: 0 0 280px;
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--borderMainColor, #e0e0e0);
+  background: var(--defaultBackgroundColor, #fbfbfd);
+  overflow: hidden;
+}
+.app-main {
+  flex: 1 1 auto;
+  min-width: 0; /* let the chat area shrink instead of overflowing the page */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--paperBackgroundColor, #fff);
+}
+.app-sidebar-header {
+  padding: 12px;
+  font-weight: 700;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--secondaryTextColor, #95999d);
+}
+.app-sidebar-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0 8px 8px;
+  margin: 0;
+  list-style: none;
+}
+.app-new-btn {
+  margin: 8px 12px 12px;
+  padding: 9px 12px;
+  border: none;
+  border-radius: 8px;
+  background: var(--primaryColor, #0a84ff);
+  color: var(--primaryContrastTextColor, #fff);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+}
+.app-new-btn:hover {
+  background: var(--primaryColorDark, #006bd8);
+}
+.app-conv-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  margin-bottom: 2px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.app-conv-btn:hover {
+  background: var(--primaryBackground, rgba(10, 132, 255, 0.08));
+}
+.app-conv-btn[aria-current='page'] {
+  background: var(--primaryBackground, rgba(10, 132, 255, 0.12));
+  font-weight: 600;
+}
+
+/* Keep the partition selector from forcing horizontal page overflow when
+   option labels are very long. */
+.openrag-partition-select {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

@@ -60,9 +60,9 @@ const Shell = (): JSX.Element => {
           ComposerExtras: OpenRagModelSelector
         }}
       >
-        <div className="u-flex u-h-100">
+        <div className="app-shell">
           <AppSidebar />
-          <div className="u-flex-auto u-flex u-flex-column">
+          <div className="app-main">
             <Routes>
               <Route
                 path="/assistant/:conversationId"

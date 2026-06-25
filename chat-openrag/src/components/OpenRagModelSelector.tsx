@@ -15,7 +15,7 @@ const OpenRagModelSelector = ({
   return (
     <select
       aria-label="Partition"
-      className="u-ml-auto"
+      className="u-ml-auto openrag-partition-select"
       disabled={disabled}
       value={model}
       onChange={e => setModel(e.target.value)}
