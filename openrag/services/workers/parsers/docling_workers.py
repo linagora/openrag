@@ -120,7 +120,12 @@ class DoclingLoader(BasePooledParser):
 
     def __init__(self) -> None:
         self.config = load_config()
-        self.worker: DoclingPool = ray.get_actor("DoclingPool", namespace="openrag")
+        # Create the pool lazily if bootstrap didn't: bootstrap only pre-warms the
+        # globally-configured PDF backend, but a per-preset parsing_strategy can
+        # select docling even when the global default is marker (see #569/#575).
+        from services.workers.bootstrap import get_or_create_actor
+
+        self.worker: DoclingPool = get_or_create_actor("DoclingPool", DoclingPool, lifetime="detached")
 
     def supported_types(self) -> list[str]:
         return [DocumentType.PDF.value]

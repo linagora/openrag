@@ -361,7 +361,12 @@ class MarkerLoader(BasePooledParser):
 
     def __init__(self) -> None:
         self.config = load_config()
-        self.worker = ray.get_actor("MarkerPool", namespace="openrag")
+        # Lazily create the pool if bootstrap didn't (it only pre-warms the
+        # globally-configured PDF backend; a preset can select marker even when
+        # the global default is docling — see #569/#575).
+        from services.workers.bootstrap import get_or_create_actor
+
+        self.worker = get_or_create_actor("MarkerPool", MarkerPool, lifetime="detached")
 
     def supported_types(self) -> list[str]:
         return [DocumentType.PDF.value]

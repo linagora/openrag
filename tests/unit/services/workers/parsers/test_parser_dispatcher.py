@@ -141,12 +141,13 @@ def test_for_pdf_strategy_rejects_unknown_strategy() -> None:
         ParserDispatcher(_config()).for_pdf_strategy("nope")
 
 
-def test_pymupdf_backend_builds_in_text_mode() -> None:
-    """The lightweight pymupdf backend must build in text mode: plain per-page
-    text, no image embedding — so it stays fast and never inlines base64 images
-    into chunk text (which bloats chunks and breaks Milvus inserts)."""
+def test_pymupdf_backend_builds_in_markdown_mode_without_images() -> None:
+    """The lightweight pymupdf backend builds in markdown mode — structured text
+    for the markdown-aware chunker — but with embed_images=False so it never
+    inlines base64 images into chunk text (which bloats chunks / breaks Milvus
+    inserts). Images are marker/docling's job."""
     parser = ParserDispatcher(_config(pdf="PyMuPDFLoader"))._get("pymupdf")
-    assert getattr(parser, "_mode", None) == "text"
+    assert getattr(parser, "_mode", None) == "markdown"
 
 
 def test_build_caption_vlm_requires_endpoint() -> None:

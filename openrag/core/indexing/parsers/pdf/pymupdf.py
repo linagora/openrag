@@ -31,7 +31,6 @@ import pymupdf
 import pymupdf4llm
 
 from ....models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
-from ...image_preprocessor import extract_data_uri_image_blocks
 from ..document_parser import DocumentParser
 from ..registry import parser_registry
 
@@ -48,29 +47,25 @@ def _extract_text(raw: bytes) -> tuple[list[str], list[ImageBlock]]:
 
 
 def _extract_markdown(raw: bytes) -> tuple[list[str], list[ImageBlock]]:
-    """Return Markdown per page + ``ImageBlock``s built from embedded data URIs.
+    """Return structured Markdown per page (no images).
 
-    ``embed_images=True`` makes ``pymupdf4llm`` write images as base64
-    data URIs in-line. We decode each ref into an ``ImageBlock`` and
-    leave the ref in the page text untouched so the caption stage can
-    substitute later via ``ImageBlock.metadata['markdown_ref']``.
+    pymupdf is the lightweight, no-VLM backend. ``pymupdf4llm`` preserves
+    document structure (headings, lists, tables) — which the markdown-aware
+    chunker needs to cut on real boundaries instead of mid-sentence — while
+    ``embed_images=False`` keeps base64 image data out of the text. That keeps
+    chunks small (no Milvus gRPC overflow) and skips image rendering entirely
+    (fast). Image-aware parsing is marker/docling's job, so no ``ImageBlock``s
+    are produced here.
     """
     with pymupdf.open(stream=raw, filetype="pdf") as doc:
         chunks = pymupdf4llm.to_markdown(
             doc,
             page_chunks=True,
-            embed_images=True,
+            embed_images=False,
             write_images=False,
-            dpi=300,
         )
-    pages: list[str] = []
-    images: list[ImageBlock] = []
-    for i, chunk in enumerate(chunks, start=1):
-        text = (chunk.get("text") or "").strip()
-        pages.append(text)
-        if text:
-            images.extend(extract_data_uri_image_blocks(text, page_number=i))
-    return pages, images
+    pages = [(chunk.get("text") or "").strip() for chunk in chunks]
+    return pages, []
 
 
 @parser_registry.register("pymupdf")
