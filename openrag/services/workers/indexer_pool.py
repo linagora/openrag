@@ -35,6 +35,7 @@ class IndexerPool:
         cfg = load_config()
 
         parser = build_parser_dispatcher(cfg)
+        parser_factory = _build_parser_factory(parser)
         vlm = build_caption_vlm(cfg)
         chunker = _build_chunker(cfg)
         embedder_factory = _build_embedder_factory(cfg)
@@ -62,6 +63,7 @@ class IndexerPool:
             vlm=vlm,
             image_captioning=cfg.loader.image_captioning,
             chunker_factory=_build_chunker_from_config,
+            parser_factory=parser_factory,
             embedder_factory=embedder_factory,
             contextualizer_factory=contextualizer_factory,
             topic_tagger_factory=topic_tagger_factory,
@@ -282,6 +284,27 @@ def _build_chunker(cfg: Any) -> Any:
 
 def _build_chunker_from_config(chunker_config: Any) -> Any:
     return _build_chunker(SimpleNamespace(chunker=chunker_config))
+
+
+def _build_parser_factory(parser: Any) -> Any:
+    """Factory honoring a preset's ``parsing_strategy`` for PDFs.
+
+    Without this, the pipeline falls back to the single global-config dispatcher
+    and every PDF uses the global default loader — silently ignoring a preset's
+    pymupdf/docling choice. Each per-strategy wrapper reuses ``parser``'s shared
+    backend cache, so selecting a strategy never builds a duplicate
+    marker/docling Ray pool.
+    """
+    cache: dict[str, Any] = {}
+
+    def factory(strategy: str = "marker") -> Any:
+        wrapper = cache.get(strategy)
+        if wrapper is None:
+            wrapper = parser.for_pdf_strategy(strategy)
+            cache[strategy] = wrapper
+        return wrapper
+
+    return factory
 
 
 def _build_embedder_factory(cfg: Settings) -> Any:

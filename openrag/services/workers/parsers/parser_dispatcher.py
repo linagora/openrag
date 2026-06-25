@@ -38,6 +38,10 @@ _AUDIO_BACKENDS: dict[str, str] = {
     "OpenAIAudioLoader": "audio_client",
 }
 
+# Backend names a preset ``parsing_strategy`` may select for PDFs (the values of
+# _PDF_BACKENDS). Used to validate a strategy before routing a PDF to it.
+_PDF_BACKEND_NAMES: frozenset[str] = frozenset(_PDF_BACKENDS.values())
+
 # Attachment ext (lowercased, no dot) → DocumentType, used to wire the EML
 # parser's per-attachment sub-parsers.
 _MAX_EML_ATTACHMENT_DEPTH = 3
@@ -83,6 +87,21 @@ class ParserDispatcher(DocumentParser):
         backend = self._resolve_backend(document.content_type, _suffix(document.filename))
         parser = self._get(backend)
         return await parser.parse(document)
+
+    def for_pdf_strategy(self, strategy: str) -> DocumentParser:
+        """Return a parser that forces ``strategy`` (a PDF backend name such as
+        ``"pymupdf"`` or ``"docling"``) for PDF documents while dispatching every
+        other content type exactly as this dispatcher does.
+
+        Backends come from this dispatcher's shared cache, so honoring a
+        per-preset ``parsing_strategy`` never spins up a duplicate marker/docling
+        pool.
+        """
+        if strategy not in _PDF_BACKEND_NAMES:
+            raise ValueError(
+                f"Unsupported PDF parsing strategy {strategy!r}; expected one of {sorted(_PDF_BACKEND_NAMES)}"
+            )
+        return _PdfStrategyParser(self, strategy)
 
     # ----- backend resolution -----
 
@@ -200,6 +219,24 @@ class ParserDispatcher(DocumentParser):
             concurrency_limit=tcfg.max_concurrent_chunks,
         )
         return _create("core.indexing.parsers.audio.client_based", "audio_client", client=client)
+
+
+class _PdfStrategyParser(DocumentParser):
+    """Force a specific PDF backend (a preset's ``parsing_strategy``) for PDF
+    documents, delegating every other content type to the shared dispatcher so
+    the per-preset choice never duplicates a backend or its pool."""
+
+    def __init__(self, dispatcher: ParserDispatcher, pdf_backend: str) -> None:
+        self._dispatcher = dispatcher
+        self._pdf_backend = pdf_backend
+
+    def supported_types(self) -> list[str]:
+        return self._dispatcher.supported_types()
+
+    async def parse(self, document: Document) -> ProcessedDocument:
+        if document.content_type is DocumentType.PDF:
+            return await self._dispatcher._get(self._pdf_backend).parse(document)
+        return await self._dispatcher.parse(document)
 
 
 # Only backends that need a non-conventional module path (``pymupdf`` lives

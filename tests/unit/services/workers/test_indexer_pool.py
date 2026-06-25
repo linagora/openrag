@@ -156,6 +156,28 @@ def test_build_contextualizer_factory_returns_factory_for_later_hydration(tmp_pa
         factory("default")
 
 
+def test_build_parser_factory_delegates_to_strategy_and_caches() -> None:
+    # The parser factory must route a preset's parsing_strategy through the
+    # dispatcher's for_pdf_strategy (so pymupdf/docling are honored, not the
+    # global default) and cache per strategy so no backend/pool is duplicated.
+    from services.workers.indexer_pool import _build_parser_factory
+
+    calls: list[str] = []
+
+    class _FakeDispatcher:
+        def for_pdf_strategy(self, strategy: str):
+            calls.append(strategy)
+            return SimpleNamespace(strategy=strategy)
+
+    factory = _build_parser_factory(_FakeDispatcher())
+
+    first = factory("pymupdf")
+    assert first.strategy == "pymupdf"
+    assert factory("pymupdf") is first  # cached: built once per strategy
+    assert factory("docling").strategy == "docling"
+    assert calls == ["pymupdf", "docling"]  # no rebuild for the repeated strategy
+
+
 def test_contextualizer_factory_reads_live_registry(tmp_path) -> None:
     # The factory holds a live reference to cfg.models.llm: a name added to the
     # registry AFTER the factory is built (mimicking the indexer's lazy DB

@@ -115,6 +115,32 @@ async def test_parse_dispatches_to_cached_backend() -> None:
     assert result.text_blocks[0].text == "ok"
 
 
+@pytest.mark.asyncio
+async def test_for_pdf_strategy_overrides_pdf_backend_and_shares_cache() -> None:
+    """A preset's ``parsing_strategy`` must override the global PDF backend for
+    PDFs while non-PDF types still dispatch normally — reusing the dispatcher's
+    cached backends (no duplicate pools)."""
+    disp = ParserDispatcher(_config(pdf="MarkerLoader"))  # global default = marker
+    marker, pymupdf, text = _FakeParser(), _FakeParser(), _FakeParser()
+    disp._by_name.update({"marker": marker, "pymupdf": pymupdf, "text": text})
+
+    pdf_parser = disp.for_pdf_strategy("pymupdf")
+
+    pdf = Document(filename="a.pdf", content_type=DocumentType.PDF, raw_bytes=b"%PDF-1.4")
+    await pdf_parser.parse(pdf)
+    assert pymupdf.seen is pdf  # routed to the preset strategy, not the global marker
+    assert marker.seen is None
+
+    txt = Document(filename="a.txt", content_type=DocumentType.TEXT, raw_bytes=b"hi")
+    await pdf_parser.parse(txt)
+    assert text.seen is txt  # non-PDF content still dispatches by content type
+
+
+def test_for_pdf_strategy_rejects_unknown_strategy() -> None:
+    with pytest.raises(ValueError, match="Unsupported PDF parsing strategy"):
+        ParserDispatcher(_config()).for_pdf_strategy("nope")
+
+
 def test_build_caption_vlm_requires_endpoint() -> None:
     # No VLM endpoint configured -> unavailable, regardless of the captioning flag.
     assert build_caption_vlm(_config(image_captioning=True, vlm_base_url="")) is None
