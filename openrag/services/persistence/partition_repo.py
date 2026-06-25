@@ -19,6 +19,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from core.ports.partition_repo import PartitionRepository
+from core.utils.exceptions import ValidationError
 
 if TYPE_CHECKING:
     import asyncpg
@@ -36,7 +37,7 @@ class PgPartitionRepository(PartitionRepository):
 
     # ── PartitionRepository port methods ─────────────────────────────
 
-    async def create_partition(self, name: str, user_id: int | None = None) -> dict:
+    async def create_partition(self, name: str, user_id: int | None = None, *, max_owned: int | None = None) -> dict:
         """Insert a partition row; idempotent on the unique constraint.
 
         When ``user_id`` is provided the caller is granted ``owner`` on
@@ -46,11 +47,27 @@ class PgPartitionRepository(PartitionRepository):
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                if user_id is not None and max_owned is not None and max_owned >= 0:
+                    await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", user_id)
                 row = await conn.fetchrow(
                     "SELECT * FROM partitions WHERE partition = $1",
                     name,
                 )
                 if row is None:
+                    if user_id is not None and max_owned is not None and max_owned >= 0:
+                        owned = await conn.fetchval(
+                            """
+                            SELECT COUNT(*)::int FROM partition_memberships
+                            WHERE user_id = $1 AND role = 'owner'
+                            """,
+                            user_id,
+                        )
+                        if owned >= max_owned:
+                            raise ValidationError(
+                                f"Partition limit reached ({max_owned}). Contact an administrator.",
+                                status_code=403,
+                                code="PARTITION_LIMIT_EXCEEDED",
+                            )
                     row = await conn.fetchrow(
                         """
                         INSERT INTO partitions (partition, created_at)

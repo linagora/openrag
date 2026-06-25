@@ -8,8 +8,9 @@ from services.orchestrators.partition_service import PartitionService
 
 
 class FakePartitionRepo:
-    def __init__(self, existing: set[str] | None = None):
+    def __init__(self, existing: set[str] | None = None, *, owned_count: int = 0):
         self._existing = existing if existing is not None else set()
+        self._owned_count = owned_count
         self.created: list[tuple[str, int]] = []
         self.deleted: list[str] = []
 
@@ -19,7 +20,13 @@ class FakePartitionRepo:
     async def list_partitions(self) -> list[dict]:
         return [{"partition": p} for p in sorted(self._existing)]
 
-    async def create_partition(self, name: str, user_id: int | None = None) -> dict:
+    async def create_partition(self, name: str, user_id: int | None = None, *, max_owned: int | None = None) -> dict:
+        if max_owned is not None and max_owned >= 0 and self._owned_count >= max_owned:
+            raise ValidationError(
+                f"Partition limit reached ({max_owned}). Contact an administrator.",
+                status_code=403,
+                code="PARTITION_LIMIT_EXCEEDED",
+            )
         self._existing.add(name)
         self.created.append((name, user_id))
         return {"partition": name}
@@ -152,7 +159,7 @@ async def test_create_partition_conflict_raises_409():
 
 @pytest.mark.asyncio
 async def test_create_partition_enforces_owned_cap():
-    prepo = FakePartitionRepo(existing=set())
+    prepo = FakePartitionRepo(existing=set(), owned_count=2)
     mrepo = FakeMembershipRepo(owned={7: 2})
     with pytest.raises(ValidationError) as exc:
         await _svc(prepo=prepo, mrepo=mrepo).create_partition("new", 7, max_owned=2)
@@ -162,7 +169,7 @@ async def test_create_partition_enforces_owned_cap():
 
 @pytest.mark.asyncio
 async def test_create_partition_zero_cap_blocks_regular_user():
-    prepo = FakePartitionRepo(existing=set())
+    prepo = FakePartitionRepo(existing=set(), owned_count=0)
     mrepo = FakeMembershipRepo(owned={7: 0})
     with pytest.raises(ValidationError) as exc:
         await _svc(prepo=prepo, mrepo=mrepo).create_partition("new", 7, max_owned=0)
@@ -172,7 +179,7 @@ async def test_create_partition_zero_cap_blocks_regular_user():
 
 @pytest.mark.asyncio
 async def test_create_partition_negative_cap_disables_limit():
-    prepo = FakePartitionRepo(existing=set())
+    prepo = FakePartitionRepo(existing=set(), owned_count=999)
     mrepo = FakeMembershipRepo(owned={7: 999})
     await _svc(prepo=prepo, mrepo=mrepo).create_partition("new", 7, max_owned=-1)
     assert "new" in prepo._existing
@@ -180,7 +187,7 @@ async def test_create_partition_negative_cap_disables_limit():
 
 @pytest.mark.asyncio
 async def test_create_partition_under_cap_succeeds():
-    prepo = FakePartitionRepo(existing=set())
+    prepo = FakePartitionRepo(existing=set(), owned_count=1)
     mrepo = FakeMembershipRepo(owned={7: 1})
     await _svc(prepo=prepo, mrepo=mrepo).create_partition("new", 7, max_owned=5)
     assert "new" in prepo._existing
@@ -188,7 +195,7 @@ async def test_create_partition_under_cap_succeeds():
 
 @pytest.mark.asyncio
 async def test_create_partition_admin_bypass_cap_when_max_owned_none():
-    prepo = FakePartitionRepo(existing=set())
+    prepo = FakePartitionRepo(existing=set(), owned_count=999)
     mrepo = FakeMembershipRepo(owned={7: 999})
     # max_owned=None (admin) → cap skipped even with many owned partitions.
     await _svc(prepo=prepo, mrepo=mrepo).create_partition("new", 7, max_owned=None)
