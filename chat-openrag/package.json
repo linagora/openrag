@@ -20,7 +20,6 @@
     "cozy-device-helper": "^4.0.3",
     "cozy-flags": "^4.9.1",
     "cozy-logger": "^1.18.1",
-    "cozy-minilog": "^3.10.1",
     "cozy-search": "file:/home/paul/dev/cozy/apps/cozy-libs/packages/cozy-search",
     "cozy-ui": "^138.4.0",
     "cozy-ui-plus": "^8.0.1",

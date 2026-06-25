@@ -12,8 +12,8 @@ export default {
       'twake-i18n': new URL('./node_modules/twake-i18n', import.meta.url).pathname,
       'cozy-ui': new URL('./node_modules/cozy-ui', import.meta.url).pathname,
       'cozy-ui-plus': new URL('./node_modules/cozy-ui-plus', import.meta.url).pathname,
-      // cozy-search is symlinked, so its (and its nested cozy-client's) bare
-      // requires for these peers must be pinned back to this app's installs.
+      // cozy-search is symlinked, so its bare requires for peers must be
+      // pinned back to this app's installs.
       '@linagora/twake-icons': new URL(
         './node_modules/@linagora/twake-icons',
         import.meta.url
