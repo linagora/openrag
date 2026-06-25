@@ -84,18 +84,25 @@ def test_named_volume_profile_is_opt_in() -> None:
     assert milvus_env["MINIO_SECRET_ACCESS_KEY"] == "${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}"
 
 
-def test_quick_start_milvus_uses_current_minio_root_env_names() -> None:
+def test_quick_start_milvus_uses_matching_minio_credentials() -> None:
+    # The quickstart docs tell users to ``cp .env.example .env`` (which defines
+    # MINIO_ACCESS_KEY / MINIO_SECRET_KEY) and drop it in quick_start/. The
+    # quick_start compose must therefore read the same variable names, both so
+    # interpolation succeeds and so Milvus's object-storage creds match minio's.
     quickstart = _load_yaml(ROOT / "infra" / "quick_start" / "vdb" / "milvus.yaml")
+    default_env_values = _load_env_example(COMPOSE_DIR / ".env.example")
 
     minio_env = quickstart["services"]["minio"]["environment"]
     milvus_env = quickstart["services"]["milvus"]["environment"]
 
-    assert "MINIO_ACCESS_KEY" not in minio_env
-    assert "MINIO_SECRET_KEY" not in minio_env
-    assert minio_env["MINIO_ROOT_USER"] == "${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in your .env}"
-    assert minio_env["MINIO_ROOT_PASSWORD"] == "${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in your .env}"
-    assert milvus_env["MINIO_ACCESS_KEY_ID"] == "${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in your .env}"
-    assert milvus_env["MINIO_SECRET_ACCESS_KEY"] == "${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in your .env}"
+    assert "MINIO_ROOT_USER" not in minio_env
+    assert "MINIO_ROOT_PASSWORD" not in minio_env
+    assert "MINIO_ACCESS_KEY" in default_env_values
+    assert "MINIO_SECRET_KEY" in default_env_values
+    assert minio_env["MINIO_ACCESS_KEY"] == "${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in your .env}"
+    assert minio_env["MINIO_SECRET_KEY"] == "${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}"
+    assert milvus_env["MINIO_ACCESS_KEY_ID"] == minio_env["MINIO_ACCESS_KEY"]
+    assert milvus_env["MINIO_SECRET_ACCESS_KEY"] == minio_env["MINIO_SECRET_KEY"]
 
 
 def test_ollama_cpu_milvus_uses_matching_minio_credentials() -> None:
