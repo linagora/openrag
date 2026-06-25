@@ -249,3 +249,46 @@ def test_recursive_splitter_skips_pages_get_correct_marker():
     pages = sorted({c.page_number for c in chunks if c.page_number is not None})
     assert 1 in pages
     assert 5 in pages, f"page 5 missing despite second block on page 5: {pages}"
+
+
+def test_dewrap_paragraphs_collapses_line_wraps_but_keeps_structure():
+    from core.chunking.recursive import dewrap_paragraphs
+
+    text = (
+        "# Heading\n"
+        "The committee reviewed the report\n"
+        "and was assisted by the auditors.\n"
+        "\n"
+        "- first item\n"
+        "- second item\n"
+        "[PAGE_2]\n"
+    )
+    lines = dewrap_paragraphs(text).splitlines()
+
+    # Wrapped prose is joined onto one line.
+    assert "The committee reviewed the report and was assisted by the auditors." in lines
+    # Markdown block lines keep their own line.
+    assert "# Heading" in lines
+    assert "- first item" in lines
+    assert "- second item" in lines
+    assert "[PAGE_2]" in lines
+
+
+def test_recursive_splitter_does_not_cut_mid_sentence_on_line_wraps():
+    """A mid-paragraph line-wrap (as pymupdf4llm emits) must not become a chunk
+    boundary; chunks should break on sentence/paragraph boundaries (#579)."""
+    # "Alpha beta gamma\ndelta epsilon zeta." carries a wrap inside one sentence.
+    text = "Alpha beta gamma\ndelta epsilon zeta. Eta theta iota kappa lambda mu. Nu xi omicron pi rho sigma."
+    splitter = RecursiveSplitter(chunk_size=12, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=text, page_number=1)],
+        metadata={"source": "wrapped.md"},
+    )
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert len(chunks) >= 2
+    # The wrap word must never end a chunk...
+    assert not any(c.text.strip().endswith("gamma") for c in chunks)
+    # ...and every text chunk ends on a sentence terminator.
+    assert all(c.text.strip()[-1] in ".?!" for c in chunks if c.chunk_type == ChunkType.TEXT)
