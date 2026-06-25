@@ -13,6 +13,10 @@ class LLMParamsConfig(ConfigMixin):
     temperature: float = 0.1
     timeout: int = 60
     max_retries: int = 2
+    # Forwarded on non-streaming calls only. OpenRAG never reads logprobs back,
+    # and streaming them through a LiteLLM proxy triggers a pydantic
+    # serialization crash, so the client strips logprobs from streamed requests
+    # (see VLLMClient / linagora/openrag#563).
     logprobs: bool = True
     enable_thinking: bool | None = None
 

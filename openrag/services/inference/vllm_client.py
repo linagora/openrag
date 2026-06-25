@@ -47,6 +47,13 @@ def _parse_response(resp: httpx.Response) -> dict:
 # LLM
 # ---------------------------------------------------------------------------
 
+# Knobs that travel inside ``settings.llm`` (and therefore the client
+# ``_defaults``) but are NOT OpenAI request-body fields. ``max_retries`` is a
+# client-side retry policy — retries are handled by ``@with_retry``, so
+# forwarding it on the wire does nothing useful and only risks tripping strict
+# downstream validators (e.g. a LiteLLM proxy).
+_NON_WIRE_DEFAULTS = frozenset({"max_retries"})
+
 
 @llm_registry.register("vllm")
 class VLLMClient(LLM):
@@ -71,7 +78,9 @@ class VLLMClient(LLM):
         self._model = model_name
         self._api_key = api_key
         self._enable_thinking = enable_thinking
-        self._defaults: dict = kwargs
+        # Drop non-OpenAI knobs (see ``_NON_WIRE_DEFAULTS``) so they never leak
+        # into request bodies for any code path (chat / completions / vision).
+        self._defaults: dict = {k: v for k, v in kwargs.items() if k not in _NON_WIRE_DEFAULTS}
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -103,8 +112,18 @@ class VLLMClient(LLM):
 
         return base_url, model, override_headers
 
-    def _chat_payload_kwargs(self, kwargs: dict) -> dict:
+    def _chat_payload_kwargs(self, kwargs: dict, *, stream: bool = False) -> dict:
         payload_kwargs = {**self._defaults, **kwargs}
+
+        # ``logprobs`` is never read back by OpenRAG, and streaming it through a
+        # LiteLLM proxy crashes the proxy while serializing the final chunk's
+        # ``ChoiceLogprobs`` ("'MockValSer' object cannot be converted to
+        # 'SchemaSerializer'"), surfacing as an opaque chat failure in the UI
+        # (linagora/openrag#563, BerriAI/litellm#24357). Drop it from streamed
+        # requests regardless of where it came from (config default or client).
+        if stream:
+            payload_kwargs.pop("logprobs", None)
+
         enable_thinking = payload_kwargs.pop("enable_thinking", self._enable_thinking)
         if enable_thinking is not None:
             chat_template_kwargs = dict(payload_kwargs.get("chat_template_kwargs") or {})
@@ -155,7 +174,12 @@ class VLLMClient(LLM):
     async def stream_chat(self, messages: list[dict[str, str]], **kwargs) -> AsyncIterator[str]:
         base_url, model, headers = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
-        payload = {**self._chat_payload_kwargs(kwargs), "model": model, "messages": messages, "stream": True}
+        payload = {
+            **self._chat_payload_kwargs(kwargs, stream=True),
+            "model": model,
+            "messages": messages,
+            "stream": True,
+        }
         try:
             async with self._client.stream(
                 "POST", f"{base_url}/chat/completions", json=payload, headers=headers

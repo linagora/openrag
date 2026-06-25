@@ -208,6 +208,52 @@ class TestVLLMClient:
         await self._make_client(handler).chat([{"role": "user", "content": "hi"}], temperature=0.9, max_tokens=100)
 
     @pytest.mark.asyncio
+    async def test_stream_chat_omits_logprobs(self):
+        """Streaming a logprobs request through a LiteLLM proxy crashes its
+        serializer (linagora/openrag#563), so logprobs is stripped on stream."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return httpx.Response(200, text="data: [DONE]\n")
+
+        client = self._make_client(capture, logprobs=True)
+        _ = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}], logprobs=True)]
+
+        assert "logprobs" not in captured
+
+    @pytest.mark.asyncio
+    async def test_chat_keeps_logprobs_for_non_streaming(self):
+        """Non-streaming responses don't hit the LiteLLM streaming bug, so a
+        configured logprobs is still forwarded."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture, logprobs=True).chat([{"role": "user", "content": "hi"}])
+        assert captured["logprobs"] is True
+
+    @pytest.mark.asyncio
+    async def test_max_retries_never_sent_on_wire(self):
+        """``max_retries`` is a client-side retry knob (handled by @with_retry),
+        not an OpenAI body field — it must never leak onto the wire."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response() if "/chat/" in str(req.url) else _completions_response()
+
+        client = self._make_client(capture, max_retries=5)
+        await client.chat([{"role": "user", "content": "hi"}])
+        assert "max_retries" not in captured
+
+        captured.clear()
+        await client.generate("say something")
+        assert "max_retries" not in captured
+
+    @pytest.mark.asyncio
     async def test_trailing_slash_stripped(self):
         c = VLLMClient(endpoint="http://vllm:8000/v1/", model_name="m")
         assert c._endpoint == "http://vllm:8000/v1"
