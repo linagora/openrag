@@ -15,6 +15,16 @@ class FetchJsdomEnvironment extends TestEnvironment {
       this.global.Request = globalThis.Request
       this.global.Response = globalThis.Response
     }
+    // Also copy TextEncoder, TextDecoder, and ReadableStream
+    if (typeof globalThis.TextEncoder === 'function') {
+      this.global.TextEncoder = globalThis.TextEncoder
+    }
+    if (typeof globalThis.TextDecoder === 'function') {
+      this.global.TextDecoder = globalThis.TextDecoder
+    }
+    if (typeof globalThis.ReadableStream === 'function') {
+      this.global.ReadableStream = globalThis.ReadableStream
+    }
   }
 }
 
