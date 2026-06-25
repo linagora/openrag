@@ -146,7 +146,12 @@ class IndexingPipeline:
         """Pick the captioning VLM instance (availability only — policy is in
         ``_should_caption``)."""
         if config is not None and self.vlm_factory is not None:
-            return self.vlm_factory(config.vlm or "default")
+            if config.vlm:
+                return self.vlm_factory(config.vlm)
+            try:
+                return self.vlm_factory("default")
+            except KeyError:
+                return self.vlm
         return self.vlm
 
     def _should_caption(self, row: MutableMapping[str, Any], config: IndexationPipelineConfig | None) -> bool:
