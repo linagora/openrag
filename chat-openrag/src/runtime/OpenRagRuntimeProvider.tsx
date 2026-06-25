@@ -22,6 +22,29 @@ const toThreadMessages = (messages: StoredMessage[]): ThreadMessageLike[] =>
         : undefined
   }))
 
+interface InnerProps {
+  conversationId: string
+  store: LocalStore
+  initialMessages: ThreadMessageLike[]
+  children: ReactNode
+}
+
+const OpenRagRuntimeProviderInner = ({
+  store: _store,
+  initialMessages,
+  children
+}: InnerProps): JSX.Element => {
+  const { model } = useModel()
+  const adapter = useMemo(() => createOpenRagChatAdapter({ model }), [model])
+  const runtime = useLocalRuntime(adapter, { initialMessages })
+
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      {children}
+    </AssistantRuntimeProvider>
+  )
+}
+
 export const OpenRagRuntimeProvider = ({
   conversationId,
   store,
@@ -30,18 +53,19 @@ export const OpenRagRuntimeProvider = ({
   conversationId: string
   store: LocalStore
   children: ReactNode
-}): JSX.Element => {
-  const { model } = useModel()
-  const { messages } = store.useConversationMessages(conversationId)
-  const initialMessages = useMemo(() => toThreadMessages(messages), [messages])
+}): JSX.Element | null => {
+  const { messages, isLoading } = store.useConversationMessages(conversationId)
 
-  const adapter = useMemo(() => createOpenRagChatAdapter({ model }), [model])
-
-  const runtime = useLocalRuntime(adapter, { initialMessages })
+  if (isLoading) return null
 
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
+    <OpenRagRuntimeProviderInner
+      key={conversationId}
+      conversationId={conversationId}
+      store={store}
+      initialMessages={toThreadMessages(messages)}
+    >
       {children}
-    </AssistantRuntimeProvider>
+    </OpenRagRuntimeProviderInner>
   )
 }
