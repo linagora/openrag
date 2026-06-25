@@ -9,10 +9,18 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint --ext ts,tsx src"
   },
+  "overrides": {
+    "@assistant-ui/store": "0.2.20"
+  },
   "dependencies": {
     "@assistant-ui/react": "^0.12.5",
+    "@linagora/twake-icons": "^2.6.6",
     "classnames": "^2.5.1",
+    "cozy-client": "^60.28.0",
+    "cozy-device-helper": "^4.0.3",
     "cozy-flags": "^4.9.1",
+    "cozy-logger": "^1.18.1",
+    "cozy-minilog": "^3.10.1",
     "cozy-search": "file:/home/paul/dev/cozy/apps/cozy-libs/packages/cozy-search",
     "cozy-ui": "^138.4.0",
     "cozy-ui-plus": "^8.0.1",
@@ -37,6 +45,7 @@
     "fake-indexeddb": "^6.0.0",
     "jest": "30.3.0",
     "jest-environment-jsdom": "30.3.0",
+    "path-browserify": "^1.0.1",
     "stylus": "^0.64.0",
     "stylus-loader": "^8.1.0",
     "typescript": "5.5.2"
