@@ -293,6 +293,31 @@ async def test_failed_token_auth_is_rate_limited_by_ip(monkeypatch) -> None:
     assert second.headers.get("Retry-After")
 
 
+@pytest.mark.asyncio
+async def test_failed_bearer_limit_blocks_before_token_lookup(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+
+    svc = type("S", (), {})()
+    svc.get_user_by_token_for_request = AsyncMock(return_value=None)
+
+    async def call_next(req):
+        return Response("ok")
+
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+
+    first = await middleware.dispatch(_request(headers={"authorization": "Bearer bad"}), call_next)
+    second = await middleware.dispatch(_request(headers={"authorization": "Bearer bad"}), call_next)
+
+    assert first.status_code == 403
+    assert second.status_code == 429
+    svc.get_user_by_token_for_request.assert_awaited_once_with("bad")
+
+
 def test_request_object_is_unused_by_helpers() -> None:
     """Sanity: ``is_ui_path`` / ``is_bypass_path`` are pure functions
     over the string path, so a FastAPI ``Request`` is never required

@@ -145,6 +145,8 @@ async def search_multiple_partitions(
 ):
     if partitions == ["all"]:
         partitions = user_partitions
+    if not partitions:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No accessible partitions")
 
     log = logger.bind(
         partitions=partitions,

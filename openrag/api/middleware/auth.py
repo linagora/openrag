@@ -120,9 +120,23 @@ class AuthFailureRateLimiter:
             return None
         identity = self._identity(request)
         tier = "auth-failure"
+        allowed = await self._limiter.test(self._limit, tier, identity)
+        if allowed:
+            return None
+        return await self._limited_response(request, identity)
+
+    async def record_failure(self, request: Request) -> JSONResponse | None:
+        if not self.enabled:
+            return None
+        identity = self._identity(request)
+        tier = "auth-failure"
         allowed = await self._limiter.hit(self._limit, tier, identity)
         if allowed:
             return None
+        return await self._limited_response(request, identity)
+
+    async def _limited_response(self, request: Request, identity: str) -> JSONResponse:
+        tier = "auth-failure"
         stats = await self._limiter.get_window_stats(self._limit, tier, identity)
         retry_after = max(1, int(stats.reset_time - time.time()))
         logger.warning("Auth failure rate limit exceeded", path=request.url.path, identity=identity)
@@ -155,7 +169,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self._auth_failure_limiter = AuthFailureRateLimiter()
 
     async def _auth_failure(self, request: Request, *, status_code: int, detail: str) -> JSONResponse:
-        limited = await self._auth_failure_limiter.response_if_limited(request)
+        limited = await self._auth_failure_limiter.record_failure(request)
         if limited is not None:
             return limited
         return JSONResponse(status_code=status_code, content={"detail": detail})
@@ -216,6 +230,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         status_code=302,
                     )
             return await call_next(request)
+
+        limited = await self._auth_failure_limiter.response_if_limited(request)
+        if limited is not None:
+            return limited
 
         user = None
         session = None
