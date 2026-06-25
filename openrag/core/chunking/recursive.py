@@ -12,6 +12,7 @@ separate stage by the orchestrator — not from inside the chunker.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -35,6 +36,56 @@ _IMAGE_PLACEHOLDER_MARKER = "[image placeholder]"
 # Tables/images smaller than this token count are inlined with surrounding
 # text rather than emitted as standalone chunks.
 _INLINE_ELEMENT_TOKEN_THRESHOLD = 100
+
+# A line that begins a markdown block (heading, list item, blockquote, table
+# row, code fence, horizontal rule, or a synthetic [PAGE_N] marker). Such lines
+# must keep their own line — they are NOT prose to be joined into a paragraph.
+_BLOCK_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"#{1,6}\s"  # heading
+    r"|[-*+]\s"  # bullet list
+    r"|\d+[.)]\s"  # ordered list
+    r"|>\s?"  # blockquote
+    r"|\|"  # table row
+    r"|```|~~~"  # code fence
+    r"|(?:-{3,}|\*{3,}|_{3,})\s*$"  # horizontal rule (---, ***, ___)
+    r"|\[PAGE_\d+\]\s*$"  # synthetic page marker
+    r")"
+)
+
+
+def dewrap_paragraphs(text: str) -> str:
+    """Reflow PDF visual line-wraps so prose paragraphs sit on a single line.
+
+    Backends like ``pymupdf4llm`` keep the PDF's line breaks inside a
+    paragraph (e.g. ``"…assisted by the\\nexternal auditors…"``). Those
+    mid-sentence ``\\n`` make the splitter break mid-sentence and read poorly
+    once stored. We join consecutive prose lines with a space while preserving
+    paragraph breaks (blank lines) and any markdown block line (heading, list
+    item, table row, code fence, blockquote, rule, page marker), which keep
+    their own line. See #579.
+    """
+    out: list[str] = []
+    paragraph: list[str] = []
+
+    def flush() -> None:
+        if paragraph:
+            out.append(" ".join(line.strip() for line in paragraph))
+            paragraph.clear()
+
+    for line in text.split("\n"):
+        if line.strip() == "":
+            flush()
+            out.append("")
+        elif _BLOCK_LINE_RE.match(line):
+            flush()
+            out.append(line)
+        else:
+            paragraph.append(line)
+    flush()
+
+    # Collapse any 3+ newline runs the flushing may have produced.
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
 
 
 class BaseChunker(ChunkingStrategy):
@@ -181,7 +232,10 @@ class BaseChunker(ChunkingStrategy):
         objects without leaking domain types into the lower-level helpers.
         """
         texts, tables_and_images = self._prepare_md_elements(content=content)
-        combined_texts = "\n".join(e.content for e in texts)
+        # Reflow PDF line-wraps within each element, then join elements as
+        # paragraphs (blank line) so the splitter cuts on paragraph/sentence
+        # boundaries rather than mid-sentence line-wraps (#579).
+        combined_texts = "\n\n".join(dewrap_paragraphs(e.content) for e in texts)
 
         sanitized = sanitize_text(
             combined_texts,
@@ -276,5 +330,8 @@ class RecursiveSplitter(BaseChunker):
             chunk_overlap=self.chunk_overlap,
             length_function=self.length_function,
             is_separator_regex=True,
-            separators=["\n", r"(?<=[\.\?\!])"],
+            # Paragraph → sentence → line → word. A single "\n" is a last
+            # resort (only when a sentence itself exceeds chunk_size), so the
+            # splitter no longer breaks mid-sentence on a line-wrap (#579).
+            separators=["\n\n", r"(?<=[\.\?\!])", "\n", " "],
         )
