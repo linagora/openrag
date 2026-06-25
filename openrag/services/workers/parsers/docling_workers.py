@@ -37,7 +37,22 @@ logger = get_logger()
 
 
 def _docling_num_gpus(config) -> float:
-    return config.loader.docling_num_gpus if torch.cuda.is_available() else 0
+    """Return Docling's Ray GPU reservation, falling back to CUDA detection.
+
+    Must mirror Marker: ``_docling_num_gpus`` runs inside the ``DoclingPool``
+    actor, which Ray schedules with no GPU — so ``torch.cuda.is_available()`` is
+    False there (``CUDA_VISIBLE_DEVICES=""``) and a naive local check reserves 0
+    GPUs for the worker, leaving Docling stuck on CPU. Query the Ray *cluster*
+    for GPU capacity instead, with local CUDA only as a startup fallback.
+    """
+    requested_gpus = config.loader.docling_num_gpus
+    if requested_gpus <= 0:
+        return 0
+    try:
+        return requested_gpus if ray.cluster_resources().get("GPU", 0) > 0 else 0
+    except Exception as exc:
+        logger.warning("Failed to query Ray cluster GPU resources; falling back to CUDA check", error=str(exc))
+        return requested_gpus if torch.cuda.is_available() else 0
 
 
 @ray.remote
