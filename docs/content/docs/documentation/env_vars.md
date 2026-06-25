@@ -377,7 +377,7 @@ Ray is used for distributed task processing and parallel execution in the RAG pi
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `RAY_POOL_SIZE` | `int` | 1 | Number of indexer worker actors in the pool. Total indexing capacity = `RAY_POOL_SIZE` × `RAY_MAX_TASKS_PER_WORKER`. |
-| `RAY_MAX_TASKS_PER_WORKER` | `int` | 8 | Maximum number of files processed concurrently per indexer worker actor |
+| `RAY_MAX_TASKS_PER_WORKER` | `int` | 50 | Maximum number of files processed concurrently per indexer worker actor |
 | `RAY_DASHBOARD_PORT` | `int` | 8265 | Ray Dashboard port used for monitoring. In production, [comment out this line](https://github.com/linagora/openrag/blob/ee732ea8e080dcde0107d62d12703a7525f810cd/docker-compose.yaml#L21C1-L22C1) to avoid exposing the port, as it may introduce security vulnerabilities. |
 
 :::danger[Attention]
@@ -391,19 +391,6 @@ The following environment variables control Ray's logging behavior, task retry s
 | `RAY_task_retry_delay_ms` | `number` | `3000` | Delay (in milliseconds) before retrying a failed task. Controls the wait time between retry attempts. |
 | `RAY_ENABLE_UV_RUN_RUNTIME_ENV` | `number` | `0` | Controls UV runtime environment integration. **Critical**: Must be set to `0` when using the newest version of UV to avoid compatibility issues. |
 |`RAY_memory_monitor_refresh_ms`| `number` | 250 ms | To control the frequency of memory usage checks and task or actor termination if needed. If you set this value to 0, task killing is disabled. |
-
-#### Indexer Configuration
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `RAY_POOL_SIZE` | int | 1 | Number of indexer worker actors created to handle indexation tasks |
-| `RAY_MAX_TASKS_PER_WORKER` | int | 50 | Files each indexer worker processes concurrently (total concurrency = `RAY_POOL_SIZE × RAY_MAX_TASKS_PER_WORKER`) |
-
-#### Semaphore Configuration
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `RAY_SEMAPHORE_CONCURRENCY` | int | 100000 | Global concurrency limit for Ray semaphore operations |
 
 #### Ray Serve Configuration
 Ray Serve enables deployment of the FastAPI as a scalable service. For simple deployment, without the intend to scale, one can usage the [uvicorn deployment mode](/openrag/documentation/env_vars/#ray-serve-configuration)
