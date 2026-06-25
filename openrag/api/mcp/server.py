@@ -445,6 +445,7 @@ async def index_url(url: str, partition: str, file_id: str, extra_metadata: dict
         file_id=file_id,
         allowed_partitions=get_allowed_partitions(),
         user_id=get_user_id(),
+        is_admin=is_admin(),
         extra_metadata=extra_metadata,
     )
 

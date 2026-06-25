@@ -23,6 +23,8 @@ from core.utils.exceptions import ValidationError
 
 if TYPE_CHECKING:
     import asyncpg
+else:  # pragma: no cover - import shape only matters at runtime
+    import asyncpg
 
 
 class PgPartitionRepository(PartitionRepository):
@@ -38,12 +40,11 @@ class PgPartitionRepository(PartitionRepository):
     # ── PartitionRepository port methods ─────────────────────────────
 
     async def create_partition(self, name: str, user_id: int | None = None, *, max_owned: int | None = None) -> dict:
-        """Insert a partition row; idempotent on the unique constraint.
+        """Insert a partition row and grant the creator owner membership.
 
-        When ``user_id`` is provided the caller is granted ``owner`` on
-        creation. Existing partitions are returned unchanged with no
-        membership churn — matches the legacy "already exists, log and
-        skip" behaviour.
+        Existing partitions are not treated as successful creates. The service
+        layer needs that distinction so it does not update preset/config fields
+        for a partition it did not create.
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -53,21 +54,27 @@ class PgPartitionRepository(PartitionRepository):
                     "SELECT * FROM partitions WHERE partition = $1",
                     name,
                 )
-                if row is None:
-                    if user_id is not None and max_owned is not None and max_owned >= 0:
-                        owned = await conn.fetchval(
-                            """
-                            SELECT COUNT(*)::int FROM partition_memberships
-                            WHERE user_id = $1 AND role = 'owner'
-                            """,
-                            user_id,
+                if row is not None:
+                    raise ValidationError(
+                        f"Partition '{name}' already exists.",
+                        status_code=409,
+                        code="PARTITION_EXISTS",
+                    )
+                if user_id is not None and max_owned is not None and max_owned >= 0:
+                    owned = await conn.fetchval(
+                        """
+                        SELECT COUNT(*)::int FROM partition_memberships
+                        WHERE user_id = $1 AND role = 'owner'
+                        """,
+                        user_id,
+                    )
+                    if owned >= max_owned:
+                        raise ValidationError(
+                            f"Partition limit reached ({max_owned}). Contact an administrator.",
+                            status_code=403,
+                            code="PARTITION_LIMIT_EXCEEDED",
                         )
-                        if owned >= max_owned:
-                            raise ValidationError(
-                                f"Partition limit reached ({max_owned}). Contact an administrator.",
-                                status_code=403,
-                                code="PARTITION_LIMIT_EXCEEDED",
-                            )
+                try:
                     row = await conn.fetchrow(
                         """
                         INSERT INTO partitions (partition, created_at)
@@ -76,17 +83,23 @@ class PgPartitionRepository(PartitionRepository):
                         """,
                         name,
                     )
-                    if user_id is not None:
-                        await conn.execute(
-                            """
-                            INSERT INTO partition_memberships
-                                (partition_name, user_id, role, added_at)
-                            VALUES ($1, $2, 'owner', NOW())
-                            ON CONFLICT (partition_name, user_id) DO NOTHING
-                            """,
-                            name,
-                            user_id,
-                        )
+                except asyncpg.UniqueViolationError as exc:
+                    raise ValidationError(
+                        f"Partition '{name}' already exists.",
+                        status_code=409,
+                        code="PARTITION_EXISTS",
+                    ) from exc
+                if user_id is not None:
+                    await conn.execute(
+                        """
+                        INSERT INTO partition_memberships
+                            (partition_name, user_id, role, added_at)
+                        VALUES ($1, $2, 'owner', NOW())
+                        ON CONFLICT (partition_name, user_id) DO NOTHING
+                        """,
+                        name,
+                        user_id,
+                    )
         return self._row_to_dict(row)
 
     async def get_partition(self, name: str) -> dict | None:

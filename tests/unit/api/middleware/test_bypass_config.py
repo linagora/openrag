@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 from api.middleware.auth import (
+    AuthFailureRateLimiter,
     AuthMiddleware,
     is_bypass_path,
     is_ui_path,
@@ -316,6 +317,31 @@ async def test_failed_bearer_limit_blocks_before_token_lookup(monkeypatch) -> No
     assert first.status_code == 403
     assert second.status_code == 429
     svc.get_user_by_token_for_request.assert_awaited_once_with("bad")
+
+
+@pytest.mark.asyncio
+async def test_disabled_auth_failure_limiter_ignores_malformed_limit(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "false")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "not-a-limit")
+
+    async def call_next(req):
+        return Response("ok")
+
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: None)
+    response = await middleware.dispatch(_request(), call_next)
+
+    assert response.status_code == 403
+
+
+def test_auth_failure_log_value_is_single_line_and_bounded() -> None:
+    value = AuthFailureRateLimiter._safe_log_value("ip:1.2.3.4\nextra\rdata\x00" + ("x" * 300), max_len=40)
+
+    assert "\n" not in value
+    assert "\r" not in value
+    assert "\x00" not in value
+    assert len(value) == 40
 
 
 def test_request_object_is_unused_by_helpers() -> None:

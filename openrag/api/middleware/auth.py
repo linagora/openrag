@@ -108,15 +108,23 @@ class AuthFailureRateLimiter:
     def __init__(self) -> None:
         self.enabled = _env_flag("RATE_LIMIT_ENABLED", True)
         self._limiter = MovingWindowRateLimiter(MemoryStorage())
-        self._limit = parse(os.environ.get("RATE_LIMIT_AUTH_FAILURE", os.environ.get("RATE_LIMIT_AUTH", "20/minute")))
+        self._limit = (
+            parse(os.environ.get("RATE_LIMIT_AUTH_FAILURE", os.environ.get("RATE_LIMIT_AUTH", "20/minute")))
+            if self.enabled
+            else None
+        )
 
     @staticmethod
     def _identity(request: Request) -> str:
         client = request.client
         return f"ip:{client.host}" if client else "ip:unknown"
 
+    @staticmethod
+    def _safe_log_value(value: str, *, max_len: int = 200) -> str:
+        return value.replace("\r", "\\r").replace("\n", "\\n").replace("\x00", "\\0")[:max_len]
+
     async def response_if_limited(self, request: Request) -> JSONResponse | None:
-        if not self.enabled:
+        if not self.enabled or self._limit is None:
             return None
         identity = self._identity(request)
         tier = "auth-failure"
@@ -126,7 +134,7 @@ class AuthFailureRateLimiter:
         return await self._limited_response(request, identity)
 
     async def record_failure(self, request: Request) -> JSONResponse | None:
-        if not self.enabled:
+        if not self.enabled or self._limit is None:
             return None
         identity = self._identity(request)
         tier = "auth-failure"
@@ -136,10 +144,14 @@ class AuthFailureRateLimiter:
         return await self._limited_response(request, identity)
 
     async def _limited_response(self, request: Request, identity: str) -> JSONResponse:
+        assert self._limit is not None
         tier = "auth-failure"
         stats = await self._limiter.get_window_stats(self._limit, tier, identity)
         retry_after = max(1, int(stats.reset_time - time.time()))
-        logger.warning("Auth failure rate limit exceeded", path=request.url.path, identity=identity)
+        logger.bind(
+            path=self._safe_log_value(str(request.url.path)),
+            identity=self._safe_log_value(identity),
+        ).warning("Auth failure rate limit exceeded")
         return JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded. Please retry later.", "extra": {}},

@@ -18,8 +18,9 @@ class _AsyncContext:
 
 
 class _FakeConn:
-    def __init__(self, *, owned_count: int = 0):
+    def __init__(self, *, owned_count: int = 0, existing_partition: bool = False):
         self.owned_count = owned_count
+        self.existing_partition = existing_partition
         self.operations: list[tuple[str, tuple]] = []
         self.inserted_partition = False
 
@@ -30,6 +31,8 @@ class _FakeConn:
     async def fetchrow(self, query: str, *params):
         self.operations.append((query, params))
         if "SELECT * FROM partitions" in query:
+            if self.existing_partition:
+                return {"partition": params[0], "created_at": datetime(2026, 1, 1, tzinfo=UTC)}
             return None
         if "INSERT INTO partitions" in query:
             self.inserted_partition = True
@@ -87,3 +90,18 @@ async def test_create_partition_locks_user_before_counting_owned_partitions():
     count_index = next(i for i, query in enumerate(operations) if "COUNT(*)::int FROM partition_memberships" in query)
     insert_index = next(i for i, query in enumerate(operations) if "INSERT INTO partitions" in query)
     assert lock_index < count_index < insert_index
+
+
+@pytest.mark.asyncio
+async def test_create_partition_existing_row_raises_conflict():
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _FakeConn(existing_partition=True)
+    repo = PgPartitionRepository(pool_getter=lambda: _FakePool(conn))
+
+    with pytest.raises(ValidationError) as exc:
+        await repo.create_partition("existing", user_id=7, max_owned=2)
+
+    assert exc.value.status_code == 409
+    assert exc.value.code == "PARTITION_EXISTS"
+    assert conn.inserted_partition is False

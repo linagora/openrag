@@ -314,6 +314,28 @@ async def test_add_file_auto_create_defaults_to_admin_when_user_missing(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_add_file_auto_create_preserves_admin_cap_bypass(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    config = _config_with_partition("tenant-a")
+    psvc = FakePartitionService(config)
+    svc = _service(config=config, partition_service=psvc)
+
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="tenant-new",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user={"id": 7, "is_admin": True},
+    )
+
+    assert psvc.created == [("tenant-new", 7)]
+    assert psvc.create_kwargs == [{"max_owned": None}]
+
+
+@pytest.mark.asyncio
 async def test_add_file_refreshes_cache_when_partition_row_exists(tmp_path):
     f = tmp_path / "doc.txt"
     f.write_text("x")

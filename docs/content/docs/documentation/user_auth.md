@@ -11,7 +11,8 @@ It covers admin behavior, user tokens, and partition-level permissions.
 
 ### `AUTH_TOKEN`
 - **`AUTH_TOKEN`** is the token used to bootstrap the admin user and authenticate protected API calls.
-- If **`AUTH_TOKEN`** is absent, OpenRAG fails closed by default.
+- In **`AUTH_MODE=token`**, if **`AUTH_TOKEN`** is absent, OpenRAG fails closed by default.
+- In **`AUTH_MODE=oidc`**, human login uses the OIDC session flow; **`AUTH_TOKEN`** is not the OIDC login mechanism.
 - Local open mode requires **`ALLOW_NO_AUTH=true`** together with `AUTH_MODE=token`. This should never be used in production.
 
 :::danger[Attention !!!]
@@ -106,7 +107,7 @@ Role-based restrictions are enforced via dependency guards:
 ## **7. Authorization Flow Summary**
 
 1. Request arrives with optional `Authorization: Bearer <token>`.
-2. If `AUTH_TOKEN` is **unset**, authentication is rejected unless `ALLOW_NO_AUTH=true` is explicitly enabled for local development.
+2. In `AUTH_MODE=token`, if `AUTH_TOKEN` is **unset**, authentication is rejected unless `ALLOW_NO_AUTH=true` is explicitly enabled for local development.
 3. If a token is configured:
    - Middleware hashes the token.
    - Looks up the user by hash.

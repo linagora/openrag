@@ -169,6 +169,8 @@ class MCPService:
         partition: str,
         allowed_partitions: list[str] | None,
         user_id: int | None,
+        *,
+        is_admin: bool = False,
     ) -> list[str] | None:
         """Auto-create *partition* (owned by the caller) when it is missing.
 
@@ -183,7 +185,7 @@ class MCPService:
             return allowed_partitions
         if await self._partitions.partition_exists(partition):
             return allowed_partitions  # exists but no membership → access check raises
-        cap_user = {"id": user_id, "is_admin": False} if user_id is not None else {"id": 1, "is_admin": True}
+        cap_user = {"id": user_id, "is_admin": is_admin} if user_id is not None else {"id": 1, "is_admin": True}
         await self._partitions.create_partition(partition, user_id, max_owned=max_partitions_for_user(cap_user))
         return [*allowed_partitions, partition]
 
@@ -573,6 +575,7 @@ class MCPService:
         file_id: str,
         allowed_partitions: list[str] | None,
         user_id: int | None,
+        is_admin: bool = False,
         extra_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # Validate cheap/safe inputs BEFORE any side effect (partition
@@ -585,7 +588,12 @@ class MCPService:
         if not is_safe_url(url):
             raise ValueError(f"URL is not allowed for server-side fetch: {url!r}")
 
-        allowed_partitions = await self._ensure_partition_exists(partition, allowed_partitions, user_id)
+        allowed_partitions = await self._ensure_partition_exists(
+            partition,
+            allowed_partitions,
+            user_id,
+            is_admin=is_admin,
+        )
         await self._enforce_editor_access(partition, allowed_partitions, user_id)
 
         if await self._partitions.file_exists(file_id, partition):
@@ -614,7 +622,7 @@ class MCPService:
             metadata=metadata,
             sanitized_filename=filename,
             original_filename=filename,
-            user={"id": user_id} if user_id is not None else None,
+            user={"id": user_id, "is_admin": is_admin} if user_id is not None else None,
         )
         return {
             "partition": partition,

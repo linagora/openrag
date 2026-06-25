@@ -9,6 +9,7 @@ whose exact non-bracketed ``{"detail": ...}`` body the endpoints return
 via ``HTTPException``.
 """
 
+import os
 from typing import Literal
 from urllib.parse import quote
 
@@ -286,7 +287,12 @@ async def create_partition(
     try:
         max_owned = max_partitions_for_user(user)
     except ConfigError as exc:
-        logger.error("Invalid MAX_PARTITIONS_PER_USER value")
+        logger.bind(
+            max_partitions_per_user=os.environ.get("MAX_PARTITIONS_PER_USER"),
+            user_id=user_id,
+            is_admin=bool(user.get("is_admin")),
+            partition=partition,
+        ).error("Invalid MAX_PARTITIONS_PER_USER value")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=exc.message,

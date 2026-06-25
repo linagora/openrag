@@ -674,6 +674,30 @@ async def test_index_url_auto_creates_partition_and_indexes(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_index_url_admin_auto_create_bypasses_partition_cap(monkeypatch):
+    parts = FakePartitions(exists=False, partition_exists=False)
+    indexing = FakeIndexing()
+    svc = _service(partitions=parts, indexing=indexing)
+
+    async def fake_download(url, dest):
+        dest.write_bytes(b"data")
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    await svc.index_url(
+        url="https://example.com/report.pdf",
+        partition="adminpart",
+        file_id="f1",
+        allowed_partitions=["other"],
+        user_id=1,
+        is_admin=True,
+    )
+
+    assert parts.created == [("adminpart", 1, None)]
+    assert indexing.added[0]["user"] == {"id": 1, "is_admin": True}
+
+
+@pytest.mark.asyncio
 async def test_safe_download_rejects_redirect_to_private(monkeypatch, tmp_path):
     # A public host that 302-redirects to a loopback target must be rejected on
     # the re-validated hop, not followed.
