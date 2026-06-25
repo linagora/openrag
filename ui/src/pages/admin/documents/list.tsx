@@ -6,7 +6,7 @@ import { Plus, Eye, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/shared/page-header";
-import { DataTable } from "@/components/shared/data-table";
+import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import {
@@ -72,6 +72,25 @@ export default function DocumentListPage() {
     onError: (err: Error) => toast.error(`Failed to delete: ${err.message}`),
   });
 
+  // Bulk delete: OpenRag deletes one file per request, so fan the selection out
+  // concurrently and report how many succeeded/failed.
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const bulkDeleteMutation = useMutation({
+    mutationFn: async (fileIds: string[]) => {
+      setBulkDeleting(true);
+      const results = await Promise.allSettled(fileIds.map((id) => deleteFile(selected, id)));
+      const ok = results.filter((r) => r.status === "fulfilled").length;
+      return { ok, failed: results.length - ok };
+    },
+    onSuccess: ({ ok, failed }) => {
+      if (ok) toast.success(`${ok} file(s) deleted`);
+      if (failed) toast.error(`${failed} file(s) failed to delete`);
+      queryClient.invalidateQueries({ queryKey: ["partition-files", selected] });
+    },
+    onError: (err: Error) => toast.error(`Bulk delete failed: ${err.message}`),
+    onSettled: () => setBulkDeleting(false),
+  });
+
   // OpenRag indexes one file per request; multi-file upload is a client-side
   // loop, each file becoming its own indexing task (track in Jobs).
   const uploadMutation = useMutation({
@@ -107,8 +126,9 @@ export default function DocumentListPage() {
 
   const columns: ColumnDef<PartitionFile, unknown>[] = [
     {
-      accessorKey: "filename",
-      header: "Filename",
+      id: "filename",
+      accessorFn: (f) => fileLabel(f).toLowerCase(),
+      header: ({ column }) => <SortableHeader column={column} title="Filename" />,
       cell: ({ row }) => (
         <Link to={fileHref(selected, row.original.file_id)} className="text-primary hover:underline font-medium">
           {fileLabel(row.original)}
@@ -122,7 +142,9 @@ export default function DocumentListPage() {
     },
     {
       id: "indexed_at",
-      header: "Indexed",
+      // ISO timestamps sort lexically = chronologically.
+      accessorFn: (f) => (f.indexed_at as string) ?? (f.created_at as string) ?? "",
+      header: ({ column }) => <SortableHeader column={column} title="Indexed" />,
       cell: ({ row }) =>
         formatDate((row.original.indexed_at as string) ?? (row.original.created_at as string) ?? null),
     },
@@ -237,7 +259,45 @@ export default function DocumentListPage() {
           Failed to load files: {(filesQuery.error as Error).message}
         </div>
       ) : (
-        <DataTable columns={columns} data={fileRows} />
+        <DataTable
+          columns={columns}
+          data={fileRows}
+          initialSorting={[{ id: "indexed_at", desc: true }]}
+          enableSelection={writable}
+          getRowId={(f) => f.file_id}
+          renderBulkActions={({ selected: rows, total, allSelected, selectAll, clear }) => {
+            const names = rows.map(fileLabel);
+            const description =
+              names.length <= 5
+                ? `Delete ${names.length} file(s)? This cannot be undone: ${names.join(", ")}`
+                : `Delete ${names.length} files? This cannot be undone.`;
+            return (
+              <>
+                <span className="text-sm font-medium text-primary">{rows.length} selected</span>
+                <ConfirmDialog
+                  title="Delete files"
+                  description={description}
+                  onConfirm={() => {
+                    bulkDeleteMutation.mutate(rows.map((r) => r.file_id));
+                    clear();
+                  }}
+                >
+                  <Button variant="destructive" size="sm" disabled={bulkDeleting}>
+                    <Trash2 className="h-3.5 w-3.5" /> Delete selected
+                  </Button>
+                </ConfirmDialog>
+                <Button variant="ghost" size="sm" onClick={clear}>
+                  Clear
+                </Button>
+                {!allSelected && rows.length < total && (
+                  <Button variant="link" size="sm" className="ml-auto" onClick={selectAll}>
+                    Select all {total}
+                  </Button>
+                )}
+              </>
+            );
+          }}
+        />
       )}
     </div>
   );
