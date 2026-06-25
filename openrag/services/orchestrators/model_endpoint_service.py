@@ -37,6 +37,13 @@ def _with_api_key(extra: dict[str, Any], api_key: str | None) -> dict[str, Any]:
     return extra
 
 
+def _with_enable_thinking(extra: dict[str, Any], enable_thinking: bool | None) -> dict[str, Any]:
+    """Add chat-template thinking control only when explicitly configured."""
+    if enable_thinking is None:
+        return extra
+    return {**extra, "enable_thinking": enable_thinking}
+
+
 class ModelEndpointService:
     """CRUD and lifecycle management for named model endpoints."""
 
@@ -103,17 +110,23 @@ class ModelEndpointService:
             "llm": {
                 "endpoint": os.getenv("LLM_ENDPOINT", s.llm.base_url),
                 "model_name": os.getenv("LLM_MODEL", s.llm.model),
-                "extra": _with_api_key(
-                    {"implementation": "vllm"},
-                    os.getenv("API_KEY", s.llm.api_key),
+                "extra": _with_enable_thinking(
+                    _with_api_key(
+                        {"implementation": "vllm"},
+                        os.getenv("API_KEY", s.llm.api_key),
+                    ),
+                    s.llm.enable_thinking,
                 ),
             },
             "vlm": {
                 "endpoint": os.getenv("VLM_ENDPOINT", s.vlm.base_url),
                 "model_name": os.getenv("VLM_MODEL", s.vlm.model),
-                "extra": _with_api_key(
-                    {"implementation": "vllm"},
-                    os.getenv("VLM_API_KEY", s.vlm.api_key),
+                "extra": _with_enable_thinking(
+                    _with_api_key(
+                        {"implementation": "vllm"},
+                        os.getenv("VLM_API_KEY", s.vlm.api_key),
+                    ),
+                    s.vlm.enable_thinking,
                 ),
             },
             "reranker": {

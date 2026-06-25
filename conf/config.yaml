@@ -14,9 +14,12 @@ _llm_params: &llm_params
   timeout: 60
   max_retries: 2
   logprobs: true
+  # null omits chat_template_kwargs; set false for Qwen-style models when
+  # reasoning traces should be disabled. Leave unset for Mistral tokenizers.
+  enable_thinking: null
 
 # --- LLM ---
-# Env: BASE_URL, MODEL, API_KEY
+# Env: BASE_URL, MODEL, API_KEY, LLM_ENABLE_THINKING
 llm:
   <<: *llm_params
   base_url: ""
@@ -24,7 +27,7 @@ llm:
   api_key: ""
 
 # --- VLM (Vision Language Model) ---
-# Env: VLM_BASE_URL, VLM_MODEL, VLM_API_KEY
+# Env: VLM_BASE_URL, VLM_MODEL, VLM_API_KEY, VLM_ENABLE_THINKING
 vlm:
   <<: *llm_params
   base_url: ""
@@ -239,7 +242,8 @@ loader:
 
   # Env: OPENAI_LOADER_BASE_URL, OPENAI_LOADER_API_KEY, OPENAI_LOADER_MODEL,
   #      OPENAI_LOADER_TEMPERATURE, OPENAI_LOADER_TIMEOUT, OPENAI_LOADER_MAX_RETRIES,
-  #      OPENAI_LOADER_TOP_P, OPENAI_LOADER_CONCURRENCY_LIMIT
+  #      OPENAI_LOADER_TOP_P, OPENAI_LOADER_CONCURRENCY_LIMIT,
+  #      OPENAI_LOADER_ENABLE_THINKING
   openai:
     base_url: http://openai:8000/v1
     api_key: EMPTY
@@ -249,6 +253,7 @@ loader:
     max_retries: 2
     top_p: 0.9
     concurrency_limit: 20
+    enable_thinking: null
 
 # --- Ray ---
 ray:
