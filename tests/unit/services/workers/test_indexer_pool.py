@@ -20,6 +20,18 @@ class _NonCallableChunker:
     chunk = None
 
 
+def test_build_pipeline_timeouts_bounds_parse_from_config() -> None:
+    """The pipeline must bound the parse stage at loader.parse_timeout so a wedged
+    parse fails that file instead of stalling indexing (#571)."""
+    from services.workers.indexer_pool import _build_pipeline_timeouts
+
+    cfg = SimpleNamespace(loader=SimpleNamespace(parse_timeout=42))
+
+    timeouts = _build_pipeline_timeouts(cfg)
+
+    assert timeouts.parse == 42
+
+
 def test_build_chunker_returns_native_chunker(monkeypatch: pytest.MonkeyPatch) -> None:
     import core.chunking.factory as factory
     from services.workers.indexer_pool import _build_chunker
@@ -569,7 +581,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
             batch_size=32,
             embed_concurrency=2,
         ),
-        loader=SimpleNamespace(image_captioning=True),
+        loader=SimpleNamespace(image_captioning=True, parse_timeout=3600),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )

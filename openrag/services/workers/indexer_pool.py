@@ -62,6 +62,7 @@ class IndexerPool:
             vector_store=self._vector_store,
             vlm=vlm,
             image_captioning=cfg.loader.image_captioning,
+            timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
             parser_factory=parser_factory,
             embedder_factory=embedder_factory,
@@ -305,6 +306,18 @@ def _build_parser_factory(parser: Any) -> Any:
         return wrapper
 
     return factory
+
+
+def _build_pipeline_timeouts(cfg: Settings) -> Any:
+    """Per-stage timeouts for the indexing pipeline.
+
+    Bounds the parse stage at ``loader.parse_timeout`` so a wedged parse (notably
+    pymupdf, which has no internal timeout) fails that file instead of stalling
+    indexing. Other stages stay unbounded here (their backends self-limit). See #571.
+    """
+    from services.workers.pipeline_builder import PipelineTimeouts
+
+    return PipelineTimeouts(parse=cfg.loader.parse_timeout)
 
 
 def _build_embedder_factory(cfg: Settings) -> Any:

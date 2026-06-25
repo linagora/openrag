@@ -106,6 +106,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("DOCLING_NUM_GPUS", "loader.docling_num_gpus", float),
     ("DOCLING_POOL_SIZE", "loader.docling_pool_size", int),
     ("DOCLING_MAX_TASKS_PER_WORKER", "loader.docling_max_tasks_per_worker", int),
+    ("PARSE_TIMEOUT", "loader.parse_timeout", int),
     ("WHISPER_MODEL", "loader.local_whisper.model", str),
     ("WHISPER_N_WORKERS", "loader.local_whisper.whisper_n_workers", int),
     ("WHISPER_NUM_GPUS", "loader.local_whisper.whisper_num_gpus", float),
