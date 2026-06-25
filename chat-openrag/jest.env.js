@@ -25,6 +25,10 @@ class FetchJsdomEnvironment extends TestEnvironment {
     if (typeof globalThis.ReadableStream === 'function') {
       this.global.ReadableStream = globalThis.ReadableStream
     }
+    // Node 17+ structuredClone (required by fake-indexeddb)
+    if (typeof globalThis.structuredClone === 'function') {
+      this.global.structuredClone = globalThis.structuredClone
+    }
   }
 }
 
