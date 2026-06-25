@@ -3,7 +3,14 @@ import { rspack } from '@rspack/core'
 export default {
   entry: './src/main.tsx',
   output: { clean: true, publicPath: '/' },
-  resolve: { extensions: ['.tsx', '.ts', '.jsx', '.js'] },
+  resolve: {
+    extensions: ['.tsx', '.ts', '.jsx', '.js'],
+    alias: {
+      react: new URL('./node_modules/react', import.meta.url).pathname,
+      'react-dom': new URL('./node_modules/react-dom', import.meta.url).pathname,
+      '@assistant-ui/react': new URL('./node_modules/@assistant-ui/react', import.meta.url).pathname
+    }
+  },
   module: {
     rules: [
       {
@@ -33,7 +40,5 @@ export default {
       'process.env.OPENRAG_TOKEN': JSON.stringify(process.env.OPENRAG_TOKEN || '')
     })
   ],
-  devServer: { port: 3042, historyApiFallback: true, hot: true },
-  // cozy-search & cozy-ui already bundle React; dedupe to one copy
-  optimization: { providedExports: true }
+  devServer: { port: 3042, historyApiFallback: true, hot: true }
 }
