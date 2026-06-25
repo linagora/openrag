@@ -13,9 +13,9 @@
     "@assistant-ui/react": "^0.12.5",
     "classnames": "^2.5.1",
     "cozy-flags": "^4.9.1",
+    "cozy-search": "file:/home/paul/dev/cozy/apps/cozy-libs/packages/cozy-search",
     "cozy-ui": "^138.4.0",
     "cozy-ui-plus": "^8.0.1",
-    "cozy-search": "file:/home/paul/dev/cozy/apps/cozy-libs/packages/cozy-search",
     "idb": "^8.0.0",
     "react": "18.2.0",
     "react-dom": "18.2.0",
@@ -23,6 +23,7 @@
     "twake-i18n": "^0.4.1"
   },
   "devDependencies": {
+    "@babel/core": "^7.29.7",
     "@rspack/cli": "^1.2.7",
     "@rspack/core": "^1.2.7",
     "@testing-library/jest-dom": "^6.4.0",
