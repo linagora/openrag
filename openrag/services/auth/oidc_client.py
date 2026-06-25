@@ -30,6 +30,7 @@ from authlib.jose.errors import JoseError
 # Clock-skew tolerance (seconds) applied to time-based JWT claims (exp/nbf) so
 # small drift between the IdP and this host doesn't reject valid tokens.
 _CLOCK_SKEW_LEEWAY = 60
+_LOGOUT_TOKEN_MAX_AGE_WITHOUT_EXP = 300
 
 
 @dataclass
@@ -54,7 +55,7 @@ class LogoutTokenClaims:
     sid: str | None
     iat: int
     jti: str | None
-    exp: int
+    exp: int | None
 
 
 class OIDCClient:
@@ -362,12 +363,18 @@ class OIDCClient:
 
         if "iat" not in decoded:
             raise ValueError("logout_token missing iat claim")
-        # exp is REQUIRED by the OIDC back-channel logout spec; do not default
-        # it, or an absent exp would make the token never expire.
-        if "exp" not in decoded:
-            raise ValueError("logout_token missing exp claim")
-        if int(decoded["exp"]) < now - _CLOCK_SKEW_LEEWAY:
-            raise ValueError("logout_token has expired")
+        issued_at = int(decoded["iat"])
+        if issued_at > now + _CLOCK_SKEW_LEEWAY:
+            raise ValueError("logout_token not yet valid (iat in the future)")
+
+        exp: int | None = None
+        if "exp" in decoded:
+            exp = int(decoded["exp"])
+            if exp < now - _CLOCK_SKEW_LEEWAY:
+                raise ValueError("logout_token has expired")
+        elif issued_at < now - _LOGOUT_TOKEN_MAX_AGE_WITHOUT_EXP - _CLOCK_SKEW_LEEWAY:
+            raise ValueError("logout_token without exp is too old")
+
         # jti is REQUIRED and is what enables replay detection by the caller.
         if not decoded.get("jti"):
             raise ValueError("logout_token missing jti claim")
@@ -387,9 +394,9 @@ class OIDCClient:
             aud=decoded["aud"],
             sub=decoded.get("sub"),
             sid=decoded.get("sid"),
-            iat=int(decoded["iat"]),
+            iat=issued_at,
             jti=decoded.get("jti"),
-            exp=int(decoded["exp"]),
+            exp=exp,
         )
 
     # ------------------------------------------------------------------

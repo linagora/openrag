@@ -474,6 +474,32 @@ async def test_backchannel_logout_rejects_replayed_jti():
     assert ei.value.error_description == "logout_token replayed"
 
 
+@pytest.mark.asyncio
+async def test_backchannel_logout_rejects_replayed_jti_without_exp(monkeypatch):
+    from services.orchestrators import auth_service as _as
+
+    now = 1_000_000
+    _as._seen_logout_jti.clear()
+    monkeypatch.setattr(_as.time, "time", lambda: now)
+
+    srepo = FakeSessionRepo()
+    claims = LogoutTokenClaims(
+        iss="i",
+        aud="openrag",
+        sub="s",
+        sid="sess-9",
+        iat=now,
+        jti="jti-without-exp",
+        exp=None,
+    )
+    svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
+
+    assert await svc.handle_backchannel_logout("tok") == 3
+    with pytest.raises(OIDCFlowError) as ei:
+        await svc.handle_backchannel_logout("tok")
+    assert ei.value.error_description == "logout_token replayed"
+
+
 def test_logout_replay_cache_keeps_jti_for_clock_skew(monkeypatch):
     """Replay protection must last through the same leeway accepted by token verification."""
     from services.orchestrators import auth_service as _as

@@ -36,7 +36,7 @@ from services.auth import (
     hash_session_token,
     issue_session_token,
 )
-from services.auth.oidc_client import _CLOCK_SKEW_LEEWAY
+from services.auth.oidc_client import _CLOCK_SKEW_LEEWAY, _LOGOUT_TOKEN_MAX_AGE_WITHOUT_EXP
 from services.auth.oidc_groups import extract_partition_roles
 
 if TYPE_CHECKING:
@@ -71,17 +71,21 @@ class OIDCFlowError(OpenRAGError):
 
 
 # In-process replay cache for back-channel logout token jti values, mapping
-# jti -> token exp. A logout token may only be consumed once (OIDC spec). This
+# jti -> replay expiry. A logout token may only be consumed once (OIDC spec). This
 # is per-worker; with multiple workers a replay could still reach a different
 # worker, but back-channel logout is idempotent (re-revoking sessions is a
 # no-op), so this is a defence-in-depth guard, not the sole protection.
 _seen_logout_jti: dict[str, int] = {}
 
 
-def _logout_jti_is_replay(jti: str, exp: int) -> bool:
+def _logout_jti_is_replay(jti: str, exp: int | None, iat: int | None = None) -> bool:
     """Record a logout-token jti and report whether it was already seen."""
     now = int(time.time())
-    replay_expires_at = exp + _CLOCK_SKEW_LEEWAY
+    if exp is None:
+        issued_at = iat if iat is not None else now
+        replay_expires_at = max(issued_at + _LOGOUT_TOKEN_MAX_AGE_WITHOUT_EXP, now) + _CLOCK_SKEW_LEEWAY
+    else:
+        replay_expires_at = exp + _CLOCK_SKEW_LEEWAY
     # Prune expired entries to bound memory.
     for old_jti, old_exp in list(_seen_logout_jti.items()):
         if old_exp < now:
@@ -278,7 +282,7 @@ class AuthService:
             raise OIDCFlowError("invalid_request") from e
 
         # Reject replays: a given logout token (jti) must only be processed once.
-        if claims.jti and _logout_jti_is_replay(claims.jti, claims.exp):
+        if claims.jti and _logout_jti_is_replay(claims.jti, claims.exp, claims.iat):
             logger.warning(f"Replayed back-channel logout token ignored — jti={claims.jti!r}")
             raise OIDCFlowError("logout_token replayed", error_description="logout_token replayed")
 
