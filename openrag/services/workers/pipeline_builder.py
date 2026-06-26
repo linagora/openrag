@@ -75,6 +75,16 @@ class IndexingPipeline:
         stage is easy to spot — e.g. comparing docling vs marker parse cost.
         Timings are emitted even when a stage fails, so a failure shows how far
         indexing got before erroring.
+
+        CAVEAT — these are **wall-clock**, not CPU time. Files in a batch index
+        concurrently and stages share resources (the parser pools, the
+        ``asyncio.to_thread`` chunk executor + the GIL, async LLM calls), so a
+        stage's value includes time spent **queued/contending** for a slot, not
+        just its own work. Under concurrency a value can balloon far past the
+        real cost (e.g. the same file chunking in 0.3 s in one run and 67 s in a
+        busy batch). They are only a clean per-stage cost at **low concurrency**
+        — index one file at a time for accurate numbers; for a batch, read the
+        first-finishing (least-contended) file.
         """
         config = self._effective_indexation_config(row)
         parser = self._select_parser(config)
