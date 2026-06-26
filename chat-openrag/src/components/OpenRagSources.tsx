@@ -13,6 +13,7 @@ import {
   Globe
 } from '@linagora/twake-icons'
 import IconRaw from 'cozy-ui/transpiled/react/Icon'
+import MultiFilesIcon from 'cozy-ui/transpiled/react/Icons/MultiFiles'
 import ListRaw from 'cozy-ui/transpiled/react/List'
 import ListItemRaw from 'cozy-ui/transpiled/react/ListItem'
 import ListItemIconRaw from 'cozy-ui/transpiled/react/ListItemIcon'
@@ -141,7 +142,7 @@ const OpenRagSources = ({
         aria-expanded={open}
         onClick={() => setOpen(v => !v)}
       >
-        <Icon icon={FileTypeFiles} size={16} />
+        <Icon icon={MultiFilesIcon} size={16} />
         <span>{tc('assistant.sources', items.length)}</span>
         <svg
           width="14"
