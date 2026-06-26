@@ -40,7 +40,17 @@ export interface UserCreateRequest {
   file_quota?: number | null;
 }
 
-export type UserUpdateRequest = UserCreateRequest;
+// PATCH semantics differ from create: omitting a field leaves it unchanged,
+// while sending an explicit `null` clears the nullable identity columns (e.g.
+// clearing external_user_id returns the user to the token-only state). Create
+// can't express null, so this is a standalone type rather than an extension.
+export interface UserUpdateRequest {
+  display_name?: string | null;
+  external_user_id?: string | null;
+  email?: string | null;
+  is_admin?: boolean;
+  file_quota?: number | null;
+}
 
 /**
  * Resolve a user's *effective* file quota from the raw `file_quota` column,

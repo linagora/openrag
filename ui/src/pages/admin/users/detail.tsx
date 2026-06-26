@@ -52,6 +52,16 @@ import {
 import { formatDate, copyToClipboard } from "@/lib/utils";
 
 export default function UserDetailPage() {
+  // Remount the entire detail view when the route's user id changes. React Router
+  // reuses the same element across param-only navigation (e.g. browser back/forward
+  // between two user pages), so without a fresh key all local state — the profile
+  // form, the quota input, the active tab — would leak the previous user's values.
+  // Keying by id gives each user a clean mount, so the form re-seeds every time.
+  const { id } = useParams<{ id: string }>();
+  return <UserDetail key={id} />;
+}
+
+function UserDetail() {
   const { id } = useParams<{ id: string }>();
   const userId = Number(id);
   const navigate = useNavigate();
@@ -80,9 +90,13 @@ export default function UserDetailPage() {
   const updateMut = useMutation({
     mutationFn: () =>
       updateUser(id!, {
-        display_name: displayName.trim() || undefined,
-        email: email.trim() || undefined,
-        external_user_id: externalId.trim() || undefined,
+        // Send an explicit null (not undefined) for a cleared field so the PATCH
+        // actually clears the column. Coercing empty -> undefined drops the key,
+        // which the backend treats as "no change" — so e.g. an external_user_id
+        // could never be cleared back to the token-only state from this form.
+        display_name: displayName.trim() || null,
+        email: email.trim() || null,
+        external_user_id: externalId.trim() || null,
         is_admin: isAdmin,
       }),
     onSuccess: () => {
