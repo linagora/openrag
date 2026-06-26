@@ -299,14 +299,7 @@ def test_dewrap_preserves_code_fence_verbatim():
     space-joined as prose), while surrounding prose still reflows (#583)."""
     from core.chunking.recursive import dewrap_paragraphs
 
-    text = (
-        "Intro wrapped\nacross two lines.\n"
-        "```python\n"
-        "def f():\n"
-        "    return 1\n"
-        "```\n"
-        "Outro wrapped\nacross two.\n"
-    )
+    text = "Intro wrapped\nacross two lines.\n```python\ndef f():\n    return 1\n```\nOutro wrapped\nacross two.\n"
     lines = dewrap_paragraphs(text).splitlines()
 
     assert "def f():" in lines  # code line on its own, not joined to the fence
