@@ -10,11 +10,11 @@ jest.mock('twake-i18n', () => ({
 
 import App from './App'
 
-// The default route ("/") matches the "*" route -> EmptyState + AppSidebar.
+// The default route ("/") matches the "*" route -> EmptyState + Sidebar.
 // This proves the full provider/router/store/chat-components composition boots
 // without mounting the chat route's <Conversation /> (assistant-ui thread),
 // which is exercised separately by the runtime provider spec. The "New
-// conversation" affordance comes from both EmptyState and AppSidebar.
+// conversation" affordance comes from both EmptyState and the cozy-search Sidebar.
 beforeEach(() => {
   jest
     .spyOn(global, 'fetch')
@@ -27,7 +27,7 @@ afterEach(() => {
 
 it('boots and shows the new-conversation entry', async () => {
   render(<App />)
-  // EmptyState + AppSidebar both render the create button (t returns the key).
+  // EmptyState + Sidebar both render the create button (t returns the key).
   expect(
     (await screen.findAllByText(/assistant\.sidebar\.create_new/)).length
   ).toBeGreaterThan(0)

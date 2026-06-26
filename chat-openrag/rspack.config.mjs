@@ -8,6 +8,11 @@ export default {
     alias: {
       react: new URL('./node_modules/react', import.meta.url).pathname,
       'react-dom': new URL('./node_modules/react-dom', import.meta.url).pathname,
+      // cozy-search's Sidebar/useConversation call react-router hooks; they must
+      // share this app's single react-router-dom instance or useNavigate() can't
+      // see the app's <Router> (duplicate-context error).
+      'react-router-dom': new URL('./node_modules/react-router-dom', import.meta.url).pathname,
+      'react-router': new URL('./node_modules/react-router', import.meta.url).pathname,
       '@assistant-ui/react': new URL('./node_modules/@assistant-ui/react', import.meta.url).pathname,
       'twake-i18n': new URL('./node_modules/twake-i18n', import.meta.url).pathname,
       'cozy-ui': new URL('./node_modules/cozy-ui', import.meta.url).pathname,

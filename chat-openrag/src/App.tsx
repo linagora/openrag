@@ -12,11 +12,12 @@ import { useI18n } from 'twake-i18n'
 import {
   ConversationStoreProvider,
   ChatComponentsProvider,
-  Conversation
-} from 'cozy-search/decoupled'
+  Conversation,
+  Sidebar as SidebarRaw,
+  AssistantProvider as AssistantProviderRaw
+} from 'cozy-search/ai-chat-ui'
 
 import AppProviders from './providers/AppProviders'
-import AppSidebar from './components/AppSidebar'
 import OpenRagModelSelector from './components/OpenRagModelSelector'
 import OpenRagSources from './components/OpenRagSources'
 import { ModelProvider } from './runtime/ModelContext'
@@ -25,6 +26,15 @@ import {
   useLocalConversationStore,
   type LocalStore
 } from './store/LocalConversationStore'
+
+// cozy-search ai-chat-ui ships loose types: Sidebar marks className required and
+// AssistantProvider's .d.ts has no default-export type. Cast to the real shapes.
+const Sidebar = SidebarRaw as unknown as React.ComponentType<{
+  className?: string
+}>
+const AssistantProvider = AssistantProviderRaw as unknown as React.ComponentType<{
+  children?: React.ReactNode
+}>
 
 const EmptyState = (): JSX.Element => {
   const navigate = useNavigate()
@@ -64,18 +74,22 @@ const Shell = (): JSX.Element => {
           ComposerExtras: OpenRagModelSelector
         }}
       >
-        <div className="app-shell">
-          <AppSidebar />
-          <div className="app-main">
-            <Routes>
-              <Route
-                path="/assistant/:conversationId"
-                element={<ChatRoute store={store} />}
-              />
-              <Route path="*" element={<EmptyState />} />
-            </Routes>
+        {/* AssistantProvider supplies the state that cozy-search's Sidebar and
+            its useConversation hook read via useAssistant(). */}
+        <AssistantProvider>
+          <div className="app-shell">
+            <Sidebar />
+            <div className="app-main">
+              <Routes>
+                <Route
+                  path="/assistant/:conversationId"
+                  element={<ChatRoute store={store} />}
+                />
+                <Route path="*" element={<EmptyState />} />
+              </Routes>
+            </div>
           </div>
-        </div>
+        </AssistantProvider>
       </ChatComponentsProvider>
     </ConversationStoreProvider>
   )

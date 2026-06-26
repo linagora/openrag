@@ -3,7 +3,7 @@ import React, { ReactNode } from 'react'
 import CozyTheme from 'cozy-ui-plus/dist/providers/CozyTheme'
 import { BreakpointsProvider } from 'cozy-ui/transpiled/react/providers/Breakpoints'
 import { I18n } from 'twake-i18n'
-import { locales } from 'cozy-search/decoupled'
+import { locales } from 'cozy-search/ai-chat-ui'
 
 import '../styles/index.css'
 

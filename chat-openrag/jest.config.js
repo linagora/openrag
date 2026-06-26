@@ -6,6 +6,8 @@ module.exports = {
   moduleNameMapper: {
     '^react$': '<rootDir>/node_modules/react',
     '^react-dom$': '<rootDir>/node_modules/react-dom',
+    '^react-router-dom$': '<rootDir>/node_modules/react-router-dom',
+    '^react-router$': '<rootDir>/node_modules/react-router',
     '^@assistant-ui/react$': '<rootDir>/jest.assistantUiMock.js',
     '^twake-i18n$': '<rootDir>/node_modules/twake-i18n',
     '^@linagora/twake-icons$': '<rootDir>/jest.twakeIconsMock.js',
