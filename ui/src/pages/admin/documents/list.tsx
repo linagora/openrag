@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
 import { Plus, Eye, Trash2 } from "lucide-react";
@@ -42,8 +42,13 @@ export default function DocumentListPage() {
   const { canWrite } = usePermissions();
 
   // OpenRag has no flat/cross-partition file list — files live inside a
-  // partition, so the view is partition-scoped (pick one, see its files).
-  const [partition, setPartition] = useState("");
+  // partition, so the view is partition-scoped (pick one, see its files). The
+  // selection persists so navigating away and back (detail view, or switching
+  // to Jobs and returning) lands on the same partition rather than resetting to
+  // the first one: the URL ?partition= wins (carried by the detail "Back"
+  // button + deep links), then the last choice remembered in sessionStorage.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [remembered] = useState(() => sessionStorage.getItem("documents.partition") || "");
   const [uploadOpen, setUploadOpen] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -51,7 +56,20 @@ export default function DocumentListPage() {
 
   const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
   const partitions = partitionsQuery.data?.partitions ?? [];
-  const selected = partition || partitions[0]?.partition || "";
+  const selected = searchParams.get("partition") || remembered || partitions[0]?.partition || "";
+
+  // Keep the remembered partition in sync (covers landing via a ?partition= URL).
+  useEffect(() => {
+    if (selected) sessionStorage.setItem("documents.partition", selected);
+  }, [selected]);
+
+  const selectPartition = (p: string) => {
+    sessionStorage.setItem("documents.partition", p);
+    setSearchParams((prev) => {
+      prev.set("partition", p);
+      return prev;
+    });
+  };
 
   const role = partitions.find((p) => p.partition === selected)?.role;
   const writable = canWrite(role);
@@ -236,7 +254,7 @@ export default function DocumentListPage() {
 
       <div className="flex items-center gap-2 mb-4">
         <Label className="text-sm font-medium">Partition</Label>
-        <Select value={selected} onValueChange={setPartition}>
+        <Select value={selected} onValueChange={selectPartition}>
           <SelectTrigger className="w-[220px]">
             <SelectValue placeholder="Select partition" />
           </SelectTrigger>

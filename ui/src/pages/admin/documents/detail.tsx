@@ -129,6 +129,10 @@ export default function DocumentDetailPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
+  // Return to the documents list scoped to THIS file's partition, so "Back"
+  // (and post-delete) lands where the user came from, not the default partition.
+  const documentsHref = `/documents?partition=${encodeURIComponent(partition ?? "")}`;
+
   const [replaceSel, setReplaceSel] = useState<File | null>(null);
   const [copyTarget, setCopyTarget] = useState("");
   const replaceFileRef = useRef<HTMLInputElement>(null);
@@ -172,7 +176,7 @@ export default function DocumentDetailPage() {
     mutationFn: () => deleteFile(partition!, fileId!),
     onSuccess: () => {
       toast.success("File deleted");
-      navigate("/documents");
+      navigate(documentsHref);
     },
     onError: (err: Error) => toast.error(`Failed to delete: ${err.message}`),
   });
@@ -202,7 +206,7 @@ export default function DocumentDetailPage() {
     <div className="space-y-6">
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="sm" asChild>
-          <Link to="/documents">
+          <Link to={documentsHref}>
             <ArrowLeft className="h-4 w-4" />
             Back to Documents
           </Link>
