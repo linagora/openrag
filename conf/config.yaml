@@ -228,6 +228,13 @@ loader:
   docling_max_task_retry: 3
   docling_retry_base_delay: 2.0
 
+  # Env: PARSE_TIMEOUT
+  # Outer wall-clock bound (seconds) for a single file's parse stage. marker and
+  # docling self-limit at marker_timeout/docling_timeout; pymupdf has no internal
+  # timeout, so this prevents a wedged pymupdf parse from stalling indexing — the
+  # bad file fails and is reported instead.
+  parse_timeout: 3600
+
   # Env: TRANSCRIBER_BASE_URL, TRANSCRIBER_API_KEY, TRANSCRIBER_MODEL,
   #      TRANSCRIBER_TIMEOUT, TRANSCRIBER_MAX_CONCURRENT_CHUNKS, USE_WHISPER_LANG_DETECTOR,
   #      TRANSCRIBER_DIRECT_UPLOAD_SUFFIXES (pipe-separated, e.g. ".mp3|.mp4|.wav")
