@@ -133,22 +133,103 @@ body,
   color: var(--textPrimaryColor, #32363f);
 }
 
-/* Partition selector styled as a chip in the composer actions row */
-.openrag-partition-select {
+/* Partition selector — chip button + popover (replaces the native <select>) */
+.openrag-selector {
+  position: relative;
+}
+.openrag-selector-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   max-width: 240px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  padding: 5px 10px;
   border: 1px solid var(--borderMainColor, #d6d8db);
   border-radius: 16px;
-  padding: 4px 10px;
-  font-size: 13px;
   background: var(--paperBackgroundColor, #fff);
-  color: var(--textPrimaryColor, #32363f);
+  color: var(--primaryColor, #0a84ff);
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
 }
-.openrag-partition-select:disabled {
-  opacity: 0.6;
+.openrag-selector-chip:hover:not(:disabled) {
+  background: var(--primaryBackground, rgba(10, 132, 255, 0.06));
+}
+.openrag-selector-chip:disabled {
+  opacity: 0.55;
   cursor: default;
+}
+.openrag-selector-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--textPrimaryColor, #32363f);
+}
+.openrag-selector-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  width: 280px;
+  max-width: 80vw;
+  background: var(--paperBackgroundColor, #fff);
+  border: 1px solid var(--borderMainColor, #e0e0e0);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  padding: 8px;
+  z-index: 30;
+}
+.openrag-selector-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid var(--borderMainColor, #e0e0e0);
+  border-radius: 8px;
+  font-size: 13px;
+  margin-bottom: 6px;
+  outline: none;
+}
+.openrag-selector-search:focus {
+  border-color: var(--primaryColor, #0a84ff);
+}
+.openrag-selector-options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.openrag-selector-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--textPrimaryColor, #32363f);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.openrag-selector-option:hover {
+  background: var(--primaryBackground, rgba(10, 132, 255, 0.08));
+}
+.openrag-selector-option.is-selected {
+  background: var(--primaryBackground, rgba(10, 132, 255, 0.12));
+  font-weight: 600;
+  color: var(--primaryColor, #0a84ff);
+}
+
+/* Constrain the message column (cozy-search keeps it readable, ~maw-7). */
+[class*='conversationViewport'] > * {
+  max-width: 768px;
+  margin-left: auto;
+  margin-right: auto;
+  width: 100%;
+  box-sizing: border-box;
+  padding-left: 16px;
+  padding-right: 16px;
 }
 
 /* Sources — styled chip + list (matches cozy-search look) */

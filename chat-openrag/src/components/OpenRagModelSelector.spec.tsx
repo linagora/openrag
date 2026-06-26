@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 
 import OpenRagModelSelector from './OpenRagModelSelector'
@@ -6,52 +6,51 @@ import { ModelProvider } from '../runtime/ModelContext'
 
 afterEach(() => jest.restoreAllMocks())
 
+const mockModels = (ids: string[]): void => {
+  jest
+    .spyOn(global, 'fetch')
+    .mockResolvedValue(
+      new Response(JSON.stringify({ data: ids.map(id => ({ id })) }))
+    )
+}
+
+const renderSelector = (): ReturnType<typeof render> =>
+  render(
+    <ModelProvider>
+      <OpenRagModelSelector />
+    </ModelProvider>
+  )
+
 it('defaults to the first model and lets the user switch', async () => {
-  jest.spyOn(global, 'fetch').mockResolvedValue(
-    new Response(
-      JSON.stringify({ data: [{ id: 'openrag-docs' }, { id: 'openrag-all' }] })
-    )
-  )
-  render(
-    <ModelProvider>
-      <OpenRagModelSelector />
-    </ModelProvider>
-  )
-  const select = (await screen.findByLabelText('Partition')) as HTMLSelectElement
-  expect(select.value).toBe('openrag-docs')
-  fireEvent.change(select, { target: { value: 'openrag-all' } })
-  expect(select.value).toBe('openrag-all')
+  mockModels(['openrag-docs', 'openrag-all'])
+  renderSelector()
+  // The chip shows the first model's label by default.
+  const chip = await screen.findByRole('button', { name: /docs/ })
+  expect(chip).toBeInTheDocument()
+  // Open the dropdown and pick another partition.
+  fireEvent.click(chip)
+  fireEvent.click(screen.getByRole('option', { name: 'All partitions' }))
+  // The chip label reflects the new selection (and the menu closed).
+  expect(
+    await screen.findByRole('button', { name: /All partitions/ })
+  ).toBeInTheDocument()
 })
 
-it('renders null when no models are available', async () => {
-  jest.spyOn(global, 'fetch').mockResolvedValue(
-    new Response(JSON.stringify({ data: [] }))
-  )
-  const { container } = render(
-    <ModelProvider>
-      <OpenRagModelSelector />
-    </ModelProvider>
-  )
-  // Wait for fetch to resolve then assert nothing rendered
-  await new Promise(r => setTimeout(r, 50))
-  expect(container.querySelector('select')).toBeNull()
+it('renders nothing when no models are available', async () => {
+  mockModels([])
+  const { container } = renderSelector()
+  await waitFor(() => {
+    expect(container.querySelector('.openrag-selector')).toBeNull()
+  })
 })
 
-it('labels openrag-all as "All partitions" and strips prefix otherwise', async () => {
-  jest.spyOn(global, 'fetch').mockResolvedValue(
-    new Response(
-      JSON.stringify({
-        data: [{ id: 'openrag-docs' }, { id: 'openrag-all' }]
-      })
-    )
-  )
-  render(
-    <ModelProvider>
-      <OpenRagModelSelector />
-    </ModelProvider>
-  )
-  await screen.findByLabelText('Partition')
-  // getByRole throws if not found — sufficient to assert presence
-  expect(screen.getByRole('option', { name: 'docs' }).textContent).toBe('docs')
-  expect(screen.getByRole('option', { name: 'All partitions' }).textContent).toBe('All partitions')
+it('labels openrag-all as "All partitions" and strips the prefix otherwise', async () => {
+  mockModels(['openrag-docs', 'openrag-all'])
+  renderSelector()
+  const chip = await screen.findByRole('button', { name: /docs/ })
+  fireEvent.click(chip)
+  expect(screen.getByRole('option', { name: 'docs' })).toBeInTheDocument()
+  expect(
+    screen.getByRole('option', { name: 'All partitions' })
+  ).toBeInTheDocument()
 })

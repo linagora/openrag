@@ -34,6 +34,8 @@ const AppSidebar = (): JSX.Element => {
   const { conversations } = store.useConversations()
 
   const newLabel = t('assistant.sidebar.create_new')
+  // Title shown for a conversation that has no messages yet.
+  const untitled = lang === 'fr' ? 'Nouvelle conversation' : 'New conversation'
 
   const onNew = async (): Promise<void> => {
     const id = await store.createConversation()
@@ -50,7 +52,7 @@ const AppSidebar = (): JSX.Element => {
       </div>
       <ul className="app-sidebar-list">
         {conversations.map(c => {
-          const title = conversationTitle(c, newLabel)
+          const title = conversationTitle(c, untitled)
           const preview = conversationPreview(c)
           const date = formatDate(c.cozyMetadata?.updatedAt, lang)
           return (

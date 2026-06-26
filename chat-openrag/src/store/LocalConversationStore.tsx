@@ -45,15 +45,21 @@ function useConversations(): ReturnType<ConversationStore['useConversations']> {
 function useConversationMessages(
   conversationId: string
 ): ReturnType<ConversationStore['useConversationMessages']> {
-  const [messages, setMessages] = useState<StoredMessage[]>([])
-  const [isLoading, setLoading] = useState(true)
+  // Track which conversation the loaded messages belong to. Deriving isLoading
+  // from `loaded.id !== conversationId` makes the switch synchronous: the
+  // instant conversationId changes, isLoading is true again (before the async
+  // load), so a consumer that gates on it never seeds with the previous
+  // conversation's messages.
+  const [loaded, setLoaded] = useState<{
+    id: string | null
+    messages: StoredMessage[]
+  }>({ id: null, messages: [] })
+
   useEffect(() => {
     let active = true
     const reload = (): void => {
       localDb.getConversation(conversationId).then(c => {
-        if (!active) return
-        setMessages(c?.messages || [])
-        setLoading(false)
+        if (active) setLoaded({ id: conversationId, messages: c?.messages || [] })
       })
     }
     reload()
@@ -63,7 +69,9 @@ function useConversationMessages(
       listeners.delete(reload)
     }
   }, [conversationId])
-  return { messages, isLoading }
+
+  const isLoading = loaded.id !== conversationId
+  return { messages: isLoading ? [] : loaded.messages, isLoading }
 }
 
 export const useLocalConversationStore = (): LocalStore => {
