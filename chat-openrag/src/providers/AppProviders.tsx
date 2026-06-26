@@ -7,8 +7,20 @@ import { locales } from 'cozy-search/decoupled'
 
 import '../styles/index.css'
 
+// Use the browser locale (cozy-search ships en/fr/ru/vi); fall back to en.
+const detectLang = (): string => {
+  const l = (typeof navigator !== 'undefined' && navigator.language) || 'en'
+  const short = l.slice(0, 2)
+  return short in locales ? short : 'en'
+}
+
 const AppProviders = ({ children }: { children: ReactNode }): JSX.Element => (
-  <I18n lang="en" dictRequire={(lang: string) => locales[lang as keyof typeof locales] || locales.en}>
+  <I18n
+    lang={detectLang()}
+    dictRequire={(lang: string) =>
+      locales[lang as keyof typeof locales] || locales.en
+    }
+  >
     {/* ignoreCozySettings bypasses the cozy-stack settings query
         (CozyThemeWithQuery needs a CozyClient/stack we don't have) and uses
         cozy-ui's built-in light palette directly. */}

@@ -1,6 +1,14 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import React from 'react'
 
+jest.mock('twake-i18n', () => ({
+  useI18n: () => ({
+    t: (key: string, count?: number) =>
+      key === 'assistant.sources' ? `${count} sources` : key,
+    lang: 'en'
+  })
+}))
+
 import OpenRagSources from './OpenRagSources'
 
 it('renders a collapsible sources list with links', () => {

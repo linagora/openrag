@@ -2,6 +2,12 @@
 import { render, screen } from '@testing-library/react'
 import React from 'react'
 
+// Make the test locale-independent: I18n is a passthrough and t returns the key.
+jest.mock('twake-i18n', () => ({
+  I18n: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  useI18n: () => ({ t: (k: string) => k, lang: 'en' })
+}))
+
 import App from './App'
 
 // The default route ("/") matches the "*" route -> EmptyState + AppSidebar.
@@ -21,5 +27,8 @@ afterEach(() => {
 
 it('boots and shows the new-conversation entry', async () => {
   render(<App />)
-  expect((await screen.findAllByText(/New conversation/)).length).toBeGreaterThan(0)
+  // EmptyState + AppSidebar both render the create button (t returns the key).
+  expect(
+    (await screen.findAllByText(/assistant\.sidebar\.create_new/)).length
+  ).toBeGreaterThan(0)
 })

@@ -7,6 +7,8 @@ import {
   useParams
 } from 'react-router-dom'
 
+import { useI18n } from 'twake-i18n'
+
 import {
   ConversationStoreProvider,
   ChatComponentsProvider,
@@ -26,15 +28,17 @@ import {
 
 const EmptyState = (): JSX.Element => {
   const navigate = useNavigate()
+  const { t } = useI18n()
   const store = useLocalConversationStore()
   const onNew = async (): Promise<void> => {
     const id = await store.createConversation()
     navigate(`/assistant/${id}`)
   }
   return (
-    <div className="u-flex u-flex-column u-flex-items-center u-flex-justify-center u-flex-auto">
-      <button type="button" onClick={onNew}>
-        New conversation
+    <div className="app-empty">
+      <h2 className="app-empty-title">{t('assistant.message.welcome')}</h2>
+      <button type="button" className="app-new-btn" onClick={onNew}>
+        + {t('assistant.sidebar.create_new')}
       </button>
     </div>
   )
