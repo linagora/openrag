@@ -42,7 +42,21 @@ export default {
         use: [
           rspack.CssExtractRspackPlugin.loader,
           { loader: 'css-loader', options: { modules: { namedExport: false, exportLocalsConvention: 'as-is' } } },
-          'stylus-loader'
+          {
+            loader: 'stylus-loader',
+            options: {
+              // cozy-search's .styl files do `@require 'settings/...'` against
+              // cozy-ui's stylus tree; without these search paths stylus fails
+              // and the component CSS is silently dropped.
+              stylusOptions: {
+                paths: [
+                  new URL('./node_modules/cozy-ui/stylus', import.meta.url)
+                    .pathname,
+                  new URL('./node_modules', import.meta.url).pathname
+                ]
+              }
+            }
+          }
         ]
       },
       { test: /\.css$/, use: [rspack.CssExtractRspackPlugin.loader, 'css-loader'] },

@@ -6,6 +6,10 @@
    cozy-ui.min.css = component styles + theme vars; utils = the u-* utilities. */
 @import 'cozy-ui/dist/cozy-ui.min.css';
 @import 'cozy-ui/dist/cozy-ui.utils.min.css';
+/* cozy-search pre-compiles its component .styl into this extracted stylesheet
+   (babel css-modules-transform extractCss). Without it the chat components
+   (message bubbles, composer, sources, sidebar) render unstyled. */
+@import 'cozy-search/dist/stylesheet.css';
 
 @font-face {
   font-family: 'Lato';
