@@ -21,6 +21,8 @@ import ListItemTextRaw from 'cozy-ui/transpiled/react/ListItemText'
 import { useI18n } from 'twake-i18n'
 import type { StoredSource } from 'cozy-search'
 
+import { getConfig } from '../config'
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const Icon = IconRaw as any
 const List = ListRaw as any
@@ -88,6 +90,17 @@ interface DisplaySource {
   icon: unknown
 }
 
+// openRAG's /static (and /extract) endpoints authenticate via a `?token=`
+// query param — a plain <a> click sends no Authorization header — so document
+// links must carry the token. Web links are external and left untouched.
+const withToken = (url: string | undefined): string | undefined => {
+  if (!url) return undefined
+  const token = getConfig().token
+  if (!token) return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}token=${encodeURIComponent(token)}`
+}
+
 const toDisplay = (sources: StoredSource[]): DisplaySource[] => {
   const out: DisplaySource[] = []
   const seen = new Set<string>()
@@ -112,7 +125,7 @@ const toDisplay = (sources: StoredSource[]): DisplaySource[] => {
     const name = s.title || (s.path ? basename(s.path) : 'document')
     out.push({
       key: `doc:${fileKey}`,
-      href: s.fileUrl || s.chunkUrl || s.url,
+      href: withToken(s.fileUrl || s.chunkUrl || s.url),
       name,
       meta: s.path ? dirOf(s.path) : '',
       icon: fileIcon(name)
