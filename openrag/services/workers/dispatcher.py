@@ -90,17 +90,25 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=f"set_details({task_id})",
         )
 
-        task = self._pool.process_file.remote(
-            task_id=task_id,
-            path=path,
-            metadata=metadata,
-            partition=partition,
-            user=user,
-            workspace_ids=workspace_ids,
-            replace=replace,
-            indexation_config=indexation_config,
-            embedder_name=embedder_name,
+        # ``IndexerPool`` is a Ray actor; ``submit`` returns ``[worker_ref]``
+        # (wrapped so Ray doesn't auto-dereference and block on the worker task).
+        # Awaiting the submit call yields that list; element 0 is the worker ref
+        # that ``cancel_task``/``ray.cancel`` must target.
+        submitted = await self._call(
+            self._pool.submit.remote(
+                task_id=task_id,
+                path=path,
+                metadata=metadata,
+                partition=partition,
+                user=user,
+                workspace_ids=workspace_ids,
+                replace=replace,
+                indexation_config=indexation_config,
+                embedder_name=embedder_name,
+            ),
+            task_description=f"submit({task_id})",
         )
+        task = submitted[0]
 
         await self._call(
             self._tsm.set_object_ref.remote(task_id, {"ref": task}),

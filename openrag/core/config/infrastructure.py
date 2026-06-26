@@ -20,6 +20,8 @@ class VectorDBConfig(ConfigMixin):
     collection_name: str = "vdb_test"
     hybrid_search: bool = True
     enable: bool = True
+    # Per-request timeout (s) applied to the Milvus sync and async clients.
+    timeout: float = Field(default=120.0, gt=0)
     schema_version: int = 1
 
 
@@ -47,31 +49,14 @@ class RDBConfig(ConfigMixin):
 
 
 # ---------------------------------------------------------------------------
-# Ray — concurrency groups, serve config
+# Ray — worker pool, serve config
 # ---------------------------------------------------------------------------
 
 
-class IndexerConcurrencyGroupsConfig(ConfigMixin):
-    default: int = 1000
-    update: int = 100
-    search: int = 100
-    delete: int = 100
-    serialize: int = 50
-    chunk: int = 1000
-    insert: int = 100
-
-
 class RayIndexerConfig(ConfigMixin):
-    max_task_retries: int = 2
-    serialize_timeout: int = 3600
-    vectordb_timeout: int = 30
-    concurrency_groups: IndexerConcurrencyGroupsConfig = Field(
-        default_factory=IndexerConcurrencyGroupsConfig,
-    )
-
-
-class RaySemaphoreConfig(ConfigMixin):
-    concurrency: int = 100000
+    # Indexing capacity = pool_size (worker actors) × max_tasks_per_worker (files per worker).
+    pool_size: int = Field(default=1, ge=1)
+    max_tasks_per_worker: int = Field(default=50, ge=1)
 
 
 class RayServeConfig(ConfigMixin):
@@ -83,11 +68,7 @@ class RayServeConfig(ConfigMixin):
 
 
 class RayConfig(ConfigMixin):
-    num_gpus: float = 0.01
-    pool_size: int = 1
-    max_tasks_per_worker: int = 8
     indexer: RayIndexerConfig = Field(default_factory=RayIndexerConfig)
-    semaphore: RaySemaphoreConfig = Field(default_factory=RaySemaphoreConfig)
     serve: RayServeConfig = Field(default_factory=RayServeConfig)
 
 

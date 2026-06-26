@@ -10,8 +10,8 @@ try:
     from core.config import load_config as _load_config
 
     _cfg = _load_config()
-    _POOL_SIZE: int = _cfg.ray.pool_size
-    _MAX_TASKS_PER_WORKER: int = _cfg.ray.max_tasks_per_worker
+    _POOL_SIZE: int = _cfg.ray.indexer.pool_size
+    _MAX_TASKS_PER_WORKER: int = _cfg.ray.indexer.max_tasks_per_worker
 except (ImportError, AttributeError) as _cfg_err:
     import logging as _logging
 

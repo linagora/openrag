@@ -14,8 +14,10 @@ def _remote_mock(return_value: Any = None) -> MagicMock:
 
 def _pool_with_ref(ref: object) -> MagicMock:
     pool = MagicMock()
-    pool.process_file = MagicMock()
-    pool.process_file.remote = MagicMock(return_value=ref)
+    # IndexerPool is a Ray actor; submit.remote() picks the least-loaded worker
+    # and returns its ObjectRef wrapped in a one-element list (the dispatcher
+    # awaits the call and takes element 0).
+    pool.submit = _remote_mock([ref])
     return pool
 
 
@@ -131,7 +133,7 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         metadata={"filename": "report.txt"},
         user_id=42,
     )
-    pool.process_file.remote.assert_called_once_with(
+    pool.submit.remote.assert_called_once_with(
         task_id="task-1",
         path="/data/report.txt",
         metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},

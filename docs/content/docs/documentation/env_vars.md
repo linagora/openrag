@@ -180,6 +180,7 @@ The vector database stores embeddings and is configured using the following envi
 | `VDB_COLLECTION_NAME` | str | vdb_test | Name of the collection storing embeddings |
 |`VDB_HYBRID_SEARCH`| `bool` | true |To activate hybrid search (semantic similarity + Keyword search)|
 | `VDB_ENABLE_INSERTION` | bool | true | Enable or disable vector database insertion. When disabled, documents are processed but not inserted into Milvus. Useful for testing. |
+| `VDB_TIMEOUT` | float | 120.0 | Per-request timeout (seconds) applied to the Milvus sync and async clients |
 
 These variables can be overridden when using an external vector database service.
 
@@ -377,8 +378,8 @@ Ray is used for distributed task processing and parallel execution in the RAG pi
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `RAY_POOL_SIZE` | `int` | 1 | Number of serializer actor instances (typically 1 actor per cluster node) |
-| `RAY_MAX_TASKS_PER_WORKER` | `int` | 8 | Maximum number of concurrent tasks (serialization tasks) per serializer actor instance |
+| `RAY_POOL_SIZE` | `int` | 1 | Number of indexer worker actors in the pool. Total indexing capacity = `RAY_POOL_SIZE` × `RAY_MAX_TASKS_PER_WORKER`. |
+| `RAY_MAX_TASKS_PER_WORKER` | `int` | 50 | Maximum number of files processed concurrently per indexer worker actor |
 | `RAY_DASHBOARD_PORT` | `int` | 8265 | Ray Dashboard port used for monitoring. In production, [comment out this line](https://github.com/linagora/openrag/blob/ee732ea8e080dcde0107d62d12703a7525f810cd/docker-compose.yaml#L21C1-L22C1) to avoid exposing the port, as it may introduce security vulnerabilities. |
 | `RAY_DASHBOARD_HOST` | `str` | `127.0.0.1` | Interface the **embedded** Ray dashboard binds to. Defaults to loopback because the Ray dashboard/job-submission API is **unauthenticated** ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)). Set to `0.0.0.0` only when the dashboard port is firewalled or sits behind an authenticating proxy. Ignored when `RAY_ADDRESS` is set. |
 | `RAY_ADDRESS` | `str` | (unset) | When set, attach to an **external** Ray cluster at this address (e.g. `ray://HEAD_IP:10001`) instead of starting an embedded cluster in-process. In this mode the app does not start a local dashboard — the head node owns it. See [Ray Cluster deployment](/openrag/documentation/deploy_ray_cluster/). |
@@ -394,33 +395,6 @@ The following environment variables control Ray's logging behavior, task retry s
 | `RAY_task_retry_delay_ms` | `number` | `3000` | Delay (in milliseconds) before retrying a failed task. Controls the wait time between retry attempts. |
 | `RAY_ENABLE_UV_RUN_RUNTIME_ENV` | `number` | `0` | Controls UV runtime environment integration. **Critical**: Must be set to `0` when using the newest version of UV to avoid compatibility issues. |
 |`RAY_memory_monitor_refresh_ms`| `number` | 250 ms | To control the frequency of memory usage checks and task or actor termination if needed. If you set this value to 0, task killing is disabled. |
-
-#### Indexer Configuration
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `RAY_MAX_TASK_RETRIES` | int | 2 | Number of retry attempts for failed tasks |
-| `INDEXER_SERIALIZE_TIMEOUT` | int | 36000 | Timeout in seconds for serialization operations (10 hours) |
-
-#### Indexer Concurrency Groups
-
-Controls the maximum number of concurrent operations for different indexer tasks:
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `INDEXER_DEFAULT_CONCURRENCY` | int | 1000 | Default concurrency limit for general operations |
-| `INDEXER_UPDATE_CONCURRENCY` | int | 100 | Maximum concurrent document update operations |
-| `INDEXER_SERIALIZE_CONCURRENCY` | int | 50 | Maximum concurrent serialization operations |
-| `INDEXER_SEARCH_CONCURRENCY` | int | 100 | Maximum concurrent search/retrieval operations |
-| `INDEXER_DELETE_CONCURRENCY` | int | 100 | Maximum concurrent document deletion operations |
-| `INDEXER_CHUNK_CONCURRENCY` | int | 1000 | Maximum concurrent document chunking operations |
-| `INDEXER_INSERT_CONCURRENCY` | int | 10 | Maximum concurrent document insertion operations |
-
-#### Semaphore Configuration
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `RAY_SEMAPHORE_CONCURRENCY` | int | 100000 | Global concurrency limit for Ray semaphore operations |
 
 #### Ray Serve Configuration
 
