@@ -53,6 +53,9 @@ _BLOCK_LINE_RE = re.compile(
     r")"
 )
 
+# A ``` / ~~~ fenced-code-block delimiter line (open or close).
+_CODE_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+
 
 def dewrap_paragraphs(text: str) -> str:
     """Reflow PDF visual line-wraps so prose paragraphs sit on a single line.
@@ -67,6 +70,7 @@ def dewrap_paragraphs(text: str) -> str:
     """
     out: list[str] = []
     paragraph: list[str] = []
+    in_fence = False
 
     def flush() -> None:
         if paragraph:
@@ -74,6 +78,16 @@ def dewrap_paragraphs(text: str) -> str:
             paragraph.clear()
 
     for line in text.split("\n"):
+        # Inside a ``` / ~~~ code fence, emit lines verbatim — never reflow, or
+        # we'd destroy code indentation and line breaks.
+        if _CODE_FENCE_RE.match(line):
+            flush()
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
         if line.strip() == "":
             flush()
             out.append("")

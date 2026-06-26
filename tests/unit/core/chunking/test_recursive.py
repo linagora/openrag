@@ -292,3 +292,24 @@ def test_recursive_splitter_does_not_cut_mid_sentence_on_line_wraps():
     assert not any(c.text.strip().endswith("gamma") for c in chunks)
     # ...and every text chunk ends on a sentence terminator.
     assert all(c.text.strip()[-1] in ".?!" for c in chunks if c.chunk_type == ChunkType.TEXT)
+
+
+def test_dewrap_preserves_code_fence_verbatim():
+    """Lines inside a ``` fence must keep their indentation/line breaks (not be
+    space-joined as prose), while surrounding prose still reflows (#583)."""
+    from core.chunking.recursive import dewrap_paragraphs
+
+    text = (
+        "Intro wrapped\nacross two lines.\n"
+        "```python\n"
+        "def f():\n"
+        "    return 1\n"
+        "```\n"
+        "Outro wrapped\nacross two.\n"
+    )
+    lines = dewrap_paragraphs(text).splitlines()
+
+    assert "def f():" in lines  # code line on its own, not joined to the fence
+    assert "    return 1" in lines  # indentation preserved
+    assert "Intro wrapped across two lines." in lines  # prose still reflowed
+    assert "Outro wrapped across two." in lines
