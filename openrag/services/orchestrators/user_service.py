@@ -42,6 +42,11 @@ logger = get_logger()
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _MAX_DISPLAY_NAME = 255
 
+# Fields a caller may set via update_user. The repository accepts additional
+# fields for internal flows, so this service-level whitelist keeps token,
+# file_count, id, and created_at out of user-update payloads.
+_UPDATABLE_USER_FIELDS = frozenset({"display_name", "external_user_id", "email", "is_admin", "file_quota"})
+
 
 class UserService:
     """User account CRUD — validation + repo delegation."""
@@ -194,6 +199,7 @@ class UserService:
     async def update_user(self, user_id: int, body: UserUpdate) -> dict:
         await self._ensure_exists(user_id)
         updates = body.model_dump(exclude_unset=True)
+        updates = {k: v for k, v in updates.items() if k in _UPDATABLE_USER_FIELDS}
         self._validate_profile(updates.get("display_name"), updates.get("email"))
 
         existing_user = await self._user_repo.get_user(user_id)

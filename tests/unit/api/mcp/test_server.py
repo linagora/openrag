@@ -86,9 +86,23 @@ async def _dispatch(monkeypatch, request):
 
 
 @pytest.mark.asyncio
-async def test_dev_mode_resolves_user_one(monkeypatch):
+async def test_token_mode_missing_auth_token_fails_closed_without_allow_no_auth(monkeypatch):
     monkeypatch.setenv("AUTH_MODE", "token")
     monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ALLOW_NO_AUTH", raising=False)
+    _install_container(monkeypatch, FakeAuthService(user={"id": 1, "is_admin": True}))
+
+    response, captured = await _dispatch(monkeypatch, _request())
+
+    assert response.status_code == 403
+    assert captured == {}
+
+
+@pytest.mark.asyncio
+async def test_dev_mode_resolves_user_one_when_allow_no_auth_set(monkeypatch):
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ALLOW_NO_AUTH", "true")
     monkeypatch.delenv("SUPER_ADMIN_MODE", raising=False)
     _install_container(
         monkeypatch,
@@ -107,6 +121,7 @@ async def test_dev_mode_resolves_user_one(monkeypatch):
 async def test_super_admin_gets_wildcard(monkeypatch):
     monkeypatch.setenv("AUTH_MODE", "token")
     monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ALLOW_NO_AUTH", "true")
     monkeypatch.setenv("SUPER_ADMIN_MODE", "true")
     _install_container(monkeypatch, FakeAuthService(user={"id": 1, "is_admin": True}, partitions=[{"partition": "a"}]))
 

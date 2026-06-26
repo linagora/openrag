@@ -25,7 +25,6 @@ import warnings
 from contextlib import asynccontextmanager
 from enum import Enum
 from importlib.metadata import version as get_package_version
-from pathlib import Path
 
 import ray
 import uvicorn
@@ -34,6 +33,7 @@ from api.error_handlers import register_error_handlers
 from api.middleware import (
     AuthMiddleware,
     InstrumentationMiddleware,
+    RateLimitMiddleware,
     RequestIdMiddleware,
     RequestTimeoutMiddleware,
 )
@@ -50,6 +50,7 @@ from api.routers.admin.workspaces import router as workspaces_router
 from api.routers.auth.oidc import router as auth_router
 from api.routers.user.chat import prime_max_model_tokens
 from api.routers.user.chat import router as openai_router
+from api.routers.user.download import router as download_router
 from api.routers.user.extract import router as extract_router
 from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
@@ -63,7 +64,6 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
 
 # pydub 0.25.1 ships invalid-escape regex literals; the warning is upstream.
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
@@ -75,7 +75,6 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
 
 logger = get_logger()
 settings = load_config()
-DATA_DIR = Path(settings.paths.data_dir)
 CONTAINER_STARTUP_TIMEOUT = float(
     os.getenv("OPENRAG_CONTAINER_STARTUP_TIMEOUT", max(60, settings.rdb.command_timeout * 4))
 )
@@ -150,7 +149,21 @@ async def lifespan(app: FastAPI):
     """
     if not ray.is_initialized():
         logger.info("Startup: initializing Ray")
-        ray.init(dashboard_host="0.0.0.0", ignore_reinit_error=True)
+        _ray_address = os.environ.get("RAY_ADDRESS")
+        if _ray_address:
+            # Connect to an external Ray cluster (e.g. a dedicated ray-head
+            # container). No local dashboard is started — the head node owns it.
+            ray.init(address=_ray_address, ignore_reinit_error=True)
+        else:
+            # Embedded mode: start a local Ray cluster inside this process.
+            # Bind the Ray dashboard to localhost by default; the dashboard /
+            # Jobs API is unauthenticated (CVE-2023-48022 "ShadowRay") so it
+            # must never listen on a routable interface. Operators that front it
+            # with an auth proxy can override via RAY_DASHBOARD_HOST.
+            ray.init(
+                dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "127.0.0.1"),
+                ignore_reinit_error=True,
+            )
     logger.info("Startup: Ray is initialized")
 
     # ``ensure_worker_bootstrap`` imports ``services.workers.bootstrap``
@@ -253,6 +266,10 @@ app.openapi = custom_openapi
 # and Instrumentation captures the full request duration including the
 # auth check. CORS is added later and ends up outside this stack so
 # preflights short-circuit before any instrumentation runs.
+# RateLimitMiddleware is registered BEFORE AuthMiddleware so it executes AFTER
+# it (registration is reverse of execution), letting it key limits on the
+# authenticated user id that AuthMiddleware just put on request.state.
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     AuthMiddleware,
     get_auth_service=lambda request: request.app.state.container.auth_service,
@@ -281,8 +298,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.mount("/static", StaticFiles(directory=DATA_DIR.resolve(), check_dir=True), name="static")
 
 
 @app.get("/", include_in_schema=False)
@@ -316,6 +331,8 @@ def get_config():
 app.include_router(health_router, tags=[Tags.MONITORING])
 app.include_router(indexer_router, prefix="/indexer", tags=[Tags.INDEXER])
 app.include_router(extract_router, prefix="/extract", tags=[Tags.EXTRACT])
+# Authorized, partition-checked source-file download (served under /static).
+app.include_router(download_router, tags=[Tags.EXTRACT])
 app.include_router(search_router, prefix="/search", tags=[Tags.SEARCH])
 app.include_router(partition_router, prefix="/partition", tags=[Tags.PARTITION])
 app.include_router(model_endpoints_router, prefix="/model-endpoints", tags=[Tags.MODEL_ENDPOINTS])
@@ -345,10 +362,25 @@ if __name__ == "__main__":
     if settings.ray.serve.enable:
         from ray import serve
 
+        # @serve.ingress cloudpickles `app` to ship it to replica processes.
+        # loguru's file sink isn't picklable (an open file handle, and with
+        # enqueue=True a multiprocessing.SimpleQueue that errors with "SimpleQueue
+        # objects should only be shared between processes through inheritance"),
+        # and the app graph (lifespan, exception handlers) captures the
+        # module-global logger by value. Strip the sinks before binding so the
+        # captured logger is handler-less (picklable), then restore them for this
+        # driver process below. Replica processes re-add their own sinks via the
+        # module-level get_logger() that runs on import — matching loguru's
+        # multiprocessing model, where handlers are per-process and never travel
+        # through a pickle.
+        logger.remove()
+
         @serve.deployment(num_replicas=settings.ray.serve.num_replicas)
         @serve.ingress(app)
         class OpenRagAPI:
             """Ray Serve deployment wrapper for the FastAPI app."""
+
+        get_logger()  # restore this driver's logging now that `app` is serialized
 
         serve.start(http_options={"host": settings.ray.serve.host, "port": settings.ray.serve.port})
         if WITH_CHAINLIT_UI:

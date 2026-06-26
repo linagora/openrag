@@ -33,8 +33,10 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from core.utils.exceptions import ValidationError
 from core.utils.log_tail import collect_task_logs
 from core.utils.logging import get_logger
+from core.utils.partition_limits import max_partitions_for_user
 from core.utils.url_safety import is_blocked_address, is_safe_url
 
 if TYPE_CHECKING:
@@ -128,6 +130,8 @@ class MCPService:
             raise PermissionError("Authentication context is missing")
         if allowed_partitions == ["all"]:
             return ["all"] if requested_partitions == ["all"] else requested_partitions
+        if requested_partitions == ["all"] and not allowed_partitions:
+            raise PermissionError("No accessible partitions")
         if requested_partitions == ["all"]:
             return allowed_partitions
         denied = [p for p in requested_partitions if p not in allowed_partitions]
@@ -166,6 +170,8 @@ class MCPService:
         partition: str,
         allowed_partitions: list[str] | None,
         user_id: int | None,
+        *,
+        is_admin: bool = False,
     ) -> list[str] | None:
         """Auto-create *partition* (owned by the caller) when it is missing.
 
@@ -180,7 +186,12 @@ class MCPService:
             return allowed_partitions
         if await self._partitions.partition_exists(partition):
             return allowed_partitions  # exists but no membership → access check raises
-        await self._partitions.create_partition(partition, user_id)
+        cap_user = {"id": user_id, "is_admin": is_admin} if user_id is not None else {"id": 1, "is_admin": True}
+        try:
+            await self._partitions.create_partition(partition, user_id, max_owned=max_partitions_for_user(cap_user))
+        except ValidationError as exc:
+            if exc.code != "PARTITION_EXISTS":
+                raise
         return [*allowed_partitions, partition]
 
     # ------------------------------------------------------------------
@@ -405,7 +416,10 @@ class MCPService:
         state = await self._indexing.get_task_state(task_id)
         result: dict[str, Any] = {"task_id": task_id, "task_state": state, "details": details}
         if state == "FAILED":
-            result["error"] = await self._indexing.get_task_error(task_id)
+            if is_admin:
+                result["error"] = await self._indexing.get_task_error(task_id)
+            else:
+                result["error"] = "Task failed. Contact an administrator for details."
         return result
 
     async def list_my_tasks(
@@ -418,7 +432,10 @@ class MCPService:
         tasks = await self._jobs.list_tasks(is_admin=is_admin, user_id=user_id, task_status=task_status)
         for task in tasks:
             if task.get("state") == "FAILED":
-                task["error"] = await self._indexing.get_task_error(task["task_id"])
+                if is_admin:
+                    task["error"] = await self._indexing.get_task_error(task["task_id"])
+                else:
+                    task["error"] = "Task failed. Contact an administrator for details."
         return {"count": len(tasks), "tasks": tasks}
 
     async def get_task_logs(
@@ -563,6 +580,7 @@ class MCPService:
         file_id: str,
         allowed_partitions: list[str] | None,
         user_id: int | None,
+        is_admin: bool = False,
         extra_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # Validate cheap/safe inputs BEFORE any side effect (partition
@@ -575,7 +593,12 @@ class MCPService:
         if not is_safe_url(url):
             raise ValueError(f"URL is not allowed for server-side fetch: {url!r}")
 
-        allowed_partitions = await self._ensure_partition_exists(partition, allowed_partitions, user_id)
+        allowed_partitions = await self._ensure_partition_exists(
+            partition,
+            allowed_partitions,
+            user_id,
+            is_admin=is_admin,
+        )
         await self._enforce_editor_access(partition, allowed_partitions, user_id)
 
         if await self._partitions.file_exists(file_id, partition):
@@ -604,7 +627,7 @@ class MCPService:
             metadata=metadata,
             sanitized_filename=filename,
             original_filename=filename,
-            user={"id": user_id} if user_id is not None else None,
+            user={"id": user_id, "is_admin": is_admin} if user_id is not None else None,
         )
         return {
             "partition": partition,

@@ -14,7 +14,7 @@ from core.models.user import PartitionRole, User, UserPartition
 from core.utils.exceptions import OpenRAGError
 from cryptography.fernet import Fernet
 from services.auth import StateCookieSerializer, hash_session_token
-from services.auth.oidc_client import LogoutTokenClaims, TokenBundle
+from services.auth.oidc_client import _CLOCK_SKEW_LEEWAY, LogoutTokenClaims, TokenBundle
 from services.orchestrators.auth_service import AuthService, OIDCFlowError
 
 KEY = Fernet.generate_key().decode()
@@ -424,7 +424,7 @@ async def test_claim_mapping_rejects_userinfo_sub_mismatch():
 @pytest.mark.asyncio
 async def test_backchannel_logout_revokes_by_sid():
     srepo = FakeSessionRepo()
-    claims = LogoutTokenClaims(iss="i", aud="openrag", sub="s", sid="sess-9", iat=0, jti=None)
+    claims = LogoutTokenClaims(iss="i", aud="openrag", sub="s", sid="sess-9", iat=0, jti=None, exp=1)
     svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
     count = await svc.handle_backchannel_logout("tok")
     assert count == 3
@@ -442,10 +442,78 @@ async def test_backchannel_logout_invalid_token_carries_description():
 @pytest.mark.asyncio
 async def test_backchannel_logout_sidless_is_noop_200():
     srepo = FakeSessionRepo()
-    claims = LogoutTokenClaims(iss="i", aud="openrag", sub="s", sid=None, iat=0, jti=None)
+    claims = LogoutTokenClaims(iss="i", aud="openrag", sub="s", sid=None, iat=0, jti=None, exp=1)
     svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
     assert await svc.handle_backchannel_logout("tok") == 0
     assert srepo.revoked_sids == []
+
+
+@pytest.mark.asyncio
+async def test_backchannel_logout_rejects_replayed_jti():
+    import time as _time
+
+    from services.orchestrators import auth_service as _as
+
+    _as._seen_logout_jti.clear()
+    srepo = FakeSessionRepo()
+    claims = LogoutTokenClaims(
+        iss="i",
+        aud="openrag",
+        sub="s",
+        sid="sess-9",
+        iat=0,
+        jti="jti-replay-1",
+        exp=int(_time.time()) + 120,
+    )
+    svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
+    # First processing succeeds and revokes the session(s).
+    assert await svc.handle_backchannel_logout("tok") == 3
+    # Re-processing the same jti is rejected as a replay.
+    with pytest.raises(OIDCFlowError) as ei:
+        await svc.handle_backchannel_logout("tok")
+    assert ei.value.error_description == "logout_token replayed"
+
+
+@pytest.mark.asyncio
+async def test_backchannel_logout_rejects_replayed_jti_without_exp(monkeypatch):
+    from services.orchestrators import auth_service as _as
+
+    now = 1_000_000
+    _as._seen_logout_jti.clear()
+    monkeypatch.setattr(_as.time, "time", lambda: now)
+
+    srepo = FakeSessionRepo()
+    claims = LogoutTokenClaims(
+        iss="i",
+        aud="openrag",
+        sub="s",
+        sid="sess-9",
+        iat=now,
+        jti="jti-without-exp",
+        exp=None,
+    )
+    svc = _service(session_repo=srepo, client=FakeOIDCClient(logout_claims=claims))
+
+    assert await svc.handle_backchannel_logout("tok") == 3
+    with pytest.raises(OIDCFlowError) as ei:
+        await svc.handle_backchannel_logout("tok")
+    assert ei.value.error_description == "logout_token replayed"
+
+
+def test_logout_replay_cache_keeps_jti_for_clock_skew(monkeypatch):
+    """Replay protection must last through the same leeway accepted by token verification."""
+    from services.orchestrators import auth_service as _as
+
+    now = 1_000_000
+    _as._seen_logout_jti.clear()
+    monkeypatch.setattr(_as.time, "time", lambda: now)
+
+    assert _as._logout_jti_is_replay("skew-jti", now - 1) is False
+    assert _as._logout_jti_is_replay("skew-jti", now - 1) is True
+
+    monkeypatch.setattr(_as.time, "time", lambda: now + _CLOCK_SKEW_LEEWAY + 1)
+    assert _as._logout_jti_is_replay("skew-jti", now - 1) is False
+    _as._seen_logout_jti.clear()
 
 
 @pytest.mark.asyncio

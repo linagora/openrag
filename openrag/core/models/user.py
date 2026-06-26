@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Request DTOs — shared between the API layer (request bodies) and the
@@ -21,13 +21,25 @@ class UserBase(BaseModel):
     is_admin: bool = False
     file_quota: int | None = Field(default=None)
 
+    @field_validator("external_user_id", mode="before")
+    @classmethod
+    def _empty_external_id_to_none(cls, v):
+        # Coerce "" / whitespace to NULL so it can't collide on the unique index
+        # (Postgres allows many NULLs but only one empty string). This covers the
+        # update path too, which the repo-level create normalization does not.
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
 
 class UserCreate(UserBase):
-    model_config = ConfigDict(extra="allow")
+    # Reject unknown fields so callers cannot smuggle extra column names.
+    model_config = ConfigDict(extra="ignore")
 
 
 class UserUpdate(UserBase):
-    model_config = ConfigDict(extra="allow")
+    # Reject unknown fields; UserService additionally whitelists writable columns.
+    model_config = ConfigDict(extra="ignore")
 
 
 class UserPublic(UserBase):

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 from api.middleware.auth import (
+    AuthFailureRateLimiter,
     AuthMiddleware,
     is_bypass_path,
     is_ui_path,
@@ -214,6 +215,133 @@ def test_is_bypass_path_bypass_config_is_keyword_only() -> None:
     treating an arbitrary value as the config."""
     with pytest.raises(TypeError):
         is_bypass_path("/docs", AuthBypassConfig())  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Dev bypass (AUTH_MODE=token, AUTH_TOKEN unset) requires ALLOW_NO_AUTH=true
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dev_bypass_resolves_admin_when_allow_no_auth_set(monkeypatch) -> None:
+    """With ALLOW_NO_AUTH=true the no-token bypass resolves admin user 1."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ALLOW_NO_AUTH", "true")
+
+    svc = type("S", (), {})()
+    svc.get_user_for_request = AsyncMock(return_value={"id": 1, "display_name": "Admin"})
+    svc.list_user_partitions_for_request = AsyncMock(return_value=[])
+
+    captured = {}
+
+    async def call_next(req):
+        captured["user"] = req.state.user
+        return Response("ok")
+
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    response = await middleware.dispatch(_request(), call_next)
+
+    assert response.status_code == 200
+    svc.get_user_for_request.assert_awaited_with(1)
+    assert captured["user"] == {"id": 1, "display_name": "Admin"}
+
+
+@pytest.mark.asyncio
+async def test_dev_bypass_does_not_fail_open_without_flag(monkeypatch) -> None:
+    """Without ALLOW_NO_AUTH a missing AUTH_TOKEN must NOT fail open to admin."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ALLOW_NO_AUTH", raising=False)
+
+    svc = type("S", (), {})()
+    svc.get_user_for_request = AsyncMock()
+    svc.list_user_partitions_for_request = AsyncMock()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+
+    async def call_next(req):
+        return Response("ok")
+
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+    response = await middleware.dispatch(_request(), call_next)
+
+    # No token + no opt-in → not authenticated, never resolves to admin.
+    assert response.status_code in (401, 403)
+    svc.get_user_for_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_token_auth_is_rate_limited_by_ip(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+
+    async def call_next(req):
+        return Response("ok")
+
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: None)
+
+    first = await middleware.dispatch(_request(), call_next)
+    second = await middleware.dispatch(_request(), call_next)
+
+    assert first.status_code == 403
+    assert second.status_code == 429
+    assert second.headers.get("Retry-After")
+
+
+@pytest.mark.asyncio
+async def test_failed_bearer_limit_blocks_before_token_lookup(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "1/minute")
+
+    svc = type("S", (), {})()
+    svc.get_user_by_token_for_request = AsyncMock(return_value=None)
+
+    async def call_next(req):
+        return Response("ok")
+
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: svc)
+
+    first = await middleware.dispatch(_request(headers={"authorization": "Bearer bad"}), call_next)
+    second = await middleware.dispatch(_request(headers={"authorization": "Bearer bad"}), call_next)
+
+    assert first.status_code == 403
+    assert second.status_code == 429
+    svc.get_user_by_token_for_request.assert_awaited_once_with("bad")
+
+
+@pytest.mark.asyncio
+async def test_disabled_auth_failure_limiter_ignores_malformed_limit(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "false")
+    monkeypatch.setenv("RATE_LIMIT_AUTH_FAILURE", "not-a-limit")
+
+    async def call_next(req):
+        return Response("ok")
+
+    middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=lambda _r: None)
+    response = await middleware.dispatch(_request(), call_next)
+
+    assert response.status_code == 403
+
+
+def test_auth_failure_log_value_is_single_line_and_bounded() -> None:
+    value = AuthFailureRateLimiter._safe_log_value("ip:1.2.3.4\nextra\rdata\x00" + ("x" * 300), max_len=40)
+
+    assert "\n" not in value
+    assert "\r" not in value
+    assert "\x00" not in value
+    assert len(value) == 40
 
 
 def test_request_object_is_unused_by_helpers() -> None:

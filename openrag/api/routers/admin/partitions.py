@@ -9,6 +9,7 @@ whose exact non-bracketed ``{"detail": ...}`` body the endpoints return
 via ``HTTPException``.
 """
 
+import os
 from typing import Literal
 from urllib.parse import quote
 
@@ -17,8 +18,11 @@ from api.dependencies.auth import (
     require_partition_owner,
     require_partition_viewer,
 )
+from api.dependencies.files import validate_file_id
 from api.schemas.admin.partition_schemas import PartitionDetailResponse, UpdatePartitionRequest
+from core.utils.exceptions import ConfigError
 from core.utils.logging import get_logger
+from core.utils.partition_limits import max_partitions_for_user
 from di.providers import get_partition_service
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -172,8 +176,8 @@ Returns file information including:
 async def get_file(
     request: Request,
     partition: str,
-    file_id: str,
     limit: int = Query(default=2000, ge=0),
+    file_id: str = Depends(validate_file_id),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
@@ -274,8 +278,26 @@ async def create_partition(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Partition '{partition}' already exists.",
         )
-    user_id = request.state.user["id"]
-    await service.create_partition(partition=partition, user_id=user_id)
+    user = request.state.user
+    user_id = user["id"]
+    # Cap how many partitions a non-admin may own so an authenticated user can't
+    # exhaust storage/metadata. None bypasses the cap (admins); a negative
+    # MAX_PARTITIONS_PER_USER also disables it. The service raises a 403
+    # (PARTITION_LIMIT_EXCEEDED) when the cap is reached.
+    try:
+        max_owned = max_partitions_for_user(user)
+    except ConfigError as exc:
+        logger.bind(
+            max_partitions_per_user=os.environ.get("MAX_PARTITIONS_PER_USER"),
+            user_id=user_id,
+            is_admin=bool(user.get("is_admin")),
+            partition=partition,
+        ).error("Invalid MAX_PARTITIONS_PER_USER value")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=exc.message,
+        ) from exc
+    await service.create_partition(partition=partition, user_id=user_id, max_owned=max_owned)
     return Response(status_code=status.HTTP_201_CREATED)
 
 
@@ -534,8 +556,8 @@ For email threads with parallel branches, each branch has its own ancestor path.
 )
 async def get_file_ancestors(
     partition: str,
-    file_id: str,
     max_ancestor_depth: int | None = None,
+    file_id: str = Depends(validate_file_id),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):

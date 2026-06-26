@@ -15,4 +15,8 @@ By default, OpenRAG services are exposed on the following ports:
 | Ray Dashboard     | 8265           | Ray dashboard for monitoring and managing tasks                |
 | Indexer UI        | 3042/          | Main user interface for indexing and viewing indexed documents |
 
+:::note[Ray Serve mode]
+The table above is for the default (uvicorn) deployment, where the Chainlit UI is the `/chainlit` subroute of the API. When `ENABLE_RAY_SERVE=true`, the API is served by Ray Serve on `RAY_SERVE_PORT` and the **Chainlit UI runs on its own port, `CHAINLIT_PORT`** (default `8090`), instead of the subroute. Uncomment the `${CHAINLIT_PORT}:${CHAINLIT_PORT}` mapping in `docker-compose.yaml` to expose it. See [`CHAINLIT_PORT`](/openrag/documentation/env_vars/#ray-serve-configuration).
+:::
+
 More information about the different services can be found in their respective documentation pages.

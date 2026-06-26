@@ -35,7 +35,10 @@ def test_compose_defaults_preserve_existing_host_paths() -> None:
     assert "${DATA_VOLUME:-../../data}:/app/data" in openrag_volumes
     assert "${LOG_VOLUME:-../../logs}:/app/logs" in openrag_volumes
     assert "${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights" in openrag_volumes
-    assert "../../openrag:/app/openrag" in openrag_volumes
+    assert compose["x-openrag"]["build"]["args"]["APP_UID"] == "${APP_UID:-1000}"
+    # N8: the ../../openrag source bind-mount is commented out by default
+    # (dev-only) so production never lets host changes override the running code.
+    assert "../../openrag:/app/openrag" not in openrag_volumes
     assert "${DB_VOLUME:-../../db}:/var/lib/postgresql/data" in rdb_volumes
 
     assert {"appdata", "logs", "modelweights", "pgdata"} <= top_level_volumes
@@ -52,8 +55,12 @@ def test_milvus_compose_defaults_preserve_existing_host_paths() -> None:
 
 
 def test_named_volume_profile_is_opt_in() -> None:
+    default_env_values = _load_env_example(COMPOSE_DIR / ".env.example")
     env_values = _load_env_example(COMPOSE_DIR / ".env.named-volumes.example")
     named_milvus = _load_yaml(COMPOSE_DIR / "milvus" / "milvus.named-volumes.yaml")
+
+    assert "MINIO_ACCESS_KEY" in default_env_values
+    assert "MINIO_SECRET_KEY" in default_env_values
 
     assert env_values["DATA_VOLUME"] == "appdata"
     assert env_values["LOG_VOLUME"] == "logs"
@@ -66,6 +73,40 @@ def test_named_volume_profile_is_opt_in() -> None:
     assert named_milvus["services"]["minio"]["volumes"] == ["${MINIO_VOLUME:-minio}:/minio_data"]
     assert named_milvus["services"]["milvus"]["volumes"] == ["${MILVUS_VOLUME:-milvus}:/var/lib/milvus"]
     assert {"etcd", "minio", "milvus"} <= set(named_milvus["volumes"])
+
+    minio_env = named_milvus["services"]["minio"]["environment"]
+    milvus_env = named_milvus["services"]["milvus"]["environment"]
+    assert "MINIO_ROOT_USER" not in minio_env
+    assert "MINIO_ROOT_PASSWORD" not in minio_env
+    assert minio_env["MINIO_ACCESS_KEY"] == "${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in your .env}"
+    assert minio_env["MINIO_SECRET_KEY"] == "${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}"
+    assert "minioadmin" not in str(minio_env)
+    assert milvus_env["MINIO_ACCESS_KEY_ID"] == "${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in your .env}"
+    assert milvus_env["MINIO_SECRET_ACCESS_KEY"] == "${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}"
+
+
+def test_quick_start_milvus_uses_current_minio_root_env_names() -> None:
+    quickstart = _load_yaml(ROOT / "infra" / "quick_start" / "vdb" / "milvus.yaml")
+
+    minio_env = quickstart["services"]["minio"]["environment"]
+    milvus_env = quickstart["services"]["milvus"]["environment"]
+
+    assert "MINIO_ACCESS_KEY" not in minio_env
+    assert "MINIO_SECRET_KEY" not in minio_env
+    assert minio_env["MINIO_ROOT_USER"] == "${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in your .env}"
+    assert minio_env["MINIO_ROOT_PASSWORD"] == "${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in your .env}"
+    assert milvus_env["MINIO_ACCESS_KEY_ID"] == "${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in your .env}"
+    assert milvus_env["MINIO_SECRET_ACCESS_KEY"] == "${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in your .env}"
+
+
+def test_ollama_cpu_milvus_uses_matching_minio_credentials() -> None:
+    compose = _load_yaml(ROOT / "docs" / "assets" / "compose_ollama_cpu.yaml")
+
+    minio_env = compose["services"]["minio"]["environment"]
+    milvus_env = compose["services"]["milvus"]["environment"]
+
+    assert milvus_env["MINIO_ACCESS_KEY_ID"] == minio_env["MINIO_ACCESS_KEY"]
+    assert milvus_env["MINIO_SECRET_ACCESS_KEY"] == minio_env["MINIO_SECRET_KEY"]
 
 
 def test_model_serving_cache_preserves_host_path_default_with_named_volume_opt_in() -> None:

@@ -15,8 +15,9 @@ Covered:
 from api.routers.user.source_links import build_document_source_link
 
 
-def _static(filename: str) -> str:
-    return f"https://host/static/{filename}"
+def _static(extract_id) -> str:
+    # Authorized download is keyed by chunk id, not a raw filename.
+    return f"https://host/static/{extract_id}"
 
 
 def _chunk(extract_id) -> str:
@@ -44,15 +45,16 @@ def test_empty_source_value_omits_file_url():
     assert "file_url" not in link
 
 
-def test_file_url_emitted_and_encoded_when_source_present():
-    link = _build({"_id": "x", "source": "/srv/data/my doc.pdf"})
-    # basename only, with spaces percent-encoded by quote()
-    assert link["file_url"] == "https://host/static/my%20doc.pdf"
+def test_file_url_keyed_by_chunk_id_when_source_present():
+    # A chunk with a source gets a download URL keyed by its id (not the raw
+    # filename), so the URL never leaks an unguarded filesystem path.
+    link = _build({"_id": "42", "source": "/srv/data/my doc.pdf"})
+    assert link["file_url"] == "https://host/static/42"
 
 
-def test_basename_extracted_from_path():
-    link = _build({"_id": "x", "source": "/srv/data/doc.pdf"})
-    assert link["file_url"] == "https://host/static/doc.pdf"
+def test_file_url_independent_of_source_basename():
+    link = _build({"_id": "7", "source": "/srv/data/doc.pdf"})
+    assert link["file_url"] == "https://host/static/7"
 
 
 def test_metadata_is_passed_through():

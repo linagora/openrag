@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 
 import pytest
-from api.dependencies.auth import check_user_file_quota, ensure_partition_role, require_task_owner
+from api.dependencies.auth import (
+    check_user_file_quota,
+    ensure_partition_role,
+    require_partitions_viewer,
+    require_task_owner,
+)
 from core.utils.exceptions import AuthError
 from fastapi import HTTPException
 
@@ -107,6 +112,28 @@ async def test_ensure_partition_role_allows_unknown_partition_without_membership
     assert partition_service.checked == ["new-partition"]
 
 
+@pytest.mark.parametrize("role", ["viewer", "owner"])
+@pytest.mark.asyncio
+async def test_ensure_partition_role_404s_on_missing_partition_for_non_editor(role):
+    # A non-member must not pass a viewer/owner check by naming an unknown
+    # partition. Only `editor` (create-on-write) may proceed on a missing
+    # partition.
+    partition_service = FakePartitionService(existing=set())
+
+    with pytest.raises(HTTPException) as exc:
+        await ensure_partition_role(
+            partition="ghost",
+            user={"id": 1},
+            user_partitions=[],
+            required_role=role,
+            auth_service=FakeAuthService,
+            partition_service=partition_service,
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Partition 'ghost' not found"
+
+
 @pytest.mark.asyncio
 async def test_ensure_partition_role_forbids_existing_partition_without_membership():
     partition_service = FakePartitionService(existing={"existing"})
@@ -123,6 +150,21 @@ async def test_ensure_partition_role_forbids_existing_partition_without_membersh
 
     assert exc.value.status_code == 403
     assert exc.value.detail == "Access to partition 'existing' forbidden"
+
+
+@pytest.mark.asyncio
+async def test_require_partitions_viewer_fails_closed_for_all_scope_without_memberships():
+    with pytest.raises(HTTPException) as exc:
+        await require_partitions_viewer(
+            partitions=["all"],
+            user={"id": 1, "is_admin": False},
+            user_partitions=[],
+            auth_service=FakeAuthService,
+            partition_service=FakePartitionService(existing=set()),
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "No accessible partitions"
 
 
 @pytest.mark.asyncio

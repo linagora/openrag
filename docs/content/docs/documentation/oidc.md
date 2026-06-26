@@ -1,4 +1,6 @@
-# OpenID Connect (OIDC) Authentication Guide
+---
+title: OpenID Connect (OIDC) Authentication Guide
+---
 
 This guide walks you through configuring and using OpenRag's OIDC authentication mode.
 

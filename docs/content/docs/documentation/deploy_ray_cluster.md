@@ -112,7 +112,7 @@ auth:
 
 head_start_ray_commands:
     - uv run ray stop
-    - uv run ray start --head --dashboard-host 0.0.0.0 --dashboard-port ${RAY_DASHBOARD_PORT:-8265} --node-ip-address ${HEAD_NODE_IP} --autoscaling-config=~/ray_bootstrap_config.yaml
+    - uv run ray start --head --dashboard-host ${RAY_DASHBOARD_HOST:-127.0.0.1} --dashboard-port ${RAY_DASHBOARD_PORT:-8265} --node-ip-address ${HEAD_NODE_IP} --autoscaling-config=~/ray_bootstrap_config.yaml
 worker_start_ray_commands:
     - uv run ray stop
     - uv run ray start --address ${HEAD_NODE_IP:-10.0.0.1}:6379
@@ -135,6 +135,10 @@ docker compose up -d
 ```
 
 Once running, **OpenRAG will auto-connect** to the Ray cluster using `RAY_ADDRESS` from `.env`.
+
+:::note
+When `RAY_ADDRESS` is set, the app **attaches** to the external cluster and does **not** start its own embedded Ray dashboard — the head node owns it. Keep the dashboard bound to `127.0.0.1` by default because the dashboard API is unauthenticated ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)). If operators need remote dashboard access, expose it only through a private network, SSH tunnel, or authenticated proxy.
+:::
 
 ---
 

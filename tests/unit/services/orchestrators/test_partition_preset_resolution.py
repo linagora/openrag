@@ -41,8 +41,8 @@ class _FakePartitionRepo:
     async def partition_exists(self, name: str) -> bool:
         return name in self._store
 
-    async def create_partition(self, name: str, user_id: int | None = None) -> dict:
-        self.calls.append(("create_partition", (name, user_id)))
+    async def create_partition(self, name: str, user_id: int | None = None, *, max_owned: int | None = None) -> dict:
+        self.calls.append(("create_partition", (name, user_id, max_owned)))
         self._store.setdefault(name, _full_row(name))
         return self._store[name]
 

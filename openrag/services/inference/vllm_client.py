@@ -89,17 +89,14 @@ class VLLMClient(LLM):
         model = self._model
         override_headers: dict[str, str] | None = None
 
+        # Only `model` may be overridden by the client. `base_url` / `api_key`
+        # are deliberately NOT read from the request: honoring a client-supplied
+        # endpoint enables SSRF (the server would issue requests to an arbitrary
+        # host, e.g. cloud metadata) and would leak the server's API key to that
+        # host. The endpoint and credentials always come from server config.
         llm_override = (kwargs.get("metadata") or {}).get("llm_override") or {}
-        if llm_override:
-            if llm_override.get("base_url"):
-                base_url = llm_override["base_url"].rstrip("/")
-            if llm_override.get("model"):
-                model = llm_override["model"]
-            if llm_override.get("api_key"):
-                override_headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {llm_override['api_key']}",
-                }
+        if llm_override.get("model"):
+            model = llm_override["model"]
 
         return base_url, model, override_headers
 

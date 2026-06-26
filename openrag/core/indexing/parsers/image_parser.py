@@ -95,7 +95,11 @@ class ImageParser(DocumentParser):
         try:
             import cairosvg
 
-            return cairosvg.svg2png(bytestring=raw)
+            # unsafe=False (cairosvg's default) routes resource loading through
+            # safe_fetch and sets forbid_external/forbid_entities, so an untrusted
+            # SVG cannot pull external URLs or expand XML entities (SSRF/XXE). Set
+            # it explicitly to document and lock in the guarantee.
+            return cairosvg.svg2png(bytestring=raw, unsafe=False)
         except Exception as exc:
             logger.warning("Failed to rasterize SVG: %s", exc)
             return None

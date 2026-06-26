@@ -54,6 +54,49 @@ def test_chat_request_omits_response_format_when_unset():
     assert "response_format" not in dump
 
 
+def test_chat_request_logprobs_opt_in_is_boolean_and_forwarded():
+    """logprobs is off by default (server) but a client can opt in. For chat
+    completions it's a boolean and must reach the LLM as `true`, not coerced int.
+    """
+    request = OpenAIChatCompletionRequest.model_validate(
+        {"messages": [{"role": "user", "content": "hi"}], "logprobs": True, "top_logprobs": 5}
+    )
+    dump = request.model_dump(exclude_none=True)
+
+    assert dump["logprobs"] is True
+    assert dump["top_logprobs"] == 5
+
+
+def test_chat_request_drops_top_logprobs_when_logprobs_not_enabled():
+    """top_logprobs only applies when logprobs is enabled. Mirroring OpenAI, an
+    unsolicited top_logprobs (logprobs false/omitted) is silently dropped — not
+    rejected — so it never reaches strict downstream providers that would error.
+    """
+    omitted = OpenAIChatCompletionRequest.model_validate(
+        {"messages": [{"role": "user", "content": "hi"}], "top_logprobs": 5}
+    )
+    explicit_false = OpenAIChatCompletionRequest.model_validate(
+        {"messages": [{"role": "user", "content": "hi"}], "logprobs": False, "top_logprobs": 5}
+    )
+
+    for request in (omitted, explicit_false):
+        dump = request.model_dump(exclude_none=True)
+        assert request.top_logprobs is None
+        assert "top_logprobs" not in dump
+
+
+def test_chat_request_omits_logprobs_when_unset():
+    """An unset logprobs must not be emitted — the server never requests it on the
+    client's behalf (sending it unsolicited can break streaming on some backends).
+    """
+    request = OpenAIChatCompletionRequest(messages=[OpenAIMessage(role="user", content="hi")])
+    dump = request.model_dump(exclude_none=True)
+
+    assert request.logprobs is None
+    assert "logprobs" not in dump
+    assert "top_logprobs" not in dump
+
+
 def test_chat_request_passes_through_extra_openai_params():
     """extra='allow' keeps vendor params (tools, seed, ...) that are not declared
     on the model, so any OpenAI-compatible field reaches the downstream LLM
@@ -116,3 +159,11 @@ def test_add_files_request_accepts_id_list():
 def test_tool_info_schema():
     info = ToolInfo(name="extractText", description="Extract text from a file")
     assert info.name == "extractText"
+
+
+def test_completion_request_bounds_n_and_best_of():
+    # M12: n / best_of each multiply generation cost — reject out-of-range values.
+    assert OpenAICompletionRequest(prompt="x", n=8, best_of=8).n == 8
+    for bad in ({"n": 0}, {"n": 9}, {"best_of": 0}, {"best_of": 9}):
+        with pytest.raises(ValidationError):
+            OpenAICompletionRequest(prompt="x", **bad)

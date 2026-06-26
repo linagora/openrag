@@ -1,3 +1,15 @@
+# === Network isolation ===
+# Default-deny ingress for all pods in the release namespace, allowing only
+# intra-namespace traffic plus the public HTTP ports below. This isolates the
+# unauthenticated Ray dashboard (8265), GCS (6379), Postgres, Milvus, etc. from
+# outside the namespace. Disable only if you manage isolation elsewhere.
+networkPolicy:
+  enabled: true
+  # Ports reachable from outside the namespace (e.g. via the Ingress controller).
+  externalPorts:
+    - 8080  # openrag API/UI
+    - 3000  # indexer-ui
+
 # === Global shared persistence ===
 persistence:
   enabled: true
@@ -11,6 +23,7 @@ persistence:
     venv: { size: 10Gi }
 
 ray:
+  dashboardHost: "127.0.0.1"
   workers:
     count: 1
     replicas: 1
@@ -20,13 +33,15 @@ ray:
     gpu-role: serving
   image:
     repository: ghcr.io/linagora/openrag-ray
-    tag: latest
+    # Pin to a release tag (ideally a digest) for reproducible deploys.
+    tag: "1.1.13"
 
 # === PostgreSQL (bitnami) ===
 postgresql:
   enabled: true
   auth:
     username: &pgUser root
+    # Must be supplied at install time; templates fail closed if it is empty.
     password: &pgPass ""
   primary:
     persistence:
@@ -98,6 +113,9 @@ vllm:
       capabilities:
         drop:
           - ALL
+    # NOTE: the per-model `tag: "latest"` entries below are operator-supplied
+    # serving images — pin each to a specific vLLM release tag (or digest)
+    # before production use for reproducible deploys (see vlm, pinned to v0.11.2).
     modelSpec:
       - name: "embedder"
         repository: "vllm/vllm-openai"
@@ -208,6 +226,8 @@ reranker:
   servicePort: &rerankerPort 7997
   image:
     repository: michaelf34/infinity
+    # Operator-supplied serving image: pin to a specific infinity release tag
+    # (or digest) before production use rather than tracking latest.
     tag: latest
   nodeSelector:
     gpu-role: serving
@@ -235,7 +255,7 @@ reranker:
 indexerUi:
   enabled: true
 
-  image: "linagoraai/indexer-ui:latest"
+  image: "linagoraai/indexer-ui:1.1.13"
   imagePullPolicy: IfNotPresent
 
   replicaCount: 1
@@ -258,7 +278,8 @@ indexerUi:
 openrag:
   image:
     repository: linagoraai/openrag
-    tag: latest
+    # Pin to a release tag (ideally a digest) for reproducible deploys.
+    tag: "1.1.13"
   service:
     type: ClusterIP
     port: 8080
@@ -319,7 +340,8 @@ env:
 
     WITH_CHAINLIT_UI: "false"
     SAVE_UPLOADED_FILES: "false"
-    API_NUM_WORKERS: "8"
+    # HTTP scaling is handled by Ray Serve above (ENABLE_RAY_SERVE +
+    # RAY_SERVE_NUM_REPLICAS), not uvicorn workers — see entrypoint.sh.
     INDEXERUI_URL: "http://indexer-ui:3042"
 
     # Vector DB
@@ -331,6 +353,8 @@ env:
     POSTGRES_HOST: "{{ .Release.Name }}-postgresql"
     POSTGRES_PORT: *pgPort
     POSTGRES_USER: *pgUser
+    # POSTGRES_PASSWORD is a secret — defined under env.secrets, not here in the
+    # (world-readable) ConfigMap.
     POSTGRES_AUTO_CREATE_DB: "{{ .Values.postgresProvisioning.autoCreateDatabase }}"
     POSTGRES_RUN_MIGRATIONS: "{{ .Values.postgresProvisioning.runMigrationsInApp }}"
 

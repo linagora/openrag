@@ -21,7 +21,7 @@ import copy
 from collections.abc import Callable
 from typing import Protocol
 
-from core.utils.text import sanitize_text
+from core.utils.text import neutralize_prompt_control_tokens, sanitize_text
 
 SOURCE_SEPARATOR = "-" * 10 + "\n\n"
 EMPTY_CONTEXT_MESSAGE = "No document found from the database"
@@ -65,12 +65,16 @@ def format_context(
 
     for i, text in enumerate(texts):
         prefix = f"[Source {len(reduced) + 1}]\n" if number_sources else ""
-        n_tokens = length_function(text)
+        # Neutralize control tokens so a poisoned document cannot forge a
+        # [Source N] block, inject a [Sources: ...] citation tag, or fake the
+        # inter-source separator. The [Source N] prefix is the only trusted marker.
+        content = neutralize_prompt_control_tokens(text)
+        n_tokens = length_function(content)
         if prefix:
             n_tokens += length_function(prefix)
         if total_tokens + n_tokens > max_context_tokens:
             break
-        reduced.append(f"{prefix}{text}")
+        reduced.append(f"{prefix}{content}")
         included.append(i)
         total_tokens += n_tokens
 
@@ -107,9 +111,9 @@ def format_web_context(
 
     for i, result in enumerate(web_results):
         n = start_index + i
-        title = sanitize_text(result.title)
+        title = neutralize_prompt_control_tokens(sanitize_text(result.title))
         body_raw = result.content if result.content else result.snippet
-        body = sanitize_text(body_raw) if body_raw else ""
+        body = neutralize_prompt_control_tokens(sanitize_text(body_raw)) if body_raw else ""
         block = f"[Source {n}]\n{title}\n{body}"
         block_tokens = length_function(block)
         if total_tokens + block_tokens > max_tokens:

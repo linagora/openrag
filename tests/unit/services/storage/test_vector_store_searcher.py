@@ -248,3 +248,29 @@ async def test_get_ancestor_chunks_passes_max_depth():
     searcher, _, _, doc_repo = _make_searcher(ancestor_ids=[])
     await searcher.get_ancestor_chunks(partition="p1", file_id="f1", limit=5, max_ancestor_depth=2)
     doc_repo.get_ancestor_file_ids.assert_awaited_once_with(partition="p1", file_id="f1", max_ancestor_depth=2)
+
+
+@pytest.mark.asyncio
+async def test_fetch_surrounding_scopes_section_lookup_to_partition():
+    """N6: section_id is only unique within a partition, so neighbour lookups
+    must be scoped to each source chunk's partition (no cross-tenant leak)."""
+    searcher, store, _, _ = _make_searcher()
+    chunks = [
+        _dict_to_chunk(_make_row("1", partition="p1", prev_section_id="s0")),
+        _dict_to_chunk(_make_row("2", partition="p2", next_section_id="s9")),
+    ]
+    await searcher._fetch_surrounding(chunks)
+    calls = store.query_chunks_by_filter.call_args_list
+    # One scoped query per partition; section_id is never queried unscoped.
+    by_part = {c.args[1]["partition"]: set(c.args[1]["section_id"]) for c in calls}
+    assert by_part == {"p1": {"s0"}, "p2": {"s9"}}
+    assert all("partition" in c.args[1] for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_fetch_surrounding_drops_refs_without_partition():
+    searcher, store, _, _ = _make_searcher()
+    c = _dict_to_chunk(_make_row("1", partition="p1", prev_section_id="s0"))
+    c.partition = ""  # source chunk with no partition → dropped, not queried unscoped
+    assert await searcher._fetch_surrounding([c]) == []
+    store.query_chunks_by_filter.assert_not_awaited()

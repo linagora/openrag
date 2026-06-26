@@ -18,6 +18,7 @@ come from ``services.auth`` — the infrastructure adapters for OIDC.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -35,6 +36,7 @@ from services.auth import (
     hash_session_token,
     issue_session_token,
 )
+from services.auth.oidc_client import _CLOCK_SKEW_LEEWAY, _LOGOUT_TOKEN_MAX_AGE_WITHOUT_EXP
 from services.auth.oidc_groups import extract_partition_roles
 
 if TYPE_CHECKING:
@@ -66,6 +68,32 @@ class OIDCFlowError(OpenRAGError):
     ) -> None:
         super().__init__(message, code="OIDC_FLOW_ERROR", status_code=status_code)
         self.error_description = error_description
+
+
+# In-process replay cache for back-channel logout token jti values, mapping
+# jti -> replay expiry. A logout token may only be consumed once (OIDC spec). This
+# is per-worker; with multiple workers a replay could still reach a different
+# worker, but back-channel logout is idempotent (re-revoking sessions is a
+# no-op), so this is a defence-in-depth guard, not the sole protection.
+_seen_logout_jti: dict[str, int] = {}
+
+
+def _logout_jti_is_replay(jti: str, exp: int | None, iat: int | None = None) -> bool:
+    """Record a logout-token jti and report whether it was already seen."""
+    now = int(time.time())
+    if exp is None:
+        issued_at = iat if iat is not None else now
+        replay_expires_at = max(issued_at + _LOGOUT_TOKEN_MAX_AGE_WITHOUT_EXP, now) + _CLOCK_SKEW_LEEWAY
+    else:
+        replay_expires_at = exp + _CLOCK_SKEW_LEEWAY
+    # Prune expired entries to bound memory.
+    for old_jti, old_exp in list(_seen_logout_jti.items()):
+        if old_exp < now:
+            del _seen_logout_jti[old_jti]
+    if jti in _seen_logout_jti:
+        return True
+    _seen_logout_jti[jti] = replay_expires_at
+    return False
 
 
 @dataclass
@@ -253,6 +281,11 @@ class AuthService:
             logger.warning(f"Back-channel logout token verification failed: {e}")
             raise OIDCFlowError("invalid_request") from e
 
+        # Reject replays: a given logout token (jti) must only be processed once.
+        if claims.jti and _logout_jti_is_replay(claims.jti, claims.exp, claims.iat):
+            logger.warning(f"Replayed back-channel logout token ignored — jti={claims.jti!r}")
+            raise OIDCFlowError("logout_token replayed", error_description="logout_token replayed")
+
         if claims.sid:
             count = await self._oidc_session_repo.revoke_by_sid(claims.sid)
             logger.info(f"Back-channel logout revoked sessions — sid={claims.sid!r}, count={count}")
@@ -265,6 +298,14 @@ class AuthService:
             f"ignoring per implementation policy (sub={claims.sub!r})"
         )
         return 0
+
+    async def revoke_user_oidc_sessions(self, user_id: int) -> int:
+        """Revoke all active OIDC sessions for a user.
+
+        Used when the user's API token is rotated so their browser sessions
+        can't outlive the rotation.
+        """
+        return await self._oidc_session_repo.revoke_by_user(user_id)
 
     async def logout(self, session_cookie_value: str | None) -> str | None:
         """Revoke the local session and build the IdP end-session redirect.

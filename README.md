@@ -217,7 +217,7 @@ OpenRag supports two authentication modes:
 
 To enable OIDC, set `AUTH_MODE=oidc` and configure the required OIDC variables (see [`infra/compose/.env.example`](./infra/compose/.env.example) for the full list).
 
-For comprehensive OIDC setup and configuration, see the [OIDC Authentication Guide](./docs/oidc.md).
+For comprehensive OIDC setup and configuration, see the [OIDC Authentication Guide](./docs/content/docs/documentation/oidc.md) (or the [SSO Quick Start](./docs/content/docs/documentation/sso-quickstart.md) for a faster path).
 
 3. `http://localhost:INDEXERUI_PORT` to access the indexer ui for easy document ingestion, indexing, and management
 

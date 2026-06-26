@@ -206,6 +206,8 @@ The PostgreSQL database is configured using the following environment variables:
 
 The main Docker Compose stack keeps the historical host-path defaults. Set these variables when you want to move state elsewhere, including Docker named volumes.
 
+When using host paths with the non-root API image, make sure the mounted directories are writable by the container user. If that is not practical for your deployment, use the named-volume profile instead.
+
 For an opt-in named-volume profile, copy the values from `infra/compose/.env.named-volumes.example` into your `.env`.
 
 | Variable | Default | Description |
@@ -378,6 +380,8 @@ Ray is used for distributed task processing and parallel execution in the RAG pi
 | `RAY_POOL_SIZE` | `int` | 1 | Number of serializer actor instances (typically 1 actor per cluster node) |
 | `RAY_MAX_TASKS_PER_WORKER` | `int` | 8 | Maximum number of concurrent tasks (serialization tasks) per serializer actor instance |
 | `RAY_DASHBOARD_PORT` | `int` | 8265 | Ray Dashboard port used for monitoring. In production, [comment out this line](https://github.com/linagora/openrag/blob/ee732ea8e080dcde0107d62d12703a7525f810cd/docker-compose.yaml#L21C1-L22C1) to avoid exposing the port, as it may introduce security vulnerabilities. |
+| `RAY_DASHBOARD_HOST` | `str` | `127.0.0.1` | Interface the **embedded** Ray dashboard binds to. Defaults to loopback because the Ray dashboard/job-submission API is **unauthenticated** ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)). Set to `0.0.0.0` only when the dashboard port is firewalled or sits behind an authenticating proxy. Ignored when `RAY_ADDRESS` is set. |
+| `RAY_ADDRESS` | `str` | (unset) | When set, attach to an **external** Ray cluster at this address (e.g. `ray://HEAD_IP:10001`) instead of starting an embedded cluster in-process. In this mode the app does not start a local dashboard — the head node owns it. See [Ray Cluster deployment](/openrag/documentation/deploy_ray_cluster/). |
 
 :::danger[Attention]
 The following environment variables control Ray's logging behavior, task retry settings. These are not set by default and must be supplied [as suggested in the .env](/openrag/getting_started/quickstart#2-create-a-env-file)
@@ -419,7 +423,19 @@ Controls the maximum number of concurrent operations for different indexer tasks
 | `RAY_SEMAPHORE_CONCURRENCY` | int | 100000 | Global concurrency limit for Ray semaphore operations |
 
 #### Ray Serve Configuration
-Ray Serve enables deployment of the FastAPI as a scalable service. For simple deployment, without the intend to scale, one can usage the [uvicorn deployment mode](/openrag/documentation/env_vars/#ray-serve-configuration)
+
+Ray Serve enables deployment of the FastAPI app as a horizontally scalable service.
+
+By default (`ENABLE_RAY_SERVE=false`) OpenRAG runs under **uvicorn with a single worker**. This is intentional: the app initializes Ray and its named actors (`Indexer`, `Vectordb`, `TaskStateManager`, …) at import time, so a second uvicorn worker would start its **own isolated Ray cluster** with duplicate actors, fragmenting task state and vector-DB access. Concurrency within the single worker comes from the async app and from Ray itself — **not** from multiple uvicorn workers (there is intentionally no `API_NUM_WORKERS` knob).
+
+**To scale the HTTP layer, enable Ray Serve** — it runs `RAY_SERVE_NUM_REPLICAS` replicas inside one shared Ray cluster:
+
+```bash
+ENABLE_RAY_SERVE=true
+RAY_SERVE_NUM_REPLICAS=4
+```
+
+For multi-node distributed deployments, see [Distributed Deployment in a Ray Cluster](/openrag/documentation/deploy_ray_cluster/).
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -512,10 +528,10 @@ The following environment variables configure the FastAPI server and control acc
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `APP_PORT` | `number` | `8000` | Port number on which the FastAPI application listens for incoming requests. |
-| `AUTH_TOKEN` | `string` | `EMPTY` | An authentication token is required to access protected API endpoints. By default, this token corresponds to the API key of the created admin (see [Admin Bootstrapping](/openrag/documentation/user_auth/#2-admin-bootstrapping)). If left empty, authentication is disabled. |
+| `AUTH_TOKEN` | `string` | `EMPTY` | Authentication token used to bootstrap the admin user and access protected API endpoints. If it is empty, the API fails closed unless `ALLOW_NO_AUTH=true` is explicitly set for local development. |
+| `ALLOW_NO_AUTH` | `boolean` | `false` | Enables the no-auth local development bypass when `AUTH_MODE=token` and `AUTH_TOKEN` is unset. Never enable this in production. |
 | `SUPER_ADMIN_MODE` | `boolean` | `false` | Enables super admin privileges when set to `true`, [granting unrestricted access](/openrag/documentation/data_model/#access-control) to all operations and bypassing standard access controls. This is for debugging |
 | `DEFAULT_FILE_QUOTA` | `int` | `-1` | Default per-user file quota. `<0` disables quotas globally; `>=0` sets the default limit when a user has no explicit quota. |
-|`API_NUM_WORKERS`|`int`|1|Number of uvicorn workers|
 | `PREFERRED_URL_SCHEME` | `string` | `null` | URL scheme (`http` or `https`) used when generating URLs in API responses (e.g., `task_status_url`). When running behind a reverse proxy that terminates SSL, set this to `https` to ensure generated URLs use the correct scheme. If unset, the scheme from the incoming request is used. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
 

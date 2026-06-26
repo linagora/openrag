@@ -266,6 +266,14 @@ DEFAULT_API_PREFIXES: tuple[str, ...] = (
 # IdP flow instead of staring at a 401 JSON blob).
 DEFAULT_UI_PATH_PREFIXES: tuple[str, ...] = ("/static",)
 
+# Subset of the bypass paths that stay public in token mode but, under
+# AUTH_MODE=oidc, are gated behind login instead of served anonymously. The
+# interactive docs leak the full route + schema surface, so in an OIDC
+# deployment an unauthenticated browser is redirected to /auth/login; an
+# authenticated session still renders them. Must be a subset of
+# DEFAULT_BYPASS_PATHS (these are bypassed in token mode).
+DEFAULT_OIDC_GATED_PATHS: tuple[str, ...] = ("/docs", "/redoc", "/openapi.json")
+
 
 class AuthBypassConfig(BaseModel):
     """Path policy consulted by :class:`AuthMiddleware` per request.
@@ -279,3 +287,6 @@ class AuthBypassConfig(BaseModel):
     bypass_paths: tuple[str, ...] = DEFAULT_BYPASS_PATHS
     api_prefixes: tuple[str, ...] = DEFAULT_API_PREFIXES
     ui_path_prefixes: tuple[str, ...] = DEFAULT_UI_PATH_PREFIXES
+    # Public in token mode, login-gated under oidc (see constant above).
+    # Operators that want docs fully public under oidc can override to ().
+    oidc_gated_paths: tuple[str, ...] = DEFAULT_OIDC_GATED_PATHS

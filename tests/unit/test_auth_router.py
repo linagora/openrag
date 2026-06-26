@@ -286,3 +286,27 @@ def test_logout_without_idp_target_confirms_in_place(oidc_env, client, stub):
     assert r.status_code == 200
     assert r.json()["detail"] == "Logged out"
     assert any(SESSION_COOKIE_NAME in c for c in _set_cookies(r))
+
+
+def test_logout_blocks_cross_site_non_navigation_csrf(oidc_env, client, stub):
+    # A forged <img>/fetch request is cross-site and not a top-level navigation.
+    r = client.get(
+        "/auth/logout",
+        headers={"sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors"},
+        cookies={SESSION_COOKIE_NAME: "sess"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 403
+    assert stub.calls == []  # session never revoked
+
+
+def test_logout_allows_cross_site_top_level_navigation(oidc_env, client, stub):
+    # The IdP RP-initiated logout redirect is a genuine top-level navigation.
+    r = client.get(
+        "/auth/logout",
+        headers={"sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate"},
+        cookies={SESSION_COOKIE_NAME: "sess"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert stub.calls == [("logout", "sess")]

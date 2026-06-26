@@ -498,7 +498,15 @@ class MilvusVectorStore(VectorStore):
         if raw_expr:
             parts.append(str(raw_expr))
 
-        return " and ".join(parts)
+        if len(parts) <= 1:
+            return parts[0] if parts else ""
+        # Multiple predicates: wrap each in parentheses when joining so a
+        # user-supplied filter (the ``expr`` escape hatch) cannot escape the
+        # partition scope via operator precedence — Milvus binds ``and`` tighter
+        # than ``or``, so an unparenthesised
+        # ``partition == 'p' and text != "" or partition == 'q'`` would leak
+        # another tenant's chunks.
+        return " and ".join(f"({part})" for part in parts)
 
     # ------------------------------------------------------------------
     # Sync paginated query helper (Milvus 2.6 query_iterator is sync-only)

@@ -1,0 +1,33 @@
+{{- if .Values.networkPolicy.enabled }}
+# Default-deny ingress baseline: applies to every pod in the namespace
+# (podSelector: {}). Two allowances:
+#   1. any pod in the same namespace (intra-stack traffic), and
+#   2. the public HTTP ports, reachable from anywhere (Ingress controller).
+# Everything else — notably the unauthenticated Ray dashboard (8265), GCS
+# (6379), Ray client (10001), Postgres and Milvus — is only reachable from
+# within the namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-default-deny
+  labels:
+    {{- include "openrag-stack.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # 1. Allow all traffic originating from pods in this namespace.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+    # 2. Allow the public HTTP ports from any source (e.g. the Ingress controller).
+    {{- with .Values.networkPolicy.externalPorts }}
+    - ports:
+        {{- range . }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+    {{- end }}
+{{- end }}
