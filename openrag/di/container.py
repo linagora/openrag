@@ -147,11 +147,24 @@ class ServiceContainer:
     def _wire_named_component_factories(self, settings: Settings) -> None:
         """Wire Phase 14 named inference factories from ``settings.models``."""
         models = settings.models
+        embed_defaults = settings.embedder
+
+        def _embedder_extra_kwargs(cfg: Any) -> dict[str, Any]:
+            """Backfill max_model_len/embed_concurrency from static settings when the
+            endpoint's ``extra`` omits them (an explicit ``extra`` value wins)."""
+            defaults: dict[str, Any] = {}
+            if "max_model_len" not in cfg.extra:
+                defaults["max_model_len"] = embed_defaults.max_model_len
+            if "embed_concurrency" not in cfg.extra:
+                defaults["embed_concurrency"] = embed_defaults.embed_concurrency
+            return defaults
+
         self.embedder_factory, self._embedder_cache = make_component_factory(
             registry=embedder_registry,
             config_section=models.embedder,
             default_impl="vllm",
             client_caches=self._client_caches,
+            extra_kwargs_fn=_embedder_extra_kwargs,
         )
         self.reranker_factory, self._reranker_cache = make_component_factory(
             registry=reranker_registry,

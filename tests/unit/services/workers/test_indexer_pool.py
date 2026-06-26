@@ -290,6 +290,44 @@ def test_embedder_factory_reads_live_registry() -> None:
         embedder_registry._registry.pop("live-probe-embedder", None)
 
 
+def test_embedder_factory_backfills_max_model_len_from_settings() -> None:
+    """A named endpoint whose `extra` omits max_model_len inherits it from the
+    static embedder settings (an explicit per-endpoint value still wins)."""
+    from core.embeddings import embedder_registry
+    from services.workers.indexer_pool import _build_embedder_factory
+
+    class ProbeEmbedder:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    embedder_registry.register("backfill-probe-embedder")(ProbeEmbedder)
+    try:
+        registry: dict = {
+            "no-extra": ModelEndpointConfig(
+                endpoint="http://embed.example/v1",
+                model_name="embed-model",
+                extra={"implementation": "backfill-probe-embedder", "api_key": "k"},
+            ),
+            "explicit": ModelEndpointConfig(
+                endpoint="http://embed.example/v1",
+                model_name="embed-model",
+                extra={"implementation": "backfill-probe-embedder", "max_model_len": 4096},
+            ),
+        }
+        cfg = SimpleNamespace(
+            models=SimpleNamespace(embedder=registry),
+            embedder=SimpleNamespace(max_model_len=2047, embed_concurrency=4),
+        )
+
+        factory = _build_embedder_factory(cfg)
+        backfilled = factory("no-extra")
+        assert backfilled.kwargs["max_model_len"] == 2047
+        assert backfilled.kwargs["embed_concurrency"] == 4
+        assert factory("explicit").kwargs["max_model_len"] == 4096  # per-endpoint extra wins
+    finally:
+        embedder_registry._registry.pop("backfill-probe-embedder", None)
+
+
 def test_embedder_factory_rebuilds_on_api_key_rotation() -> None:
     from core.embeddings import embedder_registry
     from services.workers.indexer_pool import _build_embedder_factory

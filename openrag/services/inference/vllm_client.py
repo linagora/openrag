@@ -212,6 +212,17 @@ class VLLMEmbedder(Embedder):
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
+        logger.bind(
+            model=self._model,
+            max_model_len=self._max_model_len,
+            batch_size=self._batch_size,
+            embed_concurrency=self._embed_concurrency,
+        ).debug("VLLMEmbedder ready")
+        if self._max_model_len is None:
+            logger.bind(model=self._model).warning(
+                "VLLMEmbedder built without max_model_len — truncate_prompt_tokens disabled; "
+                "pooling models can hang/400 on context-boundary inputs (vllm#29496)."
+            )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed *texts*, splitting large inputs into bounded-concurrent batches.
@@ -243,7 +254,11 @@ class VLLMEmbedder(Embedder):
                 *tasks,
                 desc=f"Embedding {len(texts)} chunks ({len(batches)} batches of {self._batch_size})",
             )
-        except BaseException:
+        except BaseException as exc:
+            done = sum(1 for task in tasks if task.done() and not task.cancelled() and task.exception() is None)
+            logger.bind(batches_done=done, n_batches=len(batches), error=repr(exc)).warning(
+                "Embedding failed after {d}/{b} batches", d=done, b=len(batches)
+            )
             for task in tasks:
                 if not task.done():
                     task.cancel()

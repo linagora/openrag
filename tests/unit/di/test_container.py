@@ -548,6 +548,8 @@ class TestPhase14NamedComponentFactories:
         llm = c.llm_factory("chat-a")
         vlm = c.vlm_factory("vision-a")
 
+        # max_model_len / embed_concurrency aren't carried by the endpoint config,
+        # so the embedder factory backfills them from the static ``embedder`` settings.
         assert embedder.kwargs == {
             "endpoint": "http://embedder:8000/v1",
             "model_name": "embed-model",
@@ -555,6 +557,8 @@ class TestPhase14NamedComponentFactories:
             "timeout": 12.5,
             "api_key": "embed-key",
             "dimension": 384,
+            "max_model_len": 2047,
+            "embed_concurrency": 4,
         }
         assert reranker.kwargs["endpoint"] == "http://reranker:8000"
         assert reranker.kwargs["model_name"] == "rank-model"
@@ -563,6 +567,14 @@ class TestPhase14NamedComponentFactories:
         assert llm.kwargs["temperature"] == 0.2
         assert vlm.kwargs["endpoint"] == "http://vlm:8000/v1"
         assert vlm.kwargs["max_tokens"] == 256
+
+    def test_embedder_extra_overrides_backfilled_max_model_len(self):
+        """A per-endpoint ``extra.max_model_len`` wins over the settings default."""
+        settings = _settings_with_named_models()
+        settings.models.embedder["embed-a"].extra["max_model_len"] = 4096
+        c = ServiceContainer(settings)
+
+        assert c.embedder_factory("embed-a").kwargs["max_model_len"] == 4096
 
     def test_named_factories_cache_by_endpoint_name(self):
         """Repeated factory calls for the same endpoint return one client."""
