@@ -364,7 +364,11 @@ function IndexationPresetForm({
         <h4 className="text-sm font-medium">Features</h4>
         <FeatureToggle
           label="Image captioning"
-          enabled={configGet(config, "enable_image_captioning", false)}
+          // Backend default is ON (IndexationPipelineConfig.enable_image_captioning
+          // = True) and configs are stored sparse — so a preset that omits the key
+          // captions by default. The toggle must show that truth, otherwise it
+          // reads "off" while the backend still captions during indexing (#453).
+          enabled={configGet(config, "enable_image_captioning", true)}
           onToggle={(on) => toggleFeature("enable_image_captioning", "vlm", on)}
           disabled={configGet<string>(config, "parsing_strategy", "marker") === "pymupdf"}
           disabledHint="pymupdf extracts text only — use marker or docling for image captioning."
