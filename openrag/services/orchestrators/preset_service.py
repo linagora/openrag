@@ -28,15 +28,21 @@ logger = get_logger()
 _VALID_PRESET_TYPES = frozenset({"indexation", "retrieval"})
 
 _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
-    # ``enable_contextualization`` is intentionally omitted from the ``default``
-    # indexation preset below — it is injected at seed time from the global
-    # ``chunker.contextual_retrieval`` (``CONTEXTUAL_RETRIEVAL``) toggle in
-    # _finalize_seed, so the env flag still drives contextualization on fresh
-    # deployments. Named presets (legal/finance) keep their explicit choice.
+    # ``enable_contextualization`` and ``parsing_strategy`` are intentionally
+    # omitted from the ``default`` indexation preset below. The former is injected
+    # at seed time from the global ``chunker.contextual_retrieval``
+    # (``CONTEXTUAL_RETRIEVAL``) toggle in _finalize_seed; the latter stays unset
+    # so the default preset inherits the global ``file_loaders.pdf`` (``PDFLoader``)
+    # backend at parse time. Named presets (legal/finance) keep their explicit choice.
     "indexation": {
         "default": {
             "chunking": {"name": "recursive_splitter", "chunk_size": 512, "chunk_overlap_rate": 0.2},
-            "parsing_strategy": "marker",
+            # ``parsing_strategy`` is intentionally omitted so the default preset
+            # inherits the deployment's global PDFLoader (``file_loaders.pdf``)
+            # rather than forcing one PDF backend on every partition. A hardcoded
+            # value here would override the operator's global choice and lazily
+            # spin up that backend's Ray pool — e.g. forcing marker on a
+            # pymupdf-configured deployment. Named presets below opt in explicitly.
             "enable_image_captioning": True,
             "enable_entity_extraction": True,
             "enable_topic_tagging": True,
