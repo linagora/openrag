@@ -4,6 +4,8 @@ export interface NormalizedSource extends StoredSource {
   sourceType: 'web' | 'document'
   fileUrl?: string
   chunkUrl?: string
+  /** Raw file path from openRAG (e.g. /app/data/foo.pdf) — for dedup + path. */
+  path?: string
 }
 
 interface RawDoc {
@@ -45,6 +47,7 @@ export const normalizeSources = (raw: unknown): NormalizedSource[] => {
       title: s.title || (s.source ? basename(s.source) : undefined),
       fileUrl: s.file_url,
       chunkUrl: s.chunk_url,
+      path: s.source,
       url: link
     }
   })

@@ -1,33 +1,53 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import React from 'react'
 
 jest.mock('twake-i18n', () => ({
   useI18n: () => ({
     t: (key: string, count?: number) =>
-      key === 'assistant.sources' ? `${count} sources` : key,
-    lang: 'en'
+      key === 'assistant.sources' ? `${count} sources` : key
   })
 }))
 
 import OpenRagSources from './OpenRagSources'
 
-it('renders a collapsible sources list with links', () => {
+const doc = (path: string, chunk: string): unknown => ({
+  sourceType: 'document',
+  path,
+  fileUrl: `http://x/static${path}`,
+  chunkUrl: `http://x/extract/${chunk}`,
+  title: path.split('/').pop()
+})
+
+it('dedupes multiple chunks of the same file into a single source', () => {
   render(
     <OpenRagSources
-      messageId="m1"
-      sources={[
-        { sourceType: 'document', title: 'a.pdf', fileUrl: 'http://x/a.pdf' } as never,
-        { sourceType: 'web', title: 'Example', url: 'https://e.com' } as never
-      ]}
+      messageId="m"
+      sources={
+        [
+          doc('/app/data/a.pdf', 'c1'),
+          doc('/app/data/a.pdf', 'c2'),
+          doc('/app/data/a.pdf', 'c3')
+        ] as never
+      }
     />
   )
-  // count chip visible
-  expect(screen.getByText(/2/)).toBeInTheDocument()
-  // expand
-  fireEvent.click(screen.getByText(/2/))
-  const links = screen.getAllByRole('link')
-  expect(links.map(a => a.getAttribute('href'))).toEqual([
-    'http://x/a.pdf',
-    'https://e.com'
-  ])
+  // The chip count reflects distinct files, not chunks.
+  expect(screen.getByText('1 sources')).toBeInTheDocument()
+})
+
+it('counts distinct files', () => {
+  render(
+    <OpenRagSources
+      messageId="m"
+      sources={
+        [doc('/app/data/a.pdf', 'c1'), doc('/app/data/b.docx', 'c2')] as never
+      }
+    />
+  )
+  expect(screen.getByText('2 sources')).toBeInTheDocument()
+})
+
+it('renders nothing when there are no sources', () => {
+  const { container } = render(<OpenRagSources messageId="m" sources={[]} />)
+  expect(container).toBeEmptyDOMElement()
 })

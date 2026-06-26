@@ -204,29 +204,14 @@ body,
 .openrag-sources-chip:hover {
   background: var(--primaryBackground, rgba(10, 132, 255, 0.06));
 }
-.openrag-sources-list {
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+/* Source cards — mirrors cozy-search's .sourcesItem (border + radius). */
+.openrag-source-card {
+  margin-bottom: 0.25rem !important;
+  border: 1px solid var(--borderMainColor, #e0e0e0) !important;
+  border-radius: 8px !important;
+  color: inherit !important;
+  text-decoration: none !important;
 }
-.openrag-source-item a,
-.openrag-source-item span {
-  display: inline-flex;
-  align-items: center;
-  padding: 6px 10px;
-  border-radius: 8px;
-  background: var(--defaultBackgroundColor, #f5f6f7);
-  color: var(--primaryColor, #0a84ff);
-  font-size: 13px;
-  text-decoration: none;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.openrag-source-item a:hover {
-  text-decoration: underline;
+.openrag-source-card:hover {
+  background: var(--primaryBackground, rgba(10, 132, 255, 0.04)) !important;
 }

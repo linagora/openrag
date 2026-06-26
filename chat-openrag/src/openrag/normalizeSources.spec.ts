@@ -25,6 +25,7 @@ it('normalizes document and web sources from an extra JSON string', () => {
       title: 'a.pdf',
       fileUrl: 'http://x/static/a.pdf',
       chunkUrl: 'http://x/extract/c1',
+      path: '/data/a.pdf',
       url: 'http://x/static/a.pdf'
     },
     {
