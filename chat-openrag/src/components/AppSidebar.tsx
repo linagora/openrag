@@ -37,7 +37,7 @@ const AppSidebar = (): JSX.Element => {
         <Button
           className="u-w-100 u-bdrs-6"
           label={t('assistant.sidebar.create_new')}
-          startIcon={<Icon icon={PlusIcon} />}
+          startIcon={<Icon icon={PlusIcon} color="white" />}
           fullWidth
           variant="primary"
           onClick={onNew}
