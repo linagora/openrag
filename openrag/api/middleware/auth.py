@@ -213,7 +213,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # --- Bypass list (docs, health, /auth/* callbacks, chainlit).
         path = request.url.path
-        if is_bypass_path(path, bypass_config=self._bypass_config):
+
+        # In oidc mode the interactive API docs are gated behind login rather
+        # than served anonymously: they expose the full route + schema surface,
+        # and an authenticated browser session still reaches them after the IdP
+        # redirect. In token mode they stay public — a browser has no login flow
+        # to bounce through — preserving the legacy bypass contract. ``oidc_gated``
+        # therefore suppresses the bypass for these paths only when AUTH_MODE=oidc,
+        # so they fall through to the normal auth + UI-redirect path below.
+        oidc_gated = auth_mode == "oidc" and path in self._bypass_config.oidc_gated_paths
+
+        if not oidc_gated and is_bypass_path(path, bypass_config=self._bypass_config):
             # Special case: browser HTML page-loads on /chainlit/* without an
             # active session can't be served usefully — Chainlit configures no
             # in-app auth provider when headerAuth is used, so the SPA shows
@@ -323,9 +333,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 # Token mode: no cookie + no bearer → legacy 403 "Missing token".
                 return await self._auth_failure(request, status_code=403, detail="Missing token")
 
-        # --- 3) Unauthenticated: redirect UI in oidc mode, else 401 JSON.
+        # --- 3) Unauthenticated: redirect UI (and the oidc-gated docs) in oidc
+        #        mode, else 401 JSON. ``oidc_gated`` is already mode-checked.
         if user is None:
-            if auth_mode == "oidc" and is_ui_path(path, bypass_config=self._bypass_config):
+            if oidc_gated or (auth_mode == "oidc" and is_ui_path(path, bypass_config=self._bypass_config)):
                 next_path = path
                 if request.url.query:
                     next_path = f"{path}?{request.url.query}"
