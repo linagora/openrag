@@ -817,6 +817,15 @@ def _bare_pool(workers: list) -> object:
     return pool
 
 
+async def _settle_pool_release_tasks(pool: object, *futures: asyncio.Future[object]) -> None:
+    for fut in futures:
+        if not fut.done():
+            fut.set_result(None)
+    release_tasks = list(getattr(pool, "_release_tasks"))
+    if release_tasks:
+        await asyncio.gather(*release_tasks)
+
+
 def test_pool_requires_positive_pool_size() -> None:
     from services.workers.indexer_pool import IndexerPool
 
@@ -839,6 +848,12 @@ async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
     # The ObjectRef is passed through wrapped in a one-element list (the
     # dispatcher unwraps it; the wrapper stops Ray auto-dereferencing the ref).
     assert ref0 == [workers[0].futures[0]]
+    await _settle_pool_release_tasks(
+        pool,
+        workers[0].futures[0],
+        workers[1].futures[0],
+        workers[0].futures[1],
+    )
 
 
 @pytest.mark.asyncio
@@ -863,6 +878,7 @@ async def test_pool_releases_inflight_when_task_settles() -> None:
     # Freed workers are eligible again on the next dispatch.
     await pool.submit(task_id="c")
     assert pool._inflight[0] == 1
+    await _settle_pool_release_tasks(pool, workers[0].futures[1])
 
 
 @pytest.mark.asyncio
