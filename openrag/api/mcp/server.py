@@ -77,7 +77,18 @@ def _service():
 async def _startup() -> None:
     global _container
     if not ray.is_initialized():
-        ray.init(dashboard_host="0.0.0.0", ignore_reinit_error=True)
+        _ray_address = os.environ.get("RAY_ADDRESS")
+        if _ray_address:
+            # Attach to an external Ray cluster; the head node owns the dashboard.
+            ray.init(address=_ray_address, ignore_reinit_error=True)
+        else:
+            # Bind the Ray dashboard to localhost by default; it is
+            # unauthenticated (CVE-2023-48022). Override via RAY_DASHBOARD_HOST
+            # behind an auth proxy.
+            ray.init(
+                dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "127.0.0.1"),
+                ignore_reinit_error=True,
+            )
     ensure_worker_bootstrap()
     container = ServiceContainer(config)
     try:
@@ -108,10 +119,11 @@ class MCPAuthContextMiddleware(BaseHTTPMiddleware):
     """Resolve the bearer-token principal and set the MCP auth context.
 
     Mirrors the token-mode contract of ``api.middleware.AuthMiddleware``:
-    when ``AUTH_TOKEN`` is unset the server runs in dev mode and every call
-    acts as admin user 1; otherwise a valid ``Authorization: Bearer`` is
-    required. Allowed partitions follow ``current_user_or_admin_partitions_list``
-    (``["all"]`` for admins under ``SUPER_ADMIN_MODE``).
+    when ``AUTH_TOKEN`` is unset and ``ALLOW_NO_AUTH=true`` the server runs in
+    dev mode and every call acts as admin user 1; otherwise a valid
+    ``Authorization: Bearer`` is required. Allowed partitions follow
+    ``current_user_or_admin_partitions_list`` (``["all"]`` for admins under
+    ``SUPER_ADMIN_MODE``).
     """
 
     async def _resolve_principal(self, request: Request) -> tuple[int | None, bool, list[str] | None]:
@@ -124,7 +136,12 @@ class MCPAuthContextMiddleware(BaseHTTPMiddleware):
         # In OIDC mode AUTH_TOKEN is commonly unset; without this gate the MCP
         # endpoint would silently treat every caller as admin (auth bypass), so
         # a valid bearer (users.token) is always required there.
-        if auth_mode == "token" and auth_token is None:
+        allow_no_auth = os.getenv("ALLOW_NO_AUTH", "false").strip().lower() == "true"
+        if auth_mode == "token" and auth_token is None and allow_no_auth:
+            logger.warning(
+                "ALLOW_NO_AUTH=true and AUTH_TOKEN is unset: MCP authentication is DISABLED — "
+                "every request is treated as admin user 1. Never use this in production."
+            )
             user = await auth_service.get_user_for_request(1)
         else:
             header = request.headers.get("authorization", "")
@@ -428,6 +445,7 @@ async def index_url(url: str, partition: str, file_id: str, extra_metadata: dict
         file_id=file_id,
         allowed_partitions=get_allowed_partitions(),
         user_id=get_user_id(),
+        is_admin=is_admin(),
         extra_metadata=extra_metadata,
     )
 

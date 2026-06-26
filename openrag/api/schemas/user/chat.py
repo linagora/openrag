@@ -44,7 +44,7 @@ class OpenAIChatCompletionRequest(BaseModel):
             "websearch": False,
             "llm_override": None,
         },
-        description="Extra custom parameters. Supports 'llm_override' object with optional 'base_url', 'api_key', and 'model' to override the downstream LLM endpoint.",
+        description="Extra custom parameters. Supports 'llm_override' object with an optional 'model' to override the downstream model name. The LLM endpoint and credentials are fixed by server configuration and cannot be overridden by the client.",
     )
 
     @model_validator(mode="after")
@@ -63,13 +63,15 @@ class OpenAIChatCompletionRequest(BaseModel):
 class OpenAICompletionRequest(BaseModel):
     model: str | None = Field(None, description="model name")
     prompt: str
-    best_of: int | None = Field(1)
+    # Bound n/best_of: each multiplies generation cost, so leaving them unbounded
+    # lets one request fan out into a resource-exhaustion amplifier.
+    best_of: int | None = Field(1, ge=1, le=8)
     echo: bool | None = Field(False)
     frequency_penalty: float | None = Field(0.0)
     logit_bias: dict | None = Field(None)
     logprobs: int | None = Field(None)
     max_tokens: int | None = Field(default_factory=default_max_tokens)
-    n: int | None = Field(1)
+    n: int | None = Field(1, ge=1, le=8)
     presence_penalty: float | None = Field(0.0)
     seed: int | None = Field(None)
     stop: list[str] | None = Field(None)

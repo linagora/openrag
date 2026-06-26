@@ -1,6 +1,6 @@
 [project]
 name = "openrag"
-version = "1.1.11"
+version = "1.1.13"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -55,6 +55,13 @@ dependencies = [
     "authlib>=1.3",
     "itsdangerous>=2.2",
     "cryptography>=42",
+    # Moving-window rate limiter backing api.middleware.rate_limit.
+    "limits>=3.6",
+    # Starlette < 0.47.2 is vulnerable to the multipart upload DoS CVE-2025-54121.
+    # Constrain starlette and the coordinated fastapi line (fastapi 0.115.x pins
+    # starlette<0.47). Both are otherwise pulled transitively (e.g. via chainlit).
+    "starlette>=0.47.2,<0.48",
+    "fastapi>=0.116.1,<0.117",
     "tenacity>=8.2.0",
     "aiobreaker>=1.2.0",
     "mcp>=1.11.0",

@@ -76,7 +76,9 @@ rdb:
   host: rdb
   port: 5432
   user: root
-  password: "root_password"
+  # No default: supply via the POSTGRES_PASSWORD env var. Shipping a known
+  # password would be a usable default credential on any exposed deployment.
+  password: ""
   default_file_quota: -1
   # Leave unset to derive partitions_for_collection_<VDB_COLLECTION_NAME>.
   database: null

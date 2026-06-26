@@ -16,6 +16,7 @@ from api.dependencies.auth import (
     require_partition_viewer,
     require_partitions_viewer,
 )
+from api.dependencies.files import validate_file_id
 from core.utils.logging import get_logger
 from di.providers import get_retrieval_service, get_workspace_service
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -144,10 +145,12 @@ async def search_multiple_partitions(
 ):
     if partitions == ["all"]:
         partitions = user_partitions
+    if not partitions:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No accessible partitions")
 
     log = logger.bind(
         partitions=partitions,
-        query=search_params.text,
+        query_len=len(search_params.text),
         top_k=search_params.top_k,
         workspace=workspace,
         include_related=related_params.include_related,
@@ -233,7 +236,7 @@ async def search_one_partition(
 ):
     log = logger.bind(
         partition=partition,
-        query=search_params.text,
+        query_len=len(search_params.text),
         top_k=search_params.top_k,
         workspace=workspace,
         include_related=related_params.include_related,
@@ -305,12 +308,14 @@ Find specific information within a single document using semantic search.
 async def search_file(
     request: Request,
     partition: str,
-    file_id: str,
     search_params: Annotated[CommonSearchParams, Depends()],
+    file_id: str = Depends(validate_file_id),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_retrieval_service),
 ):
-    log = logger.bind(partition=partition, file_id=file_id, query=search_params.text, top_k=search_params.top_k)
+    log = logger.bind(
+        partition=partition, file_id=file_id, query_len=len(search_params.text), top_k=search_params.top_k
+    )
 
     filter = "file_id == {_file_id}" + (f" AND {search_params.filter}" if search_params.filter else "")
     params = {"_file_id": file_id}

@@ -6,11 +6,22 @@ include:
 
 x-openrag: &openrag_template
   image: linagoraai/openrag:latest
+  # Start as root so entrypoint.sh can grant GID-0 write on the bind-mounted
+  # writable dirs (data/, logs/, the HF cache) — which a non-root container
+  # can't write when Docker auto-creates them root-owned — then it immediately
+  # drops to the non-root app user (UID in GID 0) via setpriv before launching.
+  # The image's USER stays non-root for non-compose/OpenShift runs.
+  user: "0:0"
   build:
     # Build context is the repo root so the Dockerfile can COPY pyproject.toml,
     # uv.lock, openrag/, conf/ and infra/scripts/entrypoint.sh directly.
     context: ../..
     dockerfile: infra/docker/api.Dockerfile
+    args:
+      # Local compose bind-mounts repo-owned paths (data, logs, i8n). Build the
+      # image with the host user's UID by default so the non-root container can
+      # still write those mounts; OpenShift builds keep the Dockerfile default.
+      APP_UID: ${APP_UID:-1000}
   extra_hosts:
     # Let containers reach services running on the Docker host via
     # ``host.docker.internal`` (Linux Docker >= 20.10). Useful when an OIDC
@@ -24,12 +35,18 @@ x-openrag: &openrag_template
     - ${DATA_VOLUME:-../../data}:/app/data
     - ../../i8n:/app/openrag/.chainlit/translations
     - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
-    - ../../openrag:/app/openrag # For dev mode
+    # Dev only: bind-mounting the source tree over the image lets host changes
+    # (or a writable host path) override the running code. Uncomment for local
+    # development; keep it off in production.
+    # - ../../openrag:/app/openrag # For dev mode
     - /$SHARED_ENV:/ray_mount/.env # Shared environment variables
-    - ${LOG_VOLUME:-../../logs}:/app/logs # For dev mode
+    - ${LOG_VOLUME:-../../logs}:/app/logs
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
-    - ${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
+    # Bind the Ray dashboard to localhost only: it has no authentication and
+    # its job-submission API allows arbitrary code execution on the cluster,
+    # so it must never be reachable from outside the host.
+    - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
     - ${CHAINLIT_PORT:-8090}:${CHAINLIT_PORT:-8090}
   networks:
     default:
@@ -134,7 +151,7 @@ services:
   rdb:
     image: postgres:15
     environment:
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-root_password}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}
       - POSTGRES_USER=${POSTGRES_USER:-root}
     volumes:
       - ${DB_VOLUME:-../../db}:/var/lib/postgresql/data

@@ -20,7 +20,6 @@ restart a named actor on-demand from the admin endpoint.
 from functools import wraps
 from typing import TYPE_CHECKING
 
-import ray
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -50,12 +49,13 @@ def _track_actor(func):
 
 @_track_actor
 def get_or_create_actor(name, cls, namespace="openrag", remote_args=(), **options):
-    try:
-        return ray.get_actor(name, namespace=namespace)
-    except ValueError:
-        return cls.options(name=name, namespace=namespace, **options).remote(*remote_args)
-    except Exception:
-        raise
+    # ``get_if_exists`` makes get-or-create atomic inside Ray: concurrent callers
+    # (e.g. the multiple Ray Serve replicas that all run worker bootstrap in their
+    # lifespan at once) either all attach to the same actor or exactly one creates
+    # it and the rest attach. The previous get_actor()-then-create pattern had a
+    # TOCTOU race — two replicas both saw "not found" and then collided on
+    # creation, crashing a replica's startup with "Failed to look up actor".
+    return cls.options(name=name, namespace=namespace, get_if_exists=True, **options).remote(*remote_args)
 
 
 def get_task_state_manager():

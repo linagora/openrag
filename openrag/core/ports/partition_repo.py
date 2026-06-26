@@ -9,7 +9,9 @@ class PartitionRepository(ABC):
     """CRUD operations for partitions."""
 
     @abstractmethod
-    async def create_partition(self, name: str, user_id: int | None = None) -> dict: ...
+    async def create_partition(
+        self, name: str, user_id: int | None = None, *, max_owned: int | None = None
+    ) -> dict: ...
 
     @abstractmethod
     async def get_partition(self, name: str) -> dict | None: ...

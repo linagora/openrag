@@ -30,6 +30,7 @@ and deleted the ``components/auth/middleware.py`` shim.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
@@ -38,6 +39,9 @@ from core.config.auth import AuthBypassConfig
 from core.utils.logging import get_logger
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from limits import parse
+from limits.aio.storage import MemoryStorage
+from limits.aio.strategies import MovingWindowRateLimiter
 from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = get_logger()
@@ -83,6 +87,78 @@ def is_bypass_path(path: str, *, bypass_config: AuthBypassConfig | None = None) 
     return path in cfg.bypass_paths or path == "/chainlit" or path.startswith("/chainlit/")
 
 
+def _allow_no_auth() -> bool:
+    """Whether the no-auth dev bypass (AUTH_TOKEN unset → admin) is allowed.
+
+    Read lazily so it can be toggled per-test, mirroring the other env reads.
+    """
+    return os.getenv("ALLOW_NO_AUTH", "false").strip().lower() == "true"
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+class AuthFailureRateLimiter:
+    """Limit failed authentication attempts by client IP."""
+
+    def __init__(self) -> None:
+        self.enabled = _env_flag("RATE_LIMIT_ENABLED", True)
+        self._limiter = MovingWindowRateLimiter(MemoryStorage())
+        self._limit = (
+            parse(os.environ.get("RATE_LIMIT_AUTH_FAILURE", os.environ.get("RATE_LIMIT_AUTH", "20/minute")))
+            if self.enabled
+            else None
+        )
+
+    @staticmethod
+    def _identity(request: Request) -> str:
+        client = request.client
+        return f"ip:{client.host}" if client else "ip:unknown"
+
+    @staticmethod
+    def _safe_log_value(value: str, *, max_len: int = 200) -> str:
+        return value.replace("\r", "\\r").replace("\n", "\\n").replace("\x00", "\\0")[:max_len]
+
+    async def response_if_limited(self, request: Request) -> JSONResponse | None:
+        if not self.enabled or self._limit is None:
+            return None
+        identity = self._identity(request)
+        tier = "auth-failure"
+        allowed = await self._limiter.test(self._limit, tier, identity)
+        if allowed:
+            return None
+        return await self._limited_response(request, identity)
+
+    async def record_failure(self, request: Request) -> JSONResponse | None:
+        if not self.enabled or self._limit is None:
+            return None
+        identity = self._identity(request)
+        tier = "auth-failure"
+        allowed = await self._limiter.hit(self._limit, tier, identity)
+        if allowed:
+            return None
+        return await self._limited_response(request, identity)
+
+    async def _limited_response(self, request: Request, identity: str) -> JSONResponse:
+        assert self._limit is not None
+        tier = "auth-failure"
+        stats = await self._limiter.get_window_stats(self._limit, tier, identity)
+        retry_after = max(1, int(stats.reset_time - time.time()))
+        logger.bind(
+            path=self._safe_log_value(str(request.url.path)),
+            identity=self._safe_log_value(identity),
+        ).warning("Auth failure rate limit exceeded")
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Please retry later.", "extra": {}},
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """FastAPI middleware enforcing authentication for both token and oidc modes.
 
@@ -102,6 +178,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self._get_auth_service = get_auth_service
         self._bypass_config = bypass_config or AuthBypassConfig()
+        self._auth_failure_limiter = AuthFailureRateLimiter()
+
+    async def _auth_failure(self, request: Request, *, status_code: int, detail: str) -> JSONResponse:
+        limited = await self._auth_failure_limiter.record_failure(request)
+        if limited is not None:
+            return limited
+        return JSONResponse(status_code=status_code, content={"detail": detail})
 
     async def dispatch(self, request: Request, call_next):
         # Read env lazily so tests can flip AUTH_MODE per-test.
@@ -110,7 +193,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
         enc_key = os.getenv("OIDC_TOKEN_ENCRYPTION_KEY") or ""
 
         # --- Dev mode: AUTH_MODE=token + AUTH_TOKEN unset → user 1 bypass.
-        if auth_mode == "token" and auth_token is None:
+        #     This disables authentication entirely (every request becomes the
+        #     admin user), so it is gated behind an explicit ALLOW_NO_AUTH=true
+        #     opt-in. Without that flag, an unset AUTH_TOKEN does not grant
+        #     access: requests fall through to normal Bearer auth and
+        #     unauthenticated callers get 401.
+        if auth_mode == "token" and auth_token is None and _allow_no_auth():
+            logger.warning(
+                "ALLOW_NO_AUTH=true and AUTH_TOKEN is unset: authentication is DISABLED — "
+                "every request is treated as admin user 1. Never use this in production."
+            )
             auth_service = self._get_auth_service(request)
             user = await auth_service.get_user_for_request(1)
             user_partitions = await auth_service.list_user_partitions_for_request(1)
@@ -121,7 +213,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # --- Bypass list (docs, health, /auth/* callbacks, chainlit).
         path = request.url.path
-        if is_bypass_path(path, bypass_config=self._bypass_config):
+
+        # In oidc mode the interactive API docs are gated behind login rather
+        # than served anonymously: they expose the full route + schema surface,
+        # and an authenticated browser session still reaches them after the IdP
+        # redirect. In token mode they stay public — a browser has no login flow
+        # to bounce through — preserving the legacy bypass contract. ``oidc_gated``
+        # therefore suppresses the bypass for these paths only when AUTH_MODE=oidc,
+        # so they fall through to the normal auth + UI-redirect path below.
+        oidc_gated = auth_mode == "oidc" and path in self._bypass_config.oidc_gated_paths
+
+        if not oidc_gated and is_bypass_path(path, bypass_config=self._bypass_config):
             # Special case: browser HTML page-loads on /chainlit/* without an
             # active session can't be served usefully — Chainlit configures no
             # in-app auth provider when headerAuth is used, so the SPA shows
@@ -138,9 +240,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
                 session_valid = False
                 if cookie_token:
-                    auth_service = self._get_auth_service(request)
-                    session = await auth_service.get_oidc_session_by_token_for_request(cookie_token)
-                    session_valid = session is not None
+                    # Never let a session-lookup failure (e.g. a degraded boot
+                    # where the container's pool was never opened) surface as a
+                    # 500 on a plain page load — treat it as no session and let
+                    # the redirect below send the browser through /auth/login.
+                    try:
+                        auth_service = self._get_auth_service(request)
+                        session = await auth_service.get_oidc_session_by_token_for_request(cookie_token)
+                        session_valid = session is not None
+                    except Exception as e:
+                        logger.bind(error=str(e)).warning(
+                            "OIDC session check failed on chainlit bypass; redirecting to login"
+                        )
+                        session_valid = False
                 if not session_valid:
                     next_path = path
                     if request.url.query:
@@ -150,6 +262,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         status_code=302,
                     )
             return await call_next(request)
+
+        limited = await self._auth_failure_limiter.response_if_limited(request)
+        if limited is not None:
+            return limited
 
         user = None
         session = None
@@ -222,14 +338,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     user = await auth_service.get_user_by_token_for_request(token)
                     if not user and auth_mode == "token":
                         # Legacy test contract: robot suite asserts 403 + "Invalid token".
-                        return JSONResponse(status_code=403, content={"detail": "Invalid token"})
+                        return await self._auth_failure(request, status_code=403, detail="Invalid token")
             elif auth_mode == "token":
                 # Token mode: no cookie + no bearer → legacy 403 "Missing token".
-                return JSONResponse(status_code=403, content={"detail": "Missing token"})
+                return await self._auth_failure(request, status_code=403, detail="Missing token")
 
-        # --- 3) Unauthenticated: redirect UI in oidc mode, else 401 JSON.
+        # --- 3) Unauthenticated: redirect UI (and the oidc-gated docs) in oidc
+        #        mode, else 401 JSON. ``oidc_gated`` is already mode-checked.
         if user is None:
-            if auth_mode == "oidc" and is_ui_path(path, bypass_config=self._bypass_config):
+            if oidc_gated or (auth_mode == "oidc" and is_ui_path(path, bypass_config=self._bypass_config)):
                 next_path = path
                 if request.url.query:
                     next_path = f"{path}?{request.url.query}"
@@ -237,7 +354,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     url=f"/auth/login?next={quote(next_path, safe='')}",
                     status_code=302,
                 )
-            return JSONResponse(status_code=401, content={"detail": "Unauthenticated"})
+            return await self._auth_failure(request, status_code=401, detail="Unauthenticated")
 
         # --- Happy path: user resolved.
         request.state.user = user

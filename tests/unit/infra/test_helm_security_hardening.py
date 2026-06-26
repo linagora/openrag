@@ -79,6 +79,15 @@ def test_chart_workloads_apply_restricted_security_contexts() -> None:
     assert "image: {{ $.Values.ray.image.repository }}:{{ $.Values.ray.image.tag }}" in raycluster
 
 
+def test_ray_dashboard_defaults_to_loopback_in_helm_cluster() -> None:
+    values = _values()
+    raycluster = _template("raycluster.yaml")
+
+    assert values["ray"]["dashboardHost"] == "127.0.0.1"
+    assert "--dashboard-host=0.0.0.0" not in raycluster
+    assert "--dashboard-host={{ .Values.ray.dashboardHost }}" in raycluster
+
+
 def test_ingress_is_not_exposed_by_default_and_supports_tls() -> None:
     values = _values()
     template = _template("ingress.yaml")

@@ -246,9 +246,11 @@ async def test_regenerate_token_repo_returns_none_404():
 async def test_regenerate_token_success():
     repo = FakeUserRepo(existing={3})
     repo.regen_results[3] = {"id": 3, "token": "or-new"}
-    out = await _svc(repo).regenerate_token(3)
+    auth = FakeAuthService()
+    out = await _svc(repo, auth_service=auth).regenerate_token(3)
     assert out == {"id": 3, "token": "or-new"}
     assert repo.regenerated == [3]
+    assert auth.revoked_users == [3]
 
 
 @pytest.mark.asyncio
@@ -307,6 +309,28 @@ async def test_update_user_validates_email():
     repo = FakeUserRepo(existing={2})
     with pytest.raises(ValidationError):
         await _svc(repo).update_user(2, UserUpdate(email="bogus"))
+
+
+@pytest.mark.asyncio
+async def test_update_user_drops_mass_assignment_fields():
+    """token / file_count / other non-profile columns must never reach the repo
+    through the update payload (mass assignment)."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="X", is_admin=False, file_quota=5, file_count=4)
+    # extra="ignore" drops unknown fields at parse; the service whitelist is the
+    # second line of defence. Both are exercised here.
+    body = UserUpdate.model_validate(
+        {"display_name": "X", "is_admin": True, "token": "evil", "file_count": 999, "id": 7}
+    )
+    await _svc(repo).update_user(2, body)
+    assert repo.updated, "repo.update_user was not called"
+    _, fields = repo.updated[-1]
+    assert "token" not in fields
+    assert "file_count" not in fields
+    assert "id" not in fields
+    # whitelisted profile fields still pass through
+    assert fields.get("display_name") == "X"
+    assert fields.get("is_admin") is True
 
 
 @pytest.mark.asyncio

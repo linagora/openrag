@@ -1,5 +1,6 @@
 import os
 
+from core.indexing.validators import validate_partition_name
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from di.providers import get_auth_service, get_config, get_job_service, get_partition_service
@@ -62,6 +63,8 @@ async def ensure_partition_role(
     partition_service,
 ):
     """Ensure the user has at least `required_role` for the partition."""
+    # Reject crafted partition names before they reach any filter expression.
+    validate_partition_name(partition)
     if SUPER_ADMIN_MODE and user.get("is_admin"):
         return True
 
@@ -72,7 +75,18 @@ async def ensure_partition_role(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Access to partition '{partition}' forbidden",
             )
-        return True
+        # Partition does not exist. The only legitimate reason a non-member may
+        # act on a missing partition is the create-on-write path (file upload),
+        # which is `editor` and which later creates the partition with the
+        # uploader as owner. Reading or owning a partition that does not exist
+        # must NOT silently succeed, or a non-member could pass an owner/viewer
+        # check by naming an unknown partition.
+        if required_role == "editor":
+            return True
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Partition '{partition}' not found",
+        )
 
     try:
         auth_service.check_partition_access(
@@ -155,6 +169,11 @@ async def require_partitions_viewer(
     if SUPER_ADMIN_MODE and user.get("is_admin"):
         return user
     if isinstance(partitions, list) and len(partitions) == 1 and partitions[0] == "all":
+        if not user_partitions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No accessible partitions",
+            )
         return user
     for partition in partitions:
         await ensure_partition_role(

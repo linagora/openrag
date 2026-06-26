@@ -262,7 +262,14 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
         filename = Path(s["filename"])
         file_url = s["file_url"]
         file_url = file_url.replace(INTERNAL_BASE_URL, external_url)  # put the correct base url
-        file_url = f"{file_url}?token={api_key}"  # add token for authentication
+        # Avoid leaking the credential in the URL (browser history, proxy logs,
+        # Referer headers). In OIDC mode the browser already sends the
+        # openrag_session cookie on same-origin file fetches, which the auth
+        # middleware accepts — so the token query param is unnecessary. In token
+        # mode there is no such cookie, so it remains the only way for the
+        # browser to authenticate the fetch.
+        if AUTH_MODE != "oidc":
+            file_url = f"{file_url}?token={api_key}"
         page = s["page"]
         source_name = f"{filename}" + (
             f" (page: {page})" if filename.suffix in [".pdf", ".pptx", ".docx", ".doc"] else ""

@@ -166,7 +166,7 @@ The system uses token-based authentication with role-based access control (RBAC)
 1. Token extracted from `Authorization: Bearer <token>` header (or `?token=` query param for `/static` routes)
 2. Token hashed with SHA-256, looked up in database
 3. User info and accessible partitions set on `request.state.user` and `request.state.user_partitions`
-4. Bypassed for: `/docs`, `/openapi.json`, `/redoc`, `/health_check`, `/version`, `/chainlit/*`
+4. Bypassed for: `/docs`, `/openapi.json`, `/redoc`, `/health_check`, `/version`, `/chainlit/*` — except in OIDC mode the three docs paths (`/docs`, `/redoc`, `/openapi.json`) are login-gated instead of public (see Middleware Behavior below)
 5. If `AUTH_TOKEN` env var is not set, defaults to admin user (id=1) for all requests
 
 **Role Hierarchy** (`openrag/services/orchestrators/auth_service.py`):
@@ -449,9 +449,10 @@ New table `oidc_sessions`:
 **Middleware Behavior**:
 
 - UI paths (`/`, `/chainlit`, `/static`) in OIDC mode without auth → 302 redirect to `/auth/login?next=...`
+- Interactive docs (`/docs`, `/redoc`, `/openapi.json`): **public in token mode** (bypassed), but **login-gated in OIDC mode** — an unauthenticated browser is 302-redirected to `/auth/login`; a valid session renders them. This stops the full API surface + schema from being served anonymously in production. The set is `AuthBypassConfig.oidc_gated_paths` (default `("/docs", "/redoc", "/openapi.json")`); override it to `()` to keep docs public under OIDC.
 - API paths (`/v1`, `/indexer`, `/search`, etc.) without auth:
   - **Token mode** → `403 {"detail": "Missing token"}` (no bearer) or `403 {"detail": "Invalid token"}` (unknown bearer). The 403 status is a legacy contract the robot suite asserts (`tests/api/`).
   - **OIDC mode** → `401 {"detail": "Unauthenticated"}` (no usable session/bearer and the path isn't a UI redirect target).
 - Programmatic access: Bearer `users.token` accepted in both modes
 
-**See Also**: Full configuration and troubleshooting guide at `docs/oidc.md`.
+**See Also**: Full configuration and troubleshooting guide at `docs/content/docs/documentation/oidc.md` (quick start: `docs/content/docs/documentation/sso-quickstart.md`).

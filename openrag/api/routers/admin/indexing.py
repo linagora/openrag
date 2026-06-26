@@ -17,6 +17,7 @@ from typing import Any
 
 from api.dependencies.auth import (
     check_user_file_quota,
+    current_user,
     current_user_partitions,
     ensure_partition_role,
     require_partition_editor,
@@ -138,10 +139,12 @@ async def add_file(
     try:
         file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
     except Exception as e:
+        # Log the full error server-side; return a generic message so we don't
+        # leak filesystem paths or internals to the client.
         logger.exception("Failed to save file to disk.", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Failed to save uploaded file.",
         )
 
     parsed_workspace_ids = None
@@ -373,6 +376,10 @@ async def copy_file_between_partitions(
     auth_service=Depends(get_auth_service),
     partition_service=Depends(get_partition_service),
 ):
+    # source_file_id arrives as a form field (not a path param with the
+    # validate_file_id dependency), so validate it here against the same safe
+    # identifier allowlist before it reaches a Milvus filter expression.
+    await validate_file_id(source_file_id)
     # Make sure user has access to the source partition
     await ensure_partition_role(
         partition=source_partition,
@@ -462,6 +469,7 @@ async def get_task_error(
     task_id: str,
     task_details=Depends(require_task_owner),
     service=Depends(get_indexing_service),
+    user=Depends(current_user),
 ):
     error = await service.get_task_error(task_id)
     if error is None:
@@ -469,7 +477,11 @@ async def get_task_error(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No error found for task '{task_id}'.",
         )
-    return {"task_id": task_id, "traceback": error.splitlines()}
+    # The raw traceback exposes filesystem paths and internals; only return it
+    # to admins. Task owners get a generic failure indicator.
+    if user and user.get("is_admin", False):
+        return {"task_id": task_id, "traceback": error.splitlines()}
+    return {"task_id": task_id, "traceback": ["Task failed. Contact an administrator for details."]}
 
 
 @router.get(
