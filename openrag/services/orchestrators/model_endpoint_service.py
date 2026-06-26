@@ -246,6 +246,11 @@ class ModelEndpointService:
             self._invalidate_client_cache(model_type, name)
 
         self._invalidate_client_cache(model_type, effective_name)
+        if existing.is_default:
+            # The 'default' alias resolves to this endpoint, so a client built under
+            # the 'default' cache key is now stale too. Evict it alongside the named
+            # entry (set_default already does this; update must match).
+            self._invalidate_client_cache(model_type, "default")
         await self.load_all()
         return await self._repo.get(effective_name, model_type) or (updated or existing)
 
@@ -265,6 +270,15 @@ class ModelEndpointService:
 
         await self._repo.delete(name, model_type)
         self._invalidate_client_cache(model_type, name)
+        if existing.is_default:
+            # load_all only adds the 'default' alias for an is_default row, so
+            # deleting the default would drop it entirely and make factory("default")
+            # raise. Promote a surviving endpoint (deterministic: first by name) so
+            # 'default' keeps resolving, and evict its now-stale cached client.
+            survivor = next((e for e in sorted(all_of_type, key=lambda e: e.name) if e.name != name), None)
+            if survivor is not None:
+                await self._repo.set_default(model_type, survivor.name)
+            self._invalidate_client_cache(model_type, "default")
         await self.load_all()
 
     async def set_default(self, model_type: str, name: str) -> None:

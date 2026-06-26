@@ -335,6 +335,26 @@ async def test_update_preset_renames_preset():
 
 
 @pytest.mark.asyncio
+async def test_update_preset_rename_rejects_existing_target_name():
+    from core.utils.exceptions import ValidationError
+
+    rows = [
+        _make_row("old-name", "retrieval", _VALID_RET_CONFIG),
+        _make_row("taken", "retrieval", _VALID_RET_CONFIG),
+    ]
+    repo = _FakePresetRepo(rows=rows)
+    svc = _make_service(repo)
+
+    with pytest.raises(ValidationError, match="already exists"):
+        await svc.update_preset("old-name", "retrieval", new_name="taken")
+
+    # The rename must not run — the existing 'taken' preset is left intact.
+    assert not any(call[0] == "rename" for call in repo.calls)
+    assert ("old-name", "retrieval") in repo._store
+    assert ("taken", "retrieval") in repo._store
+
+
+@pytest.mark.asyncio
 async def test_update_preset_calls_partition_service():
     existing = _make_row("default", "retrieval", _VALID_RET_CONFIG)
     repo = _FakePresetRepo(rows=[existing])

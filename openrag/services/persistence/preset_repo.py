@@ -79,18 +79,28 @@ class PgPresetRepository(PresetRepository):
         return self._row_to_dict(rec)
 
     async def rename(self, old_name: str, new_name: str, preset_type: str, config: dict) -> dict:
+        # Partitions reference a preset by its name string (partitions.{col}), with
+        # no FK, so a bare DELETE+INSERT would leave every referencing partition
+        # pointing at a name that no longer exists. Do it atomically: insert the
+        # new-named row, repoint referencing partitions, then drop the old row.
+        col = _preset_column(preset_type)
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute(
-                    "DELETE FROM pipeline_presets WHERE name = $1 AND preset_type = $2",
-                    old_name,
-                    preset_type,
-                )
                 rec = await conn.fetchrow(
                     _UPSERT_PRESET_SQL,
                     new_name,
                     preset_type,
                     config,
+                )
+                await conn.execute(
+                    f"UPDATE partitions SET {col} = $1 WHERE {col} = $2",
+                    new_name,
+                    old_name,
+                )
+                await conn.execute(
+                    "DELETE FROM pipeline_presets WHERE name = $1 AND preset_type = $2",
+                    old_name,
+                    preset_type,
                 )
         return self._row_to_dict(rec)
 
