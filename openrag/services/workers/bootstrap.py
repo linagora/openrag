@@ -53,7 +53,10 @@ def get_or_create_actor(name, cls, namespace="openrag", remote_args=(), **option
     try:
         return ray.get_actor(name, namespace=namespace)
     except ValueError:
-        return cls.options(name=name, namespace=namespace, **options).remote(*remote_args)
+        # get_if_exists makes the create idempotent: if another caller (e.g. a
+        # second indexer actor selecting the same backend) wins the race, Ray
+        # returns the existing actor instead of raising "actor already exists".
+        return cls.options(name=name, namespace=namespace, get_if_exists=True, **options).remote(*remote_args)
     except Exception:
         raise
 
