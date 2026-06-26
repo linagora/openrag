@@ -240,9 +240,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
                 session_valid = False
                 if cookie_token:
-                    auth_service = self._get_auth_service(request)
-                    session = await auth_service.get_oidc_session_by_token_for_request(cookie_token)
-                    session_valid = session is not None
+                    # Never let a session-lookup failure (e.g. a degraded boot
+                    # where the container's pool was never opened) surface as a
+                    # 500 on a plain page load — treat it as no session and let
+                    # the redirect below send the browser through /auth/login.
+                    try:
+                        auth_service = self._get_auth_service(request)
+                        session = await auth_service.get_oidc_session_by_token_for_request(cookie_token)
+                        session_valid = session is not None
+                    except Exception as e:
+                        logger.bind(error=str(e)).warning(
+                            "OIDC session check failed on chainlit bypass; redirecting to login"
+                        )
+                        session_valid = False
                 if not session_valid:
                     next_path = path
                     if request.url.query:
