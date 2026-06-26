@@ -149,6 +149,28 @@ def test_pymupdf_backend_builds_in_markdown_mode_without_images() -> None:
     parser = ParserDispatcher(_config(pdf="PyMuPDFLoader"))._get("pymupdf")
     assert getattr(parser, "_mode", None) == "markdown"
 
+    # The "without images" contract: build a PDF that actually contains an image
+    # and confirm the markdown extractor produces NO ImageBlocks and inlines no
+    # base64 data URIs. Catches a regression that re-enables embed_images.
+    import io
+
+    import pymupdf
+    from core.indexing.parsers.pdf.pymupdf import _extract_markdown
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), "red").save(buf, format="PNG")
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Hello world.")
+    page.insert_image(pymupdf.Rect(0, 0, 8, 8), stream=buf.getvalue())
+    raw = doc.tobytes()
+    doc.close()
+
+    pages, images = _extract_markdown(raw)
+    assert images == []  # pymupdf must not extract/inline images
+    assert not any("data:image" in p for p in pages)
+
 
 def test_build_caption_vlm_requires_endpoint() -> None:
     # No VLM endpoint configured -> unavailable, regardless of the captioning flag.
