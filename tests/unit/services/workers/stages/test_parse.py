@@ -96,3 +96,17 @@ async def test_parse_stage_requires_document_in_row():
     assert row["stage"] == "parse_failed"
     assert row["error"] == "parse_stage row must contain a Document under 'document'"
     assert "api_key" not in row
+
+
+@pytest.mark.asyncio
+async def test_parse_stage_surfaces_internal_timeout_when_no_outer_bound():
+    """With timeout=None, a TimeoutError raised inside the parser is internal —
+    it must surface as-is (not be relabeled or crash formatting None)."""
+    document = Document(id="doc-1", filename="x.pdf", content_type=DocumentType.TEXT, text="hi")
+    row = {"document": document}
+
+    with pytest.raises(TimeoutError, match="internal parser timeout"):
+        await parse_stage(row, FakeParser(error=TimeoutError("internal parser timeout")), timeout=None)
+
+    assert row["stage"] == "parse_failed"
+    assert row["error"] == "internal parser timeout"

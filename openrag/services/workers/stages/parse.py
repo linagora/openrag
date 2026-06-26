@@ -42,6 +42,10 @@ async def _parse_with_timeout(
     try:
         return await run_with_optional_timeout(lambda: parser.parse(document), timeout)
     except TimeoutError as exc:
+        if timeout is None:
+            # No outer bound was applied, so this TimeoutError is internal to the
+            # parser — surface it as-is (and avoid formatting {timeout:g} on None).
+            raise
         # asyncio.wait_for raises a bare TimeoutError whose str() is empty; give
         # the failed-file report (row["error"]) a message that names the file and
         # the bound that was exceeded.
