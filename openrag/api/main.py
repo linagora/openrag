@@ -362,10 +362,25 @@ if __name__ == "__main__":
     if settings.ray.serve.enable:
         from ray import serve
 
+        # @serve.ingress cloudpickles `app` to ship it to replica processes.
+        # loguru's file sink isn't picklable (an open file handle, and with
+        # enqueue=True a multiprocessing.SimpleQueue that errors with "SimpleQueue
+        # objects should only be shared between processes through inheritance"),
+        # and the app graph (lifespan, exception handlers) captures the
+        # module-global logger by value. Strip the sinks before binding so the
+        # captured logger is handler-less (picklable), then restore them for this
+        # driver process below. Replica processes re-add their own sinks via the
+        # module-level get_logger() that runs on import — matching loguru's
+        # multiprocessing model, where handlers are per-process and never travel
+        # through a pickle.
+        logger.remove()
+
         @serve.deployment(num_replicas=settings.ray.serve.num_replicas)
         @serve.ingress(app)
         class OpenRagAPI:
             """Ray Serve deployment wrapper for the FastAPI app."""
+
+        get_logger()  # restore this driver's logging now that `app` is serialized
 
         serve.start(http_options={"host": settings.ray.serve.host, "port": settings.ray.serve.port})
         if WITH_CHAINLIT_UI:
