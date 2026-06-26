@@ -98,6 +98,10 @@ RUN useradd --uid ${APP_UID} --gid 0 --no-log-init --no-create-home \
     && chmod -R g=u /app/home /app/data /app/db /app/logs /app/model_weights \
         /app/.venv /app/openrag.egg-info /opt/uv/cache \
         /app/openrag/.files /app/openrag/.chainlit
+# Expose APP_UID at runtime so entrypoint.sh can drop back to this user after
+# fixing bind-mount permissions (when the container is started as root, e.g.
+# compose `user: "0:0"`). USER below keeps the image's default non-root.
+ENV APP_UID=${APP_UID}
 USER ${APP_UID}
 
 ENTRYPOINT ../entrypoint.sh

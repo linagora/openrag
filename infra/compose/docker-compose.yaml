@@ -6,6 +6,12 @@ include:
 
 x-openrag: &openrag_template
   image: linagoraai/openrag:latest
+  # Start as root so entrypoint.sh can grant GID-0 write on the bind-mounted
+  # writable dirs (data/, logs/, the HF cache) — which a non-root container
+  # can't write when Docker auto-creates them root-owned — then it immediately
+  # drops to the non-root app user (UID in GID 0) via setpriv before launching.
+  # The image's USER stays non-root for non-compose/OpenShift runs.
+  user: "0:0"
   build:
     # Build context is the repo root so the Dockerfile can COPY pyproject.toml,
     # uv.lock, openrag/, conf/ and infra/scripts/entrypoint.sh directly.

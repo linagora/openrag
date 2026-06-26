@@ -1,4 +1,30 @@
 #!/bin/bash
+
+# --- Writable-dir permission fix + privilege drop --------------------------
+# The app runs as a non-root user whose primary group is GID 0. Its writable
+# dirs (/app/data, /app/logs, /app/model_weights) are bind-mounted from the
+# host, so the image's group-0-writable perms (Dockerfile `chmod g=u`) don't
+# apply to them — the host directory's ownership does, and Docker creates a
+# missing bind source as root:root with no group-write. That makes the
+# non-root app fail with "Permission denied" on upload/logging/model download.
+#
+# To make bind mounts "just work" with no host-side chmod: when started as
+# root (compose sets `user: "0:0"` on the service), grant GID-0 write on those
+# dirs — mirroring the image's own `chmod g=u` — then drop to the non-root app
+# user and continue. When NOT root (OpenShift assigns an arbitrary non-root
+# UID in GID 0; or a plain non-root run), skip the fix: the platform's GID-0
+# membership plus the image's group-writable paths already cover it.
+APP_UID="${APP_UID:-10001}"
+if [ "$(id -u)" = "0" ]; then
+  for d in /app/data /app/logs /app/model_weights; do
+    mkdir -p "$d" 2>/dev/null || true
+    chgrp -R 0 "$d" 2>/dev/null || true
+    chmod -R g+rwX "$d" 2>/dev/null || true
+  done
+  # Re-exec this script as the non-root app user (UID in GID 0) to run the app.
+  exec setpriv --reuid "$APP_UID" --regid 0 --clear-groups /app/entrypoint.sh "$@"
+fi
+
 ENV_ARGS=()
 if [[ -n "${SHARED_ENV}" ]]; then
   ENV_ARGS+=("--env-file=${SHARED_ENV}")
