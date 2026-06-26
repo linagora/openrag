@@ -15,6 +15,7 @@ from openrag.core.config.root import Settings
 # this window (and on a miss), bounding both staleness and DB load regardless
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
+_INDEXER_POOL_DISPATCHER_ACTOR_NAME = "IndexerPoolDispatcher"
 
 
 @ray.remote
@@ -316,8 +317,10 @@ def build_indexer_pool(namespace: str = "openrag") -> Any:
     # the whole fleet's capacity. The constructor args are honoured only on the
     # first creation; later get_if_exists calls reuse the existing dispatcher
     # and ignore them — which is correct, since every replica loads the same cfg.
+    # Do not reuse the old "IndexerPool" name: that detached actor exposed
+    # process_file(), while this dispatcher exposes submit().
     return IndexerPool.options(  # type: ignore[attr-defined]
-        name="IndexerPool",
+        name=_INDEXER_POOL_DISPATCHER_ACTOR_NAME,
         namespace=namespace,
         get_if_exists=True,
         lifetime="detached",

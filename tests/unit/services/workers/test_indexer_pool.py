@@ -76,7 +76,7 @@ async def test_catalog_initialization_is_single_flight() -> None:
     assert pool._catalog_initialized is True
 
 
-def test_build_indexer_pool_creates_single_detached_dispatcher(
+def test_build_indexer_pool_uses_new_detached_dispatcher_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import core.config
@@ -107,7 +107,9 @@ def test_build_indexer_pool_creates_single_detached_dispatcher(
     assert pool == "dispatcher-actor"
     assert len(options_calls) == 1
     opts = options_calls[0]
-    assert opts["name"] == "IndexerPool"
+    # The dispatcher has a different public interface from the old detached
+    # IndexerPool actor, so it must not reuse that actor name during upgrades.
+    assert opts["name"] == "IndexerPoolDispatcher"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
