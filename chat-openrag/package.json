@@ -16,6 +16,7 @@
     "cozy-client": "^60.28.0",
     "cozy-device-helper": "^4.0.3",
     "cozy-flags": "^4.9.1",
+    "cozy-intent": "^2.31.1",
     "cozy-logger": "^1.18.1",
     "cozy-search": "file:/home/paul/dev/cozy/apps/cozy-libs/packages/cozy-search",
     "cozy-ui": "^138.4.0",
