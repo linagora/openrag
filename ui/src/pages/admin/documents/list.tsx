@@ -60,6 +60,11 @@ export default function DocumentListPage() {
     queryKey: ["partition-files", selected],
     queryFn: () => listPartitionFiles(selected),
     enabled: !!selected,
+    // A file only appears here once its indexing job finishes (the catalog row
+    // is written post-indexing), so poll to pick up freshly-indexed files
+    // without the user having to switch partitions. Mirrors the Jobs page;
+    // refetchIntervalInBackground defaults false, so it only polls when focused.
+    refetchInterval: 5000,
   });
   const fileRows = filesQuery.data?.files ?? [];
 
