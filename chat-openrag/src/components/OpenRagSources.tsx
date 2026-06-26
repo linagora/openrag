@@ -21,7 +21,7 @@ import ListItemTextRaw from 'cozy-ui/transpiled/react/ListItemText'
 import { useI18n } from 'twake-i18n'
 import type { StoredSource } from 'cozy-search'
 
-import { getConfig } from '../config'
+import { apiFetch } from '../config'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const Icon = IconRaw as any
@@ -35,6 +35,9 @@ interface OpenRagSource extends StoredSource {
   fileUrl?: string
   chunkUrl?: string
   path?: string
+  doctype?: string
+  fileId?: string
+  partition?: string
 }
 
 const EXT_ICON: Record<string, unknown> = {
@@ -77,28 +80,28 @@ const fileIcon = (name: string): unknown => {
 }
 
 // Directory part of an openRAG source path, minus the server storage prefix.
-const dirOf = (path: string): string => {
-  const dir = path.replace(/\/[^/]+$/, '')
-  return dir.replace(/^\/app\/data/, '') // strip the internal storage root
-}
+const dirOf = (path: string): string =>
+  path.replace(/\/[^/]+$/, '').replace(/^\/app\/data/, '')
+
+type Kind = 'web' | 'twake' | 'doc'
 
 interface DisplaySource {
   key: string
-  href?: string
+  kind: Kind
+  href?: string // web / twake link
+  extractPath?: string // /extract/<id> for best-effort chunk content
   name: string
   meta: string
   icon: unknown
 }
 
-// openRAG's /static (and /extract) endpoints authenticate via a `?token=`
-// query param — a plain <a> click sends no Authorization header — so document
-// links must carry the token. Web links are external and left untouched.
-const withToken = (url: string | undefined): string | undefined => {
+const pathOf = (url: string | undefined): string | undefined => {
   if (!url) return undefined
-  const token = getConfig().token
-  if (!token) return url
-  const sep = url.includes('?') ? '&' : '?'
-  return `${url}${sep}token=${encodeURIComponent(token)}`
+  try {
+    return new URL(url).pathname
+  } catch {
+    return url
+  }
 }
 
 const toDisplay = (sources: StoredSource[]): DisplaySource[] => {
@@ -111,6 +114,7 @@ const toDisplay = (sources: StoredSource[]): DisplaySource[] => {
       seen.add(key)
       out.push({
         key,
+        kind: 'web',
         href: s.url,
         name: s.title || s.url || 'source',
         meta: s.url || '',
@@ -118,20 +122,84 @@ const toDisplay = (sources: StoredSource[]): DisplaySource[] => {
       })
       continue
     }
-    // document: dedupe by file (same file split into many chunks)
     const fileKey = s.path || s.fileUrl || s.title || ''
     if (seen.has(`doc:${fileKey}`)) continue
     seen.add(`doc:${fileKey}`)
     const name = s.title || (s.path ? basename(s.path) : 'document')
+    const isTwake = s.doctype === 'io.cozy.files' && !!s.fileId && !!s.partition
     out.push({
       key: `doc:${fileKey}`,
-      href: withToken(s.fileUrl || s.chunkUrl || s.url),
+      kind: isTwake ? 'twake' : 'doc',
+      // Twake link is pending the right scheme (openRAG returns file_id but not
+      // the dir_id cozy-search needs). Until then, every document falls back to
+      // the best-effort chunk-content view.
+      href: undefined,
+      extractPath: pathOf(s.chunkUrl),
       name,
       meta: s.path ? dirOf(s.path) : '',
       icon: fileIcon(name)
     })
   }
   return out
+}
+
+const SourceCard = ({ item }: { item: DisplaySource }): JSX.Element => {
+  const [open, setOpen] = useState(false)
+  const [content, setContent] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  // Twake / web sources are plain links.
+  if (item.href) {
+    return (
+      <ListItem
+        className="openrag-source-card"
+        component="a"
+        href={item.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        button
+      >
+        <ListItemIcon>
+          <Icon icon={item.icon} size={32} />
+        </ListItemIcon>
+        <ListItemText primary={item.name} secondary={item.meta} />
+      </ListItem>
+    )
+  }
+
+  // openRAG-only document: best-effort — reveal the chunk content on click.
+  const onToggle = async (): Promise<void> => {
+    const next = !open
+    setOpen(next)
+    if (next && content === null && item.extractPath) {
+      setLoading(true)
+      try {
+        const res = await apiFetch(item.extractPath)
+        const data = (await res.json()) as { page_content?: string }
+        setContent(data.page_content || '')
+      } catch {
+        setContent('')
+      } finally {
+        setLoading(false)
+      }
+    }
+  }
+
+  return (
+    <div className="openrag-source-card openrag-source-card--expandable">
+      <ListItem button onClick={onToggle}>
+        <ListItemIcon>
+          <Icon icon={item.icon} size={32} />
+        </ListItemIcon>
+        <ListItemText primary={item.name} secondary={item.meta} />
+      </ListItem>
+      {open && (
+        <div className="openrag-source-extract">
+          {loading ? '…' : content || '(extrait indisponible)'}
+        </div>
+      )}
+    </div>
+  )
 }
 
 const OpenRagSources = ({
@@ -171,20 +239,7 @@ const OpenRagSources = ({
       {open && (
         <List dense={false} className="u-w-100 u-p-0 u-mt-half">
           {items.map(item => (
-            <ListItem
-              key={item.key}
-              className="openrag-source-card"
-              component={item.href ? 'a' : 'div'}
-              href={item.href}
-              target={item.href ? '_blank' : undefined}
-              rel={item.href ? 'noopener noreferrer' : undefined}
-              button={Boolean(item.href)}
-            >
-              <ListItemIcon>
-                <Icon icon={item.icon} size={32} />
-              </ListItemIcon>
-              <ListItemText primary={item.name} secondary={item.meta} />
-            </ListItem>
+            <SourceCard key={item.key} item={item} />
           ))}
         </List>
       )}

@@ -215,3 +215,16 @@ body,
 .openrag-source-card:hover {
   background: var(--primaryBackground, rgba(10, 132, 255, 0.04)) !important;
 }
+.openrag-source-card--expandable {
+  overflow: hidden;
+}
+.openrag-source-extract {
+  padding: 8px 14px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--secondaryTextColor, #5d6165);
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow-y: auto;
+  border-top: 1px solid var(--borderMainColor, #eee);
+}

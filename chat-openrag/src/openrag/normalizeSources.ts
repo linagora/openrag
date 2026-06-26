@@ -6,6 +6,11 @@ export interface NormalizedSource extends StoredSource {
   chunkUrl?: string
   /** Raw file path from openRAG (e.g. /app/data/foo.pdf) — for dedup + path. */
   path?: string
+  /** openRAG chunk metadata to distinguish a Twake (Cozy) file from an
+      openRAG-only upload, and to build a Twake link. */
+  doctype?: string
+  fileId?: string
+  partition?: string
 }
 
 interface RawDoc {
@@ -16,6 +21,9 @@ interface RawDoc {
   title?: string
   snippet?: string
   source?: string
+  doctype?: string
+  file_id?: string
+  partition?: string
 }
 
 const basename = (p: string): string => p.split('/').pop() || p
@@ -48,6 +56,9 @@ export const normalizeSources = (raw: unknown): NormalizedSource[] => {
       fileUrl: s.file_url,
       chunkUrl: s.chunk_url,
       path: s.source,
+      doctype: s.doctype,
+      fileId: s.file_id,
+      partition: s.partition,
       url: link
     }
   })
