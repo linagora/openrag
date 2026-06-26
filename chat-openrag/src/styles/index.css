@@ -49,6 +49,8 @@ body,
   flex-direction: column;
   overflow: hidden;
   background: var(--paperBackgroundColor, #fff);
+  /* breathing room so the composer doesn't sit flush against the window edge */
+  padding-bottom: 20px;
 }
 .app-sidebar-list {
   flex: 1 1 auto;
