@@ -14,12 +14,21 @@ const detectLang = (): string => {
   return short in locales ? short : 'en'
 }
 
+// App-specific strings not provided by cozy-search, under an `openrag`
+// namespace so they merge alongside cozy-search's dictionary without collision.
+// `%{page}` is the polyglot interpolation token cozy-ui i18n uses.
+const APP_LOCALES: Record<string, { openrag: { sources: { page: string } } }> = {
+  en: { openrag: { sources: { page: 'Page %{page}' } } },
+  fr: { openrag: { sources: { page: 'Page %{page}' } } }
+}
+
 const AppProviders = ({ children }: { children: ReactNode }): JSX.Element => (
   <I18n
     lang={detectLang()}
-    dictRequire={(lang: string) =>
-      locales[lang as keyof typeof locales] || locales.en
-    }
+    dictRequire={(lang: string) => ({
+      ...(locales[lang as keyof typeof locales] || locales.en),
+      ...(APP_LOCALES[lang] || APP_LOCALES.en)
+    })}
   >
     {/* ignoreCozySettings bypasses the cozy-stack settings query
         (CozyThemeWithQuery needs a CozyClient/stack we don't have) and uses

@@ -10,10 +10,14 @@ import {
   FileTypeText,
   FileTypeVideo,
   FileTypeZip,
-  Globe
+  Globe,
+  Icon as TwakeIcon,
+  MultiFiles,
+  Right
 } from '@linagora/twake-icons'
+import BoxRaw from 'cozy-ui/transpiled/react/Box'
+import ChipRaw from 'cozy-ui/transpiled/react/Chips'
 import IconRaw from 'cozy-ui/transpiled/react/Icon'
-import MultiFilesIcon from 'cozy-ui/transpiled/react/Icons/MultiFiles'
 import ListRaw from 'cozy-ui/transpiled/react/List'
 import ListItemRaw from 'cozy-ui/transpiled/react/ListItem'
 import ListItemIconRaw from 'cozy-ui/transpiled/react/ListItemIcon'
@@ -24,6 +28,8 @@ import type { StoredSource } from 'cozy-search'
 import { apiFetch } from '../config'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+const Box = BoxRaw as any
+const Chip = ChipRaw as any
 const Icon = IconRaw as any
 const List = ListRaw as any
 const ListItem = ListItemRaw as any
@@ -38,6 +44,8 @@ interface OpenRagSource extends StoredSource {
   doctype?: string
   fileId?: string
   partition?: string
+  page?: number
+  chunkId?: string
 }
 
 const EXT_ICON: Record<string, unknown> = {
@@ -74,25 +82,46 @@ const EXT_ICON: Record<string, unknown> = {
 
 const basename = (p: string): string => p.split('/').pop() || p
 
-const fileIcon = (name: string): unknown => {
-  const ext = name.split('.').pop()?.toLowerCase() || ''
-  return EXT_ICON[ext] || FileTypeFiles
-}
+const extOf = (name: string): string => name.split('.').pop()?.toLowerCase() || ''
+
+const fileIcon = (name: string): unknown => EXT_ICON[extOf(name)] || FileTypeFiles
+
+// Formats whose chunks carry a meaningful page number (Marker/Docling paginate
+// PDFs). Office/markdown/text come back as page 1, so the page is noise there.
+const PAGINATED_EXTS = new Set(['pdf'])
+const isPaginated = (name: string): boolean => PAGINATED_EXTS.has(extOf(name))
 
 // Directory part of an openRAG source path, minus the server storage prefix.
 const dirOf = (path: string): string =>
   path.replace(/\/[^/]+$/, '').replace(/^\/app\/data/, '')
 
-type Kind = 'web' | 'twake' | 'doc'
+type Kind = 'web' | 'doc'
 
 interface DisplaySource {
   key: string
   kind: Kind
-  href?: string // web / twake link
+  href?: string // web link
   extractPath?: string // /extract/<id> for best-effort chunk content
   name: string
+  /** Directory (documents) or URL (web) shown in the subtitle. */
   meta: string
+  /** 1-indexed page for a document chunk (undefined for web / non-paginated). */
+  page?: number
   icon: unknown
+}
+
+/**
+ * Subtitle for a source row: "Page {page} · {dir}", degrading gracefully when
+ * either part is missing (page-only, dir-only, or empty). `t` localizes the
+ * page label.
+ */
+export const formatSubtitle = (
+  t: (key: string, opts?: { page?: number }) => string,
+  page: number | undefined,
+  dir: string
+): string => {
+  const pageLabel = page != null ? t('openrag.sources.page', { page }) : ''
+  return [pageLabel, dir].filter(Boolean).join(' · ')
 }
 
 const pathOf = (url: string | undefined): string | undefined => {
@@ -104,7 +133,7 @@ const pathOf = (url: string | undefined): string | undefined => {
   }
 }
 
-const toDisplay = (sources: StoredSource[]): DisplaySource[] => {
+export const toDisplay = (sources: StoredSource[]): DisplaySource[] => {
   const out: DisplaySource[] = []
   const seen = new Set<string>()
   for (const s of sources as OpenRagSource[]) {
@@ -122,21 +151,23 @@ const toDisplay = (sources: StoredSource[]): DisplaySource[] => {
       })
       continue
     }
-    const fileKey = s.path || s.fileUrl || s.title || ''
-    if (seen.has(`doc:${fileKey}`)) continue
-    seen.add(`doc:${fileKey}`)
+    // One entry per chunk (no file-level dedup); only collapse exact repeats of
+    // the same chunk. Twake-specific dedup + file links are deferred — every
+    // document chunk falls back to the best-effort chunk-content view.
+    const chunkKey = `doc:${s.chunkId || s.chunkUrl || s.path || s.title || ''}`
+    if (seen.has(chunkKey)) continue
+    seen.add(chunkKey)
     const name = s.title || (s.path ? basename(s.path) : 'document')
-    const isTwake = s.doctype === 'io.cozy.files' && !!s.fileId && !!s.partition
     out.push({
-      key: `doc:${fileKey}`,
-      kind: isTwake ? 'twake' : 'doc',
-      // Twake link is pending the right scheme (openRAG returns file_id but not
-      // the dir_id cozy-search needs). Until then, every document falls back to
-      // the best-effort chunk-content view.
+      key: chunkKey,
+      kind: 'doc',
       href: undefined,
       extractPath: pathOf(s.chunkUrl),
       name,
       meta: s.path ? dirOf(s.path) : '',
+      // Only paginated formats (PDF) carry a real page; suppress the noisy
+      // "Page 1" that docx/md/txt always report.
+      page: isPaginated(name) ? s.page : undefined,
       icon: fileIcon(name)
     })
   }
@@ -147,8 +178,14 @@ const SourceCard = ({ item }: { item: DisplaySource }): JSX.Element => {
   const [open, setOpen] = useState(false)
   const [content, setContent] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const { t } = useI18n()
+  const subtitle = formatSubtitle(
+    t as unknown as (key: string, opts?: { page?: number }) => string,
+    item.page,
+    item.meta
+  )
 
-  // Twake / web sources are plain links.
+  // Web sources are plain links.
   if (item.href) {
     return (
       <ListItem
@@ -162,7 +199,7 @@ const SourceCard = ({ item }: { item: DisplaySource }): JSX.Element => {
         <ListItemIcon>
           <Icon icon={item.icon} size={32} />
         </ListItemIcon>
-        <ListItemText primary={item.name} secondary={item.meta} />
+        <ListItemText primary={item.name} secondary={subtitle} />
       </ListItem>
     )
   }
@@ -191,7 +228,7 @@ const SourceCard = ({ item }: { item: DisplaySource }): JSX.Element => {
         <ListItemIcon>
           <Icon icon={item.icon} size={32} />
         </ListItemIcon>
-        <ListItemText primary={item.name} secondary={item.meta} />
+        <ListItemText primary={item.name} secondary={subtitle} />
       </ListItem>
       {open && (
         <div className="openrag-source-extract">
@@ -216,26 +253,20 @@ const OpenRagSources = ({
   if (!items.length) return null
 
   return (
-    <div className="openrag-sources">
-      <button
-        type="button"
-        className="openrag-sources-chip"
-        aria-expanded={open}
+    <Box className="openrag-sources u-mt-1-half">
+      {/* cozy-ui Chip (same as cozy-search's native Sources) so the label picks
+          up the MUI Chip typography rather than a hand-rolled button font. */}
+      <Chip
+        className="u-mb-1"
+        icon={<TwakeIcon icon={MultiFiles} className="u-ml-half" />}
+        label={tc('assistant.sources', items.length)}
+        deleteIcon={
+          <TwakeIcon className="u-h-1" icon={Right} rotate={open ? 90 : 0} />
+        }
+        clickable
         onClick={() => setOpen(v => !v)}
-      >
-        <Icon icon={MultiFilesIcon} size={16} />
-        <span>{tc('assistant.sources', items.length)}</span>
-        <svg
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          aria-hidden="true"
-          style={{ transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}
-        >
-          <path d="m9 6 6 6-6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
+        onDelete={() => setOpen(v => !v)}
+      />
       {open && (
         <List dense={false} className="u-w-100 u-p-0 u-mt-half">
           {items.map(item => (
@@ -243,7 +274,7 @@ const OpenRagSources = ({
           ))}
         </List>
       )}
-    </div>
+    </Box>
   )
 }
 

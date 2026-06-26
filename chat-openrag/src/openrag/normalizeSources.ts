@@ -11,6 +11,10 @@ export interface NormalizedSource extends StoredSource {
   doctype?: string
   fileId?: string
   partition?: string
+  /** 1-indexed page the chunk came from (null for non-paginated formats). */
+  page?: number
+  /** Chunk primary key — stable per-chunk identity for keys and dedup. */
+  chunkId?: string
 }
 
 interface RawDoc {
@@ -24,6 +28,11 @@ interface RawDoc {
   doctype?: string
   file_id?: string
   partition?: string
+  // openRAG stamps the chunk page as `page` (see milvus_store.py); accept
+  // `page_number` defensively in case an upstream renames it.
+  page?: number
+  page_number?: number
+  _id?: string | number
 }
 
 const basename = (p: string): string => p.split('/').pop() || p
@@ -59,6 +68,8 @@ export const normalizeSources = (raw: unknown): NormalizedSource[] => {
       doctype: s.doctype,
       fileId: s.file_id,
       partition: s.partition,
+      page: s.page ?? s.page_number,
+      chunkId: s._id != null ? String(s._id) : undefined,
       url: link
     }
   })

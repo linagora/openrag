@@ -8,7 +8,8 @@ it('normalizes document and web sources from an extra JSON string', () => {
         file_url: 'http://x/static/a.pdf',
         chunk_url: 'http://x/extract/c1',
         _id: 'c1',
-        source: '/data/a.pdf'
+        source: '/data/a.pdf',
+        page: 3
       },
       {
         source_type: 'web',
@@ -26,7 +27,9 @@ it('normalizes document and web sources from an extra JSON string', () => {
       fileUrl: 'http://x/static/a.pdf',
       chunkUrl: 'http://x/extract/c1',
       path: '/data/a.pdf',
-      url: 'http://x/static/a.pdf'
+      url: 'http://x/static/a.pdf',
+      page: 3,
+      chunkId: 'c1'
     },
     {
       sourceType: 'web',
@@ -35,6 +38,23 @@ it('normalizes document and web sources from an extra JSON string', () => {
       snippet: 'hello'
     }
   ])
+})
+
+it('reads page from page_number when page is absent', () => {
+  const extra = JSON.stringify({
+    sources: [
+      {
+        source_type: 'document',
+        chunk_url: 'http://x/extract/c2',
+        _id: 'c2',
+        source: '/data/b.docx',
+        page_number: 7
+      }
+    ]
+  })
+  const [doc] = normalizeSources(extra)
+  expect(doc.page).toBe(7)
+  expect(doc.chunkId).toBe('c2')
 })
 
 it('returns [] for empty / malformed extra', () => {

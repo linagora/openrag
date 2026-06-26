@@ -185,25 +185,8 @@ body,
   padding-right: 16px;
 }
 
-/* Sources — styled chip + list (matches cozy-search look) */
-.openrag-sources {
-  margin-top: 12px;
-}
-.openrag-sources-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  border: 1px solid var(--borderMainColor, #e0e0e0);
-  border-radius: 16px;
-  background: var(--paperBackgroundColor, #fff);
-  color: var(--textPrimaryColor, #32363f);
-  font-size: 13px;
-  cursor: pointer;
-}
-.openrag-sources-chip:hover {
-  background: var(--primaryBackground, rgba(10, 132, 255, 0.06));
-}
+/* Sources — chip + list (matches cozy-search look). The chip itself is the
+   cozy-ui <Chip> component (see OpenRagSources), so no custom chip CSS here. */
 /* Source cards — mirrors cozy-search's .sourcesItem (border + radius). */
 .openrag-source-card {
   margin-bottom: 0.25rem !important;
