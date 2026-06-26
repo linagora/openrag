@@ -183,7 +183,9 @@ class LoaderConfig(ConfigMixin):
     # pymupdf backend has no internal timeout, so without this a wedged pymupdf
     # parse would stall indexing indefinitely. Bounds any backend (and any future
     # unbounded one); a slow/wedged parse fails *that* file instead of hanging.
-    parse_timeout: int = 3600
+    # Must be > 0: it feeds asyncio.wait_for, so 0/negative would fail every
+    # parse immediately rather than disable the bound.
+    parse_timeout: int = Field(default=3600, gt=0)
     transcriber: TranscriberConfig = Field(default_factory=TranscriberConfig)
     openai: OpenAILoaderConfig = Field(default_factory=OpenAILoaderConfig)
     # Max depth of nested .eml-in-.eml attachments the EmlLoader will descend
