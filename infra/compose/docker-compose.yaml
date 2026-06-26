@@ -11,6 +11,11 @@ x-openrag: &openrag_template
     # uv.lock, openrag/, conf/ and infra/scripts/entrypoint.sh directly.
     context: ../..
     dockerfile: infra/docker/api.Dockerfile
+    args:
+      # Local compose bind-mounts repo-owned paths (data, logs, i8n). Build the
+      # image with the host user's UID by default so the non-root container can
+      # still write those mounts; OpenShift builds keep the Dockerfile default.
+      APP_UID: ${APP_UID:-1000}
   extra_hosts:
     # Let containers reach services running on the Docker host via
     # ``host.docker.internal`` (Linux Docker >= 20.10). Useful when an OIDC

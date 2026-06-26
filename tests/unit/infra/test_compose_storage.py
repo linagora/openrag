@@ -35,6 +35,7 @@ def test_compose_defaults_preserve_existing_host_paths() -> None:
     assert "${DATA_VOLUME:-../../data}:/app/data" in openrag_volumes
     assert "${LOG_VOLUME:-../../logs}:/app/logs" in openrag_volumes
     assert "${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights" in openrag_volumes
+    assert compose["x-openrag"]["build"]["args"]["APP_UID"] == "${APP_UID:-1000}"
     # N8: the ../../openrag source bind-mount is commented out by default
     # (dev-only) so production never lets host changes override the running code.
     assert "../../openrag:/app/openrag" not in openrag_volumes
