@@ -1,5 +1,5 @@
 import React from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useMatch, useNavigate } from 'react-router-dom'
 
 import ButtonRaw from 'cozy-ui/transpiled/react/Buttons'
 import IconRaw from 'cozy-ui/transpiled/react/Icon'
@@ -19,7 +19,10 @@ const Typography = TypographyRaw as unknown as React.ComponentType<any>
 const AppSidebar = (): JSX.Element => {
   const navigate = useNavigate()
   const { t } = useI18n()
-  const { conversationId } = useParams<{ conversationId: string }>()
+  // useParams() only resolves inside a routed element; AppSidebar sits beside
+  // the <Routes>, so use useMatch to read the active conversation id.
+  const conversationId = useMatch('/assistant/:conversationId')?.params
+    .conversationId
   const store = useConversationStore()
   const { conversations } = store.useConversations()
 

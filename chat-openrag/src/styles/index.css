@@ -39,7 +39,7 @@ body,
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--borderMainColor, #e0e0e0);
-  background: var(--defaultBackgroundColor, #fbfbfd);
+  background: var(--paperBackgroundColor, #fff);
   overflow: hidden;
 }
 .app-main {
