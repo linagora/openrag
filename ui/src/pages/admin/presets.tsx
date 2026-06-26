@@ -398,6 +398,10 @@ function IndexationPresetForm({
           label="Topic tagging"
           enabled={configGet(config, "enable_topic_tagging", true)}
           onToggle={(on) => toggleFeature("enable_topic_tagging", "topic_tagging_llm", on)}
+          // Postponed: tags are generated but not yet surfaced or used in
+          // retrieval, so the control is disabled until the feature ships.
+          disabled
+          disabledHint="Coming soon — generated tags aren't surfaced or used in retrieval yet."
           modelLabel="LLM"
           modelValue={configGet(config, "topic_tagging_llm", "")}
           onModelChange={(v) => set("topic_tagging_llm", v)}
