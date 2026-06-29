@@ -178,6 +178,14 @@ class LoaderConfig(ConfigMixin):
     docling_timeout: int = 3600
     docling_max_task_retry: int = 3
     docling_retry_base_delay: float = 2.0
+    # Outer wall-clock bound (seconds) for a single file's parse stage. Unlike
+    # marker/docling — which self-limit at marker_timeout/docling_timeout — the
+    # pymupdf backend has no internal timeout, so without this a wedged pymupdf
+    # parse would stall indexing indefinitely. Bounds any backend (and any future
+    # unbounded one); a slow/wedged parse fails *that* file instead of hanging.
+    # Must be > 0: it feeds asyncio.wait_for, so 0/negative would fail every
+    # parse immediately rather than disable the bound.
+    parse_timeout: int = Field(default=3600, gt=0)
     transcriber: TranscriberConfig = Field(default_factory=TranscriberConfig)
     openai: OpenAILoaderConfig = Field(default_factory=OpenAILoaderConfig)
     # Max depth of nested .eml-in-.eml attachments the EmlLoader will descend

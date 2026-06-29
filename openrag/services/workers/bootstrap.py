@@ -51,10 +51,10 @@ def _track_actor(func):
 def get_or_create_actor(name, cls, namespace="openrag", remote_args=(), **options):
     # ``get_if_exists`` makes get-or-create atomic inside Ray: concurrent callers
     # (e.g. the multiple Ray Serve replicas that all run worker bootstrap in their
-    # lifespan at once) either all attach to the same actor or exactly one creates
-    # it and the rest attach. The previous get_actor()-then-create pattern had a
-    # TOCTOU race — two replicas both saw "not found" and then collided on
-    # creation, crashing a replica's startup with "Failed to look up actor".
+    # lifespan at once, or a per-preset backend selecting the same pool) either all
+    # attach to the same actor or exactly one creates it and the rest attach. The
+    # previous get_actor()-then-create pattern had a TOCTOU race — two callers both
+    # saw "not found" and collided on creation, crashing with "Failed to look up actor".
     return cls.options(name=name, namespace=namespace, get_if_exists=True, **options).remote(*remote_args)
 
 

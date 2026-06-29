@@ -1,7 +1,5 @@
 """Admin routes for the Phase 14 pipeline preset registry."""
 
-from typing import get_args
-
 from api.dependencies.auth import require_admin
 from api.schemas.admin.preset_schemas import (
     CreatePresetRequest,
@@ -11,7 +9,7 @@ from api.schemas.admin.preset_schemas import (
     UpdatePresetRequest,
 )
 from core.chunking import chunking_registry
-from core.config.indexation_pipeline import IndexationPipelineConfig
+from core.config.indexation_pipeline import PARSING_STRATEGIES
 from core.rerankers.registry import reranker_registry
 from core.retrieval import retriever_registry
 from di.providers import get_preset_service
@@ -21,9 +19,11 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 
 _DEFAULT_RERANKER_PROVIDERS = ["infinity", "openai"]
 
-# Derived from the validated Literal so the exposed options can never drift from
-# what IndexationPipelineConfig actually accepts.
-_PARSING_STRATEGIES = list(get_args(IndexationPipelineConfig.model_fields["parsing_strategy"].annotation))
+# The selectable PDF backends. Shares the IndexationPipelineConfig constant so
+# the exposed options can never drift from what the model accepts. ``None``
+# (inherit the global PDFLoader) is the field default, not an explicit choice,
+# so it is not surfaced here.
+_PARSING_STRATEGIES = list(PARSING_STRATEGIES)
 
 
 def _registered_or_default(registered: list[str], defaults: list[str]) -> list[str]:

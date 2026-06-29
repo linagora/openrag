@@ -115,6 +115,63 @@ async def test_parse_dispatches_to_cached_backend() -> None:
     assert result.text_blocks[0].text == "ok"
 
 
+@pytest.mark.asyncio
+async def test_for_pdf_strategy_overrides_pdf_backend_and_shares_cache() -> None:
+    """A preset's ``parsing_strategy`` must override the global PDF backend for
+    PDFs while non-PDF types still dispatch normally — reusing the dispatcher's
+    cached backends (no duplicate pools)."""
+    disp = ParserDispatcher(_config(pdf="MarkerLoader"))  # global default = marker
+    marker, pymupdf, text = _FakeParser(), _FakeParser(), _FakeParser()
+    disp._by_name.update({"marker": marker, "pymupdf": pymupdf, "text": text})
+
+    pdf_parser = disp.for_pdf_strategy("pymupdf")
+
+    pdf = Document(filename="a.pdf", content_type=DocumentType.PDF, raw_bytes=b"%PDF-1.4")
+    await pdf_parser.parse(pdf)
+    assert pymupdf.seen is pdf  # routed to the preset strategy, not the global marker
+    assert marker.seen is None
+
+    txt = Document(filename="a.txt", content_type=DocumentType.TEXT, raw_bytes=b"hi")
+    await pdf_parser.parse(txt)
+    assert text.seen is txt  # non-PDF content still dispatches by content type
+
+
+def test_for_pdf_strategy_rejects_unknown_strategy() -> None:
+    with pytest.raises(ValueError, match="Unsupported PDF parsing strategy"):
+        ParserDispatcher(_config()).for_pdf_strategy("nope")
+
+
+def test_pymupdf_backend_builds_in_markdown_mode_without_images() -> None:
+    """The lightweight pymupdf backend builds in markdown mode — structured text
+    for the markdown-aware chunker — but with embed_images=False so it never
+    inlines base64 images into chunk text (which bloats chunks / breaks Milvus
+    inserts). Images are marker/docling's job."""
+    parser = ParserDispatcher(_config(pdf="PyMuPDFLoader"))._get("pymupdf")
+    assert getattr(parser, "_mode", None) == "markdown"
+
+    # The "without images" contract: build a PDF that actually contains an image
+    # and confirm the markdown extractor produces NO ImageBlocks and inlines no
+    # base64 data URIs. Catches a regression that re-enables embed_images.
+    import io
+
+    import pymupdf
+    from core.indexing.parsers.pdf.pymupdf import _extract_markdown
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), "red").save(buf, format="PNG")
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Hello world.")
+    page.insert_image(pymupdf.Rect(0, 0, 8, 8), stream=buf.getvalue())
+    raw = doc.tobytes()
+    doc.close()
+
+    pages, images = _extract_markdown(raw)
+    assert images == []  # pymupdf must not extract/inline images
+    assert not any("data:image" in p for p in pages)
+
+
 def test_build_caption_vlm_requires_endpoint() -> None:
     # No VLM endpoint configured -> unavailable, regardless of the captioning flag.
     assert build_caption_vlm(_config(image_captioning=True, vlm_base_url="")) is None

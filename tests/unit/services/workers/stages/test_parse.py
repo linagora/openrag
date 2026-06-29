@@ -62,6 +62,31 @@ async def test_parse_stage_marks_error_and_scrubs_credentials_when_parser_fails(
 
 
 @pytest.mark.asyncio
+async def test_parse_stage_times_out_a_wedged_parse_and_reports_the_file():
+    """A slow/wedged parse must fail *that* file (with a descriptive, non-empty
+    error naming the file) instead of hanging the pipeline indefinitely (#571)."""
+    import asyncio
+
+    class _WedgedParser(DocumentParser):
+        async def parse(self, document: Document) -> ProcessedDocument:
+            await asyncio.sleep(10)  # longer than the stage timeout
+            raise AssertionError("should have timed out")
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.TEXT.value]
+
+    document = Document(id="doc-1", filename="wedged.pdf", content_type=DocumentType.TEXT, text="x")
+    row = {"document": document, "token": "secret"}
+
+    with pytest.raises(TimeoutError, match=r"parse timed out after 0.05s for 'wedged.pdf'"):
+        await parse_stage(row, _WedgedParser(), timeout=0.05)
+
+    assert row["stage"] == "parse_failed"
+    assert row["error"] == "parse timed out after 0.05s for 'wedged.pdf'"
+    assert "token" not in row
+
+
+@pytest.mark.asyncio
 async def test_parse_stage_requires_document_in_row():
     row = {"api_key": "secret"}
 
@@ -71,3 +96,17 @@ async def test_parse_stage_requires_document_in_row():
     assert row["stage"] == "parse_failed"
     assert row["error"] == "parse_stage row must contain a Document under 'document'"
     assert "api_key" not in row
+
+
+@pytest.mark.asyncio
+async def test_parse_stage_surfaces_internal_timeout_when_no_outer_bound():
+    """With timeout=None, a TimeoutError raised inside the parser is internal —
+    it must surface as-is (not be relabeled or crash formatting None)."""
+    document = Document(id="doc-1", filename="x.pdf", content_type=DocumentType.TEXT, text="hi")
+    row = {"document": document}
+
+    with pytest.raises(TimeoutError, match="internal parser timeout"):
+        await parse_stage(row, FakeParser(error=TimeoutError("internal parser timeout")), timeout=None)
+
+    assert row["stage"] == "parse_failed"
+    assert row["error"] == "internal parser timeout"

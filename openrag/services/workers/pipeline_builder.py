@@ -177,7 +177,11 @@ class IndexingPipeline:
         raise TypeError("indexation_config must be an IndexationPipelineConfig or dict")
 
     def _select_parser(self, config: IndexationPipelineConfig | None) -> DocumentParser:
-        if config is not None and self.parser_factory is not None:
+        # parsing_strategy is None => the preset doesn't override PDF parsing, so
+        # defer to the global dispatcher (self.parser), which routes PDFs to the
+        # deployment's configured file_loaders.pdf. Only an explicit strategy
+        # goes through the factory (and lazily builds that backend's pool).
+        if config is not None and self.parser_factory is not None and config.parsing_strategy is not None:
             return self.parser_factory(config.parsing_strategy)
         return self.parser
 

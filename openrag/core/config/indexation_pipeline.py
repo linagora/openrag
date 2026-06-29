@@ -12,6 +12,13 @@ from typing import Literal
 from core.config.chunking import ChunkerConfig
 from pydantic import BaseModel, ConfigDict, Field
 
+# PDF parsing backends a preset may explicitly select. ``None`` (the default)
+# means "inherit the deployment's global PDFLoader" — a preset that doesn't care
+# about PDF parsing follows the operator's global ``file_loaders.pdf`` choice
+# instead of silently forcing one backend (and, with it, lazily spinning up that
+# backend's Ray pool). See pipeline_builder._select_parser.
+PARSING_STRATEGIES: tuple[str, ...] = ("pymupdf", "marker", "docling")
+
 
 class IndexationPipelineConfig(BaseModel):
     """Indexation pipeline settings for one partition preset."""
@@ -19,7 +26,8 @@ class IndexationPipelineConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     chunking: ChunkerConfig = Field(default_factory=ChunkerConfig)
-    parsing_strategy: Literal["pymupdf", "marker", "docling"] = "marker"
+    # None => inherit the global PDFLoader (see PARSING_STRATEGIES above).
+    parsing_strategy: Literal["pymupdf", "marker", "docling"] | None = None
 
     # VLM / image captioning
     vlm: str | None = None  # endpoint name; None = use global default
@@ -50,4 +58,4 @@ class IndexationPipelineConfig(BaseModel):
     topic_tagging_llm: str | None = None
 
 
-__all__ = ["IndexationPipelineConfig"]
+__all__ = ["IndexationPipelineConfig", "PARSING_STRATEGIES"]
