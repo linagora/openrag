@@ -55,6 +55,7 @@ from api.routers.user.extract import router as extract_router
 from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
 from core.config import load_config
+from core.utils.banner import print_startup_banner
 from core.utils.logging import get_logger
 from di.container import ServiceContainer
 from di.providers import set_container
@@ -217,6 +218,7 @@ async def lifespan(app: FastAPI):
     logger.info("Startup: registering process container", available=getattr(app.state, "container", None) is not None)
     set_container(getattr(app.state, "container", None))
     logger.info("Startup: complete")
+    print_startup_banner(app_version)
 
     try:
         yield
