@@ -9,6 +9,7 @@ from api.dependencies.auth import (
 )
 from core.utils.exceptions import AuthError
 from fastapi import HTTPException
+from services.orchestrators.auth_service import AuthService
 
 
 class FakeAuthService:
@@ -194,6 +195,7 @@ async def test_require_task_owner_reads_task_details_through_job_service():
         task_id="task-1",
         user={"id": 7},
         job_service=job_service,
+        auth_service=AuthService,
     )
 
     assert details == {"user_id": 7, "filename": "a.pdf"}
@@ -209,6 +211,7 @@ async def test_require_task_owner_allows_admin_for_another_users_task():
         task_id="task-2",
         user={"id": 1, "is_admin": True},
         job_service=job_service,
+        auth_service=AuthService,
     )
 
     assert details == {"user_id": 2, "filename": "b.pdf"}
@@ -223,6 +226,7 @@ async def test_require_task_owner_rejects_non_owner_non_admin():
             task_id="task-2",
             user={"id": 1, "is_admin": False},
             job_service=job_service,
+            auth_service=AuthService,
         )
     assert exc.value.status_code == 403
 

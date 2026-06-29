@@ -587,17 +587,11 @@ def test_check_partition_access_super_admin_bypass():
 
 def test_authorize_task_access_owner_admin_and_deny():
     # Owner is allowed.
-    assert AuthService.authorize(
-        user={"id": 7, "is_admin": False}, action="task:access", resource={"user_id": 7}
-    )
+    assert AuthService.authorize(user={"id": 7, "is_admin": False}, action="task:access", resource={"user_id": 7})
     # Admin may access any task.
-    assert AuthService.authorize(
-        user={"id": 1, "is_admin": True}, action="task:access", resource={"user_id": 2}
-    )
+    assert AuthService.authorize(user={"id": 1, "is_admin": True}, action="task:access", resource={"user_id": 2})
     # Non-owner non-admin is denied (deny-by-default).
-    assert not AuthService.authorize(
-        user={"id": 1, "is_admin": False}, action="task:access", resource={"user_id": 2}
-    )
+    assert not AuthService.authorize(user={"id": 1, "is_admin": False}, action="task:access", resource={"user_id": 2})
     # Missing resource denies rather than crashes.
     assert not AuthService.authorize(user={"id": 1, "is_admin": False}, action="task:access")
 
