@@ -93,13 +93,14 @@ async def test_create_inserts_and_returns_model():
     from services.persistence.model_endpoint_repo import PgModelEndpointRepository
 
     pool = _FakePool()
-    pool._fetchrow_result = _make_row()
+    pool.conn._fetchrow_result = _make_row()
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
     row = ModelEndpointRow(
         name="default",
         model_type="embedder",
         endpoint="http://vllm:8000/v1",
+        is_default=False,
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -107,7 +108,36 @@ async def test_create_inserts_and_returns_model():
 
     assert result.name == "default"
     assert result.model_type == "embedder"
-    assert any("INSERT INTO model_endpoints" in q for q, _ in pool.executed)
+    queries = [q for q, _ in pool.conn.executed]
+    assert any("INSERT INTO model_endpoints" in q for q in queries)
+    # is_default=False on the row -> no demotion of an existing default.
+    assert not any("is_default = false" in q for q in queries)
+
+
+@pytest.mark.asyncio
+async def test_create_default_demotes_existing_in_same_transaction():
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(is_default=True)
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    row = ModelEndpointRow(
+        name="default",
+        model_type="embedder",
+        endpoint="http://vllm:8000/v1",
+        is_default=True,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    await repo.create(row)
+
+    queries = [q for q, _ in pool.conn.executed]
+    # The clear UPDATE must precede the INSERT so the new row is the sole default.
+    clear_idx = next(i for i, q in enumerate(queries) if "is_default = false" in q)
+    insert_idx = next(i for i, q in enumerate(queries) if "INSERT INTO model_endpoints" in q)
+    assert clear_idx < insert_idx
 
 
 @pytest.mark.asyncio

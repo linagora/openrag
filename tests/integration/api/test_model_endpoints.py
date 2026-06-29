@@ -128,3 +128,70 @@ def test_update_is_default_keeps_single_default(api_client):
             api_client.post(f"/model-endpoints/llm/{original_default_llm}/set-default")
         _delete_ignore_errors(api_client, f"/model-endpoints/llm/{name_a}")
         _delete_ignore_errors(api_client, f"/model-endpoints/llm/{name_b}")
+
+
+def test_create_is_default_keeps_single_default(api_client):
+    """POST {"is_default": true} must not add a second default for the type.
+
+    Regression (Hedi's review): "A create request marked as default can still add
+    another default without demoting the current one." The create path ran a bare
+    INSERT with the is_default flag straight through — the same hazard the update
+    path avoids — so registering a new endpoint marked default while one already
+    existed left two is_default=true rows. create now demotes any existing default
+    in the same transaction, so the new endpoint becomes the sole default.
+    """
+    suffix = uuid.uuid4().hex[:8]
+    new_name = f"ci-llm-create-default-{suffix}"
+    original_default_llm = None
+
+    try:
+        endpoints = api_client.get("/model-endpoints/", params={"model_type": "llm"})
+        _assert_success(endpoints, context="list llm endpoints")
+        original_default_llm = next(row["name"] for row in endpoints.json() if row["is_default"])
+        assert original_default_llm != new_name
+
+        created = api_client.post(
+            "/model-endpoints/",
+            json={
+                "name": new_name,
+                "model_type": "llm",
+                "endpoint": MOCK_VLLM_ENDPOINT,
+                "model_name": MOCK_CHAT_MODEL,
+                "is_default": True,
+            },
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["is_default"] is True
+
+        listing = api_client.get("/model-endpoints/", params={"model_type": "llm"}).json()
+        defaults = sorted(row["name"] for row in listing if row["is_default"])
+        assert defaults == [new_name], f"expected exactly one default ({new_name}), got {defaults}"
+    finally:
+        if original_default_llm is not None:
+            api_client.post(f"/model-endpoints/llm/{original_default_llm}/set-default")
+        _delete_ignore_errors(api_client, f"/model-endpoints/llm/{new_name}")
+
+
+def test_set_default_missing_target_keeps_existing_default(api_client):
+    """set-default on a vanished target must never leave the type with no default.
+
+    Regression (Hedi's review): "set-default checks the target before the
+    transaction that clears/promotes defaults. If the target disappears in that
+    gap, the model type can end up with no default." The promote transaction now
+    verifies the target via ``RETURNING`` and rolls the clear back when it matched
+    no row, so the previous default survives. At the API level the observable
+    contract is: a set-default whose target does not exist is a clean 404 that
+    leaves exactly one default standing — never zero. (The repo-level rollback on
+    the concurrent-delete race is covered deterministically by the unit suite.)
+    """
+    endpoints = api_client.get("/model-endpoints/", params={"model_type": "llm"})
+    _assert_success(endpoints, context="list llm endpoints")
+    original_default_llm = next(row["name"] for row in endpoints.json() if row["is_default"])
+
+    missing = f"ci-llm-ghost-{uuid.uuid4().hex[:8]}"
+    promote_missing = api_client.post(f"/model-endpoints/llm/{missing}/set-default")
+    assert promote_missing.status_code == 404, promote_missing.text
+
+    listing = api_client.get("/model-endpoints/", params={"model_type": "llm"}).json()
+    defaults = sorted(row["name"] for row in listing if row["is_default"])
+    assert defaults == [original_default_llm], f"expected the original default to survive, got {defaults}"

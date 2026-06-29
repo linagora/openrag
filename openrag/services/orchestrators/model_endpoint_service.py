@@ -209,6 +209,11 @@ class ModelEndpointService:
             )
         result = await self._repo.create(row)
         await self.load_all()
+        if row.is_default:
+            # The new endpoint became the default (repo demoted the previous one in
+            # the same transaction), so the cached 'default' alias client — built
+            # against the old default — is stale and must be evicted.
+            self._invalidate_client_cache(row.model_type, "default")
         return result
 
     async def get_model_endpoint(self, name: str, model_type: str) -> ModelEndpointRow:

@@ -54,22 +54,34 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         )
 
     async def create(self, row: ModelEndpointRow) -> ModelEndpointRow:
-        rec = await self.pool.fetchrow(
-            """
-            INSERT INTO model_endpoints
-                (name, model_type, endpoint, model_name, batch_size, timeout, extra, is_default)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
-            RETURNING *
-            """,
-            row.name,
-            row.model_type,
-            row.endpoint,
-            row.model_name,
-            row.batch_size,
-            row.timeout,
-            row.extra,
-            row.is_default,
-        )
+        # A bare INSERT with is_default=true cannot clear the previous default, so
+        # POST /model-endpoints/ {"is_default": true} would leave two is_default=true
+        # rows for one model_type (same hazard the update path avoids by routing
+        # through set_default). Demote any existing default in the SAME transaction
+        # as the insert so the new endpoint becomes the sole default atomically.
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                if row.is_default:
+                    await conn.execute(
+                        "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
+                        row.model_type,
+                    )
+                rec = await conn.fetchrow(
+                    """
+                    INSERT INTO model_endpoints
+                        (name, model_type, endpoint, model_name, batch_size, timeout, extra, is_default)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                    RETURNING *
+                    """,
+                    row.name,
+                    row.model_type,
+                    row.endpoint,
+                    row.model_name,
+                    row.batch_size,
+                    row.timeout,
+                    row.extra,
+                    row.is_default,
+                )
         return self._to_model(rec)
 
     async def get(self, name: str, model_type: str) -> ModelEndpointRow | None:
