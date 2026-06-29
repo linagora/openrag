@@ -201,6 +201,33 @@ async def test_require_task_owner_reads_task_details_through_job_service():
 
 
 @pytest.mark.asyncio
+async def test_require_task_owner_allows_admin_for_another_users_task():
+    # Admins may open any task (parity with the admin jobs list) — no 403 dead-end.
+    job_service = FakeJobService(details={"user_id": 2, "filename": "b.pdf"})
+
+    details = await require_task_owner(
+        task_id="task-2",
+        user={"id": 1, "is_admin": True},
+        job_service=job_service,
+    )
+
+    assert details == {"user_id": 2, "filename": "b.pdf"}
+
+
+@pytest.mark.asyncio
+async def test_require_task_owner_rejects_non_owner_non_admin():
+    job_service = FakeJobService(details={"user_id": 2, "filename": "b.pdf"})
+
+    with pytest.raises(HTTPException) as exc:
+        await require_task_owner(
+            task_id="task-2",
+            user={"id": 1, "is_admin": False},
+            job_service=job_service,
+        )
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_check_user_file_quota_reads_pending_count_through_job_service():
     job_service = FakeJobService(pending_count=2)
 

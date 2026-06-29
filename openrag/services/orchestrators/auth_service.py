@@ -529,6 +529,33 @@ class AuthService:
         return True
 
     @classmethod
+    def authorize(cls, *, user: Any, action: str, resource: dict[str, Any] | None = None) -> bool:
+        """Single authorization decision point (PDP) — deny-by-default.
+
+        The seam every capability check should route through so policy lives in one
+        place instead of being inlined at call sites (which is how the rules drift).
+        Each ``action`` owns its rule here; an unknown action is a programming error
+        and is denied loudly rather than silently allowed.
+
+        Intentionally minimal today (the only migrated action is task access). Other
+        checks (partition roles via :meth:`check_partition_access`) will migrate here.
+
+        TODO(org): add an org-admin tier — allow when ``user`` is an admin of the
+        organization that owns ``resource`` (``resource['org_id'] == user's org``).
+        Until orgs exist, ``is_admin`` is the system-wide admin signal.
+        """
+        match action:
+            case "task:access":
+                # Admins may access any task — consistent with the admin jobs list,
+                # which lists every user's tasks. Otherwise only the task's owner.
+                if cls._uget(user, "is_admin", False):
+                    return True
+                resource = resource or {}
+                return resource.get("user_id") == cls._uget(user, "id", None)
+            case _:
+                raise ValueError(f"Unknown authorization action: {action!r}")
+
+    @classmethod
     def validate_file_quota(
         cls,
         user: Any,

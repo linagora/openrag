@@ -319,8 +319,15 @@ def root_redirect():
 
 @app.get("/config", summary="Get current configuration", tags=["Configuration"], dependencies=[Depends(require_admin)])
 def get_config():
-    """Return the loaded application settings for admins."""
-    return settings
+    """Return the loaded application settings for admins, plus runtime auth flags
+    the admin UI needs. ``super_admin_mode`` governs whether an admin bypasses
+    partition-membership checks; the UI permission layer mirrors the backend rule
+    instead of assuming every admin has partition access.
+    """
+    from api.dependencies.auth import SUPER_ADMIN_MODE
+    from fastapi.encoders import jsonable_encoder
+
+    return {**jsonable_encoder(settings), "super_admin_mode": SUPER_ADMIN_MODE}
 
 
 # Router mounts. Phase 10F finished moving these into

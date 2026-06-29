@@ -585,6 +585,29 @@ def test_check_partition_access_super_admin_bypass():
     )
 
 
+def test_authorize_task_access_owner_admin_and_deny():
+    # Owner is allowed.
+    assert AuthService.authorize(
+        user={"id": 7, "is_admin": False}, action="task:access", resource={"user_id": 7}
+    )
+    # Admin may access any task.
+    assert AuthService.authorize(
+        user={"id": 1, "is_admin": True}, action="task:access", resource={"user_id": 2}
+    )
+    # Non-owner non-admin is denied (deny-by-default).
+    assert not AuthService.authorize(
+        user={"id": 1, "is_admin": False}, action="task:access", resource={"user_id": 2}
+    )
+    # Missing resource denies rather than crashes.
+    assert not AuthService.authorize(user={"id": 1, "is_admin": False}, action="task:access")
+
+
+def test_authorize_unknown_action_raises():
+    # An unknown action is a programming error — denied loudly, never silently allowed.
+    with pytest.raises(ValueError, match="Unknown authorization action"):
+        AuthService.authorize(user={"id": 1, "is_admin": True}, action="bogus:action")
+
+
 def test_validate_file_quota():
     # Admin bypass.
     AuthService.validate_file_quota({"is_admin": True}, pending_task_count=99, default_quota=1)
