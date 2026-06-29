@@ -214,11 +214,18 @@ class PgPartitionRepository(PartitionRepository):
     # ── Legacy method names used by the Phase 7C shim ────────────────
 
     async def get_partition_file_count(self, partition: str) -> int:
-        """TODO(phase-9): remove."""
+        """Number of indexed files in one partition (powers ``document_count``)."""
         return await self.pool.fetchval(
             "SELECT COUNT(*)::int FROM files WHERE partition_name = $1",
             partition,
         )
+
+    async def count_files_by_partition(self) -> dict[str, int]:
+        """Return a ``{partition_name: file_count}`` map for all partitions in one query."""
+        rows = await self.pool.fetch(
+            "SELECT partition_name, COUNT(*)::int AS n FROM files GROUP BY partition_name",
+        )
+        return {r["partition_name"]: r["n"] for r in rows}
 
     async def get_total_file_count(self) -> int:
         """TODO(phase-9): remove."""

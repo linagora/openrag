@@ -116,6 +116,13 @@ class OIDCConfig(BaseModel):
     issuer_url: str = ""
     client_id: str = ""
     client_secret: str = ""
+    # Public URL the IdP redirects back to after login. Must point at the
+    # *front door* that serves the UI AND can reach the backend's /auth/callback
+    # (e.g. the admin-ui / reverse-proxy port) — not necessarily the bare API
+    # port. The post-login redirect is relative, so the browser lands back on
+    # whichever origin handled the callback; if that origin doesn't serve the
+    # UI, login silently lands on a blank page. See docs oidc.md
+    # "Choosing OIDC_REDIRECT_URI".
     redirect_uri: str = ""
     scopes: str = "openid email profile offline_access"
     token_encryption_key: str = ""

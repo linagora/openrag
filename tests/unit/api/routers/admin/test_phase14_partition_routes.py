@@ -63,11 +63,19 @@ def _build_app(service) -> FastAPI:
 
 
 class FakeListService:
-    """Service double whose ``list_partitions`` returns the full set."""
+    """Service double whose summaries cover the full set of partitions."""
 
     async def list_partitions(self) -> list[dict[str, Any]]:
         """Return every partition (the admin all-expansion target)."""
         return [{"partition": "p1"}, {"partition": "p2"}]
+
+    async def list_partition_summaries(self) -> dict[str, dict[str, Any]]:
+        """Summaries keyed by name — the admin-UI enrichment source the
+        list route reads from for the all-expansion."""
+        return {
+            "p1": {"partition": "p1", "document_count": 0},
+            "p2": {"partition": "p2", "document_count": 0},
+        }
 
 
 class FakeCreatePartitionService:

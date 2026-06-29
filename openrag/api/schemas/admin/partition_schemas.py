@@ -93,6 +93,9 @@ class PartitionDetailResponse(BaseModel):
     retrieval_pipeline: dict[str, Any]
     dimension: int
     created_at: datetime
+    document_count: int = 0
+    chat_history_depth: int = 0
+    chat_llm: str | None = None
 
 
 __all__ = [

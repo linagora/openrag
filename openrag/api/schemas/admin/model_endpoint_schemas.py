@@ -103,6 +103,14 @@ class ModelEndpointResponse(BaseModel):
     updated_at: datetime
 
 
+class ValidateEndpointRequest(BaseModel):
+    """Request body to validate endpoint values before they are saved (draft)."""
+
+    endpoint: str
+    model_name: str | None = None
+    api_key: str | None = None
+
+
 class ValidateEndpointResponse(BaseModel):
     """Response body for a model endpoint validation probe."""
 
@@ -117,5 +125,6 @@ __all__ = [
     "ModelEndpointResponse",
     "ModelEndpointType",
     "UpdateModelEndpointRequest",
+    "ValidateEndpointRequest",
     "ValidateEndpointResponse",
 ]
