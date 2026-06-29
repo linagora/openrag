@@ -44,7 +44,10 @@ class EmbedderConfig(ConfigMixin):
     model_name: str = "jinaai/jina-embeddings-v3"
     base_url: str = "http://vllm:8000/v1"
     api_key: str = Field(default="EMPTY", repr=False)
-    max_model_len: int = 8192
+    # 2047 (just below the 2048 boundary): the embedder sends
+    # truncate_prompt_tokens = max_model_len - 1, avoiding the Qwen3-Embedding
+    # context-boundary hang (vllm-project/vllm#29496).
+    max_model_len: int = Field(default=2047, gt=0)
     # Constrained > 0: a bad env var should fail at config load, not silently
     # degrade into surprising runtime behavior (VLLMEmbedder rewrites a
     # non-positive batch_size/embed_concurrency to 1 and would pass a <= 0
