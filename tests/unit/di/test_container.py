@@ -568,13 +568,16 @@ class TestPhase14NamedComponentFactories:
         assert vlm.kwargs["endpoint"] == "http://vlm:8000/v1"
         assert vlm.kwargs["max_tokens"] == 256
 
-    def test_embedder_extra_overrides_backfilled_max_model_len(self):
-        """A per-endpoint ``extra.max_model_len`` wins over the settings default."""
+    def test_embedder_extra_overrides_backfilled_embedder_defaults(self):
+        """Per-endpoint embedder extras win over the settings defaults."""
         settings = _settings_with_named_models()
         settings.models.embedder["embed-a"].extra["max_model_len"] = 4096
+        settings.models.embedder["embed-a"].extra["embed_concurrency"] = 9
         c = ServiceContainer(settings)
 
-        assert c.embedder_factory("embed-a").kwargs["max_model_len"] == 4096
+        embedder = c.embedder_factory("embed-a")
+        assert embedder.kwargs["max_model_len"] == 4096
+        assert embedder.kwargs["embed_concurrency"] == 9
 
     def test_named_factories_cache_by_endpoint_name(self):
         """Repeated factory calls for the same endpoint return one client."""
