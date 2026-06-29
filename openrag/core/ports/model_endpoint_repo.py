@@ -32,4 +32,8 @@ class ModelEndpointRepository(ABC):
     async def set_default(self, model_type: str, name: str) -> None: ...
 
     @abstractmethod
-    async def delete_and_promote_default(self, name: str, model_type: str, promote_to: str | None) -> None: ...
+    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
+        """Atomically delete an endpoint and, if it was the default, promote a
+        survivor. Decides under a row lock. Returns ``(status, promoted_name)``
+        where status is ``"not_found" | "last" | "ok"``."""
+        ...

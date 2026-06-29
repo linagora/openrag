@@ -260,27 +260,20 @@ class ModelEndpointService:
         Raises 404 if not found, 422 if it is the last endpoint of its type
         (would leave components with no fallback).
         """
-        existing = await self._repo.get(name, model_type)
-        if existing is None:
+        # The last-endpoint guard and the survivor/default choice are made INSIDE
+        # the repo's locked transaction (not from a stale snapshot here), so
+        # concurrent deletes of the same type can't both pass the count check or
+        # promote an already-deleted survivor — which would leave the type with no
+        # endpoint / no default. The repo reports what happened.
+        status, promoted = await self._repo.delete_and_promote_default(name, model_type)
+        if status == "not_found":
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
-
-        all_of_type = await self._repo.list_all(model_type=model_type)
-        if len(all_of_type) <= 1:
+        if status == "last":
             raise ValidationError(f"Cannot delete the last '{model_type}' endpoint. Register a replacement first.")
 
-        # load_all only adds the 'default' alias for an is_default row, so deleting
-        # the default would drop it entirely and make factory("default") raise.
-        # Promote a surviving endpoint (deterministic: first by name) so 'default'
-        # keeps resolving. Delete + promote run in a single repo transaction, so a
-        # failure can never leave the type with no default.
-        promote_to = None
-        if existing.is_default:
-            survivor = next((e for e in sorted(all_of_type, key=lambda e: e.name) if e.name != name), None)
-            promote_to = survivor.name if survivor is not None else None
-
-        await self._repo.delete_and_promote_default(name, model_type, promote_to)
         self._invalidate_client_cache(model_type, name)
-        if existing.is_default:
+        if promoted is not None:
+            # The deleted endpoint was the default; its 'default' alias client is now stale.
             self._invalidate_client_cache(model_type, "default")
         await self.load_all()
 

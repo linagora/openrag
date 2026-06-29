@@ -132,18 +132,35 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                     model_type,
                 )
 
-    async def delete_and_promote_default(self, name: str, model_type: str, promote_to: str | None) -> None:
-        # Delete and (when the deleted row was the default) promote a survivor in
-        # ONE transaction, so a mid-operation failure can never leave the type with
-        # no default endpoint. ``promote_to is None`` => a plain delete.
+    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
+        # Lock every row of this model_type (FOR UPDATE) so concurrent deletes of
+        # the same type serialize, then make the last-endpoint guard and survivor
+        # choice from the LOCKED, current state — not a stale snapshot. Otherwise two
+        # concurrent deletes could each pass a snapshot count check and remove the
+        # last row, or promote a survivor that another tx just deleted, leaving the
+        # type with no endpoint / no default. Returns (status, promoted_name):
+        # status is "not_found" | "last" | "ok"; promoted_name is set only when the
+        # deleted row was the default and a survivor was promoted.
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                rows = await conn.fetch(
+                    "SELECT name, is_default FROM model_endpoints WHERE model_type = $1 ORDER BY name FOR UPDATE",
+                    model_type,
+                )
+                names = [r["name"] for r in rows]
+                if name not in names:
+                    return ("not_found", None)
+                if len(names) <= 1:
+                    return ("last", None)
+                was_default = next(r["is_default"] for r in rows if r["name"] == name)
                 await conn.execute(
                     "DELETE FROM model_endpoints WHERE name = $1 AND model_type = $2",
                     name,
                     model_type,
                 )
-                if promote_to is not None:
+                promoted: str | None = None
+                if was_default:
+                    promoted = next(n for n in names if n != name)  # deterministic: first by name
                     await conn.execute(
                         "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
                         model_type,
@@ -151,9 +168,10 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                     await conn.execute(
                         "UPDATE model_endpoints SET is_default = true, updated_at = now() "
                         "WHERE name = $1 AND model_type = $2",
-                        promote_to,
+                        promoted,
                         model_type,
                     )
+                return ("ok", promoted)
 
 
 __all__ = ["PgModelEndpointRepository"]

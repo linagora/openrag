@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from core.ports.preset_repo import PresetRepository
+from core.utils.exceptions import NotFoundError
 
 if TYPE_CHECKING:
     import asyncpg
@@ -96,6 +97,11 @@ class PgPresetRepository(PresetRepository):
                     config,
                     preset_type,
                 )
+                if rec is None:
+                    # old_name vanished between the service's existence check and
+                    # this UPDATE (concurrent delete) — fail cleanly instead of
+                    # blowing up in _row_to_dict(None).
+                    raise NotFoundError(f"Preset '{old_name}' of type '{preset_type}' not found.")
                 await conn.execute(
                     f"UPDATE partitions SET {col} = $1 WHERE {col} = $2",
                     new_name,
