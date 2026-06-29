@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,11 @@ from di.providers import get_config
 from fastapi import Depends, Form, UploadFile
 
 FORBIDDEN_CHARS_IN_FILE_ID = set("/")
+
+# Maximum accepted upload size. Streamed writes are bounded so a single request
+# cannot exhaust disk/RAM (the per-user quota limits file count, not bytes).
+# 0 or negative disables the limit. Override with MAX_UPLOAD_SIZE_MB.
+MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_MB", "1024")) * 1024 * 1024
 
 
 async def validate_file_id(file_id: str):
@@ -58,11 +64,23 @@ async def save_file_to_disk(
     except ValueError:
         raise ValidationError("Uploaded filename resolves outside destination directory.", status_code=400)
 
-    async with aiofiles.open(file_path, "wb") as buffer:
-        while True:
-            chunk = await file.read(chunk_size)
-            if not chunk:
-                break
-            await buffer.write(chunk)
+    total = 0
+    try:
+        async with aiofiles.open(file_path, "wb") as buffer:
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if MAX_UPLOAD_SIZE_BYTES > 0 and total > MAX_UPLOAD_SIZE_BYTES:
+                    raise ValidationError(
+                        f"File exceeds the maximum allowed size of {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)} MB.",
+                        status_code=413,
+                    )
+                await buffer.write(chunk)
+    except ValidationError:
+        # Remove the partially written file before propagating.
+        file_path.unlink(missing_ok=True)
+        raise
 
     return file_path

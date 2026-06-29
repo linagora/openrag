@@ -31,6 +31,21 @@ async def test_save_file_to_disk_writes_content(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_save_file_to_disk_rejects_oversize_upload(tmp_path: Path, monkeypatch):
+    # Cap at ~8 bytes; a larger upload must be rejected (413) and not left on disk.
+    monkeypatch.setattr("api.dependencies.files.MAX_UPLOAD_SIZE_BYTES", 8)
+    upload = UploadFile(file=io.BytesIO(b"x" * 100), filename="big.bin")
+    dest_dir = tmp_path / "uploads"
+
+    with pytest.raises(ValidationError) as exc:
+        await save_file_to_disk(file=upload, dest_dir=dest_dir, chunk_size=4)
+
+    assert exc.value.status_code == 413
+    # The partially written file must have been cleaned up.
+    assert not (dest_dir / "big.bin").exists()
+
+
+@pytest.mark.asyncio
 async def test_save_file_to_disk_with_random_prefix(tmp_path, monkeypatch):
     def fake_make_unique_filename(filename: str) -> str:
         assert filename == "test.txt"
