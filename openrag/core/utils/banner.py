@@ -68,10 +68,7 @@ def _status_box(version: str, docs_url: str, *, color: bool) -> str:
         f"{_BOLD}API docs{_NORMAL}: {docs_url}",
         f"{_BOLD}Status{_NORMAL}: ready",
     ]
-    body = [
-        f"│ {visible}{' ' * (width - 2 - len(plain))} │"
-        for visible, plain in zip(visible_lines, plain_lines)
-    ]
+    body = [f"│ {visible}{' ' * (width - 2 - len(plain))} │" for visible, plain in zip(visible_lines, plain_lines)]
     return "\n".join(f"{red}{line}{_RESET}" for line in [top, *body, bottom])
 
 
