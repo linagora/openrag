@@ -47,6 +47,11 @@ _DIM = "\033[2m"
 
 
 def _status_box(version: str, docs_url: str, *, color: bool) -> str:
+    """Render the boxed version / docs-URL / status panel shown under the logo.
+
+    ``color`` toggles the brand-red border + bold labels; the plain branch is a
+    byte-for-byte ASCII box so widths still line up when color is disabled.
+    """
     plain_lines = [
         f"OpenRAG v{version}",
         f"API docs: {docs_url}",
@@ -88,10 +93,12 @@ def _supports_color() -> bool:
 
 
 def _disabled() -> bool:
+    """Whether the banner is suppressed via a falsy ``OPENRAG_BANNER`` value."""
     return os.environ.get("OPENRAG_BANNER", "true").strip().lower() in {"0", "false", "no", "off"}
 
 
 def _fg(rgb: tuple[int, int, int]) -> str:
+    """Build a 24-bit (true-color) ANSI foreground escape for an RGB triple."""
     return f"\033[38;2;{rgb[0]};{rgb[1]};{rgb[2]}m"
 
 
