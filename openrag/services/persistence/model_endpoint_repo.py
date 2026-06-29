@@ -141,6 +141,16 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 )
 
     async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
+        """Delete an endpoint and, if it was the default, promote a survivor to
+        default — all atomically and decided under a row lock.
+
+        Locking and deciding inside one transaction means concurrent deletes of the
+        same model type can't both pass a stale last-endpoint check or promote an
+        already-deleted survivor, so the type is never left with no endpoint or no
+        default. Returns ``(status, promoted_name)`` where ``status`` is
+        ``"not_found" | "last" | "ok"`` and ``promoted_name`` is set only when a
+        deleted default was replaced.
+        """
         # Lock every row of this model_type (FOR UPDATE) so concurrent deletes of
         # the same type serialize, then make the last-endpoint guard and survivor
         # choice from the LOCKED, current state — not a stale snapshot. Otherwise two

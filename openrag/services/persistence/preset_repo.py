@@ -80,6 +80,13 @@ class PgPresetRepository(PresetRepository):
         return self._row_to_dict(rec)
 
     async def rename(self, old_name: str, new_name: str, preset_type: str, config: dict) -> dict:
+        """Rename a preset to ``new_name`` (also updating its config) and repoint
+        every referencing partition, atomically.
+
+        Raises :class:`NotFoundError` if ``old_name`` no longer exists; a collision
+        with an existing ``new_name`` is rejected by the ``(name, preset_type)``
+        unique constraint. Returns the updated preset row as a dict.
+        """
         # Rename in place with a plain UPDATE (not an upsert): the
         # (name, preset_type) unique constraint then rejects a collision with an
         # existing target name instead of an upsert silently overwriting it, and
