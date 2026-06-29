@@ -192,6 +192,7 @@ async def require_task_owner(
     task_id=Depends(request_task_id),
     user=Depends(current_user),
     job_service=Depends(get_job_service),
+    auth_service=Depends(get_auth_service),
 ):
     task_details = await job_service.get_task_details(task_id)
     if not task_details:
@@ -199,7 +200,12 @@ async def require_task_owner(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task '{task_id}' not found",
         )
-    if task_details.get("user_id") != user.get("id"):
+    # Delegate the decision to the central PDP (AuthService.authorize, reached via DI
+    # — the api layer must not import services directly) rather than inlining policy
+    # here — admins may access any task (parity with the admin jobs list), owners
+    # their own. Without this, an admin opening another user's job in the admin UI
+    # hits a 403 dead-end.
+    if not auth_service.authorize(user=user, action="task:access", resource=task_details):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to access this task",
