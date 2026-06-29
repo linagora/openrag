@@ -30,19 +30,27 @@ def get_logger(config=None):
     config = config or load_config()
 
     def formatter(record):
-        level = record["level"].name
-        mod = record["name"]
-        func = record["function"]
-        line = record["line"]
-
-        msg = escape_markup(record["message"])
-        extra = " | ".join(f"{k}={escape_markup(str(v))}" for k, v in record["extra"].items())
-        return f"{level:<8} | {mod}:{func}:{line} - {msg}" + (f" [{extra}]" if extra else "") + "\n"
+        # ``format`` is a callable, so loguru parses the *returned string* as a
+        # template — for color markup (``<...>``) AND field placeholders
+        # (``{...}``). Keep the record fields as placeholders ({level}, {name},
+        # …): loguru substitutes those values after parsing, so a function named
+        # ``<module>`` / ``<lambda>`` or a message containing ``{}`` is inserted
+        # safely. (Splicing them in raw is what raised "Tag <module> does not
+        # correspond to any known color directive" and dropped those records.)
+        # Only the bound ``extra`` values are literal template text, so they
+        # must escape both markup (escape_markup) and braces.
+        extra = " | ".join(f"{escape_markup(k)}={escape_markup(str(v))}" for k, v in record["extra"].items())
+        suffix = f" [{extra}]".replace("{", "{{").replace("}", "}}") if extra else ""
+        return "<level>{level: <8}</level> | <cyan>{name}:{function}:{line}</cyan> - {message}" + suffix + "\n"
 
     logger.remove()
 
-    # Pretty logs to stdout (terminal)
-    logger.add(sys.stderr, format=formatter, level=config.verbose.level, colorize=False)
+    # Pretty, colorized logs to the terminal (stderr): the level label is
+    # colored by severity via loguru's <level> tag and the call site is cyan.
+    # colorize=True forces ANSI on even when stderr isn't a TTY (e.g. under
+    # ``docker compose up``); the JSON file sink below stays uncolored for
+    # machine ingestion.
+    logger.add(sys.stderr, format=formatter, level=config.verbose.level, colorize=True)
 
     # JSON logs to file for later use (e.g. Grafana ingestion)
     log_path = app_log_file(getattr(config.paths, "log_dir", None))
