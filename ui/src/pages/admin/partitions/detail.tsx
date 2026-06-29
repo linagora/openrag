@@ -55,6 +55,15 @@ import { formatDate, intOr } from "@/lib/utils";
 
 function GeneralTab({ partition }: { partition: PartitionConfig }) {
   const queryClient = useQueryClient();
+  const { canConfigurePartition, isAdmin } = usePermissions();
+
+  // Saving partition settings is owner-gated (require_partition_owner); the preset
+  // and model option lists come from admin-only registries. So non-owners get a
+  // read-only form, and the preset/LLM pickers only populate for admins (the
+  // registry calls are admin-gated to avoid guaranteed 403s).
+  const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
+  const callerRole = partitionsQuery.data?.partitions.find((p) => p.partition === partition.name)?.role;
+  const canEdit = canConfigurePartition(callerRole);
 
   const [description, setDescription] = useState(partition.description ?? "");
   const [chatHistoryDepth, setChatHistoryDepth] = useState(String(partition.chat_history_depth));
@@ -66,19 +75,24 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
   );
   const [llmValidating, setLlmValidating] = useState(false);
 
+  // Preset/model registries are admin-only — only fetch them for admins so a
+  // non-admin member's view doesn't fire requests the API answers with 403.
   const { data: presetsData } = useQuery({
     queryKey: ["presets"],
     queryFn: () => listPresets(),
+    enabled: isAdmin,
   });
 
   const { data: llmEndpoints } = useQuery({
     queryKey: ["model-endpoints", "llm"],
     queryFn: () => listModelEndpoints("llm"),
+    enabled: isAdmin,
   });
 
   const { data: embedderEndpoints } = useQuery({
     queryKey: ["model-endpoints", "embedder"],
     queryFn: () => listModelEndpoints("embedder"),
+    enabled: isAdmin,
   });
 
   const validateLlm = useCallback(
@@ -158,6 +172,16 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit} className="space-y-6 max-w-3xl">
+          {!canEdit && (
+            <p className="rounded-md border bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+              You have read-only access to this partition's settings. Only an owner can change them.
+            </p>
+          )}
+          {canEdit && !isAdmin && (
+            <p className="rounded-md border bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+              Preset and model selection is managed by an administrator and can't be changed here.
+            </p>
+          )}
           <div className="space-y-2">
             <Label>Description</Label>
             <Textarea
@@ -165,6 +189,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               className="min-h-[80px]"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
+              disabled={!canEdit}
             />
           </div>
           <div className="grid grid-cols-3 gap-6">
@@ -186,7 +211,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
           <div className="pt-2 grid grid-cols-3 gap-6">
             <div className="space-y-2">
               <Label>Indexation Preset</Label>
-              <Select value={indexationPreset} onValueChange={setIndexationPreset}>
+              <Select value={indexationPreset} onValueChange={setIndexationPreset} disabled={!canEdit || !isAdmin}>
                 <SelectTrigger>
                   <SelectValue placeholder="Select preset" />
                 </SelectTrigger>
@@ -201,7 +226,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
             </div>
             <div className="space-y-2">
               <Label>Retrieval Preset</Label>
-              <Select value={retrievalPreset} onValueChange={setRetrievalPreset}>
+              <Select value={retrievalPreset} onValueChange={setRetrievalPreset} disabled={!canEdit || !isAdmin}>
                 <SelectTrigger>
                   <SelectValue placeholder="Select preset" />
                 </SelectTrigger>
@@ -225,7 +250,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
                   <XCircle className="h-3.5 w-3.5 text-destructive" />
                 )}
               </Label>
-              <Select value={chatLlm} onValueChange={handleChatLlmChange}>
+              <Select value={chatLlm} onValueChange={handleChatLlmChange} disabled={!canEdit || !isAdmin}>
                 <SelectTrigger>
                   <SelectValue placeholder="Select LLM" />
                 </SelectTrigger>
@@ -247,12 +272,15 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               min={0}
               value={chatHistoryDepth}
               onChange={(e) => setChatHistoryDepth(e.target.value)}
+              disabled={!canEdit}
             />
           </div>
-          <Button type="submit" disabled={mutation.isPending || llmValidating || llmValidated === false}>
-            <Save className="h-4 w-4" />
-            {mutation.isPending ? "Saving..." : "Save Changes"}
-          </Button>
+          {canEdit && (
+            <Button type="submit" disabled={mutation.isPending || llmValidating || llmValidated === false}>
+              <Save className="h-4 w-4" />
+              {mutation.isPending ? "Saving..." : "Save Changes"}
+            </Button>
+          )}
         </form>
       </CardContent>
     </Card>
@@ -339,7 +367,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
   // role comes from the membership-scoped partition list. Mirrors the server's
   // require_partition_owner check — non-owners get a read-only view.
   const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
-  const callerRole = partitionsQuery.data?.partitions.find((p) => p.name === partitionName)?.role;
+  const callerRole = partitionsQuery.data?.partitions.find((p) => p.partition === partitionName)?.role;
   const canManage = canManageMembers(callerRole);
 
   const addMutation = useMutation({

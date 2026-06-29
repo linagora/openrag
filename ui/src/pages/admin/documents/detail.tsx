@@ -23,6 +23,7 @@ import { formatDate, cn } from "@/lib/utils";
 import { listFileChunks, type PartitionChunk } from "@/lib/api/documents";
 import { replaceFile, deleteFile, copyFile, newFileId } from "@/lib/api/indexing";
 import { listPartitions } from "@/lib/api/partitions";
+import { usePermissions } from "@/lib/permissions";
 
 const str = (v: unknown): string => (v == null ? "" : String(v));
 
@@ -128,6 +129,7 @@ export default function DocumentDetailPage() {
   const { partition, fileId } = useParams<{ partition: string; fileId: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { canWrite } = usePermissions();
 
   // Return to the documents list scoped to THIS file's partition, so "Back"
   // (and post-delete) lands where the user came from, not the default partition.
@@ -200,7 +202,13 @@ export default function DocumentDetailPage() {
   const metadata = chunks[0]?.metadata ?? {};
   const filename = str(metadata.filename) || fileId;
   const mimetype = str(metadata.mimetype);
-  const copyTargets = (partitionsQuery.data?.partitions ?? []).filter((p) => p.partition !== partition);
+  // Gate write actions on the caller's role, like the documents list does — the
+  // API rejects delete/replace for non-editors and copy for non-editors of the
+  // *destination*, so don't offer controls guaranteed to 403.
+  const allPartitions = partitionsQuery.data?.partitions ?? [];
+  const role = allPartitions.find((p) => p.partition === partition)?.role;
+  const writable = canWrite(role);
+  const copyTargets = allPartitions.filter((p) => p.partition !== partition && canWrite(p.role));
 
   return (
     <div className="space-y-6">
@@ -228,16 +236,18 @@ export default function DocumentDetailPage() {
             )}
           </div>
         </div>
-        <ConfirmDialog
-          title="Delete File"
-          description={`Delete "${filename}" and all its chunks? This cannot be undone.`}
-          onConfirm={() => deleteMutation.mutate()}
-        >
-          <Button variant="destructive" disabled={deleteMutation.isPending}>
-            <Trash2 className="h-4 w-4" />
-            {deleteMutation.isPending ? "Deleting..." : "Delete File"}
-          </Button>
-        </ConfirmDialog>
+        {writable && (
+          <ConfirmDialog
+            title="Delete File"
+            description={`Delete "${filename}" and all its chunks? This cannot be undone.`}
+            onConfirm={() => deleteMutation.mutate()}
+          >
+            <Button variant="destructive" disabled={deleteMutation.isPending}>
+              <Trash2 className="h-4 w-4" />
+              {deleteMutation.isPending ? "Deleting..." : "Delete File"}
+            </Button>
+          </ConfirmDialog>
+        )}
       </div>
 
       <Tabs defaultValue="chunks">
@@ -260,12 +270,14 @@ export default function DocumentDetailPage() {
           <div className="grid gap-6 md:grid-cols-2">
             <DetailsCard metadata={metadata} />
 
+            {(writable || copyTargets.length > 0) && (
             <Card>
               <CardHeader>
                 <CardTitle>Actions</CardTitle>
                 <CardDescription>Replace the file or copy it into another partition.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
+                {writable && (
                 <div className="space-y-3">
                   <p className="text-sm font-medium">Replace file</p>
                   <input
@@ -292,9 +304,11 @@ export default function DocumentDetailPage() {
                     {replaceMutation.isPending ? "Replacing..." : "Replace"}
                   </Button>
                 </div>
+                )}
 
-                <Separator />
+                {writable && copyTargets.length > 0 && <Separator />}
 
+                {copyTargets.length > 0 && (
                 <div className="space-y-3">
                   <p className="text-sm font-medium">Copy to partition</p>
                   <div className="flex gap-2">
@@ -320,8 +334,10 @@ export default function DocumentDetailPage() {
                     </Button>
                   </div>
                 </div>
+                )}
               </CardContent>
             </Card>
+            )}
           </div>
         </TabsContent>
       </Tabs>

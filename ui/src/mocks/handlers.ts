@@ -659,7 +659,10 @@ export const handlers = [
 
   http.get(`${API}/config`, () => {
     return HttpResponse.json({
-      auth: { auth_mode: "oidc", super_admin_mode: true },
+      // super_admin_mode is a top-level runtime flag on /config (see api/main.py),
+      // not nested under auth — the permission layer reads config.super_admin_mode.
+      super_admin_mode: true,
+      auth: { auth_mode: "oidc" },
       milvus: { host: "milvus", port: 19530, database: "openrag" },
       ray: { address: "ray://ray-head:10001", pool_size: 2, max_tasks_per_worker: 2 },
       postgresql: { host: "postgres", port: 5432, database: "openrag" },

@@ -1,15 +1,21 @@
 import { describe, it, expect, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 
-// usePermissions reads only `isAdmin` from useAuth — mock it (vi.hoisted so the
-// factory may reference the shared state) instead of standing up AuthProvider.
+// usePermissions reads `isAdmin` from useAuth and `super_admin_mode` from the
+// /config query — mock both (vi.hoisted so the factories may reference the shared
+// state) instead of standing up AuthProvider + a QueryClient.
 const auth = vi.hoisted(() => ({ isAdmin: false }));
+const cfg = vi.hoisted(() => ({ superAdminMode: false }));
 vi.mock("./auth", () => ({ useAuth: () => ({ isAdmin: auth.isAdmin }) }));
+vi.mock("@tanstack/react-query", () => ({
+  useQuery: () => ({ data: { super_admin_mode: cfg.superAdminMode } }),
+}));
 
 import { usePermissions } from "./permissions";
 
-function perms(isAdmin: boolean) {
+function perms(isAdmin: boolean, superAdminMode = false) {
   auth.isAdmin = isAdmin;
+  cfg.superAdminMode = superAdminMode;
   return renderHook(() => usePermissions()).result.current;
 }
 
@@ -54,18 +60,35 @@ describe("usePermissions — partition-scoped roles (non-admin)", () => {
     expect(perms(false).canWrite(null)).toBe(false);
   });
 
-  it("canManageMembers requires owner", () => {
+  it("canManageMembers / canConfigurePartition require owner", () => {
     expect(perms(false).canManageMembers("viewer")).toBe(false);
     expect(perms(false).canManageMembers("editor")).toBe(false);
     expect(perms(false).canManageMembers("owner")).toBe(true);
+    expect(perms(false).canConfigurePartition("editor")).toBe(false);
+    expect(perms(false).canConfigurePartition("owner")).toBe(true);
   });
 });
 
-describe("usePermissions — admin overrides every partition-role check", () => {
-  it("admin can read/write/manage regardless of (or absent) role", () => {
-    const p = perms(true);
+describe("usePermissions — admin bypass is gated on SUPER_ADMIN_MODE", () => {
+  it("a plain admin (mode off) does NOT bypass partition-role checks", () => {
+    const p = perms(true, false);
+    expect(p.superAdmin).toBe(false);
+    expect(p.canRead(null)).toBe(false);
+    expect(p.canWrite(null)).toBe(false);
+    expect(p.canManageMembers(null)).toBe(false);
+    expect(p.canConfigurePartition(null)).toBe(false);
+  });
+
+  it("a super-admin (mode on) bypasses every partition-role check", () => {
+    const p = perms(true, true);
+    expect(p.superAdmin).toBe(true);
     expect(p.canRead(null)).toBe(true);
     expect(p.canWrite(null)).toBe(true);
     expect(p.canManageMembers(null)).toBe(true);
+    expect(p.canConfigurePartition(null)).toBe(true);
+  });
+
+  it("a non-admin never becomes super-admin even if the flag is on", () => {
+    expect(perms(false, true).superAdmin).toBe(false);
   });
 });
