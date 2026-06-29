@@ -30,3 +30,6 @@ class ModelEndpointRepository(ABC):
 
     @abstractmethod
     async def set_default(self, model_type: str, name: str) -> None: ...
+
+    @abstractmethod
+    async def delete_and_promote_default(self, name: str, model_type: str, promote_to: str | None) -> None: ...

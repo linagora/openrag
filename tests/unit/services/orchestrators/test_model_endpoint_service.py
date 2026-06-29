@@ -84,6 +84,13 @@ class _FakeEndpointRepo:
         for key, row in list(self._store.items()):
             self._store[key] = row.model_copy(update={"is_default": key[0] == name and key[1] == model_type})
 
+    async def delete_and_promote_default(self, name: str, model_type: str, promote_to: str | None) -> None:
+        self._store.pop((name, model_type), None)
+        self.calls.append(("delete_and_promote_default", (name, model_type, promote_to)))
+        if promote_to is not None:
+            for key, row in list(self._store.items()):
+                self._store[key] = row.model_copy(update={"is_default": key[0] == promote_to and key[1] == model_type})
+
 
 def _make_service(repo=None, rows=None, settings=None):
     from core.config.root import Settings

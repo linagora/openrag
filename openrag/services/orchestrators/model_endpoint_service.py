@@ -268,16 +268,19 @@ class ModelEndpointService:
         if len(all_of_type) <= 1:
             raise ValidationError(f"Cannot delete the last '{model_type}' endpoint. Register a replacement first.")
 
-        await self._repo.delete(name, model_type)
+        # load_all only adds the 'default' alias for an is_default row, so deleting
+        # the default would drop it entirely and make factory("default") raise.
+        # Promote a surviving endpoint (deterministic: first by name) so 'default'
+        # keeps resolving. Delete + promote run in a single repo transaction, so a
+        # failure can never leave the type with no default.
+        promote_to = None
+        if existing.is_default:
+            survivor = next((e for e in sorted(all_of_type, key=lambda e: e.name) if e.name != name), None)
+            promote_to = survivor.name if survivor is not None else None
+
+        await self._repo.delete_and_promote_default(name, model_type, promote_to)
         self._invalidate_client_cache(model_type, name)
         if existing.is_default:
-            # load_all only adds the 'default' alias for an is_default row, so
-            # deleting the default would drop it entirely and make factory("default")
-            # raise. Promote a surviving endpoint (deterministic: first by name) so
-            # 'default' keeps resolving, and evict its now-stale cached client.
-            survivor = next((e for e in sorted(all_of_type, key=lambda e: e.name) if e.name != name), None)
-            if survivor is not None:
-                await self._repo.set_default(model_type, survivor.name)
             self._invalidate_client_cache(model_type, "default")
         await self.load_all()
 

@@ -185,12 +185,15 @@ async def test_rename_migrates_partition_refs_in_one_transaction():
 
     assert result["name"] == "new"
     operations = [query for query, _params in pool.executed]
-    # Atomic: insert the new row, repoint referencing partitions, drop the old row.
+    # Atomic in-place rename: UPDATE the preset row, then repoint referencing
+    # partitions. No DELETE+INSERT — the unique constraint guards collisions and
+    # created_at is preserved.
     assert operations[0] == "BEGIN"
-    assert "INSERT INTO pipeline_presets" in operations[1]
+    assert "UPDATE pipeline_presets" in operations[1]
+    assert "INSERT INTO pipeline_presets" not in operations[1]
     assert "UPDATE partitions" in operations[2]
     assert "indexation_preset" in operations[2]
-    assert "DELETE FROM pipeline_presets" in operations[3]
+    assert not any("DELETE FROM pipeline_presets" in op for op in operations)
     assert operations[-1] == "COMMIT"
 
     # The partition repoint runs old -> new on the indexation column.
