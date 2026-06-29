@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from core.config.model_endpoints import ModelEndpointRow
 from core.ports.model_endpoint_repo import ModelEndpointRepository
+from core.utils.exceptions import NotFoundError
 
 if TYPE_CHECKING:
     import asyncpg
@@ -127,8 +128,25 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         return result == "DELETE 1"
 
     async def set_default(self, model_type: str, name: str) -> None:
+        """Promote ``name`` to the default for ``model_type``, atomically.
+
+        Locks the type's rows (FOR UPDATE) and confirms ``name`` still exists
+        *inside* the transaction before clearing the old default. Without the
+        lock + existence check, a concurrent delete of ``name`` between the
+        caller's existence check and this transaction would make the second
+        UPDATE match 0 rows AFTER the first already cleared the previous default
+        — leaving the type with no default at all. Same invariant
+        ``delete_and_promote_default`` protects. Raises ``NotFoundError`` if the
+        target endpoint is gone.
+        """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                rows = await conn.fetch(
+                    "SELECT name FROM model_endpoints WHERE model_type = $1 FOR UPDATE",
+                    model_type,
+                )
+                if name not in {r["name"] for r in rows}:
+                    raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
                 await conn.execute(
                     "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
                     model_type,

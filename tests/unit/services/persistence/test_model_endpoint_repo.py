@@ -207,22 +207,46 @@ async def test_delete_returns_false_when_row_missing():
     assert await repo.delete("ghost", "embedder") is False
 
 
+def _row(name, is_default):
+    return {"name": name, "is_default": is_default}
+
+
 @pytest.mark.asyncio
-async def test_set_default_uses_transaction_with_two_updates():
+async def test_set_default_locks_rows_then_runs_two_updates():
     from services.persistence.model_endpoint_repo import PgModelEndpointRepository
 
     pool = _FakePool()
+    pool.conn._fetch_result = [_row("default", True), _row("jina", False)]
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
-    await repo.set_default("embedder", "default")
+    await repo.set_default("embedder", "jina")
 
     queries = [q for q, _ in pool.conn.executed]
+    # Decide under a row lock, then clear-then-set inside the same transaction.
+    assert any("FOR UPDATE" in q for q in queries)
     assert any("is_default = false" in q for q in queries)
     assert any("is_default = true" in q for q in queries)
 
 
-def _row(name, is_default):
-    return {"name": name, "is_default": is_default}
+@pytest.mark.asyncio
+async def test_set_default_raises_not_found_without_clearing_when_target_missing():
+    from core.utils.exceptions import NotFoundError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    # 'ghost' is absent from the locked rows (e.g. deleted concurrently). set_default
+    # must abort BEFORE clearing the existing default, so the type is never left
+    # without one.
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("jina", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(NotFoundError):
+        await repo.set_default("embedder", "ghost")
+
+    queries = [q for q, _ in pool.conn.executed]
+    assert any("FOR UPDATE" in q for q in queries)
+    assert not any("is_default = false" in q for q in queries)
+    assert not any("is_default = true" in q for q in queries)
 
 
 @pytest.mark.asyncio
