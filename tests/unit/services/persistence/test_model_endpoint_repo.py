@@ -41,6 +41,7 @@ class _FakeConn:
     def __init__(self):
         self.executed: list[tuple[str, tuple]] = []
         self._fetchrow_result = None
+        self._fetch_result: list = []
 
     def transaction(self):
         return _AsyncCtx(self)
@@ -48,6 +49,10 @@ class _FakeConn:
     async def execute(self, query: str, *params):
         self.executed.append((query, params))
         return "UPDATE 1"
+
+    async def fetch(self, query: str, *params):
+        self.executed.append((query, params))
+        return self._fetch_result
 
     async def fetchrow(self, query: str, *params):
         self.executed.append((query, params))
@@ -213,4 +218,70 @@ async def test_set_default_uses_transaction_with_two_updates():
 
     queries = [q for q, _ in pool.conn.executed]
     assert any("is_default = false" in q for q in queries)
+    assert any("is_default = true" in q for q in queries)
+
+
+def _row(name, is_default):
+    return {"name": name, "is_default": is_default}
+
+
+@pytest.mark.asyncio
+async def test_delete_and_promote_not_found_no_delete():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, promoted = await repo.delete_and_promote_default("ghost", "embedder")
+    assert status == "not_found"
+    assert promoted is None
+    assert not any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_delete_and_promote_last_no_delete():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("jina", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, promoted = await repo.delete_and_promote_default("jina", "embedder")
+    assert status == "last"
+    assert promoted is None
+    assert not any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_delete_and_promote_non_default_deletes_no_promotion():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, promoted = await repo.delete_and_promote_default("e5", "embedder")
+    assert status == "ok"
+    assert promoted is None
+    queries = [q for q, _ in pool.conn.executed]
+    assert any("FOR UPDATE" in q for q in queries)
+    assert any("DELETE FROM model_endpoints" in q for q in queries)
+    assert not any("is_default = true" in q for q in queries)
+
+
+@pytest.mark.asyncio
+async def test_delete_and_promote_default_promotes_survivor_under_lock():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, promoted = await repo.delete_and_promote_default("jina", "embedder")
+    assert status == "ok"
+    assert promoted == "e5"  # first survivor by name
+    queries = [q for q, _ in pool.conn.executed]
+    assert any("FOR UPDATE" in q for q in queries)
+    assert any("DELETE FROM model_endpoints" in q for q in queries)
     assert any("is_default = true" in q for q in queries)
