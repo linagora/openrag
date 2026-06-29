@@ -43,7 +43,6 @@ _GRAD_END = (0x83, 0x13, 0x2D)  # linagora-800 — deep crimson
 _RESET = "\033[0m"
 _BOLD = "\033[1m"
 _NORMAL = "\033[22m"
-_DIM = "\033[2m"
 
 
 def _status_box(version: str, docs_url: str, *, color: bool) -> str:
