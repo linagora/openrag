@@ -223,8 +223,7 @@ class PresetService:
                 )
             if await self._repo.get(new_name, preset_type) is not None:
                 raise ValidationError(
-                    f"Cannot rename preset to '{new_name}': a {preset_type} preset with that name "
-                    "already exists."
+                    f"Cannot rename preset to '{new_name}': a {preset_type} preset with that name already exists."
                 )
             effective_name = new_name
             result = await self._repo.rename(name, effective_name, preset_type, effective_config)
