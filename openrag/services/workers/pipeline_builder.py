@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from typing import Any
@@ -67,8 +68,24 @@ class IndexingPipeline:
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None
 
     async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
-        """Run a single row through parse, optional enrichments, embed, and store."""
+        """Run a single row through parse, optional enrichments, embed, and store.
 
+        Each stage is timed and a single structured line is logged per file
+        (``ms_parse``, ``ms_chunk``, ``ms_embed``, …), so a slow backend or
+        stage is easy to spot — e.g. comparing docling vs marker parse cost.
+        Timings are emitted even when a stage fails, so a failure shows how far
+        indexing got before erroring.
+
+        CAVEAT — these are **wall-clock**, not CPU time. Files in a batch index
+        concurrently and stages share resources (the parser pools, the
+        ``asyncio.to_thread`` chunk executor + the GIL, async LLM calls), so a
+        stage's value includes time spent **queued/contending** for a slot, not
+        just its own work. Under concurrency a value can balloon far past the
+        real cost (e.g. the same file chunking in 0.3 s in one run and 67 s in a
+        busy batch). They are only a clean per-stage cost at **low concurrency**
+        — index one file at a time for accurate numbers; for a batch, read the
+        first-finishing (least-contended) file.
+        """
         config = self._effective_indexation_config(row)
         parser = self._select_parser(config)
         chunker = self._select_chunker(config)
@@ -76,45 +93,78 @@ class IndexingPipeline:
         contextualizer = self._select_contextualizer(config)
         topic_tagger = self._select_topic_tagger(config)
 
-        await parse_stage(row, parser, timeout=self.timeouts.parse)
-        if self._should_caption(row, config):
-            vlm = self._select_vlm(config)
-            if vlm is not None:
-                await caption_stage(
-                    row,
-                    vlm,
-                    timeout=self.timeouts.caption,
-                    per_image_timeout=self.timeouts.caption_per_image,
+        timings: dict[str, float] = {}
+
+        async def _timed(name: str, coro: Any) -> None:
+            start = time.perf_counter()
+            try:
+                await coro
+            finally:
+                timings[name] = (time.perf_counter() - start) * 1000.0
+
+        try:
+            await _timed("parse", parse_stage(row, parser, timeout=self.timeouts.parse))
+            if self._should_caption(row, config):
+                vlm = self._select_vlm(config)
+                if vlm is not None:
+                    await _timed(
+                        "caption",
+                        caption_stage(
+                            row,
+                            vlm,
+                            timeout=self.timeouts.caption,
+                            per_image_timeout=self.timeouts.caption_per_image,
+                        ),
+                    )
+            await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
+            if contextualizer is not None:
+                await _timed(
+                    "contextualize",
+                    contextualize_stage(
+                        row,
+                        contextualizer,
+                        timeout=self.timeouts.contextualize,
+                        per_chunk_timeout=self.timeouts.contextualize_per_chunk,
+                    ),
                 )
-        await chunk_stage(row, chunker, timeout=self.timeouts.chunk)
-        if contextualizer is not None:
-            await contextualize_stage(
-                row,
-                contextualizer,
-                timeout=self.timeouts.contextualize,
-                per_chunk_timeout=self.timeouts.contextualize_per_chunk,
+            if topic_tagger is not None:
+                max_tags = config.max_topic_tags if config is not None else 7
+                await _timed(
+                    "topic_tag",
+                    topic_tag_stage(
+                        row,
+                        topic_tagger,
+                        max_tags=max_tags,
+                        timeout=self.timeouts.topic_tag,
+                    ),
+                )
+            await _timed(
+                "embed",
+                embed_stage(
+                    row,
+                    embedder,
+                    timeout=self.timeouts.embed,
+                    per_chunk_timeout=self.timeouts.embed_per_chunk,
+                ),
             )
-        if topic_tagger is not None:
-            max_tags = config.max_topic_tags if config is not None else 7
-            await topic_tag_stage(
-                row,
-                topic_tagger,
-                max_tags=max_tags,
-                timeout=self.timeouts.topic_tag,
+            await _timed(
+                "store",
+                store_stage(
+                    row,
+                    self.vector_store,
+                    timeout=self.timeouts.store,
+                    per_chunk_timeout=self.timeouts.store_per_chunk,
+                ),
             )
-        await embed_stage(
-            row,
-            embedder,
-            timeout=self.timeouts.embed,
-            per_chunk_timeout=self.timeouts.embed_per_chunk,
-        )
-        await store_stage(
-            row,
-            self.vector_store,
-            timeout=self.timeouts.store,
-            per_chunk_timeout=self.timeouts.store_per_chunk,
-        )
-        return row
+            return row
+        finally:
+            logger.bind(
+                task_id=row.get("task_id"),
+                filename=row.get("filename", ""),
+                n_chunks=len(row.get("chunks") or []),
+                **{f"ms_{name}": round(value) for name, value in timings.items()},
+                ms_total=round(sum(timings.values())),
+            ).info("indexing stage timings (ms)")
 
     def _effective_indexation_config(self, row: MutableMapping[str, Any]) -> IndexationPipelineConfig | None:
         raw_config = row.get("indexation_config", self.indexation_config)

@@ -65,6 +65,7 @@ class IndexerWorker:
             # One indexation timestamp for this file, shared by the Milvus chunks
             # (via the store stage) and the Postgres catalog row, so they agree.
             row: dict[str, Any] = {
+                "task_id": task_id,
                 "document": document,
                 "partition": partition,
                 "filename": document.filename,
