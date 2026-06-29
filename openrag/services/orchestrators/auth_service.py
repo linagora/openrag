@@ -550,8 +550,12 @@ class AuthService:
                 # which lists every user's tasks. Otherwise only the task's owner.
                 if cls._uget(user, "is_admin", False):
                     return True
-                resource = resource or {}
-                return resource.get("user_id") == cls._uget(user, "id", None)
+                # Deny-by-default: both identities must be present before comparing,
+                # so a missing/partially-hydrated principal or a malformed task
+                # (user_id=None) can never match by two Nones.
+                owner_id = (resource or {}).get("user_id")
+                user_id = cls._uget(user, "id", None)
+                return owner_id is not None and user_id is not None and owner_id == user_id
             case _:
                 raise ValueError(f"Unknown authorization action: {action!r}")
 

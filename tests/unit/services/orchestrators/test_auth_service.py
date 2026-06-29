@@ -596,6 +596,14 @@ def test_authorize_task_access_owner_admin_and_deny():
     assert not AuthService.authorize(user={"id": 1, "is_admin": False}, action="task:access")
 
 
+def test_authorize_task_access_denies_missing_identities():
+    # Deny-by-default: two missing ids must NOT match (no None == None bypass).
+    assert not AuthService.authorize(user=None, action="task:access", resource={"user_id": None})
+    assert not AuthService.authorize(user={"id": None}, action="task:access", resource={"user_id": None})
+    # A real user vs a malformed task with no owner is denied.
+    assert not AuthService.authorize(user={"id": 5}, action="task:access", resource={"user_id": None})
+
+
 def test_authorize_unknown_action_raises():
     # An unknown action is a programming error — denied loudly, never silently allowed.
     with pytest.raises(ValueError, match="Unknown authorization action"):
