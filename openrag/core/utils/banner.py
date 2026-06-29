@@ -42,7 +42,37 @@ _GRAD_END = (0x83, 0x13, 0x2D)  # linagora-800 — deep crimson
 
 _RESET = "\033[0m"
 _BOLD = "\033[1m"
+_NORMAL = "\033[22m"
 _DIM = "\033[2m"
+
+
+def _status_box(version: str, docs_url: str, *, color: bool) -> str:
+    plain_lines = [
+        f"OpenRAG v{version}",
+        f"API docs: {docs_url}",
+        "Status: ready",
+    ]
+    width = max(len(line) for line in plain_lines) + 2
+
+    if not color:
+        top = "╭" + ("─" * width) + "╮"
+        bottom = "╰" + ("─" * width) + "╯"
+        body = [f"│ {line.ljust(width - 2)} │" for line in plain_lines]
+        return "\n".join([top, *body, bottom])
+
+    red = _fg(_GRAD_START)
+    top = "╭" + ("─" * width) + "╮"
+    bottom = "╰" + ("─" * width) + "╯"
+    visible_lines = [
+        f"{_BOLD}OpenRAG v{version}{_NORMAL}",
+        f"{_BOLD}API docs{_NORMAL}: {docs_url}",
+        f"{_BOLD}Status{_NORMAL}: ready",
+    ]
+    body = [
+        f"│ {visible}{' ' * (width - 2 - len(plain))} │"
+        for visible, plain in zip(visible_lines, plain_lines)
+    ]
+    return "\n".join(f"{red}{line}{_RESET}" for line in [top, *body, bottom])
 
 
 def _supports_color() -> bool:
@@ -98,13 +128,10 @@ def print_startup_banner(version: str | None = None, *, stream=None) -> None:
     if _supports_color():
         n = len(_LOGO_LINES)
         logo = "\n".join(f"{_BOLD}{_gradient(i, n)}{line}{_RESET}" for i, line in enumerate(_LOGO_LINES))
-        meta = (
-            f"  {_BOLD}{_fg(_GRAD_START)}OpenRAG{_RESET} {_DIM}v{version}{_RESET}"
-            f"   {_DIM}API docs:{_RESET} {_fg(_GRAD_START)}{docs_url}{_RESET}"
-        )
+        meta = _status_box(version, docs_url, color=True)
     else:
         logo = "\n".join(_LOGO_LINES)
-        meta = f"  OpenRAG v{version}   API docs: {docs_url}"
+        meta = _status_box(version, docs_url, color=False)
 
     try:
         stream.write(f"\n{logo}\n\n{meta}\n\n")
