@@ -62,9 +62,9 @@ const documents = [
 ];
 
 const users = [
-  { id: 1, external_user_id: null, email: "admin@openrag.io", display_name: "System Admin", is_admin: true, file_quota: -1, file_count: 0, created_at: "2024-12-01T00:00:00Z" },
-  { id: 2, external_user_id: "kc-alice-uuid", email: "alice@company.com", display_name: "Alice Johnson", is_admin: true, file_quota: null, file_count: 12, created_at: "2025-01-05T10:00:00Z" },
-  { id: 3, external_user_id: "kc-bob-uuid", email: "bob@company.com", display_name: "Bob Smith", is_admin: false, file_quota: 100, file_count: 4, created_at: "2025-01-08T14:30:00Z" },
+  { id: 1, external_user_id: null, email: "admin@example.com", display_name: "System Admin", is_admin: true, file_quota: -1, file_count: 0, created_at: "2024-12-01T00:00:00Z" },
+  { id: 2, external_user_id: "kc-alice-uuid", email: "alice@example.com", display_name: "Alice Johnson", is_admin: true, file_quota: null, file_count: 12, created_at: "2025-01-05T10:00:00Z" },
+  { id: 3, external_user_id: "kc-bob-uuid", email: "bob@example.com", display_name: "Bob Smith", is_admin: false, file_quota: 100, file_count: 4, created_at: "2025-01-08T14:30:00Z" },
   { id: 4, external_user_id: null, email: null, display_name: "ci-bot", is_admin: false, file_quota: 0, file_count: 0, created_at: "2025-01-10T08:00:00Z" },
 ];
 
@@ -202,7 +202,7 @@ export const handlers = [
       id: 1,
       display_name: "System Admin",
       external_user_id: null,
-      email: "admin@openrag.io",
+      email: "admin@example.com",
       is_admin: true,
       file_quota: -1,
       indexed_files: 42,
