@@ -267,6 +267,7 @@ async def test_delete_and_promote_non_default_deletes_no_promotion():
     queries = [q for q, _ in pool.conn.executed]
     assert any("FOR UPDATE" in q for q in queries)
     assert any("DELETE FROM model_endpoints" in q for q in queries)
+    assert not any("is_default = false" in q for q in queries)
     assert not any("is_default = true" in q for q in queries)
 
 
@@ -284,4 +285,5 @@ async def test_delete_and_promote_default_promotes_survivor_under_lock():
     queries = [q for q, _ in pool.conn.executed]
     assert any("FOR UPDATE" in q for q in queries)
     assert any("DELETE FROM model_endpoints" in q for q in queries)
+    assert any("is_default = false" in q for q in queries)
     assert any("is_default = true" in q for q in queries)
