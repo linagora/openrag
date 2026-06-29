@@ -436,6 +436,46 @@ async def test_update_non_default_endpoint_keeps_default_alias_cache():
     assert cache.get("default") is sentinel
 
 
+@pytest.mark.asyncio
+async def test_update_is_default_promotes_atomically_single_default():
+    # Promoting via update({"is_default": True}) must route through the clear-then-set
+    # path: the previous default is demoted (never two is_default=true rows) and the
+    # 'default' alias client is evicted. Without this, a bare UPDATE would add a
+    # second default and the alias would resolve to whichever row sorts last by name.
+    rows = [
+        _make_row(name="jina", is_default=True),
+        _make_row(name="e5", is_default=False),
+    ]
+    repo = _FakeEndpointRepo(rows=rows)
+    cache: dict = {"e5": object(), "default": object()}
+    svc = _make_service(repo)
+    svc._client_caches["embedder"] = cache
+
+    await svc.update_model_endpoint("e5", "embedder", is_default=True)
+
+    defaults = sorted(name for (name, mt), row in repo._store.items() if mt == "embedder" and row.is_default)
+    assert defaults == ["e5"], f"expected exactly one default (e5), got {defaults}"
+    assert repo._store[("jina", "embedder")].is_default is False
+    assert "default" not in cache
+
+
+@pytest.mark.asyncio
+async def test_update_is_default_false_does_not_demote_or_touch_default_cache():
+    # is_default=False is a no-op: it must not clear the existing default (which would
+    # leave the type with none) and must not evict the unrelated 'default' client.
+    rows = [_make_row(name="e5", is_default=False), _make_row(name="jina", is_default=True)]
+    repo = _FakeEndpointRepo(rows=rows)
+    sentinel = object()
+    cache: dict = {"e5": object(), "default": sentinel}
+    svc = _make_service(repo)
+    svc._client_caches["embedder"] = cache
+
+    await svc.update_model_endpoint("e5", "embedder", is_default=False)
+
+    assert repo._store[("jina", "embedder")].is_default is True
+    assert cache.get("default") is sentinel
+
+
 # ------------------------------------------------------------------
 # delete_model_endpoint
 # ------------------------------------------------------------------

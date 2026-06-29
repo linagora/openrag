@@ -16,7 +16,15 @@ from core.ports.model_endpoint_repo import ModelEndpointRepository
 if TYPE_CHECKING:
     import asyncpg
 
-_ALLOWED_UPDATE_FIELDS = frozenset({"endpoint", "model_name", "batch_size", "timeout", "extra", "is_default"})
+# 'is_default' is deliberately excluded: a bare ``UPDATE ... SET is_default = true``
+# cannot clear the previous default in the same statement, so it would leave two
+# is_default=true rows for one model_type — and load_all() then resolves the
+# 'default' alias to whichever endpoint sorts last by name, not the one the caller
+# picked. (Verified against the live admin API: a single PUT of {"is_default": true}
+# on a non-default endpoint yielded two defaults for the type.) Promotion must go
+# through set_default / delete_and_promote_default, which clear-then-set inside one
+# transaction; ModelEndpointService.update_model_endpoint routes is_default there.
+_ALLOWED_UPDATE_FIELDS = frozenset({"endpoint", "model_name", "batch_size", "timeout", "extra"})
 
 
 class PgModelEndpointRepository(ModelEndpointRepository):

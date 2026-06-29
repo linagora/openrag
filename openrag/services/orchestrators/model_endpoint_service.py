@@ -233,6 +233,12 @@ class ModelEndpointService:
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
 
         new_name: str | None = fields.pop("new_name", None)  # type: ignore[assignment]
+        # 'is_default' is not a plain column edit: flipping it must clear the previous
+        # default in the same transaction, so route a truthy value through set_default
+        # (atomic clear-then-set) instead of letting the repo write a second
+        # is_default=true row. A false/None value is a no-op here — you switch the
+        # default by promoting another endpoint, never by leaving the type with none.
+        promote_to_default = bool(fields.pop("is_default", None))
 
         if fields:
             updated = await self._repo.update(name, model_type, **fields)
@@ -246,7 +252,12 @@ class ModelEndpointService:
             self._invalidate_client_cache(model_type, name)
 
         self._invalidate_client_cache(model_type, effective_name)
-        if existing.is_default:
+        if promote_to_default:
+            # Clears any prior default and sets this row in one transaction, then
+            # re-points the 'default' alias to it — never leaves two defaults.
+            await self._repo.set_default(model_type, effective_name)
+            self._invalidate_client_cache(model_type, "default")
+        elif existing.is_default:
             # The 'default' alias resolves to this endpoint, so a client built under
             # the 'default' cache key is now stale too. Evict it alongside the named
             # entry (set_default already does this; update must match).

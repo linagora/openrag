@@ -79,3 +79,52 @@ def test_model_endpoint_crud_validate_and_default_selection(api_client):
             api_client.post(f"/model-endpoints/llm/{original_default_llm}/set-default")
         _delete_ignore_errors(api_client, f"/model-endpoints/llm/{endpoint_renamed}")
         _delete_ignore_errors(api_client, f"/model-endpoints/llm/{endpoint_name}")
+
+
+def test_update_is_default_keeps_single_default(api_client):
+    """PUT {"is_default": true} via the update path must not create a second default.
+
+    Regression: ``update`` ran a bare ``SET is_default = true`` without clearing the
+    previous default, so a single PUT left two is_default=true rows for one type and
+    the 'default' alias resolved to whichever sorted last by name. The update path now
+    routes ``is_default`` through ``set_default`` (atomic clear-then-set).
+    """
+    suffix = uuid.uuid4().hex[:8]
+    name_a = f"ci-llm-a-{suffix}"
+    name_b = f"ci-llm-b-{suffix}"
+    original_default_llm = None
+
+    try:
+        endpoints = api_client.get("/model-endpoints/", params={"model_type": "llm"})
+        _assert_success(endpoints, context="list llm endpoints")
+        original_default_llm = next(row["name"] for row in endpoints.json() if row["is_default"])
+
+        for name in (name_a, name_b):
+            created = api_client.post(
+                "/model-endpoints/",
+                json={
+                    "name": name,
+                    "model_type": "llm",
+                    "endpoint": MOCK_VLLM_ENDPOINT,
+                    "model_name": MOCK_CHAT_MODEL,
+                },
+            )
+            assert created.status_code == 201, created.text
+            assert created.json()["is_default"] is False
+
+        # Promote A through the dedicated endpoint, then promote B through the UPDATE
+        # path. The second promotion must demote A, not add a parallel default.
+        _assert_success(api_client.post(f"/model-endpoints/llm/{name_a}/set-default"), context="set-default A")
+
+        promote_b = api_client.put(f"/model-endpoints/llm/{name_b}", json={"is_default": True})
+        _assert_success(promote_b, context="update B is_default=true")
+        assert promote_b.json()["is_default"] is True
+
+        listing = api_client.get("/model-endpoints/", params={"model_type": "llm"}).json()
+        defaults = sorted(row["name"] for row in listing if row["is_default"])
+        assert defaults == [name_b], f"expected exactly one default ({name_b}), got {defaults}"
+    finally:
+        if original_default_llm is not None:
+            api_client.post(f"/model-endpoints/llm/{original_default_llm}/set-default")
+        _delete_ignore_errors(api_client, f"/model-endpoints/llm/{name_a}")
+        _delete_ignore_errors(api_client, f"/model-endpoints/llm/{name_b}")
