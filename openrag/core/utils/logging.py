@@ -39,9 +39,17 @@ def get_logger(config=None):
         # correspond to any known color directive" and dropped those records.)
         # Only the bound ``extra`` values are literal template text, so they
         # must escape both markup (escape_markup) and braces.
+        #
+        # A callable ``format`` also means loguru does NOT auto-append its usual
+        # ``"\n{exception}"`` — that convenience only applies to string formats —
+        # so the trailing ``{exception}`` placeholder is required here, otherwise
+        # ``logger.exception()`` / ``opt(exception=True)`` records lose their
+        # traceback. It renders to an empty string when no exception is attached.
         extra = " | ".join(f"{escape_markup(k)}={escape_markup(str(v))}" for k, v in record["extra"].items())
         suffix = f" [{extra}]".replace("{", "{{").replace("}", "}}") if extra else ""
-        return "<level>{level: <8}</level> | <cyan>{name}:{function}:{line}</cyan> - {message}" + suffix + "\n"
+        return (
+            "<level>{level: <8}</level> | <cyan>{name}:{function}:{line}</cyan> - {message}" + suffix + "\n{exception}"
+        )
 
     logger.remove()
 
