@@ -27,6 +27,12 @@ logger = get_logger()
 
 _VALID_PRESET_TYPES = frozenset({"indexation", "retrieval"})
 
+# The 'default' preset is the system fallback: partitions.{indexation,retrieval}_preset
+# default to this name (schema server_default + create_partition), and
+# resolve_partition_row raises if it is missing. It must always exist under this
+# name, so renaming it away or deleting it is rejected. Editing its config is fine.
+_RESERVED_PRESET_NAME = "default"
+
 _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
     # ``enable_contextualization`` and ``parsing_strategy`` are intentionally
     # omitted from the ``default`` indexation preset below. The former is injected
@@ -216,6 +222,15 @@ class PresetService:
         effective_name = name
 
         if new_name and new_name != name:
+            if name == _RESERVED_PRESET_NAME:
+                raise ValidationError(
+                    f"Cannot rename the reserved '{_RESERVED_PRESET_NAME}' {preset_type} preset: "
+                    "it is the system fallback every partition resolves to."
+                )
+            if await self._repo.get(new_name, preset_type) is not None:
+                raise ValidationError(
+                    f"Cannot rename preset to '{new_name}': a {preset_type} preset with that name already exists."
+                )
             effective_name = new_name
             result = await self._repo.rename(name, effective_name, preset_type, effective_config)
         else:
@@ -235,6 +250,12 @@ class PresetService:
         existing = await self._repo.get(name, preset_type)
         if existing is None:
             raise NotFoundError(f"Preset '{name}' of type '{preset_type}' not found.")
+
+        if name == _RESERVED_PRESET_NAME:
+            raise ValidationError(
+                f"Cannot delete the reserved '{_RESERVED_PRESET_NAME}' {preset_type} preset: "
+                "it is the system fallback every partition resolves to."
+            )
 
         count = await self._repo.count_partitions_using(name, preset_type)
         if count > 0:

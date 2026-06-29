@@ -84,6 +84,23 @@ class _FakeEndpointRepo:
         for key, row in list(self._store.items()):
             self._store[key] = row.model_copy(update={"is_default": key[0] == name and key[1] == model_type})
 
+    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
+        names = sorted(k[0] for k in self._store if k[1] == model_type)
+        self.calls.append(("delete_and_promote_default", (name, model_type)))
+        if name not in names:
+            return ("not_found", None)
+        if len(names) <= 1:
+            return ("last", None)
+        was_default = self._store[(name, model_type)].is_default
+        self._store.pop((name, model_type), None)
+        promoted = None
+        if was_default:
+            promoted = next(n for n in names if n != name)
+            for key, row in list(self._store.items()):
+                if key[1] == model_type:
+                    self._store[key] = row.model_copy(update={"is_default": key[0] == promoted})
+        return ("ok", promoted)
+
 
 def _make_service(repo=None, rows=None, settings=None):
     from core.config.root import Settings
@@ -387,6 +404,78 @@ async def test_update_model_endpoint_renames_and_evicts_cache():
     assert ("new-name", "embedder") in repo._store
 
 
+@pytest.mark.asyncio
+async def test_update_default_endpoint_evicts_default_alias_cache():
+    # Updating the current default must evict the 'default' cache key too, not just
+    # the named one — else callers that resolved 'default' keep a stale client.
+    existing = _make_row(name="jina", is_default=True)
+    repo = _FakeEndpointRepo(rows=[existing])
+    cache: dict = {"jina": object(), "default": object()}
+    svc = _make_service(repo)
+    svc._client_caches["embedder"] = cache
+
+    await svc.update_model_endpoint("jina", "embedder", endpoint="http://new:8000/v1")
+
+    assert "jina" not in cache
+    assert "default" not in cache
+
+
+@pytest.mark.asyncio
+async def test_update_non_default_endpoint_keeps_default_alias_cache():
+    # A non-default endpoint update must NOT evict the unrelated 'default' client.
+    rows = [_make_row(name="e5", is_default=False), _make_row(name="jina", is_default=True)]
+    repo = _FakeEndpointRepo(rows=rows)
+    sentinel = object()
+    cache: dict = {"e5": object(), "default": sentinel}
+    svc = _make_service(repo)
+    svc._client_caches["embedder"] = cache
+
+    await svc.update_model_endpoint("e5", "embedder", endpoint="http://new:8000/v1")
+
+    assert "e5" not in cache
+    assert cache.get("default") is sentinel
+
+
+@pytest.mark.asyncio
+async def test_update_is_default_promotes_atomically_single_default():
+    # Promoting via update({"is_default": True}) must route through the clear-then-set
+    # path: the previous default is demoted (never two is_default=true rows) and the
+    # 'default' alias client is evicted. Without this, a bare UPDATE would add a
+    # second default and the alias would resolve to whichever row sorts last by name.
+    rows = [
+        _make_row(name="jina", is_default=True),
+        _make_row(name="e5", is_default=False),
+    ]
+    repo = _FakeEndpointRepo(rows=rows)
+    cache: dict = {"e5": object(), "default": object()}
+    svc = _make_service(repo)
+    svc._client_caches["embedder"] = cache
+
+    await svc.update_model_endpoint("e5", "embedder", is_default=True)
+
+    defaults = sorted(name for (name, mt), row in repo._store.items() if mt == "embedder" and row.is_default)
+    assert defaults == ["e5"], f"expected exactly one default (e5), got {defaults}"
+    assert repo._store[("jina", "embedder")].is_default is False
+    assert "default" not in cache
+
+
+@pytest.mark.asyncio
+async def test_update_is_default_false_does_not_demote_or_touch_default_cache():
+    # is_default=False is a no-op: it must not clear the existing default (which would
+    # leave the type with none) and must not evict the unrelated 'default' client.
+    rows = [_make_row(name="e5", is_default=False), _make_row(name="jina", is_default=True)]
+    repo = _FakeEndpointRepo(rows=rows)
+    sentinel = object()
+    cache: dict = {"e5": object(), "default": sentinel}
+    svc = _make_service(repo)
+    svc._client_caches["embedder"] = cache
+
+    await svc.update_model_endpoint("e5", "embedder", is_default=False)
+
+    assert repo._store[("jina", "embedder")].is_default is True
+    assert cache.get("default") is sentinel
+
+
 # ------------------------------------------------------------------
 # delete_model_endpoint
 # ------------------------------------------------------------------
@@ -426,6 +515,43 @@ async def test_delete_model_endpoint_removes_row_and_evicts_cache():
 
     assert ("jina", "embedder") not in repo._store
     assert "jina" not in cache
+
+
+@pytest.mark.asyncio
+async def test_delete_default_endpoint_promotes_survivor_and_evicts_default_cache():
+    # Deleting the default must promote a surviving endpoint so the 'default' alias
+    # keeps resolving (load_all only adds it for an is_default row), and evict the
+    # now-stale 'default' client.
+    rows = [
+        _make_row(name="jina", is_default=True),
+        _make_row(name="e5", is_default=False),
+    ]
+    repo = _FakeEndpointRepo(rows=rows)
+    cache: dict = {"jina": object(), "default": object()}
+    svc = _make_service(repo)
+    svc._client_caches["embedder"] = cache
+
+    await svc.delete_model_endpoint("jina", "embedder")
+
+    assert ("jina", "embedder") not in repo._store
+    assert "default" not in cache
+    # e5 is the lone survivor -> promoted so 'default' still resolves.
+    assert repo._store[("e5", "embedder")].is_default is True
+
+
+@pytest.mark.asyncio
+async def test_delete_non_default_endpoint_leaves_default_untouched():
+    rows = [
+        _make_row(name="jina", is_default=True),
+        _make_row(name="e5", is_default=False),
+    ]
+    repo = _FakeEndpointRepo(rows=rows)
+    svc = _make_service(repo)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    # Deleting a non-default endpoint leaves the existing default in place.
+    assert repo._store[("jina", "embedder")].is_default is True
 
 
 # ------------------------------------------------------------------

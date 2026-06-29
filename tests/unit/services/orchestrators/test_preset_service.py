@@ -335,6 +335,26 @@ async def test_update_preset_renames_preset():
 
 
 @pytest.mark.asyncio
+async def test_update_preset_rename_rejects_existing_target_name():
+    from core.utils.exceptions import ValidationError
+
+    rows = [
+        _make_row("old-name", "retrieval", _VALID_RET_CONFIG),
+        _make_row("taken", "retrieval", _VALID_RET_CONFIG),
+    ]
+    repo = _FakePresetRepo(rows=rows)
+    svc = _make_service(repo)
+
+    with pytest.raises(ValidationError, match="already exists"):
+        await svc.update_preset("old-name", "retrieval", new_name="taken")
+
+    # The rename must not run — the existing 'taken' preset is left intact.
+    assert not any(call[0] == "rename" for call in repo.calls)
+    assert ("old-name", "retrieval") in repo._store
+    assert ("taken", "retrieval") in repo._store
+
+
+@pytest.mark.asyncio
 async def test_update_preset_calls_partition_service():
     existing = _make_row("default", "retrieval", _VALID_RET_CONFIG)
     repo = _FakePresetRepo(rows=[existing])
@@ -376,13 +396,55 @@ async def test_delete_preset_raises_404_when_missing():
 async def test_delete_preset_raises_422_when_in_use():
     from core.utils.exceptions import ValidationError
 
-    existing = _make_row("default", "indexation")
+    existing = _make_row("legal", "indexation")
     repo = _FakePresetRepo(rows=[existing])
-    repo._partition_counts[("default", "indexation")] = 2
+    repo._partition_counts[("legal", "indexation")] = 2
     svc = _make_service(repo)
 
     with pytest.raises(ValidationError, match="2 partition"):
+        await svc.delete_preset("legal", "indexation")
+
+
+@pytest.mark.asyncio
+async def test_delete_preset_rejects_reserved_default():
+    from core.utils.exceptions import ValidationError
+
+    existing = _make_row("default", "indexation")
+    repo = _FakePresetRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    # The reserved 'default' preset is the partition fallback — deletion is blocked
+    # even when no partition currently references it, before the in-use count check.
+    with pytest.raises(ValidationError, match="reserved"):
         await svc.delete_preset("default", "indexation")
+    assert ("default", "indexation") in repo._store
+
+
+@pytest.mark.asyncio
+async def test_update_preset_rejects_renaming_reserved_default():
+    from core.utils.exceptions import ValidationError
+
+    existing = _make_row("default", "retrieval", _VALID_RET_CONFIG)
+    repo = _FakePresetRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    with pytest.raises(ValidationError, match="reserved"):
+        await svc.update_preset("default", "retrieval", new_name="custom")
+    assert not any(call[0] == "rename" for call in repo.calls)
+    assert ("default", "retrieval") in repo._store
+
+
+@pytest.mark.asyncio
+async def test_update_preset_allows_editing_reserved_default_config():
+    # Editing the default preset's config (no rename) must stay allowed.
+    existing = _make_row("default", "indexation", _VALID_IDX_CONFIG)
+    repo = _FakePresetRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    edited = {**_VALID_IDX_CONFIG, "enable_topic_tagging": False}
+    await svc.update_preset("default", "indexation", config=edited)
+
+    assert repo._store[("default", "indexation")]["config"]["enable_topic_tagging"] is False
 
 
 @pytest.mark.asyncio

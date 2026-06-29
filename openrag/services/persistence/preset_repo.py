@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from core.ports.preset_repo import PresetRepository
+from core.utils.exceptions import NotFoundError
 
 if TYPE_CHECKING:
     import asyncpg
@@ -79,18 +80,39 @@ class PgPresetRepository(PresetRepository):
         return self._row_to_dict(rec)
 
     async def rename(self, old_name: str, new_name: str, preset_type: str, config: dict) -> dict:
+        """Rename a preset to ``new_name`` (also updating its config) and repoint
+        every referencing partition, atomically.
+
+        Raises :class:`NotFoundError` if ``old_name`` no longer exists; a collision
+        with an existing ``new_name`` is rejected by the ``(name, preset_type)``
+        unique constraint. Returns the updated preset row as a dict.
+        """
+        # Rename in place with a plain UPDATE (not an upsert): the
+        # (name, preset_type) unique constraint then rejects a collision with an
+        # existing target name instead of an upsert silently overwriting it, and
+        # the row keeps its identity/created_at. Partitions reference a preset by
+        # its name string (partitions.{col}) with no FK, so referencing partitions
+        # are repointed in the same transaction or they would orphan.
+        col = _preset_column(preset_type)
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute(
-                    "DELETE FROM pipeline_presets WHERE name = $1 AND preset_type = $2",
+                rec = await conn.fetchrow(
+                    "UPDATE pipeline_presets SET name = $2, config = $3::jsonb, updated_at = now() "
+                    "WHERE name = $1 AND preset_type = $4 RETURNING *",
                     old_name,
+                    new_name,
+                    config,
                     preset_type,
                 )
-                rec = await conn.fetchrow(
-                    _UPSERT_PRESET_SQL,
+                if rec is None:
+                    # old_name vanished between the service's existence check and
+                    # this UPDATE (concurrent delete) — fail cleanly instead of
+                    # blowing up in _row_to_dict(None).
+                    raise NotFoundError(f"Preset '{old_name}' of type '{preset_type}' not found.")
+                await conn.execute(
+                    f"UPDATE partitions SET {col} = $1 WHERE {col} = $2",
                     new_name,
-                    preset_type,
-                    config,
+                    old_name,
                 )
         return self._row_to_dict(rec)
 
