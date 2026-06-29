@@ -1,0 +1,57 @@
+{
+    "run_id": "gen-20260626-121938",
+    "created_at": "2026-06-26T12:25:46.584044+00:00",
+    "schema_version": "2.0",
+    "prompt_version": "qgen-v2",
+    "partition": "test3",
+    "generator_model": "Mistral-Small-3.2-24B-Instruct-2506-FP8",
+    "base_url": "https://chat.lucie.ovh.linagora.com/v1/",
+    "language": "en",
+    "clustering": {
+        "method": "hdbscan",
+        "umap_n_neighbors": 15,
+        "umap_n_components": 5,
+        "umap_min_dist": 0.1,
+        "umap_metric": "cosine",
+        "umap_random_state": 42,
+        "kmeans_random_state": 42,
+        "kmeans_n_init": 10,
+        "dbscan_eps": 0.1,
+        "dbscan_min_samples": 3,
+        "dbscan_metric": "cosine"
+    },
+    "generation_params": {
+        "temperature": 0.2,
+        "seed": 42,
+        "n_min": 1,
+        "n_max": 3,
+        "n_questions_per_cluster": 2,
+        "n_unanswerable_per_cluster": 1
+    },
+    "filtration": {
+        "enabled": true,
+        "answerability_threshold": 0.7,
+        "self_containment_threshold": 0.7,
+        "clarity_threshold": 0.6,
+        "require_faithful": true,
+        "max_quality_retries": 2,
+        "drop_failed": true,
+        "critic_temperature": 0.0
+    },
+    "typing": {
+        "enabled": true,
+        "distribution": {
+            "single_hop_specific": 0.4,
+            "multi_hop_specific": 0.25,
+            "reasoning": 0.2,
+            "comparative": 0.15
+        }
+    },
+    "counts": {
+        "total": 274,
+        "answerable": 183,
+        "unanswerable": 91,
+        "failed_critic": 5,
+        "generation_errors": 0
+    }
+}
