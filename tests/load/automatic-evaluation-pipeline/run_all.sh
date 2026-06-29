@@ -18,10 +18,11 @@
 # are skipped (you are responsible for indexing the matching documents).
 
 # Resolve paths from this script's own location so the harness is portable across
-# machines. The eval pipeline lives at <openrag-repo>/automatic-evaluation-pipeline,
-# so the script dir is the working dir and its parent is the OpenRAG repo root.
+# machines and works regardless of where the eval dir sits in the repo (it lives at
+# tests/load/automatic-evaluation-pipeline/ on refactor/hexagonal). The OpenRAG repo
+# root is found via git toplevel rather than a fixed number of parent dirs.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OPENRAG_REPO="${OPENRAG_REPO:-$(dirname "$SCRIPT_DIR")}"
+OPENRAG_REPO="${OPENRAG_REPO:-$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || dirname "$SCRIPT_DIR")}"
 
 # Activate the project virtualenv (override with VENV_DIR). Skipped if absent, so the
 # script also works under uv/conda/system Python already on PATH.
