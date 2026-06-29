@@ -168,7 +168,8 @@ def test_create_is_default_keeps_single_default(api_client):
         assert defaults == [new_name], f"expected exactly one default ({new_name}), got {defaults}"
     finally:
         if original_default_llm is not None:
-            api_client.post(f"/model-endpoints/llm/{original_default_llm}/set-default")
+            restore = api_client.post(f"/model-endpoints/llm/{original_default_llm}/set-default")
+            _assert_success(restore, context=f"restore default llm endpoint {original_default_llm}")
         _delete_ignore_errors(api_client, f"/model-endpoints/llm/{new_name}")
 
 
