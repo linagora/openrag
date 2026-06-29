@@ -580,7 +580,7 @@ async def test_pipeline_logs_per_stage_timings(monkeypatch):
         vector_store=FakeVectorStore(),
     )
 
-    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "note.txt"})
+    await pipeline.run({"task_id": "t1", "document": document, "partition": "tenant-a", "filename": "note.txt"})
 
     assert recorder.message == "indexing stage timings (ms)"
     assert recorder.bound is not None
@@ -588,5 +588,6 @@ async def test_pipeline_logs_per_stage_timings(monkeypatch):
         assert key in recorder.bound
     # Optional stages weren't configured, so they aren't timed.
     assert "ms_caption" not in recorder.bound
+    assert recorder.bound["task_id"] == "t1"
     assert recorder.bound["n_chunks"] == 1
     assert recorder.bound["filename"] == "note.txt"

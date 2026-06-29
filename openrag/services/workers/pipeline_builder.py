@@ -159,6 +159,7 @@ class IndexingPipeline:
             return row
         finally:
             logger.bind(
+                task_id=row.get("task_id"),
                 filename=row.get("filename", ""),
                 n_chunks=len(row.get("chunks") or []),
                 **{f"ms_{name}": round(value) for name, value in timings.items()},

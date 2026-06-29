@@ -196,6 +196,32 @@ async def test_process_file_success_sets_state_and_returns_count(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_process_file_passes_task_id_to_pipeline_row(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    captured: dict[str, Any] = {}
+
+    class RecordingPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            captured.update(row)
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    tsm = _fake_tsm()
+    worker = IndexerWorker(pipeline=RecordingPipeline(), task_state_manager=tsm)
+
+    await worker.process_file(
+        task_id="t1",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+    )
+
+    assert captured["task_id"] == "t1"
+
+
+@pytest.mark.asyncio
 async def test_process_file_pipeline_failure_sets_failed_and_reraises(tmp_path: Path) -> None:
     path = tmp_path / "bad.txt"
     path.write_bytes(b"x")
