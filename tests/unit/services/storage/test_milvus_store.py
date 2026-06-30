@@ -276,10 +276,16 @@ class TestChunkOrderMetadata:
 
 
 class TestSafeBatchSize:
-    def test_scalar_only_keeps_large_default(self, store: MilvusVectorStore) -> None:
-        # No vector requested → tiny rows → keep the large default page.
-        assert store._safe_batch_size(["*"]) == 16_000
+    def test_explicit_scalar_projection_keeps_large_default(self, store: MilvusVectorStore) -> None:
+        # No vector and no wildcard → tiny rows → keep the large default page.
         assert store._safe_batch_size(["_id"]) == 16_000
+        assert store._safe_batch_size(["partition", "file_id"]) == 16_000
+
+    def test_wildcard_is_treated_as_vector_inclusive(self, store: MilvusVectorStore) -> None:
+        # Milvus 2.6 returns the dense vector for ``["*"]`` too, so a wildcard
+        # page must shrink even without an explicit ``"vector"`` field.
+        store._embedding_dimension = 1024
+        assert store._safe_batch_size(["*"]) == 3_276
 
     def test_vector_request_shrinks_page(self, store: MilvusVectorStore) -> None:
         store._embedding_dimension = 1024

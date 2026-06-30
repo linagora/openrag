@@ -515,10 +515,14 @@ class MilvusVectorStore(VectorStore):
     def _safe_batch_size(self, output_fields: list[str]) -> int:
         """Cap the batch so one page stays under Milvus's ~64MB result limit.
 
-        Only matters when the dense ``vector`` is requested (~dim*4 bytes/row);
-        scalar-only pages are small, so they keep the large default.
+        Only matters when the dense ``vector`` rides along (~dim*4 bytes/row);
+        explicit scalar projections are small, so they keep the large default.
+        Milvus 2.6 returns the vector for the ``"*"`` wildcard too — the search
+        path strips it post-hoc via ``_SEARCH_RESULT_DROPPED_KEYS`` and
+        ``query_chunks_by_filter(["*"])`` leaks it — so ``"*"`` counts as
+        vector-inclusive here.
         """
-        if "vector" not in output_fields:
+        if "vector" not in output_fields and "*" not in output_fields:
             return 16_000
         dim = self._embedding_dimension or 1024
         budget = 32 * 1024 * 1024  # ~half of Milvus's ~64MB cap
