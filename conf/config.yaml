@@ -115,8 +115,11 @@ map_reduce:
 
 # --- Logging ---
 # Env: LOG_LEVEL
+# INFO by default: DEBUG logs (and the long-lived JSON sink) persist user
+# queries and other potentially sensitive request data. Raise to DEBUG only
+# for short-lived troubleshooting.
 verbose:
-  level: DEBUG
+  level: INFO
 
 # --- Server ---
 # Env: PREFERRED_URL_SCHEME

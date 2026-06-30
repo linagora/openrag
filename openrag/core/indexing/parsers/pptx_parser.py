@@ -31,6 +31,12 @@ from .registry import parser_registry
 
 logger = logging.getLogger(__name__)
 
+# Parser-bomb caps (mirrors the EML loader's module-level limits): bound how many
+# slides we walk and how many pictures we decode into memory so a crafted PPTX
+# can't exhaust CPU/memory during ingestion.
+_MAX_SLIDES = 2000
+_MAX_IMAGES = 2000
+
 
 def _image_ref(index: int) -> str:
     """Synthetic markdown image ref used as a placeholder for slide pictures."""
@@ -83,11 +89,17 @@ class PptxParser(DocumentParser):
         images: list[ImageBlock] = []
 
         for slide_num, slide in enumerate(presentation.slides, start=1):
+            if slide_num > _MAX_SLIDES:
+                logger.warning("Capping PPTX slide processing at %d slides", _MAX_SLIDES)
+                break
             md = ""
             title = slide.shapes.title
 
             for shape in slide.shapes:
                 if self._is_picture(shape):
+                    # Bound pictures decoded into memory across the whole deck.
+                    if len(images) >= _MAX_IMAGES:
+                        continue
                     try:
                         with Image.open(BytesIO(shape.image.blob)) as im:
                             im = ensure_png_compatible_mode(im)

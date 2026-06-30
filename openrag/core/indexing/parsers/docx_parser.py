@@ -48,6 +48,13 @@ logger = logging.getLogger(__name__)
 # loader used (``components/indexer/loaders/docx.py``).
 _MARKITDOWN_IMAGE_PLACEHOLDER = re.compile(r"!\[.*?\]\(data:image/[^)]*\)")
 
+# Parser-bomb caps (mirrors the EML loader's module-level limits): bound how many
+# embedded media entries we iterate and how large any single (decompressed) entry
+# may be, so a crafted DOCX can't exhaust memory via thousands of parts, one huge
+# image, or an attacker-controlled positional index in the media filename.
+_MAX_ARCHIVE_ENTRIES = 2000
+_MAX_ARCHIVE_ENTRY_BYTES = 100 * 1024 * 1024
+
 
 def _image_ref(index: int) -> str:
     """Synthetic markdown image ref used as a placeholder for embedded DOCX images."""
@@ -133,13 +140,30 @@ class DocxParser(DocumentParser):
                 media = [n for n in zf.namelist() if n.startswith("word/media/")]
                 if not media:
                     return []
+                if len(media) > _MAX_ARCHIVE_ENTRIES:
+                    logger.warning(
+                        "Capping DOCX embedded media: %d entries found, processing first %d",
+                        len(media),
+                        _MAX_ARCHIVE_ENTRIES,
+                    )
+                    media = media[:_MAX_ARCHIVE_ENTRIES]
                 ordered: dict[int, bytes | None] = {}
                 for name in media:
-                    raw = zf.read(name)
                     try:
                         order_num = int(name.split("media/image")[1].split(".")[0])
                     except (IndexError, ValueError):
                         continue
+                    # order_num comes from the untrusted filename; a non-positive
+                    # value would misalign placeholders or index wrongly. Skip it.
+                    if order_num < 1:
+                        logger.warning("Skipping DOCX media with non-positive index: %s", name)
+                        continue
+                    # Bound per-entry decompressed size (read from the zip header,
+                    # before decompressing) so one huge embedded image can't OOM us.
+                    if zf.getinfo(name).file_size > _MAX_ARCHIVE_ENTRY_BYTES:
+                        logger.warning("Skipping oversized DOCX media %s (%d bytes)", name, zf.getinfo(name).file_size)
+                        continue
+                    raw = zf.read(name)
                     try:
                         with Image.open(BytesIO(raw)) as im:
                             im = ensure_png_compatible_mode(im)
@@ -149,8 +173,15 @@ class DocxParser(DocumentParser):
                         ordered[order_num] = None
                 if not ordered:
                     return []
+                # Reorder by document position. ``max_order`` derives from the
+                # (untrusted) filename, so only materialise the positional array
+                # when it's within the entry cap; otherwise fall back to a compact
+                # ordered list to avoid an attacker-controlled huge allocation
+                # (``[None] * max_order`` was a memory bomb).
                 max_order = max(ordered)
-                return [ordered.get(i + 1) for i in range(max_order)]
+                if max_order <= _MAX_ARCHIVE_ENTRIES:
+                    return [ordered.get(i + 1) for i in range(max_order)]
+                return [ordered[k] for k in sorted(ordered)]
         except zipfile.BadZipFile:
             logger.warning("DOCX is not a valid zip archive; skipping image extraction")
             return []

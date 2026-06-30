@@ -42,6 +42,12 @@ def _marker_num_gpus(config) -> float:
         return requested_gpus if torch.cuda.is_available() else 0
 
 
+# Parser-bomb cap: never process more than this many pages from one PDF, so a
+# crafted high-page-count file can't exhaust CPU/memory during ingestion.
+# 0 or negative disables the cap.
+_MAX_PDF_PAGES = 2000
+
+
 @ray.remote
 class MarkerWorker:
     def __init__(self):
@@ -286,15 +292,28 @@ class MarkerPool:
     async def process_pdf(self, file_path: str):
         chunk_size = self.config.loader.marker_chunk_size
 
-        if chunk_size <= 0:
-            return await self._process_chunk(file_path, page_range=None, label="(all pages)")
+        total_pages = self._get_page_count(file_path)
+        capped = _MAX_PDF_PAGES > 0 and total_pages > _MAX_PDF_PAGES
+        if capped:
+            self.logger.warning(
+                f"PDF has {total_pages} pages; processing only the first {_MAX_PDF_PAGES} (max page cap)"
+            )
+        page_count = min(total_pages, _MAX_PDF_PAGES) if _MAX_PDF_PAGES > 0 else total_pages
 
-        page_count = self._get_page_count(file_path)
+        if chunk_size <= 0:
+            # When capped, restrict to the first page_count pages instead of all.
+            page_range = list(range(page_count)) if capped else None
+            label = f"(first {page_count}p)" if capped else "(all pages)"
+            return await self._process_chunk(file_path, page_range=page_range, label=label)
+
         chunks = self._create_chunks(page_count, chunk_size)
 
         if len(chunks) == 1:
             page_range, label = chunks[0]
-            return await self._process_chunk(file_path, page_range=None, label=label)
+            # When capped, the single chunk only covers the first page_count pages,
+            # so pass that explicit range — page_range=None would process the whole
+            # file and bypass the cap. Uncapped, None means "all pages".
+            return await self._process_chunk(file_path, page_range=(page_range if capped else None), label=label)
 
         self.logger.info(
             f"Splitting {page_count}-page PDF into {len(chunks)} chunks of ~{chunk_size} pages for parallel processing"

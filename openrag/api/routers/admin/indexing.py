@@ -30,6 +30,7 @@ from api.dependencies.files import (
     validate_metadata,
 )
 from api.routers.admin.task_logs import collect_task_logs
+from core.utils.exceptions import OpenRAGError
 from core.utils.filename import sanitize_filename
 from core.utils.log_tail import app_log_file
 from core.utils.logging import get_logger
@@ -138,6 +139,11 @@ async def add_file(
     file.filename = sanitize_filename(file.filename)
     try:
         file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+    except OpenRAGError:
+        # Domain errors (e.g. 413 too-large, 400 bad filename) carry their own
+        # HTTP status; let the OpenRAGError handler map them instead of masking
+        # the upload rejection as a 500.
+        raise
     except Exception as e:
         # Log the full error server-side; return a generic message so we don't
         # leak filesystem paths or internals to the client.
