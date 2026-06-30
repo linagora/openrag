@@ -162,6 +162,11 @@ class MilvusVectorStore(VectorStore):
             ) from e
 
         self._embedding_dimension: int | None = None
+        # Real dense-vector dimension read from the live collection schema,
+        # cached for page sizing. Distinct from ``_embedding_dimension`` (the
+        # configured value passed to ``initialize``), which is ignored when the
+        # collection already exists and so may not match what Milvus stores.
+        self._schema_vector_dim: int | None = None
         self._loaded = False
         self._load_lock = asyncio.Lock()
         # Connection healing: pymilvus 2.6 exposes no documented client-level
@@ -519,21 +524,26 @@ class MilvusVectorStore(VectorStore):
     # ------------------------------------------------------------------
 
     def _vector_dim(self) -> int:
-        """Dense-vector dimension for page sizing.
+        """Best-effort dense-vector dimension for page sizing.
 
-        Prefers the value recorded at :meth:`initialize`. A read-only process
-        never indexes, so that may be ``None``; fall back to the live collection
-        schema (cached on success) and finally to :data:`_UNKNOWN_VECTOR_DIM` so
-        the page stays safe even when the schema can't be read. Reading too
-        small a dimension here would re-introduce the oversized-page failure
-        this guard exists to prevent.
+        Prefers the *real* dimension from the live collection schema, because
+        the value recorded at :meth:`initialize` is only the dimension this
+        process was configured with — it is ignored when the collection already
+        exists, so it can disagree with what Milvus actually stores. Page sizing
+        cares about on-the-wire bytes, so the schema wins. The schema read is
+        cached (the dimension can't change without a drop + recreate). Falls
+        back to the :meth:`initialize` value when the schema can't be read, then
+        to :data:`_UNKNOWN_VECTOR_DIM`. Reading too small a dimension here would
+        re-introduce the oversized-page failure this guard exists to prevent.
         """
-        if self._embedding_dimension is not None:
-            return self._embedding_dimension
+        if self._schema_vector_dim is not None:
+            return self._schema_vector_dim
         dim = self._describe_vector_dim()
         if dim is not None:
-            self._embedding_dimension = dim
+            self._schema_vector_dim = dim
             return dim
+        if self._embedding_dimension is not None:
+            return self._embedding_dimension
         return _UNKNOWN_VECTOR_DIM
 
     def _describe_vector_dim(self) -> int | None:
@@ -580,7 +590,7 @@ class MilvusVectorStore(VectorStore):
         """Drain a Milvus 2.6 ``query_iterator`` into a list.
 
         ``batch_size`` defaults to :meth:`_safe_batch_size`, which shrinks the
-        page when the dense vector is requested so one page stays under Milvus's
+        page for vector-inclusive projections so one page stays under Milvus's
         result-size limit. Total result-set size is unaffected — the iterator
         paginates until the filter is drained.
 
@@ -1070,6 +1080,9 @@ class MilvusVectorStore(VectorStore):
             ) from e
         self._loaded = False
         self._embedding_dimension = None
+        # A recreated collection may have a different dimension — drop the
+        # cached schema read so the next query re-probes.
+        self._schema_vector_dim = None
 
     # ------------------------------------------------------------------
     # Milvus-specific (not on the VectorStore ABC)
@@ -1152,9 +1165,10 @@ class MilvusVectorStore(VectorStore):
     ) -> list[dict[str, Any]]:
         """Return full row data for every chunk matching ``filters``.
 
-        ``output_fields`` defaults to ``["*"]``. Milvus 2.6 quirk: ``"*"``
-        does NOT include the dense vector — callers that need the vector
-        must pass ``output_fields=["*", "vector"]`` explicitly.
+        ``output_fields`` defaults to ``["*"]``, which in Milvus 2.6 includes
+        the dense ``vector`` field (unlike :meth:`search`, which strips it via
+        ``_SEARCH_RESULT_DROPPED_KEYS``). Callers that don't want the vector
+        should pass an explicit scalar projection instead of ``["*"]``.
         """
         self._resolve_collection(collection)
         expr = self._build_filter_expr(filters)
