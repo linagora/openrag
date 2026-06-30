@@ -298,10 +298,30 @@ class TestSafeBatchSize:
         assert page == (32 * 1024 * 1024) // (4096 * 4 + 6_144)  # 1489
         assert page < 3_276  # bigger vectors → fewer rows per page
 
-    def test_unset_dimension_falls_back_to_1024(self, store: MilvusVectorStore) -> None:
-        # ``_embedding_dimension`` is None before initialize(); must not crash.
+    def test_unknown_dimension_reads_collection_schema(self, store: MilvusVectorStore) -> None:
+        # Read-only process: dim unset (never indexed), but the live schema
+        # knows the real dimension — page must size to *that*, not a guess.
         assert store._embedding_dimension is None
-        assert store._safe_batch_size(["vector"]) == 3_276
+        store._client.describe_collection.return_value = {
+            "fields": [
+                {"name": "text", "params": {}},
+                {"name": "vector", "params": {"dim": 4096}},
+            ]
+        }
+        page = store._safe_batch_size(["*"])
+        assert page == (32 * 1024 * 1024) // (4096 * 4 + 6_144)  # 1489
+        # Resolved dim is cached so we don't re-probe Milvus on every query.
+        assert store._embedding_dimension == 4096
+
+    def test_unknown_dimension_falls_back_to_conservative_cap(self, store: MilvusVectorStore) -> None:
+        import services.storage.milvus_store as store_mod
+
+        # Schema probe fails (e.g. collection absent) → conservative large dim,
+        # never a small guess that would under-size a high-dim collection's page.
+        store._client.describe_collection.side_effect = RuntimeError("no collection")
+        page = store._safe_batch_size(["vector"])
+        assert page == (32 * 1024 * 1024) // (store_mod._UNKNOWN_VECTOR_DIM * 4 + 6_144)
+        assert store._embedding_dimension is None  # not cached on failure
 
     def test_page_never_exceeds_default_cap(self, store: MilvusVectorStore) -> None:
         store._embedding_dimension = 1

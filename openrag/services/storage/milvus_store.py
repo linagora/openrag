@@ -107,6 +107,12 @@ RRF_K = 100
 #: noisy and large; ``text`` stays in the payload (callers need it).
 _SEARCH_RESULT_DROPPED_KEYS = frozenset({"vector"})
 
+#: Fallback dense-vector dimension for page sizing when the real one is
+#: unknown — i.e. a read-only process that never ran ``initialize`` AND the
+#: collection-schema probe also failed. Conservatively large so a vector page
+#: stays under Milvus's result-size cap for any realistic embedder.
+_UNKNOWN_VECTOR_DIM = 4096
+
 #: BM25 analyzer params for the ``text`` field — standard tokenizer plus
 #: OpenRAG-specific stop words so chunk-boundary / image-placeholder markers
 #: don't pollute lexical scores.
@@ -512,6 +518,40 @@ class MilvusVectorStore(VectorStore):
     # Sync paginated query helper (Milvus 2.6 query_iterator is sync-only)
     # ------------------------------------------------------------------
 
+    def _vector_dim(self) -> int:
+        """ dense-vector dimension for page sizing.
+
+        Prefers the value recorded at :meth:`initialize`. A read-only process
+        never indexes, so that may be ``None``; fall back to the live collection
+        schema (cached on success) and finally to :data:`_UNKNOWN_VECTOR_DIM` so
+        the page stays safe even when the schema can't be read. Reading too
+        small a dimension here would re-introduce the oversized-page failure
+        this guard exists to prevent.
+        """
+        if self._embedding_dimension is not None:
+            return self._embedding_dimension
+        dim = self._describe_vector_dim()
+        if dim is not None:
+            self._embedding_dimension = dim
+            return dim
+        return _UNKNOWN_VECTOR_DIM
+
+    def _describe_vector_dim(self) -> int | None:
+        """Read the ``vector`` field's ``dim`` from the live collection schema.
+
+        Returns ``None`` if the collection or field can't be inspected (e.g. the
+        collection does not exist yet), leaving the caller to pick a fallback.
+        """
+        try:
+            desc = self._client.describe_collection(self._collection_name)
+            for field in desc.get("fields", []):
+                if field.get("name") == "vector":
+                    dim = field.get("params", {}).get("dim")
+                    return int(dim) if dim else None
+        except Exception:
+            return None
+        return None
+
     def _safe_batch_size(self, output_fields: list[str]) -> int:
         """Cap the batch so one page stays under Milvus's ~64MB result limit.
 
@@ -520,11 +560,13 @@ class MilvusVectorStore(VectorStore):
         Milvus 2.6 returns the vector for the ``"*"`` wildcard too — the search
         path strips it post-hoc via ``_SEARCH_RESULT_DROPPED_KEYS`` and
         ``query_chunks_by_filter(["*"])`` leaks it — so ``"*"`` counts as
-        vector-inclusive here.
+        vector-inclusive here. The dimension comes from :meth:`_vector_dim`, not
+        a fixed guess, so a read-only process still sizes pages to the real
+        collection.
         """
         if "vector" not in output_fields and "*" not in output_fields:
             return 16_000
-        dim = self._embedding_dimension or 1024
+        dim = self._vector_dim()
         budget = 32 * 1024 * 1024  # ~half of Milvus's ~64MB cap
         per_row = dim * 4 + 6_144  # float32 vector + text/metadata headroom
         return max(1, min(16_000, budget // per_row))
