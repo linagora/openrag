@@ -12,10 +12,20 @@ from fastapi import Depends, Form, UploadFile
 
 FORBIDDEN_CHARS_IN_FILE_ID = set("/")
 
-# Maximum accepted upload size. Streamed writes are bounded so a single request
-# cannot exhaust disk/RAM (the per-user quota limits file count, not bytes).
-# 0 or negative disables the limit. Override with MAX_UPLOAD_SIZE_MB.
-MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_MB", "1024")) * 1024 * 1024
+
+def _max_upload_size_bytes() -> int:
+    """Maximum accepted upload size in bytes, resolved at call time.
+
+    Streamed writes are bounded so a single request cannot exhaust disk/RAM
+    (the per-user quota limits file count, not bytes). 0 or negative disables
+    the limit. Override with ``MAX_UPLOAD_SIZE_MB``.
+
+    Read lazily rather than at import: ``api.main`` imports the admin routers
+    (and therefore this module) before it calls ``load_config()`` /
+    ``load_dotenv()``, so evaluating at import would ignore a
+    ``MAX_UPLOAD_SIZE_MB`` set in ``.env`` and silently use the default.
+    """
+    return int(os.getenv("MAX_UPLOAD_SIZE_MB", "1024")) * 1024 * 1024
 
 
 async def validate_file_id(file_id: str):
@@ -64,6 +74,7 @@ async def save_file_to_disk(
     except ValueError:
         raise ValidationError("Uploaded filename resolves outside destination directory.", status_code=400)
 
+    max_bytes = _max_upload_size_bytes()
     total = 0
     try:
         async with aiofiles.open(file_path, "wb") as buffer:
@@ -72,9 +83,9 @@ async def save_file_to_disk(
                 if not chunk:
                     break
                 total += len(chunk)
-                if MAX_UPLOAD_SIZE_BYTES > 0 and total > MAX_UPLOAD_SIZE_BYTES:
+                if max_bytes > 0 and total > max_bytes:
                     raise ValidationError(
-                        f"File exceeds the maximum allowed size of {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)} MB.",
+                        f"File exceeds the maximum allowed size of {max_bytes // (1024 * 1024)} MB.",
                         status_code=413,
                     )
                 await buffer.write(chunk)
