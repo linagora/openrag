@@ -18,6 +18,7 @@ from api.dependencies.files import (
     validate_metadata,
 )
 from api.schemas.admin.tools import ToolInfo
+from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from di.providers import get_config, get_conversion_service
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
@@ -120,6 +121,11 @@ async def execute_tool(
             )
 
     except HTTPException:
+        raise
+    except OpenRAGError:
+        # Domain errors (e.g. 413 too-large, 400 bad filename from
+        # save_file_to_disk) carry their own HTTP status; let the OpenRAGError
+        # handler map them instead of masking the rejection as a 500.
         raise
     except TimeoutError:
         logger.warning("Tool execution timed out.", extra={"filename": file.filename})
