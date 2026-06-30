@@ -27,20 +27,25 @@ env:
 jobs:
   guard:
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
-      # Safety rails for a hand-dispatched release build.
+      # Safety rails for a hand-dispatched release build. Context/input are read
+      # via env (not inlined into the shell) to avoid expression injection.
       - name: Validate ref and version
+        env:
+          REF: ${{ github.ref }}
+          VERSION: ${{ inputs.version }}
         run: |
-          if [ "${{ github.ref }}" != "refs/heads/refactor/hexagonal" ]; then
-            echo "::error::build_rc.yml may only be dispatched from refactor/hexagonal (got ${{ github.ref }})."
+          if [ "$REF" != "refs/heads/refactor/hexagonal" ]; then
+            echo "::error::build_rc.yml may only be dispatched from refactor/hexagonal (got $REF)."
             exit 1
           fi
-          case "${{ inputs.version }}" in
-            latest|"")
-              echo "::error::Refusing to publish an RC under the '${{ inputs.version }}' tag."
-              exit 1
-              ;;
-          esac
+          # Only the 2.0.0 RC line — the tree's pyproject is 2.0.0, so a tag from
+          # another line (e.g. v3.0.0-rc.1) would mislabel the built images.
+          if ! printf '%s\n' "$VERSION" | grep -Eq '^v2\.0\.0-rc\.[0-9]+$'; then
+            echo "::error::Version must match v2.0.0-rc.N (got '$VERSION')."
+            exit 1
+          fi
 
   build-and-push-image:
     needs: guard
