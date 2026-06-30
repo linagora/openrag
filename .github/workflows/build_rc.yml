@@ -1,12 +1,13 @@
 # TEMPORARY (v2.0 release-candidate only).
 #
-# Builds and pushes the OpenRag api + ray images from `refactor/hexagonal` so
-# v2.0.0-rc.* can be published before the GA cutover, WITHOUT touching the
-# production release pipeline (`build.yml`, which only builds from `main`).
+# Builds and pushes the OpenRag api, ray, and admin-ui images from
+# `refactor/hexagonal` so v2.0.0-rc.* can be published before the GA cutover,
+# WITHOUT touching the production release pipeline (`build.yml`).
 #
-# Runs entirely on GitHub-hosted runners — no local/L4 builds. Same two images
-# and Dockerfiles as `build.yml`; the api image goes to ghcr + Docker Hub, the
-# ray image to ghcr only (matching `build.yml`). Never tags `latest`.
+# Runs entirely on GitHub-hosted runners — no local/L4 builds. api and admin-ui
+# go to ghcr + Docker Hub; ray goes to ghcr only. NOTE: `build.yml` (the GA
+# pipeline) builds only api + ray — it needs the admin-ui job added before GA.
+# Never tags `latest`.
 #
 # DELETE this whole file once `refactor/hexagonal` is merged to `main` and
 # releases build from `main` again.
