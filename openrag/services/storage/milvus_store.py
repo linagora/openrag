@@ -519,7 +519,7 @@ class MilvusVectorStore(VectorStore):
     # ------------------------------------------------------------------
 
     def _vector_dim(self) -> int:
-        """ dense-vector dimension for page sizing.
+        """Dense-vector dimension for page sizing.
 
         Prefers the value recorded at :meth:`initialize`. A read-only process
         never indexes, so that may be ``None``; fall back to the live collection
