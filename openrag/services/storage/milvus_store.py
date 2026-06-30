@@ -512,16 +512,36 @@ class MilvusVectorStore(VectorStore):
     # Sync paginated query helper (Milvus 2.6 query_iterator is sync-only)
     # ------------------------------------------------------------------
 
+    def _safe_batch_size(self, output_fields: list[str]) -> int:
+        """Cap the batch so one page stays under Milvus's ~64MB result limit.
+
+        Only matters when the dense ``vector`` is requested (~dim*4 bytes/row);
+        scalar-only pages are small, so they keep the large default.
+        """
+        if "vector" not in output_fields:
+            return 16_000
+        dim = self._embedding_dimension or 1024
+        budget = 32 * 1024 * 1024  # ~half of Milvus's ~64MB cap
+        per_row = dim * 4 + 6_144  # float32 vector + text/metadata headroom
+        return max(1, min(16_000, budget // per_row))
+
     def _iter_query(
         self,
         expr: str,
         output_fields: list[str],
-        batch_size: int = 16_000,
+        batch_size: int | None = None,
     ) -> list[dict[str, Any]]:
         """Drain a Milvus 2.6 ``query_iterator`` into a list.
 
+        ``batch_size`` defaults to :meth:`_safe_batch_size`, which shrinks the
+        page when the dense vector is requested so one page stays under Milvus's
+        result-size limit. Total result-set size is unaffected — the iterator
+        paginates until the filter is drained.
+
         Synchronous; call via :func:`asyncio.to_thread` from async methods.
         """
+        if batch_size is None:
+            batch_size = self._safe_batch_size(output_fields)
         iterator = self._client.query_iterator(
             collection_name=self._collection_name,
             filter=expr,

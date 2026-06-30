@@ -271,6 +271,38 @@ class TestChunkOrderMetadata:
 
 
 # ---------------------------------------------------------------------------
+# _safe_batch_size — shrink the query_iterator page when vectors are requested
+# ---------------------------------------------------------------------------
+
+
+class TestSafeBatchSize:
+    def test_scalar_only_keeps_large_default(self, store: MilvusVectorStore) -> None:
+        # No vector requested → tiny rows → keep the large default page.
+        assert store._safe_batch_size(["*"]) == 16_000
+        assert store._safe_batch_size(["_id"]) == 16_000
+
+    def test_vector_request_shrinks_page(self, store: MilvusVectorStore) -> None:
+        store._embedding_dimension = 1024
+        # 32 MiB budget / (1024*4 + 6144) bytes-per-row = 3276, well under 16k.
+        assert store._safe_batch_size(["*", "vector"]) == 3_276
+
+    def test_larger_embedder_shrinks_further(self, store: MilvusVectorStore) -> None:
+        store._embedding_dimension = 4096
+        page = store._safe_batch_size(["*", "vector"])
+        assert page == (32 * 1024 * 1024) // (4096 * 4 + 6_144)  # 1489
+        assert page < 3_276  # bigger vectors → fewer rows per page
+
+    def test_unset_dimension_falls_back_to_1024(self, store: MilvusVectorStore) -> None:
+        # ``_embedding_dimension`` is None before initialize(); must not crash.
+        assert store._embedding_dimension is None
+        assert store._safe_batch_size(["vector"]) == 3_276
+
+    def test_page_never_exceeds_default_cap(self, store: MilvusVectorStore) -> None:
+        store._embedding_dimension = 1
+        assert store._safe_batch_size(["vector"]) <= 16_000
+
+
+# ---------------------------------------------------------------------------
 # _chunk_to_entity
 # ---------------------------------------------------------------------------
 
