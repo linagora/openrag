@@ -1,4 +1,4 @@
-import type { ComponentType } from "react";
+import { useState, type ComponentType } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
@@ -15,6 +15,14 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { QuotaUsageMeter } from "@/components/shared/quota-usage-meter";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useAuth } from "@/lib/auth";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -125,6 +133,8 @@ function RecentTasks({ isLoading, tasks }: { isLoading: boolean; tasks: TaskList
 
 export default function OverviewPage() {
   const { canManageUsers, canViewSystem, canCreatePartition, canWrite } = usePermissions();
+  const [uploadHelpOpen, setUploadHelpOpen] = useState(false);
+  const [rememberedPartition] = useState(() => sessionStorage.getItem("documents.partition") || "");
 
   // `GET /partition/` and `/queue/tasks` are membership-scoped server-side, so the
   // same queries serve admins and partition members. Platform-only data is gated.
@@ -168,25 +178,27 @@ export default function OverviewPage() {
   const quotaIndexed = me?.file_count ?? 0;
   const quotaEff: number | "unlimited" =
     me?.file_quota == null || me.file_quota < 0 ? "unlimited" : me.file_quota;
-  const writablePartition = partitions.find((partition) => canWrite(partition.role));
-  const uploadQuickAction = partitionsQuery.isLoading
+  const writablePartitions = partitions.filter((partition) => canWrite(partition.role));
+  const rememberedWritablePartition = writablePartitions.find(
+    (partition) => partition.partition === rememberedPartition || partition.name === rememberedPartition,
+  );
+  const writablePartition = rememberedWritablePartition ?? writablePartitions[0];
+  const uploadQuickAction = partitionsQuery.isLoading || partitionsQuery.isError
     ? null
     : writablePartition
       ? {
-          href: `/documents?partition=${encodeURIComponent(writablePartition.name)}`,
+          href: `/documents?partition=${encodeURIComponent(writablePartition.partition)}`,
           title: "Upload Documents",
           description: "Add documents to a writable partition",
-          icon: Upload,
+          type: "link" as const,
         }
       : canCreatePartition
         ? {
-            href: "/partitions?create=1",
-            title: "Create Partition to Upload",
+            title: "Upload Documents",
             description: "Create a partition first, then add documents",
-            icon: Plus,
+            type: "dialog" as const,
           }
         : null;
-  const UploadQuickActionIcon = uploadQuickAction?.icon;
 
   return (
     <div>
@@ -297,10 +309,10 @@ export default function OverviewPage() {
                   </Link>
                 </Button>
               )}
-              {uploadQuickAction && (
+              {uploadQuickAction?.type === "link" && (
                 <Button variant="outline" className="justify-start h-auto py-3" asChild>
                   <Link to={uploadQuickAction.href}>
-                    {UploadQuickActionIcon && <UploadQuickActionIcon className="h-4 w-4 mr-2" />}
+                    <Upload className="h-4 w-4 mr-2" />
                     <div className="text-left">
                       <div className="font-medium">{uploadQuickAction.title}</div>
                       <div className="text-xs text-muted-foreground">
@@ -311,10 +323,45 @@ export default function OverviewPage() {
                   </Link>
                 </Button>
               )}
+              {uploadQuickAction?.type === "dialog" && (
+                <Button
+                  variant="outline"
+                  className="justify-start h-auto py-3"
+                  onClick={() => setUploadHelpOpen(true)}
+                >
+                  <Upload className="h-4 w-4 mr-2" />
+                  <div className="text-left">
+                    <div className="font-medium">{uploadQuickAction.title}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {uploadQuickAction.description}
+                    </div>
+                  </div>
+                  <ArrowRight className="h-4 w-4 ml-auto" />
+                </Button>
+              )}
             </div>
           </CardContent>
         </Card>
       </div>
+
+      <Dialog open={uploadHelpOpen} onOpenChange={setUploadHelpOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create a partition before uploading</DialogTitle>
+            <DialogDescription>
+              You don't have a partition you can upload to yet. Create one first?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setUploadHelpOpen(false)}>
+              Cancel
+            </Button>
+            <Button asChild>
+              <Link to="/partitions?create=1">Create Partition</Link>
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <RecentTasks isLoading={tasksQuery.isLoading} tasks={tasks.slice(0, 5)} />
     </div>

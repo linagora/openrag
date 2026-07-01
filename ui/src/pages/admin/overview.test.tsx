@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -8,12 +9,17 @@ const queryData = vi.hoisted(() => ({
   partitions: [
     {
       partition: "shared-docs",
-      name: "shared-docs",
+      name: "Shared docs display name",
       role: "viewer",
       document_count: 3,
       created_at: "2026-01-01T00:00:00Z",
     },
   ],
+  isError: false,
+  isLoading: false,
+}));
+const permissions = vi.hoisted(() => ({
+  canCreatePartition: true,
 }));
 
 vi.mock("@tanstack/react-query", () => ({
@@ -22,7 +28,8 @@ vi.mock("@tanstack/react-query", () => ({
     if (key === "partitions") {
       return {
         data: { partitions: queryData.partitions },
-        isLoading: false,
+        isError: queryData.isError,
+        isLoading: queryData.isLoading,
       };
     }
     if (key === "tasks") {
@@ -55,17 +62,21 @@ vi.mock("@/lib/permissions", () => ({
   usePermissions: () => ({
     canManageUsers: false,
     canViewSystem: false,
-    canCreatePartition: true,
+    canCreatePartition: permissions.canCreatePartition,
     canWrite: (role: string | null | undefined) => role === "editor" || role === "owner",
   }),
 }));
 
 describe("OverviewPage quick actions", () => {
   beforeEach(() => {
+    sessionStorage.clear();
+    permissions.canCreatePartition = true;
+    queryData.isError = false;
+    queryData.isLoading = false;
     queryData.partitions = [
       {
         partition: "shared-docs",
-        name: "shared-docs",
+        name: "Shared docs display name",
         role: "viewer",
         document_count: 3,
         created_at: "2026-01-01T00:00:00Z",
@@ -73,32 +84,38 @@ describe("OverviewPage quick actions", () => {
     ];
   });
 
-  it("guides users without a writable partition to create one before upload", () => {
+  it("keeps one upload action and explains when no writable partition exists", async () => {
     render(
       <MemoryRouter>
         <OverviewPage />
       </MemoryRouter>,
     );
 
-    expect(screen.queryByText("Upload Documents")).toBeNull();
+    expect(screen.queryByText("Create Partition to Upload")).toBeNull();
 
-    const action = screen.getByRole("link", { name: /create partition to upload/i });
-    expect(action.getAttribute("href")).toBe("/partitions?create=1");
-    expect(screen.getByText("Create a partition first, then add documents")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /upload documents/i }));
+
+    expect(screen.getByRole("heading", { name: /create a partition before uploading/i })).toBeTruthy();
+    expect(
+      screen.getByText("You don't have a partition you can upload to yet. Create one first?"),
+    ).toBeTruthy();
+    expect(screen.getByRole("link", { name: /^create partition$/i }).getAttribute("href")).toBe(
+      "/partitions?create=1",
+    );
   });
 
   it("keeps upload available when the user has a writable partition", () => {
     queryData.partitions = [
       {
         partition: "shared-docs",
-        name: "shared-docs",
+        name: "Shared docs display name",
         role: "viewer",
         document_count: 3,
         created_at: "2026-01-01T00:00:00Z",
       },
       {
         partition: "team-upload",
-        name: "team-upload",
+        name: "Team upload display name",
         role: "editor",
         document_count: 0,
         created_at: "2026-01-01T00:00:00Z",
@@ -113,6 +130,63 @@ describe("OverviewPage quick actions", () => {
 
     const action = screen.getByRole("link", { name: /upload documents/i });
     expect(action.getAttribute("href")).toBe("/documents?partition=team-upload");
+    expect(screen.queryByText("Create Partition to Upload")).toBeNull();
+  });
+
+  it("prefers the remembered partition when it is writable", () => {
+    sessionStorage.setItem("documents.partition", "remembered-upload");
+    queryData.partitions = [
+      {
+        partition: "first-upload",
+        name: "First writable display name",
+        role: "editor",
+        document_count: 0,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        partition: "remembered-upload",
+        name: "Remembered writable display name",
+        role: "owner",
+        document_count: 0,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+
+    render(
+      <MemoryRouter>
+        <OverviewPage />
+      </MemoryRouter>,
+    );
+
+    const action = screen.getByRole("link", { name: /upload documents/i });
+    expect(action.getAttribute("href")).toBe("/documents?partition=remembered-upload");
+  });
+
+  it("does not show a derived upload action while partitions fail to load", () => {
+    queryData.isError = true;
+
+    render(
+      <MemoryRouter>
+        <OverviewPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByRole("button", { name: /upload documents/i })).toBeNull();
+    expect(screen.queryByRole("link", { name: /upload documents/i })).toBeNull();
+    expect(screen.queryByText("Create Partition to Upload")).toBeNull();
+  });
+
+  it("hides upload guidance when nothing is writable and partition creation is unavailable", () => {
+    permissions.canCreatePartition = false;
+
+    render(
+      <MemoryRouter>
+        <OverviewPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByRole("button", { name: /upload documents/i })).toBeNull();
+    expect(screen.queryByRole("link", { name: /upload documents/i })).toBeNull();
     expect(screen.queryByText("Create Partition to Upload")).toBeNull();
   });
 });
