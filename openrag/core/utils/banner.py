@@ -77,8 +77,10 @@ def _status_box(version: str, docs_url: str, *, color: bool) -> str:
     visible_lines = [
         f"{_BOLD}OpenRAG v{version}{_NORMAL}",
         f"{_BOLD}API docs{_NORMAL}: {docs_url}",
-        f"{_BOLD}Status{_NORMAL}: ready",
     ]
+    if _super_admin_mode_enabled():
+        visible_lines.append(f"{_BOLD}Super Admin Mode{_NORMAL}: enabled")
+    visible_lines.append(f"{_BOLD}Status{_NORMAL}: ready")
     body = [f"│ {visible}{' ' * (width - 2 - len(plain))} │" for visible, plain in zip(visible_lines, plain_lines)]
     return "\n".join(f"{red}{line}{_RESET}" for line in [top, *body, bottom])
 
