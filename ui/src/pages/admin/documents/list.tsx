@@ -62,7 +62,15 @@ export default function DocumentListPage() {
   // e.g. it was deleted by its owner or an admin, which otherwise 404s the files
   // query with "Partition not found". See resolveDocumentsPartition.
   const candidate = searchParams.get("partition") || remembered || "";
-  const selected = resolveDocumentsPartition(candidate, partitions, partitionsQuery.isSuccess);
+  // Treat both success AND error as "settled": on a partitions-fetch error we
+  // must stop treating the (unverifiable) candidate as sticky, or the view stays
+  // stuck on a phantom partition with the error swallowed. On error `partitions`
+  // is [], so this resolves to "" → the empty-state branch surfaces the error.
+  const selected = resolveDocumentsPartition(
+    candidate,
+    partitions,
+    partitionsQuery.isSuccess || partitionsQuery.isError,
+  );
 
   // Keep the remembered partition in sync, and heal a stale ?partition= URL so a
   // refresh / shared link doesn't re-trigger the not-found error.
@@ -292,8 +300,16 @@ export default function DocumentListPage() {
       </div>
 
       {!selected ? (
-        <div className="flex items-center justify-center py-12 text-muted-foreground">
-          {partitionsQuery.isLoading ? "Loading…" : "No partitions available."}
+        <div
+          className={`flex items-center justify-center py-12 ${
+            partitionsQuery.isError ? "text-destructive" : "text-muted-foreground"
+          }`}
+        >
+          {partitionsQuery.isError
+            ? `Failed to load partitions: ${(partitionsQuery.error as Error).message}`
+            : partitionsQuery.isLoading
+              ? "Loading…"
+              : "No partitions available."}
         </div>
       ) : filesQuery.isLoading ? (
         <div className="flex items-center justify-center py-12 text-muted-foreground">Loading files…</div>
