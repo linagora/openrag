@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 
 from api.chainlit_assets import mount_chainlit_root_assets
 from api.middleware.auth import AuthMiddleware
+from api.middleware.request_id import RequestIdMiddleware
 from api.routers.user.download import router as download_router
 from chainlit.utils import mount_chainlit
 from core.config import load_config
@@ -79,6 +80,15 @@ app.add_middleware(
     AuthMiddleware,
     get_auth_service=_get_auth_service,
 )
+# AuthMiddleware's ``/static`` branch authenticates via the ``?token=`` query
+# param, but it reads it from ``request.state.original_token`` — which only
+# RequestIdMiddleware populates (it stashes the raw token there before redacting
+# the query string for logs). The mounted deployment (``api.main``) registers
+# this; without it here, source-file downloads on this standalone origin see no
+# token and 403 with "Missing token" (the Ray Serve source-preview failure).
+# Registered after AuthMiddleware so it wraps it — i.e. runs first and sets
+# ``original_token`` before auth reads it (add_middleware adds outermost-last).
+app.add_middleware(RequestIdMiddleware)
 
 # Ray Serve mode runs the API and Chainlit on separate ports. Source previews
 # rewrite their file download links to the browser origin (the Chainlit host),
