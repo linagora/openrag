@@ -124,7 +124,7 @@ function RecentTasks({ isLoading, tasks }: { isLoading: boolean; tasks: TaskList
 }
 
 export default function OverviewPage() {
-  const { canManageUsers, canViewSystem, canCreatePartition } = usePermissions();
+  const { canManageUsers, canViewSystem, canCreatePartition, canWrite } = usePermissions();
 
   // `GET /partition/` and `/queue/tasks` are membership-scoped server-side, so the
   // same queries serve admins and partition members. Platform-only data is gated.
@@ -168,6 +168,25 @@ export default function OverviewPage() {
   const quotaIndexed = me?.file_count ?? 0;
   const quotaEff: number | "unlimited" =
     me?.file_quota == null || me.file_quota < 0 ? "unlimited" : me.file_quota;
+  const writablePartition = partitions.find((partition) => canWrite(partition.role));
+  const uploadQuickAction = partitionsQuery.isLoading
+    ? null
+    : writablePartition
+      ? {
+          href: `/documents?partition=${encodeURIComponent(writablePartition.name)}`,
+          title: "Upload Documents",
+          description: "Add documents to a writable partition",
+          icon: Upload,
+        }
+      : canCreatePartition
+        ? {
+            href: "/partitions?create=1",
+            title: "Create Partition to Upload",
+            description: "Create a partition first, then add documents",
+            icon: Plus,
+          }
+        : null;
+  const UploadQuickActionIcon = uploadQuickAction?.icon;
 
   return (
     <div>
@@ -278,18 +297,20 @@ export default function OverviewPage() {
                   </Link>
                 </Button>
               )}
-              <Button variant="outline" className="justify-start h-auto py-3" asChild>
-                <Link to="/documents">
-                  <Upload className="h-4 w-4 mr-2" />
-                  <div className="text-left">
-                    <div className="font-medium">Upload Documents</div>
-                    <div className="text-xs text-muted-foreground">
-                      Add documents to a partition
+              {uploadQuickAction && (
+                <Button variant="outline" className="justify-start h-auto py-3" asChild>
+                  <Link to={uploadQuickAction.href}>
+                    {UploadQuickActionIcon && <UploadQuickActionIcon className="h-4 w-4 mr-2" />}
+                    <div className="text-left">
+                      <div className="font-medium">{uploadQuickAction.title}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {uploadQuickAction.description}
+                      </div>
                     </div>
-                  </div>
-                  <ArrowRight className="h-4 w-4 ml-auto" />
-                </Link>
-              </Button>
+                    <ArrowRight className="h-4 w-4 ml-auto" />
+                  </Link>
+                </Button>
+              )}
             </div>
           </CardContent>
         </Card>
