@@ -5,21 +5,36 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import OverviewPage from "./overview";
 
-const queryData = vi.hoisted(() => ({
-  partitions: [
-    {
+type TestPartition = {
+  partition: string;
+  name: string;
+  role: string;
+  document_count: number;
+  created_at: string;
+};
+
+const makePartition = vi.hoisted(
+  () =>
+    (overrides: Partial<TestPartition> = {}): TestPartition => ({
       partition: "shared-docs",
       name: "Shared docs display name",
       role: "viewer",
       document_count: 3,
       created_at: "2026-01-01T00:00:00Z",
-    },
-  ],
+      ...overrides,
+    }),
+);
+const queryData = vi.hoisted(() => ({
+  partitions: [makePartition()],
   isError: false,
   isLoading: false,
 }));
 const permissions = vi.hoisted(() => ({
   canCreatePartition: true,
+  canManagePartitions: false,
+}));
+const authUser = vi.hoisted(() => ({
+  is_admin: false,
 }));
 
 vi.mock("@tanstack/react-query", () => ({
@@ -51,7 +66,7 @@ vi.mock("@/lib/auth", () => ({
     user: {
       id: 2,
       display_name: "Viewer",
-      is_admin: false,
+      is_admin: authUser.is_admin,
       file_quota: 10,
       file_count: 0,
     },
@@ -62,6 +77,7 @@ vi.mock("@/lib/permissions", () => ({
   usePermissions: () => ({
     canManageUsers: false,
     canViewSystem: false,
+    canManagePartitions: permissions.canManagePartitions,
     canCreatePartition: permissions.canCreatePartition,
     canWrite: (role: string | null | undefined) => role === "editor" || role === "owner",
   }),
@@ -71,17 +87,61 @@ describe("OverviewPage quick actions", () => {
   beforeEach(() => {
     sessionStorage.clear();
     permissions.canCreatePartition = true;
+    permissions.canManagePartitions = false;
+    authUser.is_admin = false;
     queryData.isError = false;
     queryData.isLoading = false;
-    queryData.partitions = [
-      {
-        partition: "shared-docs",
-        name: "Shared docs display name",
-        role: "viewer",
-        document_count: 3,
-        created_at: "2026-01-01T00:00:00Z",
-      },
-    ];
+    queryData.partitions = [makePartition()];
+  });
+
+  it("describes partition creation as self-service for normal users", () => {
+    render(
+      <MemoryRouter>
+        <OverviewPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Create Personal Partition")).not.toBeNull();
+    expect(screen.getByText("Create a personal partition for your documents")).not.toBeNull();
+  });
+
+  it("keeps the management create partition wording general", () => {
+    permissions.canManagePartitions = true;
+    authUser.is_admin = true;
+
+    render(
+      <MemoryRouter>
+        <OverviewPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Create Partition")).not.toBeNull();
+    expect(screen.getByText("Set up a new document partition")).not.toBeNull();
+    expect(screen.queryByText("Create Personal Partition")).toBeNull();
+    expect(screen.queryByText("Your file quota")).toBeNull();
+  });
+
+  it("updates create partition wording when management permission resolves", () => {
+    const { rerender } = render(
+      <MemoryRouter>
+        <OverviewPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Create Personal Partition")).not.toBeNull();
+
+    permissions.canManagePartitions = true;
+    authUser.is_admin = true;
+
+    rerender(
+      <MemoryRouter>
+        <OverviewPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Create Partition")).not.toBeNull();
+    expect(screen.getByText("Set up a new document partition")).not.toBeNull();
+    expect(screen.queryByText("Create Personal Partition")).toBeNull();
   });
 
   it("keeps one upload action and explains when no writable partition exists", async () => {
@@ -106,20 +166,17 @@ describe("OverviewPage quick actions", () => {
 
   it("keeps upload available when the user has a writable partition", () => {
     queryData.partitions = [
-      {
+      makePartition({
         partition: "shared-docs",
         name: "Shared docs display name",
         role: "viewer",
-        document_count: 3,
-        created_at: "2026-01-01T00:00:00Z",
-      },
-      {
+      }),
+      makePartition({
         partition: "team-upload",
         name: "Team upload display name",
         role: "editor",
         document_count: 0,
-        created_at: "2026-01-01T00:00:00Z",
-      },
+      }),
     ];
 
     render(
@@ -136,20 +193,18 @@ describe("OverviewPage quick actions", () => {
   it("prefers the remembered partition when it is writable", () => {
     sessionStorage.setItem("documents.partition", "remembered-upload");
     queryData.partitions = [
-      {
+      makePartition({
         partition: "first-upload",
         name: "First writable display name",
         role: "editor",
         document_count: 0,
-        created_at: "2026-01-01T00:00:00Z",
-      },
-      {
+      }),
+      makePartition({
         partition: "remembered-upload",
         name: "Remembered writable display name",
         role: "owner",
         document_count: 0,
-        created_at: "2026-01-01T00:00:00Z",
-      },
+      }),
     ];
 
     render(
