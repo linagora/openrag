@@ -311,7 +311,11 @@ export default function DocumentListPage() {
               ? "Loading…"
               : "No partitions available."}
         </div>
-      ) : filesQuery.isLoading ? (
+      ) : partitionsQuery.isLoading || filesQuery.isLoading ? (
+        // While the partition list is still loading, the files query is gated off
+        // (we can't yet confirm `selected` exists), and a disabled react-query is
+        // not `isLoading` — so show the loading state here rather than briefly
+        // falling through to an empty table.
         <div className="flex items-center justify-center py-12 text-muted-foreground">Loading files…</div>
       ) : filesQuery.isError ? (
         <div className="flex items-center justify-center py-12 text-destructive">
