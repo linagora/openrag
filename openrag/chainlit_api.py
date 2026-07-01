@@ -17,6 +17,7 @@ the crash only surfaced under ``AUTH_MODE=oidc``.
 
 from contextlib import asynccontextmanager
 
+from api.chainlit_assets import mount_chainlit_root_assets
 from api.middleware.auth import AuthMiddleware
 from api.routers.user.download import router as download_router
 from chainlit.utils import mount_chainlit
@@ -88,3 +89,8 @@ app.add_middleware(
 app.include_router(download_router)
 
 mount_chainlit(app=app, target="./app_front.py", path="/chainlit")
+
+# Ray Serve mode serves this standalone Chainlit app on its own origin, so it
+# must also expose Chainlit's root-absolute pdf.js worker at /assets — the same
+# separate-origin reason the /static download route is replicated above.
+mount_chainlit_root_assets(app)
