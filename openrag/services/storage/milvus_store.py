@@ -107,6 +107,12 @@ RRF_K = 100
 #: noisy and large; ``text`` stays in the payload (callers need it).
 _SEARCH_RESULT_DROPPED_KEYS = frozenset({"vector"})
 
+#: Fallback dense-vector dimension for page sizing when the real one is
+#: unknown — i.e. a read-only process that never ran ``initialize`` AND the
+#: collection-schema probe also failed. Conservatively large so a vector page
+#: stays under Milvus's result-size cap for any realistic embedder.
+_UNKNOWN_VECTOR_DIM = 4096
+
 #: BM25 analyzer params for the ``text`` field — standard tokenizer plus
 #: OpenRAG-specific stop words so chunk-boundary / image-placeholder markers
 #: don't pollute lexical scores.
@@ -156,6 +162,11 @@ class MilvusVectorStore(VectorStore):
             ) from e
 
         self._embedding_dimension: int | None = None
+        # Real dense-vector dimension read from the live collection schema,
+        # cached for page sizing. Distinct from ``_embedding_dimension`` (the
+        # configured value passed to ``initialize``), which is ignored when the
+        # collection already exists and so may not match what Milvus stores.
+        self._schema_vector_dim: int | None = None
         self._loaded = False
         self._load_lock = asyncio.Lock()
         # Connection healing: pymilvus 2.6 exposes no documented client-level
@@ -512,16 +523,81 @@ class MilvusVectorStore(VectorStore):
     # Sync paginated query helper (Milvus 2.6 query_iterator is sync-only)
     # ------------------------------------------------------------------
 
+    def _vector_dim(self) -> int:
+        """Best-effort dense-vector dimension for page sizing.
+
+        Prefers the *real* dimension from the live collection schema, because
+        the value recorded at :meth:`initialize` is only the dimension this
+        process was configured with — it is ignored when the collection already
+        exists, so it can disagree with what Milvus actually stores. Page sizing
+        cares about on-the-wire bytes, so the schema wins. The schema read is
+        cached (the dimension can't change without a drop + recreate). Falls
+        back to the :meth:`initialize` value when the schema can't be read, then
+        to :data:`_UNKNOWN_VECTOR_DIM`. Reading too small a dimension here would
+        re-introduce the oversized-page failure this guard exists to prevent.
+        """
+        if self._schema_vector_dim is not None:
+            return self._schema_vector_dim
+        dim = self._describe_vector_dim()
+        if dim is not None:
+            self._schema_vector_dim = dim
+            return dim
+        if self._embedding_dimension is not None:
+            return self._embedding_dimension
+        return _UNKNOWN_VECTOR_DIM
+
+    def _describe_vector_dim(self) -> int | None:
+        """Read the ``vector`` field's ``dim`` from the live collection schema.
+
+        Returns ``None`` if the collection or field can't be inspected (e.g. the
+        collection does not exist yet), leaving the caller to pick a fallback.
+        """
+        try:
+            desc = self._client.describe_collection(self._collection_name)
+            for field in desc.get("fields", []):
+                if field.get("name") == "vector":
+                    dim = field.get("params", {}).get("dim")
+                    return int(dim) if dim else None
+        except Exception:
+            return None
+        return None
+
+    def _safe_batch_size(self, output_fields: list[str]) -> int:
+        """Cap the batch so one page stays under Milvus's ~64MB result limit.
+
+        Only matters when the dense ``vector`` rides along (~dim*4 bytes/row);
+        explicit scalar projections are small, so they keep the large default.
+        Milvus 2.6 returns the vector for the ``"*"`` wildcard too — the search
+        path strips it post-hoc via ``_SEARCH_RESULT_DROPPED_KEYS`` and
+        ``query_chunks_by_filter(["*"])`` leaks it — so ``"*"`` counts as
+        vector-inclusive here. The dimension comes from :meth:`_vector_dim`, not
+        a fixed guess, so a read-only process still sizes pages to the real
+        collection.
+        """
+        if "vector" not in output_fields and "*" not in output_fields:
+            return 16_000
+        dim = self._vector_dim()
+        budget = 32 * 1024 * 1024  # ~half of Milvus's ~64MB cap
+        per_row = dim * 4 + 6_144  # float32 vector + text/metadata headroom
+        return max(1, min(16_000, budget // per_row))
+
     def _iter_query(
         self,
         expr: str,
         output_fields: list[str],
-        batch_size: int = 16_000,
+        batch_size: int | None = None,
     ) -> list[dict[str, Any]]:
         """Drain a Milvus 2.6 ``query_iterator`` into a list.
 
+        ``batch_size`` defaults to :meth:`_safe_batch_size`, which shrinks the
+        page for vector-inclusive projections so one page stays under Milvus's
+        result-size limit. Total result-set size is unaffected — the iterator
+        paginates until the filter is drained.
+
         Synchronous; call via :func:`asyncio.to_thread` from async methods.
         """
+        if batch_size is None:
+            batch_size = self._safe_batch_size(output_fields)
         iterator = self._client.query_iterator(
             collection_name=self._collection_name,
             filter=expr,
@@ -1004,6 +1080,9 @@ class MilvusVectorStore(VectorStore):
             ) from e
         self._loaded = False
         self._embedding_dimension = None
+        # A recreated collection may have a different dimension — drop the
+        # cached schema read so the next query re-probes.
+        self._schema_vector_dim = None
 
     # ------------------------------------------------------------------
     # Milvus-specific (not on the VectorStore ABC)
@@ -1086,9 +1165,10 @@ class MilvusVectorStore(VectorStore):
     ) -> list[dict[str, Any]]:
         """Return full row data for every chunk matching ``filters``.
 
-        ``output_fields`` defaults to ``["*"]``. Milvus 2.6 quirk: ``"*"``
-        does NOT include the dense vector — callers that need the vector
-        must pass ``output_fields=["*", "vector"]`` explicitly.
+        ``output_fields`` defaults to ``["*"]``, which in Milvus 2.6 includes
+        the dense ``vector`` field (unlike :meth:`search`, which strips it via
+        ``_SEARCH_RESULT_DROPPED_KEYS``). Callers that don't want the vector
+        should pass an explicit scalar projection instead of ``["*"]``.
         """
         self._resolve_collection(collection)
         expr = self._build_filter_expr(filters)
