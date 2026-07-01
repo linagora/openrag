@@ -82,8 +82,15 @@ async def download_source(
         or media_type.startswith(("audio/", "video/"))
         or (media_type.startswith("image/") and media_type != "image/svg+xml")
     )
+    # ``X-Content-Type-Options: nosniff`` stops the browser from MIME-sniffing
+    # the body into a type other than the one we declare. Since this route serves
+    # some files inline and the Content-Type is only inferred from the filename,
+    # nosniff ensures a mislabeled file can't be reinterpreted as an executable
+    # type (e.g. HTML/JS) in the app's origin — defense-in-depth alongside the
+    # attachment fallback for HTML/SVG above.
     return FileResponse(
         file_path,
         filename=file_path.name,
         content_disposition_type="inline" if inline_ok else "attachment",
+        headers={"X-Content-Type-Options": "nosniff"},
     )
