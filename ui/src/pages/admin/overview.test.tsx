@@ -95,11 +95,11 @@ describe("OverviewPage quick actions", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /upload documents/i }));
 
-    expect(screen.getByRole("heading", { name: /create a partition before uploading/i })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: /create a partition before uploading/i })).toBeTruthy();
     expect(
-      screen.getByText("You don't have a partition you can upload to yet. Create one first?"),
+      await screen.findByText("You don't have a partition you can upload to yet. Create one first?"),
     ).toBeTruthy();
-    expect(screen.getByRole("link", { name: /^create partition$/i }).getAttribute("href")).toBe(
+    expect((await screen.findByRole("link", { name: /^create partition$/i })).getAttribute("href")).toBe(
       "/partitions?create=1",
     );
   });
