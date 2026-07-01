@@ -82,9 +82,17 @@ def is_bypass_path(path: str, *, bypass_config: AuthBypassConfig | None = None) 
     Matches a literal bypass list (``/docs``, health probes, OIDC
     callback endpoints) plus the entire ``/chainlit`` subtree — Chainlit
     handles its own header-auth callback for those routes.
+
+    ``/assets/`` is also bypassed: Chainlit is submounted at ``/chainlit`` but
+    its bundled pdf.js worker requests itself from the origin-root
+    ``/assets/pdf.worker*.mjs`` (a runtime-computed URL the HTML root-path
+    rewrite never sees). Those files are public frontend bundles — the same
+    ones already served (and bypassed) under ``/chainlit/assets`` — so serving
+    them at ``/assets`` lets the module worker load with a JS MIME type instead
+    of a 403 JSON body that breaks source PDF previews.
     """
     cfg = bypass_config or _DEFAULT_BYPASS_CONFIG
-    return path in cfg.bypass_paths or path == "/chainlit" or path.startswith("/chainlit/")
+    return path in cfg.bypass_paths or path == "/chainlit" or path.startswith(("/chainlit/", "/assets/"))
 
 
 def _allow_no_auth() -> bool:

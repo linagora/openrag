@@ -362,9 +362,14 @@ if WITH_OPENAI_API or WITH_CHAINLIT_UI:
     app.include_router(openai_router, prefix="/v1", tags=[Tags.OPENAI])
 
 if WITH_CHAINLIT_UI:
+    from api.chainlit_assets import mount_chainlit_root_assets
     from chainlit.utils import mount_chainlit
 
     mount_chainlit(app, "./app_front.py", path="/chainlit")
+
+    # Also serve Chainlit's bundled pdf.js worker at the origin root so source
+    # PDF previews load (see mount_chainlit_root_assets for the full rationale).
+    mount_chainlit_root_assets(app)
 
 
 if __name__ == "__main__":
