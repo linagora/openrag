@@ -45,6 +45,11 @@ _BOLD = "\033[1m"
 _NORMAL = "\033[22m"
 
 
+def _super_admin_mode_enabled() -> bool:
+    """Mirror the backend SUPER_ADMIN_MODE flag used by /config and auth."""
+    return os.environ.get("SUPER_ADMIN_MODE", "false").lower() == "true"
+
+
 def _status_box(version: str, docs_url: str, *, color: bool) -> str:
     """Render the boxed version / docs-URL / status panel shown under the logo.
 
@@ -56,6 +61,8 @@ def _status_box(version: str, docs_url: str, *, color: bool) -> str:
         f"API docs: {docs_url}",
         "Status: ready",
     ]
+    if _super_admin_mode_enabled():
+        plain_lines.insert(-1, "Super Admin Mode: enabled")
     width = max(len(line) for line in plain_lines) + 2
 
     if not color:
