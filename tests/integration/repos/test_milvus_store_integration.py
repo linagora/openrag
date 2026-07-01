@@ -333,13 +333,12 @@ class TestQueryByFilter:
         assert rows
         assert rows[0]["partition"] == "p1"
         assert rows[0]["text"] == "only"
-        # NOTE: ``_iter_query`` does NOT strip the vector field, unlike the
-        # search path (which filters via ``_SEARCH_RESULT_DROPPED_KEYS``).
-        # ``query_chunks_by_filter`` therefore leaks the dense vector when
-        # called with the default ``["*"]`` output_fields — asymmetric with
-        # ``search()`` and contradicts the method docstring. Tracked as a
-        # follow-up; this test documents current behaviour so the next change
-        # is intentional.
+        # Milvus 2.6 returns the dense ``vector`` for the default ``["*"]``
+        # projection (unlike the search path, which strips it via
+        # ``_SEARCH_RESULT_DROPPED_KEYS``). ``_safe_batch_size`` relies on this
+        # to shrink the query_iterator page for wildcard reads, so assert the
+        # behaviour explicitly rather than only documenting it in prose.
+        assert "vector" in rows[0]
 
 
 class TestDropAndDelete:
