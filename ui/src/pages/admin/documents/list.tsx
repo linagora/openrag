@@ -32,6 +32,7 @@ import { listPartitionFiles, type PartitionFile } from "@/lib/api/documents";
 import { uploadFile, deleteFile, newFileId } from "@/lib/api/indexing";
 import { listPartitions } from "@/lib/api/partitions";
 import { usePermissions } from "@/lib/permissions";
+import { resolveDocumentsPartition } from "./partition-selection";
 
 const fileHref = (partition: string, fileId: string) =>
   `/documents/${encodeURIComponent(partition)}/${encodeURIComponent(fileId)}`;
@@ -56,12 +57,29 @@ export default function DocumentListPage() {
 
   const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
   const partitions = partitionsQuery.data?.partitions ?? [];
-  const selected = searchParams.get("partition") || remembered || partitions[0]?.partition || "";
+  // Prefer the sticky choice (URL ?partition= or the remembered one), but fall
+  // back to the first available partition once loaded if it no longer exists —
+  // e.g. it was deleted by its owner or an admin, which otherwise 404s the files
+  // query with "Partition not found". See resolveDocumentsPartition.
+  const candidate = searchParams.get("partition") || remembered || "";
+  const selected = resolveDocumentsPartition(candidate, partitions, partitionsQuery.isSuccess);
 
-  // Keep the remembered partition in sync (covers landing via a ?partition= URL).
+  // Keep the remembered partition in sync, and heal a stale ?partition= URL so a
+  // refresh / shared link doesn't re-trigger the not-found error.
   useEffect(() => {
-    if (selected) sessionStorage.setItem("documents.partition", selected);
-  }, [selected]);
+    if (!selected) return;
+    sessionStorage.setItem("documents.partition", selected);
+    const urlPartition = searchParams.get("partition");
+    if (urlPartition && urlPartition !== selected) {
+      setSearchParams(
+        (prev) => {
+          prev.set("partition", selected);
+          return prev;
+        },
+        { replace: true },
+      );
+    }
+  }, [selected, searchParams, setSearchParams]);
 
   const selectPartition = (p: string) => {
     sessionStorage.setItem("documents.partition", p);
@@ -77,7 +95,9 @@ export default function DocumentListPage() {
   const filesQuery = useQuery({
     queryKey: ["partition-files", selected],
     queryFn: () => listPartitionFiles(selected),
-    enabled: !!selected,
+    // Only fetch once we've confirmed `selected` is a real, still-existing
+    // partition — avoids a 404 flash for a stale/deleted selection during load.
+    enabled: !!selected && partitions.some((p) => p.partition === selected),
     // A file only appears here once its indexing job finishes (the catalog row
     // is written post-indexing), so poll to pick up freshly-indexed files
     // without the user having to switch partitions. Mirrors the Jobs page;
