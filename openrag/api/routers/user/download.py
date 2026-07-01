@@ -8,6 +8,7 @@ stored ``source`` path and confines it to ``DATA_DIR``. The URL lives under
 ``/static`` so the middleware's browser ``?token=`` access works the same way.
 """
 
+import mimetypes
 from pathlib import Path
 
 from api.dependencies.auth import current_user_or_admin_partitions_list
@@ -62,4 +63,34 @@ async def download_source(
         log.warning("Resolved source path is outside DATA_DIR or missing.")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found.")
 
-    return FileResponse(file_path, filename=file_path.name)
+    # Serve inline (not as an attachment) so browser viewers can render the
+    # source in place — the Chainlit source preview embeds this URL in cl.Pdf /
+    # cl.Image / cl.Video / cl.Audio elements, which display the resource rather
+    # than download it. FileResponse defaults to ``Content-Disposition:
+    # attachment`` when ``filename`` is set, which makes the browser download the
+    # file and leaves the PDF viewer with nothing to render ("Failed to load PDF
+    # file"). ``filename`` is kept so a manual "Save as" still gets a sane name.
+    #
+    # FileResponse already infers the Content-Type from ``filename`` (guess_type),
+    # so we don't set media_type here — we only need the guessed type to choose the
+    # disposition. Restrict inline rendering to media types that cannot execute
+    # script in the app's origin: HTML / SVG / etc. stay ``attachment`` so a crafted
+    # indexed file can't turn this same-origin route into a stored-XSS vector.
+    media_type, _ = mimetypes.guess_type(file_path.name)
+    inline_ok = bool(media_type) and (
+        media_type == "application/pdf"
+        or media_type.startswith(("audio/", "video/"))
+        or (media_type.startswith("image/") and media_type != "image/svg+xml")
+    )
+    # ``X-Content-Type-Options: nosniff`` stops the browser from MIME-sniffing
+    # the body into a type other than the one we declare. Since this route serves
+    # some files inline and the Content-Type is only inferred from the filename,
+    # nosniff ensures a mislabeled file can't be reinterpreted as an executable
+    # type (e.g. HTML/JS) in the app's origin — defense-in-depth alongside the
+    # attachment fallback for HTML/SVG above.
+    return FileResponse(
+        file_path,
+        filename=file_path.name,
+        content_disposition_type="inline" if inline_ok else "attachment",
+        headers={"X-Content-Type-Options": "nosniff"},
+    )

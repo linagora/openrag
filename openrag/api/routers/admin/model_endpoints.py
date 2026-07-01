@@ -13,6 +13,7 @@ from api.schemas.admin.model_endpoint_schemas import (
     ModelEndpointResponse,
     ModelEndpointType,
     UpdateModelEndpointRequest,
+    ValidateEndpointRequest,
     ValidateEndpointResponse,
 )
 from core.config.model_endpoints import ModelEndpointRow
@@ -94,6 +95,20 @@ async def set_default_model_endpoint(
     """Promote a registered endpoint to the default for its type."""
     await service.set_default(model_type=model_type, name=name)
     return await service.get_model_endpoint(name=name, model_type=model_type)
+
+
+@router.post("/validate", response_model=ValidateEndpointResponse)
+async def validate_endpoint_draft(
+    body: ValidateEndpointRequest,
+    service=Depends(get_model_endpoint_service),
+):
+    """Probe arbitrary endpoint values (before they are saved) for reachability
+    and model availability."""
+    return await service.validate_endpoint(
+        url=body.endpoint,
+        model_name=body.model_name,
+        api_key=body.api_key,
+    )
 
 
 @router.post("/{model_type}/{name}/validate", response_model=ValidateEndpointResponse)

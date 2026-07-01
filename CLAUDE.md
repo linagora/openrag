@@ -385,7 +385,7 @@ OpenRag supports two authentication modes, controlled by the `AUTH_MODE` environ
 | `OIDC_ENDPOINT` | Issuer URL for auto-discovery | `https://idp.example.com/realms/openrag` |
 | `OIDC_CLIENT_ID` | Client registered at IdP | `openrag` |
 | `OIDC_CLIENT_SECRET` | Client secret | (provided by IdP) |
-| `OIDC_REDIRECT_URI` | Callback URL (must match IdP config) | `https://openrag.example.com/auth/callback` |
+| `OIDC_REDIRECT_URI` | Callback URL — the **front door** that serves the UI *and* reaches the backend `/auth/callback` (the admin-ui / proxy port, **not necessarily** `APP_PORT`); must match IdP config | `https://openrag.example.com/auth/callback` |
 | `OIDC_TOKEN_ENCRYPTION_KEY` | Fernet key for token encryption | (generate via: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`) |
 
 **Optional Env Variables**:

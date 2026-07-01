@@ -1,0 +1,13 @@
+# Scoped ignore for the admin-UI image. BuildKit reads `<dockerfile>.dockerignore`
+# (here infra/docker/ui.Dockerfile.dockerignore), so this applies only to the UI
+# build — not the api/ray images that share the repo-root build context.
+#
+# Patterns are relative to the build context (repo root, per compose `context: ../..`).
+# Keeping the host's node_modules out of the context is the point: otherwise
+# `COPY ui/ .` (after `npm ci`) overwrites the freshly-installed alpine/musl deps
+# with host glibc/x64 binaries, breaking `npm run build` with a native-binary
+# mismatch — which only reproduces on machines that ran `npm install` locally.
+ui/node_modules
+ui/dist
+ui/.env
+ui/.env.*

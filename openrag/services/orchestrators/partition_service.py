@@ -137,6 +137,39 @@ class PartitionService:
     async def list_partitions(self) -> list[dict]:
         return await self._partition_repo.list_partitions()
 
+    async def file_counts_by_partition(self) -> dict[str, int]:
+        """Return a ``{partition: document_count}`` map for all partitions (one query)."""
+        return await self._partition_repo.count_files_by_partition()
+
+    async def list_partition_summaries(self) -> dict[str, dict]:
+        """Per-partition stored config columns + ``document_count``, keyed by name.
+
+        Lightweight list view: returns the stored columns (description, embedder,
+        preset references, dimension, chat config) WITHOUT resolving the
+        indexation/retrieval pipelines — so this stays two queries regardless of
+        partition count. Pipeline resolution is reserved for the single-partition
+        detail (``get_partition_config``). Values are JSON-ready.
+        """
+        rows = await self._partition_repo.list_partition_rows()
+        counts = await self.file_counts_by_partition()
+        summaries: dict[str, dict] = {}
+        for r in rows:
+            name = r["partition"]
+            created = r.get("created_at")
+            summaries[name] = {
+                "partition": name,
+                "description": r.get("description") or "",
+                "embedder": r.get("embedder") or "default",
+                "indexation_preset": r.get("indexation_preset") or "default",
+                "retrieval_preset": r.get("retrieval_preset") or "default",
+                "dimension": r.get("dimension"),
+                "chat_history_depth": r.get("chat_history_depth") or 0,
+                "chat_llm": r.get("chat_llm"),
+                "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
+                "document_count": counts.get(name, 0),
+            }
+        return summaries
+
     async def create_partition(
         self,
         partition: str,
@@ -270,7 +303,9 @@ class PartitionService:
         row = await self._partition_repo.get_partition_row(partition)
         if row is None:
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
-        return self._partition_detail(row, self.resolve_partition_row(row))
+        detail = self._partition_detail(row, self.resolve_partition_row(row))
+        detail["document_count"] = await self._partition_repo.get_partition_file_count(partition)
+        return detail
 
     async def update_partition_config(self, partition: str, **fields: object) -> dict:
         """Update a partition's preset references and return the resolved detail."""
@@ -301,6 +336,8 @@ class PartitionService:
             "retrieval_pipeline": cfg.retrieval.model_dump(mode="json"),
             "dimension": row.get("dimension"),
             "created_at": row.get("created_at"),
+            "chat_history_depth": row.get("chat_history_depth") or 0,
+            "chat_llm": row.get("chat_llm"),
         }
 
     # ------------------------------------------------------------------

@@ -41,6 +41,7 @@ class _FakeConn:
     def __init__(self):
         self.executed: list[tuple[str, tuple]] = []
         self._fetchrow_result = None
+        self._fetch_result: list = []
 
     def transaction(self):
         return _AsyncCtx(self)
@@ -48,6 +49,10 @@ class _FakeConn:
     async def execute(self, query: str, *params):
         self.executed.append((query, params))
         return "UPDATE 1"
+
+    async def fetch(self, query: str, *params):
+        self.executed.append((query, params))
+        return self._fetch_result
 
     async def fetchrow(self, query: str, *params):
         self.executed.append((query, params))
@@ -88,13 +93,14 @@ async def test_create_inserts_and_returns_model():
     from services.persistence.model_endpoint_repo import PgModelEndpointRepository
 
     pool = _FakePool()
-    pool._fetchrow_result = _make_row()
+    pool.conn._fetchrow_result = _make_row()
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
     row = ModelEndpointRow(
         name="default",
         model_type="embedder",
         endpoint="http://vllm:8000/v1",
+        is_default=False,
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -102,7 +108,36 @@ async def test_create_inserts_and_returns_model():
 
     assert result.name == "default"
     assert result.model_type == "embedder"
-    assert any("INSERT INTO model_endpoints" in q for q, _ in pool.executed)
+    queries = [q for q, _ in pool.conn.executed]
+    assert any("INSERT INTO model_endpoints" in q for q in queries)
+    # is_default=False on the row -> no demotion of an existing default.
+    assert not any("is_default = false" in q for q in queries)
+
+
+@pytest.mark.asyncio
+async def test_create_default_demotes_existing_in_same_transaction():
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(is_default=True)
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    row = ModelEndpointRow(
+        name="default",
+        model_type="embedder",
+        endpoint="http://vllm:8000/v1",
+        is_default=True,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    await repo.create(row)
+
+    queries = [q for q, _ in pool.conn.executed]
+    # The clear UPDATE must precede the INSERT so the new row is the sole default.
+    clear_idx = next(i for i, q in enumerate(queries) if "is_default = false" in q)
+    insert_idx = next(i for i, q in enumerate(queries) if "INSERT INTO model_endpoints" in q)
+    assert clear_idx < insert_idx
 
 
 @pytest.mark.asyncio
@@ -202,15 +237,107 @@ async def test_delete_returns_false_when_row_missing():
     assert await repo.delete("ghost", "embedder") is False
 
 
+def _row(name, is_default):
+    return {"name": name, "is_default": is_default}
+
+
 @pytest.mark.asyncio
-async def test_set_default_uses_transaction_with_two_updates():
+async def test_set_default_locks_rows_then_runs_two_updates():
     from services.persistence.model_endpoint_repo import PgModelEndpointRepository
 
     pool = _FakePool()
+    pool.conn._fetch_result = [_row("default", True), _row("jina", False)]
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
-    await repo.set_default("embedder", "default")
+    await repo.set_default("embedder", "jina")
 
     queries = [q for q, _ in pool.conn.executed]
+    # Decide under a row lock, then clear-then-set inside the same transaction.
+    assert any("FOR UPDATE" in q for q in queries)
+    assert any("is_default = false" in q for q in queries)
+    assert any("is_default = true" in q for q in queries)
+
+
+@pytest.mark.asyncio
+async def test_set_default_raises_not_found_without_clearing_when_target_missing():
+    from core.utils.exceptions import NotFoundError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    # 'ghost' is absent from the locked rows (e.g. deleted concurrently). set_default
+    # must abort BEFORE clearing the existing default, so the type is never left
+    # without one.
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("jina", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(NotFoundError):
+        await repo.set_default("embedder", "ghost")
+
+    queries = [q for q, _ in pool.conn.executed]
+    assert any("FOR UPDATE" in q for q in queries)
+    assert not any("is_default = false" in q for q in queries)
+    assert not any("is_default = true" in q for q in queries)
+
+
+@pytest.mark.asyncio
+async def test_delete_and_promote_not_found_no_delete():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, promoted = await repo.delete_and_promote_default("ghost", "embedder")
+    assert status == "not_found"
+    assert promoted is None
+    assert not any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_delete_and_promote_last_no_delete():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("jina", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, promoted = await repo.delete_and_promote_default("jina", "embedder")
+    assert status == "last"
+    assert promoted is None
+    assert not any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_delete_and_promote_non_default_deletes_no_promotion():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, promoted = await repo.delete_and_promote_default("e5", "embedder")
+    assert status == "ok"
+    assert promoted is None
+    queries = [q for q, _ in pool.conn.executed]
+    assert any("FOR UPDATE" in q for q in queries)
+    assert any("DELETE FROM model_endpoints" in q for q in queries)
+    assert not any("is_default = false" in q for q in queries)
+    assert not any("is_default = true" in q for q in queries)
+
+
+@pytest.mark.asyncio
+async def test_delete_and_promote_default_promotes_survivor_under_lock():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, promoted = await repo.delete_and_promote_default("jina", "embedder")
+    assert status == "ok"
+    assert promoted == "e5"  # first survivor by name
+    queries = [q for q, _ in pool.conn.executed]
+    assert any("FOR UPDATE" in q for q in queries)
+    assert any("DELETE FROM model_endpoints" in q for q in queries)
     assert any("is_default = false" in q for q in queries)
     assert any("is_default = true" in q for q in queries)

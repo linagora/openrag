@@ -174,7 +174,7 @@ async def test_delete_returns_false_when_missing():
 
 
 @pytest.mark.asyncio
-async def test_rename_runs_delete_and_upsert_in_one_transaction():
+async def test_rename_migrates_partition_refs_in_one_transaction():
     from services.persistence.preset_repo import PgPresetRepository
 
     pool = _FakePool()
@@ -185,10 +185,34 @@ async def test_rename_runs_delete_and_upsert_in_one_transaction():
 
     assert result["name"] == "new"
     operations = [query for query, _params in pool.executed]
+    # Atomic in-place rename: UPDATE the preset row, then repoint referencing
+    # partitions. No DELETE+INSERT — the unique constraint guards collisions and
+    # created_at is preserved.
     assert operations[0] == "BEGIN"
-    assert "DELETE FROM pipeline_presets" in operations[1]
-    assert "INSERT INTO pipeline_presets" in operations[2]
+    assert "UPDATE pipeline_presets" in operations[1]
+    assert "INSERT INTO pipeline_presets" not in operations[1]
+    assert "UPDATE partitions" in operations[2]
+    assert "indexation_preset" in operations[2]
+    assert not any("DELETE FROM pipeline_presets" in op for op in operations)
     assert operations[-1] == "COMMIT"
+
+    # The partition repoint runs old -> new on the indexation column.
+    update_params = pool.executed[2][1]
+    assert update_params == ("new", "old")
+
+
+@pytest.mark.asyncio
+async def test_rename_migrates_retrieval_column():
+    from services.persistence.preset_repo import PgPresetRepository
+
+    pool = _FakePool()
+    pool._fetchrow_result = _make_row(name="new", preset_type="retrieval", config={})
+    repo = PgPresetRepository(pool_getter=lambda: pool)
+
+    await repo.rename("old", "new", "retrieval", {})
+
+    update_query = next(q for q, _ in pool.executed if "UPDATE partitions" in q)
+    assert "retrieval_preset" in update_query
 
 
 @pytest.mark.asyncio

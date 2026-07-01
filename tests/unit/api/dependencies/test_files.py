@@ -2,6 +2,7 @@ import io
 from pathlib import Path
 
 import pytest
+from api.dependencies import files as files_dep
 from api.dependencies.files import save_file_to_disk
 from core.utils.exceptions import ValidationError
 from core.utils.filename import extract_temporal_fields, sanitize_filename
@@ -28,6 +29,30 @@ async def test_save_file_to_disk_writes_content(tmp_path: Path):
         saved_content = f.read()
 
     assert saved_content == content
+
+
+@pytest.mark.asyncio
+async def test_save_file_to_disk_rejects_oversize_upload(tmp_path: Path, monkeypatch):
+    # Cap at ~8 bytes; a larger upload must be rejected (413) and not left on disk.
+    monkeypatch.setattr("api.dependencies.files._max_upload_size_bytes", lambda: 8)
+    upload = UploadFile(file=io.BytesIO(b"x" * 100), filename="big.bin")
+    dest_dir = tmp_path / "uploads"
+
+    with pytest.raises(ValidationError) as exc:
+        await save_file_to_disk(file=upload, dest_dir=dest_dir, chunk_size=4)
+
+    assert exc.value.status_code == 413
+    # The partially written file must have been cleaned up.
+    assert not (dest_dir / "big.bin").exists()
+
+
+def test_max_upload_size_reads_env_at_call_time(monkeypatch):
+    # The cap must be resolved per call: api.main imports this module before
+    # load_dotenv() runs, so reading at import would ignore MAX_UPLOAD_SIZE_MB.
+    monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", "5")
+    assert files_dep._max_upload_size_bytes() == 5 * 1024 * 1024
+    monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", "0")
+    assert files_dep._max_upload_size_bytes() == 0
 
 
 @pytest.mark.asyncio

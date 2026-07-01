@@ -55,6 +55,7 @@ from api.routers.user.extract import router as extract_router
 from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
 from core.config import load_config
+from core.utils.banner import print_startup_banner
 from core.utils.logging import get_logger
 from di.container import ServiceContainer
 from di.providers import set_container
@@ -217,6 +218,7 @@ async def lifespan(app: FastAPI):
     logger.info("Startup: registering process container", available=getattr(app.state, "container", None) is not None)
     set_container(getattr(app.state, "container", None))
     logger.info("Startup: complete")
+    print_startup_banner(app_version)
 
     try:
         yield
@@ -319,8 +321,15 @@ def root_redirect():
 
 @app.get("/config", summary="Get current configuration", tags=["Configuration"], dependencies=[Depends(require_admin)])
 def get_config():
-    """Return the loaded application settings for admins."""
-    return settings
+    """Return the loaded application settings for admins, plus runtime auth flags
+    the admin UI needs. ``super_admin_mode`` governs whether an admin bypasses
+    partition-membership checks; the UI permission layer mirrors the backend rule
+    instead of assuming every admin has partition access.
+    """
+    from api.dependencies.auth import SUPER_ADMIN_MODE
+    from fastapi.encoders import jsonable_encoder
+
+    return {**jsonable_encoder(settings), "super_admin_mode": SUPER_ADMIN_MODE}
 
 
 # Router mounts. Phase 10F finished moving these into
@@ -353,9 +362,14 @@ if WITH_OPENAI_API or WITH_CHAINLIT_UI:
     app.include_router(openai_router, prefix="/v1", tags=[Tags.OPENAI])
 
 if WITH_CHAINLIT_UI:
+    from api.chainlit_assets import mount_chainlit_root_assets
     from chainlit.utils import mount_chainlit
 
     mount_chainlit(app, "./app_front.py", path="/chainlit")
+
+    # Also serve Chainlit's bundled pdf.js worker at the origin root so source
+    # PDF previews load (see mount_chainlit_root_assets for the full rationale).
+    mount_chainlit_root_assets(app)
 
 
 if __name__ == "__main__":

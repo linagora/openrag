@@ -110,7 +110,7 @@ All variables must be set when `AUTH_MODE=oidc`. If any required variable is mis
 | `OIDC_ENDPOINT` | Yes* | — | Issuer URL (auto-discovery via `/.well-known/openid-configuration`) |
 | `OIDC_CLIENT_ID` | Yes* | — | Client ID registered at the IdP |
 | `OIDC_CLIENT_SECRET` | Yes* | — | Client secret (confidential clients only) |
-| `OIDC_REDIRECT_URI` | Yes* | — | Callback URL on OpenRag's backend, must match IdP configuration. Behind a proxy: `https://openrag.example.com/auth/callback`; direct access: `http://<ip_addr>:<APP_PORT>/auth/callback`. See [Choosing `OIDC_REDIRECT_URI`](#choosing-oidc_redirect_uri). |
+| `OIDC_REDIRECT_URI` | Yes* | — | Public URL of the **front door** that serves your UI *and* reaches the backend's `/auth/callback` — the reverse-proxy / admin-ui port, **not necessarily** the bare `APP_PORT`. Must match the IdP config byte-for-byte. See [Choosing `OIDC_REDIRECT_URI`](#choosing-oidc_redirect_uri). |
 | `OIDC_TOKEN_ENCRYPTION_KEY` | Yes* | — | Fernet key for encrypting tokens at rest (see [Generating the Fernet Key](#generating-the-fernet-key)) |
 | `OIDC_CLAIM_SOURCE` | No | `id_token` | Where to read claims for [Claim Mapping](#claim-mapping-optional): `id_token` (verified JWT) or `userinfo` (`/userinfo` endpoint) |
 | `OIDC_CLAIM_MAPPING` | No | — | Optional CSV of `db_field:claim` pairs to copy claims into user fields on every login (e.g., `display_name:name,email:email`). See [Claim Mapping](#claim-mapping-optional). |
@@ -122,21 +122,34 @@ All variables must be set when `AUTH_MODE=oidc`. If any required variable is mis
 
 ### Choosing `OIDC_REDIRECT_URI`
 
-The value must be an absolute URL pointing at **OpenRag's backend** `/auth/callback` route, reachable from the user's browser, and registered verbatim in the IdP client configuration.
+`OIDC_REDIRECT_URI` is the URL the IdP sends the browser back to after login. It must point at the **origin that serves your UI _and_ can reach the backend's `/auth/callback` route**, registered verbatim in the IdP client configuration. Two things must be true of that origin, and both are easy to get subtly wrong:
 
-- **Behind a reverse proxy** (production, TLS terminated): UI and backend share the same public base URL, so use the public hostname directly:
+1. **It must host a working `/auth/callback`.** That route exists **only** on the backend (`openrag/api`). An origin satisfies this either by *being* the backend, or by *reverse-proxying* `/auth/*` to it.
+2. **It must also serve the UI you land on after login.** After the callback, the backend issues a **relative** redirect (e.g. `/app/` or `/chainlit/`). The browser resolves it against whichever origin handled the callback — so if that origin doesn't serve the UI path, login *succeeds* but you land on a blank/404/JSON page. **No error is shown — this is the silent failure.**
 
+Pick the value by deployment shape:
+
+- **Bundled admin-ui (nginx) is the front door** — it serves the React SPA at `/app/` and proxies `/auth`, `/v1`, … to the backend. Use the **admin-ui port** (`ADMIN_UI_PORT`), **not** `APP_PORT`. Both ports host a working `/auth/callback`, but only the admin-ui port *also* serves `/app/`, so only it lands you back on the UI:
+
+  ```bash
+  OIDC_REDIRECT_URI=http://<ip_addr>:<ADMIN_UI_PORT>/auth/callback
   ```
-  OIDC_REDIRECT_URI=https://openrag.example.com/auth/callback
-  ```
 
-- **No reverse proxy** (local / bare-metal deployment): each service is reached on its own port, so the backend must be addressed explicitly by host and `APP_PORT`:
+- **Backend is the front door** — it serves the Chainlit UI itself on `APP_PORT`. Address the backend directly:
 
-  ```
+  ```bash
   OIDC_REDIRECT_URI=http://<ip_addr>:<APP_PORT>/auth/callback
   ```
 
-  The IdP redirects the browser to this URL, so `<ip_addr>` must be resolvable/reachable from the end user's machine — not `localhost` or `127.0.0.1` unless the browser runs on the same host as OpenRag.
+- **Reverse proxy / single public hostname** (production, TLS terminated): the proxy serves the UI and forwards `/auth/*` to the backend, so use the public hostname:
+
+  ```bash
+  OIDC_REDIRECT_URI=https://openrag.example.com/auth/callback
+  ```
+
+> ⚠ **Never point this at a _static_ UI front that has no `/auth/callback`** (a bare SPA with no reverse proxy). The callback 404s, the browser reads that as "not authenticated", and you get an **infinite login loop**. The bundled admin-ui does **not** have this problem — its nginx proxies `/auth/callback` to the backend, which is exactly why it is a valid (and recommended) redirect target.
+
+For direct (no-proxy) values, `<ip_addr>` must be reachable from the **end user's** browser — not `localhost` / `127.0.0.1` unless the browser runs on the OpenRag host.
 
 Whichever form you use, the string must match the IdP's **Valid redirect URIs** list byte-for-byte (scheme, host, port, path, trailing slash).
 
@@ -832,6 +845,14 @@ Server logs record the attempted `sub` at `WARNING` level so admins can copy it 
 - Keycloak: Ensure `offline_access` scope is mapped to the client
   - **Clients** → `openrag` → **Client scopes** → Verify `offline_access` is in the assigned scopes
 - LemonLDAP::NG: Check the OIDC relying party configuration includes `offline_access`
+
+### 8. Login succeeds but lands on a blank / 404 / JSON page
+
+**Error**: The IdP login completes without error, but the browser ends up on an empty page, a 404, or raw JSON instead of the UI. No error is shown — this is a **silent** failure.
+
+**Cause**: `OIDC_REDIRECT_URI` points at an origin that *can* reach `/auth/callback` but does **not** serve the UI. The classic case is pointing at the bare backend `APP_PORT` when a separate front door (the admin-ui nginx, or a reverse proxy) actually serves the UI. The callback runs, but the post-login redirect is **relative** (e.g. `/app/`), so the browser resolves it against the backend origin — which has no `/app/` — and lands nowhere useful.
+
+**Solution**: Set `OIDC_REDIRECT_URI` to the origin that serves your UI *and* reaches `/auth/callback` (for the bundled admin-ui that's `http://<host>:<ADMIN_UI_PORT>/auth/callback`, **not** `APP_PORT`). See [Choosing `OIDC_REDIRECT_URI`](#choosing-oidc_redirect_uri).
 
 ---
 

@@ -109,6 +109,27 @@ services:
     ports:
       - "${INDEXERUI_PORT:-3042}:3000"
     restart: unless-stopped
+    # Superseded by the admin-ui service below. Opt in with `--profile legacy-ui`
+    # (requires the extern/indexer-ui submodule); otherwise it neither builds nor
+    # runs, so the default stack needs no submodules.
+    profiles: ["legacy-ui"]
+
+  # ── Admin UI (React SPA + nginx, same-origin reverse proxy to the API) ──
+  admin-ui:
+    image: linagoraai/openrag-admin-ui:latest
+    build:
+      context: ../..
+      dockerfile: infra/docker/ui.Dockerfile
+      args:
+        # Same-origin: nginx proxies the API, so the SPA uses relative calls.
+        VITE_API_BASE_URL: ""
+        VITE_BASE_PATH: "/app/"
+    restart: unless-stopped
+    ports:
+      - "${ADMIN_UI_PORT:-8081}:80"
+    # No depends_on the API: nginx resolves the `openrag` network alias (shared by
+    # the GPU and CPU API variants) at request time, so this works under any
+    # profile and starts even before the backend is ready.
 
   # GPU - default
   openrag:
@@ -131,8 +152,9 @@ services:
         condition: service_started
       milvus:
         condition: service_healthy
-      vllm-gpu:
-        condition: service_healthy
+    # No hard dependency on vllm-gpu: the embedder is reached over the network at
+    # ingestion time, so external-inference deploys must not be blocked by (or pull
+    # in) the bundled vLLM. With local inference, start vllm-gpu alongside.
 
   # No GPU
   openrag-cpu:
@@ -145,8 +167,7 @@ services:
         condition: service_started
       milvus:
         condition: service_healthy
-      vllm-cpu:
-        condition: service_healthy
+    # No hard dependency on vllm-cpu (see the GPU service above).
 
   rdb:
     image: postgres:15

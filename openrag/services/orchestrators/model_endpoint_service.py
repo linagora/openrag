@@ -209,6 +209,11 @@ class ModelEndpointService:
             )
         result = await self._repo.create(row)
         await self.load_all()
+        if row.is_default:
+            # The new endpoint became the default (repo demoted the previous one in
+            # the same transaction), so the cached 'default' alias client — built
+            # against the old default — is stale and must be evicted.
+            self._invalidate_client_cache(row.model_type, "default")
         return result
 
     async def get_model_endpoint(self, name: str, model_type: str) -> ModelEndpointRow:
@@ -233,6 +238,12 @@ class ModelEndpointService:
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
 
         new_name: str | None = fields.pop("new_name", None)  # type: ignore[assignment]
+        # 'is_default' is not a plain column edit: flipping it must clear the previous
+        # default in the same transaction, so route a truthy value through set_default
+        # (atomic clear-then-set) instead of letting the repo write a second
+        # is_default=true row. A false/None value is a no-op here — you switch the
+        # default by promoting another endpoint, never by leaving the type with none.
+        promote_to_default = bool(fields.pop("is_default", None))
 
         if fields:
             updated = await self._repo.update(name, model_type, **fields)
@@ -240,13 +251,28 @@ class ModelEndpointService:
             updated = existing
 
         effective_name = name
+        renamed_from: str | None = None
         if new_name and new_name != name:
             await self._repo.rename(name, model_type, new_name)
             effective_name = new_name
-            self._invalidate_client_cache(model_type, name)
+            renamed_from = name
 
-        self._invalidate_client_cache(model_type, effective_name)
+        if promote_to_default:
+            # Clears any prior default and sets this row in one transaction, then
+            # re-points the 'default' alias to it — never leaves two defaults.
+            await self._repo.set_default(model_type, effective_name)
+        # The 'default' alias client is stale when this endpoint becomes the default
+        # OR was already the default (its config just changed).
+        evict_default = bool(promote_to_default or existing.is_default)
+
+        # Reload the in-memory config FIRST, then evict, so a client rebuilt during
+        # the reload window from the old config cannot survive in the cache.
         await self.load_all()
+        if renamed_from is not None:
+            self._invalidate_client_cache(model_type, renamed_from)
+        self._invalidate_client_cache(model_type, effective_name)
+        if evict_default:
+            self._invalidate_client_cache(model_type, "default")
         return await self._repo.get(effective_name, model_type) or (updated or existing)
 
     async def delete_model_endpoint(self, name: str, model_type: str) -> None:
@@ -255,17 +281,26 @@ class ModelEndpointService:
         Raises 404 if not found, 422 if it is the last endpoint of its type
         (would leave components with no fallback).
         """
-        existing = await self._repo.get(name, model_type)
-        if existing is None:
+        # The last-endpoint guard and the survivor/default choice are made INSIDE
+        # the repo's locked transaction (not from a stale snapshot here), so
+        # concurrent deletes of the same type can't both pass the count check or
+        # promote an already-deleted survivor — which would leave the type with no
+        # endpoint / no default. The repo reports what happened.
+        status, promoted = await self._repo.delete_and_promote_default(name, model_type)
+        if status == "not_found":
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
-
-        all_of_type = await self._repo.list_all(model_type=model_type)
-        if len(all_of_type) <= 1:
+        if status == "last":
             raise ValidationError(f"Cannot delete the last '{model_type}' endpoint. Register a replacement first.")
 
-        await self._repo.delete(name, model_type)
-        self._invalidate_client_cache(model_type, name)
+        # Reload the in-memory config FIRST, then evict: evicting before load_all
+        # leaves a window where a concurrent request rebuilds a client from the old
+        # config and re-caches it; evicting after the reload drops any such stale
+        # client so the next request rebuilds from the fresh config.
         await self.load_all()
+        self._invalidate_client_cache(model_type, name)
+        if promoted is not None:
+            # The deleted endpoint was the default; its 'default' alias client is now stale.
+            self._invalidate_client_cache(model_type, "default")
 
     async def set_default(self, model_type: str, name: str) -> None:
         """Promote ``name`` to the default endpoint for ``model_type``."""
@@ -273,8 +308,9 @@ class ModelEndpointService:
         if existing is None:
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
         await self._repo.set_default(model_type, name)
-        self._invalidate_client_cache(model_type, "default")
+        # Reload before evicting so a client rebuilt during the window can't survive.
         await self.load_all()
+        self._invalidate_client_cache(model_type, "default")
 
     # ------------------------------------------------------------------
     # Endpoint validation

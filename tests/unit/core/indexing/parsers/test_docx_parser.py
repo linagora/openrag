@@ -82,6 +82,23 @@ class TestExtractEmbeddedImages:
         tmp.flush()
         assert DocxParser._extract_embedded_images(tmp.name) == []
 
+    def test_huge_positional_index_does_not_allocate(self):
+        # Security regression: order_num comes from the (untrusted) filename. A
+        # crafted entry like image999999999.png must NOT trigger a
+        # ``[None] * 999999999`` allocation (memory bomb). Above the entry cap we
+        # fall back to a compact ordered list, so the result stays tiny.
+        docx = _fake_docx({"image999999999.png": _png_bytes("red")})
+        result = DocxParser._extract_embedded_images(str(docx))
+        assert len(result) == 1
+        assert result[0] is not None
+
+    def test_non_positive_index_skipped(self):
+        # image0 (order 0) is non-positive and must be dropped; image1 is kept.
+        docx = _fake_docx({"image0.png": _png_bytes("blue"), "image1.png": _png_bytes("red")})
+        result = DocxParser._extract_embedded_images(str(docx))
+        assert len(result) == 1
+        assert result[0] is not None
+
 
 class TestRewritePlaceholdersAndBuildBlocks:
     """The parser→caption contract: synthetic refs + ImageBlock metadata."""

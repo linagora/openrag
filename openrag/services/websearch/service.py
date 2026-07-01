@@ -23,7 +23,9 @@ class WebSearchService:
         try:
             results = await self.provider.search(query)
             if not results:
-                logger.warning("Web search returned zero results", query=query)
+                # Don't log the query text (user PII); the empty-result signal
+                # is enough for diagnostics.
+                logger.warning("Web search returned zero results")
                 return results
 
             if self.content_fetcher:
