@@ -52,7 +52,15 @@ import { partitionDetailPath } from "@/lib/routes";
 
 type SortDir = "asc" | "desc" | null;
 
-function RowActions({ partition }: { partition: PartitionResponse }) {
+function RowActions({
+  partition,
+  showEdit,
+  showDelete,
+}: {
+  partition: PartitionResponse;
+  showEdit: boolean;
+  showDelete: boolean;
+}) {
   const queryClient = useQueryClient();
 
   const deleteMutation = useMutation({
@@ -68,20 +76,24 @@ function RowActions({ partition }: { partition: PartitionResponse }) {
 
   return (
     <div className="flex items-center gap-1">
-      <Button variant="ghost" size="sm" asChild>
-        <Link to={partitionDetailPath(partition.name)}>
-          <Pencil className="h-3 w-3" />
-        </Link>
-      </Button>
-      <ConfirmDialog
-        title="Delete Partition"
-        description={`Delete "${partition.name}"? This cannot be undone.`}
-        onConfirm={() => deleteMutation.mutate()}
-      >
-        <Button variant="ghost" size="sm" disabled={deleteMutation.isPending}>
-          <Trash2 className="h-3 w-3 text-destructive" />
+      {showEdit && (
+        <Button variant="ghost" size="sm" asChild>
+          <Link to={partitionDetailPath(partition.name)}>
+            <Pencil className="h-3 w-3" />
+          </Link>
         </Button>
-      </ConfirmDialog>
+      )}
+      {showDelete && (
+        <ConfirmDialog
+          title="Delete Partition"
+          description={`Delete "${partition.name}"? This cannot be undone.`}
+          onConfirm={() => deleteMutation.mutate()}
+        >
+          <Button variant="ghost" size="sm" disabled={deleteMutation.isPending}>
+            <Trash2 className="h-3 w-3 text-destructive" />
+          </Button>
+        </ConfirmDialog>
+      )}
     </div>
   );
 }
@@ -103,7 +115,7 @@ function SortButton({ label, active, direction, onClick }: { label: string; acti
 
 export default function PartitionListPage() {
   const queryClient = useQueryClient();
-  const { canManagePartitions } = usePermissions();
+  const { canManagePartitions, canConfigurePartition } = usePermissions();
   const [dialogOpen, setDialogOpen] = useState(false);
 
   // Open the create dialog directly when arriving from the Overview quick action
@@ -233,6 +245,13 @@ export default function PartitionListPage() {
     return items;
   }, [partitionsQuery.data, search, sortDir, sortColumn]);
 
+  // Show a delete affordance for anyone the backend (`require_partition_owner`)
+  // would allow: admins (satisfied via SUPER_ADMIN_MODE) and partition owners.
+  // `canConfigurePartition(role)` is `superAdmin || role === "owner"`, so a
+  // non-admin owner can delete their own partition — not just admins.
+  const showActions =
+    canManagePartitions || filteredAndSorted.some((p) => canConfigurePartition(p.role));
+
   const handleSort = (column: "name" | "created_at") => {
     if (sortColumn !== column) {
       setSortColumn(column);
@@ -340,7 +359,7 @@ export default function PartitionListPage() {
                     onClick={() => handleSort("created_at")}
                   />
                 </TableHead>
-                {canManagePartitions && <TableHead>Actions</TableHead>}
+                {showActions && <TableHead>Actions</TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -386,9 +405,13 @@ export default function PartitionListPage() {
                         ? new Date(p.created_at).toLocaleDateString()
                         : "--"}
                     </TableCell>
-                    {canManagePartitions && (
+                    {showActions && (
                       <TableCell>
-                        <RowActions partition={p} />
+                        <RowActions
+                          partition={p}
+                          showEdit={canManagePartitions}
+                          showDelete={canConfigurePartition(p.role)}
+                        />
                       </TableCell>
                     )}
                   </TableRow>
@@ -396,7 +419,7 @@ export default function PartitionListPage() {
               ) : (
                 <TableRow>
                   <TableCell
-                    colSpan={canManagePartitions ? 8 : 4}
+                    colSpan={(canManagePartitions ? 7 : 4) + (showActions ? 1 : 0)}
                     className="h-24 text-center text-muted-foreground"
                   >
                     {search.trim() ? "No partitions match your search." : "No partitions."}
