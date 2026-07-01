@@ -113,6 +113,7 @@ class IndexerWorkerActor:
             task_state_manager=task_state_manager,
             document_repo=self._catalog_store.document_repo,
             topic_tag_repo=self._catalog_store.topic_tag_repo,
+            save_uploaded_files=cfg.loader.save_uploaded_files,
         )
 
     async def _ensure_catalog(self) -> None:

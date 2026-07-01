@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from core.models.document import Document
+from core.utils.logging import get_logger
 from services.workers.pipeline_builder import IndexingPipeline
 
 
@@ -34,11 +35,19 @@ class IndexerWorker:
         task_state_manager: Any,
         document_repo: Any = None,
         topic_tag_repo: Any = None,
+        save_uploaded_files: bool = True,
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
         self._document_repo = document_repo
         self._topic_tag_repo = topic_tag_repo
+        # When False (e.g. Twake, which keeps its own copy), the raw upload is
+        # removed from ``paths.data_dir`` once indexing settles so only the
+        # derived chunks are retained.
+        self._save_uploaded_files = save_uploaded_files
+        # Instance-level logger (not module-global): the enclosing actor pickles
+        # by value, and a module-global loguru handle would make it unpicklable.
+        self._logger = get_logger()
 
     async def process_file(
         self,
@@ -103,6 +112,23 @@ class IndexerWorker:
             tb = traceback.format_exc()
             await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
             raise
+        finally:
+            # Cleanup runs on both success and failure: a client that manages its
+            # own files wants the disk copy gone regardless of how indexing ended.
+            if not self._save_uploaded_files:
+                await self._delete_input_file(path)
+
+    async def _delete_input_file(self, path: str) -> None:
+        """Remove the raw upload from disk, swallowing any cleanup error.
+
+        A failed delete must never turn a successful indexation into a failure,
+        so the exception is logged and discarded.
+        """
+        try:
+            await asyncio.to_thread(Path(path).unlink, missing_ok=True)
+            self._logger.debug(f"Deleted input file: {path}")
+        except Exception as cleanup_err:  # noqa: BLE001 - cleanup must not fail the task
+            self._logger.warning(f"Failed to delete input file {path}: {cleanup_err}")
 
 
 async def _write_catalog_record(

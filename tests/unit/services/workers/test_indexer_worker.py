@@ -558,6 +558,72 @@ async def test_process_file_deletes_topic_tags_when_tagging_is_disabled(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_process_file_keeps_input_file_by_default(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    worker = IndexerWorker(pipeline=_make_pipeline(processed, chunks), task_state_manager=_fake_tsm())
+
+    await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    # Default (save_uploaded_files=True): the raw upload stays on disk so the
+    # source-download route can serve it back.
+    assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_process_file_deletes_input_file_when_not_saving(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=_fake_tsm(),
+        save_uploaded_files=False,
+    )
+
+    await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    # save_uploaded_files=False (client manages its own files): the upload is
+    # removed from disk after a successful indexation.
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_process_file_deletes_input_file_on_failure_when_not_saving(tmp_path: Path) -> None:
+    path = tmp_path / "bad.txt"
+    path.write_bytes(b"x")
+
+    class BrokenParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            raise RuntimeError("parser exploded")
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.TEXT.value]
+
+    pipeline = build_indexing_pipeline(
+        parser=BrokenParser(),
+        chunker=FakeChunker([]),
+        embedder=FakeEmbedder(),
+        vector_store=FakeVectorStore(),
+    )
+    worker = IndexerWorker(
+        pipeline=pipeline,
+        task_state_manager=_fake_tsm(),
+        save_uploaded_files=False,
+    )
+
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        await worker.process_file(task_id="t2", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    # Cleanup runs in a finally block, so a failed indexation still removes the
+    # upload — the client's contract is "don't leave my file on disk".
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
 async def test_process_file_rejects_malformed_topic_tags_before_delete(tmp_path: Path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")
