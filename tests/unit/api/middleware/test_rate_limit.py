@@ -78,5 +78,42 @@ def test_disabled_passes_through(monkeypatch):
         assert client.get("/v1/chat").status_code == 200
 
 
+def test_is_admin_true_for_admin_user_dict():
+    assert RateLimitMiddleware._is_admin(_make_request(user={"id": 1, "is_admin": True})) is True
+
+
+def test_is_admin_false_for_non_admin_and_unauthenticated():
+    assert RateLimitMiddleware._is_admin(_make_request(user={"id": 2, "is_admin": False})) is False
+    assert RateLimitMiddleware._is_admin(_make_request(user=None)) is False
+
+
+def test_admin_bypasses_rate_limit(monkeypatch):
+    # An admin user is never throttled even past a tiny limit; a non-admin on the
+    # same tier still gets 429. AuthMiddleware runs before this middleware and sets
+    # request.state.user, so we inject it via a tiny inline middleware here.
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    monkeypatch.setenv("RATE_LIMIT_CHAT", "1/minute")
+
+    admin = {"id": 1, "is_admin": True}
+
+    async def ok(request: Request):
+        return PlainTextResponse("ok")
+
+    class _InjectUser(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            request.state.user = admin
+            return await call_next(request)
+
+    app = Starlette(routes=[Route("/v1/chat", ok)])
+    # add_middleware is reverse of execution: _InjectUser (added last) runs first,
+    # populating request.state.user before RateLimitMiddleware sees the request.
+    app.add_middleware(RateLimitMiddleware)
+    app.add_middleware(_InjectUser)
+    client = TestClient(app)
+    for _ in range(5):
+        assert client.get("/v1/chat").status_code == 200
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
