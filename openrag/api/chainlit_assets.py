@@ -29,6 +29,13 @@ def mount_chainlit_root_assets(app: FastAPI) -> None:
     import chainlit
     from starlette.staticfiles import StaticFiles
 
-    assets_dir = Path(chainlit.__file__).parent / "frontend" / "dist" / "assets"
+    # A regularly installed ``chainlit`` always has ``__file__``; a namespace
+    # package or a test double (bare ``ModuleType``) may not — treat that as
+    # "bundled assets unavailable" and no-op rather than raising AttributeError.
+    chainlit_file = getattr(chainlit, "__file__", None)
+    if not chainlit_file:
+        return
+
+    assets_dir = Path(chainlit_file).parent / "frontend" / "dist" / "assets"
     if assets_dir.is_dir():
         app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="chainlit_root_assets")
