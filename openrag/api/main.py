@@ -362,9 +362,26 @@ if WITH_OPENAI_API or WITH_CHAINLIT_UI:
     app.include_router(openai_router, prefix="/v1", tags=[Tags.OPENAI])
 
 if WITH_CHAINLIT_UI:
+    from pathlib import Path as _Path
+
+    import chainlit as _chainlit
     from chainlit.utils import mount_chainlit
+    from starlette.staticfiles import StaticFiles
 
     mount_chainlit(app, "./app_front.py", path="/chainlit")
+
+    # Chainlit is submounted at /chainlit, so its HTML asset references are
+    # rewritten to /chainlit/assets/*. Its bundled pdf.js worker URL, however,
+    # is computed at runtime in JS as the root-absolute /assets/pdf.worker*.mjs
+    # (no mount prefix), so react-pdf fetches the worker from the origin root.
+    # That path is not under the /chainlit auth bypass, so it returns a 403 JSON
+    # body and the browser blocks the module worker on a bad MIME type — source
+    # PDF previews then fail with "Failed to load PDF file". Serve the same asset
+    # files at /assets too (AuthMiddleware bypasses /assets/*) so the worker
+    # loads with a JavaScript MIME type.
+    _chainlit_assets = _Path(_chainlit.__file__).parent / "frontend" / "dist" / "assets"
+    if _chainlit_assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(_chainlit_assets)), name="chainlit_root_assets")
 
 
 if __name__ == "__main__":
