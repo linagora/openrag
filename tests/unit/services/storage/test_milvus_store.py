@@ -271,6 +271,91 @@ class TestChunkOrderMetadata:
 
 
 # ---------------------------------------------------------------------------
+# _safe_batch_size — shrink the query_iterator page for vector-inclusive reads
+# ---------------------------------------------------------------------------
+
+
+def _set_schema_dim(store: MilvusVectorStore, dim: int) -> None:
+    """Make the store's mocked client report ``dim`` as the vector field size."""
+    store._client.describe_collection.return_value = {
+        "fields": [
+            {"name": "text", "params": {}},
+            {"name": "vector", "params": {"dim": dim}},
+        ]
+    }
+
+
+def _break_schema_probe(store: MilvusVectorStore) -> None:
+    """Make the schema probe raise, forcing the dimension fallback chain."""
+    store._client.describe_collection.side_effect = RuntimeError("no collection")
+
+
+class TestSafeBatchSize:
+    def test_explicit_scalar_projection_keeps_large_default(self, store: MilvusVectorStore) -> None:
+        # No vector and no wildcard → tiny rows → keep the large default page,
+        # without even probing the dimension.
+        assert store._safe_batch_size(["_id"]) == 16_000
+        assert store._safe_batch_size(["partition", "file_id"]) == 16_000
+
+    def test_wildcard_is_treated_as_vector_inclusive(self, store: MilvusVectorStore) -> None:
+        # Milvus 2.6 returns the dense vector for ``["*"]`` too, so a wildcard
+        # page must shrink even without an explicit ``"vector"`` field.
+        _set_schema_dim(store, 1024)
+        assert store._safe_batch_size(["*"]) == 3_276
+
+    def test_vector_request_shrinks_page(self, store: MilvusVectorStore) -> None:
+        _set_schema_dim(store, 1024)
+        # 32 MiB budget / (1024*4 + 6144) bytes-per-row = 3276, well under 16k.
+        assert store._safe_batch_size(["*", "vector"]) == 3_276
+
+    def test_larger_embedder_shrinks_further(self, store: MilvusVectorStore) -> None:
+        _set_schema_dim(store, 4096)
+        page = store._safe_batch_size(["*", "vector"])
+        assert page == (32 * 1024 * 1024) // (4096 * 4 + 6_144)  # 1489
+        assert page < 3_276  # bigger vectors → fewer rows per page
+
+    def test_schema_dim_preferred_over_initialize_value(self, store: MilvusVectorStore) -> None:
+        # The edge case: initialize() recorded 1024, but the existing collection
+        # is really 4096 (initialize's value is ignored for an existing
+        # collection). Page sizing must trust the schema — the real on-the-wire
+        # size — not the possibly-stale initialize() value.
+        store._embedding_dimension = 1024
+        _set_schema_dim(store, 4096)
+        assert store._safe_batch_size(["*"]) == (32 * 1024 * 1024) // (4096 * 4 + 6_144)  # 1489
+
+    def test_schema_read_is_cached(self, store: MilvusVectorStore) -> None:
+        _set_schema_dim(store, 4096)
+        store._safe_batch_size(["*"])
+        assert store._schema_vector_dim == 4096
+        # Second call must reuse the cache, not re-probe Milvus.
+        store._client.describe_collection.reset_mock()
+        store._safe_batch_size(["*"])
+        store._client.describe_collection.assert_not_called()
+
+    def test_falls_back_to_initialize_value_when_schema_unreadable(self, store: MilvusVectorStore) -> None:
+        # Schema probe fails → use the initialize() value rather than guessing.
+        _break_schema_probe(store)
+        store._embedding_dimension = 1024
+        assert store._safe_batch_size(["*"]) == 3_276
+        assert store._schema_vector_dim is None  # nothing resolved, nothing cached
+
+    def test_falls_back_to_conservative_cap_when_dim_unknown(self, store: MilvusVectorStore) -> None:
+        import services.storage.milvus_store as store_mod
+
+        # No initialize() value AND schema unreadable (e.g. collection absent) →
+        # conservative large dim, never a small guess that would over-size the
+        # page (too many rows) for a high-dim collection.
+        _break_schema_probe(store)
+        assert store._embedding_dimension is None
+        page = store._safe_batch_size(["vector"])
+        assert page == (32 * 1024 * 1024) // (store_mod._UNKNOWN_VECTOR_DIM * 4 + 6_144)
+
+    def test_page_never_exceeds_default_cap(self, store: MilvusVectorStore) -> None:
+        _set_schema_dim(store, 1)
+        assert store._safe_batch_size(["vector"]) <= 16_000
+
+
+# ---------------------------------------------------------------------------
 # _chunk_to_entity
 # ---------------------------------------------------------------------------
 
