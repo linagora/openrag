@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import ray
-from services.workers.indexer_actor import IndexerWorker
+from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
 
 from openrag.core.config.root import Settings
 
@@ -113,8 +113,12 @@ class IndexerWorkerActor:
             task_state_manager=task_state_manager,
             document_repo=self._catalog_store.document_repo,
             topic_tag_repo=self._catalog_store.topic_tag_repo,
-            save_uploaded_files=cfg.loader.save_uploaded_files,
         )
+        # When False (e.g. Twake, which keeps its own copy), the raw upload is
+        # purged from ``paths.data_dir`` once indexing settles. Enforced at this
+        # actor boundary — not in the worker — so cleanup also covers failures
+        # that never reach the worker (catalog/registry init, state updates).
+        self._save_uploaded_files = cfg.loader.save_uploaded_files
 
     async def _ensure_catalog(self) -> None:
         if self._catalog_initialized:
@@ -206,31 +210,39 @@ class IndexerWorkerActor:
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
     ) -> dict[str, Any]:
-        await self._ensure_catalog()
-        await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
-        result = await self._worker.process_file(
-            task_id=task_id,
-            path=path,
-            metadata=metadata,
-            partition=partition,
-            user=user,
-            workspace_ids=workspace_ids,
-            replace=replace,
-            indexation_config=indexation_config,
-            embedder_name=embedder_name,
-        )
-        file_id = metadata.get("file_id", "")
-        if workspace_ids and not replace and file_id:
-            try:
-                await asyncio.gather(
-                    *(
-                        self._catalog_store.workspace_repo.add_files_to_workspace(workspace_id, [file_id])
-                        for workspace_id in workspace_ids
+        try:
+            await self._ensure_catalog()
+            await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
+            result = await self._worker.process_file(
+                task_id=task_id,
+                path=path,
+                metadata=metadata,
+                partition=partition,
+                user=user,
+                workspace_ids=workspace_ids,
+                replace=replace,
+                indexation_config=indexation_config,
+                embedder_name=embedder_name,
+            )
+            file_id = metadata.get("file_id", "")
+            if workspace_ids and not replace and file_id:
+                try:
+                    await asyncio.gather(
+                        *(
+                            self._catalog_store.workspace_repo.add_files_to_workspace(workspace_id, [file_id])
+                            for workspace_id in workspace_ids
+                        )
                     )
-                )
-            except Exception:
-                pass
-        return result
+                except Exception:
+                    pass
+            return result
+        finally:
+            # Purge the raw upload (when configured) after indexing settles —
+            # success or failure. Enforced here rather than in the worker so it
+            # also covers pre-processing failures (catalog/registry init, or the
+            # SERIALIZING state update) that never enter the worker's try block.
+            if not self._save_uploaded_files:
+                await delete_uploaded_file(path, self._logger)
 
 
 @ray.remote

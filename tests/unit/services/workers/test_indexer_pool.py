@@ -1049,3 +1049,123 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     assert captured["contextualizer_factory"] is contextualizer_factory
     assert captured["topic_tagger_factory"] is topic_tagger_factory
     assert captured["vlm_factory"] is vlm_factory
+
+
+# ---------------------------------------------------------------------------
+# Tests — IndexerWorkerActor.process_file upload cleanup (SAVE_UPLOADED_FILES)
+#
+# The actor owns raw-upload disposal (not the inner IndexerWorker) so cleanup
+# also covers failures that never reach the worker — catalog/registry init or
+# the SERIALIZING state update.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingWorker:
+    """Stand-in for the inner IndexerWorker: counts calls, optionally raises."""
+
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self._error = error
+        self.calls = 0
+
+    async def process_file(self, **_kwargs) -> dict:
+        self.calls += 1
+        if self._error is not None:
+            raise self._error
+        return {"stored_count": 1, "stage": "stored"}
+
+
+def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
+    """Bare IndexerWorkerActor with only the attributes process_file touches."""
+    from services.workers.indexer_pool import IndexerWorkerActor
+
+    actor_class = IndexerWorkerActor.__ray_metadata__.modified_class
+    actor = actor_class.__new__(actor_class)
+
+    async def _noop(*_a, **_k):
+        return None
+
+    actor._ensure_catalog = _noop
+    actor._ensure_registry_fresh = _noop
+    actor._worker = worker
+    actor._catalog_store = SimpleNamespace(workspace_repo=SimpleNamespace())
+    actor._save_uploaded_files = save_uploaded_files
+    actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
+    return actor
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_upload_by_default(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    # Default: the raw upload stays on disk so the source-download route can
+    # serve it back for Chainlit source viewing.
+    assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_actor_purges_upload_when_disabled(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=False, worker=_RecordingWorker())
+
+    await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    # save_uploaded_files=False (client manages its own files): purged on success.
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_actor_purges_upload_on_worker_failure(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=False, worker=_RecordingWorker(error=RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    # The finally runs on failure too — don't leave the client's file behind.
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_actor_purges_upload_on_pre_worker_failure(tmp_path) -> None:
+    # The gap the old worker-level finally missed: catalog/registry init (or the
+    # SERIALIZING state update) fails *before* the worker runs. The upload must
+    # still be purged, and the worker must never be entered.
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=False, worker=worker)
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("pg down")
+
+    actor._ensure_catalog = _boom
+
+    with pytest.raises(RuntimeError, match="pg down"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert not path.exists()
+    assert worker.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_upload_on_pre_worker_failure_when_saving(tmp_path) -> None:
+    # Mirror image: with saving on, a pre-worker failure must not delete the file.
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("pg down")
+
+    actor._ensure_catalog = _boom
+
+    with pytest.raises(RuntimeError, match="pg down"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert path.exists()
