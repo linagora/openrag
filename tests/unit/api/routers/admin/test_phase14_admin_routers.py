@@ -228,6 +228,26 @@ async def test_update_model_endpoint_maps_name_to_new_name(async_client_factory)
 
 
 @pytest.mark.asyncio
+async def test_model_endpoint_read_responses_hide_stored_api_key(async_client_factory):
+    model_service = FakeModelEndpointService()
+    model_service.endpoint_extra = {
+        "implementation": "vllm",
+        "api_key": "secret-token",
+        "temperature": 0.2,
+    }
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/model-endpoints/llm/default")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "secret-token" not in response.text
+    assert payload["has_api_key"] is True
+    assert payload["extra"] == {"implementation": "vllm", "temperature": 0.2}
+
+
+@pytest.mark.asyncio
 async def test_validate_model_endpoint_uses_route_identity(async_client_factory):
     """Endpoint validation should resolve route identity before probing."""
     model_service = FakeModelEndpointService()
@@ -282,6 +302,30 @@ async def test_validate_endpoint_draft_forwards_body_without_lookup(async_client
     assert response.json()["reachable"] is True
     assert model_service.calls == [
         ("validate", {"url": "http://candidate:8000/v1", "model_name": "mistral-small", "api_key": "draft-key"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_draft_can_reuse_stored_api_key(async_client_factory):
+    model_service = FakeModelEndpointService()
+    model_service.endpoint_extra = {"api_key": "secret-token"}
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post(
+            "/model-endpoints/validate",
+            json={
+                "endpoint": "http://candidate:8000/v1",
+                "model_name": "mistral-small",
+                "stored_api_key_model_type": "llm",
+                "stored_api_key_name": "default",
+            },
+        )
+
+    assert response.status_code == 200
+    assert model_service.calls == [
+        ("get", {"name": "default", "model_type": "llm"}),
+        ("validate", {"url": "http://candidate:8000/v1", "model_name": "mistral-small", "api_key": "secret-token"}),
     ]
 
 

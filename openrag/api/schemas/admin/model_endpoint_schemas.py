@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
+from core.utils.redaction import redact_secret_mapping
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm"]
@@ -98,9 +99,24 @@ class ModelEndpointResponse(BaseModel):
     batch_size: int
     timeout: float
     extra: dict[str, Any]
+    has_api_key: bool = False
     is_default: bool
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def redact_secret_extra(cls, value: Any) -> Any:
+        if hasattr(value, "model_dump"):
+            data = value.model_dump()
+        elif isinstance(value, dict):
+            data = dict(value)
+        else:
+            data = dict(value)
+        extra = dict(data.get("extra") or {})
+        data["has_api_key"] = bool(extra.get("api_key"))
+        data["extra"] = redact_secret_mapping(extra)
+        return data
 
 
 class ValidateEndpointRequest(BaseModel):
@@ -109,6 +125,23 @@ class ValidateEndpointRequest(BaseModel):
     endpoint: str
     model_name: str | None = None
     api_key: str | None = None
+    stored_api_key_model_type: ModelEndpointType | None = None
+    stored_api_key_name: str | None = None
+
+    @field_validator("stored_api_key_name")
+    @classmethod
+    def validate_stored_api_key_name(cls, value: str | None) -> str | None:
+        """Normalize the optional saved endpoint name used as credential source."""
+        return _normalize_name(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def require_complete_stored_api_key_source(self) -> ValidateEndpointRequest:
+        """Require both fields when draft validation reuses a stored key."""
+        has_type = self.stored_api_key_model_type is not None
+        has_name = self.stored_api_key_name is not None
+        if has_type != has_name:
+            raise ValueError("stored_api_key_model_type and stored_api_key_name must be provided together")
+        return self
 
 
 class ValidateEndpointResponse(BaseModel):

@@ -104,10 +104,17 @@ async def validate_endpoint_draft(
 ):
     """Probe arbitrary endpoint values (before they are saved) for reachability
     and model availability."""
+    api_key = body.api_key
+    if api_key is None and body.stored_api_key_model_type and body.stored_api_key_name:
+        endpoint = await service.get_model_endpoint(
+            name=body.stored_api_key_name,
+            model_type=body.stored_api_key_model_type,
+        )
+        api_key = endpoint.extra.get("api_key")
     return await service.validate_endpoint(
         url=body.endpoint,
         model_name=body.model_name,
-        api_key=body.api_key,
+        api_key=api_key,
     )
 
 

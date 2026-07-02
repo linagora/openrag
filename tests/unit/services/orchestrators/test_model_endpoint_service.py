@@ -476,6 +476,72 @@ async def test_update_is_default_false_does_not_demote_or_touch_default_cache():
     assert cache.get("default") is sentinel
 
 
+@pytest.mark.asyncio
+async def test_update_extra_without_api_key_preserves_existing_secret():
+    existing = _make_row(
+        name="jina",
+        extra={"implementation": "vllm", "api_key": "stored-key", "temperature": 0.1},
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    await svc.update_model_endpoint("jina", "embedder", extra={"implementation": "vllm", "temperature": 0.2})
+
+    updated = repo._store[("jina", "embedder")]
+    assert updated.extra == {"implementation": "vllm", "temperature": 0.2, "api_key": "stored-key"}
+
+
+@pytest.mark.asyncio
+async def test_update_extra_preserves_nested_redacted_secrets():
+    existing = _make_row(
+        name="jina",
+        extra={
+            "implementation": "vllm",
+            "auth": {
+                "token": "stored-token",
+                "headers": [{"api_key": "nested-key"}],
+            },
+        },
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    await svc.update_model_endpoint(
+        "jina",
+        "embedder",
+        extra={
+            "implementation": "vllm",
+            "auth": {
+                "token": "<redacted>",
+                "headers": [{"api_key": "<redacted>"}],
+            },
+            "temperature": 0.2,
+        },
+    )
+
+    updated = repo._store[("jina", "embedder")]
+    assert updated.extra == {
+        "implementation": "vllm",
+        "auth": {
+            "token": "stored-token",
+            "headers": [{"api_key": "nested-key"}],
+        },
+        "temperature": 0.2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_extra_with_new_api_key_rotates_existing_secret():
+    existing = _make_row(name="jina", extra={"implementation": "vllm", "api_key": "old-key"})
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    await svc.update_model_endpoint("jina", "embedder", extra={"implementation": "vllm", "api_key": "new-key"})
+
+    updated = repo._store[("jina", "embedder")]
+    assert updated.extra == {"implementation": "vllm", "api_key": "new-key"}
+
+
 # ------------------------------------------------------------------
 # delete_model_endpoint
 # ------------------------------------------------------------------

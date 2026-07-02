@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from core.config.model_endpoints import ModelEndpointConfig, ModelEndpointRow
 from core.utils.exceptions import NotFoundError, ValidationError
 from core.utils.logging import get_logger
+from core.utils.redaction import preserve_existing_secrets
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -244,6 +245,9 @@ class ModelEndpointService:
         # is_default=true row. A false/None value is a no-op here — you switch the
         # default by promoting another endpoint, never by leaving the type with none.
         promote_to_default = bool(fields.pop("is_default", None))
+
+        if isinstance(fields.get("extra"), dict):
+            fields["extra"] = preserve_existing_secrets(existing.extra, fields["extra"])  # type: ignore[arg-type]
 
         if fields:
             updated = await self._repo.update(name, model_type, **fields)

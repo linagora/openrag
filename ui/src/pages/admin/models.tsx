@@ -7,6 +7,9 @@ import {
   createModelEndpoint,
   updateModelEndpoint,
   deleteModelEndpoint,
+  displayModelEndpointExtra,
+  prepareModelEndpointExtraForSubmit,
+  REDACTED_SECRET,
   setDefaultModelEndpoint,
   validateModelEndpoint,
 } from "@/lib/api/models";
@@ -255,14 +258,20 @@ function EndpointDialog({
     if (open) {
       setValidated(null);
       setValidating(false);
-      setValidationMsg(null);
       if (editing) {
+        const displayExtra = displayModelEndpointExtra(editing.extra);
         setName(editing.name);
         setEndpoint(editing.endpoint);
         setModelName(editing.model_name || "");
         setBatchSize(String(editing.batch_size));
         setTimeout(String(editing.timeout));
-        setExtraJson(JSON.stringify(editing.extra, null, 2));
+        setExtraJson(JSON.stringify(displayExtra, null, 2));
+        setValidated(true);
+        setValidationMsg(
+          editing.has_api_key
+            ? "API key is stored server-side. Leave api_key out to keep it, or add a new api_key to rotate it."
+            : null,
+        );
       } else {
         setName("");
         setEndpoint("");
@@ -270,15 +279,31 @@ function EndpointDialog({
         setBatchSize("32");
         setTimeout("30");
         setExtraJson("{}");
+        setValidated(null);
+        setValidationMsg(null);
       }
     }
   }, [open, editing]);
 
   // Reset validation when relevant fields change
   useEffect(() => {
+    if (
+      editing &&
+      endpoint === editing.endpoint &&
+      (modelName || "") === (editing.model_name || "") &&
+      extraJson === JSON.stringify(displayModelEndpointExtra(editing.extra), null, 2)
+    ) {
+      setValidated(true);
+      setValidationMsg(
+        editing.has_api_key
+          ? "API key is stored server-side. Leave api_key out to keep it, or add a new api_key to rotate it."
+          : null,
+      );
+      return;
+    }
     setValidated(null);
     setValidationMsg(null);
-  }, [endpoint, modelName, extraJson]);
+  }, [endpoint, modelName, extraJson, editing]);
 
   const handleValidate = async () => {
     // Draft validation: probe the values currently in the form (before saving),
@@ -289,18 +314,29 @@ function EndpointDialog({
     }
     let apiKey: string | undefined;
     try {
-      apiKey = (JSON.parse(extraJson || "{}").api_key as string) || undefined;
+      const extra = prepareModelEndpointExtraForSubmit(JSON.parse(extraJson || "{}"));
+      apiKey = (extra.api_key as string) || undefined;
     } catch {
       // invalid extra JSON is reported on save; ignore here
     }
     setValidating(true);
     setValidationMsg(null);
     try {
-      const res = await validateModelEndpoint({
-        endpoint,
-        model_name: modelName || undefined,
-        api_key: apiKey,
-      });
+      const canUseStoredSecret =
+        editing?.has_api_key === true &&
+        (!apiKey || apiKey === REDACTED_SECRET);
+      const res = canUseStoredSecret
+        ? await validateModelEndpoint({
+            endpoint,
+            model_name: modelName || undefined,
+            stored_api_key_model_type: editing.model_type,
+            stored_api_key_name: editing.name,
+          })
+        : await validateModelEndpoint({
+            endpoint,
+            model_name: modelName || undefined,
+            api_key: apiKey,
+          });
       if (!res.reachable) {
         setValidated(false);
         const msg = res.detail || "Endpoint is unreachable.";
@@ -337,7 +373,7 @@ function EndpointDialog({
     e.preventDefault();
     let extra: Record<string, unknown> = {};
     try {
-      extra = JSON.parse(extraJson);
+      extra = prepareModelEndpointExtraForSubmit(JSON.parse(extraJson));
     } catch {
       toast.error("Invalid JSON in extra field");
       return;
@@ -411,6 +447,11 @@ function EndpointDialog({
               onChange={(e) => setExtraJson(e.target.value)}
               rows={4}
             />
+            {editing?.has_api_key && (
+              <p className="text-xs text-muted-foreground">
+                API key is configured and hidden. Leave api_key out to keep it, or add a new api_key to rotate it.
+              </p>
+            )}
           </div>
           {validationMsg && (
             <p

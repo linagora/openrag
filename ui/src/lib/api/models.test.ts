@@ -1,6 +1,36 @@
-import { describe, it, expect } from "vitest";
-import { pickDefaultEndpoint, resolveEmbedderName } from "./models";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import {
+  displayModelEndpointExtra,
+  pickDefaultEndpoint,
+  prepareModelEndpointExtraForSubmit,
+  resolveEmbedderName,
+  validateModelEndpoint,
+} from "./models";
 import type { ModelEndpointResponse } from "./models";
+
+function fakeResponse({
+  status = 200,
+  body = "{}",
+}: { status?: number; body?: string } = {}): Response {
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: (key: string) => (key.toLowerCase() === "content-type" ? "application/json" : null) },
+    json: async () => JSON.parse(body),
+    text: async () => body,
+  } as unknown as Response;
+}
+
+const fetchMock = vi.fn();
+
+beforeEach(() => {
+  vi.stubGlobal("fetch", fetchMock);
+  fetchMock.mockReset();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 function ep(name: string, is_default = false): ModelEndpointResponse {
   return {
@@ -62,5 +92,62 @@ describe("resolveEmbedderName", () => {
 
   it("keeps 'default' when the default endpoint is itself named 'default'", () => {
     expect(resolveEmbedderName("default", [ep("default", true)])).toBe("default");
+  });
+});
+
+describe("validateModelEndpoint", () => {
+  it("can request draft validation with a stored server-side API key", async () => {
+    fetchMock.mockResolvedValue(fakeResponse({ body: JSON.stringify({ reachable: true }) }));
+
+    await validateModelEndpoint({
+      endpoint: "http://candidate:8000/v1",
+      model_name: "mistral-small",
+      stored_api_key_model_type: "llm",
+      stored_api_key_name: "private-llm",
+    });
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      endpoint: "http://candidate:8000/v1",
+      model_name: "mistral-small",
+      stored_api_key_model_type: "llm",
+      stored_api_key_name: "private-llm",
+    });
+  });
+});
+
+describe("model endpoint secret placeholders", () => {
+  it("shows backend redacted secret sentinels as password-style bullets", () => {
+    expect(
+      displayModelEndpointExtra({
+        auth: { token: "<redacted>" },
+        headers: [{ api_key: "<redacted>" }],
+        note: "<redacted>",
+      }),
+    ).toEqual({
+      auth: { token: "••••••••" },
+      headers: [{ api_key: "sk-********" }],
+      note: "<redacted>",
+    });
+  });
+
+  it("converts unchanged bullet placeholders back to the backend redacted sentinel", () => {
+    expect(
+      prepareModelEndpointExtraForSubmit({
+        auth: { token: "••••••••" },
+        headers: [{ api_key: "sk-********" }],
+        note: "••••••••",
+      }),
+    ).toEqual({
+      auth: { token: "<redacted>" },
+      headers: [{ api_key: "<redacted>" }],
+      note: "••••••••",
+    });
+  });
+
+  it("still accepts the previous API key placeholder when an edit form is already open", () => {
+    expect(prepareModelEndpointExtraForSubmit({ api_key: "********" })).toEqual({
+      api_key: "<redacted>",
+    });
   });
 });

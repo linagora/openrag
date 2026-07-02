@@ -327,9 +327,10 @@ def get_config():
     instead of assuming every admin has partition access.
     """
     from api.dependencies.auth import SUPER_ADMIN_MODE
+    from core.utils.redaction import redact_secrets
     from fastapi.encoders import jsonable_encoder
 
-    return {**jsonable_encoder(settings), "super_admin_mode": SUPER_ADMIN_MODE}
+    return {**redact_secrets(jsonable_encoder(settings)), "super_admin_mode": SUPER_ADMIN_MODE}
 
 
 # Router mounts. Phase 10F finished moving these into

@@ -21,6 +21,7 @@ export interface ModelEndpointResponse {
   batch_size: number;
   timeout: number;
   extra: Record<string, unknown>;
+  has_api_key?: boolean;
   is_default: boolean;
   created_at: string;
   updated_at: string;
@@ -57,6 +58,70 @@ export interface ValidateModelEndpointResponse {
 
 const BASE = "/model-endpoints";
 const enc = encodeURIComponent;
+export const REDACTED_SECRET = "<redacted>";
+export const API_KEY_DISPLAY_PLACEHOLDER = "sk-********";
+export const SECRET_DISPLAY_PLACEHOLDER = "••••••••";
+const LEGACY_API_KEY_DISPLAY_PLACEHOLDER = "********";
+
+const SECRET_FIELD_NAMES = new Set([
+  "api_key",
+  "api_token",
+  "auth_token",
+  "chainlit_auth_secret",
+  "client_secret",
+  "hf_token",
+  "oidc_client_secret",
+  "oidc_token_encryption_key",
+  "password",
+  "secret",
+  "secret_key",
+  "token",
+  "token_encryption_key",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSecretField(key: string | undefined): boolean {
+  return key ? SECRET_FIELD_NAMES.has(key.toLowerCase()) : false;
+}
+
+function displayPlaceholderFor(key: string | undefined): string {
+  return key?.toLowerCase() === "api_key" ? API_KEY_DISPLAY_PLACEHOLDER : SECRET_DISPLAY_PLACEHOLDER;
+}
+
+function isUnchangedPlaceholder(value: string, key: string | undefined): boolean {
+  if (value === displayPlaceholderFor(key)) return true;
+  return key?.toLowerCase() === "api_key" && value === LEGACY_API_KEY_DISPLAY_PLACEHOLDER;
+}
+
+function transformSecretPlaceholders(value: unknown, direction: "display" | "submit", key?: string): unknown {
+  if (isSecretField(key) && typeof value === "string") {
+    if (direction === "display") return displayPlaceholderFor(key);
+    if (isUnchangedPlaceholder(value, key)) return REDACTED_SECRET;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => transformSecretPlaceholders(item, direction));
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([entryKey, item]) => [
+        entryKey,
+        transformSecretPlaceholders(item, direction, entryKey),
+      ]),
+    );
+  }
+  return value;
+}
+
+export function displayModelEndpointExtra(extra: Record<string, unknown>): Record<string, unknown> {
+  return transformSecretPlaceholders(extra, "display") as Record<string, unknown>;
+}
+
+export function prepareModelEndpointExtraForSubmit(extra: Record<string, unknown>): Record<string, unknown> {
+  return transformSecretPlaceholders(extra, "submit") as Record<string, unknown>;
+}
 
 /** List endpoints (bare array). Optionally filter by model type. */
 export function listModelEndpoints(modelType?: ModelType) {
@@ -103,6 +168,8 @@ export interface ValidateModelEndpointRequest {
   endpoint: string;
   model_name?: string;
   api_key?: string;
+  stored_api_key_model_type?: ModelType;
+  stored_api_key_name?: string;
 }
 
 /**
