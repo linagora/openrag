@@ -670,9 +670,10 @@ async def test_validate_endpoint_probes_url_and_model_name(monkeypatch):
             return {"data": [{"id": "mistral-small"}]}
 
     class FakeClient:
-        def __init__(self, *, timeout, headers):
+        def __init__(self, *, timeout, headers, follow_redirects):
             assert timeout == 5.0
             assert headers == {}
+            assert follow_redirects is False
 
         async def __aenter__(self):
             return self
@@ -711,8 +712,9 @@ async def test_validate_endpoint_sends_api_key(monkeypatch):
             return {"data": [{"id": "mistral-small"}]}
 
     class FakeClient:
-        def __init__(self, *, timeout, headers):
+        def __init__(self, *, timeout, headers, follow_redirects):
             captured_headers.append(headers)
+            assert follow_redirects is False
 
         async def __aenter__(self):
             return self
@@ -728,3 +730,45 @@ async def test_validate_endpoint_sends_api_key(monkeypatch):
     await svc.validate_endpoint("http://llm:8000/v1", "mistral-small", api_key="secret-token")
 
     assert captured_headers == [{"Authorization": "Bearer secret-token"}]
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_rejects_non_http_urls_without_request(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    def fail_client(**_kwargs):
+        raise AssertionError("HTTP client should not be created for invalid URLs")
+
+    monkeypatch.setattr(httpx, "AsyncClient", fail_client)
+
+    result = await svc.validate_endpoint("file:///etc/passwd", "mistral-small")
+
+    assert result == {
+        "reachable": False,
+        "model_found": None,
+        "models_served": None,
+        "detail": "Endpoint URL must be an absolute HTTP(S) URL.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_rejects_url_credentials_without_request(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    def fail_client(**_kwargs):
+        raise AssertionError("HTTP client should not be created for URLs with credentials")
+
+    monkeypatch.setattr(httpx, "AsyncClient", fail_client)
+
+    result = await svc.validate_endpoint("https://user:pass@example.test/v1", "mistral-small")
+
+    assert result == {
+        "reachable": False,
+        "model_found": None,
+        "models_served": None,
+        "detail": "Endpoint URL must not include credentials.",
+    }

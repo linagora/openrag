@@ -128,6 +128,12 @@ class ValidateEndpointRequest(BaseModel):
     stored_api_key_model_type: ModelEndpointType | None = None
     stored_api_key_name: str | None = None
 
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        """Normalize the draft endpoint URL before probing it."""
+        return _normalize_endpoint(value)
+
     @field_validator("stored_api_key_name")
     @classmethod
     def validate_stored_api_key_name(cls, value: str | None) -> str | None:
@@ -153,10 +159,17 @@ class ValidateEndpointResponse(BaseModel):
     detail: str | None = None
 
 
+class RevealApiKeyResponse(BaseModel):
+    """Response body for explicitly revealing a stored endpoint API key."""
+
+    api_key: str | None = None
+
+
 __all__ = [
     "CreateModelEndpointRequest",
     "ModelEndpointResponse",
     "ModelEndpointType",
+    "RevealApiKeyResponse",
     "UpdateModelEndpointRequest",
     "ValidateEndpointRequest",
     "ValidateEndpointResponse",

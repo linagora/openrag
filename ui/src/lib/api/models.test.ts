@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
   displayModelEndpointExtra,
+  mergeModelEndpointApiKeyExtra,
   pickDefaultEndpoint,
   prepareModelEndpointExtraForSubmit,
+  revealModelEndpointApiKey,
   resolveEmbedderName,
+  splitModelEndpointApiKeyExtra,
   validateModelEndpoint,
 } from "./models";
 import type { ModelEndpointResponse } from "./models";
@@ -116,18 +119,48 @@ describe("validateModelEndpoint", () => {
   });
 });
 
+describe("revealModelEndpointApiKey", () => {
+  it("requests the admin-only reveal endpoint for the selected model endpoint", async () => {
+    fetchMock.mockResolvedValue(fakeResponse({ body: JSON.stringify({ api_key: "secret-token" }) }));
+
+    const result = await revealModelEndpointApiKey("llm", "private-llm");
+
+    expect(result).toEqual({ api_key: "secret-token" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/model-endpoints/llm/private-llm/reveal-api-key",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+});
+
 describe("model endpoint secret placeholders", () => {
   it("shows backend redacted secret sentinels as password-style bullets", () => {
     expect(
       displayModelEndpointExtra({
         auth: { token: "<redacted>" },
+        backend_secret: "<redacted>",
         headers: [{ api_key: "<redacted>" }],
         note: "<redacted>",
       }),
     ).toEqual({
       auth: { token: "••••••••" },
+      backend_secret: "••••••••",
       headers: [{ api_key: "sk-********" }],
       note: "<redacted>",
+    });
+  });
+
+  it("keeps backend prefix-masked secret values visible without revealing the full secret", () => {
+    expect(
+      displayModelEndpointExtra({
+        auth: { token: "nes********" },
+        headers: [{ api_key: "hf-********" }],
+        note: "abc********",
+      }),
+    ).toEqual({
+      auth: { token: "nes********" },
+      headers: [{ api_key: "hf-********" }],
+      note: "abc********",
     });
   });
 
@@ -135,7 +168,7 @@ describe("model endpoint secret placeholders", () => {
     expect(
       prepareModelEndpointExtraForSubmit({
         auth: { token: "••••••••" },
-        headers: [{ api_key: "sk-********" }],
+        headers: [{ api_key: "hf-********" }],
         note: "••••••••",
       }),
     ).toEqual({
@@ -147,6 +180,50 @@ describe("model endpoint secret placeholders", () => {
 
   it("still accepts the previous API key placeholder when an edit form is already open", () => {
     expect(prepareModelEndpointExtraForSubmit({ api_key: "********" })).toEqual({
+      api_key: "<redacted>",
+    });
+  });
+
+  it("splits the API key out of endpoint extra for the dedicated form field", () => {
+    expect(
+      splitModelEndpointApiKeyExtra({
+        api_key: "sk-real-secret",
+        implementation: "vllm",
+        temperature: 0.2,
+      }),
+    ).toEqual({
+      apiKey: "sk-********",
+      extra: {
+        implementation: "vllm",
+        temperature: 0.2,
+      },
+    });
+  });
+
+  it("merges the dedicated API key field back into the endpoint extra payload", () => {
+    expect(
+      mergeModelEndpointApiKeyExtra(
+        {
+          implementation: "vllm",
+        },
+        "sk-new-secret",
+      ),
+    ).toEqual({
+      implementation: "vllm",
+      api_key: "sk-new-secret",
+    });
+  });
+
+  it("preserves a stored API key when the dedicated field is unchanged", () => {
+    expect(
+      mergeModelEndpointApiKeyExtra(
+        {
+          implementation: "vllm",
+        },
+        "sk-********",
+      ),
+    ).toEqual({
+      implementation: "vllm",
       api_key: "<redacted>",
     });
   });

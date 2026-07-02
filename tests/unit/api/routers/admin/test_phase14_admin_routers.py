@@ -244,7 +244,20 @@ async def test_model_endpoint_read_responses_hide_stored_api_key(async_client_fa
     payload = response.json()
     assert "secret-token" not in response.text
     assert payload["has_api_key"] is True
-    assert payload["extra"] == {"implementation": "vllm", "temperature": 0.2}
+    assert payload["extra"] == {"api_key": "sec********", "implementation": "vllm"}
+
+
+@pytest.mark.asyncio
+async def test_model_endpoint_reveal_api_key_returns_stored_secret(async_client_factory):
+    model_service = FakeModelEndpointService()
+    model_service.endpoint_extra = {"api_key": "secret-token", "implementation": "vllm"}
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post("/model-endpoints/llm/default/reveal-api-key")
+
+    assert response.status_code == 200
+    assert response.json() == {"api_key": "secret-token"}
 
 
 @pytest.mark.asyncio
@@ -315,7 +328,7 @@ async def test_validate_endpoint_draft_can_reuse_stored_api_key(async_client_fac
         response = await client.post(
             "/model-endpoints/validate",
             json={
-                "endpoint": "http://candidate:8000/v1",
+                "endpoint": "http://llm:8000/v1/",
                 "model_name": "mistral-small",
                 "stored_api_key_model_type": "llm",
                 "stored_api_key_name": "default",
@@ -325,7 +338,31 @@ async def test_validate_endpoint_draft_can_reuse_stored_api_key(async_client_fac
     assert response.status_code == 200
     assert model_service.calls == [
         ("get", {"name": "default", "model_type": "llm"}),
-        ("validate", {"url": "http://candidate:8000/v1", "model_name": "mistral-small", "api_key": "secret-token"}),
+        ("validate", {"url": "http://llm:8000/v1", "model_name": "mistral-small", "api_key": "secret-token"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_draft_rejects_stored_key_for_different_endpoint(async_client_factory):
+    model_service = FakeModelEndpointService()
+    model_service.endpoint_extra = {"api_key": "secret-token"}
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post(
+            "/model-endpoints/validate",
+            json={
+                "endpoint": "http://candidate:8000/v1",
+                "model_name": "mistral-small",
+                "stored_api_key_model_type": "llm",
+                "stored_api_key_name": "default",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Stored API key can only be reused with its saved endpoint URL."
+    assert model_service.calls == [
+        ("get", {"name": "default", "model_type": "llm"}),
     ]
 
 

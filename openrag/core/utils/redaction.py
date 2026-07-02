@@ -6,11 +6,15 @@ from collections.abc import Mapping
 from typing import Any
 
 REDACTED_SECRET = "<redacted>"
+MASK_SUFFIX = "********"
+MASK_PREFIX_LENGTH = 3
+MIN_PREFIX_MASK_LENGTH = 8
 
 SECRET_FIELD_NAMES = frozenset(
     {
         "api_key",
         "api_token",
+        "access_key",
         "auth_token",
         "chainlit_auth_secret",
         "client_secret",
@@ -18,24 +22,57 @@ SECRET_FIELD_NAMES = frozenset(
         "oidc_client_secret",
         "oidc_token_encryption_key",
         "password",
+        "private_key",
+        "refresh_token",
         "secret",
         "secret_key",
+        "signing_key",
         "token",
         "token_encryption_key",
+    }
+)
+SECRET_FIELD_SUFFIXES = frozenset(
+    {
+        "_access_key",
+        "_api_key",
+        "_auth_token",
+        "_password",
+        "_private_key",
+        "_refresh_token",
+        "_secret",
+        "_signing_key",
+        "_token",
+        "_token_encryption_key",
     }
 )
 
 
 def is_secret_field(key: str) -> bool:
     """Return true only for known secret field names, not fuzzy token matches."""
-    return key.lower() in SECRET_FIELD_NAMES
+    normalized = key.lower()
+    return normalized in SECRET_FIELD_NAMES or any(normalized.endswith(suffix) for suffix in SECRET_FIELD_SUFFIXES)
+
+
+def mask_secret_value(value: Any) -> str:
+    """Return a public masked value with a short prefix when that is useful."""
+    if not isinstance(value, str) or len(value) < MIN_PREFIX_MASK_LENGTH:
+        return REDACTED_SECRET
+    return f"{value[:MASK_PREFIX_LENGTH]}{MASK_SUFFIX}"
+
+
+def is_masked_secret_value(value: Any) -> bool:
+    """Return true for placeholders produced by the public redaction layer."""
+    return (
+        isinstance(value, str) and len(value) == MASK_PREFIX_LENGTH + len(MASK_SUFFIX) and value.endswith(MASK_SUFFIX)
+    )
 
 
 def redact_secrets(value: Any) -> Any:
     """Recursively redact values for known secret fields without mutating input."""
     if isinstance(value, Mapping):
         return {
-            key: REDACTED_SECRET if is_secret_field(str(key)) else redact_secrets(item) for key, item in value.items()
+            key: mask_secret_value(item) if is_secret_field(str(key)) else redact_secrets(item)
+            for key, item in value.items()
         }
     if isinstance(value, list):
         return [redact_secrets(item) for item in value]
@@ -45,8 +82,14 @@ def redact_secrets(value: Any) -> Any:
 
 
 def redact_secret_mapping(extra: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Drop secret fields from endpoint extras while preserving non-secret metadata."""
-    return {key: redact_secrets(item) for key, item in dict(extra or {}).items() if not is_secret_field(str(key))}
+    """Return the public model-endpoint extra shape shown in Admin UI."""
+    source = dict(extra or {})
+    redacted: dict[str, Any] = {}
+    if "api_key" in source:
+        redacted["api_key"] = mask_secret_value(source.get("api_key"))
+    if "implementation" in source:
+        redacted["implementation"] = source["implementation"]
+    return redacted
 
 
 def preserve_existing_secrets(existing: Mapping[str, Any] | None, incoming: Mapping[str, Any]) -> dict[str, Any]:
@@ -59,7 +102,7 @@ def _preserve_existing_secrets(existing: Mapping[str, Any], incoming: Mapping[st
     for key, value in existing.items():
         incoming_value = merged.get(key)
         if is_secret_field(str(key)):
-            if key not in merged or incoming_value == REDACTED_SECRET:
+            if key not in merged or incoming_value == REDACTED_SECRET or is_masked_secret_value(incoming_value):
                 merged[key] = value
             continue
         if isinstance(value, Mapping) and isinstance(incoming_value, Mapping):
@@ -85,7 +128,9 @@ def _preserve_existing_secret_lists(existing: list[Any], incoming: list[Any]) ->
 __all__ = [
     "REDACTED_SECRET",
     "SECRET_FIELD_NAMES",
+    "is_masked_secret_value",
     "is_secret_field",
+    "mask_secret_value",
     "preserve_existing_secrets",
     "redact_secret_mapping",
     "redact_secrets",

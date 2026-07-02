@@ -47,7 +47,7 @@ def test_model_endpoint_crud_validate_and_default_selection(api_client):
         assert create_endpoint.status_code == 201, create_endpoint.text
         assert "ci-test-key" not in create_endpoint.text
         assert create_endpoint.json()["has_api_key"] is True
-        assert "api_key" not in create_endpoint.json()["extra"]
+        assert create_endpoint.json()["extra"]["api_key"] == "ci-********"
 
         validate_missing = api_client.post(f"/model-endpoints/llm/{endpoint_name}/validate")
         _assert_success(validate_missing, context="validate missing model")

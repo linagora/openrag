@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from core.config.model_endpoints import ModelEndpointConfig, ModelEndpointRow
 from core.utils.exceptions import NotFoundError, ValidationError
@@ -340,10 +341,17 @@ class ModelEndpointService:
             "models_served": None,
             "detail": None,
         }
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            result["detail"] = "Endpoint URL must be an absolute HTTP(S) URL."
+            return result
+        if parsed.username or parsed.password:
+            result["detail"] = "Endpoint URL must not include credentials."
+            return result
         models_url = url.rstrip("/") + "/models"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         try:
-            async with httpx.AsyncClient(timeout=5.0, headers=headers) as client:
+            async with httpx.AsyncClient(timeout=5.0, headers=headers, follow_redirects=False) as client:
                 resp = await client.get(models_url)
             result["reachable"] = True
             if resp.status_code == 200:

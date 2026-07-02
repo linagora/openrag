@@ -1,16 +1,29 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Plus, Trash2, Pencil, Star, Loader2, CheckCircle, XCircle } from "lucide-react";
+import {
+  Plus,
+  Trash2,
+  Pencil,
+  Star,
+  Loader2,
+  CheckCircle,
+  XCircle,
+  Eye,
+  EyeOff,
+  Copy,
+} from "lucide-react";
 import {
   listModelEndpoints,
   createModelEndpoint,
   updateModelEndpoint,
   deleteModelEndpoint,
-  displayModelEndpointExtra,
+  mergeModelEndpointApiKeyExtra,
   prepareModelEndpointExtraForSubmit,
+  revealModelEndpointApiKey,
   REDACTED_SECRET,
   setDefaultModelEndpoint,
+  splitModelEndpointApiKeyExtra,
   validateModelEndpoint,
 } from "@/lib/api/models";
 import type {
@@ -27,6 +40,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
@@ -249,27 +263,41 @@ function EndpointDialog({
   const [modelName, setModelName] = useState("");
   const [batchSize, setBatchSize] = useState("32");
   const [timeout, setTimeout] = useState("30");
+  const [apiKey, setApiKey] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
   const [validationMsg, setValidationMsg] = useState<string | null>(null);
+  const [revealedApiKey, setRevealedApiKey] = useState<string | null>(null);
+  const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const [revealingApiKey, setRevealingApiKey] = useState(false);
 
   useEffect(() => {
+    if (!open) {
+      setRevealedApiKey(null);
+      setApiKeyVisible(false);
+      setRevealingApiKey(false);
+      return;
+    }
     if (open) {
       setValidated(null);
       setValidating(false);
+      setRevealedApiKey(null);
+      setApiKeyVisible(false);
+      setRevealingApiKey(false);
       if (editing) {
-        const displayExtra = displayModelEndpointExtra(editing.extra);
+        const { apiKey: displayApiKey, extra: displayExtra } = splitModelEndpointApiKeyExtra(editing.extra);
         setName(editing.name);
         setEndpoint(editing.endpoint);
         setModelName(editing.model_name || "");
         setBatchSize(String(editing.batch_size));
         setTimeout(String(editing.timeout));
+        setApiKey(displayApiKey);
         setExtraJson(JSON.stringify(displayExtra, null, 2));
         setValidated(true);
         setValidationMsg(
           editing.has_api_key
-            ? "API key is stored server-side. Leave api_key out to keep it, or add a new api_key to rotate it."
+            ? "API key is stored server-side. Leave it unchanged to keep it, or type a new key to rotate it."
             : null,
         );
       } else {
@@ -278,6 +306,7 @@ function EndpointDialog({
         setModelName("");
         setBatchSize("32");
         setTimeout("30");
+        setApiKey("");
         setExtraJson("{}");
         setValidated(null);
         setValidationMsg(null);
@@ -287,23 +316,85 @@ function EndpointDialog({
 
   // Reset validation when relevant fields change
   useEffect(() => {
+    const editingExtra = editing ? splitModelEndpointApiKeyExtra(editing.extra) : null;
     if (
       editing &&
       endpoint === editing.endpoint &&
       (modelName || "") === (editing.model_name || "") &&
-      extraJson === JSON.stringify(displayModelEndpointExtra(editing.extra), null, 2)
+      apiKey === editingExtra?.apiKey &&
+      extraJson === JSON.stringify(editingExtra.extra, null, 2)
     ) {
       setValidated(true);
       setValidationMsg(
         editing.has_api_key
-          ? "API key is stored server-side. Leave api_key out to keep it, or add a new api_key to rotate it."
+          ? "API key is stored server-side. Leave it unchanged to keep it, or type a new key to rotate it."
           : null,
       );
       return;
     }
     setValidated(null);
     setValidationMsg(null);
-  }, [endpoint, modelName, extraJson, editing]);
+  }, [endpoint, modelName, apiKey, extraJson, editing]);
+
+  const apiKeySubmitValue = () =>
+    prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
+
+  const shouldReuseStoredApiKey = () => {
+    const preparedApiKey = apiKeySubmitValue();
+    return editing?.has_api_key === true && (!preparedApiKey || preparedApiKey === REDACTED_SECRET);
+  };
+
+  const fetchStoredApiKey = async ({ cache = true }: { cache?: boolean } = {}): Promise<string | null> => {
+    if (!editing?.has_api_key) return null;
+    if (revealedApiKey) {
+      return revealedApiKey;
+    }
+    setRevealingApiKey(true);
+    try {
+      const result = await revealModelEndpointApiKey(editing.model_type, editing.name);
+      if (!result.api_key) {
+        toast.error("No API key is stored for this endpoint");
+        return null;
+      }
+      if (cache) {
+        setRevealedApiKey(result.api_key);
+      }
+      return result.api_key;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to reveal API key";
+      toast.error(msg);
+      return null;
+    } finally {
+      setRevealingApiKey(false);
+    }
+  };
+
+  const handleToggleApiKeyVisibility = async () => {
+    if (apiKeyVisible) {
+      setApiKeyVisible(false);
+      setRevealedApiKey(null);
+      return;
+    }
+    if (shouldReuseStoredApiKey()) {
+      const storedApiKey = await fetchStoredApiKey();
+      if (!storedApiKey) return;
+      setRevealedApiKey(storedApiKey);
+      setApiKeyVisible(true);
+      return;
+    }
+    setApiKeyVisible(true);
+  };
+
+  const handleCopyApiKey = async () => {
+    const value = shouldReuseStoredApiKey() ? await fetchStoredApiKey({ cache: false }) : apiKey.trim();
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success("API key copied");
+    } catch {
+      toast.error("Could not copy API key");
+    }
+  };
 
   const handleValidate = async () => {
     // Draft validation: probe the values currently in the form (before saving),
@@ -314,8 +405,8 @@ function EndpointDialog({
     }
     let apiKey: string | undefined;
     try {
-      const extra = prepareModelEndpointExtraForSubmit(JSON.parse(extraJson || "{}"));
-      apiKey = (extra.api_key as string) || undefined;
+      const submittedApiKey = apiKeySubmitValue();
+      apiKey = typeof submittedApiKey === "string" ? submittedApiKey : undefined;
     } catch {
       // invalid extra JSON is reported on save; ignore here
     }
@@ -323,8 +414,7 @@ function EndpointDialog({
     setValidationMsg(null);
     try {
       const canUseStoredSecret =
-        editing?.has_api_key === true &&
-        (!apiKey || apiKey === REDACTED_SECRET);
+        editing?.has_api_key === true && (!apiKey || apiKey === REDACTED_SECRET);
       const res = canUseStoredSecret
         ? await validateModelEndpoint({
             endpoint,
@@ -373,7 +463,7 @@ function EndpointDialog({
     e.preventDefault();
     let extra: Record<string, unknown> = {};
     try {
-      extra = prepareModelEndpointExtraForSubmit(JSON.parse(extraJson));
+      extra = mergeModelEndpointApiKeyExtra(JSON.parse(extraJson), apiKey);
     } catch {
       toast.error("Invalid JSON in extra field");
       return;
@@ -411,6 +501,9 @@ function EndpointDialog({
           <DialogTitle>
             {editing ? `Edit ${editing.name}` : `Add ${activeTab} endpoint`}
           </DialogTitle>
+          <DialogDescription>
+            Configure the endpoint connection and stored credentials.
+          </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
@@ -440,6 +533,57 @@ function EndpointDialog({
             </div>
           </div>
           <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>API key</Label>
+              <div className="flex items-center gap-1">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={handleToggleApiKeyVisibility}
+                  disabled={revealingApiKey || (!apiKey.trim() && !editing?.has_api_key)}
+                  aria-label={apiKeyVisible ? "Hide API key" : "Show API key"}
+                  title={apiKeyVisible ? "Hide API key" : "Show API key"}
+                >
+                  {revealingApiKey ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : apiKeyVisible ? (
+                    <EyeOff className="h-4 w-4" />
+                  ) : (
+                    <Eye className="h-4 w-4" />
+                  )}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={handleCopyApiKey}
+                  disabled={revealingApiKey || (!apiKey.trim() && !editing?.has_api_key)}
+                  aria-label="Copy API key"
+                  title="Copy API key"
+                >
+                  <Copy className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+            <Input
+              className="font-mono"
+              type={apiKeyVisible ? "text" : "password"}
+              value={apiKeyVisible && revealedApiKey ? revealedApiKey : apiKey}
+              onChange={(e) => {
+                setApiKey(e.target.value);
+                setRevealedApiKey(null);
+              }}
+              placeholder={editing?.has_api_key ? "Stored API key" : "Optional API key"}
+              autoComplete="off"
+            />
+            <p className="text-xs text-muted-foreground">
+              {editing?.has_api_key
+                ? "Leave unchanged to keep the stored key, or type a new key to rotate it."
+                : "Stored in the endpoint extra payload when provided."}
+            </p>
+          </div>
+          <div className="space-y-2">
             <Label>Extra (JSON)</Label>
             <Textarea
               className="font-mono text-sm"
@@ -447,11 +591,9 @@ function EndpointDialog({
               onChange={(e) => setExtraJson(e.target.value)}
               rows={4}
             />
-            {editing?.has_api_key && (
-              <p className="text-xs text-muted-foreground">
-                API key is configured and hidden. Leave api_key out to keep it, or add a new api_key to rotate it.
-              </p>
-            )}
+            <p className="text-xs text-muted-foreground">
+              Non-secret endpoint options only. The API key is handled separately above.
+            </p>
           </div>
           {validationMsg && (
             <p

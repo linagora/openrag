@@ -9,6 +9,7 @@ import { request } from "./client";
 //   PUT    /model-endpoints/{type}/{name}          update
 //   DELETE /model-endpoints/{type}/{name}          delete → 204
 //   POST   /model-endpoints/{type}/{name}/set-default
+//   POST   /model-endpoints/{type}/{name}/reveal-api-key
 //   POST   /model-endpoints/{type}/{name}/validate → ValidateEndpointResponse (no body)
 
 export type ModelType = "embedder" | "reranker" | "llm" | "vlm";
@@ -56,16 +57,23 @@ export interface ValidateModelEndpointResponse {
   detail?: string | null;
 }
 
+export interface RevealApiKeyResponse {
+  api_key: string | null;
+}
+
 const BASE = "/model-endpoints";
 const enc = encodeURIComponent;
 export const REDACTED_SECRET = "<redacted>";
 export const API_KEY_DISPLAY_PLACEHOLDER = "sk-********";
 export const SECRET_DISPLAY_PLACEHOLDER = "••••••••";
+const MASK_SUFFIX = "********";
+const MASK_PREFIX_LENGTH = 3;
 const LEGACY_API_KEY_DISPLAY_PLACEHOLDER = "********";
 
 const SECRET_FIELD_NAMES = new Set([
   "api_key",
   "api_token",
+  "access_key",
   "auth_token",
   "chainlit_auth_secret",
   "client_secret",
@@ -73,32 +81,57 @@ const SECRET_FIELD_NAMES = new Set([
   "oidc_client_secret",
   "oidc_token_encryption_key",
   "password",
+  "private_key",
+  "refresh_token",
   "secret",
   "secret_key",
+  "signing_key",
   "token",
   "token_encryption_key",
 ]);
+const SECRET_FIELD_SUFFIXES = [
+  "_access_key",
+  "_api_key",
+  "_auth_token",
+  "_password",
+  "_private_key",
+  "_refresh_token",
+  "_secret",
+  "_signing_key",
+  "_token",
+  "_token_encryption_key",
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isSecretField(key: string | undefined): boolean {
-  return key ? SECRET_FIELD_NAMES.has(key.toLowerCase()) : false;
+  if (!key) return false;
+  const normalized = key.toLowerCase();
+  return SECRET_FIELD_NAMES.has(normalized) || SECRET_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
 }
 
 function displayPlaceholderFor(key: string | undefined): string {
   return key?.toLowerCase() === "api_key" ? API_KEY_DISPLAY_PLACEHOLDER : SECRET_DISPLAY_PLACEHOLDER;
 }
 
+function isPrefixMaskedSecret(value: string): boolean {
+  return value.length === MASK_PREFIX_LENGTH + MASK_SUFFIX.length && value.endsWith(MASK_SUFFIX);
+}
+
 function isUnchangedPlaceholder(value: string, key: string | undefined): boolean {
   if (value === displayPlaceholderFor(key)) return true;
+  if (isPrefixMaskedSecret(value)) return true;
   return key?.toLowerCase() === "api_key" && value === LEGACY_API_KEY_DISPLAY_PLACEHOLDER;
 }
 
 function transformSecretPlaceholders(value: unknown, direction: "display" | "submit", key?: string): unknown {
   if (isSecretField(key) && typeof value === "string") {
-    if (direction === "display") return displayPlaceholderFor(key);
+    if (direction === "display") {
+      if (isPrefixMaskedSecret(value)) return value;
+      return displayPlaceholderFor(key);
+    }
     if (isUnchangedPlaceholder(value, key)) return REDACTED_SECRET;
   }
   if (Array.isArray(value)) {
@@ -121,6 +154,30 @@ export function displayModelEndpointExtra(extra: Record<string, unknown>): Recor
 
 export function prepareModelEndpointExtraForSubmit(extra: Record<string, unknown>): Record<string, unknown> {
   return transformSecretPlaceholders(extra, "submit") as Record<string, unknown>;
+}
+
+export function splitModelEndpointApiKeyExtra(extra: Record<string, unknown>): {
+  apiKey: string;
+  extra: Record<string, unknown>;
+} {
+  const displayExtra = displayModelEndpointExtra(extra);
+  const { api_key: apiKey, ...rest } = displayExtra;
+  return {
+    apiKey: typeof apiKey === "string" ? apiKey : "",
+    extra: rest,
+  };
+}
+
+export function mergeModelEndpointApiKeyExtra(
+  extra: Record<string, unknown>,
+  apiKey: string,
+): Record<string, unknown> {
+  const prepared = prepareModelEndpointExtraForSubmit(extra);
+  const normalizedApiKey = prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
+  if (typeof normalizedApiKey === "string" && normalizedApiKey) {
+    return { ...prepared, api_key: normalizedApiKey };
+  }
+  return prepared;
 }
 
 /** List endpoints (bare array). Optionally filter by model type. */
@@ -154,6 +211,13 @@ export function updateModelEndpoint(
 export function setDefaultModelEndpoint(modelType: ModelType, name: string) {
   return request<ModelEndpointResponse>(
     `${BASE}/${enc(modelType)}/${enc(name)}/set-default`,
+    { method: "POST" },
+  );
+}
+
+export function revealModelEndpointApiKey(modelType: ModelType, name: string) {
+  return request<RevealApiKeyResponse>(
+    `${BASE}/${enc(modelType)}/${enc(name)}/reveal-api-key`,
     { method: "POST" },
   );
 }
