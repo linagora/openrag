@@ -30,9 +30,13 @@ npm run lint
 
 ## Environment
 
+All settings are build-time (Vite inlines `import.meta.env.*` — rebuild after changing).
+The UI discovers the auth mode (`token` / `oidc`) from the backend at runtime, not from a build var.
+
 | Var | Purpose |
 |-----|---------|
 | `VITE_API_BASE_URL` | OpenRAG API base (empty = same origin) |
-| `VITE_AUTH_MODE` | `oidc` (default) or `token` |
+| `VITE_BASE_PATH` | base path when served under a sub-path (default `/`) |
+| `VITE_GRAFANA_URL` | Grafana dashboard link shown on the admin System page |
+| `VITE_APP_NAME` | app display name / branding (default `OpenRAG`) |
 | `VITE_MOCK_API` | `true` to serve MSW mocks in dev |
-| `VITE_BASE_PATH` | base path when served under a sub-path |

@@ -20,9 +20,6 @@ x-openrag: &openrag_template
     - AUTH_TOKEN=${AUTH_TOKEN:?Set a strong AUTH_TOKEN in your .env}
     - RERANKER_ENABLED=false
     - MARKER_MAX_PROCESSES=1
-    - INDEXERUI_COMPOSE_FILE=true           # Does not serve any purpose but needs to be enabled until PR is merged
-    - INDEXERUI_PORT=8067                   # Here as well
-    - INDEXERUI_URL=http://localhost:8067   # Here as well
     - RAY_DEDUP_LOGS=0
     - RAY_ENABLE_UV_RUN_RUNTIME_ENV=0s
     - RAY_memory_monitor_refresh_ms=0
@@ -108,11 +105,8 @@ services:
       - "etcd"
       - "minio"
 
-  indexer-ui:
-    image: linagoraai/indexer-ui:latest
+  admin-ui:
+    image: linagoraai/openrag-admin-ui:latest
     ports:
-      - "8067:3000"
-    environment:
-      - API_BASE_URL=http://localhost:8090
-      - INCLUDE_CREDENTIALS=true
+      - "8081:8080"
     restart: unless-stopped
