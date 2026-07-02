@@ -35,6 +35,7 @@ x-openrag: &openrag_template
     - ${DATA_VOLUME:-../../data}:/app/data
     - ../../i8n:/app/openrag/.chainlit/translations
     - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
+    - ${VENV_VOLUME:-../../.venv}:/app/.venv # Pre-synced venv — avoids reinstalling packages on every start
     # Dev only: bind-mounting the source tree over the image lets host changes
     # (or a writable host path) override the running code. Uncomment for local
     # development; keep it off in production.

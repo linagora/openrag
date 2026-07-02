@@ -16,7 +16,7 @@
 # membership plus the image's group-writable paths already cover it.
 APP_UID="${APP_UID:-10001}"
 if [ "$(id -u)" = "0" ]; then
-  for d in /app/data /app/logs /app/model_weights; do
+  for d in /app/data /app/logs /app/model_weights /app/.venv; do
     mkdir -p "$d" 2>/dev/null || true
     chgrp -R 0 "$d" 2>/dev/null || true
     chmod -R g+rwX "$d" 2>/dev/null || true
