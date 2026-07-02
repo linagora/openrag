@@ -103,6 +103,10 @@ class IndexerWorker:
             tb = traceback.format_exc()
             await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
             raise
+        # The raw upload is purged (when configured) by the enclosing actor, not
+        # here: cleanup must also cover failures that happen *before* this method
+        # runs (catalog/registry init, the SERIALIZING state update). See
+        # ``delete_uploaded_file`` and ``IndexerWorkerActor.process_file``.
 
 
 async def _write_catalog_record(
@@ -222,4 +226,20 @@ def _display_filename(path: str, metadata: dict[str, Any]) -> str:
     return Path(path).name
 
 
-__all__ = ["IndexerWorker"]
+async def delete_uploaded_file(path: str, logger: Any) -> None:
+    """Remove the raw upload from disk, swallowing any cleanup error.
+
+    Called from the actor boundary (``IndexerWorkerActor.process_file``) when
+    ``save_uploaded_files`` is off, so a client that manages its own files never
+    has a disk copy left behind — even when indexing fails before the pipeline
+    runs. A failed delete must never turn indexing into a failure, so the error
+    is logged and discarded.
+    """
+    try:
+        await asyncio.to_thread(Path(path).unlink, missing_ok=True)
+        logger.debug(f"Deleted input file: {path}")
+    except Exception as cleanup_err:  # noqa: BLE001 - cleanup must not fail the task
+        logger.warning(f"Failed to delete input file {path}: {cleanup_err}")
+
+
+__all__ = ["IndexerWorker", "delete_uploaded_file"]
