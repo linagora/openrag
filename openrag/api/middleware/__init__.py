@@ -9,6 +9,7 @@ from api.middleware.instrumentation import InstrumentationMiddleware
 from api.middleware.rate_limit import RateLimitMiddleware
 from api.middleware.request_id import REQUEST_ID_HEADER, RequestIdMiddleware
 from api.middleware.request_timeout import RequestTimeoutMiddleware
+from api.middleware.security_headers import SecurityHeadersMiddleware
 
 __all__ = [
     "AuthMiddleware",
@@ -17,4 +18,5 @@ __all__ = [
     "RequestIdMiddleware",
     "REQUEST_ID_HEADER",
     "RequestTimeoutMiddleware",
+    "SecurityHeadersMiddleware",
 ]

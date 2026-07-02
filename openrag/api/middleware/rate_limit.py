@@ -41,10 +41,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.enabled = _env_flag("RATE_LIMIT_ENABLED", True)
         self._limiter = MovingWindowRateLimiter(MemoryStorage())
-        self._default = parse(os.environ.get("RATE_LIMIT_DEFAULT", "600/minute"))
-        self._auth = parse(os.environ.get("RATE_LIMIT_AUTH", "60/minute"))
-        self._chat = parse(os.environ.get("RATE_LIMIT_CHAT", "120/minute"))
+        # Only parse the limit configs when rate limiting is enabled: a malformed
+        # RATE_LIMIT_* value must not crash boot when the feature is turned off
+        # (``dispatch`` short-circuits before touching these when disabled).
+        self._default = self._auth = self._chat = None
         if self.enabled:
+            self._default = parse(os.environ.get("RATE_LIMIT_DEFAULT", "600/minute"))
+            self._auth = parse(os.environ.get("RATE_LIMIT_AUTH", "60/minute"))
+            self._chat = parse(os.environ.get("RATE_LIMIT_CHAT", "120/minute"))
             logger.info(
                 "Rate limiting enabled",
                 default=str(self._default),

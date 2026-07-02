@@ -28,6 +28,7 @@ from importlib.metadata import version as get_package_version
 
 import ray
 import uvicorn
+from api.cors_config import sanitize_cors_origins
 from api.dependencies.auth import require_admin
 from api.error_handlers import register_error_handlers
 from api.middleware import (
@@ -36,6 +37,7 @@ from api.middleware import (
     RateLimitMiddleware,
     RequestIdMiddleware,
     RequestTimeoutMiddleware,
+    SecurityHeadersMiddleware,
 )
 from api.routers.admin.cluster import router as actors_router
 from api.routers.admin.indexing import router as indexer_router
@@ -279,6 +281,9 @@ app.add_middleware(
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(RequestTimeoutMiddleware)
 app.add_middleware(InstrumentationMiddleware)
+# Registered last among the app stack so it wraps outermost and stamps the
+# baseline security headers on every response that flows out.
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Phase 10B centralises the OpenRAGError + generic Exception handlers in
 # api/error_handlers.py — the inline decorators that used to live here
@@ -292,6 +297,10 @@ allow_origins = [
     INDEXERUI_URL,
     *CORS_EXTRA_ORIGINS,
 ]
+
+# Credentials + a wildcard origin is unsafe (Starlette reflects the Origin with
+# credentials), so drop any "*" from a misconfigured CORS_EXTRA_ORIGINS=*.
+allow_origins = sanitize_cors_origins(allow_origins, allow_credentials=True)
 
 app.add_middleware(
     CORSMiddleware,
