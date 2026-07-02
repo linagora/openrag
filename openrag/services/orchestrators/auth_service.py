@@ -644,15 +644,13 @@ class AuthService:
     def _allowed_next_origins() -> set[str]:
         """Origins accepted as post-login redirect targets.
 
-        Mirrors the CORS allowlist: localhost dev ports plus
-        ``INDEXERUI_URL`` so the separately-served indexer-ui can receive
-        the user back after the flow.
+        Mirrors the CORS allowlist in ``api/main.py``: the admin UI (nginx)
+        published on the host at ``ADMIN_UI_PORT``. Browsers drop the default
+        port, so ``ADMIN_UI_PORT=80`` collapses to a bare ``http://localhost``.
         """
-        origins = {"http://localhost:3042", "http://localhost:5173"}
-        indexer_ui = os.getenv("INDEXERUI_URL")
-        if indexer_ui:
-            origins.add(indexer_ui.rstrip("/"))
-        return origins
+        port = os.getenv("ADMIN_UI_PORT", "8081")
+        origin = "http://localhost" if port == "80" else f"http://localhost:{port}"
+        return {origin}
 
     @staticmethod
     def _display_name_from_claims(claims: dict[str, Any], sub: str) -> str:

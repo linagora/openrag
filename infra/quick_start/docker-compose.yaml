@@ -54,21 +54,17 @@ x-vllm: &vllm_template
   # ports:
   #   - ${VLLM_PORT:-8000}:8000
 services:
-  # OpenRAG Indexer UI
-  indexer-ui:
-    image: linagoraai/indexer-ui:latest
-    # build:
-    #   context: ./extern/indexer-ui
-    #   dockerfile: Dockerfile
-    environment:
-      - API_BASE_URL=${API_BASE_URL:-http://localhost:${APP_PORT:-8080}}
-      - INCLUDE_CREDENTIALS=${INCLUDE_CREDENTIALS:-false}
-      - DEFAULT_LANGUAGE=${DEFAULT_LANGUAGE:-}
+  # Admin UI (React SPA + nginx) — same-origin reverse proxy to the API, so the
+  # UI works out of the box with no CORS/build setup. nginx forwards /v1, /auth,
+  # … to the `openrag` service on the shared network (resolved at request time,
+  # so it starts even before the backend is up). Runs under any profile.
+  admin-ui:
+    image: linagoraai/openrag-admin-ui:latest
     ports:
-      - "${INDEXERUI_PORT:-3042}:3000"
+      - "${ADMIN_UI_PORT:-8081}:8080"
     restart: unless-stopped
 
-  # GPU - default 
+  # GPU - default
   openrag:
     <<: *openrag_template
     deploy:

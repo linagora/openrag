@@ -12,7 +12,7 @@ OpenRag is a modular Retrieval-Augmented Generation (RAG) framework built with F
 openrag/        # Python package (application code only): core/ services/ api/ di/ prompts/
 conf/           # YAML configuration
 infra/          # All deployment infrastructure
-  docker/       #   api.Dockerfile, ray.Dockerfile (build from repo root)
+  docker/       #   api.Dockerfile, ray.Dockerfile, ui.Dockerfile (build from repo root)
   compose/      #   docker-compose.yaml + service configs (grafana, prometheus, milvus, .env.example)
   scripts/      #   entrypoint.sh and other deployment scripts
   ansible/      #   Ansible playbooks
@@ -22,7 +22,7 @@ infra/          # All deployment infrastructure
 scripts/        # Developer/operational CLI tools (check_layer_imports.py, data_indexer.py, postgres-init/)
 tests/          # Integration tests (api_tests/, integration/)
 docs/           # Documentation (Astro site + refactoring docs)
-ui -> extern/indexer-ui   # Symlink to the admin frontend submodule
+ui/             # Admin frontend (React SPA), served by the admin-ui container (infra/docker/ui.Dockerfile)
 extern/         # Git submodules + compose service includes
 ```
 
