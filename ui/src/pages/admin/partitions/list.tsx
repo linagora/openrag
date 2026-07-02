@@ -303,6 +303,11 @@ export default function PartitionListPage() {
     createMutation.mutate();
   };
 
+  const createPartitionLabel = canManagePartitions ? "Create Partition" : "Create Personal Partition";
+  const createPartitionDescription = canManagePartitions
+    ? "Create a new document partition with its configuration."
+    : "Create a personal document partition. You will be the owner and can upload documents to it.";
+
   return (
     <div>
       <PageHeader
@@ -310,7 +315,7 @@ export default function PartitionListPage() {
         description={canManagePartitions ? "Manage document partitions and their configurations" : "Your assigned document partitions"}
         actions={
           <Button onClick={() => setDialogOpen(true)}>
-            <Plus className="mr-2 h-4 w-4" /> Create Partition
+            <Plus className="mr-2 h-4 w-4" /> {createPartitionLabel}
           </Button>
         }
       />
@@ -434,9 +439,9 @@ export default function PartitionListPage() {
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Create Partition</DialogTitle>
+            <DialogTitle>{createPartitionLabel}</DialogTitle>
             <DialogDescription>
-              Create a new document partition with its configuration.
+              {createPartitionDescription}
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">

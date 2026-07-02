@@ -132,7 +132,13 @@ function RecentTasks({ isLoading, tasks }: { isLoading: boolean; tasks: TaskList
 }
 
 export default function OverviewPage() {
-  const { canManageUsers, canViewSystem, canCreatePartition, canWrite } = usePermissions();
+  const {
+    canManageUsers,
+    canViewSystem,
+    canManagePartitions,
+    canCreatePartition,
+    canWrite,
+  } = usePermissions();
   const [uploadHelpOpen, setUploadHelpOpen] = useState(false);
   const [rememberedPartition] = useState(() => sessionStorage.getItem("documents.partition") || "");
 
@@ -178,6 +184,10 @@ export default function OverviewPage() {
   const quotaIndexed = me?.file_count ?? 0;
   const quotaEff: number | "unlimited" =
     me?.file_quota == null || me.file_quota < 0 ? "unlimited" : me.file_quota;
+  const createPartitionLabel = canManagePartitions ? "Create Partition" : "Create Personal Partition";
+  const createPartitionDescription = canManagePartitions
+    ? "Set up a new document partition"
+    : "Create a personal partition for your documents";
   const writablePartitions = partitions.filter((partition) => canWrite(partition.role));
   const rememberedWritablePartition = writablePartitions.find(
     (partition) => partition.partition === rememberedPartition || partition.name === rememberedPartition,
@@ -300,9 +310,9 @@ export default function OverviewPage() {
                   <Link to="/partitions?create=1">
                     <Plus className="h-4 w-4 mr-2" />
                     <div className="text-left">
-                      <div className="font-medium">Create Partition</div>
+                      <div className="font-medium">{createPartitionLabel}</div>
                       <div className="text-xs text-muted-foreground">
-                        Set up a new document partition
+                        {createPartitionDescription}
                       </div>
                     </div>
                     <ArrowRight className="h-4 w-4 ml-auto" />
