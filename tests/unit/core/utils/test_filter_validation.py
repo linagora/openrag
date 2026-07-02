@@ -31,6 +31,11 @@ from core.utils.filter_validation import MAX_FILTER_LENGTH, validate_search_filt
         "1 == 1",
         "true",
         "TRUE",
+        # Tautologies must not slip past by wrapping in parentheses.
+        "(1==1)",
+        "( 1 == 1 )",
+        "((1==1))",
+        "(true)",
         # Unterminated string literal.
         'file_id == "abc',
     ],

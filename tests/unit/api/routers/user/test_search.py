@@ -60,3 +60,34 @@ def test_search_rejects_cross_tenant_filter_injection():
     )
 
     assert response.status_code == 400
+    # Confirm the rejection is the filter guard specifically — the code is
+    # embedded in the detail (``"[INVALID_FILTER]: ..."``), not a generic 400.
+    assert "INVALID_FILTER" in response.json()["detail"]
+
+
+def test_search_file_parenthesises_caller_filter():
+    # The by-file route must wrap the caller filter so an OR predicate cannot
+    # widen the file_id scope (``page > 5 OR 1==1`` must stay a single operand).
+    from api.dependencies.auth import require_partition_viewer
+    from api.dependencies.files import validate_file_id
+
+    captured: dict = {}
+
+    class _CapturingRetrieval:
+        async def search(self, **kwargs):
+            captured.update(kwargs)
+            return []
+
+    app = FastAPI()
+    register_error_handlers(app)
+    app.include_router(search_router, prefix="/search")
+    app.dependency_overrides[require_partition_viewer] = lambda: None
+    app.dependency_overrides[validate_file_id] = lambda: "abc123"
+    app.dependency_overrides[get_retrieval_service] = lambda: _CapturingRetrieval()
+
+    resp = TestClient(app).get(
+        "/search/partition/mine/file/abc123", params={"text": "q", "filter": "page > 5 OR page < 2"}
+    )
+
+    assert resp.status_code == 200
+    assert captured["filter"] == "file_id == {_file_id} AND (page > 5 OR page < 2)"

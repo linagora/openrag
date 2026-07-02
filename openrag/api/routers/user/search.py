@@ -322,7 +322,10 @@ async def search_file(
         partition=partition, file_id=file_id, query_len=len(search_params.text), top_k=search_params.top_k
     )
 
-    filter = "file_id == {_file_id}" + (f" AND {search_params.filter}" if search_params.filter else "")
+    # Parenthesise the caller filter so it stays a single AND-operand and can't
+    # break out of the file scope (e.g. ``page > 5 OR 1==1`` must not widen the
+    # ``file_id ==`` constraint). It is already validated by CommonSearchParams.
+    filter = "file_id == {_file_id}" + (f" AND ({search_params.filter})" if search_params.filter else "")
     params = {"_file_id": file_id}
 
     results = await service.search(

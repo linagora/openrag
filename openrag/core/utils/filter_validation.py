@@ -22,7 +22,11 @@ are ignored):
   partition wrapper. This is the core isolation guarantee.
 * **No ``partition`` reference** — the tenant boundary is set by the route and
   auth, never by the caller (defense-in-depth).
-* **No bare tautology**, and a bounded length.
+* A bounded length, and a best-effort reject of trivial tautologies
+  (``1==1`` / ``true``). The tautology reject is defense-in-depth only —
+  tenant isolation is guaranteed by the two rules above, not by it, since an
+  always-true predicate is still confined to the caller's partitions by the
+  outer ``and``.
 
 ``or`` / ``not`` remain allowed: once parentheses are balanced, the top-level
 ``and`` with the partition clause confines the result set to the caller's
@@ -49,6 +53,31 @@ def _reject(reason: str) -> None:
         status_code=400,
         code="INVALID_FILTER",
     )
+
+
+def _strip_wrapping_parens(s: str) -> str:
+    """Strip parentheses that wrap the *entire* string, one layer at a time.
+
+    ``(1==1)`` -> ``1==1``; ``((true))`` -> ``true``. A leading ``(`` that
+    closes before the end (e.g. ``(a)and(b)``) is left untouched. Used so the
+    tautology check can't be defeated by simply wrapping the expression in
+    parentheses.
+    """
+    while len(s) >= 2 and s[0] == "(" and s[-1] == ")":
+        depth = 0
+        wraps = True
+        for i, ch in enumerate(s):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and i != len(s) - 1:
+                    wraps = False
+                    break
+        if not wraps:
+            break
+        s = s[1:-1]
+    return s
 
 
 def validate_search_filter(expr: str | None) -> None:
@@ -105,7 +134,11 @@ def validate_search_filter(expr: str | None) -> None:
     if any(ident.lower() in _RESERVED_FIELDS for ident in identifiers):
         _reject("`partition` is not a permitted filter field")
 
-    if "".join(expr.split()).lower() in _TAUTOLOGIES:
+    # Best-effort tautology reject (defense-in-depth only — tenant isolation is
+    # guaranteed by the balanced-paren + reserved-field rules above, not by
+    # this). Strip whitespace and any wrapping parens so `(1==1)` / `( true )`
+    # can't trivially slip past the literal match.
+    if _strip_wrapping_parens("".join(expr.split()).lower()) in _TAUTOLOGIES:
         _reject("tautological expression")
 
 
