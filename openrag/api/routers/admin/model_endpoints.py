@@ -18,10 +18,12 @@ from api.schemas.admin.model_endpoint_schemas import (
     ValidateEndpointResponse,
 )
 from core.config.model_endpoints import ModelEndpointRow
+from core.utils.logging import get_logger
 from di.providers import get_model_endpoint_service
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 router = APIRouter(dependencies=[Depends(require_admin)])
+logger = get_logger()
 
 
 def _same_endpoint_url(left: str, right: str) -> bool:
@@ -112,6 +114,11 @@ async def reveal_model_endpoint_api_key(
     """Return the stored API key only after an explicit admin reveal action."""
     endpoint = await service.get_model_endpoint(name=name, model_type=model_type)
     api_key = endpoint.extra.get("api_key")
+    logger.bind(
+        model_type=model_type,
+        name=name,
+        has_api_key=isinstance(api_key, str),
+    ).info("Model endpoint API key revealed.")
     return {"api_key": api_key if isinstance(api_key, str) else None}
 
 

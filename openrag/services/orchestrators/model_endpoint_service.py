@@ -341,7 +341,11 @@ class ModelEndpointService:
             "models_served": None,
             "detail": None,
         }
-        parsed = urlsplit(url)
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            result["detail"] = "Endpoint URL must be an absolute HTTP(S) URL."
+            return result
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             result["detail"] = "Endpoint URL must be an absolute HTTP(S) URL."
             return result

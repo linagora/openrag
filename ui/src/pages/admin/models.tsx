@@ -54,6 +54,12 @@ import { formatDate, intOr, numOr } from "@/lib/utils";
 
 const MODEL_TYPES = ["embedder", "reranker", "llm", "vlm"] as const;
 
+type RevealedApiKey = {
+  modelType: ModelType;
+  name: string;
+  value: string;
+};
+
 export default function ModelsPage() {
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState("embedder");
@@ -268,7 +274,7 @@ function EndpointDialog({
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
   const [validationMsg, setValidationMsg] = useState<string | null>(null);
-  const [revealedApiKey, setRevealedApiKey] = useState<string | null>(null);
+  const [revealedApiKey, setRevealedApiKey] = useState<RevealedApiKey | null>(null);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [revealingApiKey, setRevealingApiKey] = useState(false);
 
@@ -344,20 +350,28 @@ function EndpointDialog({
     return editing?.has_api_key === true && (!preparedApiKey || preparedApiKey === REDACTED_SECRET);
   };
 
+  const revealedApiKeyForEditing =
+    editing &&
+    revealedApiKey?.modelType === editing.model_type &&
+    revealedApiKey.name === editing.name
+      ? revealedApiKey.value
+      : null;
+
   const fetchStoredApiKey = async ({ cache = true }: { cache?: boolean } = {}): Promise<string | null> => {
-    if (!editing?.has_api_key) return null;
-    if (revealedApiKey) {
-      return revealedApiKey;
-    }
+    const target = editing?.has_api_key
+      ? { modelType: editing.model_type, name: editing.name }
+      : null;
+    if (!target) return null;
+    if (revealedApiKeyForEditing) return revealedApiKeyForEditing;
     setRevealingApiKey(true);
     try {
-      const result = await revealModelEndpointApiKey(editing.model_type, editing.name);
+      const result = await revealModelEndpointApiKey(target.modelType, target.name);
       if (!result.api_key) {
         toast.error("No API key is stored for this endpoint");
         return null;
       }
       if (cache) {
-        setRevealedApiKey(result.api_key);
+        setRevealedApiKey({ ...target, value: result.api_key });
       }
       return result.api_key;
     } catch (e) {
@@ -378,7 +392,6 @@ function EndpointDialog({
     if (shouldReuseStoredApiKey()) {
       const storedApiKey = await fetchStoredApiKey();
       if (!storedApiKey) return;
-      setRevealedApiKey(storedApiKey);
       setApiKeyVisible(true);
       return;
     }
@@ -569,7 +582,7 @@ function EndpointDialog({
             <Input
               className="font-mono"
               type={apiKeyVisible ? "text" : "password"}
-              value={apiKeyVisible && revealedApiKey ? revealedApiKey : apiKey}
+              value={apiKeyVisible && revealedApiKeyForEditing ? revealedApiKeyForEditing : apiKey}
               onChange={(e) => {
                 setApiKey(e.target.value);
                 setRevealedApiKey(null);

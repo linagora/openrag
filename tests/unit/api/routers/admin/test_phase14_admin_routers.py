@@ -248,16 +248,35 @@ async def test_model_endpoint_read_responses_hide_stored_api_key(async_client_fa
 
 
 @pytest.mark.asyncio
-async def test_model_endpoint_reveal_api_key_returns_stored_secret(async_client_factory):
+async def test_model_endpoint_reveal_api_key_returns_stored_secret(async_client_factory, monkeypatch):
     model_service = FakeModelEndpointService()
     model_service.endpoint_extra = {"api_key": "secret-token", "implementation": "vllm"}
     app = _build_app(model_service=model_service)
+    logs: list[tuple[dict[str, Any], str]] = []
+
+    class FakeLogger:
+        def __init__(self, context: dict[str, Any] | None = None) -> None:
+            self.context = context or {}
+
+        def bind(self, **kwargs: Any) -> FakeLogger:
+            return FakeLogger({**self.context, **kwargs})
+
+        def info(self, message: str) -> None:
+            logs.append((self.context, message))
+
+    monkeypatch.setattr(model_endpoints, "logger", FakeLogger())
 
     async with async_client_factory(app) as client:
         response = await client.post("/model-endpoints/llm/default/reveal-api-key")
 
     assert response.status_code == 200
     assert response.json() == {"api_key": "secret-token"}
+    assert logs == [
+        (
+            {"model_type": "llm", "name": "default", "has_api_key": True},
+            "Model endpoint API key revealed.",
+        )
+    ]
 
 
 @pytest.mark.asyncio

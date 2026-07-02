@@ -754,6 +754,27 @@ async def test_validate_endpoint_rejects_non_http_urls_without_request(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_validate_endpoint_rejects_malformed_urls_without_request(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    def fail_client(**_kwargs):
+        raise AssertionError("HTTP client should not be created for malformed URLs")
+
+    monkeypatch.setattr(httpx, "AsyncClient", fail_client)
+
+    result = await svc.validate_endpoint("http://[::1", "mistral-small")
+
+    assert result == {
+        "reachable": False,
+        "model_found": None,
+        "models_served": None,
+        "detail": "Endpoint URL must be an absolute HTTP(S) URL.",
+    }
+
+
+@pytest.mark.asyncio
 async def test_validate_endpoint_rejects_url_credentials_without_request(monkeypatch):
     import httpx
 
