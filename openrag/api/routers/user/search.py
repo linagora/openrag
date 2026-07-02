@@ -17,6 +17,7 @@ from api.dependencies.auth import (
     require_partitions_viewer,
 )
 from api.dependencies.files import validate_file_id
+from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
 from di.providers import get_retrieval_service, get_workspace_service
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -58,6 +59,10 @@ class CommonSearchParams:
             description="""Milvus filter expression string.""",
         ),
     ):
+        # Reject filter expressions that could break out of the partition
+        # scope (unbalanced parens rebalancing the `(partition …) and (…)`
+        # wrapper) before the raw string reaches the store. Raises 400.
+        validate_search_filter(filter)
         self.text = text
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold

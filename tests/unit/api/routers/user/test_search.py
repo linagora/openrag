@@ -3,6 +3,7 @@ from api.dependencies.auth import (
     current_user_or_admin_partitions_list,
     current_user_partitions,
 )
+from api.error_handlers import register_error_handlers
 from api.routers.user.search import router as search_router
 from di.providers import get_auth_service, get_partition_service, get_retrieval_service, get_workspace_service
 from fastapi import FastAPI
@@ -27,6 +28,7 @@ class _RetrievalService:
 
 def _client(*, user_partitions):
     app = FastAPI()
+    register_error_handlers(app)
     app.include_router(search_router, prefix="/search")
     app.dependency_overrides[current_user] = lambda: {"id": 7, "is_admin": False}
     app.dependency_overrides[current_user_partitions] = lambda: user_partitions
@@ -45,3 +47,16 @@ def test_search_default_all_fails_closed_when_user_has_no_partitions():
 
     assert response.status_code == 403
     assert response.json()["detail"] == "No accessible partitions"
+
+
+def test_search_rejects_cross_tenant_filter_injection():
+    # An authorized viewer on one partition must not be able to break out of the
+    # partition scope via an unbalanced-paren filter. The guard fires during
+    # dependency resolution, so retrieval never runs (``_RetrievalService.search``
+    # raises if it does) and the request is rejected with 400 — not a 500 or a
+    # leaked result set.
+    response = _client(user_partitions=[{"partition": "mine", "role": "viewer"}]).get(
+        "/search", params={"text": "hello", "filter": "1==1) or (1==1"}
+    )
+
+    assert response.status_code == 400
