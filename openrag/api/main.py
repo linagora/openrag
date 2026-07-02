@@ -281,9 +281,6 @@ app.add_middleware(
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(RequestTimeoutMiddleware)
 app.add_middleware(InstrumentationMiddleware)
-# Registered last among the app stack so it wraps outermost and stamps the
-# baseline security headers on every response that flows out.
-app.add_middleware(SecurityHeadersMiddleware)
 
 # Phase 10B centralises the OpenRAGError + generic Exception handlers in
 # api/error_handlers.py — the inline decorators that used to live here
@@ -309,6 +306,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Registered last so it wraps CORS and every other layer: this stamps the
+# baseline security headers on all responses, including CORS preflights that
+# CORSMiddleware short-circuits before they reach the inner stack.
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 @app.get("/", include_in_schema=False)

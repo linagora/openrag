@@ -25,6 +25,7 @@ from ``api/main.py``.
 
 from __future__ import annotations
 
+from api.middleware.security_headers import apply_security_headers
 from core.utils.exceptions import (
     AuthenticationError,
     AuthError,
@@ -136,10 +137,14 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     request_id = _get_request_id(request)
     if request_id is not None:
         extra["request_id"] = request_id
-    return JSONResponse(
+    response = JSONResponse(
         status_code=500,
         content={"detail": "[UNEXPECTED_ERROR]: An unexpected error occurred", "extra": extra},
     )
+    # Starlette generates unhandled-500s in its outer ServerErrorMiddleware,
+    # which sits outside the user middleware stack, so SecurityHeadersMiddleware
+    # never sees this response — set the baseline headers here too.
+    return apply_security_headers(response, request)
 
 
 def register_error_handlers(app: FastAPI) -> None:

@@ -45,3 +45,22 @@ def test_does_not_clobber_route_set_header():
     resp = TestClient(app).get("/strict")
     # setdefault must preserve a stricter value a route chose for itself.
     assert resp.headers["X-Frame-Options"] == "DENY"
+
+
+def test_unhandled_500_still_gets_headers():
+    # Unhandled exceptions are turned into a 500 by Starlette's outer
+    # ServerErrorMiddleware, which sits outside the user middleware stack — so
+    # the 500 handler must apply the headers itself.
+    from api.error_handlers import register_error_handlers
+
+    async def boom(_request: Request):
+        raise RuntimeError("boom")
+
+    app = Starlette(routes=[Route("/boom", boom)])
+    register_error_handlers(app)
+    app.add_middleware(SecurityHeadersMiddleware)
+
+    resp = TestClient(app, raise_server_exceptions=False).get("/boom")
+    assert resp.status_code == 500
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["X-Frame-Options"] == "SAMEORIGIN"
