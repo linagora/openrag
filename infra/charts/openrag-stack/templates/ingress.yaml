@@ -22,6 +22,18 @@ spec:
     - host: {{ required "ingress.host must be set when ingress.enabled=true" .Values.ingress.host | quote }}
       http:
         paths:
+          {{- if .Values.adminUi.enabled }}
+          # Admin UI SPA (nginx serves it under /app/). Listed first and more
+          # specific than the API catch-all below, so /app* routes to the UI;
+          # the SPA's own same-origin /v1, /auth, … calls fall through to the API.
+          - path: /(app(?:/.*)?)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ .Release.Name }}-admin-ui
+                port:
+                  number: {{ .Values.adminUi.service.port }}
+          {{- end }}
           {{- if .Values.ingress.paths.openrag.enabled }}
           - path: /(.*)
             pathType: ImplementationSpecific

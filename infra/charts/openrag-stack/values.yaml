@@ -8,7 +8,6 @@ networkPolicy:
   # Ports reachable from outside the namespace (e.g. via the Ingress controller).
   externalPorts:
     - 8080  # openrag API/UI
-    - 3000  # indexer-ui
 
 # === Global shared persistence ===
 persistence:
@@ -252,26 +251,24 @@ reranker:
       cpu: "4"
       memory: "16Gi"
 
-indexerUi:
+# === Admin UI (React SPA + nginx) ===
+# Static SPA served by the admin-ui container (nginx-unprivileged, :8080). It is
+# same-origin: the SPA makes relative /v1, /auth, … calls that the Ingress routes
+# to the API (see ingress.paths below), so there is no CORS. Runs under the same
+# hardened security context as the rest of the stack.
+adminUi:
   enabled: true
-
-  image: "linagoraai/indexer-ui:1.1.13"
+  image:
+    repository: linagoraai/openrag-admin-ui
+    # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
+    # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
+    tag: "v2.0.0"
   imagePullPolicy: IfNotPresent
-
   replicaCount: 1
-
-  env:
-    API_BASE_URL: "http://localhost:8080"
-    INCLUDE_CREDENTIALS: "false"
-
   service:
     type: ClusterIP
-    port: 3000
-    targetPort: 3000
-
-  ingress:
-    enabled: false
-
+    port: 8080
+    targetPort: 8080
   resources: {}
 
 # === OpenRAG main app ===
@@ -342,7 +339,6 @@ env:
     SAVE_UPLOADED_FILES: "false"
     # HTTP scaling is handled by Ray Serve above (ENABLE_RAY_SERVE +
     # RAY_SERVE_NUM_REPLICAS), not uvicorn workers — see entrypoint.sh.
-    INDEXERUI_URL: "http://indexer-ui:3042"
 
     # Vector DB
     VDB_HOST: "{{ .Release.Name }}-milvus"
