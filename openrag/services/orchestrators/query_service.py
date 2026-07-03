@@ -354,6 +354,55 @@ class QueryService:
         return payload, docs
 
     # ------------------------------------------------------------------
+    # Message sanitization
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sanitize_messages(messages: list[dict]) -> list[dict]:
+        """Replace empty-content ``role="assistant"`` messages with a placeholder.
+
+        Some LLMs reject an assistant turn with no content. Substituting a
+        placeholder preserves role alternation (no consecutive same-role
+        messages are created). This should normally never happen, but we do it
+        as a safeguard against a client sending a malformed history.
+
+        An assistant message carrying ``tool_calls`` / ``function_call`` is
+        legitimately content-free and is left untouched.
+        """
+
+        def _is_empty_content(content: object) -> bool:
+            if content is None:
+                return True
+            if isinstance(content, str):
+                return not content.strip()
+            if isinstance(content, list):
+                return not content
+            return False
+
+        result = []
+        replaced_count = 0
+        for msg in messages:
+            should_replace_msg = (
+                msg.get("role") == "assistant"
+                and not msg.get("tool_calls")
+                and not msg.get("function_call")
+                and _is_empty_content(msg.get("content"))
+            )
+            if should_replace_msg:
+                result.append({**msg, "content": "NO_CONTENT"})
+                replaced_count += 1
+            else:
+                result.append(msg)
+        if replaced_count:
+            logger.warning(
+                "Replaced empty assistant message(s) with NO_CONTENT placeholder before LLM call — "
+                "this should normally never happen; likely a client-side history persistence "
+                "or streaming response issue",
+                replaced_count=replaced_count,
+            )
+        return result
+
+    # ------------------------------------------------------------------
     # Public API (router = transport)
     # ------------------------------------------------------------------
 
@@ -373,6 +422,7 @@ class QueryService:
             payload, docs, web_results = await self._prepare_chat(partitions, payload)
         sources = prepare_sources(docs, web_results)
 
+        payload["messages"] = self._sanitize_messages(payload["messages"])
         chunk = await self._llm.chat(payload["messages"], **_sampling(payload))
         chunk["model"] = model_name
         content = chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
@@ -397,6 +447,7 @@ class QueryService:
             payload, docs, web_results = await self._prepare_chat(partitions, payload)
         sources = prepare_sources(docs, web_results)
 
+        payload["messages"] = self._sanitize_messages(payload["messages"])
         llm_stream = self._llm.stream_chat(payload["messages"], **_sampling(payload))
         async for sse_line in stream_with_source_filtering(llm_stream, sources, model_name):
             yield sse_line

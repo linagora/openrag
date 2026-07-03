@@ -286,3 +286,127 @@ def test_dedupe_web_preserves_first_seen():
 def test_sampling_strips_transport_keys():
     out = qs._sampling({"messages": [], "stream": True, "model": "m", "temperature": 0.5})
     assert out == {"temperature": 0.5}
+
+
+# --------------------------------------------------------------------------- #
+# _sanitize_messages
+# --------------------------------------------------------------------------- #
+
+
+def test_sanitize_valid_alternating_unchanged():
+    """Valid alternating history → identical output."""
+    msgs = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "again"},
+    ]
+    assert QueryService._sanitize_messages(msgs) == msgs
+
+
+def test_sanitize_empty_content_replaced_with_placeholder():
+    """Empty assistant content → replaced with NO_CONTENT, alternation preserved."""
+    msgs = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "second"},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert len(out) == 3
+    assert out[1]["role"] == "assistant"
+    assert out[1]["content"] == "NO_CONTENT"
+
+
+def test_sanitize_whitespace_only_replaced():
+    """Whitespace-only assistant content → replaced with NO_CONTENT."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "   "},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert out[1]["content"] == "NO_CONTENT"
+
+
+def test_sanitize_no_content_key_replaced():
+    """Assistant with no 'content' key → replaced with NO_CONTENT, other keys kept."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "name": "bot"},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert out[1]["content"] == "NO_CONTENT"
+    assert out[1]["name"] == "bot"
+
+
+def test_sanitize_empty_list_content_replaced():
+    """Empty multimodal content list → treated as empty, replaced with NO_CONTENT."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": []},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert out[1]["content"] == "NO_CONTENT"
+
+
+def test_sanitize_assistant_with_tool_calls_untouched():
+    """Empty assistant content is legitimate when carrying tool_calls → untouched."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "type": "function"}]},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert out == msgs
+
+
+def test_sanitize_assistant_with_function_call_untouched():
+    """Empty assistant content is legitimate when carrying function_call → untouched."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": None, "function_call": {"name": "f"}},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert out == msgs
+
+
+def test_sanitize_empty_user_not_touched():
+    """User message with empty content → kept as-is (only assistant is patched)."""
+    msgs = [{"role": "user", "content": ""}]
+    assert QueryService._sanitize_messages(msgs) == msgs
+
+
+def test_sanitize_multiple_empty_assistants_all_replaced():
+    """Multiple empty assistants → all replaced, alternation intact."""
+    msgs = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "u3"},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert len(out) == 5
+    assert out[1]["content"] == "NO_CONTENT"
+    assert out[3]["content"] == "NO_CONTENT"
+
+
+def test_sanitize_multimodal_content_untouched():
+    """Non-empty multimodal content list → never replaced."""
+    msgs = [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "desc"}]},
+    ]
+    assert QueryService._sanitize_messages(msgs) == msgs
+
+
+def test_sanitize_empty_list():
+    """Empty input → empty output."""
+    assert QueryService._sanitize_messages([]) == []
+
+
+def test_sanitize_system_message_preserved():
+    """System message in head → preserved untouched."""
+    msgs = [
+        {"role": "system", "content": "You are an assistant."},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    assert QueryService._sanitize_messages(msgs) == msgs
