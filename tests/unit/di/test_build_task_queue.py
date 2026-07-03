@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from core.config.infrastructure import MessagingConfig
 from core.config.root import Settings
 from di.messaging import build_task_queue

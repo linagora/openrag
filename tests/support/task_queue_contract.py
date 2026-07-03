@@ -14,7 +14,6 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
-
 from core.ports.task_queue import Task, TaskStatus
 
 

@@ -18,7 +18,7 @@ def test_multiple_chunks_cover_all_pages_contiguously():
     ranges = [r for r, _ in chunks]
     labels = [lab for _, lab in chunks]
 
-    assert ranges == [list(range(0, 10)), list(range(10, 20)), list(range(20, 25))]
+    assert ranges == [list(range(10)), list(range(10, 20)), list(range(20, 25))]
     assert labels == ["[p0-9]", "[p10-19]", "[p20-24]"]
     # full, gap-free coverage
     assert [p for r in ranges for p in r] == list(range(25))

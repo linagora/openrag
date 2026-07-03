@@ -8,9 +8,8 @@ the *same* assertions. Adding a backend = a ~5-line subclass with its fixture.
 from __future__ import annotations
 
 import pytest
-from support.task_queue_contract import TaskQueueContract
-
 from services.messaging.in_memory import InMemoryTaskQueue
+from support.task_queue_contract import TaskQueueContract
 
 
 class TestInMemoryTaskQueue(TaskQueueContract):

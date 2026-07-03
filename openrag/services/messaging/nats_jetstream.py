@@ -25,10 +25,9 @@ from typing import Any
 
 import nats
 import nats.errors
-from nats.js.api import KeyValueConfig, RetentionPolicy, StreamConfig
-
 from core.ports.task_queue import Handler, Task, TaskHandle, TaskQueue, TaskResult, TaskStatus
 from core.utils.logging import get_logger
+from nats.js.api import KeyValueConfig, RetentionPolicy, StreamConfig
 
 logger = get_logger()
 
@@ -44,7 +43,7 @@ class _NatsHandle(TaskHandle):
     async def result(self, timeout: float | None = None) -> TaskResult:
         try:
             return await asyncio.wait_for(self._queue._await_result(self.task_id), timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise TimeoutError(f"task {self.task_id} timed out after {timeout}s") from exc
 
 
@@ -91,8 +90,12 @@ class NatsJetStreamTaskQueue(TaskQueue):
 
     # ---- Producer ------------------------------------------------------------
     async def submit(
-        self, topic: str, payload: dict[str, Any], *,
-        idempotency_key: str | None = None, max_attempts: int = 3,
+        self,
+        topic: str,
+        payload: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+        max_attempts: int = 3,
     ) -> TaskHandle:
         await self._ensure()
         task_id = idempotency_key or uuid.uuid4().hex
@@ -153,7 +156,7 @@ class NatsJetStreamTaskQueue(TaskQueue):
         while True:
             try:
                 msgs = await psub.fetch(1, timeout=2)
-            except (nats.errors.TimeoutError, asyncio.TimeoutError):
+            except (TimeoutError, nats.errors.TimeoutError):
                 continue
             for msg in msgs:
                 await self._handle(subject, msg)
@@ -162,7 +165,7 @@ class NatsJetStreamTaskQueue(TaskQueue):
         headers = msg.headers or {}
         task_id = headers.get("Task-Id", "")
         max_attempts = int(headers.get("Max-Attempts", "3"))
-        topic = subject[len(self._prefix) + 1:]
+        topic = subject[len(self._prefix) + 1 :]
         task = Task(id=task_id, topic=topic, payload=json.loads(msg.data.decode()), max_attempts=max_attempts)
         handler = self._handlers[topic]
         try:
@@ -187,7 +190,9 @@ class NatsJetStreamTaskQueue(TaskQueue):
 
 def _decode_result(raw: bytes) -> TaskResult:
     d = json.loads(raw.decode())
-    return TaskResult(task_id=d["task_id"], status=TaskStatus(d["status"]), result=d.get("result"), error=d.get("error"))
+    return TaskResult(
+        task_id=d["task_id"], status=TaskStatus(d["status"]), result=d.get("result"), error=d.get("error")
+    )
 
 
 __all__ = ["NatsJetStreamTaskQueue"]

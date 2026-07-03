@@ -12,7 +12,6 @@ import uuid
 
 import nats
 import pytest
-
 from services.messaging.nats_jetstream import NatsJetStreamTaskQueue
 
 NATS_URL = os.environ.get("NATS_TEST_URL", "nats://localhost:4222")

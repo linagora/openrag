@@ -36,14 +36,12 @@ convention — guard with ``table_exists``):
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import Any
-
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.ports.task_queue import Handler, Task, TaskHandle, TaskQueue, TaskResult, TaskStatus
 from core.utils.logging import get_logger
+from sqlalchemy import text
 
 logger = get_logger()
 
@@ -79,28 +77,42 @@ class PgTaskQueue(TaskQueue):
 
     # ---- Producer ------------------------------------------------------------
     async def submit(
-        self, topic: str, payload: dict[str, Any], *,
-        idempotency_key: str | None = None, max_attempts: int = 3,
+        self,
+        topic: str,
+        payload: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+        max_attempts: int = 3,
     ) -> TaskHandle:
         task = Task(topic=topic, payload=payload, idempotency_key=idempotency_key, max_attempts=max_attempts)
         async with self._session() as s:
             # ON CONFLICT on the unique idempotency_key makes retries return the
             # existing task instead of enqueuing a duplicate.
-            row = (await s.execute(text("""
+            row = (
+                await s.execute(
+                    text("""
                 INSERT INTO parse_tasks (id, topic, payload, status, idempotency_key, max_attempts)
                 VALUES (:id, :topic, :payload, 'PENDING', :ikey, :maxa)
                 ON CONFLICT (idempotency_key) DO UPDATE SET updated_at = now()
                 RETURNING id
-            """), {"id": task.id, "topic": topic, "payload": _json(payload),
-                   "ikey": idempotency_key, "maxa": max_attempts})).scalar_one()
+            """),
+                    {
+                        "id": task.id,
+                        "topic": topic,
+                        "payload": _json(payload),
+                        "ikey": idempotency_key,
+                        "maxa": max_attempts,
+                    },
+                )
+            ).scalar_one()
             await s.commit()
         return _PgTaskHandle(row, self)
 
     async def get_result(self, task_id: str) -> TaskResult | None:
         async with self._session() as s:
-            row = (await s.execute(text(
-                "SELECT status, result, error FROM parse_tasks WHERE id = :id"
-            ), {"id": task_id})).first()
+            row = (
+                await s.execute(text("SELECT status, result, error FROM parse_tasks WHERE id = :id"), {"id": task_id})
+            ).first()
         if row is None:
             return None
         return TaskResult(task_id=task_id, status=TaskStatus(row.status), result=row.result, error=row.error)
@@ -126,7 +138,9 @@ class PgTaskQueue(TaskQueue):
     async def _claim(self, topics: list[str]) -> Task | None:
         """Atomically claim one PENDING (or lease-expired RUNNING) task."""
         async with self._session() as s:
-            row = (await s.execute(text(f"""
+            row = (
+                await s.execute(
+                    text(f"""
                 UPDATE parse_tasks SET
                     status = 'RUNNING',
                     attempts = attempts + 1,
@@ -141,12 +155,16 @@ class PgTaskQueue(TaskQueue):
                     LIMIT 1
                 )
                 RETURNING id, topic, payload, attempts, max_attempts
-            """), {"topics": topics})).first()
+            """),
+                    {"topics": topics},
+                )
+            ).first()
             await s.commit()
         if row is None:
             return None
-        return Task(id=row.id, topic=row.topic, payload=row.payload,
-                    attempts=row.attempts, max_attempts=row.max_attempts)
+        return Task(
+            id=row.id, topic=row.topic, payload=row.payload, attempts=row.attempts, max_attempts=row.max_attempts
+        )
 
     async def _execute(self, task: Task) -> None:
         handler = self._handlers[task.topic]
@@ -169,31 +187,40 @@ class PgTaskQueue(TaskQueue):
             while True:
                 await asyncio.sleep(_LEASE_SECONDS / 3)
                 async with self._session() as s:
-                    await s.execute(text(
-                        f"UPDATE parse_tasks SET locked_until = now() + interval '{_LEASE_SECONDS} seconds' "
-                        "WHERE id = :id AND status = 'RUNNING'"), {"id": task_id})
+                    await s.execute(
+                        text(
+                            f"UPDATE parse_tasks SET locked_until = now() + interval '{_LEASE_SECONDS} seconds' "
+                            "WHERE id = :id AND status = 'RUNNING'"
+                        ),
+                        {"id": task_id},
+                    )
                     await s.commit()
         except asyncio.CancelledError:
             pass
 
     async def _finish(self, task_id: str, status: TaskStatus, *, result=None, error=None) -> None:
         async with self._session() as s:
-            await s.execute(text(
-                "UPDATE parse_tasks SET status=:st, result=:res, error=:err, "
-                "locked_until=NULL, updated_at=now() WHERE id=:id"),
-                {"st": status.value, "res": _json(result) if result else None, "err": error, "id": task_id})
+            await s.execute(
+                text(
+                    "UPDATE parse_tasks SET status=:st, result=:res, error=:err, "
+                    "locked_until=NULL, updated_at=now() WHERE id=:id"
+                ),
+                {"st": status.value, "res": _json(result) if result else None, "err": error, "id": task_id},
+            )
             await s.commit()
 
     async def _requeue(self, task_id: str) -> None:
         async with self._session() as s:
-            await s.execute(text(
-                "UPDATE parse_tasks SET status='PENDING', locked_until=NULL, updated_at=now() WHERE id=:id"),
-                {"id": task_id})
+            await s.execute(
+                text("UPDATE parse_tasks SET status='PENDING', locked_until=NULL, updated_at=now() WHERE id=:id"),
+                {"id": task_id},
+            )
             await s.commit()
 
 
 def _json(value: Any) -> Any:
     import json
+
     return json.dumps(value)
 
 

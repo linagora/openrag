@@ -28,7 +28,7 @@ class _InMemoryHandle(TaskHandle):
         event = self._queue._events[self.task_id]
         try:
             await asyncio.wait_for(event.wait(), timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise TimeoutError(f"task {self.task_id} timed out after {timeout}s") from exc
         return self._queue._results[self.task_id]
 
@@ -44,8 +44,12 @@ class InMemoryTaskQueue(TaskQueue):
 
     # ---- Producer ------------------------------------------------------------
     async def submit(
-        self, topic: str, payload: dict[str, Any], *,
-        idempotency_key: str | None = None, max_attempts: int = 3,
+        self,
+        topic: str,
+        payload: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+        max_attempts: int = 3,
     ) -> TaskHandle:
         if idempotency_key is not None and idempotency_key in self._by_idem:
             return _InMemoryHandle(self._by_idem[idempotency_key], self)
