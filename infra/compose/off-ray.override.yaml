@@ -26,6 +26,9 @@ services:
     user: "0:0"
     working_dir: /app
     runtime: nvidia
+    # Marker's share_memory() + ProcessPoolExecutor need a large /dev/shm; the
+    # 64MB Docker default causes SIGBUS (exit 135). Match the app's value.
+    shm_size: "10.24gb"
     depends_on:
       nats:
         condition: service_healthy
