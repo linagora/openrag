@@ -349,7 +349,7 @@ function EndpointDialog({
 
   const shouldReuseStoredApiKey = () => {
     const preparedApiKey = apiKeySubmitValue();
-    return editing?.has_api_key === true && (!preparedApiKey || preparedApiKey === REDACTED_SECRET);
+    return editing?.has_api_key === true && preparedApiKey === REDACTED_SECRET;
   };
 
   const revealedApiKeyForEditing =
@@ -434,8 +434,10 @@ function EndpointDialog({
     setValidating(true);
     setValidationMsg(null);
     try {
+      const isClearingStoredApiKey = editing?.has_api_key === true && submittedApiKey === "";
       if (
         editing?.has_api_key === true &&
+        !isClearingStoredApiKey &&
         normalizeEndpointUrl(endpoint) !== normalizeEndpointUrl(editing.endpoint) &&
         !apiKey &&
         (!submittedApiKey || submittedApiKey === REDACTED_SECRET)
@@ -447,7 +449,10 @@ function EndpointDialog({
         return;
       }
       const canUseStoredSecret =
-        editing?.has_api_key === true && !apiKey && (!submittedApiKey || submittedApiKey === REDACTED_SECRET);
+        editing?.has_api_key === true &&
+        !isClearingStoredApiKey &&
+        !apiKey &&
+        (!submittedApiKey || submittedApiKey === REDACTED_SECRET);
       const res = canUseStoredSecret
         ? await validateModelEndpoint({
             endpoint,

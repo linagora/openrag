@@ -114,3 +114,38 @@ def test_preserve_existing_secrets_clears_explicit_empty_secret_values():
         "auth": {},
         "headers": [{}],
     }
+
+
+def test_preserve_existing_secrets_matches_list_items_by_non_secret_identity():
+    from core.utils.redaction import preserve_existing_secrets
+
+    merged = preserve_existing_secrets(
+        {
+            "providers": [
+                {"name": "a", "api_key": "key-a"},
+                {"name": "b", "api_key": "key-b"},
+            ]
+        },
+        {
+            "providers": [
+                {"name": "b", "api_key": "<redacted>"},
+            ]
+        },
+    )
+
+    assert merged == {
+        "providers": [
+            {"name": "b", "api_key": "key-b"},
+        ]
+    }
+
+
+def test_preserve_existing_secrets_drops_unmatched_list_placeholders_without_identity():
+    from core.utils.redaction import preserve_existing_secrets
+
+    merged = preserve_existing_secrets(
+        {"headers": [{"api_key": "key-a"}, {"api_key": "key-b"}]},
+        {"headers": [{"api_key": "<redacted>"}]},
+    )
+
+    assert merged == {"headers": [{}]}
