@@ -107,11 +107,11 @@ class TestVLLMClient:
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
             assert body["stream"] is True
-            assert body["chat_template_kwargs"] == {"enable_thinking": False}
+            assert body["chat_template_kwargs"] == {"enable_thinking": True}
             assert "enable_thinking" not in body
             return httpx.Response(200, text="data: [DONE]\n")
 
-        client = self._make_client(handler, enable_thinking=False)
+        client = self._make_client(handler, enable_thinking=True)
         lines = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
 
         assert lines == ["data: [DONE]"]
@@ -164,9 +164,9 @@ class TestVLLMClient:
             captured.update(json.loads(req.content))
             return _chat_response()
 
-        await self._make_client(capture, enable_thinking=False).chat([{"role": "user", "content": "hi"}])
+        await self._make_client(capture, enable_thinking=True).chat([{"role": "user", "content": "hi"}])
 
-        assert captured["chat_template_kwargs"] == {"enable_thinking": False}
+        assert captured["chat_template_kwargs"] == {"enable_thinking": True}
         assert "enable_thinking" not in captured
 
     @pytest.mark.asyncio
@@ -179,11 +179,11 @@ class TestVLLMClient:
 
         await self._make_client(
             capture,
-            enable_thinking=False,
+            enable_thinking=True,
             chat_template_kwargs={"custom": "value"},
         ).chat([{"role": "user", "content": "hi"}])
 
-        assert captured["chat_template_kwargs"] == {"custom": "value", "enable_thinking": False}
+        assert captured["chat_template_kwargs"] == {"custom": "value", "enable_thinking": True}
 
     @pytest.mark.asyncio
     async def test_chat_template_kwargs_omitted_by_default(self):
@@ -532,22 +532,22 @@ class TestVLLMVision:
     async def test_caption_image_sends_enable_thinking_as_chat_template_kwargs_when_configured(self):
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
-            assert body["chat_template_kwargs"] == {"enable_thinking": False}
+            assert body["chat_template_kwargs"] == {"enable_thinking": True}
             assert "enable_thinking" not in body
             return _chat_response("ok")
 
-        await self._make_vision(handler, enable_thinking=False).caption_image(b"img")
+        await self._make_vision(handler, enable_thinking=True).caption_image(b"img")
 
     @pytest.mark.asyncio
     async def test_caption_image_merges_enable_thinking_with_existing_chat_template_kwargs(self):
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
-            assert body["chat_template_kwargs"] == {"custom": "value", "enable_thinking": False}
+            assert body["chat_template_kwargs"] == {"custom": "value", "enable_thinking": True}
             return _chat_response("ok")
 
         await self._make_vision(
             handler,
-            enable_thinking=False,
+            enable_thinking=True,
             chat_template_kwargs={"custom": "value"},
         ).caption_image(b"img")
 
