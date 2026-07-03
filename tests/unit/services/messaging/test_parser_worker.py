@@ -9,13 +9,14 @@ from __future__ import annotations
 import asyncio
 import base64
 
-from PIL import Image
-
+import pytest
 from core.config.root import Settings
 from core.ports.task_queue import Task, TaskStatus
+from PIL import Image
 from services.messaging import parser_worker
 from services.messaging.in_memory import InMemoryTaskQueue
 from services.messaging.parser_worker import MARKER_TOPIC, MarkerParseHandler
+from services.object_store.memory import InMemoryObjectStore
 
 
 class FakeEngine:
@@ -67,6 +68,21 @@ async def test_images_are_base64_png(monkeypatch):
     assert "_page_0_Picture_1.png" in res["images"]
     raw = base64.b64decode(res["images"]["_page_0_Picture_1.png"])
     assert raw[:8] == b"\x89PNG\r\n\x1a\n"  # PNG magic
+
+
+async def test_object_key_branch_fetches_from_store(monkeypatch):
+    monkeypatch.setattr(parser_worker, "page_count", lambda _p: 1)
+    store = InMemoryObjectStore()
+    await store.put("handoff/abc.pdf", b"%PDF fake bytes")
+    handler = MarkerParseHandler(_cfg(), engine=FakeEngine(), object_store=store)
+    res = await handler(Task(topic=MARKER_TOPIC, payload={"object_key": "handoff/abc.pdf"}))
+    assert res["markdown"] == "chunk-all"
+
+
+async def test_object_key_without_store_raises():
+    handler = MarkerParseHandler(_cfg(), engine=FakeEngine(), object_store=None)
+    with pytest.raises(RuntimeError, match="requires an object store"):
+        await handler(Task(topic=MARKER_TOPIC, payload={"object_key": "handoff/abc.pdf"}))
 
 
 async def test_end_to_end_through_queue(monkeypatch):

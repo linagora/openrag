@@ -4,12 +4,17 @@ Runs a parser ENGINE (``MarkerEngine`` today) as a :class:`TaskQueue` consumer,
 **off Ray**. The same image is deployed in both modes; only the queue backend
 and scaling differ (compose: fixed replicas; K8s: KEDA).
 
-Job payload:  ``{"file_path": "<path on shared storage>"}``
-Result:       ``{"markdown": str, "images": {key: base64-png}}``
+Job payload (in priority order):
+  ``{"object_key": "<key in the object store>"}``  — production path (E1); the
+      app uploaded the bytes, the worker fetches them back by key.
+  ``{"file_bytes_b64": "<base64>"}``               — bytes inlined (legacy / small)
+  ``{"file_path": "<path on shared storage>"}``    — standalone parse test
+Result: ``{"markdown": str, "images": {key: base64-png}}``
 
-Image handoff note: images are base64-inlined in the result for now — fine for
-the single-L4 test and modest documents. **E1** swaps this for object-store keys
-so large documents don't push big payloads through the broker.
+Result-image handoff note: images are still base64-inlined in the result — fine
+for the single-L4 test and typical documents (OCR output is mostly text). Moving
+the *result* images to object-store keys too is a later follow-up if a very
+image-heavy document ever pushes the result past the broker's KV limit.
 """
 
 from __future__ import annotations
@@ -21,9 +26,11 @@ import tempfile
 
 from core.config import Settings, load_config
 from core.indexing.image_preprocessor import pil_to_png_bytes
+from core.ports.object_store import ObjectStore
 from core.ports.task_queue import Task, TaskQueue
 from core.utils.logging import get_logger
-from di.messaging import build_task_queue
+from services.messaging.factory import build_task_queue
+from services.object_store.factory import build_object_store
 from services.workers.parsers.marker_engine import MAX_PDF_PAGES, MarkerEngine, create_chunks, page_count
 
 logger = get_logger()
@@ -72,13 +79,20 @@ def encode_images(images: dict) -> dict[str, str]:
 class MarkerParseHandler:
     """TaskQueue handler: one whole-PDF parse per task. Model loaded once."""
 
-    def __init__(self, config: Settings, engine=None):
+    def __init__(self, config: Settings, engine=None, object_store: ObjectStore | None = None):
         self.config = config
         self.engine = engine or MarkerEngine(config)
+        self.object_store = object_store
 
     async def __call__(self, task: Task) -> dict:
         payload = task.payload
-        # Bytes-in-payload (app path, no shared FS) or a shared path (standalone test).
+        # Object-store key (production app path), bytes-in-payload (legacy/small),
+        # or a shared path (standalone test) — checked in that order.
+        if "object_key" in payload:
+            if self.object_store is None:
+                raise RuntimeError("object_key payload requires an object store; none configured")
+            data = await self.object_store.get(payload["object_key"])
+            return await self._parse_bytes(data)
         if "file_bytes_b64" in payload:
             return await self._parse_bytes(base64.b64decode(payload["file_bytes_b64"]))
         markdown, images = await parse_pdf(self.engine, self.config, payload["file_path"])
@@ -107,15 +121,20 @@ class MarkerParseHandler:
 async def run_worker(config: Settings | None = None, *, concurrency: int | None = None) -> None:
     config = config or load_config()
     queue: TaskQueue = build_task_queue(config)
-    handler = MarkerParseHandler(config)
+    object_store: ObjectStore = build_object_store(config)
+    handler = MarkerParseHandler(config, object_store=object_store)
     queue.register(MARKER_TOPIC, handler)
     n = concurrency if concurrency is not None else config.loader.marker_max_processes
-    logger.info(f"marker-serve worker starting (backend={config.messaging.backend}, topic={MARKER_TOPIC}, concurrency={n})")
+    logger.info(
+        f"marker-serve worker starting (queue={config.messaging.backend}, "
+        f"object_store={config.object_store.backend}, topic={MARKER_TOPIC}, concurrency={n})"
+    )
     try:
         await queue.run(concurrency=n)
     finally:
         handler.close()
         await queue.aclose()
+        await object_store.aclose()
 
 
 def main() -> None:

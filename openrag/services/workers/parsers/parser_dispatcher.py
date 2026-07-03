@@ -176,10 +176,11 @@ class ParserDispatcher(DocumentParser):
         return _create("core.indexing.parsers.pdf.marker", "marker", pool=MarkerLoader())
 
     def _build_marker_serve(self) -> DocumentParser:
-        from di.messaging import build_task_queue
+        from services.messaging.factory import build_task_queue
         from services.messaging.marker_serve_client import MarkerServeClient
+        from services.object_store.factory import build_object_store
 
-        client = MarkerServeClient(self._config, build_task_queue(self._config))
+        client = MarkerServeClient(self._config, build_task_queue(self._config), build_object_store(self._config))
         return _create("core.indexing.parsers.pdf.marker_serve", "marker_serve", client=client)
 
     def _build_docling(self) -> DocumentParser:

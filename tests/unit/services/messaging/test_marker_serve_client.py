@@ -1,22 +1,28 @@
-"""D1/D3 — MarkerServeClient rebuilds a ProcessedDocument from a queue result,
-and the dispatcher wires the marker_serve backend. In-memory queue, no models."""
+"""D1/D3 + E1 — MarkerServeClient uploads the PDF to the object store, hands the
+worker only the key, rebuilds a ProcessedDocument from the result, and cleans up
+the object. In-memory queue + in-memory object store, no models."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 from io import BytesIO
 
 import pytest
-from PIL import Image
-
-from core.config.infrastructure import MessagingConfig
+from core.config.infrastructure import MessagingConfig, ObjectStoreConfig
 from core.config.root import Settings
 from core.indexing.parsers.pdf.marker_serve import MarkerServeParser
 from core.models.document import Document, DocumentType
+from core.ports.object_store import ObjectNotFound
+from PIL import Image
 from services.messaging.in_memory import InMemoryTaskQueue
 from services.messaging.marker_serve_client import MarkerServeClient
+from services.object_store.memory import InMemoryObjectStore
 from services.workers.parsers.parser_dispatcher import _PDF_BACKENDS, build_parser_dispatcher
+
+PDF_BYTES = b"%PDF-1.4 fake"
+EXPECTED_KEY = f"handoff/{hashlib.sha256(PDF_BYTES).hexdigest()}.pdf"
 
 
 def _png_b64() -> str:
@@ -29,17 +35,22 @@ async def _run(queue):
     return asyncio.create_task(queue.run(concurrency=1))
 
 
-async def test_parse_rebuilds_processed_document():
+async def test_parse_uploads_by_key_and_rebuilds_document():
     queue = InMemoryTaskQueue()
+    store = InMemoryObjectStore()
+    seen: dict = {}
 
     async def handler(task):
-        assert "file_bytes_b64" in task.payload  # bytes handed off in the payload
+        # Worker side: only a key travels in the payload; fetch the bytes back.
+        assert "file_bytes_b64" not in task.payload
+        key = task.payload["object_key"]
+        seen["bytes"] = await store.get(key)  # proves the client uploaded them
         return {"markdown": "one{1}[PAGE_SEP]two{2}[PAGE_SEP]", "images": {"_page_0_Picture_1.png": _png_b64()}}
 
     queue.register("marker.parse", handler)
     run = await _run(queue)
-    client = MarkerServeClient(Settings(), queue)
-    doc = Document(id="d1", filename="x.pdf", content_type=DocumentType.PDF, raw_bytes=b"%PDF-1.4 fake")
+    client = MarkerServeClient(Settings(), queue, store)
+    doc = Document(id="d1", filename="x.pdf", content_type=DocumentType.PDF, raw_bytes=PDF_BYTES)
     try:
         pd = await client.parse(doc)
     finally:
@@ -47,40 +58,62 @@ async def test_parse_rebuilds_processed_document():
         await asyncio.gather(run, return_exceptions=True)
         await queue.aclose()
 
+    assert seen["bytes"] == PDF_BYTES  # worker received the exact bytes via the store
     assert pd.document_id == "d1"
     assert len(pd.text_blocks) >= 1
     assert len(pd.images) == 1
     assert pd.images[0].page_number == 1  # from "_page_0_..." → 1-indexed
     assert pd.images[0].image_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+    # Content-addressed key, cleaned up after a terminal result.
+    with pytest.raises(ObjectNotFound):
+        await store.get(EXPECTED_KEY)
 
 
-async def test_empty_document_returns_empty():
-    client = MarkerServeClient(Settings(), InMemoryTaskQueue())
+async def test_empty_document_uploads_nothing():
+    store = InMemoryObjectStore()
+    client = MarkerServeClient(Settings(), InMemoryTaskQueue(), store)
     pd = await client.parse(Document(id="d2", content_type=DocumentType.PDF, raw_bytes=None))
     assert pd.document_id == "d2"
     assert pd.text_blocks == []
+    assert store._objects == {}  # short-circuits before any upload
 
 
-async def test_failed_result_raises():
+async def test_failed_result_raises_and_still_cleans_up():
     queue = InMemoryTaskQueue()
+    store = InMemoryObjectStore()
 
     async def handler(task):
         raise RuntimeError("boom")
 
     queue.register("marker.parse", handler)
     run = await _run(queue)
-    # 1 attempt so it fails fast
-    cfg = Settings()
-    cfg_client = MarkerServeClient(cfg, queue)
-    cfg_client._max_attempts = 1
-    doc = Document(id="d3", content_type=DocumentType.PDF, raw_bytes=b"%PDF fake")
+    client = MarkerServeClient(Settings(), queue, store)
+    client._max_attempts = 1  # fail fast
+    doc = Document(id="d3", content_type=DocumentType.PDF, raw_bytes=PDF_BYTES)
     try:
         with pytest.raises(RuntimeError, match="marker-serve parse failed"):
-            await cfg_client.parse(doc)
+            await client.parse(doc)
     finally:
         run.cancel()
         await asyncio.gather(run, return_exceptions=True)
         await queue.aclose()
+
+    # Terminal failure ⇒ no more retries ⇒ the object is cleaned up too.
+    assert store._objects == {}
+
+
+async def test_timeout_leaves_object_for_retrying_worker():
+    # No consumer runs, so the result times out while the task is still pending.
+    # The client must NOT delete the object — a later worker attempt needs it.
+    queue = InMemoryTaskQueue()
+    store = InMemoryObjectStore()
+    client = MarkerServeClient(Settings(), queue, store)
+    client._timeout = 0.2
+    doc = Document(id="d4", content_type=DocumentType.PDF, raw_bytes=PDF_BYTES)
+    with pytest.raises(TimeoutError):
+        await client.parse(doc)
+    assert await store.get(EXPECTED_KEY) == PDF_BYTES  # preserved for the retry
+    await queue.aclose()
 
 
 def test_backend_mapping_registered():
@@ -88,7 +121,10 @@ def test_backend_mapping_registered():
 
 
 def test_dispatcher_builds_marker_serve_facade():
-    cfg = Settings(messaging=MessagingConfig(backend="in_memory"))
+    cfg = Settings(
+        messaging=MessagingConfig(backend="in_memory"),
+        object_store=ObjectStoreConfig(backend="in_memory"),
+    )
     dispatcher = build_parser_dispatcher(cfg)
-    parser = dispatcher._get("marker_serve")  # builds facade + client (in-memory queue, no connect)
+    parser = dispatcher._get("marker_serve")  # builds facade + client (in-memory, no connect)
     assert isinstance(parser, MarkerServeParser)

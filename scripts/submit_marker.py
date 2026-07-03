@@ -14,7 +14,7 @@ import asyncio
 import sys
 
 from core.config import load_config
-from di.messaging import build_task_queue
+from services.messaging.factory import build_task_queue
 
 
 async def main(pdf: str) -> None:

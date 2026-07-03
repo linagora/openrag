@@ -5,25 +5,26 @@ rebuilds the ``ProcessedDocument`` from the result using the shared
 ``marker_format`` helpers, so the output is byte-for-byte the shape the Ray
 ``MarkerLoader`` produces. Idempotent by content hash (safe retries).
 
-Dependencies are injected (the ``TaskQueue`` is composed in
+Dependencies are injected (the ``TaskQueue`` and ``ObjectStore`` are composed in
 ``parser_dispatcher``), keeping this class pure and unit-testable with the
-in-memory queue.
+in-memory backends.
 
-FILE HANDOFF — INTERIM: the PDF bytes are base64-inlined in the task payload.
-This is bounded by the broker's max payload (fine for modest PDFs and the
-single-L4 mode) and is the one non-production shortcut here. The production path
-for large/scanned docs is object-store keys (E1); only the payload construction
-below and the worker's decode change — this client's contract does not.
+FILE HANDOFF (E1): the PDF bytes are uploaded to the object store under a
+content-addressed key; only that key travels in the task payload, so large or
+scanned PDFs never hit the broker's max-payload limit. The client owns the
+object's lifecycle — it best-effort deletes the object once a *terminal* result
+is in hand (never on timeout, when a retrying worker may still need it); a bucket
+TTL policy reaps anything a crashed producer leaves behind.
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 
 from core.config import Settings
 from core.indexing.parsers.document_parser import BaseClientParser
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from core.ports.object_store import ObjectStore
 from core.ports.task_queue import TaskQueue, TaskStatus
 from core.utils.logging import get_logger
 from services.workers.parsers.marker_format import build_image_blocks_from_encoded, split_pages
@@ -31,12 +32,16 @@ from services.workers.parsers.marker_format import build_image_blocks_from_encod
 logger = get_logger()
 
 MARKER_TOPIC = "marker.parse"
+# Content-addressed scratch key: the queue's idempotency (keyed on the same
+# hash) guarantees one task/reader/deleter per unique file, so this is race-free.
+OBJECT_KEY_PREFIX = "handoff"
 
 
 class MarkerServeClient(BaseClientParser):
-    def __init__(self, config: Settings, queue: TaskQueue) -> None:
+    def __init__(self, config: Settings, queue: TaskQueue, object_store: ObjectStore) -> None:
         self._config = config
         self._queue = queue
+        self._object_store = object_store
         self._timeout = config.loader.marker_timeout
         self._max_attempts = max(1, config.loader.marker_max_task_retry)
 
@@ -47,13 +52,21 @@ class MarkerServeClient(BaseClientParser):
         if not document.raw_bytes:
             return ProcessedDocument(document_id=document.id, metadata=dict(document.metadata))
 
-        payload = {"file_bytes_b64": base64.b64encode(document.raw_bytes).decode()}
-        idempotency_key = hashlib.sha256(document.raw_bytes).hexdigest()
+        content_hash = hashlib.sha256(document.raw_bytes).hexdigest()
+        object_key = f"{OBJECT_KEY_PREFIX}/{content_hash}.pdf"
 
+        await self._object_store.put(object_key, document.raw_bytes, content_type="application/pdf")
         handle = await self._queue.submit(
-            MARKER_TOPIC, payload, idempotency_key=idempotency_key, max_attempts=self._max_attempts
+            MARKER_TOPIC,
+            {"object_key": object_key},
+            idempotency_key=content_hash,
+            max_attempts=self._max_attempts,
         )
+
+        # A timeout/cancel leaves the task possibly still running (and still
+        # needing the object), so only clean up once a terminal result is in hand.
         result = await handle.result(timeout=self._timeout)
+        await self._delete_quietly(object_key)
 
         if result.status is not TaskStatus.SUCCEEDED:
             raise RuntimeError(f"marker-serve parse failed for document {document.id}: {result.error}")
@@ -68,5 +81,12 @@ class MarkerServeClient(BaseClientParser):
             page_count=pages[-1][0] if pages else 0,
         )
 
+    async def _delete_quietly(self, object_key: str) -> None:
+        try:
+            await self._object_store.delete(object_key)
+        except Exception as exc:  # noqa: BLE001 — cleanup is best-effort; TTL is the backstop
+            logger.warning(f"failed to delete handoff object {object_key!r}: {exc}")
+
     async def aclose(self) -> None:
         await self._queue.aclose()
+        await self._object_store.aclose()
