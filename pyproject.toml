@@ -65,6 +65,7 @@ dependencies = [
     "tenacity>=8.2.0",
     "aiobreaker>=1.2.0",
     "mcp>=1.11.0",
+    "nats-py>=2.15.0",
 ]
 
 [dependency-groups]
@@ -137,7 +138,7 @@ exclude = ["tests/load/prompt_eval"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["./openrag"]
+pythonpath = ["./openrag", "./tests"]
 python_files = ["test_*.py"]
 addopts = "--strict-markers --tb=short"
 asyncio_mode = "auto"

@@ -1,0 +1,9 @@
+# NATS with JetStream for the TaskQueue integration conformance run.
+#   docker compose -f tests/integration/messaging/docker-compose.yaml up -d
+#   NATS_TEST_URL=nats://localhost:4222 uv run pytest tests/integration/messaging
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js"]          # enable JetStream
+    ports:
+      - "4222:4222"
