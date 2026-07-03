@@ -35,6 +35,33 @@ describe("applyParsingStrategyChange", () => {
     expect(applyParsingStrategyChange({}, "docling")).not.toHaveProperty("enable_image_captioning");
   });
 
+  it("clears the forced-off captioning flag when leaving pymupdf for another backend", () => {
+    // pymupdf forced captioning off; switching to marker/docling (which can
+    // caption) must revert to the sparse/default (enabled) behavior.
+    expect(
+      applyParsingStrategyChange({ parsing_strategy: "pymupdf", enable_image_captioning: false }, "marker"),
+    ).toEqual({ parsing_strategy: "marker" });
+    expect(
+      applyParsingStrategyChange({ parsing_strategy: "pymupdf", enable_image_captioning: false }, "docling"),
+    ).toEqual({ parsing_strategy: "docling" });
+  });
+
+  it("clears the forced-off captioning flag when leaving pymupdf for inherit-default", () => {
+    expect(
+      applyParsingStrategyChange(
+        { parsing_strategy: "pymupdf", enable_image_captioning: false },
+        PARSING_STRATEGY_INHERIT,
+      ),
+    ).toEqual({});
+  });
+
+  it("preserves an explicit captioning choice when not coming from pymupdf", () => {
+    // marker -> docling is not a pymupdf exit, so a user-set false is kept.
+    expect(
+      applyParsingStrategyChange({ parsing_strategy: "marker", enable_image_captioning: false }, "docling"),
+    ).toEqual({ parsing_strategy: "docling", enable_image_captioning: false });
+  });
+
   it("does not mutate the input config", () => {
     const input = { parsing_strategy: "marker" };
     applyParsingStrategyChange(input, PARSING_STRATEGY_INHERIT);
