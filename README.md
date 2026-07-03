@@ -36,16 +36,16 @@
 
 All files are intelligently converted to **Markdown format** with images replaced by AI-generated captions, ensuring consistent processing across all document types.
 
-### 🎛️ Native Web-Based Indexer UI
-Experience intuitive document management through our built-in web interface.
+### 🎛️ Native Web-Based Admin UI
+Manage OpenRAG through the bundled web interface.
 
 <details>
 
-<summary>Indexer UI Features</summary>
+<summary>Admin UI Features</summary>
 
 * **Drag-and-drop file upload** with batch processing capabilities
 * **Real-time indexing progress** monitoring and status updates
-* **Admin Dashbord** to monitore RAG components (Indexer, VectorDB, TaskStateManager, etc)
+* **Admin dashboard** to monitor RAG components (Indexer, VectorDB, TaskStateManager, etc)
 * **Partition management** - organize documents into logical collections
 * **Visual document preview** and metadata inspection
 * **Search and filtering** capabilities for indexed content

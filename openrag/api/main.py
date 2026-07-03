@@ -288,7 +288,7 @@ app.add_middleware(InstrumentationMiddleware)
 register_error_handlers(app)
 
 
-_admin_ui_origin = f"http://localhost:{ADMIN_UI_PORT}"
+_admin_ui_origin = "http://localhost" if ADMIN_UI_PORT == "80" else f"http://localhost:{ADMIN_UI_PORT}"
 
 allow_origins = [
     _admin_ui_origin,

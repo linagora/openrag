@@ -538,4 +538,4 @@ changing one, rebuild the image: `docker compose build admin-ui`.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `DEFAULT_LANGUAGE` | `str` | `` | UI language for Chainlit and Indexer UI (e.g. `en-US`, `fr`). When unset, the browser language is used, with `en-US` as the final fallback. |
+| `DEFAULT_LANGUAGE` | `str` | `` | UI language for Chainlit and the Admin UI (e.g. `en-US`, `fr`). When unset, the browser language is used, with `en-US` as the final fallback. |

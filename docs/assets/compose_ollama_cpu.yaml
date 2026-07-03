@@ -108,5 +108,5 @@ services:
   admin-ui:
     image: linagoraai/openrag-admin-ui:latest
     ports:
-      - "8081:8080"
+      - "${ADMIN_UI_PORT:-8081}:8080"
     restart: unless-stopped
