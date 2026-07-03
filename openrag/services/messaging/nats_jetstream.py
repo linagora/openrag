@@ -27,7 +27,7 @@ import nats
 import nats.errors
 from core.ports.task_queue import Handler, Task, TaskHandle, TaskQueue, TaskResult, TaskStatus
 from core.utils.logging import get_logger
-from nats.js.api import KeyValueConfig, RetentionPolicy, StreamConfig
+from nats.js.api import AckPolicy, ConsumerConfig, KeyValueConfig, RetentionPolicy, StreamConfig
 
 logger = get_logger()
 
@@ -152,6 +152,23 @@ class NatsJetStreamTaskQueue(TaskQueue):
         await asyncio.gather(*self._tasks)
 
     async def _consume(self, subject: str, durable: str) -> None:
+        # Explicitly provision the durable consumer with our ack_wait lease.
+        # JetStream's default ack_wait is 30s, but marker/docling parses run for
+        # minutes — without this the task would be redelivered mid-parse (wasted
+        # GPU work + num_delivered climbing to a false FAILED). Idempotent across
+        # the concurrency loops that share this durable ("already exists").
+        try:
+            await self._js.add_consumer(
+                self._stream,
+                ConsumerConfig(
+                    durable_name=durable,
+                    filter_subject=subject,
+                    ack_policy=AckPolicy.EXPLICIT,
+                    ack_wait=_ACK_WAIT,
+                ),
+            )
+        except Exception:  # noqa: BLE001 — consumer already exists
+            pass
         psub = await self._js.pull_subscribe(subject, durable=durable, stream=self._stream)
         while True:
             try:
@@ -168,6 +185,10 @@ class NatsJetStreamTaskQueue(TaskQueue):
         topic = subject[len(self._prefix) + 1 :]
         task = Task(id=task_id, topic=topic, payload=json.loads(msg.data.decode()), max_attempts=max_attempts)
         handler = self._handlers[topic]
+        # Keep the lease alive for legitimately long tasks so ack_wait doesn't
+        # redeliver a task the worker is still processing (defence-in-depth on top
+        # of the ack_wait above, for a task that outruns even that window).
+        heartbeat = asyncio.create_task(self._extend_lease(msg))
         try:
             result = await handler(task)
             await self._put_result(task_id, TaskStatus.SUCCEEDED, result=result)
@@ -179,6 +200,22 @@ class NatsJetStreamTaskQueue(TaskQueue):
                 await msg.term()  # stop redelivery
             else:
                 await msg.nak()  # redeliver
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def _extend_lease(self, msg) -> None:
+        """Periodically send AckInProgress so a long-running handler's task is not
+        redelivered while it is still being processed. Fires well within ack_wait."""
+        interval = max(1.0, _ACK_WAIT / 2)
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                await msg.in_progress()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — best effort; ack_wait is the backstop
+            pass
 
     async def aclose(self) -> None:
         for t in self._tasks:
