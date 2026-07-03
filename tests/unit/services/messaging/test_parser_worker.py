@@ -85,6 +85,49 @@ async def test_object_key_without_store_raises():
         await handler(Task(topic=MARKER_TOPIC, payload={"object_key": "handoff/abc.pdf"}))
 
 
+async def test_broken_engine_pool_is_reset_before_parse(monkeypatch):
+    monkeypatch.setattr(parser_worker, "page_count", lambda _p: 1)
+
+    class BrokenThenHealthyEngine(FakeEngine):
+        def __init__(self):
+            super().__init__()
+            self.broken = True
+            self.reset_calls = 0
+
+        def is_broken(self):
+            return self.broken
+
+        def reset(self):
+            self.reset_calls += 1
+            self.broken = False
+
+    engine = BrokenThenHealthyEngine()
+    handler = MarkerParseHandler(_cfg(), engine=engine)
+    res = await handler(Task(topic=MARKER_TOPIC, payload={"file_path": "x.pdf"}))
+    assert engine.reset_calls == 1  # broken pool was recovered, not left dead
+    assert res["markdown"] == "chunk-all"
+
+
+async def test_healthy_engine_pool_is_not_reset(monkeypatch):
+    monkeypatch.setattr(parser_worker, "page_count", lambda _p: 1)
+
+    class HealthyEngine(FakeEngine):
+        def __init__(self):
+            super().__init__()
+            self.reset_calls = 0
+
+        def is_broken(self):
+            return False
+
+        def reset(self):
+            self.reset_calls += 1
+
+    engine = HealthyEngine()
+    handler = MarkerParseHandler(_cfg(), engine=engine)
+    await handler(Task(topic=MARKER_TOPIC, payload={"file_path": "x.pdf"}))
+    assert engine.reset_calls == 0
+
+
 async def test_end_to_end_through_queue(monkeypatch):
     monkeypatch.setattr(parser_worker, "page_count", lambda _p: 3)
     queue = InMemoryTaskQueue()

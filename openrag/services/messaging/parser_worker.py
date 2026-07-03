@@ -84,7 +84,19 @@ class MarkerParseHandler:
         self.engine = engine or MarkerEngine(config)
         self.object_store = object_store
 
+    def _ensure_engine_healthy(self) -> None:
+        """Reset a broken ProcessPoolExecutor before parsing, so one crashed child
+        (OOM/CUDA error) doesn't fail every subsequent task until the container
+        restarts. Mirrors the Ray ``MarkerPool.ensure_worker_pool_healthy`` path.
+        Tolerant of engines (e.g. test fakes) that don't expose is_broken/reset."""
+        is_broken = getattr(self.engine, "is_broken", None)
+        reset = getattr(self.engine, "reset", None)
+        if callable(is_broken) and callable(reset) and is_broken():
+            logger.warning("Marker engine pool is broken; resetting before parse")
+            reset()
+
     async def __call__(self, task: Task) -> dict:
+        self._ensure_engine_healthy()
         payload = task.payload
         # Object-store key (production app path), bytes-in-payload (legacy/small),
         # or a shared path (standalone test) — checked in that order.
