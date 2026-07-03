@@ -137,6 +137,10 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("RAY_SERVE_HOST", "ray.serve.host", str),
     ("RAY_SERVE_PORT", "ray.serve.port", int),
     ("CHAINLIT_PORT", "ray.serve.chainlit_port", int),
+    # Messaging (work-queue backend)
+    ("QUEUE_BACKEND", "messaging.backend", str),
+    ("NATS_URL", "messaging.nats_url", str),
+    ("QUEUE_NAMESPACE", "messaging.namespace", str),
     # Chunker
     ("CHUNKER", "chunker.name", str),
     ("CONTEXTUAL_RETRIEVAL", "chunker.contextual_retrieval", bool),

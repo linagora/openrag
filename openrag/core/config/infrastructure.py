@@ -9,6 +9,23 @@ from pydantic import Field
 from .base import ConfigMixin
 
 # ---------------------------------------------------------------------------
+# Messaging (work-queue backend for the distributed parsing tier)
+# ---------------------------------------------------------------------------
+
+
+class MessagingConfig(ConfigMixin):
+    """Backend for the TaskQueue port (parser workers, etc.).
+
+    ``backend`` selects the adapter; the rest are backend-specific knobs.
+    Swappable NATS -> Redis -> Temporal without touching producers/consumers.
+    """
+
+    backend: str = "nats"  # "nats" | "in_memory" | "postgres"
+    nats_url: str = "nats://localhost:4222"
+    namespace: str = "openrag"
+
+
+# ---------------------------------------------------------------------------
 # VectorDB (Milvus)
 # ---------------------------------------------------------------------------
 
