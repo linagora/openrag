@@ -1,0 +1,64 @@
+# Off-Ray override for the FULL stack: routes the app's PDF parsing to a
+# marker-serve worker over NATS (no Ray in the parsing tier), so you can index
+# with marker from the admin UI.
+#
+# Deploy (from infra/compose/, on the off-Ray branch):
+#   docker compose -f docker-compose.yaml -f off-ray.override.yaml up --build -d
+#
+# Everything joins the stack's `default` network, so the app reaches `nats` by
+# name. `environment:` here overrides the app's env_file, so no .env edit needed.
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]          # JetStream + monitoring for healthcheck
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  marker-serve:
+    build:
+      context: ../..
+      dockerfile: infra/docker/api.Dockerfile   # same image/code as the app (+ nats-py)
+      args:
+        APP_UID: ${APP_UID:-1000}
+    user: "0:0"
+    working_dir: /app
+    runtime: nvidia
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      - QUEUE_BACKEND=nats
+      - NATS_URL=nats://nats:4222
+      - QUEUE_NAMESPACE=openrag
+      - HF_HOME=/app/model_weights
+      - PYTHONPATH=/app/openrag
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    command: ["sh", "-c", "uv run --no-dev python -m services.messaging.parser_worker"]
+    volumes:
+      - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights  # reuse the app's surya cache
+      - markerserve_venv:/app/.venv                                       # own venv (avoids sync race)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Flip the app to the off-Ray marker backend + point it at NATS.
+  openrag:
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      - PDFLoader=MarkerServeLoader
+      - QUEUE_BACKEND=nats
+      - NATS_URL=nats://nats:4222
+      - QUEUE_NAMESPACE=openrag
+
+volumes:
+  markerserve_venv:
