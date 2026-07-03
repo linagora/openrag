@@ -12,7 +12,7 @@ networkPolicy:
   # Ports reachable from outside the namespace (e.g. via the Ingress controller).
   externalPorts:
     - 8080  # openrag API/UI
-    - 3000  # indexer-ui
+    - 80    # admin-ui (nginx)
 
 # === Global shared persistence ===
 persistence:
@@ -49,7 +49,7 @@ ray:
   image:
     registry: ghcr.io
     repository: linagora/openrag-ray
-    tag: "v1.1.12"
+    tag: "v2.0.0-rc.1"
   resources:
     head:
       requests:
@@ -267,58 +267,74 @@ reranker:
       drop: ["ALL"]
     readOnlyRootFilesystem: false  # model cache writes to /app/.cache
 
-indexerUi:
+# === Admin UI (replaces indexer-ui) ===
+# React SPA served by an nginx bundled inside the image. VITE_BASE_PATH=/app/
+# and VITE_API_BASE_URL="" are compiled into the JS bundle at image build time
+# (see infra/docker/ui.Dockerfile) — the SPA assumes it is served under /app/
+# and makes same-origin, root-relative API calls (/v1, /auth, /chainlit, ...).
+# Changing the path prefix requires rebuilding the image with different
+# build-args; this chart cannot do it via runtime env.
+adminUi:
   enabled: true
 
   image:
     registry: ""
-    repository: "linagoraai/indexer-ui"
-    tag: v1.1.1
+    repository: "linagoraai/openrag-admin-ui"
+    tag: v2.0.0-rc.1
   imagePullPolicy: IfNotPresent
 
   replicaCount: 1
 
-  env:
-    API_BASE_URL: 'http://{{ include "openrag-stack.fullname" . }}-openrag:8080'
-    INCLUDE_CREDENTIALS: "false"
-
   service:
     type: ClusterIP
-    port: 3000
-    targetPort: 3000
+    port: 80
+    targetPort: 80
 
+  # Routing note: this chart exposes admin-ui and openrag/ray-serve as two
+  # separate optional Ingress resources (this block and openrag.ingress),
+  # rather than a single combined Ingress — mirrors the docker-compose
+  # front-door (infra/compose/nginx/openrag-admin.conf) but leaves path
+  # precedence and SSE/X-Forwarded-Proto handling to the ingress controller.
+  # For a single-vhost deployment, set the same `host` on both Ingress blocks:
+  # the controller must then route this more specific "/app" prefix ahead of
+  # openrag.ingress's "/" catch-all (nginx-ingress does this automatically by
+  # merging same-host Ingress resources and sorting by path specificity —
+  # verify equivalent behavior before relying on it with another controller,
+  # e.g. OpenShift HAProxy Routes or a Gateway API implementation).
+  # There is no automatic "/" -> "/app/" redirect in this mode (unlike the
+  # compose front-door) — users must browse to /app/ directly.
   ingress:
     enabled: false
     className: ""
     host: ""
     annotations: {}
-      # nginx.ingress.kubernetes.io/rewrite-target: /
-      # nginx.ingress.kubernetes.io/proxy-body-size: "500m"
     tls: []
-    path: /
+    path: /app
     pathType: Prefix
 
   resources: {}
 
-  podSecurityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
+  # nginx:1.27-alpine (the admin-ui base image) binds the privileged port 80
+  # as root before nginx workers drop to their own user, and isn't built to
+  # run rootless — unlike the other pods in this chart it can't use
+  # runAsNonRoot. NET_BIND_SERVICE is granted back explicitly so it doesn't
+  # need to run as full root.
+  podSecurityContext: {}
   serviceAccountName: ""
 
   containerSecurityContext:
     allowPrivilegeEscalation: false
     capabilities:
       drop: ["ALL"]
-    readOnlyRootFilesystem: false  # Next.js writes to /app/config.json and /tmp at runtime
+      add: ["NET_BIND_SERVICE"]
+    readOnlyRootFilesystem: false
 
 # === OpenRAG main app ===
 openrag:
   image:
     registry: ""
     repository: linagoraai/openrag
-    tag: "v1.1.13"
+    tag: "v2.0.0-rc.1"
   service:
     type: ClusterIP
     port: 8080
@@ -465,7 +481,7 @@ env:
     RAY_SERVE_PORT: "80"
 
     WITH_CHAINLIT_UI: "false"
-    SAVE_UPLOADED_FILES: "http://indexer-ui:3042/milvus"
+    SAVE_UPLOADED_FILES: 'http://{{ include "openrag-stack.fullname" . }}-admin-ui:{{ .Values.adminUi.service.port }}/milvus'
 
     # PostgreSQL
     POSTGRES_HOST: '{{ include "openrag-stack.fullname" . }}-postgresql'

@@ -147,6 +147,13 @@ spec:
                 port:
                   number: {{ .Values.openrag.service.port }}
                 {{- end }}
+          - path: /app/
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "openrag-stack.fullname" . }}-indexer-ui
+                port:
+                  number: 3000
       {{- with .Values.openrag.ingress.host }}
       host: {{ . | quote }}
       {{- end }}
