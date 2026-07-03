@@ -3,6 +3,7 @@ import asyncio
 import pytest
 from core.indexing.topic_tags import TopicTagger
 from core.models.chunk import Chunk
+from core.utils.exceptions import InferenceError
 
 
 class FakeLLM:
@@ -57,6 +58,17 @@ async def test_topic_tagger_timeout_zero_uses_timeout_path():
             return {"choices": [{"message": {"content": '["finance"]'}}]}
 
     tagger = TopicTagger(SlowLLM(), "extract topics", timeout_seconds=0)
+
+    assert await tagger.tag([Chunk(id="c1", text="hello")], max_tags=5) == []
+
+
+@pytest.mark.asyncio
+async def test_topic_tagger_returns_empty_on_inference_error():
+    class FailingLLM:
+        async def chat(self, messages: list[dict[str, str]], **kwargs):
+            raise InferenceError("LLM rejected topic tagging request")
+
+    tagger = TopicTagger(FailingLLM(), "extract topics")
 
     assert await tagger.tag([Chunk(id="c1", text="hello")], max_tags=5) == []
 

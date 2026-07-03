@@ -10,6 +10,7 @@ from collections.abc import Sequence
 
 from core.llm import LLM
 from core.models.chunk import Chunk
+from core.utils.exceptions import CircuitBreakerOpenError, InferenceError
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,15 @@ class TopicTagger:
                 else await operation
             )
             return _parse_topic_tags(_chat_response_text(response), max_tags=max_tags)
-        except (TimeoutError, OSError, RuntimeError, ValueError, TypeError) as exc:
+        except (
+            TimeoutError,
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            InferenceError,
+            CircuitBreakerOpenError,
+        ) as exc:
             logger.warning("Error extracting topic tags for %s: %s", filename, exc)
             return []
 
