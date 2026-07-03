@@ -103,7 +103,7 @@ class VLLMClient(LLM):
     def _chat_payload_kwargs(self, kwargs: dict) -> dict:
         payload_kwargs = {**self._defaults, **kwargs}
         enable_thinking = payload_kwargs.pop("enable_thinking", self._enable_thinking)
-        if enable_thinking is not None:
+        if enable_thinking is not None and enable_thinking is True:
             chat_template_kwargs = dict(payload_kwargs.get("chat_template_kwargs") or {})
             chat_template_kwargs.setdefault("enable_thinking", enable_thinking)
             payload_kwargs["chat_template_kwargs"] = chat_template_kwargs
