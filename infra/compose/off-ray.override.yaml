@@ -37,6 +37,9 @@ services:
       - PYTHONPATH=/app/openrag
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    # Bypass the image ENTRYPOINT (entrypoint.sh launches the API/Ray, not the
+    # worker) and run the parser worker directly.
+    entrypoint: []
     command: ["sh", "-c", "uv run --no-dev python -m services.messaging.parser_worker"]
     volumes:
       - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights  # reuse the app's surya cache
