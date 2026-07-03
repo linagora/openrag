@@ -17,6 +17,7 @@ from api.dependencies.auth import (
     require_partitions_viewer,
 )
 from api.dependencies.files import validate_file_id
+from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
 from di.providers import get_retrieval_service, get_workspace_service
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -58,6 +59,10 @@ class CommonSearchParams:
             description="""Milvus filter expression string.""",
         ),
     ):
+        # Reject filter expressions that could break out of the partition
+        # scope (unbalanced parens rebalancing the `(partition …) and (…)`
+        # wrapper) before the raw string reaches the store. Raises 400.
+        validate_search_filter(filter)
         self.text = text
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
@@ -317,7 +322,10 @@ async def search_file(
         partition=partition, file_id=file_id, query_len=len(search_params.text), top_k=search_params.top_k
     )
 
-    filter = "file_id == {_file_id}" + (f" AND {search_params.filter}" if search_params.filter else "")
+    # Parenthesise the caller filter so it stays a single AND-operand and can't
+    # break out of the file scope (e.g. ``page > 5 OR 1==1`` must not widen the
+    # ``file_id ==`` constraint). It is already validated by CommonSearchParams.
+    filter = "file_id == {_file_id}" + (f" AND ({search_params.filter})" if search_params.filter else "")
     params = {"_file_id": file_id}
 
     results = await service.search(
