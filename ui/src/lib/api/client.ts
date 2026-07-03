@@ -58,6 +58,13 @@ export async function request<T>(
   const res = await fetch(`${API_BASE}${path}`, {
     ...fetchOptions,
     headers,
+    // Send the OIDC `openrag_session` cookie. A no-op for the same-origin
+    // default, but required for a browser-direct build (absolute
+    // VITE_API_BASE_URL): without it the cross-origin cookie is dropped and
+    // OIDC users are treated as unauthenticated. The API sets
+    // Access-Control-Allow-Credentials, so list the UI origin in
+    // CORS_EXTRA_ORIGINS when going cross-origin.
+    credentials: "include",
   });
 
   if (res.status === 401) {

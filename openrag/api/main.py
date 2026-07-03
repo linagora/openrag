@@ -85,8 +85,10 @@ env_vars = dotenv_values(SHARED_ENV) if SHARED_ENV else {}
 env_vars["PYTHONPATH"] = "/app/openrag"
 
 AUTH_TOKEN: str | None = os.getenv("AUTH_TOKEN")
-INDEXERUI_PORT: str | None = os.getenv("INDEXERUI_PORT", "3042")
-INDEXERUI_URL: str | None = os.getenv("INDEXERUI_URL", f"http://localhost:{INDEXERUI_PORT}")
+# Host port the admin UI (nginx) is published on. The container listens on :8080
+# internally (nginx-unprivileged), but the browser reaches it via this mapped
+# host port — so this is the Origin it sends on cross-origin API calls.
+ADMIN_UI_PORT: str = os.getenv("ADMIN_UI_PORT", "8081")
 CORS_EXTRA_ORIGINS: list[str] = [o.strip() for o in os.getenv("CORS_EXTRA_ORIGINS", "").split(";") if o.strip()]
 WITH_CHAINLIT_UI: bool = os.getenv("WITH_CHAINLIT_UI", "true").lower() == "true"
 WITH_OPENAI_API: bool = os.getenv("WITH_OPENAI_API", "true").lower() == "true"
@@ -286,10 +288,10 @@ app.add_middleware(InstrumentationMiddleware)
 register_error_handlers(app)
 
 
+_admin_ui_origin = "http://localhost" if ADMIN_UI_PORT == "80" else f"http://localhost:{ADMIN_UI_PORT}"
+
 allow_origins = [
-    "http://localhost:3042",
-    "http://localhost:5173",
-    INDEXERUI_URL,
+    _admin_ui_origin,
     *CORS_EXTRA_ORIGINS,
 ]
 
@@ -304,16 +306,10 @@ app.add_middleware(
 
 @app.get("/", include_in_schema=False)
 def root_redirect():
-    """Root handler — sends authenticated users to the indexer-ui (if
-    configured on a separate host) or the chainlit chat mounted on this
-    app. Prevents a bare ``http://localhost:APP_PORT/`` from returning
-    404 after an OIDC login that used ``next=/``.
+    """Root handler — sends authenticated users to the chainlit chat
+    mounted on this app. Prevents a bare ``http://localhost:APP_PORT/``
+    from returning 404 after an OIDC login that used ``next=/``.
     """
-    # INDEXERUI_URL always has a default (localhost:INDEXERUI_PORT); only
-    # redirect there when it points to a different host/port than us —
-    # otherwise we'd loop.
-    if INDEXERUI_URL and f":{os.getenv('APP_PORT', '8080')}" not in INDEXERUI_URL:
-        return RedirectResponse(url=INDEXERUI_URL, status_code=302)
     if WITH_CHAINLIT_UI:
         return RedirectResponse(url="/chainlit/", status_code=302)
     return JSONResponse({"status": "ok", "app": "openrag", "version": app.version})

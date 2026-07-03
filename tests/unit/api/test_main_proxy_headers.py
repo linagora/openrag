@@ -95,6 +95,27 @@ def test_phase14_admin_routers_are_mounted():
     assert mounted["presets_router"] == "/presets:PRESETS"
 
 
+def test_admin_ui_cors_origin_collapses_default_http_port():
+    """Browsers omit :80 from the Origin header, so the API CORS allowlist
+    must match the bare localhost origin for ADMIN_UI_PORT=80.
+    """
+    with open(_MAIN_PATH) as f:
+        tree = ast.parse(f.read())
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "_admin_ui_origin" for target in node.targets):
+            continue
+        assert isinstance(node.value, ast.IfExp)
+        assert isinstance(node.value.body, ast.Constant)
+        assert node.value.body.value == "http://localhost"
+        assert isinstance(node.value.orelse, ast.JoinedStr)
+        return
+
+    raise AssertionError("_admin_ui_origin assignment not found")
+
+
 def test_api_package_exports_app_for_legacy_uvicorn_path(monkeypatch):
     """Older images or overrides may still run ``uvicorn api:app``."""
     fake_app = object()
