@@ -1,0 +1,84 @@
+# Off-Ray marker parsing — self-contained test bundle (NATS + marker-serve).
+#
+# Bundles JetStream + the marker-serve worker so you DON'T run NATS separately.
+# Reuses infra/docker/ray.Dockerfile, so the image has this branch's code + nats-py.
+#
+# Usage (from the worktree root on the L4):
+#   # point MODEL_WEIGHTS at your existing surya cache so models aren't re-downloaded
+#   export MODEL_WEIGHTS=/path/to/your/model_weights
+#   export DATA=./data                       # put your test PDF here, e.g. ./data/sample.pdf
+#   docker compose -f infra/compose/off-ray.docker-compose.yaml up --build -d
+#
+#   # submit a PDF (path is the WORKER container's path under /app/data):
+#   docker compose -f infra/compose/off-ray.docker-compose.yaml --profile tools \
+#       run --rm submit /app/data/sample.pdf
+#
+#   # follow the worker:
+#   docker compose -f infra/compose/off-ray.docker-compose.yaml logs -f marker-serve
+#
+# First `up --build` is heavy (image build + `uv run` syncs torch/marker on first
+# start); the uv-cache volume makes subsequent runs fast.
+
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]          # JetStream + monitoring for healthcheck
+    ports:
+      - "4222:4222"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  marker-serve:
+    build:
+      context: ../..
+      dockerfile: infra/docker/ray.Dockerfile
+    depends_on:
+      nats:
+        condition: service_healthy
+    user: "0:0"                              # entrypoint-style: root writes to mounts; fine for a test
+    working_dir: /app
+    environment:
+      QUEUE_BACKEND: nats
+      NATS_URL: nats://nats:4222
+      QUEUE_NAMESPACE: openrag
+      HF_HOME: /app/model_weights
+      PYTHONPATH: /app/openrag
+    command: ["sh", "-c", "uv run --no-dev python -m services.messaging.parser_worker"]
+    volumes:
+      - ${MODEL_WEIGHTS:-./model_weights}:/app/model_weights
+      - ${DATA:-./data}:/app/data
+      - uv-cache:/app/.cache/uv              # persist uv sync across runs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # One-shot submit client (profile "tools"): reaches NATS on the same network.
+  #   docker compose ... --profile tools run --rm submit /app/data/<file>.pdf
+  submit:
+    profiles: ["tools"]
+    build:
+      context: ../..
+      dockerfile: infra/docker/ray.Dockerfile
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      QUEUE_BACKEND: nats
+      NATS_URL: nats://nats:4222
+      QUEUE_NAMESPACE: openrag
+      PYTHONPATH: /app/openrag
+    working_dir: /app
+    volumes:
+      - ${DATA:-./data}:/app/data
+      - uv-cache:/app/.cache/uv
+    entrypoint: ["uv", "run", "--no-dev", "python", "scripts/submit_marker.py"]
+
+volumes:
+  uv-cache:
