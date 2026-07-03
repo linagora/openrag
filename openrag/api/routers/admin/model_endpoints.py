@@ -12,15 +12,23 @@ from api.schemas.admin.model_endpoint_schemas import (
     CreateModelEndpointRequest,
     ModelEndpointResponse,
     ModelEndpointType,
+    RevealApiKeyResponse,
     UpdateModelEndpointRequest,
     ValidateEndpointRequest,
     ValidateEndpointResponse,
 )
 from core.config.model_endpoints import ModelEndpointRow
+from core.utils.logging import get_logger
 from di.providers import get_model_endpoint_service
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 router = APIRouter(dependencies=[Depends(require_admin)])
+logger = get_logger()
+
+
+def _same_endpoint_url(left: str, right: str) -> bool:
+    """Compare endpoint URLs after the schema-level normalization rules."""
+    return left.strip().rstrip("/") == right.strip().rstrip("/")
 
 
 @router.post(
@@ -97,6 +105,23 @@ async def set_default_model_endpoint(
     return await service.get_model_endpoint(name=name, model_type=model_type)
 
 
+@router.post("/{model_type}/{name}/reveal-api-key", response_model=RevealApiKeyResponse)
+async def reveal_model_endpoint_api_key(
+    model_type: ModelEndpointType,
+    name: str,
+    service=Depends(get_model_endpoint_service),
+):
+    """Return the stored API key only after an explicit admin reveal action."""
+    endpoint = await service.get_model_endpoint(name=name, model_type=model_type)
+    api_key = endpoint.extra.get("api_key")
+    logger.bind(
+        model_type=model_type,
+        name=name,
+        has_api_key=isinstance(api_key, str),
+    ).info("Model endpoint API key revealed.")
+    return {"api_key": api_key if isinstance(api_key, str) else None}
+
+
 @router.post("/validate", response_model=ValidateEndpointResponse)
 async def validate_endpoint_draft(
     body: ValidateEndpointRequest,
@@ -104,10 +129,22 @@ async def validate_endpoint_draft(
 ):
     """Probe arbitrary endpoint values (before they are saved) for reachability
     and model availability."""
+    api_key = body.api_key
+    if api_key is None and body.stored_api_key_model_type and body.stored_api_key_name:
+        endpoint = await service.get_model_endpoint(
+            name=body.stored_api_key_name,
+            model_type=body.stored_api_key_model_type,
+        )
+        if not _same_endpoint_url(body.endpoint, endpoint.endpoint):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Stored API key can only be reused with its saved endpoint URL.",
+            )
+        api_key = endpoint.extra.get("api_key")
     return await service.validate_endpoint(
         url=body.endpoint,
         model_name=body.model_name,
-        api_key=body.api_key,
+        api_key=api_key,
     )
 
 
