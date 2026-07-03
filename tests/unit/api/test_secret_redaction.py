@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-def test_redact_secrets_hides_known_secret_keys_without_false_token_matches():
+def test_redact_secrets_fully_hides_known_secret_keys_without_false_token_matches():
     from core.utils.redaction import redact_secrets
 
     payload = {
@@ -28,20 +28,20 @@ def test_redact_secrets_hides_known_secret_keys_without_false_token_matches():
 
     redacted = redact_secrets(payload)
 
-    assert redacted["llm"]["api_key"] == "sk-********"
-    assert redacted["object_storage"]["access_key"] == "obj********"
-    assert redacted["rdb"]["password"] == "db-********"
-    assert redacted["websearch"]["api_token"] == "sea********"
+    assert redacted["llm"]["api_key"] == "<redacted>"
+    assert redacted["object_storage"]["access_key"] == "<redacted>"
+    assert redacted["rdb"]["password"] == "<redacted>"
+    assert redacted["websearch"]["api_token"] == "<redacted>"
     assert redacted["websearch"]["max_tokens"] == 2048
-    assert redacted["oidc_client_secret"] == "oid********"
-    assert redacted["chainlit_auth_secret"] == "cha********"
-    assert redacted["future"]["backend_secret"] == "bac********"
-    assert redacted["future"]["session_token"] == "ses********"
-    assert redacted["future"]["storage_access_key"] == "sto********"
-    assert redacted["nested"][0]["private_key"] == "pri********"
-    assert redacted["nested"][0]["refresh_token"] == "ref********"
-    assert redacted["nested"][0]["signing_key"] == "sig********"
-    assert redacted["nested"][0]["token_encryption_key"] == "fer********"
+    assert redacted["oidc_client_secret"] == "<redacted>"
+    assert redacted["chainlit_auth_secret"] == "<redacted>"
+    assert redacted["future"]["backend_secret"] == "<redacted>"
+    assert redacted["future"]["session_token"] == "<redacted>"
+    assert redacted["future"]["storage_access_key"] == "<redacted>"
+    assert redacted["nested"][0]["private_key"] == "<redacted>"
+    assert redacted["nested"][0]["refresh_token"] == "<redacted>"
+    assert redacted["nested"][0]["signing_key"] == "<redacted>"
+    assert redacted["nested"][0]["token_encryption_key"] == "<redacted>"
     assert payload["llm"]["api_key"] == "sk-llm-secret"
 
 
