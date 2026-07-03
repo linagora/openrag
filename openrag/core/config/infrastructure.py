@@ -26,6 +26,33 @@ class MessagingConfig(ConfigMixin):
 
 
 # ---------------------------------------------------------------------------
+# Object store (S3/MinIO) — large-file handoff to off-Ray parser workers
+# ---------------------------------------------------------------------------
+
+
+class ObjectStoreConfig(ConfigMixin):
+    """S3-compatible blob store for producer->worker file handoff.
+
+    The app uploads a document's bytes under a key and passes only the key in
+    the task payload; the parser worker fetches the bytes back by key, so large
+    or scanned PDFs never traverse the message broker. ``backend`` selects the
+    adapter; the rest are S3 connection knobs. Swappable MinIO -> AWS S3 -> GCS
+    without touching producers/consumers.
+
+    Defaults target the in-stack MinIO (Milvus's dependency). Credentials come
+    from the deployment env (see ``OBJECT_STORE_*`` overrides); ``bucket`` is a
+    dedicated scratch bucket, not Milvus's data bucket.
+    """
+
+    backend: str = "s3"  # "s3" | "in_memory"
+    endpoint_url: str = "http://minio:9000"
+    access_key: str = Field(default="", repr=False)
+    secret_key: str = Field(default="", repr=False)
+    bucket: str = "openrag-parsing"
+    region: str = "us-east-1"
+
+
+# ---------------------------------------------------------------------------
 # VectorDB (Milvus)
 # ---------------------------------------------------------------------------
 

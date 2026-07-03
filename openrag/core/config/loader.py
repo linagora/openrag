@@ -141,6 +141,13 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("QUEUE_BACKEND", "messaging.backend", str),
     ("NATS_URL", "messaging.nats_url", str),
     ("QUEUE_NAMESPACE", "messaging.namespace", str),
+    # Object store (large-file handoff to off-Ray parser workers)
+    ("OBJECT_STORE_BACKEND", "object_store.backend", str),
+    ("OBJECT_STORE_ENDPOINT_URL", "object_store.endpoint_url", str),
+    ("OBJECT_STORE_ACCESS_KEY", "object_store.access_key", str),
+    ("OBJECT_STORE_SECRET_KEY", "object_store.secret_key", str),
+    ("OBJECT_STORE_BUCKET", "object_store.bucket", str),
+    ("OBJECT_STORE_REGION", "object_store.region", str),
     # Chunker
     ("CHUNKER", "chunker.name", str),
     ("CONTEXTUAL_RETRIEVAL", "chunker.contextual_retrieval", bool),

@@ -17,6 +17,7 @@ from .endpoints import (
 from .indexation import LoaderConfig
 from .infrastructure import (
     MessagingConfig,
+    ObjectStoreConfig,
     PathsConfig,
     PromptsConfig,
     RayConfig,
@@ -63,6 +64,7 @@ class Settings(ConfigMixin):
     loader: LoaderConfig = Field(default_factory=LoaderConfig)
     ray: RayConfig = Field(default_factory=RayConfig)
     messaging: MessagingConfig = Field(default_factory=MessagingConfig)
+    object_store: ObjectStoreConfig = Field(default_factory=ObjectStoreConfig)
     chunker: ChunkerConfig = Field(default_factory=ChunkerConfig)
     retriever: RetrieverConfig = Field(default_factory=SingleRetrieverConfig)
     rag: RAGConfig = Field(default_factory=RAGConfig)
