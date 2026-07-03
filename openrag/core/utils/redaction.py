@@ -82,13 +82,19 @@ def redact_secrets(value: Any) -> Any:
 
 def redact_secret_mapping(extra: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return the public model-endpoint extra shape shown in Admin UI."""
-    source = dict(extra or {})
-    redacted: dict[str, Any] = {}
-    if "api_key" in source:
-        redacted["api_key"] = mask_secret_value(source.get("api_key"))
-    if "implementation" in source:
-        redacted["implementation"] = source["implementation"]
-    return redacted
+    return _redact_endpoint_extra(dict(extra or {}))
+
+
+def _redact_endpoint_extra(value: Any, key: str | None = None) -> Any:
+    if key is not None and is_secret_field(key):
+        return mask_secret_value(value)
+    if isinstance(value, Mapping):
+        return {entry_key: _redact_endpoint_extra(item, str(entry_key)) for entry_key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_endpoint_extra(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_endpoint_extra(item) for item in value)
+    return value
 
 
 def preserve_existing_secrets(existing: Mapping[str, Any] | None, incoming: Mapping[str, Any]) -> dict[str, Any]:

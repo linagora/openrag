@@ -60,6 +60,8 @@ type RevealedApiKey = {
   value: string;
 };
 
+const normalizeEndpointUrl = (value: string) => value.trim().replace(/\/+$/, "");
+
 export default function ModelsPage() {
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState("embedder");
@@ -417,17 +419,35 @@ function EndpointDialog({
       return;
     }
     let apiKey: string | undefined;
+    let submittedApiKey: string | undefined;
     try {
-      const submittedApiKey = apiKeySubmitValue();
-      apiKey = typeof submittedApiKey === "string" ? submittedApiKey : undefined;
+      const preparedApiKey = apiKeySubmitValue();
+      submittedApiKey = typeof preparedApiKey === "string" ? preparedApiKey : undefined;
+      if (submittedApiKey && submittedApiKey !== REDACTED_SECRET) {
+        apiKey = submittedApiKey;
+      } else if (revealedApiKeyForEditing) {
+        apiKey = revealedApiKeyForEditing;
+      }
     } catch {
       // invalid extra JSON is reported on save; ignore here
     }
     setValidating(true);
     setValidationMsg(null);
     try {
+      if (
+        editing?.has_api_key === true &&
+        normalizeEndpointUrl(endpoint) !== normalizeEndpointUrl(editing.endpoint) &&
+        !apiKey &&
+        (!submittedApiKey || submittedApiKey === REDACTED_SECRET)
+      ) {
+        setValidated(false);
+        const msg = "Reveal or enter the API key before validating a changed endpoint URL.";
+        setValidationMsg(msg);
+        toast.error(msg);
+        return;
+      }
       const canUseStoredSecret =
-        editing?.has_api_key === true && (!apiKey || apiKey === REDACTED_SECRET);
+        editing?.has_api_key === true && !apiKey && (!submittedApiKey || submittedApiKey === REDACTED_SECRET);
       const res = canUseStoredSecret
         ? await validateModelEndpoint({
             endpoint,

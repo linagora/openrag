@@ -244,7 +244,7 @@ async def test_model_endpoint_read_responses_hide_stored_api_key(async_client_fa
     payload = response.json()
     assert "secret-token" not in response.text
     assert payload["has_api_key"] is True
-    assert payload["extra"] == {"api_key": "sec********", "implementation": "vllm"}
+    assert payload["extra"] == {"api_key": "sec********", "implementation": "vllm", "temperature": 0.2}
 
 
 @pytest.mark.asyncio

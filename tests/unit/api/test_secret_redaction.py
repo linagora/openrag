@@ -45,7 +45,7 @@ def test_redact_secrets_fully_hides_known_secret_keys_without_false_token_matche
     assert payload["llm"]["api_key"] == "sk-llm-secret"
 
 
-def test_redact_secret_mapping_keeps_only_public_endpoint_extra_shape():
+def test_redact_secret_mapping_keeps_non_secret_endpoint_extra_shape():
     from core.utils.redaction import redact_secret_mapping
 
     redacted = redact_secret_mapping(
@@ -55,12 +55,17 @@ def test_redact_secret_mapping_keeps_only_public_endpoint_extra_shape():
             "auth": {"token": "nested-token"},
             "headers": [{"api_key": "hf-nested-secret"}],
             "temperature": 0.2,
+            "enable_thinking": True,
         }
     )
 
     assert redacted == {
         "api_key": "sk-********",
         "implementation": "vllm",
+        "auth": {"token": "nes********"},
+        "headers": [{"api_key": "hf-********"}],
+        "temperature": 0.2,
+        "enable_thinking": True,
     }
 
 
