@@ -39,6 +39,13 @@ import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatDate, intOr, numOr } from "@/lib/utils";
+import {
+  type Config,
+  configGet,
+  configSet,
+  applyParsingStrategyChange,
+  PARSING_STRATEGY_INHERIT,
+} from "./preset-config";
 
 const PRESET_TYPES = ["indexation", "retrieval"] as const;
 
@@ -213,20 +220,6 @@ export default function PresetsPage() {
   );
 }
 
-/* ---------- helpers ---------- */
-
-type Config = Record<string, unknown>;
-
-function configGet<T>(config: Config, key: string, fallback: T): T {
-  const v = config[key];
-  if (v === undefined || v === null) return fallback;
-  return v as T;
-}
-
-function configSet(prev: Config, key: string, value: unknown): Config {
-  return { ...prev, [key]: value };
-}
-
 /* ---------- Indexation form ---------- */
 
 function IndexationPresetForm({
@@ -334,19 +327,14 @@ function IndexationPresetForm({
         <div className="space-y-1.5">
           <Label className="text-xs">Strategy</Label>
           <Select
-            value={configGet(config, "parsing_strategy", "marker")}
-            onValueChange={(v) => {
-              // pymupdf is text-only (no images), so captioning can't apply —
-              // turn it off when switching to it (see the disabled toggle below).
-              let next = configSet(config, "parsing_strategy", v);
-              if (v === "pymupdf") next = configSet(next, "enable_image_captioning", false);
-              onChange(next);
-            }}
+            value={configGet(config, "parsing_strategy", PARSING_STRATEGY_INHERIT)}
+            onValueChange={(v) => onChange(applyParsingStrategyChange(config, v))}
           >
             <SelectTrigger size="sm">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value={PARSING_STRATEGY_INHERIT}>Default (inherit global loader)</SelectItem>
               {parsingStrategies.map((s) => (
                 <SelectItem key={s} value={s}>
                   {s}
@@ -370,7 +358,7 @@ function IndexationPresetForm({
           // reads "off" while the backend still captions during indexing (#453).
           enabled={configGet(config, "enable_image_captioning", true)}
           onToggle={(on) => toggleFeature("enable_image_captioning", "vlm", on)}
-          disabled={configGet<string>(config, "parsing_strategy", "marker") === "pymupdf"}
+          disabled={configGet<string>(config, "parsing_strategy", PARSING_STRATEGY_INHERIT) === "pymupdf"}
           disabledHint="pymupdf extracts text only — use marker or docling for image captioning."
           modelLabel="VLM"
           modelValue={configGet(config, "vlm", "")}
