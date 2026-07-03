@@ -115,5 +115,13 @@ class TaskQueue(ABC):
         """Start consuming and dispatching to registered handlers. Blocks."""
         ...
 
+    async def aclose(self) -> None:
+        """Release backend resources (connections, background tasks).
+
+        Default no-op so simple adapters need not override; connection-holding
+        adapters (NATS, Redis) override to close cleanly.
+        """
+        return None
+
 
 __all__ = ["TaskQueue", "TaskHandle", "Task", "TaskResult", "TaskStatus", "Handler"]
