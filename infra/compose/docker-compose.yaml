@@ -35,6 +35,13 @@ x-openrag: &openrag_template
     - ${DATA_VOLUME:-../../data}:/app/data
     - ../../i8n:/app/openrag/.chainlit/translations
     - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
+    # Container-owned venv cache: `uv run` syncs into this named volume on the
+    # first start and skips the sync on every start after, so packages aren't
+    # reinstalled each `docker compose up`. A named volume (not a host bind
+    # mount) is deliberate — the venv is only ever populated by the container,
+    # so its interpreter/script paths always match the image (a host-synced
+    # venv would point at host paths that don't exist inside the container).
+    - openrag_venv:/app/.venv
     # Dev only: bind-mounting the source tree over the image lets host changes
     # (or a writable host path) override the running code. Uncomment for local
     # development; keep it off in production.
@@ -228,3 +235,4 @@ volumes:
   logs:
   modelweights:
   pgdata:
+  openrag_venv: # Persists the container-synced /app/.venv so packages survive restarts
