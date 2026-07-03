@@ -496,7 +496,9 @@ function EndpointDialog({
     e.preventDefault();
     let extra: Record<string, unknown> = {};
     try {
-      extra = mergeModelEndpointApiKeyExtra(JSON.parse(extraJson), apiKey);
+      extra = mergeModelEndpointApiKeyExtra(JSON.parse(extraJson), apiKey, {
+        clearApiKey: editing?.has_api_key === true,
+      });
     } catch {
       toast.error("Invalid JSON in extra field");
       return;

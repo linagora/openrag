@@ -171,11 +171,15 @@ export function splitModelEndpointApiKeyExtra(extra: Record<string, unknown>): {
 export function mergeModelEndpointApiKeyExtra(
   extra: Record<string, unknown>,
   apiKey: string,
+  options: { clearApiKey?: boolean } = {},
 ): Record<string, unknown> {
   const prepared = prepareModelEndpointExtraForSubmit(extra);
   const normalizedApiKey = prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
   if (typeof normalizedApiKey === "string" && normalizedApiKey) {
     return { ...prepared, api_key: normalizedApiKey };
+  }
+  if (options.clearApiKey) {
+    return { ...prepared, api_key: "" };
   }
   return prepared;
 }

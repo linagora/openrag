@@ -90,3 +90,27 @@ def test_preserve_existing_secrets_accepts_prefix_masked_values():
         "auth": {"token": "nested-token-secret"},
         "headers": [{"api_key": "hf-nested-secret"}],
     }
+
+
+def test_preserve_existing_secrets_clears_explicit_empty_secret_values():
+    from core.utils.redaction import preserve_existing_secrets
+
+    merged = preserve_existing_secrets(
+        {
+            "api_key": "stored-key",
+            "auth": {"token": "nested-token"},
+            "headers": [{"api_key": "nested-key"}],
+        },
+        {
+            "implementation": "vllm",
+            "api_key": "",
+            "auth": {"token": None},
+            "headers": [{"api_key": ""}],
+        },
+    )
+
+    assert merged == {
+        "implementation": "vllm",
+        "auth": {},
+        "headers": [{}],
+    }

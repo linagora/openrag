@@ -542,6 +542,18 @@ async def test_update_extra_with_new_api_key_rotates_existing_secret():
     assert updated.extra == {"implementation": "vllm", "api_key": "new-key"}
 
 
+@pytest.mark.asyncio
+async def test_update_extra_with_empty_api_key_clears_existing_secret():
+    existing = _make_row(name="jina", extra={"implementation": "vllm", "api_key": "old-key"})
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    await svc.update_model_endpoint("jina", "embedder", extra={"implementation": "vllm", "api_key": ""})
+
+    updated = repo._store[("jina", "embedder")]
+    assert updated.extra == {"implementation": "vllm"}
+
+
 # ------------------------------------------------------------------
 # delete_model_endpoint
 # ------------------------------------------------------------------

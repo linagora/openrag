@@ -227,4 +227,32 @@ describe("model endpoint secret placeholders", () => {
       api_key: "<redacted>",
     });
   });
+
+  it("submits an explicit empty API key when clearing an existing stored key", () => {
+    expect(
+      mergeModelEndpointApiKeyExtra(
+        {
+          implementation: "vllm",
+        },
+        "",
+        { clearApiKey: true },
+      ),
+    ).toEqual({
+      implementation: "vllm",
+      api_key: "",
+    });
+  });
+
+  it("omits an empty API key when creating an endpoint without a stored key", () => {
+    expect(
+      mergeModelEndpointApiKeyExtra(
+        {
+          implementation: "vllm",
+        },
+        "",
+      ),
+    ).toEqual({
+      implementation: "vllm",
+    });
+  });
 });

@@ -67,6 +67,11 @@ def is_masked_secret_value(value: Any) -> bool:
     )
 
 
+def is_clear_secret_value(value: Any) -> bool:
+    """Return true when an update explicitly clears a stored secret."""
+    return value is None or value == ""
+
+
 def redact_secrets(value: Any) -> Any:
     """Recursively redact values for known secret fields without mutating input."""
     if isinstance(value, Mapping):
@@ -107,6 +112,9 @@ def _preserve_existing_secrets(existing: Mapping[str, Any], incoming: Mapping[st
     for key, value in existing.items():
         incoming_value = merged.get(key)
         if is_secret_field(str(key)):
+            if key in merged and is_clear_secret_value(incoming_value):
+                merged.pop(key, None)
+                continue
             if key not in merged or incoming_value == REDACTED_SECRET or is_masked_secret_value(incoming_value):
                 merged[key] = value
             continue
@@ -114,6 +122,9 @@ def _preserve_existing_secrets(existing: Mapping[str, Any], incoming: Mapping[st
             merged[key] = _preserve_existing_secrets(value, incoming_value)
         elif isinstance(value, list) and isinstance(incoming_value, list):
             merged[key] = _preserve_existing_secret_lists(value, incoming_value)
+    for key, value in list(merged.items()):
+        if is_secret_field(str(key)) and is_clear_secret_value(value):
+            merged.pop(key, None)
     return merged
 
 
@@ -135,6 +146,7 @@ __all__ = [
     "SECRET_FIELD_NAMES",
     "is_masked_secret_value",
     "is_secret_field",
+    "is_clear_secret_value",
     "mask_secret_value",
     "preserve_existing_secrets",
     "redact_secret_mapping",
