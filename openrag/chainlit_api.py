@@ -18,6 +18,7 @@ the crash only surfaced under ``AUTH_MODE=oidc``.
 from contextlib import asynccontextmanager
 
 from api.chainlit_assets import mount_chainlit_root_assets
+from api.error_handlers import register_error_handlers
 from api.middleware.auth import AuthMiddleware
 from api.middleware.request_id import RequestIdMiddleware
 from api.middleware.security_headers import SecurityHeadersMiddleware
@@ -94,6 +95,11 @@ app.add_middleware(RequestIdMiddleware)
 # baseline security headers the mounted deployment gets from api.main. Added
 # last → outermost, covering every response on this origin.
 app.add_middleware(SecurityHeadersMiddleware)
+# Unhandled 500s are produced by Starlette's outer ServerErrorMiddleware, which
+# sits outside the user middleware stack — so the SecurityHeadersMiddleware above
+# never sees them. register_error_handlers' 500 handler applies the same baseline
+# headers (via apply_security_headers), covering that path on this origin too.
+register_error_handlers(app)
 
 # Ray Serve mode runs the API and Chainlit on separate ports. Source previews
 # rewrite their file download links to the browser origin (the Chainlit host),
