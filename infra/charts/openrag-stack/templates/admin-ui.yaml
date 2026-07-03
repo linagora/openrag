@@ -31,6 +31,20 @@ spec:
             {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
           ports:
             - containerPort: {{ .Values.adminUi.service.targetPort }}
+          # nginx serves the SPA at /app/; probe it so a crash-looping or stuck
+          # pod is restarted and gated out of rollout traffic.
+          readinessProbe:
+            httpGet:
+              path: /app/
+              port: {{ .Values.adminUi.service.targetPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /app/
+              port: {{ .Values.adminUi.service.targetPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 20
           resources:
             {{- toYaml .Values.adminUi.resources | nindent 12 }}
 ---
