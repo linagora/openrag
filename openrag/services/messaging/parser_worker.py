@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
+import tempfile
 
 from core.config import Settings, load_config
 from core.indexing.image_preprocessor import pil_to_png_bytes
@@ -75,9 +77,26 @@ class MarkerParseHandler:
         self.engine = engine or MarkerEngine(config)
 
     async def __call__(self, task: Task) -> dict:
-        file_path = task.payload["file_path"]
-        markdown, images = await parse_pdf(self.engine, self.config, file_path)
+        payload = task.payload
+        # Bytes-in-payload (app path, no shared FS) or a shared path (standalone test).
+        if "file_bytes_b64" in payload:
+            return await self._parse_bytes(base64.b64decode(payload["file_bytes_b64"]))
+        markdown, images = await parse_pdf(self.engine, self.config, payload["file_path"])
         return {"markdown": markdown, "images": encode_images(images)}
+
+    async def _parse_bytes(self, data: bytes) -> dict:
+        fd, path = tempfile.mkstemp(suffix=".pdf")
+        os.close(fd)
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+            markdown, images = await parse_pdf(self.engine, self.config, path)
+            return {"markdown": markdown, "images": encode_images(images)}
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
     def close(self):
         close = getattr(self.engine, "close", None)

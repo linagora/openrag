@@ -1,11 +1,9 @@
 import asyncio
-import re
 import time
 
 import ray
 import torch
 from core.config import load_config
-from core.indexing.image_preprocessor import pil_to_png_bytes
 from core.indexing.parsers.document_parser import BasePooledParser
 from core.models.document import (
     Document,
@@ -17,6 +15,7 @@ from core.models.document import (
 from core.utils.logging import get_logger
 
 from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
+from . import marker_format
 from .marker_engine import MAX_PDF_PAGES, MarkerEngine, create_chunks, page_count
 
 logger = get_logger()
@@ -198,26 +197,6 @@ class MarkerPool:
         return combined_markdown, all_images
 
 
-_MARKER_KEY_PAGE_RE = re.compile(r"_page_(\d+)_")
-
-
-def _marker_key_to_page(key: str) -> int | None:
-    """Extract the 1-indexed page number from a Marker image key.
-
-    Marker emits keys like ``_page_0_Picture_1.jpeg`` (0-indexed). We
-    return ``N + 1`` so callers see 1-indexed pages aligned with the
-    ``[PAGE_N]`` markers produced by the post-processing step.
-    Returns ``None`` if the key doesn't match the expected pattern.
-    """
-    match = _MARKER_KEY_PAGE_RE.search(key)
-    if match is None:
-        return None
-    try:
-        return int(match.group(1)) + 1
-    except (TypeError, ValueError):
-        return None
-
-
 class MarkerLoader(BasePooledParser):
     """Public ``BasePooledParser`` facade for the Marker Ray pool.
 
@@ -235,7 +214,6 @@ class MarkerLoader(BasePooledParser):
     """
 
     PAGE_SEP = "[PAGE_SEP]"
-    _PAGE_MARKER_RE = re.compile(r"\{(\d+)\}" + re.escape(PAGE_SEP))
 
     def __init__(self) -> None:
         self.config = load_config()
@@ -295,65 +273,9 @@ class MarkerLoader(BasePooledParser):
 
     @staticmethod
     def _build_image_blocks(images: dict) -> list[ImageBlock]:
-        """Convert Marker's ``{key: PIL_image}`` dict into ``ImageBlock``s.
-
-        Each block records the ``![](key)`` markdown ref in
-        ``metadata['markdown_ref']`` so a downstream caption stage can
-        substitute the wrapped caption back into the text. The page
-        number is parsed from Marker's key format
-        (``_page_{N}_Picture_{i}.{ext}``) and stored 1-indexed to match
-        the ``[PAGE_N]`` markers in the post-processed markdown.
-        """
-        blocks: list[ImageBlock] = []
-        for key, pil_image in images.items():
-            try:
-                png_bytes = pil_to_png_bytes(pil_image)
-            except Exception as exc:
-                logger.warning(f"Failed to encode Marker image {key}: {exc}")
-                continue
-            blocks.append(
-                ImageBlock(
-                    image_bytes=png_bytes,
-                    page_number=_marker_key_to_page(str(key)),
-                    mime_type="image/png",
-                    metadata={"markdown_ref": f"![]({key})", "marker_key": str(key)},
-                )
-            )
-        return blocks
+        # {key: PIL_image} -> ImageBlocks (shared with the off-Ray client)
+        return marker_format.build_image_blocks(images)
 
     @classmethod
     def _split_pages(cls, markdown: str) -> list[tuple[int, str]]:
-        """Clean Marker output and split it into ``[(page_number, text), …]``.
-
-        Marker emits ``<page1>{1}[PAGE_SEP]<page2>{2}[PAGE_SEP]…``. We
-        drop the leading ``[PAGE_SEP]`` segment (Marker prefixes one),
-        strip ``<br>``, then split on each ``{N}[PAGE_SEP]`` marker —
-        the captured ``N`` is the 1-indexed page that just ended.
-
-        Blank pages are preserved (text=``""``) so ``page_number`` and
-        ``page_count`` reflect the source document, not just the
-        non-empty subset. Trailing text after the last marker (rare) is
-        assigned to ``last_page + 1``. Markdown with no markers collapses
-        to a single page-1 entry.
-        """
-        if markdown is None:
-            return []
-        if cls.PAGE_SEP in markdown:
-            markdown = markdown.split(cls.PAGE_SEP, 1)[1]
-        markdown = markdown.replace("<br>", "")
-
-        pairs: list[tuple[int, str]] = []
-        cursor = 0
-        last_page = 0
-        for match in cls._PAGE_MARKER_RE.finditer(markdown):
-            page = int(match.group(1))
-            text = markdown[cursor : match.start()].strip()
-            pairs.append((page, text))
-            cursor = match.end()
-            last_page = page
-        tail = markdown[cursor:].strip()
-        if tail:
-            pairs.append((last_page + 1, tail))
-        elif not pairs and markdown.strip():
-            pairs.append((1, markdown.strip()))
-        return pairs
+        return marker_format.split_pages(markdown)

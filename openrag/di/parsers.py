@@ -14,6 +14,7 @@ def register_parsers() -> None:
     import core.indexing.parsers.pdf.client_based  # noqa: F401
     import core.indexing.parsers.pdf.docling  # noqa: F401
     import core.indexing.parsers.pdf.marker  # noqa: F401
+    import core.indexing.parsers.pdf.marker_serve  # noqa: F401
     import core.indexing.parsers.pdf.pymupdf  # noqa: F401
     import core.indexing.parsers.pptx_parser  # noqa: F401
     import core.indexing.parsers.text_parser  # noqa: F401

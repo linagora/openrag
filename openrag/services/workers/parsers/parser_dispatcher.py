@@ -28,6 +28,7 @@ logger = get_logger()
 # the dispatcher always resolves to a backend whose pool actually exists.
 _PDF_BACKENDS: dict[str, str] = {
     "MarkerLoader": "marker",
+    "MarkerServeLoader": "marker_serve",
     "DoclingLoader": "docling",
     "PyMuPDFLoader": "pymupdf",
     "DotsOCRLoader": "pdf_client",
@@ -174,6 +175,13 @@ class ParserDispatcher(DocumentParser):
 
         return _create("core.indexing.parsers.pdf.marker", "marker", pool=MarkerLoader())
 
+    def _build_marker_serve(self) -> DocumentParser:
+        from di.messaging import build_task_queue
+        from services.messaging.marker_serve_client import MarkerServeClient
+
+        client = MarkerServeClient(self._config, build_task_queue(self._config))
+        return _create("core.indexing.parsers.pdf.marker_serve", "marker_serve", client=client)
+
     def _build_docling(self) -> DocumentParser:
         from services.workers.parsers.docling_workers import DoclingLoader
 
@@ -250,6 +258,7 @@ _BUILDERS: dict[str, Any] = {
     "pymupdf": lambda d: _create("core.indexing.parsers.pdf.pymupdf", "pymupdf"),
     "eml": lambda d: d._build_eml(),
     "marker": lambda d: d._build_marker(),
+    "marker_serve": lambda d: d._build_marker_serve(),
     "docling": lambda d: d._build_docling(),
     "local_whisper": lambda d: d._build_local_whisper(),
     "pdf_client": lambda d: d._build_pdf_client(),
