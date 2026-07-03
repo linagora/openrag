@@ -85,9 +85,9 @@ env_vars = dotenv_values(SHARED_ENV) if SHARED_ENV else {}
 env_vars["PYTHONPATH"] = "/app/openrag"
 
 AUTH_TOKEN: str | None = os.getenv("AUTH_TOKEN")
-# Host port the admin UI (nginx) is published on. The container listens on :80
-# internally, but the browser reaches it via this mapped host port — so this is
-# the Origin it sends on cross-origin API calls.
+# Host port the admin UI (nginx) is published on. The container listens on :8080
+# internally (nginx-unprivileged), but the browser reaches it via this mapped
+# host port — so this is the Origin it sends on cross-origin API calls.
 ADMIN_UI_PORT: str = os.getenv("ADMIN_UI_PORT", "8081")
 CORS_EXTRA_ORIGINS: list[str] = [o.strip() for o in os.getenv("CORS_EXTRA_ORIGINS", "").split(";") if o.strip()]
 WITH_CHAINLIT_UI: bool = os.getenv("WITH_CHAINLIT_UI", "true").lower() == "true"
