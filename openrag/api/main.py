@@ -28,6 +28,7 @@ from importlib.metadata import version as get_package_version
 
 import ray
 import uvicorn
+from api.cors_config import sanitize_cors_origins
 from api.dependencies.auth import require_admin
 from api.error_handlers import register_error_handlers
 from api.middleware import (
@@ -36,6 +37,7 @@ from api.middleware import (
     RateLimitMiddleware,
     RequestIdMiddleware,
     RequestTimeoutMiddleware,
+    SecurityHeadersMiddleware,
 )
 from api.routers.admin.cluster import router as actors_router
 from api.routers.admin.indexing import router as indexer_router
@@ -295,6 +297,10 @@ allow_origins = [
     *CORS_EXTRA_ORIGINS,
 ]
 
+# Credentials + a wildcard origin is unsafe (Starlette reflects the Origin with
+# credentials), so drop any "*" from a misconfigured CORS_EXTRA_ORIGINS=*.
+allow_origins = sanitize_cors_origins(allow_origins, allow_credentials=True)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
@@ -302,6 +308,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Registered last so it wraps CORS and every other layer: this stamps the
+# baseline security headers on all responses, including CORS preflights that
+# CORSMiddleware short-circuits before they reach the inner stack.
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 @app.get("/", include_in_schema=False)

@@ -78,6 +78,14 @@ def test_disabled_passes_through(monkeypatch):
         assert client.get("/v1/chat").status_code == 200
 
 
+def test_disabled_ignores_malformed_config(monkeypatch):
+    # A malformed RATE_LIMIT_* value must not crash boot when limiting is off:
+    # the middleware skips parsing the limits entirely when disabled.
+    app = _build_app(monkeypatch, RATE_LIMIT_ENABLED="false", RATE_LIMIT_DEFAULT="not-a-valid-limit")
+    client = TestClient(app)
+    assert client.get("/other").status_code == 200
+
+
 def test_is_admin_true_for_admin_user_dict():
     assert RateLimitMiddleware._is_admin(_make_request(user={"id": 1, "is_admin": True})) is True
 
