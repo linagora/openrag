@@ -32,10 +32,21 @@ services:
     depends_on:
       nats:
         condition: service_healthy
+      minio:                          # defined in the milvus include; E1 handoff
+        condition: service_healthy
     environment:
       - QUEUE_BACKEND=nats
       - NATS_URL=nats://nats:4222
       - QUEUE_NAMESPACE=openrag
+      # E1 file handoff: fetch the PDF bytes by key from the in-stack MinIO
+      # (large/scanned PDFs never travel through NATS). Same MinIO Milvus uses,
+      # dedicated scratch bucket, same credentials. The worker auto-creates the
+      # bucket on first use.
+      - OBJECT_STORE_BACKEND=s3
+      - OBJECT_STORE_ENDPOINT_URL=http://minio:9000
+      - OBJECT_STORE_ACCESS_KEY=${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in your .env}
+      - OBJECT_STORE_SECRET_KEY=${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}
+      - OBJECT_STORE_BUCKET=${OBJECT_STORE_BUCKET:-openrag-parsing}
       - HF_HOME=/app/model_weights
       - PYTHONPATH=/app/openrag
       - NVIDIA_VISIBLE_DEVICES=all
@@ -55,7 +66,7 @@ services:
               count: all
               capabilities: [gpu]
 
-  # Flip the app to the off-Ray marker backend + point it at NATS.
+  # Flip the app to the off-Ray marker backend + point it at NATS + MinIO.
   openrag:
     depends_on:
       nats:
@@ -65,6 +76,12 @@ services:
       - QUEUE_BACKEND=nats
       - NATS_URL=nats://nats:4222
       - QUEUE_NAMESPACE=openrag
+      # E1: upload the PDF bytes to MinIO and hand the worker only the key.
+      - OBJECT_STORE_BACKEND=s3
+      - OBJECT_STORE_ENDPOINT_URL=http://minio:9000
+      - OBJECT_STORE_ACCESS_KEY=${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in your .env}
+      - OBJECT_STORE_SECRET_KEY=${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}
+      - OBJECT_STORE_BUCKET=${OBJECT_STORE_BUCKET:-openrag-parsing}
 
 volumes:
   markerserve_venv:
