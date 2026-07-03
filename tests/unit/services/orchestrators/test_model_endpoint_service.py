@@ -476,6 +476,84 @@ async def test_update_is_default_false_does_not_demote_or_touch_default_cache():
     assert cache.get("default") is sentinel
 
 
+@pytest.mark.asyncio
+async def test_update_extra_without_api_key_preserves_existing_secret():
+    existing = _make_row(
+        name="jina",
+        extra={"implementation": "vllm", "api_key": "stored-key", "temperature": 0.1},
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    await svc.update_model_endpoint("jina", "embedder", extra={"implementation": "vllm", "temperature": 0.2})
+
+    updated = repo._store[("jina", "embedder")]
+    assert updated.extra == {"implementation": "vllm", "temperature": 0.2, "api_key": "stored-key"}
+
+
+@pytest.mark.asyncio
+async def test_update_extra_preserves_nested_redacted_secrets():
+    existing = _make_row(
+        name="jina",
+        extra={
+            "implementation": "vllm",
+            "auth": {
+                "token": "stored-token",
+                "headers": [{"api_key": "nested-key"}],
+            },
+        },
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    await svc.update_model_endpoint(
+        "jina",
+        "embedder",
+        extra={
+            "implementation": "vllm",
+            "auth": {
+                "token": "<redacted>",
+                "headers": [{"api_key": "<redacted>"}],
+            },
+            "temperature": 0.2,
+        },
+    )
+
+    updated = repo._store[("jina", "embedder")]
+    assert updated.extra == {
+        "implementation": "vllm",
+        "auth": {
+            "token": "stored-token",
+            "headers": [{"api_key": "nested-key"}],
+        },
+        "temperature": 0.2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_extra_with_new_api_key_rotates_existing_secret():
+    existing = _make_row(name="jina", extra={"implementation": "vllm", "api_key": "old-key"})
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    await svc.update_model_endpoint("jina", "embedder", extra={"implementation": "vllm", "api_key": "new-key"})
+
+    updated = repo._store[("jina", "embedder")]
+    assert updated.extra == {"implementation": "vllm", "api_key": "new-key"}
+
+
+@pytest.mark.asyncio
+async def test_update_extra_with_empty_api_key_clears_existing_secret():
+    existing = _make_row(name="jina", extra={"implementation": "vllm", "api_key": "old-key"})
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    await svc.update_model_endpoint("jina", "embedder", extra={"implementation": "vllm", "api_key": ""})
+
+    updated = repo._store[("jina", "embedder")]
+    assert updated.extra == {"implementation": "vllm"}
+
+
 # ------------------------------------------------------------------
 # delete_model_endpoint
 # ------------------------------------------------------------------
@@ -604,9 +682,10 @@ async def test_validate_endpoint_probes_url_and_model_name(monkeypatch):
             return {"data": [{"id": "mistral-small"}]}
 
     class FakeClient:
-        def __init__(self, *, timeout, headers):
+        def __init__(self, *, timeout, headers, follow_redirects):
             assert timeout == 5.0
             assert headers == {}
+            assert follow_redirects is False
 
         async def __aenter__(self):
             return self
@@ -645,8 +724,9 @@ async def test_validate_endpoint_sends_api_key(monkeypatch):
             return {"data": [{"id": "mistral-small"}]}
 
     class FakeClient:
-        def __init__(self, *, timeout, headers):
+        def __init__(self, *, timeout, headers, follow_redirects):
             captured_headers.append(headers)
+            assert follow_redirects is False
 
         async def __aenter__(self):
             return self
@@ -662,3 +742,66 @@ async def test_validate_endpoint_sends_api_key(monkeypatch):
     await svc.validate_endpoint("http://llm:8000/v1", "mistral-small", api_key="secret-token")
 
     assert captured_headers == [{"Authorization": "Bearer secret-token"}]
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_rejects_non_http_urls_without_request(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    def fail_client(**_kwargs):
+        raise AssertionError("HTTP client should not be created for invalid URLs")
+
+    monkeypatch.setattr(httpx, "AsyncClient", fail_client)
+
+    result = await svc.validate_endpoint("file:///etc/passwd", "mistral-small")
+
+    assert result == {
+        "reachable": False,
+        "model_found": None,
+        "models_served": None,
+        "detail": "Endpoint URL must be an absolute HTTP(S) URL.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_rejects_malformed_urls_without_request(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    def fail_client(**_kwargs):
+        raise AssertionError("HTTP client should not be created for malformed URLs")
+
+    monkeypatch.setattr(httpx, "AsyncClient", fail_client)
+
+    result = await svc.validate_endpoint("http://[::1", "mistral-small")
+
+    assert result == {
+        "reachable": False,
+        "model_found": None,
+        "models_served": None,
+        "detail": "Endpoint URL must be an absolute HTTP(S) URL.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_rejects_url_credentials_without_request(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    def fail_client(**_kwargs):
+        raise AssertionError("HTTP client should not be created for URLs with credentials")
+
+    monkeypatch.setattr(httpx, "AsyncClient", fail_client)
+
+    result = await svc.validate_endpoint("https://user:pass@example.test/v1", "mistral-small")
+
+    assert result == {
+        "reachable": False,
+        "model_found": None,
+        "models_served": None,
+        "detail": "Endpoint URL must not include credentials.",
+    }

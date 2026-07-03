@@ -35,6 +35,13 @@ x-openrag: &openrag_template
     - ${DATA_VOLUME:-../../data}:/app/data
     - ../../i8n:/app/openrag/.chainlit/translations
     - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
+    # Container-owned venv cache: `uv run` syncs into this named volume on the
+    # first start and skips the sync on every start after, so packages aren't
+    # reinstalled each `docker compose up`. A named volume (not a host bind
+    # mount) is deliberate — the venv is only ever populated by the container,
+    # so its interpreter/script paths always match the image (a host-synced
+    # venv would point at host paths that don't exist inside the container).
+    - openrag_venv:/app/.venv
     # Dev only: bind-mounting the source tree over the image lets host changes
     # (or a writable host path) override the running code. Uncomment for local
     # development; keep it off in production.
@@ -89,31 +96,6 @@ x-vllm: &vllm_template
   # ports:
   #   - ${VLLM_PORT:-8000}:8000
 services:
-  # OpenRAG Indexer UI
-  indexer-ui:
-    image: linagoraai/indexer-ui:latest
-    build:
-      context: ../../extern/indexer-ui
-      dockerfile: Dockerfile
-      args:
-        # Mount indexer-ui under a subpath (e.g. /indexerui/) on a shared
-        # vhost with the backend. Empty = root-level (default). See
-        # docs/oidc.md §"Single vhost deployment" for the matching nginx
-        # rules.
-        BASE_PATH: ${INDEXERUI_BASE_PATH:-}
-    environment:
-      - API_BASE_URL=${API_BASE_URL:-http://localhost:${APP_PORT:-8080}}
-      - INCLUDE_CREDENTIALS=${INCLUDE_CREDENTIALS:-false}
-      - AUTH_MODE=${AUTH_MODE:-token}
-      - DEFAULT_LANGUAGE=${DEFAULT_LANGUAGE:-}
-    ports:
-      - "${INDEXERUI_PORT:-3042}:3000"
-    restart: unless-stopped
-    # Superseded by the admin-ui service below. Opt in with `--profile legacy-ui`
-    # (requires the extern/indexer-ui submodule); otherwise it neither builds nor
-    # runs, so the default stack needs no submodules.
-    profiles: ["legacy-ui"]
-
   # ── Admin UI (React SPA + nginx, same-origin reverse proxy to the API) ──
   admin-ui:
     image: linagoraai/openrag-admin-ui:latest
@@ -121,12 +103,19 @@ services:
       context: ../..
       dockerfile: infra/docker/ui.Dockerfile
       args:
-        # Same-origin: nginx proxies the API, so the SPA uses relative calls.
-        VITE_API_BASE_URL: ""
+        # Same-origin by default: the SPA makes relative calls that nginx
+        # reverse-proxies to the API over the Docker network, so the UI works on
+        # any host/IP (local or server) with NO CORS setup. Only set an absolute
+        # API URL for a browser-direct build — and then add the UI's own origin
+        # to CORS_EXTRA_ORIGINS on the API.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
         VITE_BASE_PATH: "/app/"
+        # Optional Grafana dashboard link on the admin "System" page; branding name.
+        VITE_GRAFANA_URL: ${VITE_GRAFANA_URL:-}
+        VITE_APP_NAME: ${VITE_APP_NAME:-OpenRAG}
     restart: unless-stopped
     ports:
-      - "${ADMIN_UI_PORT:-8081}:80"
+      - "${ADMIN_UI_PORT:-8081}:8080"
     # No depends_on the API: nginx resolves the `openrag` network alias (shared by
     # the GPU and CPU API variants) at request time, so this works under any
     # profile and starts even before the backend is ready.
@@ -228,3 +217,4 @@ volumes:
   logs:
   modelweights:
   pgdata:
+  openrag_venv: # Persists the container-synced /app/.venv so packages survive restarts

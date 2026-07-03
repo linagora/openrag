@@ -11,10 +11,12 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from core.config.model_endpoints import ModelEndpointConfig, ModelEndpointRow
 from core.utils.exceptions import NotFoundError, ValidationError
 from core.utils.logging import get_logger
+from core.utils.redaction import preserve_existing_secrets
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -245,6 +247,9 @@ class ModelEndpointService:
         # default by promoting another endpoint, never by leaving the type with none.
         promote_to_default = bool(fields.pop("is_default", None))
 
+        if isinstance(fields.get("extra"), dict):
+            fields["extra"] = preserve_existing_secrets(existing.extra, fields["extra"])  # type: ignore[arg-type]
+
         if fields:
             updated = await self._repo.update(name, model_type, **fields)
         else:
@@ -336,10 +341,21 @@ class ModelEndpointService:
             "models_served": None,
             "detail": None,
         }
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            result["detail"] = "Endpoint URL must be an absolute HTTP(S) URL."
+            return result
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            result["detail"] = "Endpoint URL must be an absolute HTTP(S) URL."
+            return result
+        if parsed.username or parsed.password:
+            result["detail"] = "Endpoint URL must not include credentials."
+            return result
         models_url = url.rstrip("/") + "/models"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         try:
-            async with httpx.AsyncClient(timeout=5.0, headers=headers) as client:
+            async with httpx.AsyncClient(timeout=5.0, headers=headers, follow_redirects=False) as client:
                 resp = await client.get(models_url)
             result["reachable"] = True
             if resp.status_code == 200:

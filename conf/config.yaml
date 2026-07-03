@@ -154,10 +154,13 @@ prompts:
 
 # --- Document loader ---
 loader:
-  # Env: IMAGE_CAPTIONING, IMAGE_CAPTIONING_URL, SAVE_MARKDOWN
+  # Env: IMAGE_CAPTIONING, IMAGE_CAPTIONING_URL, SAVE_MARKDOWN, SAVE_UPLOADED_FILES
   image_captioning: true
   image_captioning_url: true
   save_markdown: false
+  # Keep the raw upload on disk after indexation (needed for source viewing in
+  # Chainlit). Set false for clients that manage their own files (e.g. Twake).
+  save_uploaded_files: true
 
   mimetypes:
     text/plain: .txt

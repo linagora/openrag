@@ -36,16 +36,16 @@
 
 All files are intelligently converted to **Markdown format** with images replaced by AI-generated captions, ensuring consistent processing across all document types.
 
-### 🎛️ Native Web-Based Indexer UI
-Experience intuitive document management through our built-in web interface.
+### 🎛️ Native Web-Based Admin UI
+Manage OpenRAG through the bundled web interface.
 
 <details>
 
-<summary>Indexer UI Features</summary>
+<summary>Admin UI Features</summary>
 
 * **Drag-and-drop file upload** with batch processing capabilities
 * **Real-time indexing progress** monitoring and status updates
-* **Admin Dashbord** to monitore RAG components (Indexer, VectorDB, TaskStateManager, etc)
+* **Admin dashboard** to monitor RAG components (Indexer, VectorDB, TaskStateManager, etc)
 * **Partition management** - organize documents into logical collections
 * **Visual document preview** and metadata inspection
 * **Search and filtering** capabilities for indexed content
@@ -155,8 +155,7 @@ For CPU-only deployments or lightweight testing scenarios, you can consider swit
 
 #### 4.Deployment: Launch the app
 >[!IMPORTANT]
-> In case **`Indexer UI` (A Web interface for intuitive document ingestion, indexing, and management.)** is not configured already in your `.env`, follow this dedicated guide:
-➡ [Deploy with Indexer UI](docs/setup_indexerui.md)
+> The **admin UI** (a web interface for intuitive document ingestion, indexing, and management) ships bundled as the `admin-ui` service — no separate setup is required. Once the stack is up it is served at `http://localhost:ADMIN_UI_PORT/app/` (default port `8081`).
 
 * **Simple and quick** launch for testing
   >[!IMPORTANT]
@@ -219,7 +218,7 @@ To enable OIDC, set `AUTH_MODE=oidc` and configure the required OIDC variables (
 
 For comprehensive OIDC setup and configuration, see the [OIDC Authentication Guide](./docs/content/docs/documentation/oidc.md) (or the [SSO Quick Start](./docs/content/docs/documentation/sso-quickstart.md) for a faster path).
 
-3. `http://localhost:INDEXERUI_PORT` to access the indexer ui for easy document ingestion, indexing, and management
+3. `http://localhost:ADMIN_UI_PORT/app/` (default `8081`) to access the admin UI for easy document ingestion, indexing, and management
 
 #### 5. Distributed deployment in a Ray cluster
 

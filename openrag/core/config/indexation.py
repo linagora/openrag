@@ -160,6 +160,12 @@ class LoaderConfig(ConfigMixin):
     image_captioning: bool = True
     image_captioning_url: bool = True
     save_markdown: bool = False
+    # Keep the raw uploaded file in ``paths.data_dir`` after indexation. Default
+    # ``True`` — the source-download route (``/static/{extract_id}``) serves these
+    # back for Chainlit source viewing. Set ``False`` when the client (e.g. Twake)
+    # keeps its own copy: the file is then removed from disk once indexing settles,
+    # so only the derived chunks are retained.
+    save_uploaded_files: bool = True
     mimetypes: MimetypesConfig = Field(default_factory=MimetypesConfig)
     local_whisper: LocalWhisperConfig = Field(default_factory=LocalWhisperConfig)
     file_loaders: FileLoadersConfig = Field(default_factory=FileLoadersConfig)

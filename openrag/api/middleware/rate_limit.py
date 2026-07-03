@@ -5,8 +5,12 @@ Runs after AuthMiddleware (registered before it in ``api.main`` so it executes
 after auth populates ``request.state.user``). Limits are per-worker; use a Redis
 storage to share them across workers.
 
-Env: RATE_LIMIT_ENABLED (true), RATE_LIMIT_DEFAULT (300/minute),
-RATE_LIMIT_AUTH (20/minute, /auth/*), RATE_LIMIT_CHAT (60/minute, /v1/*).
+Admin users bypass rate limiting entirely, mirroring the file-quota bypass in
+``api.dependencies.auth`` — trusted operators (admin UI polling, bulk scripts)
+should not be throttled.
+
+Env: RATE_LIMIT_ENABLED (true), RATE_LIMIT_DEFAULT (600/minute),
+RATE_LIMIT_AUTH (60/minute, /auth/*), RATE_LIMIT_CHAT (120/minute, /v1/*).
 """
 
 import os
@@ -37,9 +41,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.enabled = _env_flag("RATE_LIMIT_ENABLED", True)
         self._limiter = MovingWindowRateLimiter(MemoryStorage())
-        self._default = parse(os.environ.get("RATE_LIMIT_DEFAULT", "300/minute"))
-        self._auth = parse(os.environ.get("RATE_LIMIT_AUTH", "20/minute"))
-        self._chat = parse(os.environ.get("RATE_LIMIT_CHAT", "60/minute"))
+        self._default = parse(os.environ.get("RATE_LIMIT_DEFAULT", "600/minute"))
+        self._auth = parse(os.environ.get("RATE_LIMIT_AUTH", "60/minute"))
+        self._chat = parse(os.environ.get("RATE_LIMIT_CHAT", "120/minute"))
         if self.enabled:
             logger.info(
                 "Rate limiting enabled",
@@ -65,8 +69,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         client = request.client
         return f"ip:{client.host}" if client else "ip:unknown"
 
+    @staticmethod
+    def _is_admin(request: Request) -> bool:
+        # AuthMiddleware sets request.state.user to a dict carrying "is_admin".
+        user = getattr(request.state, "user", None)
+        return bool(user.get("is_admin")) if isinstance(user, dict) else False
+
     async def dispatch(self, request: Request, call_next):
         if not self.enabled:
+            return await call_next(request)
+
+        # Admins bypass rate limiting entirely, mirroring the file-quota bypass
+        # in api.dependencies.auth. Unauthenticated paths (/auth/*) have no user
+        # on request.state, so this only ever exempts an authenticated admin.
+        if self._is_admin(request):
             return await call_next(request)
 
         path = request.url.path

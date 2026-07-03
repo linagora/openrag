@@ -35,8 +35,8 @@ _LOGO_LINES = (
 )
 
 # Gradient endpoints (R, G, B): the OpenRAG brand crimson, swept top to bottom.
-# Sourced from the indexer-ui's ``--color-linagora-*`` scale (src/app.css); 500
-# (#c71f45) is the logo circle fill in src/lib/icons/OpenRAG.svelte.
+# From the brand ``linagora-*`` colour scale: 500 (#c71f45) is the logo circle
+# fill, 800 (#83132d) is the deep-crimson end.
 _GRAD_START = (0xC7, 0x1F, 0x45)  # linagora-500 — brand red (logo fill)
 _GRAD_END = (0x83, 0x13, 0x2D)  # linagora-800 — deep crimson
 

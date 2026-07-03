@@ -514,14 +514,21 @@ The following environment variables configure the FastAPI server and control acc
 Always set a strong **`AUTH_TOKEN`** in production environments. Never leave it empty or use default values in production deployments.
 :::
 
-### Indexer-UI
+### Admin UI
+
+The admin UI is a React SPA served by the `admin-ui` (nginx) container. Every
+`VITE_*` setting is **baked into the bundle at build time** — Vite inlines them
+when the image is built, so they are *not* read at container runtime. After
+changing one, rebuild the image: `docker compose build admin-ui`.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `INCLUDE_CREDENTIALS` | `boolean` | `false` | If authentification is  |
-| `INDEXERUI_PORT` | `number` | `8060` | Port number on which the Indexer UI application runs. Default is `8060` (documentation mentions `3042` as another common default). |
-| `INDEXERUI_URL` | `string` | `http://X.X.X.X:INDEXERUI_PORT` | Base URL of the Indexer UI. Required to prevent CORS issues. Replace `X.X.X.X` with `localhost` (local) or your server IP, and `INDEXERUI_PORT` with the actual port. |
-| `API_BASE_URL` | `string` | `http://X.X.X.X:APP_PORT` | Base URL of your FastAPI backend, used by the frontend to communicate with the API. Replace `X.X.X.X` with `localhost` (local) or your server IP, and `APP_PORT` with your FastAPI port. |
+| `ADMIN_UI_PORT` | `number` | `8081` | Host port the admin UI (nginx) is published on. Serves `/app/` and reverse-proxies `/auth`, `/v1`, `/chainlit`, … to the backend, so it is the OIDC front door (`OIDC_REDIRECT_URI` targets this port). Deploy-time (not a `VITE_*` build arg). |
+| `VITE_API_BASE_URL` | `string` | `""` (same-origin) | API base baked into the SPA. **Empty (default) = same-origin**: nginx reverse-proxies the API over the Docker network, so the UI works on any host/IP with no CORS. Set to an absolute URL only for a browser-direct build — then list the UI's origin in `CORS_EXTRA_ORIGINS`. |
+| `VITE_BASE_PATH` | `string` | `/app/` | Sub-path the SPA is served under; must match the nginx `location`. |
+| `VITE_GRAFANA_URL` | `string` | `""` | Optional Grafana dashboard link shown on the admin **System** page. |
+| `VITE_APP_NAME` | `string` | `OpenRAG` | Application display name used in the UI branding. |
+| `VITE_MOCK_API` | `boolean` | `false` | Development only — serves in-browser MSW API mocks when `true`. Ignored in production builds. |
 
 ### Chainlit
 [See this](/openrag/documentation/setup_chainlit_ui_auth/) for chainlit authentification
@@ -531,4 +538,4 @@ Always set a strong **`AUTH_TOKEN`** in production environments. Never leave it 
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `DEFAULT_LANGUAGE` | `str` | `` | UI language for Chainlit and Indexer UI (e.g. `en-US`, `fr`). When unset, the browser language is used, with `en-US` as the final fallback. |
+| `DEFAULT_LANGUAGE` | `str` | `` | UI language for Chainlit and the Admin UI (e.g. `en-US`, `fr`). When unset, the browser language is used, with `en-US` as the final fallback. |
