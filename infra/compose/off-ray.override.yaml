@@ -10,7 +10,13 @@
 services:
   nats:
     image: nats:2.10-alpine
-    command: ["-js", "-m", "8222"]          # JetStream + monitoring for healthcheck
+    # -sd /data puts the JetStream file store on a named volume so the queue +
+    # results survive a container restart/recreation (else an in-flight 2K batch
+    # is lost). -m 8222 exposes monitoring for the healthcheck.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    restart: unless-stopped
+    volumes:
+      - nats_data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
       interval: 5s
@@ -26,6 +32,9 @@ services:
     user: "0:0"
     working_dir: /app
     runtime: nvidia
+    # Auto-restart a crashed worker (SIGBUS/OOM); NATS redelivers its in-flight
+    # task via the ack_wait lease, so the batch resumes without manual action.
+    restart: unless-stopped
     # Marker's share_memory() + ProcessPoolExecutor need a large /dev/shm; the
     # 64MB Docker default causes SIGBUS (exit 135). Match the app's value.
     shm_size: "10.24gb"
@@ -85,3 +94,4 @@ services:
 
 volumes:
   markerserve_venv:
+  nats_data:
