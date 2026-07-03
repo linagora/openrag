@@ -71,8 +71,7 @@ def redact_secrets(value: Any) -> Any:
     """Recursively redact values for known secret fields without mutating input."""
     if isinstance(value, Mapping):
         return {
-            key: REDACTED_SECRET if is_secret_field(str(key)) else redact_secrets(item)
-            for key, item in value.items()
+            key: REDACTED_SECRET if is_secret_field(str(key)) else redact_secrets(item) for key, item in value.items()
         }
     if isinstance(value, list):
         return [redact_secrets(item) for item in value]
