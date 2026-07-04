@@ -23,13 +23,19 @@ FAIRNESS — run BOTH deployments identically (mirrors marker_page_chunking.md):
   * measure GPU separately on the L4 host, alongside the run:
         nvidia-smi --query-gpu=memory.used --format=csv -l 1
 
-Usage:
-    python benchmark_indexation.py \
+Usage (self-contained uv script — installs only httpx + pypdfium2 in an isolated
+env, NOT the full project venv):
+    uv run tests/load/marker/benchmark_indexation.py \
         --base-url http://localhost:8080 --token "$AUTH_TOKEN" \
         --partition bench --pdf-dir ./pdfs --label on-ray --warmup
 
 Then redeploy off-Ray and run again with --label off-ray against the same PDFs.
 """
+
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["httpx", "pypdfium2"]
+# ///
 
 from __future__ import annotations
 
