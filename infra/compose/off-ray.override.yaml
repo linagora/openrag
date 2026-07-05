@@ -13,7 +13,10 @@ services:
     # -sd /data puts the JetStream file store on a named volume so the queue +
     # results survive a container restart/recreation (else an in-flight 2K batch
     # is lost). -m 8222 exposes monitoring for the healthcheck.
-    command: ["-js", "-sd", "/data", "-m", "8222"]
+    # --max_payload: results (markdown + base64 images) still flow through NATS
+    # today, and an image-heavy PDF exceeds the 1MB default. Raise it as an interim
+    # unblock; the production fix is a result-side object-store handoff (E1 follow-up).
+    command: ["-js", "-sd", "/data", "-m", "8222", "--max_payload=33554432"]
     restart: unless-stopped
     volumes:
       - nats_data:/data

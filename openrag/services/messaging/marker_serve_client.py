@@ -11,10 +11,11 @@ in-memory backends.
 
 FILE HANDOFF (E1): the PDF bytes are uploaded to the object store under a
 content-addressed key; only that key travels in the task payload, so large or
-scanned PDFs never hit the broker's max-payload limit. The client owns the
-object's lifecycle — it best-effort deletes the object once a *terminal* result
-is in hand (never on timeout, when a retrying worker may still need it); a bucket
-TTL policy reaps anything a crashed producer leaves behind.
+scanned PDFs never hit the broker's max-payload limit. The client does NOT
+delete the object itself — the worker may still be on a retry when the client's
+``result()`` returns (e.g. a stale/duplicate result), and an eager delete then
+races it into ``ObjectNotFound``. Cleanup is left to a **bucket TTL/lifecycle
+policy**, which reaps these short-lived scratch objects safely.
 """
 
 from __future__ import annotations
@@ -32,8 +33,8 @@ from services.workers.parsers.marker_format import build_image_blocks_from_encod
 logger = get_logger()
 
 MARKER_TOPIC = "marker.parse"
-# Content-addressed scratch key: the queue's idempotency (keyed on the same
-# hash) guarantees one task/reader/deleter per unique file, so this is race-free.
+# Content-addressed scratch key: same content -> same key (idempotent upload).
+# Reaped by a bucket TTL policy, not by the client (see module docstring).
 OBJECT_KEY_PREFIX = "handoff"
 
 
@@ -62,11 +63,7 @@ class MarkerServeClient(BaseClientParser):
             idempotency_key=content_hash,
             max_attempts=self._max_attempts,
         )
-
-        # A timeout/cancel leaves the task possibly still running (and still
-        # needing the object), so only clean up once a terminal result is in hand.
         result = await handle.result(timeout=self._timeout)
-        await self._delete_quietly(object_key)
 
         if result.status is not TaskStatus.SUCCEEDED:
             raise RuntimeError(f"marker-serve parse failed for document {document.id}: {result.error}")
@@ -80,12 +77,6 @@ class MarkerServeClient(BaseClientParser):
             metadata=dict(document.metadata),
             page_count=pages[-1][0] if pages else 0,
         )
-
-    async def _delete_quietly(self, object_key: str) -> None:
-        try:
-            await self._object_store.delete(object_key)
-        except Exception as exc:  # noqa: BLE001 — cleanup is best-effort; TTL is the backstop
-            logger.warning(f"failed to delete handoff object {object_key!r}: {exc}")
 
     async def aclose(self) -> None:
         await self._queue.aclose()

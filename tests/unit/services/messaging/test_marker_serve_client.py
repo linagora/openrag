@@ -14,7 +14,6 @@ from core.config.infrastructure import MessagingConfig, ObjectStoreConfig
 from core.config.root import Settings
 from core.indexing.parsers.pdf.marker_serve import MarkerServeParser
 from core.models.document import Document, DocumentType
-from core.ports.object_store import ObjectNotFound
 from PIL import Image
 from services.messaging.in_memory import InMemoryTaskQueue
 from services.messaging.marker_serve_client import MarkerServeClient
@@ -64,9 +63,9 @@ async def test_parse_uploads_by_key_and_rebuilds_document():
     assert len(pd.images) == 1
     assert pd.images[0].page_number == 1  # from "_page_0_..." → 1-indexed
     assert pd.images[0].image_bytes[:8] == b"\x89PNG\r\n\x1a\n"
-    # Content-addressed key, cleaned up after a terminal result.
-    with pytest.raises(ObjectNotFound):
-        await store.get(EXPECTED_KEY)
+    # The client does NOT delete the object (that would race a retrying worker);
+    # a bucket TTL reaps it, so it is still present right after parse().
+    assert await store.get(EXPECTED_KEY) == PDF_BYTES
 
 
 async def test_empty_document_uploads_nothing():
@@ -98,8 +97,8 @@ async def test_failed_result_raises_and_still_cleans_up():
         await asyncio.gather(run, return_exceptions=True)
         await queue.aclose()
 
-    # Terminal failure ⇒ no more retries ⇒ the object is cleaned up too.
-    assert store._objects == {}
+    # Client never deletes the object (TTL reaps it); it persists after a failure.
+    assert EXPECTED_KEY in store._objects
 
 
 async def test_timeout_leaves_object_for_retrying_worker():
