@@ -195,6 +195,12 @@ class NatsJetStreamTaskQueue(TaskQueue):
             await msg.ack()
         except Exception as exc:  # noqa: BLE001 — any handler failure becomes task state
             num_delivered = msg.metadata.num_delivered
+            # Log WHY the task failed — otherwise a handler/publish error (e.g. a
+            # result too large for the broker) is invisible and only shows up as a
+            # silently retried, then FAILED, task.
+            logger.opt(exception=exc).warning(
+                f"task {task_id} (topic={topic}) attempt {num_delivered}/{max_attempts} failed: {exc!r}"
+            )
             if num_delivered >= max_attempts:
                 await self._put_result(task_id, TaskStatus.FAILED, error=str(exc))
                 await msg.term()  # stop redelivery
