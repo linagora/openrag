@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import tempfile
 
@@ -104,11 +105,25 @@ class MarkerParseHandler:
             if self.object_store is None:
                 raise RuntimeError("object_key payload requires an object store; none configured")
             data = await self.object_store.get(payload["object_key"])
-            return await self._parse_bytes(data)
-        if "file_bytes_b64" in payload:
-            return await self._parse_bytes(base64.b64decode(payload["file_bytes_b64"]))
-        markdown, images = await parse_pdf(self.engine, self.config, payload["file_path"])
-        return {"markdown": markdown, "images": encode_images(images)}
+            result = await self._parse_bytes(data)
+        elif "file_bytes_b64" in payload:
+            result = await self._parse_bytes(base64.b64decode(payload["file_bytes_b64"]))
+        else:
+            markdown, images = await parse_pdf(self.engine, self.config, payload["file_path"])
+            result = {"markdown": markdown, "images": encode_images(images)}
+        return await self._handoff_result(task, result)
+
+    async def _handoff_result(self, task: Task, result: dict) -> dict:
+        """Result-side handoff (E1): markdown + base64 images can exceed the
+        broker's max payload, so write the whole result to the object store and
+        return only a key. Symmetric with the input handoff; the object is reaped
+        by the bucket TTL. Falls back to inlining when no object store is wired
+        (standalone/test)."""
+        if self.object_store is None:
+            return result
+        result_key = f"results/{task.id}.json"
+        await self.object_store.put(result_key, json.dumps(result).encode(), content_type="application/json")
+        return {"result_object_key": result_key}
 
     async def _parse_bytes(self, data: bytes) -> dict:
         fd, path = tempfile.mkstemp(suffix=".pdf")

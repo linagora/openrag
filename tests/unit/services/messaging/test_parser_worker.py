@@ -76,7 +76,10 @@ async def test_object_key_branch_fetches_from_store(monkeypatch):
     await store.put("handoff/abc.pdf", b"%PDF fake bytes")
     handler = MarkerParseHandler(_cfg(), engine=FakeEngine(), object_store=store)
     res = await handler(Task(topic=MARKER_TOPIC, payload={"object_key": "handoff/abc.pdf"}))
-    assert res["markdown"] == "chunk-all"
+    # Result is handed off to the store; only a key travels back through the broker.
+    import json
+
+    assert json.loads(await store.get(res["result_object_key"]))["markdown"] == "chunk-all"
 
 
 async def test_object_key_without_store_raises():

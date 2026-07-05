@@ -21,6 +21,7 @@ policy**, which reaps these short-lived scratch objects safely.
 from __future__ import annotations
 
 import hashlib
+import json
 
 from core.config import Settings
 from core.indexing.parsers.document_parser import BaseClientParser
@@ -69,6 +70,11 @@ class MarkerServeClient(BaseClientParser):
             raise RuntimeError(f"marker-serve parse failed for document {document.id}: {result.error}")
 
         data = result.result or {}
+        # Result-side handoff: a large result comes back as an object-store key, not
+        # inline through the broker. Fetch it (falls back to inline for small results
+        # / standalone worker).
+        if "result_object_key" in data:
+            data = json.loads(await self._object_store.get(data["result_object_key"]))
         pages = split_pages(data.get("markdown", ""))
         return ProcessedDocument(
             document_id=document.id,
