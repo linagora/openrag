@@ -39,6 +39,17 @@ class IndexerWorkerActor:
         from services.workers.pipeline_builder import build_indexing_pipeline
 
         cfg = load_config()
+        # Startup diagnostic: log the config THIS Ray worker actually resolved, so
+        # an off-Ray toggle that reaches the API process but not the worker is
+        # visible in the logs (print -> stdout -> docker logs; avoids the
+        # module-logger-in-actor pickling gotcha).
+        print(
+            f"[INDEXER-DIAG] worker resolved: pdf_loader={cfg.loader.file_loaders.pdf} "
+            f"queue={cfg.messaging.backend}@{cfg.messaging.nats_url} "
+            f"object_store={cfg.object_store.backend}@{cfg.object_store.endpoint_url} "
+            f"bucket={cfg.object_store.bucket}",
+            flush=True,
+        )
 
         parser = build_parser_dispatcher(cfg)
         parser_factory = _build_parser_factory(parser)
