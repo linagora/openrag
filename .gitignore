@@ -14,6 +14,11 @@ db/
 misc
 tmp
 
+# Embedded git repo (has its own .git); a build input for the legacy indexer-ui
+# profile, not source tracked here. Ignoring it stops `git add .` from staging
+# it as a broken gitlink.
+extern/indexer-ui/
+
 # Ignore __pycache__ directories
 __pycache__/
 **/__pycache__/
@@ -101,3 +106,11 @@ docker-compose.override.yml
 i8n/*.json
 !i8n/en-US.json
 !i8n/fr.json
+
+# Automatic evaluation pipeline (local data/artifacts, not committed)
+openrag-versions/
+tests/load/automatic-evaluation-pipeline/dataset.json
+tests/load/automatic-evaluation-pipeline/dataset.manifest.json
+tests/load/automatic-evaluation-pipeline/golden_uploads/
+tests/load/automatic-evaluation-pipeline/pdf_files/
+tests/load/automatic-evaluation-pipeline/reports/

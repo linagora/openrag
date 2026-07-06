@@ -197,6 +197,47 @@ def _pct(value) -> str:
     return f"{value * 100:.0f}%"
 
 
+def _tail(path: Path, n: int, block: int = 65536) -> list[str]:
+    """Last n lines of a file without reading the whole thing: seek from the end in
+    ~block-sized chunks until more than n newlines are collected, then slice. Cost is
+    O(n * line length), not O(filesize) — matters because the sidebar re-reads run
+    logs on every Streamlit rerun and those logs can grow to hundreds of MB."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        data = b""
+        while size > 0 and data.count(b"\n") <= n:
+            step = min(block, size)
+            size -= step
+            f.seek(size)
+            data = f.read(step) + data
+    return data.decode("utf-8", errors="replace").splitlines()[-n:]
+
+
+def _render_retrieval_metrics(d: dict) -> None:
+    """8 retrieval metrics in a 4+4 grid (shared by summary + single-query views)."""
+    cols = st.columns(4)
+    cols[0].metric("Hit Rate", fmt(d.get("hit_rate")))
+    cols[1].metric("MRR", fmt(d.get("mrr")))
+    cols[2].metric("Recall", fmt(d.get("recall")))
+    cols[3].metric("MAP", fmt(d.get("map")))
+    cols = st.columns(4)
+    cols[0].metric("Precision@5", fmt(d.get("precision_at_5")))
+    cols[1].metric("Precision@10", fmt(d.get("precision_at_10")))
+    cols[2].metric("nDCG@5", fmt(d.get("ndcg_at_5")))
+    cols[3].metric("nDCG@10", fmt(d.get("ndcg_at_10")))
+
+
+def _render_generation_metrics(d: dict) -> None:
+    """5 n-gram overlap metrics (shared by summary + single-query views)."""
+    cols = st.columns(5)
+    cols[0].metric("ROUGE-1", fmt(d.get("rouge1")))
+    cols[1].metric("ROUGE-2", fmt(d.get("rouge2")))
+    cols[2].metric("ROUGE-L", fmt(d.get("rougeL")))
+    cols[3].metric("BLEU", fmt(d.get("bleu")))
+    cols[4].metric("METEOR", fmt(d.get("meteor")))
+
+
 def classify(value, good: float, ok: float, higher_is_better: bool = True) -> tuple[str, str]:
     """Map a value to a (badge, word) traffic-light verdict against two thresholds.
 
@@ -475,25 +516,11 @@ def render_summary(summary: dict) -> None:
     if retrieval.get("hit_rate") is None:
         st.info("Retrieval metrics: n/a — dataset has no ground-truth chunks.")
     else:
-        cols = st.columns(4)
-        cols[0].metric("Hit Rate", fmt(retrieval.get("hit_rate")))
-        cols[1].metric("MRR", fmt(retrieval.get("mrr")))
-        cols[2].metric("Recall", fmt(retrieval.get("recall")))
-        cols[3].metric("MAP", fmt(retrieval.get("map")))
-        cols = st.columns(4)
-        cols[0].metric("Precision@5", fmt(retrieval.get("precision_at_5")))
-        cols[1].metric("Precision@10", fmt(retrieval.get("precision_at_10")))
-        cols[2].metric("nDCG@5", fmt(retrieval.get("ndcg_at_5")))
-        cols[3].metric("nDCG@10", fmt(retrieval.get("ndcg_at_10")))
+        _render_retrieval_metrics(retrieval)
 
     generation = summary.get("generation", {})
     st.subheader("Generation (n-gram overlap)")
-    cols = st.columns(5)
-    cols[0].metric("ROUGE-1", fmt(generation.get("rouge1")))
-    cols[1].metric("ROUGE-2", fmt(generation.get("rouge2")))
-    cols[2].metric("ROUGE-L", fmt(generation.get("rougeL")))
-    cols[3].metric("BLEU", fmt(generation.get("bleu")))
-    cols[4].metric("METEOR", fmt(generation.get("meteor")))
+    _render_generation_metrics(generation)
 
     logprobs = summary.get("logprobs", {})
     if logprobs.get("n_scored"):
@@ -1129,26 +1156,12 @@ def render_single_query_result(result: dict) -> None:
     gen = result.get("generation")
     if gen:
         st.markdown("**Generation (n-gram overlap)**")
-        cols = st.columns(5)
-        cols[0].metric("ROUGE-1", fmt(gen.get("rouge1")))
-        cols[1].metric("ROUGE-2", fmt(gen.get("rouge2")))
-        cols[2].metric("ROUGE-L", fmt(gen.get("rougeL")))
-        cols[3].metric("BLEU", fmt(gen.get("bleu")))
-        cols[4].metric("METEOR", fmt(gen.get("meteor")))
+        _render_generation_metrics(gen)
 
     retr = result.get("retrieval")
     if retr:
         st.markdown("**Retrieval (vs reference chunk IDs)**")
-        cols = st.columns(4)
-        cols[0].metric("Hit Rate", fmt(retr.get("hit_rate")))
-        cols[1].metric("MRR", fmt(retr.get("mrr")))
-        cols[2].metric("Recall", fmt(retr.get("recall")))
-        cols[3].metric("MAP", fmt(retr.get("map")))
-        cols = st.columns(4)
-        cols[0].metric("Precision@5", fmt(retr.get("precision_at_5")))
-        cols[1].metric("Precision@10", fmt(retr.get("precision_at_10")))
-        cols[2].metric("nDCG@5", fmt(retr.get("ndcg_at_5")))
-        cols[3].metric("nDCG@10", fmt(retr.get("ndcg_at_10")))
+        _render_retrieval_metrics(retr)
 
     chunk_ids = result.get("chunk_ids") or []
     chunk_texts = result.get("chunk_texts") or []
@@ -1345,6 +1358,7 @@ def start_orchestrator(
     generate_questions: bool = False,
     n_questions_per_cluster: int | None = None,
     n_unanswerable_per_cluster: int | None = None,
+    no_retrieval: bool = False,
 ) -> None:
     """Launch orchestrator.py: deploy <version>, evaluate it, then tear it down.
 
@@ -1380,6 +1394,8 @@ def start_orchestrator(
             cmd += ["--n-questions-per-cluster", str(n_questions_per_cluster)]
         if n_unanswerable_per_cluster is not None:
             cmd += ["--n-unanswerable-per-cluster", str(n_unanswerable_per_cluster)]
+    if no_retrieval:
+        cmd += ["--no-retrieval"]
     if limit:
         cmd += ["--limit", str(limit)]
     if not prune:
@@ -1414,8 +1430,8 @@ def stop_orchestrator() -> None:
 def render_sidebar(runs: list[dict]) -> tuple[dict | None, dict | None, bool]:
     st.sidebar.header("New benchmark run")
 
-    default_partition = "test3"
-    default_base_url = "http://141.95.153.249:8095"
+    default_partition = CONFIG.common.partition
+    default_base_url = CONFIG.common.base_url
     if runs:
         default_partition = runs[0]["summary"].get("config", {}).get("partition", default_partition)
         default_base_url = runs[0]["summary"].get("config", {}).get("base_url", default_base_url)
@@ -1475,8 +1491,8 @@ def render_sidebar(runs: list[dict]) -> tuple[dict | None, dict | None, bool]:
     if log_path and Path(log_path).exists():
         with st.sidebar.expander("Latest run log (tail)", expanded=running):
             try:
-                lines = Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()
-                st.code("\n".join(lines[-25:]) or "(empty)", language="text")
+                lines = _tail(Path(log_path), 25)
+                st.code("\n".join(lines) or "(empty)", language="text")
             except OSError:
                 st.caption("(log not readable)")
 
@@ -1530,8 +1546,8 @@ def render_sidebar(runs: list[dict]) -> tuple[dict | None, dict | None, bool]:
     if gen_log_path and Path(gen_log_path).exists():
         with st.sidebar.expander("Latest generation log (tail)", expanded=generating):
             try:
-                lines = Path(gen_log_path).read_text(encoding="utf-8", errors="replace").splitlines()
-                st.code("\n".join(lines[-25:]) or "(empty)", language="text")
+                lines = _tail(Path(gen_log_path), 25)
+                st.code("\n".join(lines) or "(empty)", language="text")
             except OSError:
                 st.caption("(log not readable)")
 
@@ -1603,6 +1619,17 @@ def render_sidebar(runs: list[dict]) -> tuple[dict | None, dict | None, bool]:
             step=1,
             key="deploy_gen_unans",
         )
+    no_retrieval = st.sidebar.checkbox(
+        "Skip retrieval metrics (generation + judges only)",
+        value=False,
+        key="deploy_no_retrieval",
+        help=(
+            "Don't score ID-based retrieval (hit rate, MRR, nDCG, …). Generation metrics and "
+            "all judges still run. Use when the dataset's chunk IDs don't match this run's "
+            "index (e.g. a fixed dataset against a freshly re-indexed instance), so retrieval "
+            "would be misleading zeros."
+        ),
+    )
     env_overrides_raw = st.sidebar.text_area(
         "Config overrides (one KEY=VALUE per line)",
         value="",
@@ -1667,6 +1694,7 @@ def render_sidebar(runs: list[dict]) -> tuple[dict | None, dict | None, bool]:
                 generate_questions=gen_questions,
                 n_questions_per_cluster=int(gen_q) if gen_q is not None else None,
                 n_unanswerable_per_cluster=int(gen_unans) if gen_unans is not None else None,
+                no_retrieval=no_retrieval,
             )
             st.rerun()
         if deploy_blocked:
@@ -1685,8 +1713,8 @@ def render_sidebar(runs: list[dict]) -> tuple[dict | None, dict | None, bool]:
     if orch_log_path and Path(orch_log_path).exists():
         with st.sidebar.expander("Latest deploy log (tail)", expanded=orchestrating):
             try:
-                lines = Path(orch_log_path).read_text(encoding="utf-8", errors="replace").splitlines()
-                st.code("\n".join(lines[-30:]) or "(empty)", language="text")
+                lines = _tail(Path(orch_log_path), 30)
+                st.code("\n".join(lines) or "(empty)", language="text")
             except OSError:
                 st.caption("(log not readable)")
 
@@ -1767,8 +1795,8 @@ def main() -> None:
                 "benchmark → teardown). Use the sidebar to monitor progress."
             )
 
-    default_partition = "test3"
-    default_base_url = "http://141.95.153.249:8095"
+    default_partition = CONFIG.common.partition
+    default_base_url = CONFIG.common.base_url
     if runs:
         default_partition = runs[0]["summary"].get("config", {}).get("partition", default_partition)
         default_base_url = runs[0]["summary"].get("config", {}).get("base_url", default_base_url)

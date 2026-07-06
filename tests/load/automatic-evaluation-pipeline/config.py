@@ -11,6 +11,7 @@ class CommonConfig:
     """Shared across benchmark, ablation, generation, and upload."""
 
     partition: str = "test3"
+    base_url: str = "http://141.95.153.249:8095"
     dataset_path: str = "./dataset.json"
     output_dir: str = "./reports"
 

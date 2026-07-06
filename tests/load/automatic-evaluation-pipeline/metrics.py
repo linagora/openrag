@@ -1,7 +1,6 @@
 import math
 
 import nltk
-from loguru import logger
 from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 from nltk.translate.meteor_score import meteor_score
 from rouge_score import rouge_scorer
@@ -34,10 +33,6 @@ def compute_generation_metrics(reference: str, hypothesis: str) -> dict:
         "bleu": bleu,
         "meteor": meteor,
     }
-
-
-def compute_hits(true_chunk_id, all_retrieved_chunks):
-    return true_chunk_id in all_retrieved_chunks
 
 
 def compute_hit_at_k(true_ids, retrieved_ids, k=None):
@@ -101,18 +96,3 @@ def ndcg_at_k(true_ids, retrieved_ids, k):
     idcg = sum(rel / math.log2(i + 2) for i, rel in enumerate(ideal_rels))
 
     return dcg / idcg if idcg > 0 else 0
-
-
-def compute_inverted_ranks(true_chunk_id, all_retrieved_chunks):
-
-    key = False
-    try:
-        rank = all_retrieved_chunks.index(true_chunk_id) + 1
-        key = True
-    except ValueError:
-        logger.debug(f"ValueError: {true_chunk_id} not found in retrieved_ids")
-
-    if key:
-        return 1 / rank
-    else:
-        return 0

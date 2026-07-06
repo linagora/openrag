@@ -103,7 +103,22 @@ def parse_env_file(path: Path) -> dict[str, str]:
         if line.startswith("export "):
             line = line[len("export "):]
         key, _, val = line.partition("=")
-        out[key.strip()] = val.strip().strip('"').strip("'")
+        val = val.strip()
+        if val[:1] in ("'", '"'):
+            # Quoted: take the quoted content, ignore anything (incl. comments) after.
+            quote = val[0]
+            end = val.find(quote, 1)
+            val = val[1:end] if end != -1 else val[1:]
+        else:
+            # Unquoted: strip an inline comment (a '#' preceded by whitespace), e.g.
+            # `CHAINLIT_PORT=8097  # 8090 is taken` → `8097`. A bare '#' mid-token
+            # (no preceding space) is kept, since it may be part of the value.
+            for i in range(1, len(val)):
+                if val[i] == "#" and val[i - 1] in (" ", "\t"):
+                    val = val[:i]
+                    break
+            val = val.strip()
+        out[key.strip()] = val
     return out
 
 
@@ -223,6 +238,23 @@ def force_rmtree(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+def detect_compose_file(versions_repo: Path) -> str:
+    """Return the compose file path (relative to the repo) for the checked-out version.
+
+    The hexagonal refactor relocated it from ``./docker-compose.yaml`` to
+    ``infra/compose/docker-compose.yaml``. Prefer the repo-root file (older versions),
+    fall back to the infra path (refactored versions). Must be called AFTER checkout,
+    since the location is version-specific.
+    """
+    candidates = ["docker-compose.yaml", "infra/compose/docker-compose.yaml"]
+    for rel in candidates:
+        if (versions_repo / rel).exists():
+            return rel
+    raise RuntimeError(
+        f"No docker-compose.yaml found in {versions_repo} (tried: {', '.join(candidates)})"
+    )
+
+
 def list_compose_services(versions_repo: Path, compose_flags: list[str], env: dict[str, str]) -> list[str]:
     """Return every service defined in the merged compose config for this version."""
     out = subprocess.check_output(
@@ -326,6 +358,13 @@ def teardown(
                 log(f"{' '.join(cmd)} failed (continuing): {e}")
 
 
+def _base_env(deploy_env_vars: dict[str, str]) -> dict[str, str]:
+    """Fresh copy of the current environment layered with the deploy .env vars."""
+    env = dict(os.environ)
+    env.update(deploy_env_vars)
+    return env
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Deploy one OpenRAG version, evaluate it, and tear it down."
@@ -355,6 +394,12 @@ def main() -> int:
         help="Self-contained mode: after ingest, generate the dataset from THIS run's "
         "indexed chunks (into reports/<uuid>/dataset.json) and benchmark on it. Chunk IDs "
         "match the instance, so retrieval metrics are non-zero. Ignores --dataset.",
+    )
+    parser.add_argument(
+        "--no-retrieval",
+        action="store_true",
+        help="Skip ID-based retrieval metrics in the benchmark (generation + judges still run). "
+        "Use when the dataset's chunk IDs don't match this run's index.",
     )
     parser.add_argument(
         "--n-questions-per-cluster",
@@ -455,7 +500,6 @@ def main() -> int:
         return 2
 
     overrides = dict(kv.split("=", 1) for kv in args.env if "=" in kv)
-    compose_files = args.compose_file or ["docker-compose.yaml"]
     services = args.service or ["openrag"]
 
     run_id = uuid.uuid4().hex
@@ -472,22 +516,32 @@ def main() -> int:
     base_url = f"http://localhost:{app_port}"
     log(f"=== Run {run_id} | version={args.version} | partition={args.partition} | api_port={app_port} ===")
 
-    # Env for compose interpolation: inherit ours, then per-run mounts + overrides.
-    cenv = compose_env(dict(os.environ), data_root, app_port, overrides)
+    # Env for compose interpolation: inherit ours + the deploy .env (so vars the
+    # compose *requires with no default* — e.g. POSTGRES_PASSWORD in the refactored
+    # layout — are available), then per-run mounts + overrides (which win).
+    base_compose_env = _base_env(deploy_env_vars)
+    cenv = compose_env(base_compose_env, data_root, app_port, overrides)
     # Point SHARED_ENV at the supplied env file (absolute) so compose uses it as the
     # service env_file and the /ray_mount/.env bind mount. A leading-slash bind mount
     # (/$SHARED_ENV → //abs/path) collapses to the same absolute path on Linux.
     if deploy_env is not None:
         cenv["SHARED_ENV"] = str(deploy_env)
 
+    # Populated after checkout (the compose file location is version-specific).
+    compose_files: list[str] = []
     compose_flags: list[str] = []
-    for f in compose_files:
-        compose_flags += ["-f", f]
 
     exit_code = 0
     try:
         # 1. Checkout the requested build.
         git_commit = git_checkout(versions_repo, args.version)
+
+        # 1a. Resolve the compose file(s): explicit --compose-file, else auto-detect
+        # (root docker-compose.yaml for old versions, infra/compose/ for the refactor).
+        compose_files = args.compose_file or [detect_compose_file(versions_repo)]
+        for f in compose_files:
+            compose_flags += ["-f", f]
+        log(f"Using compose file(s): {compose_files}")
 
         # 1b. Lay a custom config into the build context (if supplied) before building.
         if config_path is not None:
@@ -524,6 +578,7 @@ def main() -> int:
             "corpus_dir": args.corpus_dir,
             "max_files": args.max_files,
             "generate_questions": args.generate_questions,
+            "no_retrieval": args.no_retrieval,
             "n_questions_per_cluster": args.n_questions_per_cluster,
             "n_unanswerable_per_cluster": args.n_unanswerable_per_cluster,
             "base_url": base_url,
@@ -543,8 +598,7 @@ def main() -> int:
         # Env for the eval scripts: inherit ours, layer the supplied env file (it also
         # carries the judge/model config — MODEL/BASE_URL/API_KEY/JUDGE_* — that
         # benchmark.py needs), then force the target instance + token last.
-        seval = dict(os.environ)
-        seval.update(deploy_env_vars)
+        seval = _base_env(deploy_env_vars)
         seval["API_BASE_URL"] = base_url
         seval["AUTH_TOKEN"] = auth_token
         if args.corpus_dir:
@@ -590,6 +644,8 @@ def main() -> int:
         ]
         if args.limit:
             bench_cmd += ["--limit", str(args.limit)]
+        if args.no_retrieval:
+            bench_cmd += ["--no-retrieval"]
         run(bench_cmd, cwd=REPO_DIR, env=seval)
 
         log(f"=== Run {run_id} complete -> {run_dir} ===")

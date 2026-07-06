@@ -159,6 +159,9 @@ def _extract_logprob_metrics(res) -> tuple[float, float, list[str], list[float]]
     return mean_lp, math.exp(-mean_lp), tokens, lps
 
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN")
+# Sentinel returned by judge functions when a judge call fails; rows carrying it
+# are excluded from metric aggregation (kept out of means, counted as errors).
+JUDGE_ERROR = "error"
 _judge_model = os.environ.get("JUDGE_MODEL") or os.environ.get("MODEL")
 _judge_base_url = os.environ.get("JUDGE_BASE_URL") or os.environ.get("BASE_URL")
 _judge_api_key = os.environ.get("JUDGE_API_KEY") or os.environ.get("API_KEY")
@@ -382,6 +385,13 @@ async def fetch_chunk_texts(
         return await asyncio.gather(*[_fetch(client, u) for u in chunk_urls])
 
 
+def _format_context(chunks: list[str]) -> str:
+    """Join non-empty chunks into numbered '[Source N]' blocks separated by '---'."""
+    return "\n\n---\n\n".join(
+        f"[Source {i + 1}]\n{c}" for i, c in enumerate(chunks) if c
+    )
+
+
 async def faithfulness_judgment_per_question(
     query: str,
     generated_answer: str,
@@ -394,9 +404,7 @@ async def faithfulness_judgment_per_question(
     if not generated_answer or not context_chunks:
         return float("nan"), 0, 0
 
-    context_text = "\n\n---\n\n".join(
-        f"[Source {i + 1}]\n{c}" for i, c in enumerate(context_chunks) if c
-    )
+    context_text = _format_context(context_chunks)
     if not context_text:
         return float("nan"), 0, 0
 
@@ -476,9 +484,7 @@ async def context_relevancy_judgment_per_question(
     if not context_chunks:
         return float("nan"), 0, 0
 
-    context_text = "\n\n---\n\n".join(
-        f"[Source {i + 1}]\n{c}" for i, c in enumerate(context_chunks) if c
-    )
+    context_text = _format_context(context_chunks)
     if not context_text:
         return float("nan"), 0, 0
 
@@ -541,7 +547,7 @@ async def response_judgment_per_question(
         return response_for_completion.score, response_for_precision.score
     except Exception as e:
         logger.debug(f"Error evaluating response: {e}")
-        return "error", "error"
+        return JUDGE_ERROR, JUDGE_ERROR
 
 
 async def evaluate_answerable_row(
@@ -599,7 +605,7 @@ async def response_judgment_cot_per_question(
         return comp.score, prec.score, comp.reasoning, prec.reasoning
     except Exception as e:
         logger.debug(f"Error evaluating response (CoT): {e}")
-        return "error", "error", "", ""
+        return JUDGE_ERROR, JUDGE_ERROR, "", ""
 
 
 async def response_judgment_cot_en_per_question(
@@ -636,7 +642,7 @@ async def response_judgment_cot_en_per_question(
         return comp.score, prec.score, comp.reasoning, prec.reasoning
     except Exception as e:
         logger.debug(f"Error evaluating response (CoT EN): {e}")
-        return "error", "error", "", ""
+        return JUDGE_ERROR, JUDGE_ERROR, "", ""
 
 
 async def label_response_per_question(
@@ -678,7 +684,7 @@ async def label_response_per_question(
             return r.label, r.reasoning
         except Exception as e:
             logger.debug(f"Error labeling response: {e}")
-            return "error", ""
+            return JUDGE_ERROR, ""
 
 LABEL_LANGUAGE: Literal["fr", "en"] = CONFIG.benchmark.label_language
 
@@ -890,6 +896,7 @@ async def main(
     run_id: str | None = None,
     version: str | None = None,
     git_commit: str | None = None,
+    no_retrieval: bool = False,
 ):
     run_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     os.makedirs(output_dir, exist_ok=True)
@@ -918,7 +925,7 @@ async def main(
     ]
 
     openrag_answer_chunk_ids_l = await tqdm.gather(*tasks, desc="Fetching")
-    hit_rates, MRRs, recalls, nDCG_scores = [], [], [], []
+    hit_rates, MRRs, recalls = [], [], []
     row_judge_tasks = []
     precision_at_5_list = []
     precision_at_10_list = []
@@ -987,7 +994,10 @@ async def main(
 
         # Retrieval metrics require ground-truth chunk IDs in the golden entry.
         # When absent (Q+A-only datasets), skip them but still run generation/judges.
-        gt_chunks = input_reference.get("chunks") or []
+        # --no-retrieval forces the skip even when chunks ARE present — useful when the
+        # dataset's chunk IDs are from a different index (e.g. a fixed dataset scored
+        # against a freshly re-indexed instance) so ID-based retrieval would be noise.
+        gt_chunks = [] if no_retrieval else (input_reference.get("chunks") or [])
         if gt_chunks:
             chunk_id_reference = [str(c["id"]) for c in gt_chunks]
             hit_rates.append(compute_hit_at_k(chunk_id_reference, openrag_chunk_ids, k=5))
@@ -1013,7 +1023,6 @@ async def main(
             nDCG_score = ndcg_at_k(
                 chunk_id_reference, openrag_chunk_ids, k=len(openrag_chunk_ids)
             )
-            nDCG_scores.append(nDCG_score)
             ndcg_per_judged_row.append(nDCG_score)
             n_chunks_per_judged_row.append(len(gt_chunks))
         else:
@@ -1148,7 +1157,7 @@ async def main(
             "difficulty": row_difficulties,
         }
     )
-    eval_results = per_row[per_row["completion_evaluation"] != "error"].copy()
+    eval_results = per_row[per_row["completion_evaluation"] != JUDGE_ERROR].copy()
     eval_results["completion_evaluation"] = pd.to_numeric(eval_results["completion_evaluation"])
     eval_results["precision_evaluation"] = pd.to_numeric(eval_results["precision_evaluation"])
     eval_results = eval_results.reset_index(drop=True)
@@ -1415,7 +1424,7 @@ async def main(
     print("\n", "-" * 50, "\n")
     print(f"--- Response Labels ({LABEL_LANGUAGE}) ---")
     label_only = [lbl for lbl, _ in label_results]
-    valid_labels = [lbl for lbl in label_only if lbl != "error"]
+    valid_labels = [lbl for lbl in label_only if lbl != JUDGE_ERROR]
     if valid_labels:
         label_counts = pd.Series(valid_labels).value_counts()
         for lbl in RESPONSE_LABELS:
@@ -1448,7 +1457,7 @@ async def main(
     print("\n", "-" * 50, "\n")
     print(f"--- CoT Evaluation ({COT_AUDIT_FRACTION:.0%} random sample, seed={COT_AUDIT_SEED}) ---")
     print(f"Sample size: {len(audit_indices)} of {len(judged_inputs)} questions")
-    valid_cot = [(i, cot) for i, cot in zip(audit_indices, cot_results) if cot[0] != "error"]
+    valid_cot = [(i, cot) for i, cot in zip(audit_indices, cot_results) if cot[0] != JUDGE_ERROR]
     if valid_cot:
         cot_comp = np.array([c[0] for _, c in valid_cot])
         cot_prec = np.array([c[1] for _, c in valid_cot])
@@ -1494,9 +1503,9 @@ async def main(
             "mean_logprob": mean_logprobs[: len(label_results)],
         })
         calib_df = calib_df[
-            (calib_df["label"] != "error")
-            & (calib_df["completion"] != "error")
-            & (calib_df["precision"] != "error")
+            (calib_df["label"] != JUDGE_ERROR)
+            & (calib_df["completion"] != JUDGE_ERROR)
+            & (calib_df["precision"] != JUDGE_ERROR)
         ].copy()
         calib_df["completion"] = pd.to_numeric(calib_df["completion"], errors="coerce")
         calib_df["precision"] = pd.to_numeric(calib_df["precision"], errors="coerce")
@@ -1600,6 +1609,7 @@ async def main(
             "run_id": run_id,
             "version": version,
             "git_commit": git_commit,
+            "no_retrieval": no_retrieval,
             "partition": partition,
             "base_url": openrag_api_base_url,
             "dataset_path": dataset_path,
@@ -1635,20 +1645,20 @@ async def main(
             lbl: int(pd.Series([lab for lab, _ in label_results] if label_results else []).value_counts().get(lbl, 0))
             for lbl in RESPONSE_LABELS
         },
-        "label_errors": sum(1 for lab, _ in label_results if lab == "error") if label_results else 0,
+        "label_errors": sum(1 for lab, _ in label_results if lab == JUDGE_ERROR) if label_results else 0,
         "cot_audit": {
             "sample_size": len(audit_indices),
-            "valid_size": len([c for c in cot_results if c[0] != "error"]) if cot_results else 0,
-            "completion_mean": float(np.mean([c[0] for c in cot_results if c[0] != "error"]))
-                if any(c[0] != "error" for c in cot_results) else None,
-            "precision_mean": float(np.mean([c[1] for c in cot_results if c[0] != "error"]))
-                if any(c[0] != "error" for c in cot_results) else None,
+            "valid_size": len([c for c in cot_results if c[0] != JUDGE_ERROR]) if cot_results else 0,
+            "completion_mean": float(np.mean([c[0] for c in cot_results if c[0] != JUDGE_ERROR]))
+                if any(c[0] != JUDGE_ERROR for c in cot_results) else None,
+            "precision_mean": float(np.mean([c[1] for c in cot_results if c[0] != JUDGE_ERROR]))
+                if any(c[0] != JUDGE_ERROR for c in cot_results) else None,
         },
         "calibration": calib_summary,
         "artifacts": {
             "per_question_csv": f"eval_{run_ts}.csv",
             "labels_csv": f"response_labels_{run_ts}.csv" if label_results else None,
-            "cot_audit_csv": f"cot_audit_{run_ts}.csv" if any(c[0] != "error" for c in cot_results) else None,
+            "cot_audit_csv": f"cot_audit_{run_ts}.csv" if any(c[0] != JUDGE_ERROR for c in cot_results) else None,
             "logprobs_jsonl": f"logprobs_{run_ts}.jsonl" if any(token_sequences) else None,
             "summary_txt": f"eval_{run_ts}.txt",
         },
@@ -1744,7 +1754,6 @@ async def main(
         f"Average: {eval_results['precision_evaluation'].mean():.3f}",
     ]
 
-    #send_email_report(summary_lines)
     txt_path = os.path.join(output_dir, f"eval_{run_ts}.txt")
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write("\n".join(summary_lines))
@@ -1770,6 +1779,12 @@ if __name__ == "__main__":
     parser.add_argument("--version", default=None, help="Git tag/branch/commit of the OpenRAG build under evaluation")
     parser.add_argument("--git-commit", default=None, help="Resolved git commit SHA of the OpenRAG build under evaluation")
     parser.add_argument(
+        "--no-retrieval",
+        action="store_true",
+        help="Skip ID-based retrieval metrics even if the dataset has ground-truth chunks "
+        "(generation + judges still run). Use when chunk IDs don't match the evaluated index.",
+    )
+    parser.add_argument(
         "--ablation",
         action="store_true",
         help="After the benchmark, run the context-contribution ablation (closed-book vs OpenRAG).",
@@ -1794,6 +1809,7 @@ if __name__ == "__main__":
             run_id=args.run_id,
             version=args.version,
             git_commit=args.git_commit,
+            no_retrieval=args.no_retrieval,
         )
     )
 

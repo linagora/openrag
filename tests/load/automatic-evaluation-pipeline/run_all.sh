@@ -76,7 +76,6 @@ if [ -n "$GOLDEN" ]; then
   fi
   echo "Using golden dataset: $GOLDEN (skipping upload_files + generate_questions)"
   DATASET="$GOLDEN"
-  python3 benchmark.py --dataset "$DATASET" "${TAG_ARGS[@]}" "${EXTRA_ARGS[@]}"
 else
   python3 upload_files.py --partition "$PARTITION"
   echo "upload_files done"
@@ -85,9 +84,9 @@ else
   DATASET="$OUTPUT_DIR/dataset.json"
   python3 generate_questions.py --partition "$PARTITION" --output "$DATASET"
   echo "generate_questions done"
-
-  python3 benchmark.py --dataset "$DATASET" "${TAG_ARGS[@]}" "${EXTRA_ARGS[@]}"
 fi
+
+python3 benchmark.py --dataset "$DATASET" "${TAG_ARGS[@]}" "${EXTRA_ARGS[@]}"
 echo "benchmark done"
 
 # ---- snapshot what produced this run (optional; dashboard discovers runs via
