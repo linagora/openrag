@@ -8,6 +8,9 @@ shapes (see each class' docstring).
 
 from __future__ import annotations
 
+import asyncio
+from typing import NoReturn
+
 import httpx
 from core.rerankers import Reranker, reranker_registry
 from core.utils.exceptions import InferenceConnectionError, InferenceTimeoutError
@@ -24,8 +27,8 @@ def _response_detail(response: httpx.Response, limit: int = 500) -> str:
 
     A non-2xx reranker reply (notably a 422 from a pydantic-validated server)
     carries the exact reason — which field/type it rejected — in its body. The
-    status code alone is undiagnosable, so surface a truncated body in the raised
-    error. Best-effort: never let logging/formatting mask the original failure."""
+    status code alone is undiagnosable, so the truncated body is logged.
+    Best-effort: never let logging/formatting mask the original failure."""
     try:
         body = response.text.strip().replace("\n", " ")
     except Exception:  # noqa: BLE001 — body may be unreadable; the status still helps
@@ -33,6 +36,19 @@ def _response_detail(response: httpx.Response, limit: int = 500) -> str:
     if not body:
         return ""
     return body[:limit] + ("…" if len(body) > limit else "")
+
+
+def _raise_reranker_http_error(endpoint: str, exc: httpx.HTTPStatusError) -> NoReturn:
+    """Map a non-2xx reranker reply to ``InferenceConnectionError``.
+
+    The response body is logged for operators but deliberately kept out of the
+    raised message: ``InferenceConnectionError.message`` reaches API clients
+    verbatim (SSE error events, 503 ``detail``), and an upstream error body can
+    carry internals — stack traces, proxy pages, hostnames — that must not leak."""
+    status = exc.response.status_code
+    detail = _response_detail(exc.response)
+    logger.bind(endpoint=endpoint, status=status, body=detail).error("Reranker returned HTTP error")
+    raise InferenceConnectionError(f"Reranker at {endpoint} returned HTTP {status}") from exc
 
 
 @reranker_registry.register("infinity")
@@ -77,11 +93,7 @@ class InfinityReranker(Reranker):
         except httpx.TimeoutException as exc:
             raise InferenceTimeoutError(f"Reranker request timed out at {self._endpoint}") from exc
         except httpx.HTTPStatusError as exc:
-            detail = _response_detail(exc.response)
-            raise InferenceConnectionError(
-                f"Reranker at {self._endpoint} returned HTTP {exc.response.status_code}"
-                + (f": {detail}" if detail else "")
-            ) from exc
+            _raise_reranker_http_error(self._endpoint, exc)
         try:
             results = resp.json()["results"]
             return [(r["index"], r["relevance_score"]) for r in results]
@@ -92,6 +104,13 @@ class InfinityReranker(Reranker):
         await self._client.aclose()
 
 
+# TEI enforces ``--max-client-batch-size`` (default 32) on the number of texts
+# per /rerank request and rejects larger requests with HTTP 413. Retrieval
+# routinely reranks more candidates than that (retriever top_k defaults to 50),
+# so requests are split client-side and merged.
+_TEI_MAX_BATCH = 32
+
+
 @reranker_registry.register("tei")
 class TEIReranker(Reranker):
     """Reranker backed by a Hugging Face Text Embeddings Inference (TEI) server.
@@ -100,9 +119,14 @@ class TEIReranker(Reranker):
     request field is ``texts`` (not ``documents``), there is no ``model`` or
     ``top_n`` field (a TEI instance serves one fixed model and always scores
     every input), and the response is a bare JSON array of
-    ``{"index": ..., "score": ...}`` — not ``{"results": [...]}``. TEI does
-    sort its response by score descending, but we re-sort explicitly to keep
-    the ``Reranker`` ABC's ordering guarantee independent of that.
+    ``{"index": ..., "score": ...}`` — not ``{"results": [...]}``.
+
+    Documents are sent in batches of ``_TEI_MAX_BATCH`` (concurrently) because
+    TEI caps texts-per-request, and ``truncate: true`` is requested so one
+    over-long text degrades to a truncated score instead of failing the whole
+    request (Infinity truncates silently; TEI without it rejects the batch).
+    Results are merged and re-sorted client-side to honor the ``Reranker``
+    ABC's score-descending ordering guarantee.
     """
 
     def __init__(
@@ -124,10 +148,20 @@ class TEIReranker(Reranker):
     @with_circuit_breaker("reranker")
     @with_retry(max_attempts=2)
     async def rerank(self, query: str, documents: list[str], top_k: int | None = None) -> list[tuple[int, float]]:
+        offsets = range(0, len(documents), _TEI_MAX_BATCH)
+        batches = await asyncio.gather(
+            *(self._rerank_batch(query, documents[offset : offset + _TEI_MAX_BATCH], offset) for offset in offsets)
+        )
+        scored = [pair for batch in batches for pair in batch]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored[:top_k] if top_k is not None else scored
+
+    async def _rerank_batch(self, query: str, texts: list[str], offset: int) -> list[tuple[int, float]]:
+        """Score one ≤``_TEI_MAX_BATCH`` slice; indices are shifted back to the full list."""
         try:
             resp = await self._client.post(
                 f"{self._endpoint}/rerank",
-                json={"query": query, "texts": documents, "raw_scores": False},
+                json={"query": query, "texts": texts, "raw_scores": False, "truncate": True},
             )
             resp.raise_for_status()
         except httpx.ConnectError as exc:
@@ -135,20 +169,10 @@ class TEIReranker(Reranker):
         except httpx.TimeoutException as exc:
             raise InferenceTimeoutError(f"Reranker request timed out at {self._endpoint}") from exc
         except httpx.HTTPStatusError as exc:
-            detail = _response_detail(exc.response)
-            raise InferenceConnectionError(
-                f"Reranker at {self._endpoint} returned HTTP {exc.response.status_code}"
-                + (f": {detail}" if detail else "")
-            ) from exc
+            _raise_reranker_http_error(self._endpoint, exc)
         try:
-            results = sorted(resp.json(), key=lambda r: r["score"], reverse=True)
+            return [(r["index"] + offset, r["score"]) for r in resp.json()]
         except (KeyError, TypeError, ValueError) as exc:
-            raise InferenceConnectionError(f"Unexpected reranker response format from {self._endpoint}") from exc
-        if top_k is not None:
-            results = results[:top_k]
-        try:
-            return [(r["index"], r["score"]) for r in results]
-        except (KeyError, TypeError) as exc:
             raise InferenceConnectionError(f"Unexpected reranker response format from {self._endpoint}") from exc
 
     async def aclose(self) -> None:
@@ -195,11 +219,7 @@ class OpenAIReranker(Reranker):
         except httpx.TimeoutException as exc:
             raise InferenceTimeoutError(f"Reranker request timed out at {self._endpoint}") from exc
         except httpx.HTTPStatusError as exc:
-            detail = _response_detail(exc.response)
-            raise InferenceConnectionError(
-                f"Reranker at {self._endpoint} returned HTTP {exc.response.status_code}"
-                + (f": {detail}" if detail else "")
-            ) from exc
+            _raise_reranker_http_error(self._endpoint, exc)
         try:
             results = resp.json()["results"]
             return [(r["index"], r["relevance_score"]) for r in results]

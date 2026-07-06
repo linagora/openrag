@@ -100,16 +100,17 @@ class TestInfinityReranker:
             await reranker.rerank("query", DOCS)
 
     @pytest.mark.asyncio
-    async def test_http_error_surfaces_response_body(self, reranker):
-        # A 422 body names the exact rejected field; the raised error must carry
-        # it (status code alone is undiagnosable in production).
+    async def test_http_error_keeps_response_body_out_of_message(self, reranker):
+        # The 422 body names the rejected field, but the exception message
+        # reaches API clients verbatim (SSE errors / 503 detail) — the body is
+        # logged for operators, never embedded in the message.
         body = '{"detail":[{"loc":["body","top_n"],"msg":"field required"}]}'
         transport = httpx.MockTransport(lambda req: httpx.Response(422, text=body))
         reranker._client = httpx.AsyncClient(transport=transport)
         with pytest.raises(InferenceConnectionError) as exc:
             await reranker.rerank("query", DOCS)
         assert "422" in str(exc.value)
-        assert "field required" in str(exc.value)
+        assert "field required" not in str(exc.value)
 
     @pytest.mark.asyncio
     async def test_trailing_slash_stripped(self):
@@ -161,8 +162,10 @@ class TestTEIReranker:
         transport = httpx.MockTransport(capture)
         reranker._client = httpx.AsyncClient(transport=transport)
         await reranker.rerank("query", DOCS)
-        # TEI's contract: `texts`, no `documents`/`model`/`top_n`.
+        # TEI's contract: `texts`, no `documents`/`model`/`top_n`; `truncate`
+        # so one over-long text doesn't fail the whole request.
         assert captured["texts"] == DOCS
+        assert captured["truncate"] is True
         assert "documents" not in captured
         assert "top_n" not in captured
         assert "model" not in captured
@@ -184,14 +187,14 @@ class TestTEIReranker:
             await reranker.rerank("query", DOCS)
 
     @pytest.mark.asyncio
-    async def test_http_error_surfaces_response_body(self, reranker):
+    async def test_http_error_keeps_response_body_out_of_message(self, reranker):
         body = '{"error":"Input validation error: `texts` must be non-empty"}'
         transport = httpx.MockTransport(lambda req: httpx.Response(422, text=body))
         reranker._client = httpx.AsyncClient(transport=transport)
         with pytest.raises(InferenceConnectionError) as exc:
             await reranker.rerank("query", DOCS)
         assert "422" in str(exc.value)
-        assert "must be non-empty" in str(exc.value)
+        assert "must be non-empty" not in str(exc.value)
 
     @pytest.mark.asyncio
     async def test_connection_error(self, reranker):
@@ -202,6 +205,45 @@ class TestTEIReranker:
         reranker._client.post = fail
         with pytest.raises(InferenceConnectionError):
             await reranker.rerank("query", DOCS)
+
+    @pytest.mark.asyncio
+    async def test_batches_requests_over_tei_client_batch_limit(self, reranker):
+        # TEI rejects requests with more texts than --max-client-batch-size
+        # (default 32), so a 50-doc rerank must be split into two requests and
+        # each batch's local indices shifted back to full-list positions.
+        docs = [f"doc-{i}" for i in range(50)]
+        batch_sizes = []
+
+        def handler(req):
+            import json
+
+            texts = json.loads(req.content)["texts"]
+            batch_sizes.append(len(texts))
+            # Score each text by its global doc number so merged ordering is checkable.
+            items = [{"index": i, "score": int(t.split("-")[1]) / 100} for i, t in enumerate(texts)]
+            return httpx.Response(200, json=items)
+
+        reranker._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        result = await reranker.rerank("query", docs)
+        assert sorted(batch_sizes) == [18, 32]
+        assert [idx for idx, _ in result] == list(range(49, -1, -1))
+
+    @pytest.mark.asyncio
+    async def test_top_k_truncates_across_batches(self, reranker):
+        # The top-scored docs live in the second batch; top_k must apply to the
+        # merged, globally sorted results — not per batch.
+        docs = [f"doc-{i}" for i in range(40)]
+
+        def handler(req):
+            import json
+
+            texts = json.loads(req.content)["texts"]
+            items = [{"index": i, "score": int(t.split("-")[1]) / 100} for i, t in enumerate(texts)]
+            return httpx.Response(200, json=items)
+
+        reranker._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        result = await reranker.rerank("query", docs, top_k=3)
+        assert [idx for idx, _ in result] == [39, 38, 37]
 
 
 class TestOpenAIReranker:
@@ -237,14 +279,14 @@ class TestOpenAIReranker:
             await reranker.rerank("query", DOCS)
 
     @pytest.mark.asyncio
-    async def test_http_error_surfaces_response_body(self, reranker):
+    async def test_http_error_keeps_response_body_out_of_message(self, reranker):
         body = '{"detail":[{"loc":["body","documents"],"msg":"field required"}]}'
         transport = httpx.MockTransport(lambda req: httpx.Response(422, text=body))
         reranker._client = httpx.AsyncClient(transport=transport)
         with pytest.raises(InferenceConnectionError) as exc:
             await reranker.rerank("query", DOCS)
         assert "422" in str(exc.value)
-        assert "field required" in str(exc.value)
+        assert "field required" not in str(exc.value)
 
 
 class TestRegistryIntegration:
