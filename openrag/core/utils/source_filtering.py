@@ -127,7 +127,14 @@ async def stream_with_source_filtering(
         data = json.loads(line[len("data: ") :])
         data["model"] = model_name
 
-        choice = data.get("choices", [{}])[0]
+        # `choices` can be present but empty — e.g. the OpenAI/litellm final
+        # usage-report chunk sent when the caller requests
+        # `stream_options: {"include_usage": true}` has `"choices": []` and a
+        # top-level `"usage"` field. `.get("choices", [{}])` only falls back to
+        # the default when the key is *missing*, not when it's an empty list,
+        # so indexing straight into it raises IndexError on that chunk.
+        choices = data.get("choices") or [{}]
+        choice = choices[0]
         delta = choice.get("delta", {})
         content = delta.get("content", "") or ""
         finish_reason = choice.get("finish_reason")
