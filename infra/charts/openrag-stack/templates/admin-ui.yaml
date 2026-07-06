@@ -2,65 +2,111 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-admin-ui
+  name: {{ include "openrag-stack.fullname" . }}-admin-ui
   labels:
     app.kubernetes.io/name: admin-ui
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
 spec:
   replicas: {{ .Values.adminUi.replicaCount }}
   selector:
     matchLabels:
       app.kubernetes.io/name: admin-ui
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
   template:
     metadata:
       labels:
         app.kubernetes.io/name: admin-ui
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
     spec:
-      automountServiceAccountToken: {{ .Values.security.automountServiceAccountToken }}
+      {{- with .Values.adminUi.podSecurityContext }}
       securityContext:
-        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.adminUi.serviceAccountName }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+      {{- with .Values.adminUi.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ . }}
+      {{- end }}
       containers:
         - name: admin-ui
-          image: "{{ .Values.adminUi.image.repository }}:{{ .Values.adminUi.image.tag }}"
-          imagePullPolicy: {{ .Values.adminUi.imagePullPolicy }}
-          # nginx-unprivileged listens on :8080 as a non-root user, so it runs
-          # under the same hardened context (runAsNonRoot, drop ALL) as the API.
+          image: "{{ .Values.adminUi.image.registry | default .Values.global.image.registry }}/{{ .Values.adminUi.image.repository }}:{{ .Values.adminUi.image.tag }}"
+          imagePullPolicy: {{ .Values.adminUi.image.pullPolicy }}
+          {{- with .Values.adminUi.containerSecurityContext }}
           securityContext:
-            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - containerPort: {{ .Values.adminUi.service.targetPort }}
+              name: admin-ui
           # nginx serves the SPA at /app/; probe it so a crash-looping or stuck
           # pod is restarted and gated out of rollout traffic.
+          {{- if .Values.adminUi.probes.startup }}
+          startupProbe:
+            {{- toYaml .Values.adminUi.probes.startup | nindent 12 }}
+          {{- end }}
+          {{- if .Values.adminUi.probes.readiness }}
           readinessProbe:
-            httpGet:
-              path: /app/
-              port: {{ .Values.adminUi.service.targetPort }}
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            {{- toYaml .Values.adminUi.probes.readiness | nindent 12 }}
+          {{- end }}
+          {{- if .Values.adminUi.probes.liveness }}
           livenessProbe:
-            httpGet:
-              path: /app/
-              port: {{ .Values.adminUi.service.targetPort }}
-            initialDelaySeconds: 10
-            periodSeconds: 20
+            {{- toYaml .Values.adminUi.probes.liveness | nindent 12 }}
+          {{- end }}
           resources:
             {{- toYaml .Values.adminUi.resources | nindent 12 }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}-admin-ui
+  name: {{ include "openrag-stack.fullname" . }}-admin-ui
   labels:
     app.kubernetes.io/name: admin-ui
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
 spec:
   type: {{ .Values.adminUi.service.type }}
   selector:
     app.kubernetes.io/name: admin-ui
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
   ports:
     - port: {{ .Values.adminUi.service.port }}
       targetPort: {{ .Values.adminUi.service.targetPort }}
+      {{- if eq .Values.adminUi.service.type "NodePort" }}
+      nodePort: {{ .Values.adminUi.service.nodePort }}
+      {{- end }}
+  selector:
+    app.kubernetes.io/name: admin-ui
+    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+{{- if .Values.adminUi.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-admin-ui
+  {{- with .Values.adminUi.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.adminUi.ingress.className }}
+  ingressClassName: {{ .Values.adminUi.ingress.className | quote }}
+  {{- end }}
+  rules:
+    - http:
+        paths:
+          - path: {{ .Values.adminUi.ingress.path }}
+            pathType: {{ .Values.adminUi.ingress.pathType }}
+            backend:
+              service:
+                name: {{ include "openrag-stack.fullname" . }}-admin-ui
+                port:
+                  number: {{ .Values.adminUi.service.port }}
+      {{- with .Values.adminUi.ingress.host }}
+      host: {{ . | quote }}
+      {{- end }}
+  {{- with .Values.adminUi.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
 {{- end }}

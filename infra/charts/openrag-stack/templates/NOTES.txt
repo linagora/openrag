@@ -1,0 +1,29 @@
+OpenRAG stack deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+{{- $secretName := include "openrag-stack.secretName" . }}
+{{- $defaultVllmSecret := "rag-env-secrets" }}
+{{- if ne $secretName $defaultVllmSecret }}
+
+⚠  vLLM HF_TOKEN secret mismatch — action required
+---------------------------------------------------
+This release creates the env secret as: {{ $secretName }}
+The vLLM sub-chart values still reference: {{ $defaultVllmSecret }}
+
+vLLM serving pods will fail to mount HF_TOKEN unless you override the four
+hf_token.secretName entries. Re-run the install/upgrade with:
+
+  helm upgrade {{ .Release.Name }} ./openrag-stack --reuse-values \
+    --set "vllm.servingEngineSpec.modelSpec[0].hf_token.secretName={{ $secretName }}" \
+    --set "vllm.servingEngineSpec.modelSpec[1].hf_token.secretName={{ $secretName }}" \
+    --set "vllm.servingEngineSpec.modelSpec[2].hf_token.secretName={{ $secretName }}" \
+    --set "vllm.servingEngineSpec.modelSpec[3].hf_token.secretName={{ $secretName }}"
+
+Alternatively, edit values.yaml and set vllm.hfTokenSecretName: {{ $secretName }}
+The YAML anchor propagates the change to all four model entries automatically.
+
+{{- end }}
+
+Secrets provider: {{ .Values.env.secretsProvider.type | default "values" }}
+{{- if .Values.env.existingSecret }}
+Using existing secret: {{ .Values.env.existingSecret }}
+{{- end }}

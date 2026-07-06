@@ -1,8 +1,25 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: rag-env
+  name: {{ include "openrag-stack.fullname" . }}-env
 data:
 {{- range $key, $value := .Values.env.config }}
   {{ $key }}: "{{ tpl (printf "%v" $value) $ }}"
+{{- end }}
+{{- if .Values.proxy.enabled }}
+{{- if or (empty .Values.proxy.url) (eq .Values.proxy.url "http://192.168.100.100:80") }}
+{{- fail "proxy.enabled is true but proxy.url is not set or still uses the placeholder default. Set a valid proxy URL in proxy.url." }}
+{{- end }}
+{{- $proxyKeys := list "HTTP_PROXY" "HTTPS_PROXY" "http_proxy" "https_proxy" "NO_PROXY" "no_proxy" }}
+{{- range $proxyKeys }}
+{{- if hasKey $.Values.env.config . }}
+{{- fail (printf "proxy.enabled is true but env.config already defines %q — remove it from env.config to avoid a duplicate ConfigMap key." .) }}
+{{- end }}
+{{- end }}
+  HTTP_PROXY: {{ .Values.proxy.url | quote }}
+  HTTPS_PROXY: {{ .Values.proxy.url | quote }}
+  http_proxy: {{ .Values.proxy.url | quote }}
+  https_proxy: {{ .Values.proxy.url | quote }}
+  NO_PROXY: {{ .Values.proxy.noProxy | quote }}
+  no_proxy: {{ .Values.proxy.noProxy | quote }}
 {{- end }}

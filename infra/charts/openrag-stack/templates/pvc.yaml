@@ -2,57 +2,72 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: rag-model-weights
+  name: {{ include "openrag-stack.fullname" . }}-model-weights
+  {{- with .Values.persistence.annotations }}
   annotations:
-    "helm.sh/resource-policy": keep
-
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   accessModes:
     - {{ .Values.persistence.accessMode }}
   resources:
     requests:
       storage: {{ .Values.persistence.volumes.modelWeights.size }}
+  {{- if .Values.persistence.storageClass }}
   storageClassName: {{ .Values.persistence.storageClass }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: rag-data
+  name: {{ include "openrag-stack.fullname" . }}-data
+  {{- with .Values.persistence.annotations }}
   annotations:
-    "helm.sh/resource-policy": keep
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   accessModes:
     - {{ .Values.persistence.accessMode }}
   resources:
     requests:
       storage: {{ .Values.persistence.volumes.data.size }}
+  {{- if .Values.persistence.storageClass }}
   storageClassName: {{ .Values.persistence.storageClass }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: rag-logs
+  name: {{ include "openrag-stack.fullname" . }}-logs
+  {{- with .Values.persistence.annotations }}
   annotations:
-    "helm.sh/resource-policy": keep
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   accessModes:
     - {{ .Values.persistence.accessMode }}
   resources:
     requests:
       storage: {{ .Values.persistence.volumes.logs.size }}
+  {{- if .Values.persistence.storageClass }}
   storageClassName: {{ .Values.persistence.storageClass }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: rag-venv
+  name: {{ include "openrag-stack.fullname" . }}-venv
+  {{- with .Values.persistence.annotations }}
   annotations:
-    "helm.sh/resource-policy": keep
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   accessModes:
     - {{ .Values.persistence.accessMode }}
   resources:
     requests:
       storage: {{ .Values.persistence.volumes.venv.size }}
+  {{- if .Values.persistence.storageClass }}
   storageClassName: {{ .Values.persistence.storageClass }}
+  {{- end }}
 {{- end }}

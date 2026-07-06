@@ -1,56 +1,68 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-openrag
+  name: {{ include "openrag-stack.fullname" . }}-openrag
   labels:
     app.kubernetes.io/name: openrag
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
 spec:
   replicas: {{ .Values.openrag.replicas }}
   selector:
     matchLabels:
       app.kubernetes.io/name: openrag
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
   template:
     metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-env.yaml") . | sha256sum }}
       labels:
         app.kubernetes.io/name: openrag
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
     spec:
-      automountServiceAccountToken: {{ .Values.security.automountServiceAccountToken }}
+      {{- with .Values.openrag.podSecurityContext }}
       securityContext:
-        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
-      initContainers:
-        - name: init-venv
-          image: "{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
-          securityContext:
-            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
-          command:
-            - sh
-            - -c
-            - |
-              echo "Waiting for Python env in /app/.venv..."
-              while [ ! -f /app/.venv/.ready ]; do
-                sleep 3
-              done
-              echo "Venv is ready."
-          volumeMounts:
-            - name: venv
-              mountPath: /app/.venv
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.openrag.serviceAccountName }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+      {{- with .Values.openrag.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ . }}
+      {{- end }}
       containers:
         - name: openrag
-          image: "{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
+          image: "{{ .Values.openrag.image.registry | default .Values.global.image.registry }}/{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
+          imagePullPolicy: {{ .Values.openrag.image.pullPolicy }}
+          {{- with .Values.openrag.containerSecurityContext }}
           securityContext:
-            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
-            - containerPort: {{ .Values.openrag.service.port }}
+            - containerPort: {{ .Values.openrag.service.targetPort }}
+              name: openrag
+            {{- if .Values.openrag.rayDashboard.ingress.enabled }}
+            - containerPort: 8265
+              name: ray-dashboard
+            {{- end }}
           resources:
             {{- toYaml .Values.openrag.resources | nindent 12 }}
+          {{- if .Values.openrag.probes.startup }}
+          startupProbe:
+            {{- toYaml .Values.openrag.probes.startup | nindent 12 }}
+          {{- end }}
+          {{- if .Values.openrag.probes.readiness }}
+          readinessProbe:
+            {{- toYaml .Values.openrag.probes.readiness | nindent 12 }}
+          {{- end }}
+          {{- if .Values.openrag.probes.liveness }}
+          livenessProbe:
+            {{- toYaml .Values.openrag.probes.liveness | nindent 12 }}
+          {{- end }}
           envFrom:
             - configMapRef:
-                name: rag-env
+                name: {{ include "openrag-stack.fullname" . }}-env
             - secretRef:
-                name: rag-env-secrets
+                name: {{ include "openrag-stack.secretName" . }}
           volumeMounts:
             - name: model-weights
               mountPath: /app/model_weights
@@ -60,33 +72,135 @@ spec:
               mountPath: /app/logs
             - name: venv
               mountPath: /app/.venv
+            {{- if .Values.openrag.shmSize }}
+            - name: dshm
+              mountPath: /dev/shm
+            {{- end }}
+            {{- with .Values.openrag.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: model-weights
           persistentVolumeClaim:
-            claimName: rag-model-weights
+            claimName: {{ include "openrag-stack.fullname" . }}-model-weights
         - name: data
           persistentVolumeClaim:
-            claimName: rag-data
+            claimName: {{ include "openrag-stack.fullname" . }}-data
         - name: logs
           persistentVolumeClaim:
-            claimName: rag-logs
+            claimName: {{ include "openrag-stack.fullname" . }}-logs
         - name: venv
           persistentVolumeClaim:
-            claimName: rag-venv
+            claimName: {{ include "openrag-stack.fullname" . }}-venv
+        {{- if .Values.openrag.shmSize }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.openrag.shmSize }}
+        {{- end }}
+        {{- with .Values.openrag.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}-openrag
+  name: {{ include "openrag-stack.fullname" . }}-openrag
   labels:
     app.kubernetes.io/name: openrag
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
 spec:
   selector:
     app.kubernetes.io/name: openrag
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
   ports:
-    - protocol: TCP
+    - name: openrag
+      protocol: TCP
       port: {{ .Values.openrag.service.port }}
-      targetPort: {{ .Values.openrag.service.port }}
+      targetPort: {{ .Values.openrag.service.targetPort }}
+    {{- if .Values.openrag.rayDashboard.ingress.enabled }}
+    - name: ray-dashboard
+      protocol: TCP
+      port: 8265
+      targetPort: 8265
+    {{- end }}
   type: {{ .Values.openrag.service.type }}
+{{- if .Values.openrag.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-openrag
+  {{- with .Values.openrag.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.openrag.ingress.className }}
+  ingressClassName: {{ .Values.openrag.ingress.className | quote }}
+  {{- end }}
+  rules:
+    - http:
+        paths:
+          {{- if .Values.adminUi.enabled }}
+          - path: /app/
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "openrag-stack.fullname" . }}-admin-ui
+                port:
+                  number: {{ .Values.adminUi.service.port }}
+          {{- end }}
+          - path: {{ .Values.openrag.ingress.path }}
+            pathType: {{ .Values.openrag.ingress.pathType }}
+            backend:
+              service:
+                {{- if eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true" }}
+                name: {{ include "openrag-stack.fullname" . }}-raycluster-head-svc
+                port:
+                  number: {{ .Values.env.config.RAY_SERVE_PORT | int }}
+                {{- else }}
+                name: {{ include "openrag-stack.fullname" . }}-openrag
+                port:
+                  name: openrag
+                {{- end }}
+      {{- with .Values.openrag.ingress.host }}
+      host: {{ . | quote }}
+      {{- end }}
+  {{- with .Values.openrag.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- if .Values.openrag.rayDashboard.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-openrag-ray-dashboard
+  {{- with .Values.openrag.rayDashboard.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.openrag.rayDashboard.ingress.className }}
+  ingressClassName: {{ .Values.openrag.rayDashboard.ingress.className | quote }}
+  {{- end }}
+  rules:
+    - http:
+        paths:
+          - path: {{ .Values.openrag.rayDashboard.ingress.path }}
+            pathType: {{ .Values.openrag.rayDashboard.ingress.pathType }}
+            backend:
+              service:
+                name: {{ include "openrag-stack.fullname" . }}-openrag
+                port:
+                  name: ray-dashboard
+      {{- with .Values.openrag.rayDashboard.ingress.host }}
+      host: {{ . | quote }}
+      {{- end }}
+  {{- with .Values.openrag.rayDashboard.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

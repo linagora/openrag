@@ -51,12 +51,13 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Create the name of the service account to use
+Environment secret name used by all consumers.
+When env.existingSecret is set, that name is returned directly.
 */}}
-{{- define "openrag-stack.serviceAccountName" -}}
-{{- if .Values.serviceAccount.create }}
-{{- default (include "openrag-stack.fullname" .) .Values.serviceAccount.name }}
+{{- define "openrag-stack.secretName" -}}
+{{- if .Values.env.existingSecret }}
+{{- .Values.env.existingSecret }}
 {{- else }}
-{{- default "default" .Values.serviceAccount.name }}
+{{- printf "%s-env-secrets" (include "openrag-stack.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}

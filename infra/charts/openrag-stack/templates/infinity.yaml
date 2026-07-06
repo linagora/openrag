@@ -1,32 +1,44 @@
+{{- if .Values.reranker.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-reranker
+  name: {{ include "openrag-stack.fullname" . }}-reranker
   labels:
     app.kubernetes.io/name: reranker
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
 spec:
   replicas: {{ .Values.reranker.replicas }}
   selector:
     matchLabels:
       app.kubernetes.io/name: reranker
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
   template:
     metadata:
       labels:
         app.kubernetes.io/name: reranker
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
     spec:
-      automountServiceAccountToken: {{ .Values.security.automountServiceAccountToken }}
+      {{- with .Values.reranker.podSecurityContext }}
       securityContext:
-        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.reranker.serviceAccountName }}
+      serviceAccountName: {{ . }}
+      {{- end }}
+      {{- with .Values.reranker.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ . }}
+      {{- end }}
+      {{- if .Values.reranker.runtimeClassName }}
       runtimeClassName: {{ .Values.reranker.runtimeClassName }}
-      nodeSelector: {{- toYaml .Values.reranker.nodeSelector | nindent 8 }}
+      {{- end }}
+      {{- with .Values.reranker.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: reranker
-          image: "{{ .Values.reranker.image.repository }}:{{ .Values.reranker.image.tag }}"
+          image: "{{ .Values.reranker.image.registry | default .Values.global.image.registry }}/{{ .Values.reranker.image.repository }}:{{ .Values.reranker.image.tag }}"
           securityContext:
-            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
+            {{- toYaml .Values.reranker.containerSecurityContext | nindent 12 }}
           args:
             - "v2"
             - "--model-id"
@@ -37,30 +49,45 @@ spec:
             - containerPort: {{ .Values.reranker.service.port }}
           resources:
             {{- toYaml .Values.reranker.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.reranker.service.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.reranker.service.port }}
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
           volumeMounts:
             - name: hf-cache
               mountPath: /app/.cache/huggingface
           envFrom:
             - configMapRef:
-                name: rag-env
+                name: {{ include "openrag-stack.fullname" . }}-env
       volumes:
         - name: hf-cache
           persistentVolumeClaim:
-            claimName: rag-model-weights
+            claimName: {{ include "openrag-stack.fullname" . }}-model-weights
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}-reranker
+  name: {{ include "openrag-stack.fullname" . }}-reranker
   labels:
     app.kubernetes.io/name: reranker
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
 spec:
   selector:
     app.kubernetes.io/name: reranker
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
   ports:
     - protocol: TCP
       port: {{ .Values.reranker.service.port }}
       targetPort: {{ .Values.reranker.service.port }}
   type: {{ .Values.reranker.service.type }}
+{{- end }}

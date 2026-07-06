@@ -1,47 +1,39 @@
+{{- if .Values.ray.enabled }}
 apiVersion: ray.io/v1
 kind: RayCluster
 metadata:
-  name: raycluster
+  name: {{ include "openrag-stack.fullname" . }}-raycluster
+  {{- with .Values.ray.annotations }}
   annotations:
-    ray.io/overwrite-container-cmd: "true"
+    {{- . | toYaml | nindent 4 }}
+  {{- end }}
 spec:
-  rayVersion: "2.47.1"
-  enableInTreeAutoscaling: false
-
+  rayVersion: {{ .Values.ray.rayVersion }}
+  enableInTreeAutoscaling: {{ .Values.ray.enableInTreeAutoscaling }}
   headGroupSpec:
     serviceType: ClusterIP
     template:
       spec:
-        automountServiceAccountToken: {{ .Values.security.automountServiceAccountToken }}
+        {{- with .Values.ray.nodeSelector }}
+        nodeSelector: {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with .Values.ray.serviceAccountName }}
+        serviceAccountName: {{ . }}
+        {{- end }}
+        {{- with .Values.ray.automountServiceAccountToken }}
+        automountServiceAccountToken: {{ . }}
+        {{- end }}
+        {{- with .Values.ray.podSecurityContext }}
         securityContext:
-          {{- toYaml .Values.security.podSecurityContext | nindent 10 }}
-        nodeSelector: {{- toYaml .Values.ray.nodeSelector | nindent 12 }}
-        initContainers:
-          - name: init-venv-sync
-            image: {{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}
-            securityContext:
-              {{- toYaml .Values.security.containerSecurityContext | nindent 14 }}
-            command:
-              - sh
-              - -c
-              - |
-                if [ -f /app/.venv/.ready ]; then
-                  echo "Existing env detected, skipping install."
-                else
-                  echo "No env ready, cleaning and syncing..."
-                  rm -rf /app/.venv/*
-                  uv sync
-                  touch /app/.venv/.ready
-                fi
-            volumeMounts:
-              - name: venv
-                mountPath: /app/.venv
-
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         containers:
           - name: ray-head
-            image: {{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}
+            image: "{{ .Values.ray.image.registry | default .Values.global.image.registry }}/{{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}"
+            {{- with .Values.ray.containerSecurityContext }}
             securityContext:
-              {{- toYaml .Values.security.containerSecurityContext | nindent 14 }}
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
             command: ["uv"]
             args:
               - "run"
@@ -70,29 +62,25 @@ spec:
                 mountPath: /app/data
               - name: logs
                 mountPath: /app/logs
-              - name: venv
-                mountPath: /app/.venv
             envFrom:
               - configMapRef:
-                  name: rag-env
+                  name: {{ include "openrag-stack.fullname" . }}-env
               - secretRef:
-                  name: rag-env-secrets
+                  name: {{ include "openrag-stack.secretName" . }}
+            {{- with .Values.ray.resources.head }}
             resources:
-              limits:
-                nvidia.com/gpu: 1
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
         volumes:
           - name: model-weights
             persistentVolumeClaim:
-              claimName: rag-model-weights
+              claimName: {{ include "openrag-stack.fullname" . }}-model-weights
           - name: data
             persistentVolumeClaim:
-              claimName: rag-data
+              claimName: {{ include "openrag-stack.fullname" . }}-data
           - name: logs
             persistentVolumeClaim:
-              claimName: rag-logs
-          - name: venv
-            persistentVolumeClaim:
-              claimName: rag-venv
+              claimName: {{ include "openrag-stack.fullname" . }}-logs
 
   workerGroupSpecs:
   {{- range $i, $e := until (.Values.ray.workers.count | int) }}
@@ -102,31 +90,26 @@ spec:
       maxReplicas: {{ $.Values.ray.workers.maxReplicas }}
       template:
         spec:
-          automountServiceAccountToken: {{ $.Values.security.automountServiceAccountToken }}
-          securityContext:
-            {{- toYaml $.Values.security.podSecurityContext | nindent 12 }}
-          initContainers:
-            - name: init-venv
-              image: {{ $.Values.ray.image.repository }}:{{ $.Values.ray.image.tag }}
-              securityContext:
-                {{- toYaml $.Values.security.containerSecurityContext | nindent 16 }}
-              command:
-                - sh
-                - -c
-                - |
-                  echo "Waiting for Python env in /app/.venv..."
-                  while [ ! -f /app/.venv/.ready ]; do
-                    sleep 3
-                  done
-                  echo "Venv is ready."
-              volumeMounts:
-                - name: venv
-                  mountPath: /app/.venv
+        {{- with .Values.ray.nodeSelector }}
+        nodeSelector: {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with .Values.ray.serviceAccountName }}
+        serviceAccountName: {{ . }}
+        {{- end }}
+        {{- with .Values.ray.automountServiceAccountToken }}
+        automountServiceAccountToken: {{ . }}
+        {{- end }}
+        {{- with .Values.ray.podSecurityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
           containers:
             - name: ray-worker
-              image: {{ $.Values.ray.image.repository }}:{{ $.Values.ray.image.tag }}
+              image: "{{ $.Values.ray.image.registry | default $.Values.global.image.registry }}/{{ $.Values.ray.image.repository }}:{{ $.Values.ray.image.tag }}"
+              {{- with .Values.ray.containerSecurityContext }}
               securityContext:
-                {{- toYaml $.Values.security.containerSecurityContext | nindent 16 }}
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
               command: ["/bin/bash", "-lc", "--"]
               args:
                 - uv run $KUBERAY_GEN_RAY_START_CMD
@@ -137,27 +120,56 @@ spec:
                   mountPath: /app/data
                 - name: logs
                   mountPath: /app/logs
-                - name: venv
-                  mountPath: /app/.venv
               envFrom:
                 - configMapRef:
-                    name: rag-env
+                    name: {{ include "openrag-stack.fullname" $ }}-env
                 - secretRef:
-                    name: rag-env-secrets
+                    name: {{ include "openrag-stack.secretName" $ }}
+              {{- with $.Values.ray.resources.worker }}
               resources:
-                limits:
-                  nvidia.com/gpu: 1
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
           volumes:
             - name: model-weights
               persistentVolumeClaim:
-                claimName: rag-model-weights
+                claimName: {{ include "openrag-stack.fullname" $ }}-model-weights
             - name: data
               persistentVolumeClaim:
-                claimName: rag-data
+                claimName: {{ include "openrag-stack.fullname" $ }}-data
             - name: logs
               persistentVolumeClaim:
-                claimName: rag-logs
-            - name: venv
-              persistentVolumeClaim:
-                claimName: rag-venv
+                claimName: {{ include "openrag-stack.fullname" $ }}-logs
   {{- end }}
+{{- if .Values.ray.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-raycluster
+  {{- with .Values.ray.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ray.ingress.className }}
+  ingressClassName: {{ .Values.ray.ingress.className | quote }}
+  {{- end }}
+  rules:
+    - http:
+        paths:
+          - path: {{ .Values.ray.ingress.path }}
+            pathType: {{ .Values.ray.ingress.pathType }}
+            backend:
+              service:
+                name: {{ include "openrag-stack.fullname" . }}-raycluster-head-svc
+                port:
+                  number: {{ .Values.env.config.RAY_DASHBOARD_PORT }}
+      {{- with .Values.ray.ingress.host }}
+      host: {{ . | quote }}
+      {{- end }}
+  {{- with .Values.ray.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}
