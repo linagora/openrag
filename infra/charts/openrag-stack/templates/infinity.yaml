@@ -4,19 +4,16 @@ kind: Deployment
 metadata:
   name: {{ include "openrag-stack.fullname" . }}-reranker
   labels:
-    app.kubernetes.io/name: reranker
-    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+    {{- include "openrag-stack.componentLabels" (dict "component" "reranker" "context" $) | nindent 4 }}
 spec:
   replicas: {{ .Values.reranker.replicas }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: reranker
-      app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+      {{- include "openrag-stack.componentSelectorLabels" (dict "component" "reranker" "context" $) | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: reranker
-        app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+        {{- include "openrag-stack.componentSelectorLabels" (dict "component" "reranker" "context" $) | nindent 8 }}
     spec:
       {{- with .Values.reranker.podSecurityContext }}
       securityContext:
@@ -79,12 +76,10 @@ kind: Service
 metadata:
   name: {{ include "openrag-stack.fullname" . }}-reranker
   labels:
-    app.kubernetes.io/name: reranker
-    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+    {{- include "openrag-stack.componentLabels" (dict "component" "reranker" "context" $) | nindent 4 }}
 spec:
   selector:
-    app.kubernetes.io/name: reranker
-    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+    {{- include "openrag-stack.componentSelectorLabels" (dict "component" "reranker" "context" $) | nindent 4 }}
   ports:
     - protocol: TCP
       port: {{ .Values.reranker.service.port }}

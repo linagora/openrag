@@ -1,3 +1,16 @@
+# Pinned so every resource name is deterministic regardless of the Helm
+# release name — required for ArgoCD, which by default sets .Release.Name to
+# the Application's own name (or whatever releaseName it's given), not
+# something this chart controls. postgresql.fullnameOverride and
+# milvus.fullnameOverride below are kept in sync with this value by hand
+# (subchart values.yaml is static, it can't reference this one).
+# NOTE: the vllm-stack sub-chart has no such override hook — its Service names
+# (.../*-engine-service) are permanently derived from the real Release.Name
+# (see BASE_URL/EMBEDDER_BASE_URL/VLM_BASE_URL/TRANSCRIBER_BASE_URL below). If
+# deploying via ArgoCD, set spec.source.helm.releaseName to this same value
+# ("openrag") so those URLs resolve too.
+fullnameOverride: "openrag"
+
 global:
   image:
     registry: docker.io
@@ -76,6 +89,10 @@ ray:
 # === PostgreSQL (bitnami) ===
 postgresql:
   enabled: true
+  # Kept in sync with the root fullnameOverride ("openrag") by hand — see the
+  # note above it. Without this, the postgresql sub-chart names its own
+  # Service from the real Release.Name instead, which won't match POSTGRES_HOST below.
+  fullnameOverride: "openrag-postgresql"
   auth:
     username: &pgUser root
     # Override at install, e.g. --set postgresql.auth.password=$(openssl rand -hex 16)
@@ -104,6 +121,10 @@ postgresProvisioning:
 # === Milvus ===
 milvus:
   enabled: true
+  # Kept in sync with the root fullnameOverride ("openrag") by hand — see the
+  # note on it above. Without this, the milvus sub-chart names its own proxy
+  # Service from the real Release.Name instead, which won't match VDB_HOST.
+  fullnameOverride: "openrag-milvus"
   image:
     all: { tag: v2.6.0 }
   cluster: { enabled: true }
@@ -140,10 +161,13 @@ vllm:
   # Single source for the HF_TOKEN secret name passed to all four model specs.
   # YAML anchor: editing this value propagates to all four hf_token.secretName entries below.
   # Must match the chart env secret name ({{ include "openrag-stack.fullname" . }}-env-secrets by default).
-  # values.yaml is not templated, so set this manually when your release is not named "rag":
-  #   --set "vllm.servingEngineSpec.modelSpec[0].hf_token.secretName=<release>-env-secrets"
-  #   (repeat for indices 1, 2, 3 — see NOTES after install for the exact commands)
-  hfTokenSecretName: &vllmHfTokenSecretName "rag-env-secrets"
+  # values.yaml is not templated, so if you override fullnameOverride ("openrag")
+  # this must be updated to match too — see templates/NOTES.txt for a warning if
+  # they ever drift, and NEVER use "--set vllm.servingEngineSpec.modelSpec[N]...":
+  # Helm replaces lists wholesale rather than merging them by index, so a
+  # partial override there silently wipes repository/tag/modelURL/resources
+  # for all four models (see NOTES.txt for the safe way to override this).
+  hfTokenSecretName: &vllmHfTokenSecretName "openrag-env-secrets"
 
   servingEngineSpec:
     enableEngine: true
@@ -519,18 +543,32 @@ env:
 
   config:
     # LLM
-    BASE_URL: 'http://{{ include "openrag-stack.fullname" . }}-llm-engine-service/v1/'
+    # NOTE: postgresql/milvus are sub-charts pinned via their own
+    # fullnameOverride (see values above) so they honor "fullname" like the
+    # rest of this chart. vllm-stack has no such override in its own templates
+    # — its *-engine-service Services are permanently named from the real
+    # Release.Name, so BASE_URL/VLM_BASE_URL/EMBEDDER_BASE_URL/
+    # TRANSCRIBER_BASE_URL below must stay on .Release.Name. Under ArgoCD, set
+    # spec.source.helm.releaseName to match fullnameOverride ("openrag") so
+    # these resolve too.
+    BASE_URL: 'http://{{ .Release.Name }}-llm-engine-service/v1/'
     MODEL: '{{ .Values.vllm.llmModelName }}'
     LLM_SEMAPHORE: "50"
 
     # VLM
-    VLM_BASE_URL: 'http://{{ include "openrag-stack.fullname" . }}-vlm-engine-service/v1/'
+    VLM_BASE_URL: 'http://{{ .Release.Name }}-vlm-engine-service/v1/'
     VLM_MODEL: '{{ .Values.vllm.vlmModelName }}'
     VLM_SEMAPHORE: "50"
 
     # App
     APP_PORT: "8080"
-    ENABLE_RAY_SERVE: "true"
+    # Requires ray.enabled=true (a separate RayCluster with its own "serve" port
+    # 80 exposed on {{ fullname }}-raycluster-head-svc — see templates/openrag.yaml
+    # Ingress). With the default ray.enabled=false, the app is expected to run
+    # plain uvicorn on APP_PORT instead, which is what container/service/probes
+    # in templates/openrag.yaml are wired for. Flip both together (see
+    # values-linagora.yaml for the ray.enabled=true pairing).
+    ENABLE_RAY_SERVE: "false"
     RAY_SERVE_NUM_REPLICAS: "4"
     RAY_SERVE_PORT: "80"
 
@@ -538,11 +576,15 @@ env:
     SAVE_UPLOADED_FILES: 'http://{{ include "openrag-stack.fullname" . }}-admin-ui:{{ .Values.adminUi.service.port }}/milvus'
 
     # Vector DB
-    VDB_HOST: "{{ .Release.Name }}-milvus"
+    # milvus.fullnameOverride above pins this sub-chart's proxy Service name to
+    # match "fullname" instead of the real Release.Name (see note near the top).
+    VDB_HOST: '{{ include "openrag-stack.fullname" . }}-milvus'
     VDB_PORT: "19530"
     VDB_CONNECTOR_NAME: "milvus"
 
     # PostgreSQL
+    # postgresql.fullnameOverride above pins this sub-chart's Service name to
+    # match "fullname" instead of the real Release.Name (see note near the top).
     POSTGRES_HOST: '{{ include "openrag-stack.fullname" . }}-postgresql'
     POSTGRES_PORT: *pgPort
     POSTGRES_USER: *pgUser
@@ -553,14 +595,14 @@ env:
 
     # Embedder
     EMBEDDER_MODEL_NAME: '{{ .Values.vllm.embedderModelName }}'
-    EMBEDDER_BASE_URL: 'http://{{ include "openrag-stack.fullname" . }}-embedder-engine-service/v1'
+    EMBEDDER_BASE_URL: 'http://{{ .Release.Name }}-embedder-engine-service/v1'
 
     # Reranker
     RERANKER_MODEL: '{{ .Values.reranker.rerankerModelName }}'
     RERANKER_ENABLED: "true"
     RERANKER_TOP_K: "4"
     RERANKER_BASE_URL: 'http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.servicePort }}'
-    RERANKER_MODEL_TYPE: "infinity"
+    RERANKER_PROVIDER: "infinity"
 
     # Prompts: templates ship inside the package (openrag/prompts/templates);
     # set PROMPTS_DIR only to override with a custom template directory.
@@ -572,7 +614,7 @@ env:
     MARKER_MAX_PROCESSES: "15"
     MARKER_POOL_SIZE: "3"
     MARKER_NUM_GPUS: "0.6"
-    TRANSCRIBER_BASE_URL: 'http://{{ include "openrag-stack.fullname" . }}-whisper-engine-service/v1'
+    TRANSCRIBER_BASE_URL: 'http://{{ .Release.Name }}-whisper-engine-service/v1'
 
     # Ray
     # RAY_ADDRESS: 'ray://{{ include "openrag-stack.fullname" . }}-raycluster-head-svc:10001'

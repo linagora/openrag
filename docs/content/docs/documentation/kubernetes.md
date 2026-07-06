@@ -21,7 +21,7 @@ This guide explains how to deploy the **OpenRAG** stack on a Kubernetes cluster 
 
    - Copy or create a new `values.yaml` at the root of your repo.
    - You can see the full example file inside the chart:
-     [values.yaml](https://github.com/linagora/openrag/blob/dev/charts/openrag-stack/values.yaml)
+     [values.yaml](https://github.com/linagora/openrag/blob/dev/infra/charts/openrag-stack/values.yaml)
    - Customize the values you need (e.g., image tags, resources, ingress host, storage class, environment variables, secrets).
 
 2. **Set environment and secrets**:
@@ -36,13 +36,13 @@ This guide explains how to deploy the **OpenRAG** stack on a Kubernetes cluster 
    helm upgrade\
       --install openrag oci://ghcr.io/linagora/openrag-stack\
       -f ./values.yaml\
-      --version 0.1.0
+      --version 0.6.0
    ```
 
    - `openrag` is the Helm release name.
    - `oci://ghcr.io/linagora/openrag-stack` is the remote chart location.
    - `-f ./values.yaml` specifies your custom configuration.
-   - `--version 0.1.0` ensures you deploy a specific chart version.
+   - `--version 0.6.0` ensures you deploy a specific chart version — check `Chart.yaml` for the current version before installing.
 
 ---
 

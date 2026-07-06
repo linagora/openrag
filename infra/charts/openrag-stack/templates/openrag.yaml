@@ -3,21 +3,18 @@ kind: Deployment
 metadata:
   name: {{ include "openrag-stack.fullname" . }}-openrag
   labels:
-    app.kubernetes.io/name: openrag
-    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+    {{- include "openrag-stack.componentLabels" (dict "component" "openrag" "context" $) | nindent 4 }}
 spec:
   replicas: {{ .Values.openrag.replicas }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: openrag
-      app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+      {{- include "openrag-stack.componentSelectorLabels" (dict "component" "openrag" "context" $) | nindent 6 }}
   template:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap-env.yaml") . | sha256sum }}
       labels:
-        app.kubernetes.io/name: openrag
-        app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+        {{- include "openrag-stack.componentSelectorLabels" (dict "component" "openrag" "context" $) | nindent 8 }}
     spec:
       {{- with .Values.openrag.podSecurityContext }}
       securityContext:
@@ -107,12 +104,10 @@ kind: Service
 metadata:
   name: {{ include "openrag-stack.fullname" . }}-openrag
   labels:
-    app.kubernetes.io/name: openrag
-    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+    {{- include "openrag-stack.componentLabels" (dict "component" "openrag" "context" $) | nindent 4 }}
 spec:
   selector:
-    app.kubernetes.io/name: openrag
-    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+    {{- include "openrag-stack.componentSelectorLabels" (dict "component" "openrag" "context" $) | nindent 4 }}
   ports:
     - name: openrag
       protocol: TCP
@@ -155,7 +150,11 @@ spec:
             pathType: {{ .Values.openrag.ingress.pathType }}
             backend:
               service:
-                {{- if eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true" }}
+                {{- /* raycluster-head-svc only exists when ray.enabled renders the
+                   RayCluster (templates/raycluster.yaml) — ENABLE_RAY_SERVE alone
+                   isn't enough, otherwise this Ingress can dangle at a Service
+                   that was never created. */}}
+                {{- if and .Values.ray.enabled (eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true") }}
                 name: {{ include "openrag-stack.fullname" . }}-raycluster-head-svc
                 port:
                   number: {{ .Values.env.config.RAY_SERVE_PORT | int }}

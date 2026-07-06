@@ -1,25 +1,39 @@
 OpenRAG stack deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
 
 {{- $secretName := include "openrag-stack.secretName" . }}
-{{- $defaultVllmSecret := "rag-env-secrets" }}
-{{- if ne $secretName $defaultVllmSecret }}
+{{- $configuredVllmSecret := .Values.vllm.hfTokenSecretName }}
+{{- if ne $secretName $configuredVllmSecret }}
 
 ⚠  vLLM HF_TOKEN secret mismatch — action required
 ---------------------------------------------------
 This release creates the env secret as: {{ $secretName }}
-The vLLM sub-chart values still reference: {{ $defaultVllmSecret }}
+The vLLM sub-chart values still reference: {{ $configuredVllmSecret }}
 
-vLLM serving pods will fail to mount HF_TOKEN unless you override the four
-hf_token.secretName entries. Re-run the install/upgrade with:
+vLLM serving pods will fail to mount HF_TOKEN unless you fix this.
 
-  helm upgrade {{ .Release.Name }} ./openrag-stack --reuse-values \
-    --set "vllm.servingEngineSpec.modelSpec[0].hf_token.secretName={{ $secretName }}" \
-    --set "vllm.servingEngineSpec.modelSpec[1].hf_token.secretName={{ $secretName }}" \
-    --set "vllm.servingEngineSpec.modelSpec[2].hf_token.secretName={{ $secretName }}" \
-    --set "vllm.servingEngineSpec.modelSpec[3].hf_token.secretName={{ $secretName }}"
+DO NOT use "--set vllm.servingEngineSpec.modelSpec[N].hf_token.secretName=...".
+Helm never merges lists across values sources — it replaces the whole list —
+so a --set (or a values file) that only touches one field of one modelSpec
+entry silently wipes out repository/tag/modelURL/resources for ALL FOUR
+entries, breaking every vLLM deployment.
 
-Alternatively, edit values.yaml and set vllm.hfTokenSecretName: {{ $secretName }}
-The YAML anchor propagates the change to all four model entries automatically.
+Instead, supply the *complete* vllm.servingEngineSpec.modelSpec array (copy
+the 4 entries from values.yaml, keep every field, just change hf_token.secretName
+— an anchor keeps all 4 in sync from one line), either:
+  - directly in values.yaml (vllm.hfTokenSecretName's anchor already does this), or
+  - in your own values file / ArgoCD Application values block, reusing an
+    anchor the same way, e.g.:
+
+      vllm:
+        hfTokenSecretName: &hfTokenSecret "{{ $secretName }}"
+        servingEngineSpec:
+          modelSpec:
+            - name: "embedder"
+              # ...copy every other field from values.yaml unchanged...
+              hf_token:
+                secretName: *hfTokenSecret
+                secretKey: HF_TOKEN
+            # ...repeat for "whisper", "llm", "vlm"...
 
 {{- end }}
 

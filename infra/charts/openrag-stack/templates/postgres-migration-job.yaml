@@ -36,14 +36,14 @@ spec:
         app.kubernetes.io/component: postgres-migration
     spec:
       restartPolicy: Never
-      automountServiceAccountToken: {{ .Values.security.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ .Values.openrag.automountServiceAccountToken }}
       securityContext:
-        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+        {{- toYaml .Values.openrag.podSecurityContext | nindent 8 }}
       containers:
         - name: migrate
-          image: "{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
+          image: "{{ .Values.openrag.image.registry | default .Values.global.image.registry }}/{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
           securityContext:
-            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
+            {{- toYaml .Values.openrag.containerSecurityContext | nindent 12 }}
           workingDir: /app/openrag
           command:
             - sh
@@ -53,9 +53,9 @@ spec:
                 uv run python -m services.persistence.migrations.run
           envFrom:
             - configMapRef:
-                name: rag-env
+                name: {{ include "openrag-stack.fullname" . }}-env
             - secretRef:
-                name: rag-env-secrets
+                name: {{ include "openrag-stack.secretName" . }}
           env:
             # The runner (services.persistence.migrations.run) always runs
             # migrations and never auto-creates the database, so it ignores

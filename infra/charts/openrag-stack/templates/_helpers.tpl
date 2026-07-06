@@ -47,7 +47,33 @@ Selector labels
 */}}
 {{- define "openrag-stack.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "openrag-stack.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+{{- end }}
+
+{{/*
+Component-scoped selector labels. app.kubernetes.io/name identifies the
+specific workload ("openrag", "admin-ui", "reranker", ...) instead of the
+umbrella chart name, so e.g. `kubectl get pods -l app.kubernetes.io/name=admin-ui`
+targets one component — every workload template should use this (and
+"componentLabels" below) instead of hand-rolling its own label block.
+Usage: {{ include "openrag-stack.componentSelectorLabels" (dict "component" "openrag" "context" $) }}
+*/}}
+{{- define "openrag-stack.componentSelectorLabels" -}}
+app.kubernetes.io/name: {{ .component }}
+app.kubernetes.io/instance: {{ include "openrag-stack.fullname" .context }}
+{{- end }}
+
+{{/*
+Component-scoped common labels (componentSelectorLabels plus chart/version/managed-by).
+Usage: {{ include "openrag-stack.componentLabels" (dict "component" "openrag" "context" $) }}
+*/}}
+{{- define "openrag-stack.componentLabels" -}}
+helm.sh/chart: {{ include "openrag-stack.chart" .context }}
+{{ include "openrag-stack.componentSelectorLabels" . }}
+{{- if .context.Chart.AppVersion }}
+app.kubernetes.io/version: {{ .context.Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .context.Release.Service }}
 {{- end }}
 
 {{/*

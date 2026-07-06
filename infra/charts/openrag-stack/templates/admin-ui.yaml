@@ -4,19 +4,16 @@ kind: Deployment
 metadata:
   name: {{ include "openrag-stack.fullname" . }}-admin-ui
   labels:
-    app.kubernetes.io/name: admin-ui
-    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+    {{- include "openrag-stack.componentLabels" (dict "component" "admin-ui" "context" $) | nindent 4 }}
 spec:
   replicas: {{ .Values.adminUi.replicaCount }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: admin-ui
-      app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+      {{- include "openrag-stack.componentSelectorLabels" (dict "component" "admin-ui" "context" $) | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: admin-ui
-        app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+        {{- include "openrag-stack.componentSelectorLabels" (dict "component" "admin-ui" "context" $) | nindent 8 }}
     spec:
       {{- with .Values.adminUi.podSecurityContext }}
       securityContext:
@@ -61,22 +58,17 @@ kind: Service
 metadata:
   name: {{ include "openrag-stack.fullname" . }}-admin-ui
   labels:
-    app.kubernetes.io/name: admin-ui
-    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+    {{- include "openrag-stack.componentLabels" (dict "component" "admin-ui" "context" $) | nindent 4 }}
 spec:
   type: {{ .Values.adminUi.service.type }}
   selector:
-    app.kubernetes.io/name: admin-ui
-    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
+    {{- include "openrag-stack.componentSelectorLabels" (dict "component" "admin-ui" "context" $) | nindent 4 }}
   ports:
     - port: {{ .Values.adminUi.service.port }}
       targetPort: {{ .Values.adminUi.service.targetPort }}
       {{- if eq .Values.adminUi.service.type "NodePort" }}
       nodePort: {{ .Values.adminUi.service.nodePort }}
       {{- end }}
-  selector:
-    app.kubernetes.io/name: admin-ui
-    app.kubernetes.io/instance: {{ include "openrag-stack.fullname" . }}
 {{- if .Values.adminUi.ingress.enabled }}
 ---
 apiVersion: networking.k8s.io/v1

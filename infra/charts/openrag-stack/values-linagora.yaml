@@ -13,6 +13,10 @@ openrag:
       nginx.ingress.kubernetes.io/proxy-body-size: "500m"
 
 ray:
+  # This overlay runs the separate RayCluster (GPU node-selectors/resources
+  # below) rather than the embedded ray.init() fallback — both this flag and
+  # env.config.ENABLE_RAY_SERVE must be enabled together (see values.yaml).
+  enabled: true
   nodeSelector:
     gpu-role: serving
   resources:
@@ -23,12 +27,22 @@ ray:
       limits:
         nvidia.com/gpu: 1
 
+env:
+  config:
+    ENABLE_RAY_SERVE: "true"
+
 reranker:
   nodeSelector:
     gpu-role: serving
   runtimeClassName: nvidia
 
 vllm:
+  # Single edit point for the HF_TOKEN secret name — anchor reused in the 4
+  # hf_token.secretName entries below. Must stay in sync with fullnameOverride
+  # ("openrag") in values.yaml; keep the full modelSpec array intact when
+  # changing this (Helm replaces lists wholesale, it doesn't merge by index —
+  # see templates/NOTES.txt).
+  hfTokenSecretName: &hfTokenSecret "openrag-env-secrets"
   servingEngineSpec:
     modelSpec:
       - name: "embedder"
@@ -42,7 +56,7 @@ vllm:
         limitCPU: 4
         limitMemory: "16Gi"
         hf_token:
-          secretName: rag-env-secrets
+          secretName: *hfTokenSecret
           secretKey: HF_TOKEN
         vllmConfig:
           gpuMemoryUtilization: 0.3
@@ -64,7 +78,7 @@ vllm:
         limitCPU: 4
         limitMemory: "16Gi"
         hf_token:
-          secretName: rag-env-secrets
+          secretName: *hfTokenSecret
           secretKey: HF_TOKEN
         vllmConfig:
           gpuMemoryUtilization: 0.5
@@ -86,7 +100,7 @@ vllm:
         limitCPU: 8
         limitMemory: "32Gi"
         hf_token:
-          secretName: rag-env-secrets
+          secretName: *hfTokenSecret
           secretKey: HF_TOKEN
         vllmConfig:
           v1: 1
@@ -118,7 +132,7 @@ vllm:
         limitCPU: 8
         limitMemory: "32Gi"
         hf_token:
-          secretName: rag-env-secrets
+          secretName: *hfTokenSecret
           secretKey: HF_TOKEN
         vllmConfig:
           v1: 1

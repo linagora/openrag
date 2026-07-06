@@ -3,6 +3,8 @@ apiVersion: ray.io/v1
 kind: RayCluster
 metadata:
   name: {{ include "openrag-stack.fullname" . }}-raycluster
+  labels:
+    {{- include "openrag-stack.componentLabels" (dict "component" "raycluster" "context" $) | nindent 4 }}
   {{- with .Values.ray.annotations }}
   annotations:
     {{- . | toYaml | nindent 4 }}
@@ -42,7 +44,11 @@ spec:
               - "--head"
               - "--dashboard-host={{ .Values.ray.dashboardHost }}"
               - "--dashboard-agent-listen-port=52365"
-              - "--metrics-export-port=8080"
+              # Kept off networkPolicy.externalPorts' 8080 (openrag/admin-ui's
+              # public port) on purpose — that NetworkPolicy rule matches by
+              # port number across every pod in the namespace, so reusing 8080
+              # here would expose these unauthenticated Ray metrics publicly.
+              - "--metrics-export-port=8090"
               - "--block"
             ports:
               - containerPort: 80
@@ -53,7 +59,7 @@ spec:
                 name: client
               - containerPort: 6379
                 name: gcs
-              - containerPort: 8080
+              - containerPort: 8090
                 name: metrics
             volumeMounts:
               - name: model-weights
@@ -62,6 +68,8 @@ spec:
                 mountPath: /app/data
               - name: logs
                 mountPath: /app/logs
+              - name: venv
+                mountPath: /app/.venv
             envFrom:
               - configMapRef:
                   name: {{ include "openrag-stack.fullname" . }}-env
@@ -81,6 +89,9 @@ spec:
           - name: logs
             persistentVolumeClaim:
               claimName: {{ include "openrag-stack.fullname" . }}-logs
+          - name: venv
+            persistentVolumeClaim:
+              claimName: {{ include "openrag-stack.fullname" . }}-venv
 
   workerGroupSpecs:
   {{- range $i, $e := until (.Values.ray.workers.count | int) }}
@@ -90,23 +101,23 @@ spec:
       maxReplicas: {{ $.Values.ray.workers.maxReplicas }}
       template:
         spec:
-        {{- with .Values.ray.nodeSelector }}
-        nodeSelector: {{- toYaml . | nindent 12 }}
-        {{- end }}
-        {{- with .Values.ray.serviceAccountName }}
-        serviceAccountName: {{ . }}
-        {{- end }}
-        {{- with .Values.ray.automountServiceAccountToken }}
-        automountServiceAccountToken: {{ . }}
-        {{- end }}
-        {{- with .Values.ray.podSecurityContext }}
-        securityContext:
-          {{- toYaml . | nindent 10 }}
-        {{- end }}
+          {{- with $.Values.ray.nodeSelector }}
+          nodeSelector: {{- toYaml . | nindent 14 }}
+          {{- end }}
+          {{- with $.Values.ray.serviceAccountName }}
+          serviceAccountName: {{ . }}
+          {{- end }}
+          {{- with $.Values.ray.automountServiceAccountToken }}
+          automountServiceAccountToken: {{ . }}
+          {{- end }}
+          {{- with $.Values.ray.podSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           containers:
             - name: ray-worker
               image: "{{ $.Values.ray.image.registry | default $.Values.global.image.registry }}/{{ $.Values.ray.image.repository }}:{{ $.Values.ray.image.tag }}"
-              {{- with .Values.ray.containerSecurityContext }}
+              {{- with $.Values.ray.containerSecurityContext }}
               securityContext:
                 {{- toYaml . | nindent 16 }}
               {{- end }}
@@ -120,6 +131,8 @@ spec:
                   mountPath: /app/data
                 - name: logs
                   mountPath: /app/logs
+                - name: venv
+                  mountPath: /app/.venv
               envFrom:
                 - configMapRef:
                     name: {{ include "openrag-stack.fullname" $ }}-env
@@ -139,6 +152,9 @@ spec:
             - name: logs
               persistentVolumeClaim:
                 claimName: {{ include "openrag-stack.fullname" $ }}-logs
+            - name: venv
+              persistentVolumeClaim:
+                claimName: {{ include "openrag-stack.fullname" $ }}-venv
   {{- end }}
 {{- if .Values.ray.ingress.enabled }}
 ---
@@ -163,7 +179,7 @@ spec:
               service:
                 name: {{ include "openrag-stack.fullname" . }}-raycluster-head-svc
                 port:
-                  number: {{ .Values.env.config.RAY_DASHBOARD_PORT }}
+                  number: {{ .Values.env.config.RAY_DASHBOARD_PORT | int }}
       {{- with .Values.ray.ingress.host }}
       host: {{ . | quote }}
       {{- end }}
