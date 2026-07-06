@@ -4,10 +4,10 @@
 # `refactor/hexagonal` so v2.0.0-rc.* can be published before the GA cutover,
 # WITHOUT touching the production release pipeline (`build.yml`).
 #
-# Runs entirely on GitHub-hosted runners — no local/L4 builds. api and admin-ui
-# go to ghcr + Docker Hub; ray goes to ghcr only. NOTE: `build.yml` (the GA
-# pipeline) builds only api + ray — it needs the admin-ui job added before GA.
-# Never tags `latest`.
+# Runs entirely on GitHub-hosted runners — no local/L4 builds. All three
+# images (api, ray, admin-ui) go to ghcr only, no Docker Hub. NOTE: `build.yml`
+# (the GA pipeline) builds only api + ray — it needs the admin-ui job added
+# before GA. Never tags `latest`.
 #
 # Publish safety (NOT fully atomic): the three image jobs build and push a run-
 # scoped staging tag; the final `v2.0.0-rc.N` tags are created only by the
@@ -42,7 +42,6 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
   STAGING_TAG: rc-staging-${{ github.run_id }}
 
 jobs:
@@ -50,7 +49,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       packages: read
+    outputs:
+      image_name: ${{ steps.vars.outputs.image_name }}
     steps:
+      # GHCR (like any OCI registry) requires a lowercase repository path, but
+      # `github.repository` preserves the owner/repo casing verbatim (e.g. a
+      # fork under a mixed-case username) and Actions expressions have no
+      # built-in lower() — hence the bash `${VAR,,}` lowercasing. Exposed as a
+      # job output so the build/promote jobs below (which can't see this job's
+      # $GITHUB_ENV) can consume the same value.
+      - name: Compute lowercase image name
+        id: vars
+        run: |
+          name="${GITHUB_REPOSITORY,,}"
+          echo "image_name=$name" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_NAME=$name" >> "$GITHUB_ENV"
       # Safety rails for a hand-dispatched release build. Context/input are read
       # via env (not inlined into the shell) to avoid expression injection.
       - name: Validate ref and version
@@ -120,7 +133,7 @@ jobs:
           file: infra/docker/api.Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.STAGING_TAG }}
+          tags: ${{ env.REGISTRY }}/${{ needs.guard.outputs.image_name }}:${{ env.STAGING_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -149,7 +162,7 @@ jobs:
           file: infra/docker/ray.Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ray:${{ env.STAGING_TAG }}
+          tags: ${{ env.REGISTRY }}/${{ needs.guard.outputs.image_name }}-ray:${{ env.STAGING_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -178,7 +191,7 @@ jobs:
           file: infra/docker/ui.Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-admin-ui:${{ env.STAGING_TAG }}
+          tags: ${{ env.REGISTRY }}/${{ needs.guard.outputs.image_name }}-admin-ui:${{ env.STAGING_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -190,6 +203,7 @@ jobs:
     # leave an earlier image's final tag published. Re-dispatch the same version
     # with force:true to recover.
     needs:
+      - guard
       - build-and-push-image
       - build-and-push-image-ray
       - build-and-push-image-admin-ui
@@ -206,28 +220,22 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Promote staging images to the final RC tags
         env:
           VERSION: ${{ inputs.version }}
+          IMAGE_NAME: ${{ needs.guard.outputs.image_name }}
         run: |
           set -euo pipefail
           GHCR="$REGISTRY/$IMAGE_NAME"
-          # api -> ghcr + Docker Hub
+          # api -> ghcr only
           docker buildx imagetools create \
             -t "${GHCR}:${VERSION}" \
-            -t "linagoraai/openrag:${VERSION}" \
             "${GHCR}:${STAGING_TAG}"
           # ray -> ghcr only
           docker buildx imagetools create \
             -t "${GHCR}-ray:${VERSION}" \
             "${GHCR}-ray:${STAGING_TAG}"
-          # admin-ui -> ghcr + Docker Hub
+          # admin-ui -> ghcr only
           docker buildx imagetools create \
             -t "${GHCR}-admin-ui:${VERSION}" \
-            -t "linagoraai/openrag-admin-ui:${VERSION}" \
             "${GHCR}-admin-ui:${STAGING_TAG}"
