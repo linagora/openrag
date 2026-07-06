@@ -41,11 +41,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import time
 import uuid
 from pathlib import Path
 
 import httpx
+
+
+def _safe_id(name: str) -> str:
+    """File ids only allow [A-Za-z0-9._:-]; filenames often have spaces/accents."""
+    return re.sub(r"[^A-Za-z0-9._:-]", "_", name)
 
 # Terminal task states across both pipelines (COMPLETED/CANCELLED per the state
 # machine; SUCCESS accepted in case an older build reports it).
@@ -66,9 +72,10 @@ def _page_count(path: Path) -> int:
         return 0
 
 
-async def _upload(client: httpx.AsyncClient, base: str, partition: str, path: Path, run_tag: str) -> str | None:
-    # Unique file_id per run so re-running against the same partition never 409s.
-    file_id = f"{run_tag}-{path.name}"
+async def _upload(client: httpx.AsyncClient, base: str, partition: str, path: Path, run_tag: str, index: int) -> str | None:
+    # Sanitized + index-prefixed: valid per the file-id whitelist AND unique per run
+    # (so re-running against the same partition never 409s, even on name collisions).
+    file_id = f"{run_tag}-{index}-{_safe_id(path.name)}"
     with open(path, "rb") as f:
         resp = await client.post(
             f"{base}/indexer/partition/{partition}/file/{file_id}",
@@ -99,12 +106,12 @@ async def _await_terminal(client: httpx.AsyncClient, base: str, task_id: str, po
 async def _run_batch(client, base, partition, pdfs, poll, upload_conc, run_tag):
     sem = asyncio.Semaphore(upload_conc)
 
-    async def upload_one(p):
+    async def upload_one(index, p):
         async with sem:
-            return p, await _upload(client, base, partition, p, run_tag)
+            return p, await _upload(client, base, partition, p, run_tag, index)
 
     t0 = time.monotonic()
-    uploaded = await asyncio.gather(*(upload_one(p) for p in pdfs))
+    uploaded = await asyncio.gather(*(upload_one(i, p) for i, p in enumerate(pdfs)))
     t_uploaded = time.monotonic()
 
     task_ids = {tid: p for p, tid in uploaded if tid}
