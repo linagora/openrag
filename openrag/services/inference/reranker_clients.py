@@ -19,6 +19,22 @@ from ._retry import with_retry
 logger = get_logger()
 
 
+def _response_detail(response: httpx.Response, limit: int = 500) -> str:
+    """Short, safe snippet of an error response body.
+
+    A non-2xx reranker reply (notably a 422 from a pydantic-validated server)
+    carries the exact reason — which field/type it rejected — in its body. The
+    status code alone is undiagnosable, so surface a truncated body in the raised
+    error. Best-effort: never let logging/formatting mask the original failure."""
+    try:
+        body = response.text.strip().replace("\n", " ")
+    except Exception:  # noqa: BLE001 — body may be unreadable; the status still helps
+        return ""
+    if not body:
+        return ""
+    return body[:limit] + ("…" if len(body) > limit else "")
+
+
 @reranker_registry.register("infinity")
 class InfinityReranker(Reranker):
     """Reranker backed by an Infinity server."""
@@ -61,8 +77,10 @@ class InfinityReranker(Reranker):
         except httpx.TimeoutException as exc:
             raise InferenceTimeoutError(f"Reranker request timed out at {self._endpoint}") from exc
         except httpx.HTTPStatusError as exc:
+            detail = _response_detail(exc.response)
             raise InferenceConnectionError(
                 f"Reranker at {self._endpoint} returned HTTP {exc.response.status_code}"
+                + (f": {detail}" if detail else "")
             ) from exc
         try:
             results = resp.json()["results"]
@@ -117,12 +135,14 @@ class TEIReranker(Reranker):
         except httpx.TimeoutException as exc:
             raise InferenceTimeoutError(f"Reranker request timed out at {self._endpoint}") from exc
         except httpx.HTTPStatusError as exc:
+            detail = _response_detail(exc.response)
             raise InferenceConnectionError(
                 f"Reranker at {self._endpoint} returned HTTP {exc.response.status_code}"
+                + (f": {detail}" if detail else "")
             ) from exc
         try:
             results = sorted(resp.json(), key=lambda r: r["score"], reverse=True)
-        except (TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             raise InferenceConnectionError(f"Unexpected reranker response format from {self._endpoint}") from exc
         if top_k is not None:
             results = results[:top_k]
@@ -175,8 +195,10 @@ class OpenAIReranker(Reranker):
         except httpx.TimeoutException as exc:
             raise InferenceTimeoutError(f"Reranker request timed out at {self._endpoint}") from exc
         except httpx.HTTPStatusError as exc:
+            detail = _response_detail(exc.response)
             raise InferenceConnectionError(
                 f"Reranker at {self._endpoint} returned HTTP {exc.response.status_code}"
+                + (f": {detail}" if detail else "")
             ) from exc
         try:
             results = resp.json()["results"]
