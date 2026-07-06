@@ -432,7 +432,7 @@ async def test_preset_options_return_registered_choices(async_client_factory):
     body = response.json()
     assert body["chunking_strategies"] == ["recursive_splitter"]
     assert set(body["retrieval_types"]) == {"single", "multiQuery", "hyde"}
-    assert body["reranker_providers"] == ["infinity", "openai"]
+    assert body["reranker_providers"] == ["infinity", "openai", "tei"]
 
 
 @pytest.mark.asyncio
