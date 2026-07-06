@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, Response, status
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
-_DEFAULT_RERANKER_PROVIDERS = ["infinity", "openai"]
+_DEFAULT_RERANKER_PROVIDERS = ["infinity", "openai", "tei"]
 
 # The selectable PDF backends. Shares the IndexationPipelineConfig constant so
 # the exposed options can never drift from what the model accepts. ``None``
