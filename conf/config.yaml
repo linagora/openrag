@@ -184,7 +184,7 @@ loader:
   # Env: WHISPER_MODEL, WHISPER_N_WORKERS, WHISPER_NUM_GPUS, WHISPER_CONCURRENCY_PER_WORKER
   local_whisper:
     model: base
-    whisper_n_workers: 3
+    whisper_n_workers: 2
     whisper_num_gpus: 0.01
     whisper_concurrency_per_worker: 2
     # Whisper failures are often deterministic (corrupt audio); 1 retry
