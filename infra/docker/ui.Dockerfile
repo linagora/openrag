@@ -38,8 +38,23 @@ RUN npm run build
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 
 USER root
-COPY --from=build /app/dist /usr/share/nginx/html
-COPY infra/compose/nginx/openrag-admin.conf /etc/nginx/conf.d/default.conf
+
+COPY --chown=10001:10001 --from=build /app/dist /usr/share/nginx/html
+COPY --chown=10001:10001 infra/compose/nginx/openrag-admin.conf /etc/nginx/conf.d/default.conf
+
+# /var/cache/nginx and /var/run come from the base image (not copied above) —
+# own them as 10001:10001 and make them group-writable too, matching the Helm
+# chart's fixed podSecurityContext (runAsUser/runAsGroup: 10001). Re-chowning
+# /etc/nginx/conf.d here as well covers the directory itself (COPY --chown
+# above only touched the file), which docker-entrypoint.d/10-listen-on-ipv6...
+# needs write access to at startup. Don't rely on the base image's own
+# baked-in permissions instead — a stale/cached base layer silently reverted
+# this once already and broke nginx's cache dir at startup (mkdir EACCES on
+# /var/cache/nginx/client_temp).
+
+RUN chown -R 10001:10001 /var/cache/nginx /etc/nginx/conf.d /var/run && \
+    chmod -R g+w /var/cache/nginx /etc/nginx/conf.d /var/run
+
 USER nginx
 
 EXPOSE 8080
