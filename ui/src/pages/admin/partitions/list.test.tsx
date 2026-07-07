@@ -106,7 +106,7 @@ describe("PartitionListPage bulk actions", () => {
     expect(screen.getByText("viewer-b")).not.toBeNull();
     expect(screen.queryByText(/selected/i)).toBeNull();
 
-    await userEvent.click(screen.getByRole("checkbox", { name: /select all deletable partitions/i }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /select visible deletable partitions/i }));
 
     expect(screen.getByText("1 selected")).not.toBeNull();
     await userEvent.click(screen.getByRole("button", { name: /delete selected partitions/i }));

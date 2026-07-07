@@ -84,7 +84,7 @@ describe("DocumentListPage bulk actions", () => {
     expect(screen.getByText("b.pdf")).not.toBeNull();
     expect(screen.queryByText(/selected/i)).toBeNull();
 
-    await userEvent.click(screen.getByRole("checkbox", { name: /select all rows/i }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /select visible rows/i }));
 
     expect(screen.getByText("2 selected")).not.toBeNull();
     await userEvent.click(screen.getByRole("button", { name: /delete selected files/i }));

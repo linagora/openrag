@@ -70,18 +70,19 @@ describe("DataTable sorting", () => {
 });
 
 describe("DataTable selection", () => {
-  it("supports controlled row selection", () => {
+  it("selects only the currently visible page rows", () => {
     function Harness() {
       const [selection, setSelection] = useState<RowSelectionState>({});
       return (
         <>
           <DataTable
             columns={columns}
-            data={makeRows(3)}
+            data={makeRows(11)}
             enableSelection
             getRowId={(r) => String(r.id)}
             rowSelection={selection}
             onRowSelectionChange={setSelection}
+            pageSize={10}
           />
           <span>{Object.keys(selection).length} selected</span>
           <button onClick={() => setSelection({})}>clear-sel</button>
@@ -93,9 +94,9 @@ describe("DataTable selection", () => {
 
     expect(screen.getByText("0 selected")).toBeTruthy();
 
-    // Header checkbox is the first checkbox; it selects every row.
+    // Header checkbox is the first checkbox; it should select only page 1.
     fireEvent.click(screen.getAllByRole("checkbox")[0]);
-    expect(screen.getByText("3 selected")).toBeTruthy();
+    expect(screen.getByText("10 selected")).toBeTruthy();
 
     fireEvent.click(screen.getByText("clear-sel"));
     expect(screen.getByText("0 selected")).toBeTruthy();

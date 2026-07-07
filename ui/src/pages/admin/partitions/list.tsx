@@ -255,9 +255,14 @@ export default function PartitionListPage() {
   const showActions =
     canManagePartitions || filteredAndSorted.some((p) => canConfigurePartition(p.role));
 
-  const deletablePartitionNames = useMemo(
+  const visiblePartitions = filteredAndSorted;
+  const visibleDeletablePartitionNames = useMemo(
     () => filteredAndSorted.filter((p) => canConfigurePartition(p.role)).map((p) => p.name),
     [filteredAndSorted, canConfigurePartition],
+  );
+  const visibleDeletablePartitionNameSet = useMemo(
+    () => new Set(visibleDeletablePartitionNames),
+    [visibleDeletablePartitionNames],
   );
   const selectedPartitionNameSet = useMemo(() => new Set(selectedPartitionNames), [selectedPartitionNames]);
   const selectedPartitions = useMemo(
@@ -268,19 +273,21 @@ export default function PartitionListPage() {
     [filteredAndSorted, selectedPartitionNameSet, canConfigurePartition],
   );
   const allDeletableSelected =
-    deletablePartitionNames.length > 0 &&
-    deletablePartitionNames.every((name) => selectedPartitionNameSet.has(name));
+    visibleDeletablePartitionNames.length > 0 &&
+    visibleDeletablePartitionNames.every((name) => selectedPartitionNameSet.has(name));
   const someDeletableSelected =
-    deletablePartitionNames.some((name) => selectedPartitionNameSet.has(name)) &&
+    visibleDeletablePartitionNames.some((name) => selectedPartitionNameSet.has(name)) &&
     !allDeletableSelected;
 
   useEffect(() => {
-    const allowed = new Set(deletablePartitionNames);
+    const allowed = new Set(
+      filteredAndSorted.filter((p) => canConfigurePartition(p.role)).map((p) => p.name),
+    );
     setSelectedPartitionNames((prev) => {
       const next = prev.filter((name) => allowed.has(name));
       return next.length === prev.length ? prev : next;
     });
-  }, [deletablePartitionNames]);
+  }, [filteredAndSorted, canConfigurePartition]);
 
   const handleSort = (column: "name" | "created_at") => {
     if (sortColumn !== column) {
@@ -427,14 +434,18 @@ export default function PartitionListPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                {deletablePartitionNames.length > 0 && (
+                {visibleDeletablePartitionNames.length > 0 && (
                   <TableHead>
                     <Checkbox
                       checked={allDeletableSelected || (someDeletableSelected && "indeterminate")}
-                      onCheckedChange={(value) =>
-                        setSelectedPartitionNames(value ? deletablePartitionNames : [])
-                      }
-                      aria-label="Select all deletable partitions"
+                      onCheckedChange={(value) => {
+                        setSelectedPartitionNames((prev) =>
+                          value
+                            ? Array.from(new Set([...prev, ...visibleDeletablePartitionNames]))
+                            : prev.filter((name) => !visibleDeletablePartitionNameSet.has(name)),
+                        );
+                      }}
+                      aria-label="Select visible deletable partitions"
                     />
                   </TableHead>
                 )}
@@ -463,10 +474,10 @@ export default function PartitionListPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filteredAndSorted.length ? (
-                filteredAndSorted.map((p) => (
+              {visiblePartitions.length ? (
+                visiblePartitions.map((p) => (
                   <TableRow key={p.name}>
-                    {deletablePartitionNames.length > 0 && (
+                    {visibleDeletablePartitionNames.length > 0 && (
                       <TableCell>
                         <Checkbox
                           checked={selectedPartitionNameSet.has(p.name)}
@@ -538,7 +549,7 @@ export default function PartitionListPage() {
                     colSpan={
                       (canManagePartitions ? 7 : 4) +
                       (showActions ? 1 : 0) +
-                      (deletablePartitionNames.length > 0 ? 1 : 0)
+                      (visibleDeletablePartitionNames.length > 0 ? 1 : 0)
                     }
                     className="h-24 text-center text-muted-foreground"
                   >
