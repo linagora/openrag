@@ -53,6 +53,7 @@ import { partitionDetailPath } from "@/lib/routes";
 
 type SortDir = "asc" | "desc" | null;
 const PARTITIONS_PAGE_SIZE = 10;
+const PARTITIONS_REFETCH_INTERVAL_MS = 5000;
 
 function RowActions({
   partition,
@@ -150,6 +151,7 @@ export default function PartitionListPage() {
   const [sortColumn, setSortColumn] = useState<"name" | "created_at">("created_at");
   const [selectedPartitionNames, setSelectedPartitionNames] = useState<string[]>([]);
   const [pageIndex, setPageIndex] = useState(0);
+  const [manualRefreshing, setManualRefreshing] = useState(false);
 
   // `GET /partition/` is already membership-scoped server-side (admins with
   // SUPER_ADMIN_MODE see all; regular users see their memberships), so a single
@@ -157,7 +159,7 @@ export default function PartitionListPage() {
   const partitionsQuery = useQuery({
     queryKey: ["partitions"],
     queryFn: listPartitions,
-    refetchInterval: 2000,
+    refetchInterval: PARTITIONS_REFETCH_INTERVAL_MS,
   });
 
   const { data: presetsData } = useQuery({
@@ -271,6 +273,10 @@ export default function PartitionListPage() {
   const visibleDeletablePartitionNames = useMemo(
     () => visiblePartitions.filter((p) => canConfigurePartition(p.role)).map((p) => p.name),
     [visiblePartitions, canConfigurePartition],
+  );
+  const hasDeletablePartitions = useMemo(
+    () => filteredAndSorted.some((p) => canConfigurePartition(p.role)),
+    [filteredAndSorted, canConfigurePartition],
   );
   const visibleDeletablePartitionNameSet = useMemo(
     () => new Set(visibleDeletablePartitionNames),
@@ -425,12 +431,15 @@ export default function PartitionListPage() {
           <Button
             variant="outline"
             size="icon-sm"
-            onClick={() => partitionsQuery.refetch()}
-            disabled={partitionsQuery.isFetching}
+            onClick={() => {
+              setManualRefreshing(true);
+              partitionsQuery.refetch().finally(() => setManualRefreshing(false));
+            }}
+            disabled={manualRefreshing}
             aria-label="Refresh partitions"
             title="Refresh partitions"
           >
-            <RefreshCw className={partitionsQuery.isFetching ? "animate-spin" : ""} />
+            <RefreshCw className={manualRefreshing ? "animate-spin" : ""} />
           </Button>
         </div>
       </div>
@@ -446,10 +455,11 @@ export default function PartitionListPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                {visibleDeletablePartitionNames.length > 0 && (
+                {hasDeletablePartitions && (
                   <TableHead>
                     <Checkbox
                       checked={allDeletableSelected || (someDeletableSelected && "indeterminate")}
+                      disabled={visibleDeletablePartitionNames.length === 0}
                       onCheckedChange={(value) => {
                         setSelectedPartitionNames((prev) =>
                           value
@@ -489,7 +499,7 @@ export default function PartitionListPage() {
               {visiblePartitions.length ? (
                 visiblePartitions.map((p) => (
                   <TableRow key={p.name}>
-                    {visibleDeletablePartitionNames.length > 0 && (
+                    {hasDeletablePartitions && (
                       <TableCell>
                         <Checkbox
                           checked={selectedPartitionNameSet.has(p.name)}
@@ -561,7 +571,7 @@ export default function PartitionListPage() {
                     colSpan={
                       (canManagePartitions ? 7 : 4) +
                       (showActions ? 1 : 0) +
-                      (visibleDeletablePartitionNames.length > 0 ? 1 : 0)
+                      (hasDeletablePartitions ? 1 : 0)
                     }
                     className="h-24 text-center text-muted-foreground"
                   >
@@ -585,6 +595,7 @@ export default function PartitionListPage() {
               size="sm"
               onClick={() => setPageIndex((prev) => Math.max(0, prev - 1))}
               disabled={pageIndex === 0}
+              aria-label="Previous page"
             >
               <ChevronLeft className="h-4 w-4" />
             </Button>
@@ -593,6 +604,7 @@ export default function PartitionListPage() {
               size="sm"
               onClick={() => setPageIndex((prev) => Math.min(pageCount - 1, prev + 1))}
               disabled={pageIndex >= pageCount - 1}
+              aria-label="Next page"
             >
               <ChevronRight className="h-4 w-4" />
             </Button>

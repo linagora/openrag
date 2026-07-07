@@ -57,6 +57,7 @@ export default function DocumentListPage() {
     partition: string;
     rows: RowSelectionState;
   }>({ partition: "", rows: {} });
+  const [manualRefreshing, setManualRefreshing] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
@@ -139,8 +140,8 @@ export default function DocumentListPage() {
 
   useEffect(() => {
     if (!writable && Object.keys(fileRowSelection).length > 0) {
-      const timeout = window.setTimeout(() => setFileRowSelection({}), 0);
-      return () => window.clearTimeout(timeout);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Clear stale controlled selection when write access is lost.
+      setFileRowSelection({});
     }
   }, [fileRowSelection, setFileRowSelection, writable]);
 
@@ -363,14 +364,17 @@ export default function DocumentListPage() {
             variant="outline"
             size="icon-sm"
             onClick={() => {
-              partitionsQuery.refetch();
-              if (selected) filesQuery.refetch();
+              setManualRefreshing(true);
+              Promise.all([
+                partitionsQuery.refetch(),
+                selected ? filesQuery.refetch() : Promise.resolve(),
+              ]).finally(() => setManualRefreshing(false));
             }}
-            disabled={partitionsQuery.isFetching || filesQuery.isFetching}
+            disabled={manualRefreshing}
             aria-label="Refresh documents"
             title="Refresh documents"
           >
-            <RefreshCw className={partitionsQuery.isFetching || filesQuery.isFetching ? "animate-spin" : ""} />
+            <RefreshCw className={manualRefreshing ? "animate-spin" : ""} />
           </Button>
         </div>
       </div>

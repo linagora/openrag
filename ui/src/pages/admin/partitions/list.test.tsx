@@ -118,8 +118,7 @@ describe("PartitionListPage bulk actions", () => {
     expect(screen.queryByText("partition-11")).toBeNull();
     expect(screen.getByText("Page 1 of 2")).not.toBeNull();
 
-    const buttons = screen.getAllByRole("button");
-    await userEvent.click(buttons[buttons.length - 1]);
+    await userEvent.click(screen.getByRole("button", { name: /next page/i }));
 
     expect(await screen.findByText("partition-11")).not.toBeNull();
     expect(screen.queryByText("partition-01")).toBeNull();

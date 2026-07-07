@@ -137,6 +137,7 @@ export default function JobListPage() {
                 Failed to load tasks: {(tasksQuery.error as Error).message}
               </div>
             ) : (
+              // Remounting resets pagination for a new tab/search context; sort state resets with it.
               <DataTable key={`${statusTab}:${debouncedSearch}`} columns={columns} data={filteredTasks} />
             )}
           </TabsContent>
