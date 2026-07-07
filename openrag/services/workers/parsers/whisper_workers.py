@@ -200,7 +200,12 @@ class LocalWhisperLoader(BasePooledParser):
 
     def __init__(self):
         self.config = load_config()
-        self.whisper_actor: WhisperPool = ray.get_actor("WhisperPool", namespace="openrag")
+        # Lazily create the pool if bootstrap didn't — mirrors MarkerLoader so
+        # audio ingestion self-provisions WhisperPool instead of relying on the
+        # eager init_audio_actor() pre-warm at startup.
+        from services.workers.bootstrap import get_or_create_actor
+
+        self.whisper_actor: WhisperPool = get_or_create_actor("WhisperPool", WhisperPool, lifetime="detached")
 
     def supported_types(self) -> list[str]:
         return [DocumentType.AUDIO.value, DocumentType.VIDEO.value]

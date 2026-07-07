@@ -136,6 +136,4 @@ def initialize_worker_bootstrap(settings: "Settings") -> None:
     init_llm_semaphore()
     init_vlm_semaphore()
     init_audio_semaphore()
-    init_audio_actor()
-    get_marker_pool()
     get_task_state_manager()
