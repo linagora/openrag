@@ -179,7 +179,7 @@ spec:
               service:
                 name: {{ include "openrag-stack.fullname" . }}-raycluster-head-svc
                 port:
-                  number: {{ .Values.env.config.RAY_DASHBOARD_PORT | int }}
+                  name: ray-dashboard
       {{- with .Values.ray.ingress.host }}
       host: {{ . | quote }}
       {{- end }}

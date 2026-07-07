@@ -44,19 +44,20 @@ spec:
             - "{{ .Values.reranker.service.port }}"
           ports:
             - containerPort: {{ .Values.reranker.service.port }}
+              name: reranker
           resources:
             {{- toYaml .Values.reranker.resources | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /health
-              port: {{ .Values.reranker.service.port }}
+              port: reranker
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /health
-              port: {{ .Values.reranker.service.port }}
+              port: reranker
             initialDelaySeconds: 60
             periodSeconds: 30
             failureThreshold: 3
@@ -81,8 +82,9 @@ spec:
   selector:
     {{- include "openrag-stack.componentSelectorLabels" (dict "component" "reranker" "context" $) | nindent 4 }}
   ports:
-    - protocol: TCP
+    - name: reranker
+      protocol: TCP
       port: {{ .Values.reranker.service.port }}
-      targetPort: {{ .Values.reranker.service.port }}
+      targetPort: reranker
   type: {{ .Values.reranker.service.type }}
 {{- end }}

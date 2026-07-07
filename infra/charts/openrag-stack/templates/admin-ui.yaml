@@ -64,7 +64,8 @@ spec:
   selector:
     {{- include "openrag-stack.componentSelectorLabels" (dict "component" "admin-ui" "context" $) | nindent 4 }}
   ports:
-    - port: {{ .Values.adminUi.service.port }}
+    - name: admin-ui
+      port: {{ .Values.adminUi.service.port }}
       targetPort: {{ .Values.adminUi.service.targetPort }}
       {{- if eq .Values.adminUi.service.type "NodePort" }}
       nodePort: {{ .Values.adminUi.service.nodePort }}
