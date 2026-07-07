@@ -22,10 +22,10 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | `IMAGE_CAPTIONING_URL` | `bool` | `true` | If `true`, HTTP/HTTPS image URLs in markdown files are fetched and described by the VLM. |
 | `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing is saved. Useful for debugging and verifying the correctness of the generated markdown. |
 |`SAVE_UPLOADED_FILES`|`bool`|`false`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
-| `PDFLoader` | `str` | `MarkerLoader` | Specifies the PDF parsing engine to use. Available options: `PyMuPDFLoader`, `MarkerLoader` and `DotsOCRLoader`.|
+| `PDFLOADER` | `str` | `PyMuPDFLoader` | PDF parsing engine. `PyMuPDFLoader` (default) is a lightweight, fast, CPU-friendly backend for searchable PDFs. Switch to `MarkerLoader` for OCR / scanned documents, complex layouts and embedded images (heavier; GPU-friendly). Other options: `DoclingLoader`, `DotsOCRLoader`.|
 
 :::caution
-`PyMuPDFLoader` is a lightweight pdf loader that cannot process non-searchable (image-based) PDFs and does not extract or handle embedded images.
+`PyMuPDFLoader` (the default) is a lightweight PDF loader that cannot process non-searchable (image-based) PDFs and does not extract or handle embedded images. Set `PDFLOADER=MarkerLoader` when you need those.
 :::
 
 #### PDF Loader
@@ -87,7 +87,7 @@ For local whisper loader, here are the options to use
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `WHISPER_MODEL` | `str` | `base` | The whisper multilingual model to use depending on [available resources](https://github.com/openai/whisper?tab=readme-ov-file#available-models-and-languages). Other options: `base`, `small`, `large`, `large-v3`, etc. |
-|`WHISPER_N_WORKERS`| `int` | 3 | Number of whisper workers|
+|`WHISPER_N_WORKERS`| `int` | 2 | Number of whisper workers|
 | `WHISPER_CONCURRENCY_PER_WORKER` | `int` | 2 | Maximum number of audio transcription tasks processed concurrently by each Whisper worker. |
 
 ##### OpenAI-compatible audio Loader ( `OpenAIAudioLoader` )
@@ -426,7 +426,7 @@ For multi-node distributed deployments, see [Distributed Deployment in a Ray Clu
 | `RAY_SERVE_NUM_REPLICAS` | int | 1 | Number of service replicas for load balancing |
 | `RAY_SERVE_HOST` | str | 0.0.0.0 | Host address for the Ray Serve deployment |
 | `RAY_SERVE_PORT` | int | 8080 | Port for the Ray Serve FastAPI endpoint |
-| `CHAINLIT_PORT` | int | 8090 | Port for the Chainlit UI interface if ray serve is enable `ENABLE_RAY_SERVE`. If not chainlit UI is simply a subroute (`/chainlit` [see this](/openrag/getting_started/usage/#default-ports)) of the FastAPI **`base_url`**|
+| `CHAINLIT_PORT` | int | 8090 | Port for the Chainlit UI interface if ray serve is enable `ENABLE_RAY_SERVE`. If not chainlit UI is simply a subroute (`/chainlit` [see this](/openrag/getting_started/quickstart/#default-ports)) of the FastAPI **`base_url`**|
 
 
 ### Web Search Configuration
