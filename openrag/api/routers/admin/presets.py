@@ -21,7 +21,7 @@ _DEFAULT_RERANKER_PROVIDERS = ["infinity", "openai", "tei"]
 
 # The selectable PDF backends. Shares the IndexationPipelineConfig constant so
 # the exposed options can never drift from what the model accepts. ``None``
-# (inherit the global PDFLoader) is the field default, not an explicit choice,
+# (inherit the global PDFLOADER) is the field default, not an explicit choice,
 # so it is not surfaced here.
 _PARSING_STRATEGIES = list(PARSING_STRATEGIES)
 
