@@ -560,6 +560,8 @@ async def test_pipeline_logs_per_stage_timings(monkeypatch):
         def __init__(self) -> None:
             self.bound: dict | None = None
             self.message: str | None = None
+            self.debug_bound: dict | None = None
+            self.debug_message: str | None = None
 
         def bind(self, **kwargs):
             self.bound = kwargs
@@ -567,6 +569,10 @@ async def test_pipeline_logs_per_stage_timings(monkeypatch):
 
         def info(self, message: str) -> None:
             self.message = message
+
+        def debug(self, message: str) -> None:
+            self.debug_message = message
+            self.debug_bound = self.bound
 
     recorder = _RecordingLogger()
     monkeypatch.setattr(pb, "logger", recorder)
@@ -591,3 +597,12 @@ async def test_pipeline_logs_per_stage_timings(monkeypatch):
     assert recorder.bound["task_id"] == "t1"
     assert recorder.bound["n_chunks"] == 1
     assert recorder.bound["filename"] == "note.txt"
+
+    # The endpoint-resolution breadcrumb fired too: no VLM/contextualizer/topic
+    # tagger were configured, and the row carried no embedder_name.
+    assert recorder.debug_message == "model endpoints resolved for indexing (None = stage disabled)"
+    assert recorder.debug_bound is not None
+    assert recorder.debug_bound["vlm"] is None
+    assert recorder.debug_bound["contextualization_llm"] is None
+    assert recorder.debug_bound["topic_tagging_llm"] is None
+    assert recorder.debug_bound["embedder"] == "default"
