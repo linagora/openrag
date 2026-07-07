@@ -1,6 +1,6 @@
 import { useAuth } from "@/lib/auth";
 import { useNavigate } from "react-router-dom";
-import { LogOut } from "lucide-react";
+import { LogOut, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SidebarTrigger } from "@/components/ui/sidebar";
@@ -27,6 +27,12 @@ export function Header() {
       <div className="flex-1" />
       {user && (
         <div className="flex items-center gap-3">
+          <Button variant="outline" size="sm" asChild>
+            <a href="/chainlit/" target="_blank" rel="noopener noreferrer" title="Open Chainlit chat">
+              <MessageSquare className="h-4 w-4" />
+              Chat
+            </a>
+          </Button>
           <span className="text-sm text-muted-foreground">
             {user.display_name || user.email || `User #${user.id}`}
           </span>
