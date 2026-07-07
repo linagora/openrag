@@ -22,15 +22,15 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | `IMAGE_CAPTIONING_URL` | `bool` | `true` | If `true`, HTTP/HTTPS image URLs in markdown files are fetched and described by the VLM. |
 | `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing is saved. Useful for debugging and verifying the correctness of the generated markdown. |
 |`SAVE_UPLOADED_FILES`|`bool`|`false`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
-| `PDFLoader` | `str` | `MarkerLoader` | Specifies the PDF parsing engine to use. Available options: `PyMuPDFLoader`, `MarkerLoader` and `DotsOCRLoader`.|
+| `PDFLOADER` | `str` | `PyMuPDFLoader` | PDF parsing engine. `PyMuPDFLoader` (default) is a lightweight, fast, CPU-friendly backend for searchable PDFs. Switch to `MarkerLoader` for OCR / scanned documents, complex layouts and embedded images (heavier; GPU-friendly). Other options: `DoclingLoader`, `DotsOCRLoader`.|
 
 :::caution
-`PyMuPDFLoader` is a lightweight pdf loader that cannot process non-searchable (image-based) PDFs and does not extract or handle embedded images.
+`PyMuPDFLoader` (the default) is a lightweight PDF loader that cannot process non-searchable (image-based) PDFs and does not extract or handle embedded images. Set `PDFLOADER=MarkerLoader` when you need those.
 :::
 
 #### PDF Loader
 ##### Marker Loader Configuration
-The `MarkerLoader` is the default PDF parsing engine. It can be configured using the following environment variables:
+These settings apply when `MarkerLoader` is selected (`PDFLOADER=MarkerLoader`; the default is `PyMuPDFLoader`). It can be configured using the following environment variables:
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -87,7 +87,7 @@ For local whisper loader, here are the options to use
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `WHISPER_MODEL` | `str` | `base` | The whisper multilingual model to use depending on [available resources](https://github.com/openai/whisper?tab=readme-ov-file#available-models-and-languages). Other options: `base`, `small`, `large`, `large-v3`, etc. |
-|`WHISPER_N_WORKERS`| `int` | 3 | Number of whisper workers|
+|`WHISPER_N_WORKERS`| `int` | 2 | Number of whisper workers|
 | `WHISPER_CONCURRENCY_PER_WORKER` | `int` | 2 | Maximum number of audio transcription tasks processed concurrently by each Whisper worker. |
 
 ##### OpenAI-compatible audio Loader ( `OpenAIAudioLoader` )
@@ -202,6 +202,15 @@ The PostgreSQL database is configured using the following environment variables:
 | `POSTGRES_POOL_MIN_SIZE` | int | 5 | Minimum size of the async PostgreSQL connection pool. |
 | `POSTGRES_POOL_MAX_SIZE` | int | 20 | Maximum size of the async PostgreSQL connection pool. |
 | `POSTGRES_COMMAND_TIMEOUT` | int | 30 | Timeout in seconds for PostgreSQL commands issued through the async pool. |
+
+* **`Object Storage (MinIO)`**
+
+Milvus stores its data in a MinIO object store, whose credentials are **required (no default)** — the compose stack refuses to start if they are unset. Generate strong random values (e.g. `openssl rand -hex 16`). The same values are shared between the `minio` service and Milvus, so both sides must match.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `MINIO_ACCESS_KEY` | str | _(required)_ | MinIO access key, shared by the `minio` service and Milvus. No default. |
+| `MINIO_SECRET_KEY` | str | _(required)_ | MinIO secret key, shared by the `minio` service and Milvus. No default. |
 
 ### Compose Storage Volumes
 
@@ -419,7 +428,7 @@ For multi-node distributed deployments, see [Distributed Deployment in a Ray Clu
 | `RAY_SERVE_NUM_REPLICAS` | int | 1 | Number of service replicas for load balancing |
 | `RAY_SERVE_HOST` | str | 0.0.0.0 | Host address for the Ray Serve deployment |
 | `RAY_SERVE_PORT` | int | 8080 | Port for the Ray Serve FastAPI endpoint |
-| `CHAINLIT_PORT` | int | 8090 | Port for the Chainlit UI interface if ray serve is enable `ENABLE_RAY_SERVE`. If not chainlit UI is simply a subroute (`/chainlit` [see this](/openrag/getting_started/usage/#default-ports)) of the FastAPI **`base_url`**|
+| `CHAINLIT_PORT` | int | 8090 | Port for the Chainlit UI interface if ray serve is enable `ENABLE_RAY_SERVE`. If not chainlit UI is simply a subroute (`/chainlit` [see this](/openrag/getting_started/quickstart/#default-ports)) of the FastAPI **`base_url`**|
 
 
 ### Web Search Configuration
@@ -510,18 +519,49 @@ The following environment variables configure the FastAPI server and control acc
 | `DEFAULT_FILE_QUOTA` | `int` | `-1` | Default per-user file quota. `<0` disables quotas globally; `>=0` sets the default limit when a user has no explicit quota. |
 | `PREFERRED_URL_SCHEME` | `string` | `null` | URL scheme (`http` or `https`) used when generating URLs in API responses (e.g., `task_status_url`). When running behind a reverse proxy that terminates SSL, set this to `https` to ensure generated URLs use the correct scheme. If unset, the scheme from the incoming request is used. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
+| `UVICORN_FORWARDED_ALLOW_IPS` | `string` | `127.0.0.1` | Comma-separated CIDRs/IPs (or `*`) whose `X-Forwarded-*` headers uvicorn trusts. **Required when OpenRAG runs behind a TLS-terminating reverse proxy that lives outside loopback** (typical docker-compose / k8s); otherwise `X-Forwarded-Proto` is dropped and OIDC cookies ship with `Secure=False` even over HTTPS. |
+| `MAX_UPLOAD_SIZE_MB` | `int` | `1024` | Maximum accepted upload size, in MB. `0` or a negative value means unlimited. |
+| `MAX_PARTITIONS_PER_USER` | `int` | `100` | Maximum number of partitions a non-admin user may own. `-1` disables the cap (unlimited). Admin users always bypass it. |
+| `APP_UID` | `int` | `1000` | UID the API container drops to before running the app. Override when your host user is not UID 1000 and bind-mounted folders (`data/`, `logs/`) would otherwise not be writable by the container user. |
 
 
 :::caution[Security Notice]
 Always set a strong **`AUTH_TOKEN`** in production environments. Never leave it empty or use default values in production deployments.
 :::
 
+### Rate Limiting
+
+Per-identity request rate limiting, tiered by path prefix. Requests are keyed on the authenticated user id, falling back to the client IP for unauthenticated paths (`/auth/*`). **Admin users bypass rate limiting entirely.** Limits use a moving window and are enforced **per worker/replica** — front OpenRAG with shared storage (e.g. Redis) if you scale out and need a global budget. Exceeding a limit returns **429** with a `Retry-After` header.
+
+Limit values use the `<count>/<period>` format from the [`limits`](https://limits.readthedocs.io/) library (e.g. `120/minute`, `10/second`).
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `RATE_LIMIT_ENABLED` | `bool` | `true` | Master switch for request rate limiting. When `false`, no limits are applied and malformed limit values are ignored. |
+| `RATE_LIMIT_DEFAULT` | `str` | `600/minute` | Limit applied to every path except the tiers below. |
+| `RATE_LIMIT_AUTH` | `str` | `60/minute` | Limit for `/auth/*` (login/callback/logout). Keyed on client IP because callers are unauthenticated there — keep it high enough that a shared corporate/NAT egress IP does not throttle a legitimate login rush. |
+| `RATE_LIMIT_CHAT` | `str` | `120/minute` | Limit for `/v1/*` (chat completions, tools). |
+
 ### Admin UI
 
-The admin UI is a React SPA served by the `admin-ui` (nginx) container. Every
-`VITE_*` setting is **baked into the bundle at build time** — Vite inlines them
-when the image is built, so they are *not* read at container runtime. After
-changing one, rebuild the image: `docker compose build admin-ui`.
+The admin UI is a React SPA (the document ingestion, indexing & management interface) served by the `admin-ui` (nginx) container. Every `VITE_*` setting is **baked into the bundle at build time** — Vite inlines them when the image is built, so they are *not* read at container runtime. After changing one, rebuild the image: `docker compose build admin-ui`.
+
+**How the UI reaches the API (same-origin).** The browser only ever talks to a single origin — `http://<host>:ADMIN_UI_PORT`. nginx inside the `admin-ui` container serves the static SPA under `/app/` and reverse-proxies every other path (`/v1`, `/auth`, `/chainlit`, `/indexer`, …) to the API at `openrag:8080` over the Docker network. Because the bundle is built with `VITE_API_BASE_URL=""`, its API calls are **relative**, so they land back on that same origin — there is **no CORS**, and the OIDC `openrag_session` cookie is first-party. You don't even need to publish the API's own `APP_PORT` to the host; the UI reaches the backend internally over the compose network. Set `VITE_API_BASE_URL` only for a *browser-direct* build, where the SPA calls the API on a different origin — then also add that origin to `CORS_EXTRA_ORIGINS`.
+
+```mermaid
+flowchart TD
+    B["Browser — single origin<br/>http://HOST:ADMIN_UI_PORT"]
+    subgraph AUC["admin-ui container"]
+        N{"nginx :8080<br/>route by path"}
+        SPA["Static SPA files<br/>(/app/*)"]
+    end
+    API["openrag:8080<br/>API service · Docker network"]
+
+    B -->|"GET /app/ (page load)"| N
+    B -->|"fetch /v1, /auth, /users, /indexer …<br/>relative → same origin, no CORS"| N
+    N -->|"/app/*"| SPA
+    N -->|"everything else"| API
+```
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -541,3 +581,19 @@ changing one, rebuild the image: `docker compose build admin-ui`.
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `DEFAULT_LANGUAGE` | `str` | `` | UI language for Chainlit and the Admin UI (e.g. `en-US`, `fr`). When unset, the browser language is used, with `en-US` as the final fallback. |
+
+### MCP Server (Model Context Protocol)
+
+OpenRAG ships a standalone [Model Context Protocol](https://modelcontextprotocol.io/) server (`openrag/api/mcp/server.py`) that exposes retrieval to MCP clients. It runs as its own process (not part of the default compose stack). These variables configure the FastMCP transport binding and the search-tool defaults/bounds applied before a request reaches the retrieval service.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `OPENRAG_MCP_SERVER_NAME` | `str` | `OpenRAG MCP` | Display name advertised by the MCP server. |
+| `OPENRAG_MCP_HOST` | `str` | `0.0.0.0` | Interface the MCP server binds to. |
+| `OPENRAG_MCP_PORT` | `int` | `8081` | Port the MCP server listens on. |
+| `OPENRAG_MCP_PATH` | `str` | `/mcp` | HTTP path the MCP endpoint is served under. |
+| `OPENRAG_MCP_DEFAULT_TOP_K` | `int` | `5` | Number of chunks the search tool returns when the caller doesn't specify `top_k`. |
+| `OPENRAG_MCP_MAX_TOP_K` | `int` | `50` | Upper bound clamped on a caller-supplied `top_k`. |
+| `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.8` | Minimum similarity score for a chunk to be returned by the search tool. |
+| `OPENRAG_MCP_DOWNLOAD_TIMEOUT` | `float` | `30.0` | Timeout (seconds) for the server-side `index_url` fetch (SSRF/DoS hardening). |
+| `OPENRAG_MCP_MAX_DOWNLOAD_BYTES` | `int` | `104857600` | Maximum bytes downloaded by an `index_url` fetch. Default is 100 MiB. |

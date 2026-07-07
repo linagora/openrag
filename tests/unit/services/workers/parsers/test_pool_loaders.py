@@ -1,10 +1,10 @@
-"""The pooled PDF loaders must create their Ray pool lazily via
+"""The pooled loaders must create their Ray pool lazily via
 ``get_or_create_actor`` rather than assuming bootstrap already created it.
 
-Bootstrap only pre-warms the *globally* configured PDF backend, but a per-preset
+Bootstrap no longer pre-warms any parser pool, and a per-preset
 ``parsing_strategy`` can select any backend at runtime (#569). A get-only
 ``ray.get_actor`` then fails with "Failed to look up actor 'DoclingPool'"
-(#575); lazy creation makes whichever backend a preset picks work on first use.
+(#575); lazy creation makes whichever backend is picked work on first use.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import pytest
     [
         ("services.workers.parsers.docling_workers", "DoclingLoader", "DoclingPool", "DoclingPool"),
         ("services.workers.parsers.marker_workers", "MarkerLoader", "MarkerPool", "MarkerPool"),
+        ("services.workers.parsers.whisper_workers", "LocalWhisperLoader", "WhisperPool", "WhisperPool"),
     ],
 )
 def test_pool_loader_lazily_creates_its_pool(monkeypatch, module_name, loader_name, pool_name, pool_attr):
