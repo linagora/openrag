@@ -266,26 +266,136 @@ Search within a particular file in a partition.
 
 ### 📄 Document Extraction
 
+Extracts are the individual chunks a document is split into during indexing. Each has a stable `extract_id`, surfaced as the `link` on search results and on the file/chunk-listing endpoints below.
+
 #### Get Extract Details
 ```http
 GET /extract/{extract_id}
 ```
 
-Retrieve specific document extract (chunk) by ID.
+Retrieve a specific document extract (chunk) by its ID.
 
-**Response:** JSON containing extract content and metadata
+**Parameters:**
+- `extract_id` (path): The unique chunk identifier (from search or chunk-listing results)
+
+**Permissions:** Requires access to the partition containing the chunk — regular users are limited to their assigned partitions; admins can read any chunk.
+
+**Response:** `200 OK`
+```json
+{
+  "page_content": "The text content of the chunk…",
+  "metadata": {
+    "file_id": "doc-a-id",
+    "filename": "Document A.pdf",
+    "partition": "my_partition",
+    "page": 3,
+    "indexed_at": "2026-01-01T12:00:00Z"
+  }
+}
+```
+
+**Errors:**
+- `403 Forbidden`: You don't have access to the chunk's partition
+- `404 Not Found`: No extract with that ID
 
 ---
 
 ### Partitions & files Management
 
+Partitions are the multi-tenant document collections OpenRAG indexes into. All routes below are prefixed with **`/partition`**. Access is role-based (hierarchy `owner` > `editor` > `viewer`): **viewer** for reads, **owner** for partition deletion, config changes, and member management. Admins with `SUPER_ADMIN_MODE=true` bypass membership checks.
+
+#### List Partitions
+```http
+GET /partition/
+```
+List the partitions you can access — admins see all partitions, regular users see only their memberships. Each entry includes `partition`, `document_count`, and (for non-admins) your `role`.
+
+#### Create Partition
+```http
+POST /partition/{partition}
+```
+Create an empty partition; you automatically become its **owner**. Returns `201 Created`, or `409 Conflict` if the name is taken. Non-admins are capped by [`MAX_PARTITIONS_PER_USER`](/openrag/documentation/env_vars/) (a `403` is returned when the cap is reached).
+
+#### Delete Partition
+```http
+DELETE /partition/{partition}
+```
+Permanently delete a partition and **all** its files and chunks. **Owner** only. Returns `204 No Content`. This cannot be undone.
+
+#### List Files in a Partition
+```http
+GET /partition/{partition}
+```
+**Viewer**+. **Query:** `limit` (optional). Returns `{ "files": [ { "file_id", "filename", "link", … } ] }`, where `link` points at the file-detail endpoint below.
+
+#### Get File Details & Chunks
+```http
+GET /partition/{partition}/file/{file_id}
+```
+**Viewer**+. **Query:** `limit` (max chunks, default `2000`). Returns `{ "metadata": {…}, "documents": [ { "link": "…/extract/{id}" } ] }`. Returns `404` if the file isn't in the partition.
+
+#### List Chunks in a Partition
+```http
+GET /partition/{partition}/chunks
+```
+List document chunks (extracts) in a partition. **Viewer**+.
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `include_embedding` | boolean | `true` | Include each chunk's vector embedding |
+| `file_id` | string | None | Restrict to a single file's chunks (recommended for the document-detail view) |
+| `limit` | integer | unbounded | Max chunks to return |
+
+Returns `{ "chunks": [ { "content", "metadata", "link", "embedding"? } ] }`.
+
+:::caution
+Without `file_id` or `limit` this can return a large amount of data for partitions with many documents.
+:::
+
+#### Partition Pipeline Config
+
+Each partition references an **indexation** and a **retrieval** [preset](#-pipeline-presets), plus an embedder and chat LLM.
+
+* Get resolved config
+```http
+GET /partition/{partition}/config
+```
+**Viewer**+. Returns the partition's preset references and the fully resolved indexation/retrieval pipeline configuration.
+
+* Update config
+```http
+PATCH /partition/{partition}
+```
+**Owner** only. Body fields (all optional): `description`, `embedder`, `indexation_preset`, `retrieval_preset`, `chat_history_depth`, `chat_llm`. Returns the updated resolved config.
+
+```bash frame="none"
+curl -X PATCH http://localhost:8080/partition/my_partition \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"indexation_preset": "legal", "retrieval_preset": "hyde"}'
+```
+
+#### Partition Members
+
+Manage who can access a partition and with which role — all **owner** only.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/partition/{partition}/users` | GET | List members → `{ "members": [...] }` |
+| `/partition/{partition}/users` | POST | Add a member — form fields `user_id` (int), `role` (default `viewer`) → `201` |
+| `/partition/{partition}/users/{user_id}` | PATCH | Update a member's role — form field `role` → `200` |
+| `/partition/{partition}/users/{user_id}` | DELETE | Remove a member → `204` |
+
+#### Document Relationships
+
 * Get Files by Relationship
 
 ```http
-GET /{partition}/relationships/{relationship_id}
+GET /partition/{partition}/relationships/{relationship_id}
 ```
 
-Returns all files sharing the same `relationship_id` within a partition.
+Returns all files sharing the same `relationship_id` within a partition. **Viewer**+.
 
 **Parameters:**
 - `partition` — partition name
@@ -314,10 +424,10 @@ Returns all files sharing the same `relationship_id` within a partition.
 * Get File Ancestors
 
 ```http
-GET /{partition}/file/{file_id}/ancestors
+GET /partition/{partition}/file/{file_id}/ancestors
 ```
 
-Returns the complete ancestor path from root to the specified file.
+Returns the complete ancestor path from root to the specified file. **Viewer**+.
 
 :::note
 Returns only the direct ancestor path, not sibling branches.
@@ -350,6 +460,108 @@ Returns only the direct ancestor path, not sibling branches.
   ]
 }
 ```
+
+---
+
+### 🧩 Pipeline Presets
+
+Named, reusable **indexation** and **retrieval** pipeline configurations. Partitions reference a preset by name (see [`PATCH /partition/{partition}`](#partition-pipeline-config)) instead of carrying an inline config, so a change to a preset propagates to every partition using it. Six defaults are seeded on first boot (`default`, `legal`, `finance` for indexation; `default`, `multiquery`, `hyde` for retrieval); the `default` preset of each type cannot be deleted or renamed.
+
+All routes are prefixed with **`/presets`** and require the **admin** role. `preset_type` is one of `indexation` | `retrieval`.
+
+#### List available strategy options
+```http
+GET /presets/options
+```
+Returns the choices valid inside a preset `config`: `chunking_strategies`, `parsing_strategies` (`pymupdf`, `marker`, `docling`), `retrieval_types`, and `reranker_providers`.
+
+#### Create a preset
+```http
+POST /presets/
+```
+**Body:** `name` (string), `preset_type` (`indexation` | `retrieval`), `config` (object — its keys depend on the type). Returns `201 Created` with the stored preset.
+
+```bash frame="none" title="Create a retrieval preset"
+curl -X POST http://localhost:8080/presets/ \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "hyde-large",
+    "preset_type": "retrieval",
+    "config": {"type": "hyde", "top_k": 50, "top_n": 10}
+  }'
+```
+
+An indexation `config` instead accepts keys such as `chunking` (`{name, chunk_size, chunk_overlap_rate}`), `parsing_strategy`, `enable_image_captioning`, `enable_contextualization`, and `contextualization_mode`.
+
+#### List presets
+```http
+GET /presets/
+```
+**Query:** `preset_type` (optional) to filter by type. Returns a list of presets with `name`, `preset_type`, `config`, `created_at`, `updated_at`.
+
+#### Get / Update / Delete a preset
+```http
+GET    /presets/{preset_type}/{name}
+PUT    /presets/{preset_type}/{name}
+DELETE /presets/{preset_type}/{name}
+```
+`PUT` accepts a partial body (`name` to rename and/or `config`; at least one required) and returns the updated preset. `DELETE` returns `204 No Content`.
+
+---
+
+### 🔌 Model Endpoints
+
+A registry of named inference endpoints (embedder, reranker, LLM, VLM) that partitions and presets can point at, so operators can manage and switch inference backends at runtime instead of via `.env`. Stored API keys are **redacted** in every response and only returned through the explicit reveal action below.
+
+All routes are prefixed with **`/model-endpoints`** and require the **admin** role. `model_type` is one of `embedder` | `reranker` | `llm` | `vlm`.
+
+#### Register an endpoint
+```http
+POST /model-endpoints/
+```
+**Body:** `name`, `model_type`, `endpoint` (URL), `model_name` (optional), `batch_size` (default `32`), `timeout` (seconds, default `30`), `extra` (object — put `api_key` here), `is_default` (default `false`). Returns `201 Created`; the response carries `has_api_key` rather than the key itself.
+
+```bash frame="none"
+curl -X POST http://localhost:8080/model-endpoints/ \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "prod-embedder",
+    "model_type": "embedder",
+    "endpoint": "https://vllm.internal/v1",
+    "model_name": "jinaai/jina-embeddings-v3",
+    "extra": {"api_key": "sk-…"}
+  }'
+```
+
+#### List / Get / Update / Delete
+```http
+GET    /model-endpoints/                       # ?model_type= to filter
+GET    /model-endpoints/{model_type}/{name}
+PUT    /model-endpoints/{model_type}/{name}
+DELETE /model-endpoints/{model_type}/{name}    # 204 No Content
+```
+`PUT` takes a partial body (any of the create fields, plus `name` to rename) and returns the updated endpoint.
+
+#### Set as default for its type
+```http
+POST /model-endpoints/{model_type}/{name}/set-default
+```
+Promotes the endpoint to the default used for its `model_type`, and returns it.
+
+#### Reveal the stored API key
+```http
+POST /model-endpoints/{model_type}/{name}/reveal-api-key
+```
+Explicit admin action that returns `{ "api_key": "…" }` (or `null` if none is stored). This is the only endpoint that returns the key in clear text; the action is logged.
+
+#### Validate connectivity
+```http
+POST /model-endpoints/validate                          # probe a draft (unsaved) endpoint
+POST /model-endpoints/{model_type}/{name}/validate      # probe a registered endpoint
+```
+Both probe the target for reachability and model availability, returning `{ "reachable", "model_found", "models_served", "detail" }`. The draft form takes `endpoint` (+ optional `model_name`, `api_key`); to reuse a saved key without resending it, pass `stored_api_key_model_type` and `stored_api_key_name` (both required together, and only accepted when the draft `endpoint` matches the saved one).
 
 ---
 
