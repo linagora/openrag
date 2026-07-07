@@ -69,36 +69,4 @@ spec:
       {{- if eq .Values.adminUi.service.type "NodePort" }}
       nodePort: {{ .Values.adminUi.service.nodePort }}
       {{- end }}
-{{- if .Values.adminUi.ingress.enabled }}
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: {{ include "openrag-stack.fullname" . }}-admin-ui
-  {{- with .Values.adminUi.ingress.annotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-spec:
-  {{- if .Values.adminUi.ingress.className }}
-  ingressClassName: {{ .Values.adminUi.ingress.className | quote }}
-  {{- end }}
-  rules:
-    - http:
-        paths:
-          - path: {{ .Values.adminUi.ingress.path }}
-            pathType: {{ .Values.adminUi.ingress.pathType }}
-            backend:
-              service:
-                name: {{ include "openrag-stack.fullname" . }}-admin-ui
-                port:
-                  number: {{ .Values.adminUi.service.port }}
-      {{- with .Values.adminUi.ingress.host }}
-      host: {{ . | quote }}
-      {{- end }}
-  {{- with .Values.adminUi.ingress.tls }}
-  tls:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-{{- end }}
 {{- end }}

@@ -137,17 +137,17 @@ spec:
   rules:
     - http:
         paths:
-          {{- if .Values.adminUi.enabled }}
+          {{- if .Values.adminUi.ingress.enabled }}
           - path: /app/
             pathType: Prefix
             backend:
               service:
                 name: {{ include "openrag-stack.fullname" . }}-admin-ui
                 port:
-                  number: {{ .Values.adminUi.service.port }}
+                  name: admin-ui
           {{- end }}
-          - path: {{ .Values.openrag.ingress.path }}
-            pathType: {{ .Values.openrag.ingress.pathType }}
+          - path: /
+            pathType: Prefix
             backend:
               service:
                 {{- /* raycluster-head-svc only exists when ray.enabled renders the
@@ -157,7 +157,7 @@ spec:
                 {{- if and .Values.ray.enabled (eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true") }}
                 name: {{ include "openrag-stack.fullname" . }}-raycluster-head-svc
                 port:
-                  number: {{ .Values.env.config.RAY_SERVE_PORT | int }}
+                  name: ray-serve
                 {{- else }}
                 name: {{ include "openrag-stack.fullname" . }}-openrag
                 port:

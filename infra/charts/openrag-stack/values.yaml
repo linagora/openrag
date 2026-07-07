@@ -348,13 +348,7 @@ adminUi:
   # There is no automatic "/" -> "/app/" redirect in this mode (unlike the
   # compose front-door) — users must browse to /app/ directly.
   ingress:
-    enabled: false
-    className: ""
-    host: ""
-    annotations: {}
-    tls: []
-    path: /app
-    pathType: Prefix
+    enabled: true
 
   resources: {}
 
@@ -416,8 +410,6 @@ openrag:
       # nginx.ingress.kubernetes.io/proxy-body-size: "500m"
       # nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
     tls: []
-    path: /
-    pathType: Prefix
   # Ray dashboard ingress — only relevant when ray.enabled=false (embedded Ray via ray.init()).
   # When ray.enabled=true the dashboard is on the RayCluster head and has its own ingress (ray.ingress).
   rayDashboard:

@@ -52,15 +52,15 @@ spec:
               - "--block"
             ports:
               - containerPort: 80
-                name: serve
+                name: ray-serve
               - containerPort: 8265
-                name: dashboard
+                name: ray-dashboard
               - containerPort: 10001
-                name: client
+                name: ray-client
               - containerPort: 6379
-                name: gcs
+                name: ray-gcs
               - containerPort: 8090
-                name: metrics
+                name: ray-metrics
             volumeMounts:
               - name: model-weights
                 mountPath: /app/model_weights
