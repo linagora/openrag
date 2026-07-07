@@ -262,6 +262,7 @@ The system uses two types of language models:
 These are external services to provide !!!
 
 #### LLM Configuration
+
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `BASE_URL` | str | _(required)_ | Base URL of the LLM API endpoint |
@@ -274,6 +275,7 @@ These are external services to provide !!!
 
 
 #### VLM Configuration
+
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `VLM_BASE_URL` | str | _(required)_ | Base URL of the VLM API endpoint |
