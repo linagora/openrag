@@ -35,6 +35,27 @@ vi.mock("@/lib/api/models", () => ({
 const listPartitionsMock = vi.mocked(listPartitions);
 const deletePartitionMock = vi.mocked(deletePartition);
 
+function makePartition(name: string, role = "owner") {
+  return {
+    partition: name,
+    name,
+    role,
+    exists: true,
+    description: "",
+    embedder: "",
+    dimension: 0,
+    collection_name: null,
+    chat_history_depth: 0,
+    chat_llm: null,
+    document_count: 0,
+    indexation_preset: "",
+    retrieval_preset: "",
+    indexation_pipeline: {},
+    retrieval_pipeline: {},
+    created_at: null,
+  };
+}
+
 function renderPartitions() {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -56,45 +77,12 @@ describe("PartitionListPage bulk actions", () => {
   beforeEach(() => {
     permissions.canManagePartitions = false;
     permissions.canConfigurePartition.mockImplementation((role?: string) => role === "owner");
+    deletePartitionMock.mockClear();
     deletePartitionMock.mockResolvedValue();
     listPartitionsMock.mockResolvedValue({
       partitions: [
-        {
-          partition: "owned-a",
-          name: "owned-a",
-          role: "owner",
-          exists: true,
-          description: "",
-          embedder: "",
-          dimension: 0,
-          collection_name: null,
-          chat_history_depth: 0,
-          chat_llm: null,
-          document_count: 0,
-          indexation_preset: "",
-          retrieval_preset: "",
-          indexation_pipeline: {},
-          retrieval_pipeline: {},
-          created_at: null,
-        },
-        {
-          partition: "viewer-b",
-          name: "viewer-b",
-          role: "viewer",
-          exists: true,
-          description: "",
-          embedder: "",
-          dimension: 0,
-          collection_name: null,
-          chat_history_depth: 0,
-          chat_llm: null,
-          document_count: 0,
-          indexation_preset: "",
-          retrieval_preset: "",
-          indexation_pipeline: {},
-          retrieval_pipeline: {},
-          created_at: null,
-        },
+        makePartition("owned-a"),
+        makePartition("viewer-b", "viewer"),
       ],
     });
   });
@@ -114,5 +102,48 @@ describe("PartitionListPage bulk actions", () => {
 
     await waitFor(() => expect(deletePartitionMock).toHaveBeenCalledWith("owned-a"));
     expect(deletePartitionMock).not.toHaveBeenCalledWith("viewer-b");
+  });
+
+  it("paginates partitions with 10 rows per page", async () => {
+    listPartitionsMock.mockResolvedValue({
+      partitions: Array.from({ length: 11 }, (_, i) =>
+        makePartition(`partition-${String(i + 1).padStart(2, "0")}`),
+      ),
+    });
+
+    renderPartitions();
+
+    expect(await screen.findByText("partition-01")).not.toBeNull();
+    expect(screen.getByText("partition-10")).not.toBeNull();
+    expect(screen.queryByText("partition-11")).toBeNull();
+    expect(screen.getByText("Page 1 of 2")).not.toBeNull();
+
+    const buttons = screen.getAllByRole("button");
+    await userEvent.click(buttons[buttons.length - 1]);
+
+    expect(await screen.findByText("partition-11")).not.toBeNull();
+    expect(screen.queryByText("partition-01")).toBeNull();
+    expect(screen.getByText("Page 2 of 2")).not.toBeNull();
+  });
+
+  it("selects only visible partitions from the table header", async () => {
+    listPartitionsMock.mockResolvedValue({
+      partitions: Array.from({ length: 11 }, (_, i) =>
+        makePartition(`partition-${String(i + 1).padStart(2, "0")}`),
+      ),
+    });
+
+    renderPartitions();
+
+    expect(await screen.findByText("partition-01")).not.toBeNull();
+    await userEvent.click(screen.getByRole("checkbox", { name: /select visible deletable partitions/i }));
+
+    expect(screen.getByText("10 selected")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /delete selected partitions/i }));
+    await userEvent.click(screen.getByRole("button", { name: /confirm/i }));
+
+    await waitFor(() => expect(deletePartitionMock).toHaveBeenCalledWith("partition-01"));
+    expect(deletePartitionMock).toHaveBeenCalledTimes(10);
+    expect(deletePartitionMock).not.toHaveBeenCalledWith("partition-11");
   });
 });

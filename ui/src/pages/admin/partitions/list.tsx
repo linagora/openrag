@@ -1,7 +1,7 @@
 import { useMemo, useState, useCallback, useEffect } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Pencil, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle, XCircle, Loader2, RefreshCw } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle, XCircle, Loader2, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -52,6 +52,7 @@ import { intOr } from "@/lib/utils";
 import { partitionDetailPath } from "@/lib/routes";
 
 type SortDir = "asc" | "desc" | null;
+const PARTITIONS_PAGE_SIZE = 10;
 
 function RowActions({
   partition,
@@ -148,6 +149,7 @@ export default function PartitionListPage() {
   const [sortDir, setSortDir] = useState<SortDir>(null);
   const [sortColumn, setSortColumn] = useState<"name" | "created_at">("created_at");
   const [selectedPartitionNames, setSelectedPartitionNames] = useState<string[]>([]);
+  const [pageIndex, setPageIndex] = useState(0);
 
   // `GET /partition/` is already membership-scoped server-side (admins with
   // SUPER_ADMIN_MODE see all; regular users see their memberships), so a single
@@ -255,10 +257,20 @@ export default function PartitionListPage() {
   const showActions =
     canManagePartitions || filteredAndSorted.some((p) => canConfigurePartition(p.role));
 
-  const visiblePartitions = filteredAndSorted;
+  const pageCount = Math.ceil(filteredAndSorted.length / PARTITIONS_PAGE_SIZE);
+  useEffect(() => {
+    if (pageIndex > 0 && pageIndex > pageCount - 1) {
+      setPageIndex(Math.max(0, pageCount - 1));
+    }
+  }, [pageCount, pageIndex]);
+
+  const visiblePartitions = useMemo(() => {
+    const start = pageIndex * PARTITIONS_PAGE_SIZE;
+    return filteredAndSorted.slice(start, start + PARTITIONS_PAGE_SIZE);
+  }, [filteredAndSorted, pageIndex]);
   const visibleDeletablePartitionNames = useMemo(
-    () => filteredAndSorted.filter((p) => canConfigurePartition(p.role)).map((p) => p.name),
-    [filteredAndSorted, canConfigurePartition],
+    () => visiblePartitions.filter((p) => canConfigurePartition(p.role)).map((p) => p.name),
+    [visiblePartitions, canConfigurePartition],
   );
   const visibleDeletablePartitionNameSet = useMemo(
     () => new Set(visibleDeletablePartitionNames),
@@ -559,6 +571,32 @@ export default function PartitionListPage() {
               )}
             </TableBody>
           </Table>
+        </div>
+      )}
+
+      {pageCount > 1 && (
+        <div className="flex items-center justify-between py-4">
+          <p className="text-sm text-muted-foreground">
+            Page {pageIndex + 1} of {pageCount}
+          </p>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPageIndex((prev) => Math.max(0, prev - 1))}
+              disabled={pageIndex === 0}
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPageIndex((prev) => Math.min(pageCount - 1, prev + 1))}
+              disabled={pageIndex >= pageCount - 1}
+            >
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       )}
 

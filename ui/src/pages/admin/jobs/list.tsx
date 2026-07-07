@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
@@ -15,6 +15,8 @@ import { listTasks, type TaskListItem } from "@/lib/api/jobs";
 
 // OpenRag exposes per-file indexing tasks (TaskStateManager), not batch "jobs".
 const STATUS_TABS = ["ALL", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED"] as const;
+const JOBS_REFETCH_INTERVAL_MS = 5000;
+const JOB_SEARCH_DEBOUNCE_MS = 250;
 
 const str = (v: unknown) => (v == null ? "" : String(v));
 
@@ -49,17 +51,23 @@ export default function JobListPage() {
   const { isAdmin } = usePermissions();
   const [statusTab, setStatusTab] = useState<string>("ALL");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [manualRefreshing, setManualRefreshing] = useState(false);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedSearch(search), JOB_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timeout);
+  }, [search]);
 
   const tasksQuery = useQuery({
     queryKey: ["tasks", statusTab],
     queryFn: () => listTasks(statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab),
-    refetchInterval: 2000, // poll — OpenRag has no task SSE (scale-correct per roadmap)
+    refetchInterval: JOBS_REFETCH_INTERVAL_MS, // poll — OpenRag has no task SSE
   });
 
   const tasks = useMemo(() => tasksQuery.data?.tasks ?? [], [tasksQuery.data?.tasks]);
   const filteredTasks = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = debouncedSearch.trim().toLowerCase();
     if (!q) return tasks;
     return tasks.filter((task) => {
       const filename = str(task.details?.metadata?.filename);
@@ -69,13 +77,19 @@ export default function JobListPage() {
         str(value).toLowerCase().includes(q),
       );
     });
-  }, [tasks, search]);
+  }, [tasks, debouncedSearch]);
+
+  const handleStatusTabChange = (value: string) => {
+    setStatusTab(value);
+    setSearch("");
+    setDebouncedSearch("");
+  };
 
   return (
     <div>
       <PageHeader title="Jobs" description={isAdmin ? "Monitor indexing tasks" : "Monitor your indexing tasks"} />
 
-      <Tabs value={statusTab} onValueChange={setStatusTab}>
+      <Tabs value={statusTab} onValueChange={handleStatusTabChange}>
         <div className="mb-4 mt-0 flex items-center gap-2">
           <div className="relative max-w-sm">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -123,7 +137,7 @@ export default function JobListPage() {
                 Failed to load tasks: {(tasksQuery.error as Error).message}
               </div>
             ) : (
-              <DataTable key={`${statusTab}:${search}`} columns={columns} data={filteredTasks} />
+              <DataTable key={`${statusTab}:${debouncedSearch}`} columns={columns} data={filteredTasks} />
             )}
           </TabsContent>
         ))}
