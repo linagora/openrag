@@ -98,7 +98,7 @@ services:
       - WITH_OPENAI_API=true
       - IMAGE_CAPTIONING=false
       - LOG_LEVEL=INFO
-      - PDFLoader=PyMuPDFLoader
+      - PDFLOADER=PyMuPDFLoader
       - RAY_POOL_SIZE=1
       - RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
       - RAY_memory_monitor_refresh_ms=0
