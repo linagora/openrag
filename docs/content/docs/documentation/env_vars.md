@@ -30,7 +30,7 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 
 #### PDF Loader
 ##### Marker Loader Configuration
-The `MarkerLoader` is the default PDF parsing engine. It can be configured using the following environment variables:
+These settings apply when `MarkerLoader` is selected (`PDFLOADER=MarkerLoader`; the default is `PyMuPDFLoader`). It can be configured using the following environment variables:
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
