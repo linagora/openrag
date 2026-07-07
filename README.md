@@ -143,50 +143,34 @@ Create a `.env` file under `infra/compose/`, mirroring the structure of `infra/c
 cp infra/compose/.env.example infra/compose/.env
 ```
 #### 3. File Parser configuration 
-All supported file format parsers are pre-configured. For PDF processing, **[MarkerLoader](https://github.com/datalab-to/marker)** serves as the default parser, offering comprehensive support for OCR-scanned documents, complex layouts, tables, and embedded images. MarkerLoader operates efficiently on both GPU and CPU environments.
+All supported file format parsers are pre-configured. For PDF processing, **[PyMuPDFLoader](https://pymupdf.readthedocs.io/)** is the default parser — a lightweight, fast, CPU-friendly engine well suited to searchable PDFs and quick local testing.
+
+> ⚠️ **Important**: `PyMuPDFLoader` cannot process non-searchable (image-based / scanned) PDFs and does not run OCR or extract embedded images.
 
 <details>
 <summary>For more PDF options</summary>
 
-For CPU-only deployments or lightweight testing scenarios, you can consider switching to **`PyMuPDFLoader`**. To change the loader, set the **`PDFLoader`** variable like this `PDFLoader=PyMuPDFLoader`.
-
-> ⚠️ **Important**: These alternative loaders have limitations - they cannot process non-searchable (image-based) PDFs and do not extract or handle embedded images.
+For OCR-scanned documents, complex layouts, tables, or embedded images, switch to **[`MarkerLoader`](https://github.com/datalab-to/marker)** (heavier; runs on GPU and CPU) by setting the **`PDFLOADER`** variable: `PDFLOADER=MarkerLoader`. Other options: `DoclingLoader`, `DotsOCRLoader`.
 </details>
 
 #### 4.Deployment: Launch the app
 >[!IMPORTANT]
 > The **admin UI** (a web interface for intuitive document ingestion, indexing, and management) ships bundled as the `admin-ui` service — no separate setup is required. Once the stack is up it is served at `http://localhost:ADMIN_UI_PORT/app/` (default port `8081`).
 
-* **Simple and quick** launch for testing
-  >[!IMPORTANT]
-  > For a **simple `quick deployment`** using only the docker-compose file, only the [quick_start **folder**](./infra/quick_start/) is required. Follow these steps to launch the application:
-  
-  1. Navigate to the **`infra/quick_start`** directory or download only that folder
-  2. Place your **`.env`** file inside the **`infra/quick_start`** directory
-  3. Run the appropriate command for your system:
+The full stack and its service configs live under **`infra/compose/`**. Place the **`.env`** you created there and run the commands from that directory (`cd infra/compose`):
 
-  ```bash
-  # GPU deployment (recommended for optimal performance)
-  docker compose up -d
-  # docker compose down # to stop the application
+```bash
+# GPU deployment (recommended for optimal performance)
+docker compose up -d
+# docker compose down # to stop the application
 
-  # CPU deployment
-  docker compose --profile cpu up -d
-  # docker compose --profile cpu down # to stop the application
-  ```
-* **Development Environment**: For development builds, use the **`--build`** flag to rebuild images:
-  >[!NOTE]
-  > The full stack and its service configs live under `infra/compose/`. Execute these commands from there (`cd infra/compose`).
+# CPU deployment
+docker compose --profile cpu up -d
+# docker compose --profile cpu down # to stop the application
+```
 
-  ```bash
-  # GPU deployment with rebuild (recommended for optimal performance)
-  docker compose up --build -d
-  # docker compose down # to stop the application
-
-  # CPU deployment with rebuild
-  docker compose --profile cpu up --build -d
-  # docker compose --profile cpu down # to stop the application
-  ```
+>[!NOTE]
+> For development builds, add the **`--build`** flag to rebuild images from your working tree, e.g. `docker compose up --build -d`.
 
 >[!WARNING]
 > The first startup may take longer as required dependencies are installed. 

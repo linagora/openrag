@@ -17,7 +17,6 @@ infra/          # All deployment infrastructure
   scripts/      #   entrypoint.sh and other deployment scripts
   ansible/      #   Ansible playbooks
   charts/       #   Helm charts (openrag-stack)
-  quick_start/  #   Getting-started compose
   cluster.yaml  #   Ray cluster config
 scripts/        # Developer/operational CLI tools (check_layer_imports.py, data_indexer.py, postgres-init/)
 tests/          # Integration tests (api_tests/, integration/)

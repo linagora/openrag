@@ -24,124 +24,116 @@ cd openrag/
 git checkout main # or a given release
 ```
 #### 2. Create a `.env` File
-Create a `.env` file at the root of the project, mirroring the structure of `.env.example`, to configure your environment and supply blank environment variables.
+The Docker Compose stack lives under **`infra/compose/`**, next to its **`.env.example`** template. Copy it to a `.env` in the same folder and fill in the blanks (LLM/VLM endpoints, embedder, and the **required** MinIO / Postgres secrets):
 
-```bash title="Creating the .env file mirroring .env.example"
+```bash title="Create your .env from the template"
+cd infra/compose
 cp .env.example .env
 ```
-Here is a brief overview of key environment variables to configure:
 
-<Code code={env_example} lang="bash" title='.env'/>
+Here is the minimal set of variables to get started — see the [full environment-variable reference](/openrag/documentation/env_vars/) for every other option:
+
+<Code code={env_example} lang="bash" title='infra/compose/.env'/>
 
 #### 3. File Parser configuration 
-All supported file format parsers are pre-configured. For PDF processing, **[MarkerLoader](https://github.com/datalab-to/marker)** serves as the default parser, offering comprehensive support for OCR-scanned documents, complex layouts, tables, and embedded images. MarkerLoader operates efficiently on both GPU and CPU environments.
+All supported file format parsers are pre-configured. For PDF processing, **[PyMuPDFLoader](https://pymupdf.readthedocs.io/)** is the default parser — a lightweight, fast, CPU-friendly engine well suited to searchable PDFs and quick local testing.
 
-:::note 
-For **`CPU-only deployments`** or lightweight testing scenarios, you can consider switching to **`PyMuPDFLoader`**. To change the loader, set the **`PDFLoader`** variable like this `PDFLoader=PyMuPDFLoader`.
 :::caution[Important]
-These alternative loaders have limitations - they cannot process non-searchable (image-based) PDFs and do not extract or handle embedded images.
+`PyMuPDFLoader` cannot process non-searchable (image-based / scanned) PDFs and does not run OCR or extract embedded images.
+:::
+:::note
+For OCR-scanned documents, complex layouts, tables, or embedded images, switch to **[`MarkerLoader`](https://github.com/datalab-to/marker)** (heavier; runs on GPU and CPU) by setting the **`PDFLOADER`** variable: `PDFLOADER=MarkerLoader`. Other options: `DoclingLoader`.
 :::
 
-#### 4. Deployment
+#### 4. Run OpenRAG
+
 :::tip[Admin UI]
-The **admin UI** (a web interface for intuitive document ingestion, indexing, and management) ships bundled as the `admin-ui` service — no separate setup is required. Once the stack is up it is served at `http://localhost:ADMIN_UI_PORT/app/` (default port `8081`).
+The **admin UI** — a web interface for document ingestion, indexing, and management — ships bundled as the `admin-ui` service, so there is no separate setup. Once the stack is up it is served at `http://localhost:ADMIN_UI_PORT/app/` (default port `8081`).
 :::
 
-##### `Simple and quick` launch for testing
-  :::info
-  [OpenRAG repository](https://github.com/linagora/openrag) contains a ready-to-use `docker-compose.yml` file in the **`quick_start` folder**. This setup is ideal for local testing and quick deployments.
-  <FileTree>
-  - quick_start
-    - extern reranker and embedder utils
-      - vllm cpu dockerfile for different architectures
-        - Dockerfile.cpu for x86 CPU
-      - infinity.yaml reranker service
-    - vdb
-      - milvus.yaml
-    - docker-compose.yml
-    - .env the configured .env file
-  </FileTree>
-  :::
+All deployment assets now live under **`infra/`**:
 
-  1. Navigate to the **`quick_start`** directory or copy it
-  2. Place your **`.env`** file in the **`quick_start`** folder
-  3. Run the appropriate command for your system:
-
-
-  <Tabs>
-    <TabItem label="GPU">
-    GPU deployment, recommended for optimal performance
-
-    ```bash frame="none" {4}
-    docker compose up -d
-
-    # run the following command to stop the application
-    # docker compose down
-    ```
-    </TabItem>
-    <TabItem label="x86 CPU">
-    CPU deployment
-    ```bash frame="none" "--profile cpu" {4}
-    docker compose --profile cpu up -d
-
-    # to stop the application
-    # docker compose --profile cpu down
-    ```
-    </TabItem>
-  </Tabs>
-
-
-##### Development Environment
-
-For development builds, use the **`--build`** flag to rebuild images:
-  Execute these commands from the project root directory or the cloned repository:
-
-  <FileTree>
-    - .github/
-    - .hydra_config/
-    - ...
-    - extern/
-    - vdb/
-    - docker-compose.yml
-    - README.md
+<FileTree>
+- infra/
+  - compose/ full stack (recommended)
+    - docker-compose.yaml
     - .env.example
-    - pyproject.toml
-    - uv.lock
-    - .env the configured .env file
-  </FileTree>
+    - .env your configured env
+  - docker/ Dockerfiles
+  - ansible/ remote deployment
+- openrag/ application code
+- conf/ YAML configuration
+</FileTree>
 
-  <Tabs>
-    <TabItem label="GPU">
-    GPU deployment
-    ```bash frame="none" {4}
-    docker compose up -d
+Run the stack from **`infra/compose/`**, where the `.env` you just created lives. Use the **GPU** tab on a machine with an NVIDIA GPU, or the **CPU** tab otherwise.
 
-    # run the following command to stop the application
-    # docker compose down
-    ```
-    </TabItem>
-    <TabItem label="CPU">
-    CPU deployment
-    ```bash frame="none" "--profile cpu" {4}
-    docker compose --profile cpu up -d
+<Tabs>
+  <TabItem label="GPU">
+  ```bash frame="none"
+  cd infra/compose
+  docker compose up -d
 
-    # to stop the application
-    # docker compose --profile cpu down
-    ```
-    </TabItem>
-  </Tabs>
+  # stop it later with:
+  # docker compose down
+  ```
+  </TabItem>
+  <TabItem label="x86 CPU">
+  ```bash frame="none" "--profile cpu"
+  cd infra/compose
+  docker compose --profile cpu up -d
 
-Once the app is up and running, you can access the provided services. See the next section.
+  # stop it later with:
+  # docker compose --profile cpu down
+  ```
+  </TabItem>
+</Tabs>
+
+:::note[Development builds]
+Add `--build` to rebuild the images from your working tree: `docker compose up --build -d`.
+:::
+
+##### Inference services
+
+The **LLM** and **VLM** are always **external** OpenAI-compatible endpoints — set `BASE_URL`/`MODEL`/`API_KEY` (and the `VLM_*` equivalents) in `.env`.
+
+The **embedder** and **reranker**, by contrast, are **bundled**: `docker compose up -d` starts a `vllm` container serving `EMBEDDER_MODEL_NAME` and a reranker container (`RERANKER_PROVIDER`, default Infinity). No extra step is needed to use them.
+
+```bash
+cd infra/compose
+docker compose up -d                   # GPU — core stack + bundled embedder & reranker
+# docker compose --profile cpu up -d   # CPU-only host
+```
+
+To use **external** embedding/reranking instead — reusing existing inference servers and keeping the footprint small:
+
+- **Embedder** — set `EMBEDDER_BASE_URL` (+ `EMBEDDER_API_KEY`) to your endpoint, then stop the local server by commenting out the `vllm-gpu` / `vllm-cpu` service in `infra/compose/docker-compose.yaml`.
+- **Reranker** — set `RERANKER_ENABLED=false` to skip reranking, or point it at an endpoint with `RERANKER_PROVIDER=openai` and `RERANKER_BASE_URL` (+ `RERANKER_API_KEY`); to also stop the container, comment out the `extern/reranker/…` line in the `include:` block.
+
+Once the app is up and running, you can access the provided services — see [Default ports](#default-ports) below.
 
 ## Ansible
 
-Clone the OpenRAG repository:
+Clone the repository, then run the deployment script from **`infra/ansible/`** and follow the interactive prompts:
+
 ```bash
-git clone https://github.com/linagora/openrag.git
-cd openrag
+git clone --recurse-submodules https://github.com/linagora/openrag.git
+cd openrag/infra/ansible
+./deploy.sh
 ```
 
-Run the provided deployment script and follow the instructions:
-```bash
-./ansible/deploy.sh
-```
+## Default ports
+
+Once the stack is up, OpenRAG exposes the following services by default:
+
+| Service           | Port           | Description                                                    |
+|-------------------|----------------|----------------------------------------------------------------|
+| API Documentation | 8080/docs      | Main FastAPI for document ingestion and querying. See [this](/openrag/documentation/api) |
+| Chainlit UI       | 8080/chainlit  | User interface for interacting with the RAG system             |
+| Ray Dashboard     | 8265           | Ray dashboard for monitoring and managing tasks                |
+| Admin UI          | 8081/app/      | Main user interface for indexing and viewing indexed documents |
+
+:::note[Ray Serve mode]
+The table above is for the default (uvicorn) deployment, where the Chainlit UI is the `/chainlit` subroute of the API. When `ENABLE_RAY_SERVE=true`, the API is served by Ray Serve on `RAY_SERVE_PORT` and the **Chainlit UI runs on its own port, `CHAINLIT_PORT`** (default `8090`), instead of the subroute. Uncomment the `${CHAINLIT_PORT}:${CHAINLIT_PORT}` mapping in `infra/compose/docker-compose.yaml` to expose it. See [`CHAINLIT_PORT`](/openrag/documentation/env_vars/#ray-serve-configuration).
+:::
+
+More information about each service is available in its respective documentation page.
