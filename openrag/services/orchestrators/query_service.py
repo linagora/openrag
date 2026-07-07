@@ -107,9 +107,11 @@ class QueryService:
         config: Settings,
         web_search_service: Any | None,
         workspace_service: WorkspaceService,
+        llm_factory: Callable[[str], LLM] | None = None,
     ) -> None:
         self._retrieval = retrieval_service
         self._llm = llm
+        self._llm_factory = llm_factory
         self._web = web_search_service
         self._workspace = workspace_service
 
@@ -155,6 +157,48 @@ class QueryService:
             if explicit:
                 return max(explicit)
         return self._default_chat_history_depth
+
+    def _resolve_llm(self, partition: list[str] | None) -> LLM:
+        """Effective answer-generation LLM for this request.
+
+        Honors a partition's configured ``chat_llm`` model-endpoint preset
+        (set via the admin API) over the default LLM. Same partition
+        semantics as ``_resolve_chat_history_depth``: no partition and the
+        ``"all"`` sentinel use the default; a multi-partition request uses
+        the preset only when every partition that sets one names the same
+        endpoint — with conflicting presets there is no single owning
+        partition, so the default applies.
+
+        ``chat_llm`` is not validated against the endpoint catalog when it
+        is assigned, so an unknown name (e.g. an endpoint deleted after
+        assignment) must not fail the chat request — it falls back to the
+        default LLM with a warning.
+        """
+        if self._llm_factory is None or not partition or "all" in partition:
+            logger.bind(partitions=partition).debug("Answering with the default LLM (no partition-scoped preset)")
+            return self._llm
+        names = {
+            cfg.chat_llm
+            for name in partition
+            if (cfg := self._config.partitions.get(name)) is not None and cfg.chat_llm
+        }
+        if len(names) != 1:
+            logger.bind(partitions=partition, chat_llm_presets=sorted(names)).debug(
+                "Answering with the default LLM (no single chat_llm preset among the partitions)"
+            )
+            return self._llm
+        (chat_llm,) = names
+        try:
+            llm = self._llm_factory(chat_llm)
+        except KeyError:
+            logger.warning(
+                "Partition chat_llm preset not found in the model-endpoint catalog — using the default LLM",
+                chat_llm=chat_llm,
+                partitions=partition,
+            )
+            return self._llm
+        logger.bind(chat_llm=chat_llm, partitions=partition).debug("Answering with the partition's chat_llm preset")
+        return llm
 
     # ------------------------------------------------------------------
     # Query generation (was RagPipeline.generate_query — no LangChain)
@@ -423,7 +467,7 @@ class QueryService:
         sources = prepare_sources(docs, web_results)
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
-        chunk = await self._llm.chat(payload["messages"], **_sampling(payload))
+        chunk = await self._resolve_llm(partitions).chat(payload["messages"], **_sampling(payload))
         chunk["model"] = model_name
         content = chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
         clean, citations = extract_and_strip_sources_block(content)
@@ -448,7 +492,7 @@ class QueryService:
         sources = prepare_sources(docs, web_results)
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
-        llm_stream = self._llm.stream_chat(payload["messages"], **_sampling(payload))
+        llm_stream = self._resolve_llm(partitions).stream_chat(payload["messages"], **_sampling(payload))
         async for sse_line in stream_with_source_filtering(llm_stream, sources, model_name):
             yield sse_line
 
@@ -466,7 +510,7 @@ class QueryService:
             payload, docs = await self._prepare_completions(partitions, payload)
         sources = prepare_sources(docs, [])
 
-        resp = await self._llm.generate(payload["prompt"], **_sampling(payload, key="prompt"))
+        resp = await self._resolve_llm(partitions).generate(payload["prompt"], **_sampling(payload, key="prompt"))
         text = resp.get("choices", [{}])[0].get("text", "") or ""
         clean, citations = extract_and_strip_sources_block(text)
         resp["choices"][0]["text"] = clean

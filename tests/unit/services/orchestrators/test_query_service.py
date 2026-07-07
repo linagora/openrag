@@ -99,13 +99,14 @@ def _config(mode="SimpleRag"):
     )
 
 
-def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag") -> QueryService:
+def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None) -> QueryService:
     return QueryService(
         retrieval_service=retrieval or FakeRetrieval(),
         llm=llm or FakeLLM(),
         config=_config(mode),
         web_search_service=web or FakeWeb(),
         workspace_service=FakeWorkspace(),
+        llm_factory=llm_factory,
     )
 
 
@@ -152,6 +153,93 @@ def test_resolve_chat_history_depth_multi_partition_takes_max_explicit():
         "c": SimpleNamespace(chat_history_depth=0),  # inherits → ignored
     }
     assert svc._resolve_chat_history_depth(["a", "b", "c"]) == 6
+
+
+# --------------------------------------------------------------------------- #
+# chat LLM resolution (per-partition chat_llm model-endpoint preset)
+# --------------------------------------------------------------------------- #
+
+
+def _partition(chat_llm=None, chat_history_depth=0):
+    return SimpleNamespace(chat_llm=chat_llm, chat_history_depth=chat_history_depth)
+
+
+class RecordingFactory:
+    def __init__(self, llms=None):
+        self._llms = llms or {}
+        self.calls: list[str] = []
+
+    def __call__(self, name: str):
+        self.calls.append(name)
+        if name not in self._llms:
+            raise KeyError(name)
+        return self._llms[name]
+
+
+def test_resolve_llm_uses_partition_preset():
+    preset_llm = FakeLLM()
+    factory = RecordingFactory({"mistral": preset_llm})
+    svc = _svc(llm_factory=factory)
+    svc._config.partitions = {"p": _partition(chat_llm="mistral")}
+    assert svc._resolve_llm(["p"]) is preset_llm
+    assert factory.calls == ["mistral"]
+
+
+def test_resolve_llm_defaults_without_factory_partition_or_preset():
+    default_llm = FakeLLM()
+    factory = RecordingFactory()
+    svc = _svc(llm=default_llm, llm_factory=factory)
+    svc._config.partitions = {"p": _partition(chat_llm=None), "q": _partition(chat_llm="mistral")}
+    assert svc._resolve_llm(None) is default_llm  # direct/web-only mode
+    assert svc._resolve_llm(["all"]) is default_llm  # cross-partition sentinel
+    assert svc._resolve_llm(["p"]) is default_llm  # partition without a preset
+    assert svc._resolve_llm(["missing"]) is default_llm  # unknown partition
+    assert factory.calls == []  # default paths never hit the factory
+    no_factory = _svc(llm=default_llm)
+    no_factory._config.partitions = {"q": _partition(chat_llm="mistral")}
+    assert no_factory._resolve_llm(["q"]) is default_llm
+
+
+def test_resolve_llm_multi_partition_uses_preset_only_when_unanimous():
+    default_llm, preset_llm = FakeLLM(), FakeLLM()
+    factory = RecordingFactory({"mistral": preset_llm})
+    svc = _svc(llm=default_llm, llm_factory=factory)
+    svc._config.partitions = {
+        "a": _partition(chat_llm="mistral"),
+        "b": _partition(chat_llm="mistral"),
+        "c": _partition(chat_llm=None),  # unset → doesn't veto
+        "d": _partition(chat_llm="llama"),
+    }
+    assert svc._resolve_llm(["a", "b", "c"]) is preset_llm  # unanimous among setters
+    assert svc._resolve_llm(["a", "d"]) is default_llm  # conflicting presets → default
+
+
+def test_resolve_llm_unknown_preset_falls_back_to_default():
+    # chat_llm is not validated on assignment (the endpoint may be deleted
+    # afterwards) — an unknown name must not fail the request.
+    default_llm = FakeLLM()
+    factory = RecordingFactory()  # raises KeyError for every name
+    svc = _svc(llm=default_llm, llm_factory=factory)
+    svc._config.partitions = {"p": _partition(chat_llm="deleted")}
+    assert svc._resolve_llm(["p"]) is default_llm
+    assert factory.calls == ["deleted"]
+
+
+@pytest.mark.asyncio
+async def test_chat_answers_with_partition_chat_llm():
+    default_llm = FakeLLM()
+    preset_llm = FakeLLM(chat_responses=["preset answer [Sources: none]"])
+    svc = _svc(llm=default_llm, llm_factory=RecordingFactory({"mistral": preset_llm}))
+    svc._config.partitions = {"p": _partition(chat_llm="mistral")}
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        prepare_sources=lambda d, w: [],
+        model_name="openrag-p",
+    )
+    assert out["choices"][0]["message"]["content"] == "preset answer"
+    assert len(preset_llm.chat_calls) == 1
+    assert default_llm.chat_calls == []  # SimpleRag: no query-gen call either
 
 
 # --------------------------------------------------------------------------- #
