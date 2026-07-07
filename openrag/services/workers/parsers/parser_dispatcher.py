@@ -24,8 +24,8 @@ from core.utils.logging import get_logger
 logger = get_logger()
 
 # Translate the legacy ``file_loaders`` class-name values into new registry
-# backend names. Mirrors ``bootstrap.get_marker_pool`` / ``init_audio_actor`` so
-# the dispatcher always resolves to a backend whose pool actually exists.
+# backend names. Every pooled backend self-provisions its Ray pool on first
+# use, so the dispatcher can resolve to any of them.
 _PDF_BACKENDS: dict[str, str] = {
     "MarkerLoader": "marker",
     "DoclingLoader": "docling",

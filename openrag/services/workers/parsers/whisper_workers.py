@@ -200,7 +200,11 @@ class LocalWhisperLoader(BasePooledParser):
 
     def __init__(self):
         self.config = load_config()
-        self.whisper_actor: WhisperPool = ray.get_actor("WhisperPool", namespace="openrag")
+        # Self-provision the pool on first use — mirrors MarkerLoader; bootstrap
+        # no longer pre-warms parser pools at startup.
+        from services.workers.bootstrap import get_or_create_actor
+
+        self.worker: WhisperPool = get_or_create_actor("WhisperPool", WhisperPool, lifetime="detached")
 
     def supported_types(self) -> list[str]:
         return [DocumentType.AUDIO.value, DocumentType.VIDEO.value]
@@ -214,7 +218,7 @@ class LocalWhisperLoader(BasePooledParser):
 
         async with document.as_temporary_file() as path:
             try:
-                text = await self.whisper_actor.transcribe.remote(str(path))
+                text = await self.worker.transcribe.remote(str(path))
             except Exception as e:
                 logger.error("Error transcribing audio", error=str(e))
                 raise
