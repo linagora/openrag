@@ -21,7 +21,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.openrag.serviceAccountName }}
-      serviceAccountName: {{ . }}
+      serviceAccountName: {{ tpl . $ }}
       {{- end }}
       {{- with .Values.openrag.automountServiceAccountToken }}
       automountServiceAccountToken: {{ . }}

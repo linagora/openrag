@@ -20,7 +20,7 @@ spec:
         nodeSelector: {{- toYaml . | nindent 12 }}
         {{- end }}
         {{- with .Values.ray.serviceAccountName }}
-        serviceAccountName: {{ . }}
+        serviceAccountName: {{ tpl . $ }}
         {{- end }}
         {{- with .Values.ray.automountServiceAccountToken }}
         automountServiceAccountToken: {{ . }}
@@ -105,7 +105,7 @@ spec:
           nodeSelector: {{- toYaml . | nindent 14 }}
           {{- end }}
           {{- with $.Values.ray.serviceAccountName }}
-          serviceAccountName: {{ . }}
+          serviceAccountName: {{ tpl . $ }}
           {{- end }}
           {{- with $.Values.ray.automountServiceAccountToken }}
           automountServiceAccountToken: {{ . }}
