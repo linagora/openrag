@@ -200,9 +200,8 @@ class LocalWhisperLoader(BasePooledParser):
 
     def __init__(self):
         self.config = load_config()
-        # Lazily create the pool if bootstrap didn't — mirrors MarkerLoader so
-        # audio ingestion self-provisions WhisperPool instead of relying on the
-        # eager init_audio_actor() pre-warm at startup.
+        # Self-provision the pool on first use — mirrors MarkerLoader; bootstrap
+        # no longer pre-warms parser pools at startup.
         from services.workers.bootstrap import get_or_create_actor
 
         self.worker: WhisperPool = get_or_create_actor("WhisperPool", WhisperPool, lifetime="detached")
