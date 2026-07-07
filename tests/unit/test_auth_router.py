@@ -44,7 +44,6 @@ def _install_dependencies_stub() -> dict[str, types.ModuleType | None]:
     stub.actor_creation_map = {}
     stub.get_task_state_manager = lambda: None
     stub.get_serializer = lambda: None
-    stub.get_marker_pool = lambda: None
     sys.modules["services.workers.bootstrap"] = stub
 
     def _logger():

@@ -4,8 +4,13 @@ Imported at startup (explicitly by ``main.py``) to create the long-lived
 detached actors the request path looks up by name:
 
 * TaskStateManager  — shared task-state actor
-* MarkerPool / DoclingPool / WhisperPool / WhisperActor — GPU parsers
 * llmSemaphore / vlmSemaphore / audioSemaphore — cluster-wide rate limiters
+
+The GPU parser pools (MarkerPool / DoclingPool / WhisperPool / WhisperActor)
+are *not* created here: their loaders self-provision them on first use via
+``get_or_create_actor``. Bootstrap only registers their restart factories
+(see ``register_parser_pool_restart_factories``) so the admin restart
+endpoint can manage them from the API process.
 
 This is the **only** non-startup module outside ``services/workers/`` that
 imports Ray — the phase-9 plan permits Ray in ``services/workers/`` plus
@@ -64,32 +69,47 @@ def get_task_state_manager():
     return get_or_create_actor("TaskStateManager", TaskStateManager, lifetime="detached")
 
 
-def get_marker_pool():
-    from services.workers.parsers.docling_workers import DoclingPool
-    from services.workers.parsers.marker_workers import MarkerPool
+def register_parser_pool_restart_factories() -> None:
+    """Register restart factories for the lazily-created parser pools.
 
-    config = _require_settings()
-    pdf_loader = config.loader.file_loaders.pdf
-    match pdf_loader:
-        case "DoclingLoader":
-            return get_or_create_actor("DoclingPool", DoclingPool, lifetime="detached")
-        case "MarkerLoader":
-            return get_or_create_actor("MarkerPool", MarkerPool, lifetime="detached")
+    Parser pools are provisioned on first use, usually inside an indexer
+    worker process — but ``actor_creation_map`` is process-local, so the API
+    process would never learn how to (re)create them and
+    ``POST /cluster/{actor}/restart`` would 404 for every parser pool.
+    Register the factories for *all* pools here without creating any actor
+    (a per-preset ``parsing_strategy`` can bring up any of them at runtime,
+    not just the globally-configured backend). Restarting a pool that was
+    never created simply creates it.
 
+    Imports stay inside the factories so the API process doesn't pay for
+    the heavy parser dependencies (torch, marker, docling) at startup.
+    """
 
-def init_audio_actor():
-    from services.workers.parsers.whisper_workers import WhisperActor, WhisperPool, whisper_actor_options
+    def marker_pool():
+        from services.workers.parsers.marker_workers import MarkerPool
 
-    config = _require_settings()
-    use_whisper_lang_detector = config.loader.transcriber.use_whisper_lang_detector
-    file_loaders = config.loader.file_loaders
-    loader_values = set(file_loaders.values()) if file_loaders else set()
+        return get_or_create_actor("MarkerPool", MarkerPool, lifetime="detached")
 
-    if "LocalWhisperLoader" in loader_values:
+    def docling_pool():
+        from services.workers.parsers.docling_workers import DoclingPool
+
+        return get_or_create_actor("DoclingPool", DoclingPool, lifetime="detached")
+
+    def whisper_pool():
+        from services.workers.parsers.whisper_workers import WhisperPool
+
         return get_or_create_actor("WhisperPool", WhisperPool, lifetime="detached")
 
-    if "OpenAIAudioLoader" in loader_values and use_whisper_lang_detector:
+    def whisper_actor():
+        from services.workers.parsers.whisper_workers import WhisperActor, whisper_actor_options
+
+        config = _require_settings()
         return get_or_create_actor("WhisperActor", WhisperActor, lifetime="detached", **whisper_actor_options(config))
+
+    actor_creation_map["MarkerPool"] = marker_pool
+    actor_creation_map["DoclingPool"] = docling_pool
+    actor_creation_map["WhisperPool"] = whisper_pool
+    actor_creation_map["WhisperActor"] = whisper_actor
 
 
 def init_llm_semaphore():
@@ -129,13 +149,16 @@ def init_audio_semaphore():
 
 
 def initialize_worker_bootstrap(settings: "Settings") -> None:
-    """Create the detached worker actors required by the request path."""
+    """Create the detached worker actors required by the request path.
+
+    Parser pools are exempt: they are created lazily by their loaders, and
+    bootstrap only registers their restart factories.
+    """
     global _settings
     _settings = settings
 
     init_llm_semaphore()
     init_vlm_semaphore()
     init_audio_semaphore()
-    init_audio_actor()
-    get_marker_pool()
     get_task_state_manager()
+    register_parser_pool_restart_factories()
