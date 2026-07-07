@@ -363,16 +363,16 @@ adminUi:
 
   resources: {}
 
-  # nginx:1.27-alpine (the admin-ui base image) binds the privileged port 80
-  # as root before nginx workers drop to their own user, and isn't built to
-  # run rootless — unlike the other pods in this chart it can't use
-  # runAsNonRoot. NET_BIND_SERVICE is granted back explicitly so it doesn't
-  # need to run as full root.
+  # Base image is nginxinc/nginx-unprivileged:1.27-alpine, listening on 8080 so
+  # it never needs root/NET_BIND_SERVICE. infra/docker/ui.Dockerfile explicitly
+  # chowns /var/cache/nginx, /etc/nginx/conf.d and /var/run to 10001:10001 and
+  # makes them group-writable, matching runAsUser/runAsGroup below exactly —
+  # fsGroup would not help here instead (it only affects mounted volumes, not
+  # paths baked into the image, and this container has no volumeMounts at all).
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 10001
     runAsGroup: 10001
-    fsGroup: 10001
   serviceAccountName: ""
   automountServiceAccountToken: false
 
@@ -380,7 +380,7 @@ adminUi:
     allowPrivilegeEscalation: false
     capabilities:
       drop: ["ALL"]
-    readOnlyRootFilesystem: true
+    readOnlyRootFilesystem: false
   
   probes:
     startupProbe: {}
