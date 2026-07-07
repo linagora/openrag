@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -11,7 +12,9 @@ class CommonConfig:
     """Shared across benchmark, ablation, generation, and upload."""
 
     partition: str = "test3"
-    base_url: str = "http://141.95.153.249:8095"
+    base_url: str = field(
+        default_factory=lambda: os.environ.get("API_BASE_URL", "http://localhost:8080")
+    )
     dataset_path: str = "./dataset.json"
     output_dir: str = "./reports"
 
