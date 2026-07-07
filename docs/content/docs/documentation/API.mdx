@@ -347,7 +347,7 @@ List document chunks (extracts) in a partition. **Viewer**+.
 | `file_id` | string | None | Restrict to a single file's chunks (recommended for the document-detail view) |
 | `limit` | integer | unbounded | Max chunks to return |
 
-Returns `{ "chunks": [ { "content", "metadata", "link", "embedding"? } ] }`.
+Returns `{ "chunks": [ { "content", "metadata", "link", "embedding"? } ] }`. Note the chunk text is under `content` here, whereas the single-chunk `GET /extract/{extract_id}` endpoint returns it under `page_content`.
 
 :::caution
 Without `file_id` or `limit` this can return a large amount of data for partitions with many documents.
