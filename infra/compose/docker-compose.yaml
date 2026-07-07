@@ -46,7 +46,7 @@ x-openrag: &openrag_template
     # (or a writable host path) override the running code. Uncomment for local
     # development; keep it off in production.
     # - ../../openrag:/app/openrag # For dev mode
-    - /$SHARED_ENV:/ray_mount/.env # Shared environment variables
+    - ${SHARED_ENV:-./.env}:/ray_mount/.env # Shared environment variables (falls back to ./.env)
     - ${LOG_VOLUME:-../../logs}:/app/logs
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
