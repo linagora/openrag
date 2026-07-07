@@ -20,7 +20,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.adminUi.serviceAccountName }}
-      serviceAccountName: {{ . }}
+      serviceAccountName: {{ tpl . $ }}
       {{- end }}
       {{- with .Values.adminUi.automountServiceAccountToken }}
       automountServiceAccountToken: {{ . }}

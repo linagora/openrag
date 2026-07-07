@@ -25,6 +25,7 @@ networkPolicy:
   # Ports reachable from outside the namespace (e.g. via the Ingress controller).
   externalPorts:
     - 8080  # openrag API/UI & admin-ui
+    - 8265  # ray dashboard
 
 # === Global shared persistence ===
 persistence:
@@ -224,18 +225,7 @@ vllm:
           extraArgs: ["--trust-remote-code", "--async-scheduling"]
         nodeSelectorTerms: []
 
-      - name: "llm"
-        repository: "vllm/vllm-openai"
-        tag: "latest"
-        modelURL: *llmModel
-        replicaCount: 0
-        requestCPU: 8
-        requestMemory: "32Gi"
-        requestGPU: 2
-        limitCPU: 8
-        limitMemory: "32Gi"
-        hf_token:
-          secretName: *vllmHfTokenSecretName
+      - name: "llm"infra/charts/openrag-stack/.helmignore infra/charts/openrag-stack/Chart.lock infra/charts/openrag-stack/Chart.yaml infra/charts/openrag-stack/values-linagora.yaml infra/charts/openrag-stack/values.yamlllmHfTokenSecretName
           secretKey: HF_TOKEN
         vllmConfig:
           v1: 1
