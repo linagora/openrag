@@ -451,10 +451,19 @@ openrag:
   shmSize: ""
   extraVolumes: []
   extraVolumeMounts: []
+  # infra/docker/api.Dockerfile bakes an "openrag" user as uid 10001, primary
+  # gid 0 (`useradd --uid 10001 --gid 0`), and grants group-write on the paths
+  # it writes at runtime (venv, egg-info, HOME, data/db/logs, HF cache, uv
+  # cache) via `chgrp -R 0` + `chmod g=u` — the OpenShift arbitrary-UID
+  # pattern. runAsGroup must stay 0 (not 10001) to match, or e.g. the editable
+  # install's `openrag.egg-info` isn't writable and uv fails at startup
+  # ("Cannot update time stamp of directory 'openrag.egg-info'"). fsGroup can
+  # stay 10001: it's only applied (and added as a supplementary group) to the
+  # mounted PVCs (data/logs/model_weights/venv), not to the image's own paths.
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 10001
-    runAsGroup: 10001
+    runAsGroup: 0
     fsGroup: 10001
   serviceAccountName: ""
   automountServiceAccountToken: false
@@ -566,7 +575,7 @@ env:
     RAY_SERVE_PORT: "80"
 
     WITH_CHAINLIT_UI: "false"
-    SAVE_UPLOADED_FILES: 'http://{{ include "openrag-stack.fullname" . }}-admin-ui:{{ .Values.adminUi.service.port }}/milvus'
+    SAVE_UPLOADED_FILES: "true"
 
     # Vector DB
     # milvus.fullnameOverride above pins this sub-chart's proxy Service name to
