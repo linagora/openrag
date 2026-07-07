@@ -83,7 +83,7 @@ class LocalWhisperConfig(ConfigMixin):
 
 class FileLoadersConfig(ConfigMixin):
     txt: str = "TextLoader"
-    pdf: str = "MarkerLoader"
+    pdf: str = "PyMuPDFLoader"
     eml: str = "EmlLoader"
     docx: str = "DocxLoader"
     pptx: str = "PPTXLoader"
