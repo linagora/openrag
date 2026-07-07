@@ -49,6 +49,7 @@ export default function JobListPage() {
   const { isAdmin } = usePermissions();
   const [statusTab, setStatusTab] = useState<string>("ALL");
   const [search, setSearch] = useState("");
+  const [manualRefreshing, setManualRefreshing] = useState(false);
 
   const tasksQuery = useQuery({
     queryKey: ["tasks", statusTab],
@@ -92,12 +93,15 @@ export default function JobListPage() {
             <Button
               variant="outline"
               size="icon-sm"
-              onClick={() => tasksQuery.refetch()}
-              disabled={tasksQuery.isFetching}
+              onClick={() => {
+                setManualRefreshing(true);
+                tasksQuery.refetch().finally(() => setManualRefreshing(false));
+              }}
+              disabled={manualRefreshing}
               aria-label="Refresh jobs"
               title="Refresh jobs"
             >
-              <RefreshCw className={tasksQuery.isFetching ? "animate-spin" : ""} />
+              <RefreshCw className={manualRefreshing ? "animate-spin" : ""} />
             </Button>
           </div>
         </div>
@@ -119,7 +123,7 @@ export default function JobListPage() {
                 Failed to load tasks: {(tasksQuery.error as Error).message}
               </div>
             ) : (
-              <DataTable columns={columns} data={filteredTasks} />
+              <DataTable key={`${statusTab}:${search}`} columns={columns} data={filteredTasks} />
             )}
           </TabsContent>
         ))}

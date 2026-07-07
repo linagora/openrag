@@ -137,6 +137,13 @@ export default function DocumentListPage() {
     [fileRows, fileRowSelection],
   );
 
+  useEffect(() => {
+    if (!writable && Object.keys(fileRowSelection).length > 0) {
+      const timeout = window.setTimeout(() => setFileRowSelection({}), 0);
+      return () => window.clearTimeout(timeout);
+    }
+  }, [fileRowSelection, setFileRowSelection, writable]);
+
   const deleteMutation = useMutation({
     mutationFn: (fileId: string) => deleteFile(selected, fileId),
     onSuccess: () => {
@@ -162,7 +169,10 @@ export default function DocumentListPage() {
       queryClient.invalidateQueries({ queryKey: ["partition-files", selected] });
     },
     onError: (err: Error) => toast.error(`Bulk delete failed: ${err.message}`),
-    onSettled: () => setBulkDeleting(false),
+    onSettled: () => {
+      setBulkDeleting(false);
+      setFileRowSelection({});
+    },
   });
 
   // OpenRag indexes one file per request; multi-file upload is a client-side
@@ -317,7 +327,7 @@ export default function DocumentListPage() {
             ))}
           </SelectContent>
         </Select>
-        {selectedFiles.length > 0 && (
+        {writable && selectedFiles.length > 0 && (
           <>
             <ConfirmDialog
               title="Delete files"
@@ -328,7 +338,6 @@ export default function DocumentListPage() {
               }
               onConfirm={() => {
                 bulkDeleteMutation.mutate(selectedFiles.map((file) => file.file_id));
-                setFileRowSelection({});
               }}
             >
               <Button

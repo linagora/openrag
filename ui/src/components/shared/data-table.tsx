@@ -24,7 +24,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 
-interface DataTableProps<TData, TValue> {
+interface BaseDataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[];
   data: TData[];
   pageSize?: number;
@@ -33,10 +33,20 @@ interface DataTableProps<TData, TValue> {
   enableSelection?: boolean;
   /** Stable row id (e.g. file_id) so selection survives a data refetch. */
   getRowId?: (row: TData) => string;
-  /** Optional controlled selection state for pages that render bulk controls in their own toolbar. */
-  rowSelection?: RowSelectionState;
-  onRowSelectionChange?: OnChangeFn<RowSelectionState>;
 }
+
+type DataTableSelectionProps =
+  | {
+      /** Controlled selection state for pages that render bulk controls in their own toolbar. */
+      rowSelection: RowSelectionState;
+      onRowSelectionChange: OnChangeFn<RowSelectionState>;
+    }
+  | {
+      rowSelection?: never;
+      onRowSelectionChange?: never;
+    };
+
+type DataTableProps<TData, TValue> = BaseDataTableProps<TData, TValue> & DataTableSelectionProps;
 
 export function DataTable<TData, TValue>({
   columns,
