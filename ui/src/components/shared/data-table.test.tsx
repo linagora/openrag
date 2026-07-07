@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import type { ColumnDef } from "@tanstack/react-table";
+import type { ColumnDef, RowSelectionState } from "@tanstack/react-table";
+import { useState } from "react";
 
 import { DataTable, SortableHeader } from "./data-table";
 
@@ -69,30 +70,48 @@ describe("DataTable sorting", () => {
 });
 
 describe("DataTable selection", () => {
-  it("renders bulk actions for the selected rows and clears them", () => {
+  it("supports controlled row selection", () => {
+    function Harness() {
+      const [selection, setSelection] = useState<RowSelectionState>({});
+      return (
+        <>
+          <DataTable
+            columns={columns}
+            data={makeRows(3)}
+            enableSelection
+            getRowId={(r) => String(r.id)}
+            rowSelection={selection}
+            onRowSelectionChange={setSelection}
+          />
+          <span>{Object.keys(selection).length} selected</span>
+          <button onClick={() => setSelection({})}>clear-sel</button>
+        </>
+      );
+    }
+
+    render(<Harness />);
+
+    expect(screen.getByText("0 selected")).toBeTruthy();
+
+    // Header checkbox is the first checkbox; it selects every row.
+    fireEvent.click(screen.getAllByRole("checkbox")[0]);
+    expect(screen.getByText("3 selected")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("clear-sel"));
+    expect(screen.getByText("0 selected")).toBeTruthy();
+  });
+
+  it("does not render a built-in bulk banner", () => {
     render(
       <DataTable
         columns={columns}
         data={makeRows(3)}
         enableSelection
         getRowId={(r) => String(r.id)}
-        renderBulkActions={({ selected, clear }) => (
-          <div>
-            <span>{selected.length} selected</span>
-            <button onClick={clear}>clear-sel</button>
-          </div>
-        )}
       />,
     );
 
-    // No bulk bar until something is selected.
-    expect(screen.queryByText(/selected/)).toBeNull();
-
-    // Header checkbox is the first checkbox; it selects every row on the page.
     fireEvent.click(screen.getAllByRole("checkbox")[0]);
-    expect(screen.getByText("3 selected")).toBeTruthy();
-
-    fireEvent.click(screen.getByText("clear-sel"));
     expect(screen.queryByText(/selected/)).toBeNull();
   });
 });

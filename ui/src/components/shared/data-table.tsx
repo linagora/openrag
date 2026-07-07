@@ -1,6 +1,7 @@
 import {
   type ColumnDef,
   type ColumnFiltersState,
+  type OnChangeFn,
   type RowSelectionState,
   type SortingState,
   flexRender,
@@ -10,7 +11,7 @@ import {
   getSortedRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 import {
   Table,
@@ -23,30 +24,18 @@ import {
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 
-export interface BulkActionContext<TData> {
-  /** Rows currently selected (across all pages). */
-  selected: TData[];
-  /** Total selectable rows in the table (all pages). */
-  total: number;
-  /** Whether every row (all pages) is selected. */
-  allSelected: boolean;
-  /** Select every row across all pages. */
-  selectAll: () => void;
-  /** Clear the selection. */
-  clear: () => void;
-}
-
 interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[];
   data: TData[];
   pageSize?: number;
   initialSorting?: SortingState;
-  /** Render a leading checkbox column + a contextual bulk-action bar. */
+  /** Render a leading checkbox column. */
   enableSelection?: boolean;
   /** Stable row id (e.g. file_id) so selection survives a data refetch. */
   getRowId?: (row: TData) => string;
-  /** Bulk-action bar content, shown above the table while rows are selected. */
-  renderBulkActions?: (ctx: BulkActionContext<TData>) => ReactNode;
+  /** Optional controlled selection state for pages that render bulk controls in their own toolbar. */
+  rowSelection?: RowSelectionState;
+  onRowSelectionChange?: OnChangeFn<RowSelectionState>;
 }
 
 export function DataTable<TData, TValue>({
@@ -56,12 +45,15 @@ export function DataTable<TData, TValue>({
   initialSorting = [],
   enableSelection = false,
   getRowId,
-  renderBulkActions,
+  rowSelection: controlledRowSelection,
+  onRowSelectionChange,
 }: DataTableProps<TData, TValue>) {
   const [sorting, setSorting] = useState<SortingState>(initialSorting);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [pagination, setPagination] = useState({ pageIndex: 0, pageSize });
-  const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  const [internalRowSelection, setInternalRowSelection] = useState<RowSelectionState>({});
+  const rowSelection = controlledRowSelection ?? internalRowSelection;
+  const setRowSelection = onRowSelectionChange ?? setInternalRowSelection;
 
   // Prepend a checkbox column when selection is enabled.
   const tableColumns = useMemo<ColumnDef<TData, TValue>[]>(() => {
@@ -72,11 +64,11 @@ export function DataTable<TData, TValue>({
       header: ({ table }) => (
         <Checkbox
           checked={
-            table.getIsAllPageRowsSelected() ||
-            (table.getIsSomePageRowsSelected() && "indeterminate")
+            table.getIsAllRowsSelected() ||
+            (table.getIsSomeRowsSelected() && "indeterminate")
           }
-          onCheckedChange={(value) => table.toggleAllPageRowsSelected(!!value)}
-          aria-label="Select all rows on this page"
+          onCheckedChange={(value) => table.toggleAllRowsSelected(!!value)}
+          aria-label="Select all rows"
         />
       ),
       cell: ({ row }) => (
@@ -120,22 +112,10 @@ export function DataTable<TData, TValue>({
     }
   }, [pageCount, pagination.pageIndex]);
 
-  const selectedRows = table.getSelectedRowModel().rows;
   const columnCount = table.getAllLeafColumns().length;
 
   return (
     <div>
-      {enableSelection && renderBulkActions && selectedRows.length > 0 && (
-        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border bg-primary/5 px-4 py-2.5">
-          {renderBulkActions({
-            selected: selectedRows.map((r) => r.original),
-            total: table.getFilteredRowModel().rows.length,
-            allSelected: table.getIsAllRowsSelected(),
-            selectAll: () => table.toggleAllRowsSelected(true),
-            clear: () => table.resetRowSelection(),
-          })}
-        </div>
-      )}
       <div className="rounded-md border">
         <Table>
           <TableHeader>

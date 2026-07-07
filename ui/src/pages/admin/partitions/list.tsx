@@ -1,10 +1,11 @@
 import { useMemo, useState, useCallback, useEffect } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Pencil, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle, XCircle, Loader2 } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle, XCircle, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -146,6 +147,7 @@ export default function PartitionListPage() {
   const [search, setSearch] = useState("");
   const [sortDir, setSortDir] = useState<SortDir>(null);
   const [sortColumn, setSortColumn] = useState<"name" | "created_at">("created_at");
+  const [selectedPartitionNames, setSelectedPartitionNames] = useState<string[]>([]);
 
   // `GET /partition/` is already membership-scoped server-side (admins with
   // SUPER_ADMIN_MODE see all; regular users see their memberships), so a single
@@ -153,6 +155,7 @@ export default function PartitionListPage() {
   const partitionsQuery = useQuery({
     queryKey: ["partitions"],
     queryFn: listPartitions,
+    refetchInterval: 2000,
   });
 
   const { data: presetsData } = useQuery({
@@ -252,6 +255,33 @@ export default function PartitionListPage() {
   const showActions =
     canManagePartitions || filteredAndSorted.some((p) => canConfigurePartition(p.role));
 
+  const deletablePartitionNames = useMemo(
+    () => filteredAndSorted.filter((p) => canConfigurePartition(p.role)).map((p) => p.name),
+    [filteredAndSorted, canConfigurePartition],
+  );
+  const selectedPartitionNameSet = useMemo(() => new Set(selectedPartitionNames), [selectedPartitionNames]);
+  const selectedPartitions = useMemo(
+    () =>
+      filteredAndSorted.filter(
+        (p) => selectedPartitionNameSet.has(p.name) && canConfigurePartition(p.role),
+      ),
+    [filteredAndSorted, selectedPartitionNameSet, canConfigurePartition],
+  );
+  const allDeletableSelected =
+    deletablePartitionNames.length > 0 &&
+    deletablePartitionNames.every((name) => selectedPartitionNameSet.has(name));
+  const someDeletableSelected =
+    deletablePartitionNames.some((name) => selectedPartitionNameSet.has(name)) &&
+    !allDeletableSelected;
+
+  useEffect(() => {
+    const allowed = new Set(deletablePartitionNames);
+    setSelectedPartitionNames((prev) => {
+      const next = prev.filter((name) => allowed.has(name));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [deletablePartitionNames]);
+
   const handleSort = (column: "name" | "created_at") => {
     if (sortColumn !== column) {
       setSortColumn(column);
@@ -294,6 +324,23 @@ export default function PartitionListPage() {
     },
   });
 
+  const bulkDeleteMutation = useMutation({
+    mutationFn: async (names: string[]) => {
+      const results = await Promise.allSettled(names.map((partitionName) => deletePartition(partitionName)));
+      const ok = results.filter((r) => r.status === "fulfilled").length;
+      return { ok, failed: results.length - ok };
+    },
+    onSuccess: ({ ok, failed }) => {
+      if (ok) toast.success(`${ok} partition(s) deleted`);
+      if (failed) toast.error(`${failed} partition(s) failed to delete`);
+      queryClient.invalidateQueries({ queryKey: ["partitions"] });
+    },
+    onError: (error: Error) => {
+      toast.error(`Bulk delete failed: ${error.message}`);
+    },
+    onSettled: () => setSelectedPartitionNames([]),
+  });
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) {
@@ -320,7 +367,7 @@ export default function PartitionListPage() {
         }
       />
 
-      <div className="mb-4">
+      <div className="mb-4 flex items-center gap-2">
         <div className="relative max-w-sm">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -329,6 +376,43 @@ export default function PartitionListPage() {
             onChange={(e) => setSearch(e.target.value)}
             className="pl-9"
           />
+        </div>
+        {selectedPartitions.length > 0 && (
+          <>
+            <ConfirmDialog
+              title="Delete partitions"
+              description={`Delete ${selectedPartitions.length} partition(s)? This cannot be undone.`}
+              onConfirm={() => bulkDeleteMutation.mutate(selectedPartitions.map((p) => p.name))}
+            >
+              <Button
+                variant="outline"
+                size="icon-sm"
+                disabled={bulkDeleteMutation.isPending}
+                aria-label="Delete selected partitions"
+                title="Delete selected partitions"
+              >
+                <Trash2 className="h-3.5 w-3.5 text-destructive" />
+              </Button>
+            </ConfirmDialog>
+            <p className="text-sm text-muted-foreground">
+              {selectedPartitions.length} selected
+            </p>
+          </>
+        )}
+        <div className="ml-auto flex items-center gap-2">
+          <p className="text-sm text-muted-foreground">
+            {filteredAndSorted.length} partition{filteredAndSorted.length === 1 ? "" : "s"}
+          </p>
+          <Button
+            variant="outline"
+            size="icon-sm"
+            onClick={() => partitionsQuery.refetch()}
+            disabled={partitionsQuery.isFetching}
+            aria-label="Refresh partitions"
+            title="Refresh partitions"
+          >
+            <RefreshCw className={partitionsQuery.isFetching ? "animate-spin" : ""} />
+          </Button>
         </div>
       </div>
 
@@ -343,6 +427,17 @@ export default function PartitionListPage() {
           <Table>
             <TableHeader>
               <TableRow>
+                {deletablePartitionNames.length > 0 && (
+                  <TableHead>
+                    <Checkbox
+                      checked={allDeletableSelected || (someDeletableSelected && "indeterminate")}
+                      onCheckedChange={(value) =>
+                        setSelectedPartitionNames(value ? deletablePartitionNames : [])
+                      }
+                      aria-label="Select all deletable partitions"
+                    />
+                  </TableHead>
+                )}
                 <TableHead>
                   <SortButton
                     label="Name"
@@ -371,6 +466,22 @@ export default function PartitionListPage() {
               {filteredAndSorted.length ? (
                 filteredAndSorted.map((p) => (
                   <TableRow key={p.name}>
+                    {deletablePartitionNames.length > 0 && (
+                      <TableCell>
+                        <Checkbox
+                          checked={selectedPartitionNameSet.has(p.name)}
+                          disabled={!canConfigurePartition(p.role)}
+                          onCheckedChange={(value) =>
+                            setSelectedPartitionNames((prev) =>
+                              value
+                                ? Array.from(new Set([...prev, p.name]))
+                                : prev.filter((name) => name !== p.name),
+                            )
+                          }
+                          aria-label={`Select partition ${p.name}`}
+                        />
+                      </TableCell>
+                    )}
                     <TableCell>
                       <div className="flex items-center gap-2">
                         <Link
@@ -424,7 +535,11 @@ export default function PartitionListPage() {
               ) : (
                 <TableRow>
                   <TableCell
-                    colSpan={(canManagePartitions ? 7 : 4) + (showActions ? 1 : 0)}
+                    colSpan={
+                      (canManagePartitions ? 7 : 4) +
+                      (showActions ? 1 : 0) +
+                      (deletablePartitionNames.length > 0 ? 1 : 0)
+                    }
                     className="h-24 text-center text-muted-foreground"
                   >
                     {search.trim() ? "No partitions match your search." : "No partitions."}

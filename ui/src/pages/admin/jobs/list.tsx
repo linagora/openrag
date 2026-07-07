@@ -1,12 +1,15 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
+import { RefreshCw, Search } from "lucide-react";
 import { usePermissions } from "@/lib/permissions";
 
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { listTasks, type TaskListItem } from "@/lib/api/jobs";
 
@@ -45,20 +48,60 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
 export default function JobListPage() {
   const { isAdmin } = usePermissions();
   const [statusTab, setStatusTab] = useState<string>("ALL");
+  const [search, setSearch] = useState("");
 
   const tasksQuery = useQuery({
     queryKey: ["tasks", statusTab],
     queryFn: () => listTasks(statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab),
-    refetchInterval: 5000, // poll — OpenRag has no task SSE (scale-correct per roadmap)
+    refetchInterval: 2000, // poll — OpenRag has no task SSE (scale-correct per roadmap)
   });
 
-  const tasks = tasksQuery.data?.tasks ?? [];
+  const tasks = useMemo(() => tasksQuery.data?.tasks ?? [], [tasksQuery.data?.tasks]);
+  const filteredTasks = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return tasks;
+    return tasks.filter((task) => {
+      const filename = str(task.details?.metadata?.filename);
+      const fileId = str(task.details?.file_id);
+      const partition = str(task.details?.partition);
+      return [task.task_id, task.state, filename, fileId, partition].some((value) =>
+        str(value).toLowerCase().includes(q),
+      );
+    });
+  }, [tasks, search]);
 
   return (
     <div>
       <PageHeader title="Jobs" description={isAdmin ? "Monitor indexing tasks" : "Monitor your indexing tasks"} />
 
       <Tabs value={statusTab} onValueChange={setStatusTab}>
+        <div className="mb-4 mt-0 flex items-center gap-2">
+          <div className="relative max-w-sm">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              placeholder="Search jobs..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-9"
+            />
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <p className="text-sm text-muted-foreground">
+              {filteredTasks.length} job{filteredTasks.length === 1 ? "" : "s"}
+            </p>
+            <Button
+              variant="outline"
+              size="icon-sm"
+              onClick={() => tasksQuery.refetch()}
+              disabled={tasksQuery.isFetching}
+              aria-label="Refresh jobs"
+              title="Refresh jobs"
+            >
+              <RefreshCw className={tasksQuery.isFetching ? "animate-spin" : ""} />
+            </Button>
+          </div>
+        </div>
+
         <TabsList>
           {STATUS_TABS.map((tab) => (
             <TabsTrigger key={tab} value={tab}>
@@ -76,7 +119,7 @@ export default function JobListPage() {
                 Failed to load tasks: {(tasksQuery.error as Error).message}
               </div>
             ) : (
-              <DataTable columns={columns} data={tasks} />
+              <DataTable columns={columns} data={filteredTasks} />
             )}
           </TabsContent>
         ))}
