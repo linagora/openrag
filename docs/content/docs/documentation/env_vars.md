@@ -274,16 +274,17 @@ The retriever fetches relevant documents from the vector database based on query
 
 ### Reranker Configuration
 
-The reranker enhances search quality by re-scoring and reordering retrieved documents according to their relevance to the user's query. Two providers are supported: **Infinity** (default) and **OpenAI-compatible** endpoints.
+The reranker enhances search quality by re-scoring and reordering retrieved documents according to their relevance to the user's query. Three providers are supported: **Infinity** (default), **OpenAI-compatible** endpoints, and **Hugging Face Text Embeddings Inference (TEI)**.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `RERANKER_ENABLED` | `bool` | true | Enable or disable the reranking mechanism |
-| `RERANKER_PROVIDER` | `str` | `infinity` | Reranker backend to use. Accepted values: `infinity`, `openai` |
-| `RERANKER_MODEL` | `str` | Alibaba-NLP/gte-multilingual-reranker-base | Model used for reranking documents.|
+| `RERANKER_PROVIDER` | `str` | `infinity` | Reranker backend to use. Accepted values: `infinity`, `openai`, `tei` |
+| `RERANKER_MODEL` | `str` | Alibaba-NLP/gte-multilingual-reranker-base | Model used for reranking documents. Ignored by the `tei` provider (a TEI instance serves a single fixed model) |
 | `RERANKER_TOP_K` | `int` | 10 | Number of top documents to return after reranking. Increase for better results if your LLM has a wider context window |
 | `RERANKER_BASE_URL` | `str` | `http://reranker:7997` | Base URL of the reranker service |
-| `RERANKER_API_KEY` | `str` | `EMPTY` | API key for the reranker service. Required when using the `openai` provider |
+| `RERANKER_API_KEY` | `str` | `EMPTY` | API key for the reranker service, sent as a `Bearer` token when set. Whether a key is required depends on your endpoint |
+| `RERANKER_TIMEOUT` | `float` | 60.0 | HTTP timeout in seconds for reranker requests |
 | `RERANKER_SEMAPHORE` | `int` | 5 | Maximum number of concurrent reranking requests. Adjust based on your server capacity |
 
 #### Reranker Providers
@@ -291,7 +292,8 @@ The reranker enhances search quality by re-scoring and reordering retrieved docu
 | Provider | `RERANKER_PROVIDER` value | Description |
 |----------|--------------------------|-------------|
 | **Infinity** | `infinity` | Uses the [Infinity server](https://github.com/michaelfeil/infinity) via its native client. Default port: `7997` |
-| **OpenAI-compatible** | `openai` | Uses any OpenAI-compatible reranker endpoint (e.g. vLLM, LiteLLM, TEI). Default port: `8000` |
+| **OpenAI-compatible** | `openai` | Uses any reranker endpoint implementing the `{model, query, documents, top_n}` → `{results: [...]}` rerank contract (e.g. vLLM, LiteLLM). Default port: `8000` |
+| **TEI** | `tei` | Uses a [Hugging Face Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference) server via its native `/rerank` API (which is **not** OpenAI-compatible: `texts` instead of `documents`, no `model`/`top_n` fields, bare-array response). Default port: `8080`. Requests are batched to 32 texts to fit TEI's default `--max-client-batch-size` |
 
 ## Extra
 ### Prompts

@@ -68,7 +68,7 @@ class OpenAILoaderConfig(ConfigMixin):
 
 class LocalWhisperConfig(ConfigMixin):
     model: str = "base"
-    whisper_n_workers: int = 3
+    whisper_n_workers: int = 2
     whisper_num_gpus: float = 0.01
     whisper_concurrency_per_worker: int = 2
     whisper_timeout: int = 1800
@@ -83,7 +83,7 @@ class LocalWhisperConfig(ConfigMixin):
 
 class FileLoadersConfig(ConfigMixin):
     txt: str = "TextLoader"
-    pdf: str = "MarkerLoader"
+    pdf: str = "PyMuPDFLoader"
     eml: str = "EmlLoader"
     docx: str = "DocxLoader"
     pptx: str = "PPTXLoader"

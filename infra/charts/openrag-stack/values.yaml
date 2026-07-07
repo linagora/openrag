@@ -369,7 +369,7 @@ env:
     # set PROMPTS_DIR only to override with a custom template directory.
 
     # Loaders
-    PDFLoader: "MarkerLoader"
+    PDFLOADER: "PyMuPDFLoader"
     XDG_CACHE_HOME: "/app/model_weights"
     MARKER_MAX_TASKS_PER_CHILD: "10"
     MARKER_MAX_PROCESSES: "15"
