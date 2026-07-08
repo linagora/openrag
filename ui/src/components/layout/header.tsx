@@ -1,11 +1,11 @@
 import { useAuth } from "@/lib/auth";
+import { apiUrl } from "@/lib/api/client";
 import { useNavigate } from "react-router-dom";
 import { LogOut, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { apiUrl } from "@/lib/api/client";
 
 export function Header() {
   const { user, logout } = useAuth();
