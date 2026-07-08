@@ -56,7 +56,7 @@ describe("Header", () => {
       </MemoryRouter>,
     );
 
-    const chatLink = screen.getByRole("link", { name: /open openrag chat/i });
+    const chatLink = screen.getByRole("link", { name: /open chat in a new tab/i });
     expect(chatLink.getAttribute("href")).toBe("https://api.example.test/chainlit/");
   });
 

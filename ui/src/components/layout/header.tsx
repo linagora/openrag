@@ -1,7 +1,7 @@
 import { useAuth } from "@/lib/auth";
 import { apiUrl } from "@/lib/api/client";
 import { useNavigate } from "react-router-dom";
-import { ExternalLink, LogOut, MessageSquare } from "lucide-react";
+import { LogOut, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SidebarTrigger } from "@/components/ui/sidebar";
@@ -35,14 +35,13 @@ export function Header() {
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button variant="outline" size="sm" asChild>
-                    <a href={chatHref} target="_blank" rel="noopener noreferrer" aria-label="Open OpenRAG Chat">
+                    <a href={chatHref} target="_blank" rel="noopener noreferrer" aria-label="Open Chat in a new tab">
                       <MessageSquare className="h-4 w-4" />
                       Chat
-                      <ExternalLink className="h-3 w-3" aria-hidden="true" />
                     </a>
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>Open OpenRAG Chat</TooltipContent>
+                <TooltipContent>Open Chat in a new tab</TooltipContent>
               </Tooltip>
             </TooltipProvider>
           )}
