@@ -95,6 +95,18 @@ def test_partition_preset_assignment_drives_indexing_and_search(api_client, tmp_
         assert partition_config["indexation_pipeline"]["chunking"]["chunk_size"] == 96
         assert partition_config["retrieval_pipeline"]["top_n"] == 3
 
+        # The partition above now references both presets — deleting either
+        # must be blocked with 409 rather than silently orphaning the partition.
+        delete_in_use_indexation = api_client.delete(f"/presets/indexation/{indexation_preset}")
+        assert delete_in_use_indexation.status_code == 409, delete_in_use_indexation.text
+        delete_in_use_retrieval = api_client.delete(f"/presets/retrieval/{retrieval_preset}")
+        assert delete_in_use_retrieval.status_code == 409, delete_in_use_retrieval.text
+
+        list_indexation = api_client.get("/presets/", params={"preset_type": "indexation"})
+        _assert_success(list_indexation, context="list indexation presets")
+        rows_by_name = {row["name"]: row for row in list_indexation.json()}
+        assert rows_by_name[indexation_preset]["used_by_partitions"] == 1
+
         invalid_preset = api_client.patch(
             f"/partition/{partition}",
             json={"indexation_preset": f"missing-indexation-{suffix}"},

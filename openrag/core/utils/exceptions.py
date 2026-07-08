@@ -16,6 +16,7 @@ The hierarchy is organised by concern:
     |   +-- DocumentNotFoundError
     |   +-- PartitionNotFoundError
     |   +-- UserNotFoundError
+    +-- ConflictError                    (409)
     +-- QuotaExceededError               (429)
     +-- ServiceUnavailableError          (503)
     |   +-- CircuitBreakerOpenError
@@ -165,6 +166,18 @@ class PartitionNotFoundError(NotFoundError):
 class UserNotFoundError(NotFoundError):
     def __init__(self, message: str, **kwargs):
         super().__init__(message, code="USER_NOT_FOUND", **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Conflict
+# ---------------------------------------------------------------------------
+
+
+class ConflictError(OpenRAGError):
+    """Requested action conflicts with the resource's current state. Maps to HTTP 409."""
+
+    def __init__(self, message: str, code: str = "CONFLICT", **kwargs):
+        super().__init__(message, code=code, status_code=409, **kwargs)
 
 
 # ---------------------------------------------------------------------------

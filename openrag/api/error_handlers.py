@@ -29,6 +29,7 @@ from api.middleware.security_headers import apply_security_headers
 from core.utils.exceptions import (
     AuthenticationError,
     AuthError,
+    ConflictError,
     InferenceError,
     InferenceTimeoutError,
     LLMParsingError,
@@ -56,6 +57,7 @@ _STATUS_MAP: dict[type[BaseException], int] = {
     AuthError: 403,
     ValidationError: 422,
     NotFoundError: 404,
+    ConflictError: 409,
     QuotaExceededError: 429,
     InferenceTimeoutError: 504,
     LLMParsingError: 502,
