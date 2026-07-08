@@ -7,6 +7,7 @@ export interface MyInfo {
   id: number;
   display_name: string | null;
   is_admin: boolean;
+  chainlit_enabled?: boolean;
   file_quota: number | null;
   file_count?: number;
   indexed_files?: number;

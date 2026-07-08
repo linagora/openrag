@@ -2,7 +2,15 @@
 // missing env must fail closed: never fall back to an absolute host, which would
 // send the bearer token cross-origin. To target a remote API in dev, set
 // VITE_API_BASE_URL explicitly.
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
+const apiBase = () => import.meta.env.VITE_API_BASE_URL ?? "";
+
+export function apiUrl(path: string): string {
+  const base = apiBase();
+  if (!base) return path;
+
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${base.replace(/\/+$/, "")}${normalizedPath}`;
+}
 
 // OpenRag bearer token (the user's `or-…` token). Sent as Authorization for
 // token-mode auth; in OIDC mode the same-origin session cookie is used instead.
@@ -55,7 +63,7 @@ export async function request<T>(
     headers["Content-Type"] = "application/json";
   }
 
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(apiUrl(path), {
     ...fetchOptions,
     headers,
     // Send the OIDC `openrag_session` cookie. A no-op for the same-origin
