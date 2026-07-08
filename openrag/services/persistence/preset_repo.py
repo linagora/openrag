@@ -103,9 +103,23 @@ class PgPresetRepository(PresetRepository):
         # the row keeps its identity/created_at. Partitions reference a preset by
         # its name string (partitions.{col}) with no FK, so referencing partitions
         # are repointed in the same transaction or they would orphan.
+        #
+        # Repoint `partitions` BEFORE touching the `pipeline_presets` row so this
+        # transaction acquires the two tables' locks in the same order delete()
+        # uses (`partitions` first). Renaming the preset row first would take them
+        # in the opposite order and could deadlock against a concurrent delete of
+        # the same preset (ABBA). Both statements commit atomically, so the
+        # transient state — a partition pointing at new_name before the preset row
+        # is renamed — is never visible outside this transaction, and a NotFound
+        # rollback undoes the repoint.
         col = _preset_column(preset_type)
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                await conn.execute(
+                    f"UPDATE partitions SET {col} = $1 WHERE {col} = $2",
+                    new_name,
+                    old_name,
+                )
                 rec = await conn.fetchrow(
                     "UPDATE pipeline_presets SET name = $2, config = $3::jsonb, updated_at = now() "
                     "WHERE name = $1 AND preset_type = $4 RETURNING *",
@@ -116,14 +130,10 @@ class PgPresetRepository(PresetRepository):
                 )
                 if rec is None:
                     # old_name vanished between the service's existence check and
-                    # this UPDATE (concurrent delete) — fail cleanly instead of
-                    # blowing up in _row_to_dict(None).
+                    # this UPDATE (concurrent delete) — fail cleanly (rolling back
+                    # the partition repoint above) instead of blowing up in
+                    # _row_to_dict(None).
                     raise NotFoundError(f"Preset '{old_name}' of type '{preset_type}' not found.")
-                await conn.execute(
-                    f"UPDATE partitions SET {col} = $1 WHERE {col} = $2",
-                    new_name,
-                    old_name,
-                )
         return self._row_to_dict(rec)
 
     async def delete(self, name: str, preset_type: str) -> bool:
