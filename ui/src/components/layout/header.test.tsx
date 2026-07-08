@@ -47,7 +47,7 @@ describe("Header", () => {
     expect(chatLink.getAttribute("rel")).toBe("noopener noreferrer");
   });
 
-  it("keeps Chainlit on the UI front-door origin even when an API origin is configured", () => {
+  it("uses the configured API origin for Chainlit in browser-direct builds", () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test");
 
     render(
@@ -57,7 +57,7 @@ describe("Header", () => {
     );
 
     const chatLink = screen.getByRole("link", { name: /open chat in a new tab/i });
-    expect(chatLink.getAttribute("href")).toBe("/chainlit/");
+    expect(chatLink.getAttribute("href")).toBe("https://api.example.test/chainlit/");
   });
 
   it("hides the Chainlit chat link when Chainlit is disabled", () => {

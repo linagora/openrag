@@ -5,10 +5,12 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { apiUrl } from "@/lib/api/client";
 
 export function Header() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const chatHref = apiUrl("/chainlit/");
 
   const handleLogout = () => {
     const wasOidcSession = logout();
@@ -33,7 +35,7 @@ export function Header() {
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button variant="outline" size="sm" asChild>
-                    <a href="/chainlit/" target="_blank" rel="noopener noreferrer" aria-label="Open Chat in a new tab">
+                    <a href={chatHref} target="_blank" rel="noopener noreferrer" aria-label="Open Chat in a new tab">
                       <MessageSquare className="h-4 w-4" />
                       Chat
                     </a>
