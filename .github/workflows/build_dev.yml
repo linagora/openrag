@@ -6,7 +6,7 @@ on:
   schedule:
     - cron: "0 2 * * *"
   push:
-    branches: [dev]
+    branches: [develop]
   workflow_dispatch:
 
 env:
