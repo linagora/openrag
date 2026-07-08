@@ -76,6 +76,15 @@ class VLLMClient(LLM):
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
+        # Same construction breadcrumb as VLLMEmbedder: the component factories
+        # cache instances per endpoint name, so this fires once per configured
+        # endpoint and shows which base URL/model a preset name resolved to.
+        logger.bind(
+            model=self._model,
+            endpoint=self._endpoint,
+            timeout=timeout,
+            enable_thinking=self._enable_thinking,
+        ).debug(f"{type(self).__name__} ready")
 
     def _resolve_overrides(self, kwargs: dict) -> tuple[str, str, dict[str, str] | None]:
         """Read ``metadata.llm_override`` from *kwargs* without mutating caller data.

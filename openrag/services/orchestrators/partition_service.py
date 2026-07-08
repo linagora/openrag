@@ -57,6 +57,11 @@ logger = get_logger()
 # ``list_existant_partitions``. Matched case-insensitively.
 _RESERVED_PARTITION_NAMES = frozenset({"all"})
 
+# Columns where an explicit ``None`` in a PATCH is a real value (SQL NULL =
+# "reset to default"), not the omitted-field sentinel that the None-filter
+# in ``update_partition`` gives every other column.
+_NULLABLE_COLUMNS = frozenset({"chat_llm"})
+
 
 def _validate_limit(limit: int | None) -> None:
     """Reject negative ``limit`` values before they reach ``rows[:limit]``.
@@ -223,6 +228,8 @@ class PartitionService:
         # Validate the preset references before touching the DB.
         if self._config is not None:
             self._validate_preset_refs({"partition": partition, **config_fields})
+            if chat_llm:
+                self._validate_chat_llm_ref(chat_llm)
 
         await self._partition_repo.create_partition(name=partition, user_id=user_id, max_owned=max_owned)
 
@@ -271,18 +278,26 @@ class PartitionService:
     async def update_partition(self, partition: str, **fields: object) -> dict | None:
         """Update a partition's config columns and re-resolve the cache.
 
-        ``None`` values are ignored (so partial PATCH semantics work). When a
+        ``None`` values are ignored (so partial PATCH semantics work) —
+        except for the ``_NULLABLE_COLUMNS`` (``chat_llm``), where an
+        explicit ``None`` clears the column back to its default. When a
         preset reference changes, the merged row is validated *before* the
-        write so an unknown preset name fails fast.
+        write so an unknown preset name fails fast; likewise an assigned
+        ``chat_llm`` must name a catalogued LLM endpoint.
         """
         await self._ensure_partition(partition)
-        updates = {k: v for k, v in fields.items() if v is not None}
+        updates = {k: v for k, v in fields.items() if v is not None or k in _NULLABLE_COLUMNS}
 
         if self._config is not None and updates:
             current = await self._partition_repo.get_partition_row(partition)
             if current is None:
                 raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
             self._validate_preset_refs({**current, **updates})
+            # Only the incoming value is checked — a *stored* name that went
+            # stale (endpoint deleted later) must not block unrelated PATCHes;
+            # QueryService falls back to the default LLM for those at runtime.
+            if updates.get("chat_llm"):
+                self._validate_chat_llm_ref(updates["chat_llm"])
 
         result = await self._partition_repo.update_partition(partition, **updates)
 
@@ -323,6 +338,19 @@ class PartitionService:
             self.resolve_partition_row(row)
         except ConfigError as exc:
             raise ValidationError(exc.message, code="PRESET_NOT_FOUND") from exc
+
+    def _validate_chat_llm_ref(self, chat_llm: str) -> None:
+        """Assignment-time check: ``chat_llm`` must name a catalogued LLM endpoint.
+
+        Only guards assignment — a stored name can go stale afterwards (the
+        endpoint may be renamed or deleted), which QueryService tolerates by
+        falling back to the default LLM at request time.
+        """
+        if chat_llm not in self._require_config().models.llm:
+            raise ValidationError(
+                f"LLM endpoint '{chat_llm}' referenced by chat_llm not found.",
+                code="MODEL_ENDPOINT_NOT_FOUND",
+            )
 
     def _partition_detail(self, row: dict, cfg: PartitionConfig) -> dict:
         """Shape a resolved row into the ``PartitionDetailResponse`` payload."""

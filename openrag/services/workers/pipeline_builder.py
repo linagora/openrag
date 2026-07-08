@@ -90,8 +90,8 @@ class IndexingPipeline:
         parser = self._select_parser(config)
         chunker = self._select_chunker(config)
         embedder = self._select_embedder(row)
-        contextualizer = self._select_contextualizer(config)
-        topic_tagger = self._select_topic_tagger(config)
+        contextualizer, contextualization_llm = self._select_contextualizer(config)
+        topic_tagger, topic_tagging_llm = self._select_topic_tagger(config)
 
         timings: dict[str, float] = {}
 
@@ -104,18 +104,27 @@ class IndexingPipeline:
 
         try:
             await _timed("parse", parse_stage(row, parser, timeout=self.timeouts.parse))
-            if self._should_caption(row, config):
-                vlm = self._select_vlm(config)
-                if vlm is not None:
-                    await _timed(
-                        "caption",
-                        caption_stage(
-                            row,
-                            vlm,
-                            timeout=self.timeouts.caption,
-                            per_image_timeout=self.timeouts.caption_per_image,
-                        ),
-                    )
+            # The caption decision needs the parsed document (standalone images
+            # always caption), so the VLM is resolved after parse.
+            vlm, vlm_name = self._select_vlm(config) if self._should_caption(row, config) else (None, None)
+            logger.bind(
+                task_id=row.get("task_id"),
+                filename=row.get("filename", ""),
+                vlm=vlm_name if vlm is not None else None,
+                contextualization_llm=contextualization_llm,
+                topic_tagging_llm=topic_tagging_llm,
+                embedder=str(row.get("embedder_name") or "default"),
+            ).debug("model endpoints resolved for indexing (None = stage disabled)")
+            if vlm is not None:
+                await _timed(
+                    "caption",
+                    caption_stage(
+                        row,
+                        vlm,
+                        timeout=self.timeouts.caption,
+                        per_image_timeout=self.timeouts.caption_per_image,
+                    ),
+                )
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
             if contextualizer is not None:
                 await _timed(
@@ -196,17 +205,25 @@ class IndexingPipeline:
             return self.embedder_factory(str(embedder_name))
         return self.embedder
 
-    def _select_vlm(self, config: IndexationPipelineConfig | None) -> VLM | None:
-        """Pick the captioning VLM instance (availability only — policy is in
-        ``_should_caption``)."""
+    def _select_vlm(self, config: IndexationPipelineConfig | None) -> tuple[VLM | None, str | None]:
+        """Pick the captioning VLM instance and its endpoint name for logging
+        (availability only — policy is in ``_should_caption``).
+
+        Captioning is an enrichment step, so an unresolvable endpoint name must
+        not fail the file — same rationale as ``_select_contextualizer`` /
+        ``_select_topic_tagger``. A named VLM whose endpoint was deleted or
+        renamed after assignment (the factory raises ``KeyError``) falls back to
+        the legacy VLM with a warning instead of breaking indexing for the whole
+        partition.
+        """
         if config is not None and self.vlm_factory is not None:
-            if config.vlm:
-                return self.vlm_factory(config.vlm)
+            name = config.vlm or "default"
             try:
-                return self.vlm_factory("default")
-            except KeyError:
-                return self.vlm
-        return self.vlm
+                return self.vlm_factory(name), name
+            except KeyError as exc:
+                logger.warning(f"Skipping named VLM: cannot resolve '{name}' ({exc}) — falling back to the default VLM")
+                return self.vlm, "default"
+        return self.vlm, "default"
 
     def _should_caption(self, row: MutableMapping[str, Any], config: IndexationPipelineConfig | None) -> bool:
         """Decide whether to caption this document's images.
@@ -222,37 +239,43 @@ class IndexingPipeline:
         per_partition = config.enable_image_captioning if config is not None else True
         return self.image_captioning and per_partition
 
-    def _select_contextualizer(self, config: IndexationPipelineConfig | None) -> ChunkContextualizer | None:
+    def _select_contextualizer(
+        self, config: IndexationPipelineConfig | None
+    ) -> tuple[ChunkContextualizer | None, str | None]:
         if config is not None:
             if not config.enable_contextualization:
-                return None
+                return None, None
             if self.contextualizer_factory is not None:
                 name = config.contextualization_llm or "default"
                 try:
-                    return self.contextualizer_factory(name)
+                    return self.contextualizer_factory(name), name
                 except KeyError as exc:
                     # Only an unresolvable endpoint name (the factory raises KeyError)
                     # is skipped — contextualization is an enhancement and must not fail
                     # the file over a missing/typo'd LLM. Any other factory error (prompt
                     # load, bad client config, ...) is a real fault and is left to surface.
                     logger.warning(f"Skipping contextualization: cannot resolve LLM '{name}' ({exc})")
-                    return None
-        return self.contextualizer
+                    return None, None
+        if self.contextualizer is None:
+            return None, None
+        return self.contextualizer, "default"
 
-    def _select_topic_tagger(self, config: IndexationPipelineConfig | None) -> TopicTagger | None:
+    def _select_topic_tagger(self, config: IndexationPipelineConfig | None) -> tuple[TopicTagger | None, str | None]:
         if config is not None:
             if not config.enable_topic_tagging:
-                return None
+                return None, None
             if self.topic_tagger_factory is not None:
                 name = config.topic_tagging_llm or "default"
                 try:
-                    return self.topic_tagger_factory(name)
+                    return self.topic_tagger_factory(name), name
                 except KeyError as exc:
                     # Only an unresolvable endpoint name (KeyError) is skipped; any other
                     # factory error is a real fault and is left to surface, not masked.
                     logger.warning(f"Skipping topic tagging: cannot resolve LLM '{name}' ({exc})")
-                    return None
-        return self.topic_tagger
+                    return None, None
+        if self.topic_tagger is None:
+            return None, None
+        return self.topic_tagger, "default"
 
 
 def build_indexing_pipeline(
