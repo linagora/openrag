@@ -33,7 +33,7 @@ export default function SettingsPage() {
 
   return (
     <div>
-      <PageHeader title="Account Settings" description="Manage your programmatic API access" />
+      <PageHeader title="Account Settings" description="Manage your API access and authentication." />
 
       <div className="mt-4 grid gap-4 max-w-2xl">
         {/* Sign-in is handled by the IdP — nothing to manage here. */}
@@ -43,8 +43,8 @@ export default function SettingsPage() {
               <ShieldCheck className="h-4 w-4 text-primary" /> Sign-in
             </CardTitle>
             <CardDescription>
-              Authentication is handled by your organization's single sign-on (SSO). There are no
-              passwords to manage here — sign in and out happen through your identity provider.
+              Authentication is managed through your organization's SSO. OpenRAG does not manage
+              passwords.
             </CardDescription>
           </CardHeader>
         </Card>
@@ -56,8 +56,8 @@ export default function SettingsPage() {
               <KeyRound className="h-4 w-4 text-primary" /> API Token
             </CardTitle>
             <CardDescription>
-              Use this bearer token for programmatic access (CLI, scripts). Each account has a single
-              token — regenerating it immediately invalidates the previous one.
+              Use this token to authenticate API requests from the CLI, scripts, or other tools.
+              Regenerating it immediately revokes the previous token.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
