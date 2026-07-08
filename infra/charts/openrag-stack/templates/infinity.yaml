@@ -22,9 +22,7 @@ spec:
       {{- with .Values.reranker.serviceAccountName }}
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
-      {{- with .Values.reranker.automountServiceAccountToken }}
-      automountServiceAccountToken: {{ . }}
-      {{- end }}
+      automountServiceAccountToken: {{ .Values.reranker.automountServiceAccountToken }}
       {{- if .Values.reranker.runtimeClassName }}
       runtimeClassName: {{ .Values.reranker.runtimeClassName }}
       {{- end }}

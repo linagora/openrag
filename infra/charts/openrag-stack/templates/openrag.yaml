@@ -23,8 +23,32 @@ spec:
       {{- with .Values.openrag.serviceAccountName }}
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
-      {{- with .Values.openrag.automountServiceAccountToken }}
-      automountServiceAccountToken: {{ . }}
+      automountServiceAccountToken: {{ .Values.openrag.automountServiceAccountToken }}
+      {{- if or .Values.openrag.extraInitContainers .Values.ray.enabled }}
+      initContainers:
+        {{- with .Values.openrag.extraInitContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.ray.enabled }}
+        - name: init-venv
+          image: "{{ .Values.openrag.image.registry | default .Values.global.image.registry }}/{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
+          {{- with .Values.openrag.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Python env in /app/.venv..."
+              while [ ! -f /app/.venv/.ready ]; do
+                sleep 3
+              done
+              echo "Venv is ready."
+          volumeMounts:
+            - name: venv
+              mountPath: /app/.venv
+        {{- end }}
       {{- end }}
       containers:
         - name: openrag

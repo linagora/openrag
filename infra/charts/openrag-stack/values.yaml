@@ -25,7 +25,7 @@ networkPolicy:
   # Ports reachable from outside the namespace (e.g. via the Ingress controller).
   externalPorts:
     - 8080  # openrag API/UI & admin-ui
-    - 8265  # ray dashboard
+    # - 8265  # ray dashboard - Security issue, the ray dashboard is not protected by any auth, so it should not be exposed to the public internet.
 
 # === Global shared persistence ===
 persistence:
@@ -71,8 +71,16 @@ ray:
         cpu: "4"
         memory: "8Gi"
         nvidia.com/gpu: 1
+      limits:
+        cpu: "4"
+        memory: "8Gi"
+        nvidia.com/gpu: 1
     worker:
       requests:
+        cpu: "4"
+        memory: "8Gi"
+        nvidia.com/gpu: 1
+      limits:
         cpu: "4"
         memory: "8Gi"
         nvidia.com/gpu: 1
@@ -279,11 +287,15 @@ vllm:
 
 # === Infinity reranker ===
 reranker:
-  # Set to false to skip deploying the reranker and use an external one instead.
-  # Configure externalUrl to point to the external reranker endpoint.
+  # Set to false to skip deploying the local Infinity reranker. Also set
+  # externalUrl below to point RERANKER_BASE_URL at an external one instead —
+  # otherwise RERANKER_ENABLED renders "false" and no reranker is used at all.
   enabled: true
   # URL of an external reranker (vLLM or any OpenAI-compatible reranker).
-  # When set, this overrides RERANKER_BASE_URL and no local reranker is deployed.
+  # When set, this overrides RERANKER_BASE_URL (see env.config below) —
+  # remember to also set enabled: false so the local Deployment/Service
+  # aren't created alongside it.
+  externalUrl: ""
   rerankerModelName: &rerankerModel "Alibaba-NLP/gte-multilingual-reranker-base"
   servicePort: &rerankerPort 7997
   image:
@@ -383,14 +395,14 @@ adminUi:
     readOnlyRootFilesystem: false
   
   probes:
-    startupProbe: {}
-    readinessProbe:
+    startup: {}
+    readiness:
       httpGet:
         path: /app/
         port: admin-ui
       initialDelaySeconds: 5
       periodSeconds: 10
-    livenessProbe:
+    liveness:
       httpGet:
         path: /app/
         port: admin-ui
@@ -451,6 +463,10 @@ openrag:
   shmSize: ""
   extraVolumes: []
   extraVolumeMounts: []
+  # Raw Kubernetes initContainer objects, e.g. to merge multiple mounted CA
+  # bundles into one file on a shared emptyDir before the main container
+  # starts (see values-openrag.yaml's kc-ca-bundle example).
+  extraInitContainers: []
   # infra/docker/api.Dockerfile bakes an "openrag" user as uid 10001, primary
   # gid 0 (`useradd --uid 10001 --gid 0`), and grants group-write on the paths
   # it writes at runtime (venv, egg-info, HOME, data/db/logs, HF cache, uv
@@ -601,9 +617,12 @@ env:
 
     # Reranker
     RERANKER_MODEL: '{{ .Values.reranker.rerankerModelName }}'
-    RERANKER_ENABLED: "true"
+    # True when either the local Infinity reranker is deployed or an external
+    # one is configured — false (and RERANKER_BASE_URL below moot) when
+    # neither applies, so this never points at a Service that doesn't exist.
+    RERANKER_ENABLED: '{{ or .Values.reranker.enabled (ne .Values.reranker.externalUrl "") }}'
     RERANKER_TOP_K: "4"
-    RERANKER_BASE_URL: 'http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.servicePort }}'
+    RERANKER_BASE_URL: '{{ if .Values.reranker.externalUrl }}{{ .Values.reranker.externalUrl }}{{ else }}http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.servicePort }}{{ end }}'
     RERANKER_PROVIDER: "infinity"
 
     # Prompts: templates ship inside the package (openrag/prompts/templates);

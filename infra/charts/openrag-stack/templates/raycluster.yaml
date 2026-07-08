@@ -22,13 +22,33 @@ spec:
         {{- with .Values.ray.serviceAccountName }}
         serviceAccountName: {{ tpl . $ }}
         {{- end }}
-        {{- with .Values.ray.automountServiceAccountToken }}
-        automountServiceAccountToken: {{ . }}
-        {{- end }}
+        automountServiceAccountToken: {{ .Values.ray.automountServiceAccountToken }}
         {{- with .Values.ray.podSecurityContext }}
         securityContext:
           {{- toYaml . | nindent 10 }}
         {{- end }}
+        initContainers:
+          - name: init-venv-sync
+            image: "{{ .Values.ray.image.registry | default .Values.global.image.registry }}/{{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}"
+            {{- with .Values.ray.containerSecurityContext }}
+            securityContext:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+            command:
+              - sh
+              - -c
+              - |
+                if [ -f /app/.venv/.ready ]; then
+                  echo "Existing env detected, skipping install."
+                else
+                  echo "No env ready, cleaning and syncing..."
+                  rm -rf /app/.venv/*
+                  uv sync
+                  touch /app/.venv/.ready
+                fi
+            volumeMounts:
+              - name: venv
+                mountPath: /app/.venv
         containers:
           - name: ray-head
             image: "{{ .Values.ray.image.registry | default .Values.global.image.registry }}/{{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}"
@@ -92,7 +112,6 @@ spec:
           - name: venv
             persistentVolumeClaim:
               claimName: {{ include "openrag-stack.fullname" . }}-venv
-
   workerGroupSpecs:
   {{- range $i, $e := until (.Values.ray.workers.count | int) }}
     - groupName: worker-group-{{ add $i 1 }}

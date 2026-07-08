@@ -22,9 +22,7 @@ spec:
       {{- with .Values.adminUi.serviceAccountName }}
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
-      {{- with .Values.adminUi.automountServiceAccountToken }}
-      automountServiceAccountToken: {{ . }}
-      {{- end }}
+      automountServiceAccountToken: {{ .Values.adminUi.automountServiceAccountToken }}
       containers:
         - name: admin-ui
           image: "{{ .Values.adminUi.image.registry | default .Values.global.image.registry }}/{{ .Values.adminUi.image.repository }}:{{ .Values.adminUi.image.tag }}"
