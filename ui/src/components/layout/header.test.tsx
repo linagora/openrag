@@ -47,7 +47,7 @@ describe("Header", () => {
     expect(chatLink.getAttribute("rel")).toBe("noopener noreferrer");
   });
 
-  it("uses the configured API origin for the Chainlit chat link", () => {
+  it("uses the configured API origin for Chainlit in browser-direct builds", () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test");
 
     render(
