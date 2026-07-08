@@ -211,7 +211,10 @@ async def test_pipeline_falls_back_to_existing_vlm_when_default_registry_vlm_is_
 
 
 @pytest.mark.asyncio
-async def test_pipeline_fails_when_explicit_named_vlm_is_missing():
+async def test_pipeline_falls_back_when_explicit_named_vlm_is_missing():
+    # A named VLM endpoint deleted/renamed after assignment must not fail the
+    # whole indexing job — captioning is enrichment, so it falls back to the
+    # legacy VLM with a warning (mirrors the contextualizer/topic-tagger paths).
     def _missing_named(name: str):
         raise KeyError(f"Unknown vlm '{name}'")
 
@@ -221,12 +224,13 @@ async def test_pipeline_fails_when_explicit_named_vlm_is_missing():
         text_blocks=[TextBlock(text="hello")],
         images=[ImageBlock(image_bytes=b"png")],
     )
+    fallback_vlm = FakeVLM()
     pipeline = build_indexing_pipeline(
         parser=FakeParser(processed),
         chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
         embedder=FakeEmbedder([[1.0]]),
         vector_store=FakeVectorStore(),
-        vlm=FakeVLM(),
+        vlm=fallback_vlm,
         vlm_factory=_missing_named,
     )
     row = {
@@ -239,8 +243,9 @@ async def test_pipeline_fails_when_explicit_named_vlm_is_missing():
         },
     }
 
-    with pytest.raises(KeyError, match="missing-vlm"):
-        await pipeline.run(row)
+    await pipeline.run(row)  # no raise
+
+    assert fallback_vlm.calls == [b"png"]  # captioned via the legacy fallback VLM
 
 
 @pytest.mark.asyncio
@@ -606,3 +611,70 @@ async def test_pipeline_logs_per_stage_timings(monkeypatch):
     assert recorder.debug_bound["contextualization_llm"] is None
     assert recorder.debug_bound["topic_tagging_llm"] is None
     assert recorder.debug_bound["embedder"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_breadcrumb_reflects_resolved_named_endpoints(monkeypatch):
+    """The breadcrumb names the actually-resolved endpoint per stage, not just
+    ``None`` — the named-endpoint counterpart to the all-disabled case above."""
+    import services.workers.pipeline_builder as pb
+
+    class _RecordingLogger:
+        def __init__(self) -> None:
+            self.bound: dict | None = None
+            self.debug_bound: dict | None = None
+
+        def bind(self, **kwargs):
+            self.bound = kwargs
+            return self
+
+        def info(self, message: str) -> None:  # unused here, kept for parity
+            pass
+
+        def debug(self, message: str) -> None:
+            self.debug_bound = self.bound
+
+        def warning(self, message: str) -> None:
+            pass
+
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(pb, "logger", recorder)
+
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm_factory=lambda name: FakeVLM(),
+        contextualizer_factory=lambda name: FakeContextualizer(),
+        topic_tagger_factory=lambda name: FakeTopicTagger(),
+    )
+    row = {
+        "task_id": "t1",
+        "document": document,
+        "partition": "tenant-a",
+        "filename": "note.txt",
+        "embedder_name": "embed-fast",
+        "indexation_config": {
+            "enable_image_captioning": True,
+            "vlm": "vlm-fast",
+            "enable_contextualization": True,
+            "contextualization_llm": "ctx-llm",
+            "enable_topic_tagging": True,
+            "topic_tagging_llm": "topic-llm",
+        },
+    }
+
+    await pipeline.run(row)
+
+    assert recorder.debug_bound is not None
+    assert recorder.debug_bound["vlm"] == "vlm-fast"
+    assert recorder.debug_bound["contextualization_llm"] == "ctx-llm"
+    assert recorder.debug_bound["topic_tagging_llm"] == "topic-llm"
+    assert recorder.debug_bound["embedder"] == "embed-fast"

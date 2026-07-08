@@ -173,10 +173,12 @@ class QueryService:
         endpoint — with conflicting presets there is no single owning
         partition, so the default applies.
 
-        ``chat_llm`` is not validated against the endpoint catalog when it
-        is assigned, so an unknown name (e.g. an endpoint deleted after
-        assignment) must not fail the chat request — it falls back to the
-        default LLM with a warning.
+        ``chat_llm`` is validated against the endpoint catalog when it is
+        assigned (``PartitionService`` rejects an unknown name at create /
+        PATCH time), but a stored name can still go stale afterwards — the
+        endpoint may be renamed or deleted after assignment — so an
+        unresolvable name here must not fail the chat request; it falls back
+        to the default LLM with a warning.
         """
         if self._llm_factory is None or not partition or "all" in partition:
             logger.bind(partitions=partition).debug("Answering with the default LLM (no partition-scoped preset)")

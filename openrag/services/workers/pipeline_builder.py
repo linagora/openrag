@@ -207,13 +207,21 @@ class IndexingPipeline:
 
     def _select_vlm(self, config: IndexationPipelineConfig | None) -> tuple[VLM | None, str | None]:
         """Pick the captioning VLM instance and its endpoint name for logging
-        (availability only — policy is in ``_should_caption``)."""
+        (availability only — policy is in ``_should_caption``).
+
+        Captioning is an enrichment step, so an unresolvable endpoint name must
+        not fail the file — same rationale as ``_select_contextualizer`` /
+        ``_select_topic_tagger``. A named VLM whose endpoint was deleted or
+        renamed after assignment (the factory raises ``KeyError``) falls back to
+        the legacy VLM with a warning instead of breaking indexing for the whole
+        partition.
+        """
         if config is not None and self.vlm_factory is not None:
-            if config.vlm:
-                return self.vlm_factory(config.vlm), config.vlm
+            name = config.vlm or "default"
             try:
-                return self.vlm_factory("default"), "default"
-            except KeyError:
+                return self.vlm_factory(name), name
+            except KeyError as exc:
+                logger.warning(f"Skipping named VLM: cannot resolve '{name}' ({exc}) — falling back to the default VLM")
                 return self.vlm, "default"
         return self.vlm, "default"
 
