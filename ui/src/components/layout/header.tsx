@@ -1,5 +1,4 @@
 import { useAuth } from "@/lib/auth";
-import { apiUrl } from "@/lib/api/client";
 import { useNavigate } from "react-router-dom";
 import { LogOut, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,7 +9,6 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 export function Header() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const chatHref = apiUrl("/chainlit/");
 
   const handleLogout = () => {
     const wasOidcSession = logout();
@@ -35,7 +33,7 @@ export function Header() {
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button variant="outline" size="sm" asChild>
-                    <a href={chatHref} target="_blank" rel="noopener noreferrer" aria-label="Open Chat in a new tab">
+                    <a href="/chainlit/" target="_blank" rel="noopener noreferrer" aria-label="Open Chat in a new tab">
                       <MessageSquare className="h-4 w-4" />
                       Chat
                     </a>
