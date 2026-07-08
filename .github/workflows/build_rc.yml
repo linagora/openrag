@@ -1,19 +1,31 @@
-name: Build and Release
+# Build and publish release-candidate images.
+#
+# Git flow: release candidates are cut from a `release/X.Y.Z` branch. Tagging
+# that branch with `vX.Y.Z-rc.N` publishes the api, ray, and admin-ui images
+# under the `vX.Y.Z-rc.N` tag — mirroring the GA pipeline (`build.yml`) but
+# guarded to `release/*` instead of `main`, and NEVER tagging `latest`.
+#
+# api + admin-ui -> ghcr + Docker Hub; ray -> ghcr only (same split as build.yml).
+#
+# The GA pipeline (`build.yml`) also triggers on `v*` tags, but its jobs are
+# guarded to `base_ref == refs/heads/main`, so an rc tag on a release branch is
+# a no-op there. This workflow is the mirror image: it only runs for rc tags
+# whose base branch is `release/*`.
+name: Build RC
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*-rc.*"]
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  PYTHON_VERSION: "3.12"
 
 jobs:
   build-and-push-image:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/') && startsWith(github.event.base_ref, 'refs/heads/release/')
     permissions:
       contents: read
       packages: write
@@ -49,11 +61,6 @@ jobs:
             linagoraai/openrag
           tags: |
             type=ref,event=tag
-            type=raw,value=latest
-
-      - name: Extract tag version
-        id: get_version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -69,7 +76,7 @@ jobs:
 
   build-and-push-image-ray:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/') && startsWith(github.event.base_ref, 'refs/heads/release/')
     permissions:
       contents: read
       packages: write
@@ -97,11 +104,6 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ray
           tags: |
             type=ref,event=tag
-            type=raw,value=latest
-
-      - name: Extract tag version
-        id: get_version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -117,7 +119,7 @@ jobs:
 
   build-and-push-image-admin-ui:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/') && startsWith(github.event.base_ref, 'refs/heads/release/')
     permissions:
       contents: read
       packages: write
@@ -153,7 +155,6 @@ jobs:
             linagoraai/openrag-admin-ui
           tags: |
             type=ref,event=tag
-            type=raw,value=latest
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
