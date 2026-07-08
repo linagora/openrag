@@ -56,6 +56,7 @@ from api.routers.user.download import router as download_router
 from api.routers.user.extract import router as extract_router
 from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
+from api.runtime_flags import WITH_CHAINLIT_UI, WITH_OPENAI_API
 from core.config import load_config
 from core.utils.banner import print_startup_banner
 from core.utils.logging import get_logger
@@ -92,8 +93,6 @@ AUTH_TOKEN: str | None = os.getenv("AUTH_TOKEN")
 # host port — so this is the Origin it sends on cross-origin API calls.
 ADMIN_UI_PORT: str = os.getenv("ADMIN_UI_PORT", "8081")
 CORS_EXTRA_ORIGINS: list[str] = [o.strip() for o in os.getenv("CORS_EXTRA_ORIGINS", "").split(";") if o.strip()]
-WITH_CHAINLIT_UI: bool = os.getenv("WITH_CHAINLIT_UI", "true").lower() == "true"
-WITH_OPENAI_API: bool = os.getenv("WITH_OPENAI_API", "true").lower() == "true"
 
 # AUTH_MODE / OIDC_* env validation lives on OIDCConfig.from_env() so
 # the rules are configuration, not module-load code. ServiceContainer

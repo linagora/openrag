@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Header } from "./header";
 
 const authState = vi.hoisted(() => ({
@@ -27,6 +27,11 @@ vi.mock("@/components/ui/sidebar", () => ({
 describe("Header", () => {
   beforeEach(() => {
     authState.chainlitEnabled = true;
+    vi.stubEnv("VITE_API_BASE_URL", "");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("links to the Chainlit chat", () => {
@@ -40,6 +45,19 @@ describe("Header", () => {
     expect(chatLink.getAttribute("href")).toBe("/chainlit/");
     expect(chatLink.getAttribute("target")).toBe("_blank");
     expect(chatLink.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
+  it("uses the configured API origin for the Chainlit chat link", () => {
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test");
+
+    render(
+      <MemoryRouter>
+        <Header />
+      </MemoryRouter>,
+    );
+
+    const chatLink = screen.getByRole("link", { name: /open openrag chat/i });
+    expect(chatLink.getAttribute("href")).toBe("https://api.example.test/chainlit/");
   });
 
   it("hides the Chainlit chat link when Chainlit is disabled", () => {

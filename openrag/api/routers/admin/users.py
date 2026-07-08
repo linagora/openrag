@@ -14,9 +14,8 @@ orchestrators must not touch directly; that handler will move to a
 service once the queue is de-Ray'd.
 """
 
-import os
-
 from api.dependencies.auth import current_user, require_admin, require_admin_or_self
+from api.runtime_flags import WITH_CHAINLIT_UI
 from api.schemas.admin.users import UserCreate, UserPublic, UserUpdate
 from core.utils.logging import get_logger
 from di.providers import get_user_service
@@ -25,10 +24,6 @@ from fastapi.responses import JSONResponse
 
 logger = get_logger()
 router = APIRouter()
-
-
-def _chainlit_enabled() -> bool:
-    return os.getenv("WITH_CHAINLIT_UI", "true").lower() == "true"
 
 
 @router.get(
@@ -87,7 +82,7 @@ async def get_current_user_info(
 ):
     """Get current authenticated user info"""
     content = await service.get_current_user_info(user)
-    content["chainlit_enabled"] = _chainlit_enabled()
+    content["chainlit_enabled"] = WITH_CHAINLIT_UI
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content=content,
