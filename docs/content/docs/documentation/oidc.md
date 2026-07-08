@@ -12,12 +12,13 @@ This guide walks you through configuring and using OpenRag's OIDC authentication
 4. [User Pre-provisioning](#user-pre-provisioning)
 5. [Claim Mapping (optional)](#claim-mapping-optional)
 6. [Auto-provisioning (optional)](#auto-provisioning-optional)
-7. [Keycloak Setup](#keycloak-setup)
-8. [LemonLDAP::NG Setup](#lemonldapng-setup)
-9. [Programmatic Access](#programmatic-access)
-10. [Back-Channel Logout](#back-channel-logout)
-11. [Troubleshooting](#troubleshooting)
-12. [Security Considerations](#security-considerations)
+7. [Group → Partition Mapping (optional)](#group--partition-mapping-optional)
+8. [Keycloak Setup](#keycloak-setup)
+9. [LemonLDAP::NG Setup](#lemonldapng-setup)
+10. [Programmatic Access](#programmatic-access)
+11. [Back-Channel Logout](#back-channel-logout)
+12. [Troubleshooting](#troubleshooting)
+13. [Security Considerations](#security-considerations)
 
 ---
 
@@ -109,7 +110,7 @@ All variables must be set when `AUTH_MODE=oidc`. If any required variable is mis
 | `OIDC_ENDPOINT` | Yes* | — | Issuer URL (auto-discovery via `/.well-known/openid-configuration`) |
 | `OIDC_CLIENT_ID` | Yes* | — | Client ID registered at the IdP |
 | `OIDC_CLIENT_SECRET` | Yes* | — | Client secret (confidential clients only) |
-| `OIDC_REDIRECT_URI` | Yes* | — | Callback URL on OpenRag's backend, must match IdP configuration. Behind a proxy: `https://openrag.example.com/auth/callback`; direct access: `http://<ip_addr>:<APP_PORT>/auth/callback`. See [Choosing `OIDC_REDIRECT_URI`](#choosing-oidc_redirect_uri). |
+| `OIDC_REDIRECT_URI` | Yes* | — | Public URL of the **front door** that serves your UI *and* reaches the backend's `/auth/callback` — the reverse-proxy / admin-ui port, **not necessarily** the bare `APP_PORT`. Must match the IdP config byte-for-byte. See [Choosing `OIDC_REDIRECT_URI`](#choosing-oidc_redirect_uri). |
 | `OIDC_TOKEN_ENCRYPTION_KEY` | Yes* | — | Fernet key for encrypting tokens at rest (see [Generating the Fernet Key](#generating-the-fernet-key)) |
 | `OIDC_CLAIM_SOURCE` | No | `id_token` | Where to read claims for [Claim Mapping](#claim-mapping-optional): `id_token` (verified JWT) or `userinfo` (`/userinfo` endpoint) |
 | `OIDC_CLAIM_MAPPING` | No | — | Optional CSV of `db_field:claim` pairs to copy claims into user fields on every login (e.g., `display_name:name,email:email`). See [Claim Mapping](#claim-mapping-optional). |
@@ -121,21 +122,34 @@ All variables must be set when `AUTH_MODE=oidc`. If any required variable is mis
 
 ### Choosing `OIDC_REDIRECT_URI`
 
-The value must be an absolute URL pointing at **OpenRag's backend** `/auth/callback` route, reachable from the user's browser, and registered verbatim in the IdP client configuration.
+`OIDC_REDIRECT_URI` is the URL the IdP sends the browser back to after login. It must point at the **origin that serves your UI _and_ can reach the backend's `/auth/callback` route**, registered verbatim in the IdP client configuration. Two things must be true of that origin, and both are easy to get subtly wrong:
 
-- **Behind a reverse proxy** (production, TLS terminated): UI and backend share the same public base URL, so use the public hostname directly:
+1. **It must host a working `/auth/callback`.** That route exists **only** on the backend (`openrag/api`). An origin satisfies this either by *being* the backend, or by *reverse-proxying* `/auth/*` to it.
+2. **It must also serve the UI you land on after login.** After the callback, the backend issues a **relative** redirect (e.g. `/app/` or `/chainlit/`). The browser resolves it against whichever origin handled the callback — so if that origin doesn't serve the UI path, login *succeeds* but you land on a blank/404/JSON page. **No error is shown — this is the silent failure.**
 
+Pick the value by deployment shape:
+
+- **Bundled admin-ui (nginx) is the front door** — it serves the React SPA at `/app/` and proxies `/auth`, `/v1`, … to the backend. Use the **admin-ui port** (`ADMIN_UI_PORT`), **not** `APP_PORT`. Both ports host a working `/auth/callback`, but only the admin-ui port *also* serves `/app/`, so only it lands you back on the UI:
+
+  ```bash
+  OIDC_REDIRECT_URI=http://<ip_addr>:<ADMIN_UI_PORT>/auth/callback
   ```
-  OIDC_REDIRECT_URI=https://openrag.example.com/auth/callback
-  ```
 
-- **No reverse proxy** (local / bare-metal deployment): each service is reached on its own port, so the backend must be addressed explicitly by host and `APP_PORT`:
+- **Backend is the front door** — it serves the Chainlit UI itself on `APP_PORT`. Address the backend directly:
 
-  ```
+  ```bash
   OIDC_REDIRECT_URI=http://<ip_addr>:<APP_PORT>/auth/callback
   ```
 
-  The IdP redirects the browser to this URL, so `<ip_addr>` must be resolvable/reachable from the end user's machine — not `localhost` or `127.0.0.1` unless the browser runs on the same host as OpenRag.
+- **Reverse proxy / single public hostname** (production, TLS terminated): the proxy serves the UI and forwards `/auth/*` to the backend, so use the public hostname:
+
+  ```bash
+  OIDC_REDIRECT_URI=https://openrag.example.com/auth/callback
+  ```
+
+> ⚠ **Never point this at a _static_ UI front that has no `/auth/callback`** (a bare SPA with no reverse proxy). The callback 404s, the browser reads that as "not authenticated", and you get an **infinite login loop**. The bundled admin-ui does **not** have this problem — its nginx proxies `/auth/callback` to the backend, which is exactly why it is a valid (and recommended) redirect target.
+
+For direct (no-proxy) values, `<ip_addr>` must be reachable from the **end user's** browser — not `localhost` / `127.0.0.1` unless the browser runs on the OpenRag host.
 
 Whichever form you use, the string must match the IdP's **Valid redirect URIs** list byte-for-byte (scheme, host, port, path, trailing slash).
 
@@ -343,6 +357,75 @@ The two flags are independent and compose cleanly:
 ### Threat Model
 
 Enabling auto-provisioning shifts the trust boundary: the IdP's user list becomes the source of truth for OpenRag accounts. Strict-whitelist deployments leave the flag unset and keep the historical `403`. There is no path to grant `is_admin=true` via OIDC claims; promotion remains an explicit admin action.
+
+---
+
+## Group → Partition Mapping (optional)
+
+By default, OIDC manages only *who* a user is; their **partition access** is still granted
+manually through the `/partition/{partition}/users` admin API. If your IdP already models access as
+**groups** (Keycloak groups, LLNG/Azure roles, …), OpenRag can read those groups from the login
+token and reconcile the user's partition memberships automatically on every login.
+
+This feature is **off** unless `OIDC_CLAIM_GROUPS` is set — existing deployments are unaffected.
+
+### How It Works
+
+Each group in the configured claim is matched as:
+
+```
+<OIDC_GROUP_PREFIX><partition>/<role>
+        e.g.  /openrag/project-alpha/editor   ->   partition "project-alpha", role "editor"
+```
+
+1. The claim named by `OIDC_CLAIM_GROUPS` is read from the **verified ID token** (no extra HTTP call).
+2. `OIDC_GROUP_PREFIX` is stripped from each group; groups without the prefix are ignored (they
+   belong to other apps).
+3. The remainder is matched against `OIDC_GROUP_PATTERN`, whose two capture groups are
+   `(partition, role)`. Roles are the usual `viewer` / `editor` / `owner`.
+4. When several groups grant the same partition, the **highest** role wins.
+5. The user's memberships are reconciled: missing ones are **added**, changed roles **updated**.
+6. If `OIDC_GROUP_SYNC_PRUNE=true`, memberships **absent** from the token are **removed** (the IdP
+   becomes the sole source of truth). Default (`false`) leaves manually-granted memberships intact.
+   **Mass-revocation guard:** prune runs only when the token actually carries the groups claim. If
+   the claim is *missing* (mapper disabled, wrong `OIDC_CLAIM_GROUPS`, scope not granted), prune is
+   skipped and a warning is logged — a misconfiguration cannot silently wipe everyone's access. An
+   explicit empty list (`groups: []`, the user is genuinely in no groups) **does** prune.
+
+A group that names a partition which does not exist yet is **skipped with a warning** — it never
+blocks the login. Create the partition first (any indexing call auto-creates it), then the next
+login will attach the membership.
+
+> **`is_admin` is never derived from groups.** Admin remains an explicit operator action
+> (`POST /users/` or `PATCH /users/{id}`), the same hard boundary as [Claim Mapping](#claim-mapping-optional).
+> The role vocabulary here is strictly the partition roles `viewer`/`editor`/`owner`.
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OIDC_CLAIM_GROUPS` | — (feature off) | Name of the token claim holding the group list (Keycloak: `groups`). |
+| `OIDC_GROUP_PREFIX` | `/openrag/` | Prefix stripped from each group before matching; non-matching groups are ignored. |
+| `OIDC_GROUP_PATTERN` | `(.+)/(owner\|editor\|viewer)$` | Regex with two capture groups: 1 = partition, 2 = role. Validated at startup. |
+| `OIDC_GROUP_SYNC_PRUNE` | `false` | `true` removes memberships not present in the token (IdP = source of truth). |
+
+```bash
+OIDC_CLAIM_GROUPS=groups
+OIDC_GROUP_PREFIX=/openrag/
+OIDC_GROUP_PATTERN=(.+)/(owner|editor|viewer)$
+OIDC_GROUP_SYNC_PRUNE=false
+```
+
+### Keycloak Setup for Groups
+
+1. **Realm** → **Groups**: create a group tree mirroring your partitions, e.g.
+   `/openrag/project-alpha/editor`, `/openrag/project-alpha/viewer`, `/openrag/project-beta/owner`.
+2. Assign users to the appropriate leaf groups (**Users** → user → **Groups** → **Join**).
+3. Add a **Group Membership** mapper so the groups land in the token:
+   **Clients** → `openrag` → **Client scopes** → `openrag-dedicated` → **Add mapper** →
+   **Group Membership**. Set **Token Claim Name** = `groups`, **Full group path** = ON, and ensure
+   **Add to ID token** = ON (OpenRag reads the ID token by default).
+4. Set `OIDC_CLAIM_GROUPS=groups` in OpenRag's `.env` and restart.
 
 ---
 
@@ -762,6 +845,14 @@ Server logs record the attempted `sub` at `WARNING` level so admins can copy it 
 - Keycloak: Ensure `offline_access` scope is mapped to the client
   - **Clients** → `openrag` → **Client scopes** → Verify `offline_access` is in the assigned scopes
 - LemonLDAP::NG: Check the OIDC relying party configuration includes `offline_access`
+
+### 8. Login succeeds but lands on a blank / 404 / JSON page
+
+**Error**: The IdP login completes without error, but the browser ends up on an empty page, a 404, or raw JSON instead of the UI. No error is shown — this is a **silent** failure.
+
+**Cause**: `OIDC_REDIRECT_URI` points at an origin that *can* reach `/auth/callback` but does **not** serve the UI. The classic case is pointing at the bare backend `APP_PORT` when a separate front door (the admin-ui nginx, or a reverse proxy) actually serves the UI. The callback runs, but the post-login redirect is **relative** (e.g. `/app/`), so the browser resolves it against the backend origin — which has no `/app/` — and lands nowhere useful.
+
+**Solution**: Set `OIDC_REDIRECT_URI` to the origin that serves your UI *and* reaches `/auth/callback` (for the bundled admin-ui that's `http://<host>:<ADMIN_UI_PORT>/auth/callback`, **not** `APP_PORT`). See [Choosing `OIDC_REDIRECT_URI`](#choosing-oidc_redirect_uri).
 
 ---
 

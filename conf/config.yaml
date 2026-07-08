@@ -13,10 +13,15 @@ _llm_params: &llm_params
   temperature: 0.1
   timeout: 60
   max_retries: 2
-  logprobs: true
+  # Default off — API clients opt in per request. Requesting logprobs
+  # unsolicited can break streaming on some OpenAI-compatible backends.
+  logprobs: false
+  # null omits chat_template_kwargs; set false for Qwen-style models when
+  # reasoning traces should be disabled. Leave unset for Mistral tokenizers.
+  enable_thinking: null
 
 # --- LLM ---
-# Env: BASE_URL, MODEL, API_KEY
+# Env: BASE_URL, MODEL, API_KEY, LLM_ENABLE_THINKING
 llm:
   <<: *llm_params
   base_url: ""
@@ -24,7 +29,7 @@ llm:
   api_key: ""
 
 # --- VLM (Vision Language Model) ---
-# Env: VLM_BASE_URL, VLM_MODEL, VLM_API_KEY
+# Env: VLM_BASE_URL, VLM_MODEL, VLM_API_KEY, VLM_ENABLE_THINKING
 vlm:
   <<: *llm_params
   base_url: ""
@@ -38,17 +43,21 @@ semaphore:
   vlm_semaphore: 10
 
 # --- Embedder ---
-# Env: EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY, MAX_MODEL_LEN
+# Env: EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY, MAX_MODEL_LEN,
+#      EMBEDDER_TIMEOUT, EMBEDDER_BATCH_SIZE, EMBEDDER_CONCURRENCY
 embedder:
   provider: openai
   model_name: jinaai/jina-embeddings-v3
   base_url: http://vllm:8000/v1
   api_key: EMPTY
-  max_model_len: 8192
+  max_model_len: 2047 # truncate_prompt_tokens = this - 1; keep below the model's context boundary (vllm#29496)
+  timeout: 120.0       # per-request HTTP timeout (s); raise for slow remote endpoints
+  batch_size: 32       # chunks per embedding request (big docs are split into batches)
+  embed_concurrency: 4 # max embedding requests in flight at once
 
 # --- Vector Database (Milvus) ---
 # Env: VDB_HOST, VDB_PORT, VDB_CONNECTOR_NAME, VDB_COLLECTION_NAME, VDB_HYBRID_SEARCH,
-#      VDB_ENABLE_INSERTION
+#      VDB_ENABLE_INSERTION, VDB_TIMEOUT
 vectordb:
   host: milvus
   port: 19530
@@ -56,17 +65,32 @@ vectordb:
   collection_name: vdb_test
   hybrid_search: true
   enable: true
+  timeout: 120.0 # per-request timeout (s) for the Milvus sync/async clients
   schema_version: 1 # Increment when the collection schema changes and a migration is required
 
 # --- Relational Database (PostgreSQL) ---
-# Env: POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD, DEFAULT_FILE_QUOTA
+# Env: POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD,
+#      POSTGRES_DATABASE, POSTGRES_AUTO_CREATE_DB, POSTGRES_RUN_MIGRATIONS,
+#      DEFAULT_FILE_QUOTA, POSTGRES_POOL_MIN_SIZE, POSTGRES_POOL_MAX_SIZE,
+#      POSTGRES_COMMAND_TIMEOUT
 rdb:
   host: rdb
   port: 5432
   user: root
-  # No default; set via the POSTGRES_PASSWORD env var.
+  # No default: supply via the POSTGRES_PASSWORD env var. Shipping a known
+  # password would be a usable default credential on any exposed deployment.
   password: ""
   default_file_quota: -1
+  # Leave unset to derive partitions_for_collection_<VDB_COLLECTION_NAME>.
+  database: null
+  # Compose/dev convenience. Managed Postgres deployments should pre-create
+  # the database and set POSTGRES_AUTO_CREATE_DB=false.
+  auto_create_database: true
+  # Disable in the app when migrations run as a separate Job/init step.
+  run_migrations: true
+  pool_min_size: 5
+  pool_max_size: 20
+  command_timeout: 30
 
 # --- Reranker ---
 # Env: RERANKER_PROVIDER, RERANKER_ENABLED, RERANKER_MODEL, RERANKER_TOP_K, RERANKER_BASE_URL, RERANKER_API_KEY, RERANKER_TIMEOUT, RERANKER_SEMAPHORE
@@ -91,7 +115,9 @@ map_reduce:
 
 # --- Logging ---
 # Env: LOG_LEVEL
-# INFO by default; DEBUG persists user queries and request data to logs.
+# INFO by default: DEBUG logs (and the long-lived JSON sink) persist user
+# queries and other potentially sensitive request data. Raise to DEBUG only
+# for short-lived troubleshooting.
 verbose:
   level: INFO
 
@@ -109,7 +135,9 @@ llm_context:
 # --- Paths ---
 # Env: PROMPTS_DIR, DATA_DIR, DB_DIR, LOG_DIR
 paths:
-  prompts_dir: ../prompts/example1
+  # prompts_dir defaults to the templates bundled in the package
+  # (openrag/prompts/templates). Override via PROMPTS_DIR to load templates
+  # from a custom directory.
   data_dir: ../data
   db_dir: /app/db
   log_dir: /app/logs
@@ -126,18 +154,13 @@ prompts:
 
 # --- Document loader ---
 loader:
-  # Env: IMAGE_CAPTIONING, IMAGE_CAPTIONING_URL, SAVE_MARKDOWN
+  # Env: IMAGE_CAPTIONING, IMAGE_CAPTIONING_URL, SAVE_MARKDOWN, SAVE_UPLOADED_FILES
   image_captioning: true
-  # Off by default (captioning remote image URLs is an SSRF surface). When on,
-  # fetches are SSRF-guarded and proxied in-process. See loaders/base.py.
-  image_captioning_url: false
+  image_captioning_url: true
   save_markdown: false
-
-  # Bound fan-out/recursion/page counts during ingestion (parser-bomb guard).
-  max_attachments: 50        # attachments processed per .eml
-  max_eml_depth: 3           # nested .eml-in-.eml recursion depth
-  max_archive_entries: 2000  # embedded parts iterated per docx/pptx (zip fan-out)
-  max_pdf_pages: 2000        # pages processed per PDF
+  # Keep the raw upload on disk after indexation (needed for source viewing in
+  # Chainlit). Set false for clients that manage their own files (e.g. Twake).
+  save_uploaded_files: true
 
   mimetypes:
     text/plain: .txt
@@ -161,7 +184,7 @@ loader:
   # Env: WHISPER_MODEL, WHISPER_N_WORKERS, WHISPER_NUM_GPUS, WHISPER_CONCURRENCY_PER_WORKER
   local_whisper:
     model: base
-    whisper_n_workers: 3
+    whisper_n_workers: 2
     whisper_num_gpus: 0.01
     whisper_concurrency_per_worker: 2
     # Whisper failures are often deterministic (corrupt audio); 1 retry
@@ -170,10 +193,10 @@ loader:
     whisper_max_task_retry: 1
     whisper_retry_base_delay: 2.0
 
-  # Env: PDFLoader, AUDIOLOADER (per-extension overrides)
+  # Env: PDFLOADER, AUDIOLOADER (per-extension overrides)
   file_loaders:
     txt: TextLoader
-    pdf: MarkerLoader
+    pdf: PyMuPDFLoader
     eml: EmlLoader
     docx: DocxLoader
     pptx: PPTXLoader
@@ -216,6 +239,13 @@ loader:
   docling_max_task_retry: 3
   docling_retry_base_delay: 2.0
 
+  # Env: PARSE_TIMEOUT
+  # Outer wall-clock bound (seconds) for a single file's parse stage. marker and
+  # docling self-limit at marker_timeout/docling_timeout; pymupdf has no internal
+  # timeout, so this prevents a wedged pymupdf parse from stalling indexing — the
+  # bad file fails and is reported instead.
+  parse_timeout: 3600
+
   # Env: TRANSCRIBER_BASE_URL, TRANSCRIBER_API_KEY, TRANSCRIBER_MODEL,
   #      TRANSCRIBER_TIMEOUT, TRANSCRIBER_MAX_CONCURRENT_CHUNKS, USE_WHISPER_LANG_DETECTOR,
   #      TRANSCRIBER_DIRECT_UPLOAD_SUFFIXES (pipe-separated, e.g. ".mp3|.mp4|.wav")
@@ -230,7 +260,8 @@ loader:
 
   # Env: OPENAI_LOADER_BASE_URL, OPENAI_LOADER_API_KEY, OPENAI_LOADER_MODEL,
   #      OPENAI_LOADER_TEMPERATURE, OPENAI_LOADER_TIMEOUT, OPENAI_LOADER_MAX_RETRIES,
-  #      OPENAI_LOADER_TOP_P, OPENAI_LOADER_CONCURRENCY_LIMIT
+  #      OPENAI_LOADER_TOP_P, OPENAI_LOADER_CONCURRENCY_LIMIT,
+  #      OPENAI_LOADER_ENABLE_THINKING
   openai:
     base_url: http://openai:8000/v1
     api_key: EMPTY
@@ -240,32 +271,15 @@ loader:
     max_retries: 2
     top_p: 0.9
     concurrency_limit: 20
+    enable_thinking: null
 
 # --- Ray ---
 ray:
-  # Env: RAY_NUM_GPUS, RAY_POOL_SIZE, RAY_MAX_TASKS_PER_WORKER
-  num_gpus: 0.01
-  pool_size: 1
-  max_tasks_per_worker: 8
-
   indexer:
-    # Env: RAY_MAX_TASK_RETRIES, INDEXER_SERIALIZE_TIMEOUT, VECTORDB_TIMEOUT
-    max_task_retries: 2
-    serialize_timeout: 3600
-    vectordb_timeout: 30
-    concurrency_groups:
-      # Env: INDEXER_DEFAULT_CONCURRENCY, INDEXER_UPDATE_CONCURRENCY, etc.
-      default: 1000
-      update: 100
-      search: 100
-      delete: 100
-      serialize: 50
-      chunk: 1000
-      insert: 100
-
-  semaphore:
-    # Env: RAY_SEMAPHORE_CONCURRENCY
-    concurrency: 100000
+    # Env: RAY_POOL_SIZE, RAY_MAX_TASKS_PER_WORKER
+    # Indexing capacity = pool_size (worker actors) × max_tasks_per_worker (files per worker).
+    pool_size: 1
+    max_tasks_per_worker: 50
 
   serve:
     # Env: ENABLE_RAY_SERVE, RAY_SERVE_NUM_REPLICAS, RAY_SERVE_HOST,
@@ -330,3 +344,19 @@ websearch:
   fetch_timeout: 1.0
   fetch_max_tokens: 500
   fetch_verify_ssl: false
+
+# --- MCP server ---
+# Env: OPENRAG_MCP_SERVER_NAME, OPENRAG_MCP_HOST, OPENRAG_MCP_PORT,
+#      OPENRAG_MCP_PATH, OPENRAG_MCP_DEFAULT_TOP_K, OPENRAG_MCP_MAX_TOP_K,
+#      OPENRAG_MCP_SIMILARITY_THRESHOLD, OPENRAG_MCP_DOWNLOAD_TIMEOUT,
+#      OPENRAG_MCP_MAX_DOWNLOAD_BYTES
+mcp:
+  server_name: OpenRAG MCP
+  host: 0.0.0.0
+  port: 8081
+  path: /mcp
+  default_top_k: 5
+  max_top_k: 50
+  similarity_threshold: 0.8
+  download_timeout: 30.0
+  max_download_bytes: 104857600  # 100 MiB

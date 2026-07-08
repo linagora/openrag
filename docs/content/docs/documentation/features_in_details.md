@@ -23,12 +23,12 @@ Audio and video files are transcribed via local Whisper or OpenAI-compatible tra
 For configuration details, refer to the [Audio Loader documentation](/openrag/documentation/env_vars/#audio-loader).
 
 
-### 🎛️ Native Web-Based Indexer UI
+### 🎛️ Native Web-Based Admin UI
 Experience intuitive document management through our built-in web interface.
 
 <details>
 
-<summary>Indexer UI Features</summary>
+<summary>Admin UI Features</summary>
 
 * **Drag-and-drop file upload** with batch processing capabilities
 * **Real-time indexing progress** monitoring and status updates

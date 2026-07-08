@@ -9,9 +9,9 @@ import httpx
 from chainlit.config import config as cl_config
 from chainlit.context import get_context
 from consts import PARTITION_PREFIX
+from core.utils.logging import get_logger, mask_email
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from utils.logger import get_logger
 
 load_dotenv()
 logger = get_logger()
@@ -22,32 +22,6 @@ AUTH_MODE = os.environ.get("AUTH_MODE", "token").strip().lower()
 
 # Chainlit authentication
 CHAINLIT_AUTH_SECRET = os.environ.get("CHAINLIT_AUTH_SECRET")
-
-_DEV_AUTH_SECRET = "default_secret_for_openrag_ui"
-
-
-def _ensure_chainlit_auth_secret() -> None:
-    """Require CHAINLIT_AUTH_SECRET so UI session cookies can't be forged.
-
-    Fail if it's unset; the built-in default is only allowed with ALLOW_NO_AUTH
-    (dev).
-    """
-    if CHAINLIT_AUTH_SECRET:
-        return
-    if os.environ.get("ALLOW_NO_AUTH", "").strip().lower() == "true":
-        logger.warning(
-            "CHAINLIT_AUTH_SECRET is unset; using an insecure built-in default "
-            "because ALLOW_NO_AUTH=true. DEV ONLY — UI sessions are forgeable."
-        )
-        os.environ["CHAINLIT_AUTH_SECRET"] = _DEV_AUTH_SECRET
-        return
-    raise RuntimeError(
-        "CHAINLIT_AUTH_SECRET is not set. Generate one with "
-        '`uv run chainlit create-secret` (or `python -c "import secrets; '
-        'print(secrets.token_hex(32))"`) and set it in the environment. '
-        "To run insecurely in development only, set ALLOW_NO_AUTH=true."
-    )
-
 
 # Application internal URL (used to call the API from Chainlit)
 port = os.environ.get("APP_iPORT", "8080")
@@ -127,7 +101,12 @@ if PERSISTENCY:
 
 
 if AUTH_TOKEN and AUTH_MODE != "oidc":
-    _ensure_chainlit_auth_secret()
+    if not CHAINLIT_AUTH_SECRET:
+        raise RuntimeError(
+            "CHAINLIT_AUTH_SECRET is required when authentication is enabled. "
+            'Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"` '
+            "and set it in your environment."
+        )
 
     @cl.password_auth_callback
     async def auth_callback(username: str, password: str):
@@ -151,14 +130,19 @@ if AUTH_TOKEN and AUTH_MODE != "oidc":
             )
 
         except httpx.HTTPStatusError:
-            logger.info("Authentication failed", username=username)
+            logger.info("Authentication failed", username=mask_email(username))
             return None
         except Exception as e:
             logger.exception("Unexpected error during authentication", error=str(e))
             return None
 
 elif AUTH_MODE == "oidc":
-    _ensure_chainlit_auth_secret()
+    if not CHAINLIT_AUTH_SECRET:
+        raise RuntimeError(
+            "CHAINLIT_AUTH_SECRET is required when AUTH_MODE=oidc. "
+            'Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"` '
+            "and set it in your environment."
+        )
 
     @cl.header_auth_callback
     async def header_auth_callback(headers: dict) -> cl.User | None:
@@ -278,8 +262,12 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
         filename = Path(s["filename"])
         file_url = s["file_url"]
         file_url = file_url.replace(INTERNAL_BASE_URL, external_url)  # put the correct base url
-        # Don't put the token in the URL. In OIDC mode the browser sends the
-        # session cookie; in token mode the query param is the only option.
+        # Avoid leaking the credential in the URL (browser history, proxy logs,
+        # Referer headers). In OIDC mode the browser already sends the
+        # openrag_session cookie on same-origin file fetches, which the auth
+        # middleware accepts — so the token query param is unnecessary. In token
+        # mode there is no such cookie, so it remains the only way for the
+        # browser to authenticate the fetch.
         if AUTH_MODE != "oidc":
             file_url = f"{file_url}?token={api_key}"
         page = s["page"]

@@ -16,7 +16,6 @@ Ensure your `.env` file includes the standard app variables **plus Ray-specific 
 // .env
 # Ray
 # Resources for all files
-RAY_NUM_GPUS=0.1
 RAY_POOL_SIZE=1
 RAY_MAX_TASKS_PER_WORKER=5
 
@@ -54,15 +53,12 @@ UV_CACHE_DIR=/tmp/uv-cache
 ```
 
 :::tip[**Tips**]
-- `RAY_NUM_GPUS` defines **per-actor resource requirements**. Ray will not start a task until these resources are available on one of the nodes.  
-For example, if one indexation consumes ~1GB of VRAM and your GPU has 4GB, setting `RAY_NUM_GPUS=0.25` allows you to run **4 indexers per node**. In a 2-node cluster, that means up to **8 concurrent indexation tasks**.  
-
-- `RAY_POOL_SIZE` defines the number of worker actors that will be created to handle indexation tasks. It acts like a **maximum concurrency limit**.  
-Using the previous example, you can set `POOL_SIZE=8` to fully utilize your cluster capacity.
+- `RAY_POOL_SIZE` defines the number of indexer worker actors created to handle indexation tasks, and `RAY_MAX_TASKS_PER_WORKER` the number of files each worker processes concurrently.  
+Total indexing concurrency is `RAY_POOL_SIZE × RAY_MAX_TASKS_PER_WORKER` — e.g. `RAY_POOL_SIZE=8` with `RAY_MAX_TASKS_PER_WORKER=5` allows up to **40 concurrent indexation tasks**. Size these to your cluster capacity.
 :::
 
 :::caution
-If other GPU-intensive services are running on your nodes (e.g. vLLM, the RAG API), make sure to **reserve enough GPU memory** for them and subtract that from your total when calculating the safe pool size.
+`RAY_POOL_SIZE` and `RAY_MAX_TASKS_PER_WORKER` size **indexing throughput**, not GPU reservation — the indexer workers don't claim GPU memory. GPU on each node is consumed by the model servers (e.g. vLLM) and by the GPU-accelerated parsers, so budget GPU memory through **`MARKER_NUM_GPUS`** / **`MARKER_POOL_SIZE`** (and the Docling equivalents) and the model-server settings rather than through the indexer pool size.
 :::
 
 ---
@@ -84,7 +80,7 @@ We recommend using **GlusterFS** for this.
 
 ## 🚀 3. Start the Ray Cluster
 
-First, prepare your `cluster.yaml` file. Here's an example for a **local provider**:
+First, prepare your `cluster.yaml` file (a ready-to-edit example ships at `infra/cluster.yaml`). Here's an example for a **local provider**:
 
 ```yaml
 // cluster.yaml
@@ -112,13 +108,13 @@ auth:
 
 head_start_ray_commands:
     - uv run ray stop
-    - uv run ray start --head --dashboard-host 0.0.0.0 --dashboard-port ${RAY_DASHBOARD_PORT:-8265} --node-ip-address ${HEAD_NODE_IP} --autoscaling-config=~/ray_bootstrap_config.yaml
+    - uv run ray start --head --dashboard-host ${RAY_DASHBOARD_HOST:-127.0.0.1} --dashboard-port ${RAY_DASHBOARD_PORT:-8265} --node-ip-address ${HEAD_NODE_IP} --autoscaling-config=~/ray_bootstrap_config.yaml
 worker_start_ray_commands:
     - uv run ray stop
     - uv run ray start --address ${HEAD_NODE_IP:-10.0.0.1}:6379
 ```
 
-> 🛠️ The base image (`ghcr.io/linagora/openrag-ray`) must be built from `Dockerfile.ray` and pushed to a container registry before use.
+> 🛠️ The base image (`ghcr.io/linagora/openrag-ray`) must be built from the repository root with `infra/docker/ray.Dockerfile` and pushed to a container registry before use.
 
 ### ⬆️ Launch the cluster
 
@@ -137,7 +133,7 @@ docker compose up -d
 Once running, **OpenRAG will auto-connect** to the Ray cluster using `RAY_ADDRESS` from `.env`.
 
 :::note
-When `RAY_ADDRESS` is set, the app **attaches** to the external cluster and does **not** start its own embedded Ray dashboard — the head node owns it (started above via `--dashboard-host 0.0.0.0 --dashboard-port ${RAY_DASHBOARD_PORT:-8265}`). The app-side `RAY_DASHBOARD_HOST` setting is only used in embedded (single-node) mode, where it defaults to `127.0.0.1` because the dashboard API is unauthenticated ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)).
+When `RAY_ADDRESS` is set, the app **attaches** to the external cluster and does **not** start its own embedded Ray dashboard — the head node owns it. Keep the dashboard bound to `127.0.0.1` by default because the dashboard API is unauthenticated ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)). If operators need remote dashboard access, expose it only through a private network, SSH tunnel, or authenticated proxy.
 :::
 
 ---

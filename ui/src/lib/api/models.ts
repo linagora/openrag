@@ -1,0 +1,289 @@
+import { request } from "./client";
+
+// OpenRag model-endpoint registry (Phase 14). Mounted at `/model-endpoints`
+// (admin-only). Shapes verified against
+// openrag/api/schemas/admin/model_endpoint_schemas.py + routers/admin/model_endpoints.py:
+//   GET    /model-endpoints/                       list (bare array; optional ?model_type=)
+//   GET    /model-endpoints/{type}/{name}          get one
+//   POST   /model-endpoints/                       create → 201
+//   PUT    /model-endpoints/{type}/{name}          update
+//   DELETE /model-endpoints/{type}/{name}          delete → 204
+//   POST   /model-endpoints/{type}/{name}/set-default
+//   POST   /model-endpoints/{type}/{name}/reveal-api-key
+//   POST   /model-endpoints/{type}/{name}/validate → ValidateEndpointResponse (no body)
+
+export type ModelType = "embedder" | "reranker" | "llm" | "vlm";
+
+export interface ModelEndpointResponse {
+  name: string;
+  model_type: ModelType;
+  endpoint: string;
+  model_name: string | null;
+  batch_size: number;
+  timeout: number;
+  extra: Record<string, unknown>;
+  has_api_key?: boolean;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateModelEndpointRequest {
+  name: string;
+  model_type: ModelType;
+  endpoint: string;
+  model_name?: string | null;
+  batch_size?: number;
+  timeout?: number;
+  extra?: Record<string, unknown>;
+  is_default?: boolean;
+}
+
+/** PUT body — every field optional; `name` renames the endpoint. */
+export interface UpdateModelEndpointRequest {
+  name?: string;
+  endpoint?: string;
+  model_name?: string | null;
+  batch_size?: number;
+  timeout?: number;
+  extra?: Record<string, unknown>;
+  is_default?: boolean;
+}
+
+export interface ValidateModelEndpointResponse {
+  reachable: boolean;
+  model_found?: boolean | null;
+  models_served?: string[] | null;
+  detail?: string | null;
+}
+
+export interface RevealApiKeyResponse {
+  api_key: string | null;
+}
+
+const BASE = "/model-endpoints";
+const enc = encodeURIComponent;
+export const REDACTED_SECRET = "<redacted>";
+export const API_KEY_DISPLAY_PLACEHOLDER = "sk-********";
+export const SECRET_DISPLAY_PLACEHOLDER = "••••••••";
+const MASK_SUFFIX = "********";
+const MASK_PREFIX_LENGTH = 3;
+const LEGACY_API_KEY_DISPLAY_PLACEHOLDER = "********";
+
+const SECRET_FIELD_NAMES = new Set([
+  "api_key",
+  "api_token",
+  "access_key",
+  "auth_token",
+  "chainlit_auth_secret",
+  "client_secret",
+  "hf_token",
+  "oidc_client_secret",
+  "oidc_token_encryption_key",
+  "password",
+  "private_key",
+  "refresh_token",
+  "secret",
+  "secret_key",
+  "signing_key",
+  "token",
+  "token_encryption_key",
+]);
+const SECRET_FIELD_SUFFIXES = [
+  "_access_key",
+  "_api_key",
+  "_auth_token",
+  "_password",
+  "_private_key",
+  "_refresh_token",
+  "_secret",
+  "_signing_key",
+  "_token",
+  "_token_encryption_key",
+];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSecretField(key: string | undefined): boolean {
+  if (!key) return false;
+  const normalized = key.toLowerCase();
+  return SECRET_FIELD_NAMES.has(normalized) || SECRET_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
+}
+
+function displayPlaceholderFor(key: string | undefined): string {
+  return key?.toLowerCase() === "api_key" ? API_KEY_DISPLAY_PLACEHOLDER : SECRET_DISPLAY_PLACEHOLDER;
+}
+
+function isPrefixMaskedSecret(value: string): boolean {
+  return value.length === MASK_PREFIX_LENGTH + MASK_SUFFIX.length && value.endsWith(MASK_SUFFIX);
+}
+
+function isUnchangedPlaceholder(value: string, key: string | undefined): boolean {
+  if (value === displayPlaceholderFor(key)) return true;
+  if (isPrefixMaskedSecret(value)) return true;
+  return key?.toLowerCase() === "api_key" && value === LEGACY_API_KEY_DISPLAY_PLACEHOLDER;
+}
+
+function transformSecretPlaceholders(value: unknown, direction: "display" | "submit", key?: string): unknown {
+  if (isSecretField(key) && typeof value === "string") {
+    if (direction === "display") {
+      if (isPrefixMaskedSecret(value)) return value;
+      return displayPlaceholderFor(key);
+    }
+    if (isUnchangedPlaceholder(value, key)) return REDACTED_SECRET;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => transformSecretPlaceholders(item, direction));
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([entryKey, item]) => [
+        entryKey,
+        transformSecretPlaceholders(item, direction, entryKey),
+      ]),
+    );
+  }
+  return value;
+}
+
+export function displayModelEndpointExtra(extra: Record<string, unknown>): Record<string, unknown> {
+  return transformSecretPlaceholders(extra, "display") as Record<string, unknown>;
+}
+
+export function prepareModelEndpointExtraForSubmit(extra: Record<string, unknown>): Record<string, unknown> {
+  return transformSecretPlaceholders(extra, "submit") as Record<string, unknown>;
+}
+
+export function splitModelEndpointApiKeyExtra(extra: Record<string, unknown>): {
+  apiKey: string;
+  extra: Record<string, unknown>;
+} {
+  const displayExtra = displayModelEndpointExtra(extra);
+  const { api_key: apiKey, ...rest } = displayExtra;
+  return {
+    apiKey: typeof apiKey === "string" ? apiKey : "",
+    extra: rest,
+  };
+}
+
+export function mergeModelEndpointApiKeyExtra(
+  extra: Record<string, unknown>,
+  apiKey: string,
+  options: { clearApiKey?: boolean } = {},
+): Record<string, unknown> {
+  const prepared = prepareModelEndpointExtraForSubmit(extra);
+  const normalizedApiKey = prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
+  if (typeof normalizedApiKey === "string" && normalizedApiKey) {
+    return { ...prepared, api_key: normalizedApiKey };
+  }
+  if (options.clearApiKey) {
+    return { ...prepared, api_key: "" };
+  }
+  return prepared;
+}
+
+/** List endpoints (bare array). Optionally filter by model type. */
+export function listModelEndpoints(modelType?: ModelType) {
+  const qs = modelType ? `?model_type=${enc(modelType)}` : "";
+  return request<ModelEndpointResponse[]>(`${BASE}/${qs}`);
+}
+
+export function getModelEndpoint(modelType: ModelType, name: string) {
+  return request<ModelEndpointResponse>(`${BASE}/${enc(modelType)}/${enc(name)}`);
+}
+
+export function createModelEndpoint(data: CreateModelEndpointRequest) {
+  return request<ModelEndpointResponse>(`${BASE}/`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateModelEndpoint(
+  modelType: ModelType,
+  name: string,
+  data: UpdateModelEndpointRequest,
+) {
+  return request<ModelEndpointResponse>(`${BASE}/${enc(modelType)}/${enc(name)}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export function setDefaultModelEndpoint(modelType: ModelType, name: string) {
+  return request<ModelEndpointResponse>(
+    `${BASE}/${enc(modelType)}/${enc(name)}/set-default`,
+    { method: "POST" },
+  );
+}
+
+export function revealModelEndpointApiKey(modelType: ModelType, name: string) {
+  return request<RevealApiKeyResponse>(
+    `${BASE}/${enc(modelType)}/${enc(name)}/reveal-api-key`,
+    { method: "POST" },
+  );
+}
+
+export function deleteModelEndpoint(modelType: ModelType, name: string) {
+  return request<void>(`${BASE}/${enc(modelType)}/${enc(name)}`, {
+    method: "DELETE",
+  });
+}
+
+export interface ValidateModelEndpointRequest {
+  endpoint: string;
+  model_name?: string;
+  api_key?: string;
+  stored_api_key_model_type?: ModelType;
+  stored_api_key_name?: string;
+}
+
+/**
+ * Probe endpoint values (reachability + whether the model is served) BEFORE
+ * saving — validates exactly what's in the form, so typos / dead endpoints are
+ * caught pre-save.
+ */
+export function validateModelEndpoint(data: ValidateModelEndpointRequest) {
+  return request<ValidateModelEndpointResponse>(`${BASE}/validate`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+/** Validate an already-saved endpoint by (type, name) — used where only the
+ *  stored endpoint reference is available (e.g. a partition's chat LLM). */
+export function validateStoredModelEndpoint(modelType: ModelType, name: string) {
+  return request<ValidateModelEndpointResponse>(
+    `${BASE}/${enc(modelType)}/${enc(name)}/validate`,
+    { method: "POST" },
+  );
+}
+
+/**
+ * Pick the endpoint a picker should pre-select: the one flagged `is_default`,
+ * or the only one if exactly one is registered, otherwise none (let the user
+ * choose). Lets selection fields show a concrete endpoint instead of sitting
+ * empty when the choice is unambiguous.
+ */
+export function pickDefaultEndpoint(
+  endpoints: ModelEndpointResponse[] | undefined | null,
+): ModelEndpointResponse | undefined {
+  if (!endpoints?.length) return undefined;
+  return endpoints.find((e) => e.is_default) ?? (endpoints.length === 1 ? endpoints[0] : undefined);
+}
+
+/**
+ * Display name for a partition's embedder. The backend stores the sentinel
+ * `"default"` (resolved to the `is_default` endpoint at runtime); show the real
+ * endpoint name instead — unless that endpoint is itself literally named
+ * "default", or the default can't be resolved yet (then fall back to the raw value).
+ */
+export function resolveEmbedderName(
+  value: string | null | undefined,
+  embedderEndpoints: ModelEndpointResponse[] | undefined | null,
+): string {
+  if (value !== "default") return value || "—";
+  return pickDefaultEndpoint(embedderEndpoints)?.name ?? "default";
+}

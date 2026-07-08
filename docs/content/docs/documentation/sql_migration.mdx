@@ -34,15 +34,17 @@ Replace **`<revision_message>`** with your descriptive message before running th
 docker compose up -d rdb
 docker compose \
     run --no-deps --build --rm \
-    --entrypoint "uv run alembic -c /app/openrag/scripts/migrations/alembic/alembic.ini revision --autogenerate -m '<revision_message>'" \
+    --entrypoint "uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini revision --autogenerate -m '<revision_message>'" \
     openrag
 ```
 
-It will create a new migration script in the `openrag/scripts/migrations/alembic/versions/` directory.
+It will create a new migration script in the `openrag/services/persistence/migrations/alembic/versions/` directory.
 
 ### Step 2: Apply the Migration
 
 Once you've reviewed the generated migration script and confirmed it looks correct, apply it to your database.
+
+For managed PostgreSQL, apply migrations before starting the API and set `POSTGRES_RUN_MIGRATIONS=false` on the app deployment. This keeps the API role least-privileged and makes schema changes an explicit deployment step. OpenRAG also provides the module `services.persistence.migrations.run` for migration Jobs and init steps; it uses the normal OpenRAG database configuration but does not try to create the database.
 
 #### Option A: Docker (production)
 
@@ -52,7 +54,7 @@ Rebuilds the image to ensure the migration runs against the exact code being dep
 docker compose up -d rdb
 docker compose \
     run --no-deps --build --rm \
-    --entrypoint "uv run alembic -c /app/openrag/scripts/migrations/alembic/alembic.ini upgrade head" \
+    --entrypoint "uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head" \
     openrag; docker compose down
 ```
 
@@ -62,7 +64,7 @@ If the stack is already running, skip the rebuild:
 
 ```bash title="Apply migrations (exec)"
 docker compose exec openrag \
-    uv run alembic -c /app/openrag/scripts/migrations/alembic/alembic.ini upgrade head
+    uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head
 ```
 
 #### Option C: Local (development)
@@ -71,14 +73,14 @@ Run alembic directly with your local venv — no Docker needed:
 
 ```bash title="Apply migrations (local)"
 DATABASE_URL=postgresql://user:pass@localhost:5432/openrag \
-    uv run alembic -c openrag/scripts/migrations/alembic/alembic.ini upgrade head
+    uv run alembic -c openrag/services/persistence/migrations/alembic/alembic.ini upgrade head
 ```
 
 :::tip[Quick alternative: run inside a running container]
 If your stack is already running, you can apply migrations directly without rebuilding:
 ```bash title="Apply migrations via exec"
 docker compose exec -w /app/openrag openrag \
-  /app/.venv/bin/alembic -c scripts/migrations/alembic/alembic.ini upgrade head
+  /app/.venv/bin/alembic -c services/persistence/migrations/alembic/alembic.ini upgrade head
 ```
 :::
 
@@ -108,7 +110,7 @@ This usually happens when two or more migration scripts are created independentl
      ```bash title="Merge Alembic heads"
      docker compose up -d rdb
      docker compose run --no-deps --build --rm \
-         --entrypoint "uv run alembic -c /app/openrag/scripts/migrations/alembic/alembic.ini merge -m 'merge heads' <head1> <head2>" \
+         --entrypoint "uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini merge -m 'merge heads' <head1> <head2>" \
          openrag
      ```
      This will generate a new migration script that merges the two branches.
@@ -118,7 +120,7 @@ This usually happens when two or more migration scripts are created independentl
      ```bash title="Apply migrations after merge"
      docker compose up -d rdb
      docker compose run --no-deps --build --rm \
-         --entrypoint "uv run alembic -c /app/openrag/scripts/migrations/alembic/alembic.ini upgrade head" \
+         --entrypoint "uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini upgrade head" \
          openrag; docker compose down
      ```
 

@@ -6,7 +6,7 @@ on:
       - main
       - dev
     paths:
-      - "charts/**"
+      - "infra/charts/**"
   workflow_dispatch:
 
 env:
@@ -31,7 +31,7 @@ jobs:
 
       - name: Set chart version
         run: |
-          BASE_VERSION=$(yq '.version' charts/openrag-stack/Chart.yaml)
+          BASE_VERSION=$(yq '.version' infra/charts/openrag-stack/Chart.yaml)
 
           if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
             # Keep version as-is for stable
@@ -39,17 +39,17 @@ jobs:
           else
             # Append branch for dev builds
             CHART_VERSION="${BASE_VERSION}-dev"
-            yq -i ".version = \"${CHART_VERSION}\"" charts/openrag-stack/Chart.yaml
+            yq -i ".version = \"${CHART_VERSION}\"" infra/charts/openrag-stack/Chart.yaml
           fi
 
           echo "CHART_VERSION=$CHART_VERSION" >> $GITHUB_ENV
           echo "Using chart version: $CHART_VERSION"
 
       - name: Helm dependency update
-        run: helm dependency update charts/openrag-stack
+        run: helm dependency update infra/charts/openrag-stack
 
       - name: Package chart
-        run: helm package charts/openrag-stack --destination .
+        run: helm package infra/charts/openrag-stack --destination .
 
       - name: Login to GHCR
         run: |

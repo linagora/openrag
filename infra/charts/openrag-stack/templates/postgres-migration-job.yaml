@@ -1,0 +1,72 @@
+{{/*
+PostgreSQL schema-migration Job (managed-Postgres provisioning).
+
+This is a Helm *hook*, not a regular chart resource. The
+`helm.sh/hook: pre-install,pre-upgrade` annotation makes Helm run it
+automatically before the OpenRAG Deployment on every `helm install` /
+`helm upgrade`, and wait for it to complete before continuing. It applies the
+Alembic migrations (`python -m services.persistence.migrations.run`) against the
+externally provisioned database — it always migrates the schema and never
+creates the database (the runner does not open the app pool, so it ignores
+`POSTGRES_AUTO_CREATE_DB` / `POSTGRES_RUN_MIGRATIONS`).
+
+Disabled by default via `postgresProvisioning.migrationJob.enabled`. Enable it
+for managed Postgres and pair it with `runMigrationsInApp: false` so the app no
+longer migrates at startup. When disabled, the application runs migrations
+itself during startup instead.
+*/}}
+{{- if .Values.postgresProvisioning.migrationJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-postgres-migration
+  labels:
+    {{- include "openrag-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-migration
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": {{ .Values.postgresProvisioning.migrationJob.hookDeletePolicy | quote }}
+spec:
+  backoffLimit: {{ .Values.postgresProvisioning.migrationJob.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "openrag-stack.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: postgres-migration
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: {{ .Values.security.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
+          securityContext:
+            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
+          workingDir: /app/openrag
+          command:
+            - sh
+            - -c
+            - |
+              UV_PROJECT_ENVIRONMENT=/tmp/openrag-migration-venv \
+                uv run python -m services.persistence.migrations.run
+          envFrom:
+            - configMapRef:
+                name: rag-env
+            - secretRef:
+                name: rag-env-secrets
+          env:
+            # The runner (services.persistence.migrations.run) always runs
+            # migrations and never auto-creates the database, so it ignores
+            # POSTGRES_AUTO_CREATE_DB / POSTGRES_RUN_MIGRATIONS — no need to set
+            # them here. UV_CACHE_DIR points uv at the writable emptyDir below.
+            - name: UV_CACHE_DIR
+              value: /tmp/uv-cache
+          volumeMounts:
+            - name: uv-cache
+              mountPath: /tmp/uv-cache
+      volumes:
+        - name: uv-cache
+          emptyDir: {}
+{{- end }}

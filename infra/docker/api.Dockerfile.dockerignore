@@ -1,0 +1,15 @@
+# Scoped ignore for the api image. BuildKit reads `<dockerfile>.dockerignore`
+# (here infra/docker/api.Dockerfile.dockerignore), so this applies only to the
+# api build — not the ui/ray images that share the repo-root build context.
+#
+# Patterns are relative to the build context (repo root, per compose `context: ../..`).
+# The api Dockerfile only COPYs pyproject.toml, uv.lock, openrag/, conf/ and
+# infra/scripts/entrypoint.sh — so keeping the large host-side runtime dirs out
+# of the context avoids shipping a multi-GB tarball (torch, Ray, model weights)
+# to the daemon on every `docker compose build`/`up --build`.
+.venv
+data
+logs
+model_weights
+.git
+**/__pycache__

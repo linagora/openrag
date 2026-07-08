@@ -36,16 +36,16 @@
 
 All files are intelligently converted to **Markdown format** with images replaced by AI-generated captions, ensuring consistent processing across all document types.
 
-### 🎛️ Native Web-Based Indexer UI
-Experience intuitive document management through our built-in web interface.
+### 🎛️ Native Web-Based Admin UI
+Manage OpenRAG through the bundled web interface.
 
 <details>
 
-<summary>Indexer UI Features</summary>
+<summary>Admin UI Features</summary>
 
 * **Drag-and-drop file upload** with batch processing capabilities
 * **Real-time indexing progress** monitoring and status updates
-* **Admin Dashbord** to monitore RAG components (Indexer, VectorDB, TaskStateManager, etc)
+* **Admin dashboard** to monitor RAG components (Indexer, VectorDB, TaskStateManager, etc)
 * **Partition management** - organize documents into logical collections
 * **Visual document preview** and metadata inspection
 * **Search and filtering** capabilities for indexed content
@@ -137,57 +137,40 @@ cd openrag
 git checkout main # or a given release
 ```
 #### 2. Create a `.env` File
-Create a `.env` file at the root of the project, mirroring the structure of `.env.example`, to configure your environment and supply blank environment variables.
+Create a `.env` file under `infra/compose/`, mirroring the structure of `infra/compose/.env.example`, to configure your environment and supply blank environment variables.
 
 ```bash
-cp .env.example .env
+cp infra/compose/.env.example infra/compose/.env
 ```
 #### 3. File Parser configuration 
-All supported file format parsers are pre-configured. For PDF processing, **[MarkerLoader](https://github.com/datalab-to/marker)** serves as the default parser, offering comprehensive support for OCR-scanned documents, complex layouts, tables, and embedded images. MarkerLoader operates efficiently on both GPU and CPU environments.
+All supported file format parsers are pre-configured. For PDF processing, **[PyMuPDFLoader](https://pymupdf.readthedocs.io/)** is the default parser — a lightweight, fast, CPU-friendly engine well suited to searchable PDFs and quick local testing.
+
+> ⚠️ **Important**: `PyMuPDFLoader` cannot process non-searchable (image-based / scanned) PDFs and does not run OCR or extract embedded images.
 
 <details>
 <summary>For more PDF options</summary>
 
-For CPU-only deployments or lightweight testing scenarios, you can consider switching to **`PyMuPDF4LLMLoader`** or **`PyMuPDFLoader`**. To change the loader, set the **`PDFLoader`** variable like this `PDFLoader=PyMuPDF4LLMLoader`.
-
-> ⚠️ **Important**: These alternative loaders have limitations - they cannot process non-searchable (image-based) PDFs and do not extract or handle embedded images.
+For OCR-scanned documents, complex layouts, tables, or embedded images, switch to **[`MarkerLoader`](https://github.com/datalab-to/marker)** (heavier; runs on GPU and CPU) by setting the **`PDFLOADER`** variable: `PDFLOADER=MarkerLoader`. Other options: `DoclingLoader`, `DotsOCRLoader`.
 </details>
 
 #### 4.Deployment: Launch the app
 >[!IMPORTANT]
-> In case **`Indexer UI` (A Web interface for intuitive document ingestion, indexing, and management.)** is not configured already in your `.env`, follow this dedicated guide:
-➡ [Deploy with Indexer UI](docs/setup_indexerui.md)
+> The **admin UI** (a web interface for intuitive document ingestion, indexing, and management) ships bundled as the `admin-ui` service — no separate setup is required. Once the stack is up it is served at `http://localhost:ADMIN_UI_PORT/app/` (default port `8081`).
 
-* **Simple and quick** launch for testing
-  >[!IMPORTANT]
-  > For a **simple `quick deployment`** using only the docker-compose file, only the [quick_start **folder**](./quick_start/) is required. Follow these steps to launch the application:
-  
-  1. Navigate to the **`quick_start`** directory or download only that folder
-  2. Place your **`.env`** file inside the **`quick_start`** directory
-  3. Run the appropriate command for your system:
+The full stack and its service configs live under **`infra/compose/`**. Place the **`.env`** you created there and run the commands from that directory (`cd infra/compose`):
 
-  ```bash
-  # GPU deployment (recommended for optimal performance)
-  docker compose up -d
-  # docker compose down # to stop the application
+```bash
+# GPU deployment (recommended for optimal performance)
+docker compose up -d
+# docker compose down # to stop the application
 
-  # CPU deployment
-  docker compose --profile cpu up -d
-  # docker compose --profile cpu down # to stop the application
-  ```
-* **Development Environment**: For development builds, use the **`--build`** flag to rebuild images:
-  >[!NOTE]
-  > Execute these commands from the project root directory
+# CPU deployment
+docker compose --profile cpu up -d
+# docker compose --profile cpu down # to stop the application
+```
 
-  ```bash
-  # GPU deployment with rebuild (recommended for optimal performance)
-  docker compose up --build -d
-  # docker compose down # to stop the application
-
-  # CPU deployment with rebuild
-  docker compose --profile cpu up --build -d
-  # docker compose --profile cpu down # to stop the application
-  ```
+>[!NOTE]
+> For development builds, add the **`--build`** flag to rebuild images from your working tree, e.g. `docker compose up --build -d`.
 
 >[!WARNING]
 > The first startup may take longer as required dependencies are installed. 
@@ -215,11 +198,11 @@ OpenRag supports two authentication modes:
 - **Token Mode** (`AUTH_MODE=token`, default): Bearer token authentication via `Authorization: Bearer <AUTH_TOKEN>` header. Suitable for development and programmatic access.
 - **OIDC Mode** (`AUTH_MODE=oidc`): OpenID Connect flow with an external identity provider (Keycloak, LemonLDAP::NG, etc.). Users authenticate via browser redirect to the IdP.
 
-To enable OIDC, set `AUTH_MODE=oidc` and configure the required OIDC variables (see [`.env.example`](./.env.example) for the full list).
+To enable OIDC, set `AUTH_MODE=oidc` and configure the required OIDC variables (see [`infra/compose/.env.example`](./infra/compose/.env.example) for the full list).
 
 For comprehensive OIDC setup and configuration, see the [OIDC Authentication Guide](./docs/content/docs/documentation/oidc.md) (or the [SSO Quick Start](./docs/content/docs/documentation/sso-quickstart.md) for a faster path).
 
-3. `http://localhost:INDEXERUI_PORT` to access the indexer ui for easy document ingestion, indexing, and management
+3. `http://localhost:ADMIN_UI_PORT/app/` (default `8081`) to access the admin UI for easy document ingestion, indexing, and management
 
 #### 5. Distributed deployment in a Ray cluster
 

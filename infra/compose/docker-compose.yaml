@@ -1,0 +1,220 @@
+include:
+  - ${MILVUS_COMPOSE:-milvus/milvus.yaml}
+  - ${CHAINLIT_DATALAYER_COMPOSE:-../../extern/dummy.yaml}
+  - ../../extern/reranker/${RERANKER_PROVIDER:-infinity}.yaml
+  - ${TRANSCRIBER_COMPOSE:-../../extern/dummy.yaml}
+
+x-openrag: &openrag_template
+  image: linagoraai/openrag:v2.0.0-rc.2
+  # Start as root so entrypoint.sh can grant GID-0 write on the bind-mounted
+  # writable dirs (data/, logs/, the HF cache) — which a non-root container
+  # can't write when Docker auto-creates them root-owned — then it immediately
+  # drops to the non-root app user (UID in GID 0) via setpriv before launching.
+  # The image's USER stays non-root for non-compose/OpenShift runs.
+  user: "0:0"
+  build:
+    # Build context is the repo root so the Dockerfile can COPY pyproject.toml,
+    # uv.lock, openrag/, conf/ and infra/scripts/entrypoint.sh directly.
+    context: ../..
+    dockerfile: infra/docker/api.Dockerfile
+    args:
+      # Local compose bind-mounts repo-owned paths (data, logs, i8n). Build the
+      # image with the host user's UID by default so the non-root container can
+      # still write those mounts; OpenShift builds keep the Dockerfile default.
+      APP_UID: ${APP_UID:-1000}
+  extra_hosts:
+    # Let containers reach services running on the Docker host via
+    # ``host.docker.internal`` (Linux Docker >= 20.10). Useful when an OIDC
+    # provider runs on the host in AUTH_MODE=oidc. If the IdP is behind a
+    # custom hostname resolved only in the host's /etc/hosts, add your own
+    # mapping via a ``docker-compose.override.yaml`` rather than editing this
+    # list — otherwise real external domains with the same name would be
+    # shadowed for other users.
+    - "host.docker.internal:host-gateway"
+  volumes:
+    - ${DATA_VOLUME:-../../data}:/app/data
+    - ../../i8n:/app/openrag/.chainlit/translations
+    - ${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights # Model weights for RAG
+    # Container-owned venv cache: `uv run` syncs into this named volume on the
+    # first start and skips the sync on every start after, so packages aren't
+    # reinstalled each `docker compose up`. A named volume (not a host bind
+    # mount) is deliberate — the venv is only ever populated by the container,
+    # so its interpreter/script paths always match the image (a host-synced
+    # venv would point at host paths that don't exist inside the container).
+    - openrag_venv:/app/.venv
+    # Dev only: bind-mounting the source tree over the image lets host changes
+    # (or a writable host path) override the running code. Uncomment for local
+    # development; keep it off in production.
+    # - ../../openrag:/app/openrag # For dev mode
+    - ${SHARED_ENV:-./.env}:/ray_mount/.env # Shared environment variables (falls back to ./.env)
+    - ${LOG_VOLUME:-../../logs}:/app/logs
+  ports:
+    - ${APP_PORT:-8080}:${APP_iPORT:-8080}
+    # Bind the Ray dashboard to localhost only: it has no authentication and
+    # its job-submission API allows arbitrary code execution on the cluster,
+    # so it must never be reachable from outside the host.
+    - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265 # Disable when in cluster mode
+    - ${CHAINLIT_PORT:-8090}:${CHAINLIT_PORT:-8090}
+  networks:
+    default:
+      aliases:
+        - openrag
+  env_file:
+    - ${SHARED_ENV:-.env}
+  shm_size: 10.24gb
+
+x-vllm-env: &vllm_env
+  HUGGING_FACE_HUB_TOKEN:
+  VLLM_SLEEP_WHEN_IDLE: 1  # Avoid 100% CPU usage when idle
+
+x-vllm: &vllm_template
+  networks:
+    default:
+      aliases:
+        - vllm
+  restart: on-failure
+  environment:
+    <<: *vllm_env
+  ipc: "host"
+  volumes:
+    - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface # put ./vllm_cache if you want to have the weights on the vllm_cache folder in your project
+  command: >
+    --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
+    --trust-remote-code
+    --task embed
+    --gpu_memory_utilization 0.3
+    --max-model-len ${MAX_MODEL_LEN:-8192}
+  # --max-num-seqs 1
+  # gpu_memory_utilization, max-num-seqs et max-model-len can be tuned depending on your GPU memory
+
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    interval: 20s
+    timeout: 5s
+    retries: 4
+    start_period: 90s
+  # ports:
+  #   - ${VLLM_PORT:-8000}:8000
+services:
+  # ── Admin UI (React SPA + nginx, same-origin reverse proxy to the API) ──
+  admin-ui:
+    image: linagoraai/openrag-admin-ui:v2.0.0-rc.2
+    build:
+      context: ../..
+      dockerfile: infra/docker/ui.Dockerfile
+      args:
+        # Same-origin by default: the SPA makes relative calls that nginx
+        # reverse-proxies to the API over the Docker network, so the UI works on
+        # any host/IP (local or server) with NO CORS setup. Only set an absolute
+        # API URL for a browser-direct build — and then add the UI's own origin
+        # to CORS_EXTRA_ORIGINS on the API.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+        VITE_BASE_PATH: "/app/"
+        # Optional Grafana dashboard link on the admin "System" page; branding name.
+        VITE_GRAFANA_URL: ${VITE_GRAFANA_URL:-}
+        VITE_APP_NAME: ${VITE_APP_NAME:-OpenRAG}
+    restart: unless-stopped
+    ports:
+      - "${ADMIN_UI_PORT:-8081}:8080"
+    # No depends_on the API: nginx resolves the `openrag` network alias (shared by
+    # the GPU and CPU API variants) at request time, so this works under any
+    # profile and starts even before the backend is ready.
+
+  # GPU - default
+  openrag:
+    <<: *openrag_template
+    runtime: nvidia
+    environment:
+     - NVIDIA_VISIBLE_DEVICES=all
+     - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles:
+      - ""
+    depends_on:
+      rdb:
+        condition: service_started
+      milvus:
+        condition: service_healthy
+    # No hard dependency on vllm-gpu: the embedder is reached over the network at
+    # ingestion time, so external-inference deploys must not be blocked by (or pull
+    # in) the bundled vLLM. With local inference, start vllm-gpu alongside.
+
+  # No GPU
+  openrag-cpu:
+    <<: *openrag_template
+    deploy: {}
+    profiles:
+      - "cpu"
+    depends_on:
+      rdb:
+        condition: service_started
+      milvus:
+        condition: service_healthy
+    # No hard dependency on vllm-cpu (see the GPU service above).
+
+  rdb:
+    image: postgres:15
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your .env}
+      - POSTGRES_USER=${POSTGRES_USER:-root}
+    volumes:
+      - ${DB_VOLUME:-../../db}:/var/lib/postgresql/data
+      - ../../scripts/postgres-init:/docker-entrypoint-initdb.d:ro
+    expose:
+      - 5432
+
+  vllm-gpu:
+    <<: *vllm_template
+    image: vllm/vllm-openai:v0.9.2
+    environment:
+      <<: *vllm_env
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles:
+      - "" # Empty string gives default behavior (but does not run when cpu requested)
+
+  vllm-cpu:
+    <<: *vllm_template
+    build:
+      context: ../../extern/vllm
+      dockerfile: Dockerfile.cpu
+      target: vllm-openai
+    image: openrag-vllm-openai-cpu
+    deploy: {}
+    environment:
+      <<: *vllm_env
+      VLLM_CPU_KVCACHE_SPACE: 8
+    # Default value isn't sufficient for full context length
+    command: >
+      --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
+      --trust-remote-code
+      --dtype float32
+      --max-model-len ${MAX_MODEL_LEN:-8192}
+    #  --max-num-batched-tokens 32768
+    # dtype is required for aarch64 (https://github.com/vllm-project/vllm/issues/11327) and improves speed on amd64.
+    # max-num-batched-tokens is required for aarch64 because chunked prefill isn't supported by V1 vllm backend
+    # for aarch64 yet. On aarch64 max-num-batched-tokens must be equal max-model-len for now (without chunked prefill).
+    # For details see https://github.com/vllm-project/vllm/issues/21179
+    profiles:
+      - "cpu"
+
+volumes:
+  appdata:
+  logs:
+  modelweights:
+  pgdata:
+  openrag_venv: # Persists the container-synced /app/.venv so packages survive restarts

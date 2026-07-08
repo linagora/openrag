@@ -1,0 +1,41 @@
+"""Partition repository interface."""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+
+class PartitionRepository(ABC):
+    """CRUD operations for partitions."""
+
+    @abstractmethod
+    async def create_partition(
+        self, name: str, user_id: int | None = None, *, max_owned: int | None = None
+    ) -> dict: ...
+
+    @abstractmethod
+    async def get_partition(self, name: str) -> dict | None: ...
+
+    @abstractmethod
+    async def list_partitions(self) -> list[dict]: ...
+
+    @abstractmethod
+    async def delete_partition(self, name: str) -> bool: ...
+
+    @abstractmethod
+    async def partition_exists(self, name: str) -> bool: ...
+
+    @abstractmethod
+    async def get_partition_row(self, name: str) -> dict | None: ...
+
+    @abstractmethod
+    async def list_partition_rows(self) -> list[dict]: ...
+
+    @abstractmethod
+    async def get_partition_file_count(self, partition: str) -> int: ...
+
+    @abstractmethod
+    async def count_files_by_partition(self) -> dict[str, int]: ...
+
+    @abstractmethod
+    async def update_partition(self, name: str, **fields: object) -> dict | None: ...
