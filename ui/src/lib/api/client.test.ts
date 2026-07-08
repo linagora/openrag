@@ -87,4 +87,18 @@ describe("ApiError message parsing", () => {
     expect(e.body).toEqual({ detail: "nope" });
     expect(e.name).toBe("ApiError");
   });
+
+  it("strips the '[CODE]: ' prefix from domain errors and exposes the code", () => {
+    const e = new ApiError(409, {
+      detail: "[CONFLICT]: Preset 'legal' is used by 2 partition(s); reassign them before deleting.",
+    });
+    expect(e.message).toBe("Preset 'legal' is used by 2 partition(s); reassign them before deleting.");
+    expect(e.code).toBe("CONFLICT");
+  });
+
+  it("leaves messages without a code prefix untouched", () => {
+    const e = new ApiError(422, { detail: "bad input" });
+    expect(e.message).toBe("bad input");
+    expect(e.code).toBeUndefined();
+  });
 });

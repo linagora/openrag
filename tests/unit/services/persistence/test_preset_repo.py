@@ -155,6 +155,45 @@ async def test_delete_returns_true_on_success():
     repo = PgPresetRepository(pool_getter=lambda: pool)
 
     assert await repo.delete("default", "indexation") is True
+    operations = [query for query, _params in pool.executed]
+    assert operations[0] == "BEGIN"
+    assert any("LOCK TABLE partitions" in op for op in operations)
+    assert any("DELETE FROM pipeline_presets" in op for op in operations)
+    assert operations[-1] == "COMMIT"
+
+
+@pytest.mark.asyncio
+async def test_delete_raises_conflict_when_partitions_reference_it():
+    from core.utils.exceptions import ConflictError
+    from services.persistence.preset_repo import PgPresetRepository
+
+    pool = _FakePool()
+    pool._fetchval_result = 2
+    repo = PgPresetRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ConflictError, match="2 partition") as exc_info:
+        await repo.delete("legal", "indexation")
+    assert exc_info.value.status_code == 409
+
+    operations = [query for query, _params in pool.executed]
+    assert not any("DELETE FROM pipeline_presets" in op for op in operations)
+    assert operations[-1] == "ROLLBACK"
+
+
+@pytest.mark.asyncio
+async def test_delete_conflict_query_uses_correct_column():
+    from core.utils.exceptions import ConflictError
+    from services.persistence.preset_repo import PgPresetRepository
+
+    pool = _FakePool()
+    pool._fetchval_result = 1
+    repo = PgPresetRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ConflictError):
+        await repo.delete("hyde", "retrieval")
+
+    count_query = next(q for q, _ in pool.executed if "SELECT COUNT" in q)
+    assert "retrieval_preset" in count_query
 
 
 @pytest.mark.asyncio
@@ -255,3 +294,25 @@ async def test_count_partitions_using_rejects_invalid_type():
     with pytest.raises(ValueError, match="Invalid preset_type"):
         await repo.count_partitions_using("default", "bad-type")
     assert pool.executed == []
+
+
+@pytest.mark.asyncio
+async def test_usage_counts_returns_keyed_dict_from_single_query():
+    from services.persistence.preset_repo import PgPresetRepository
+
+    pool = _FakePool()
+    pool._fetch_result = [
+        {"name": "default", "preset_type": "indexation", "cnt": 3},
+        {"name": "legal", "preset_type": "indexation", "cnt": 0},
+        {"name": "default", "preset_type": "retrieval", "cnt": 5},
+    ]
+    repo = PgPresetRepository(pool_getter=lambda: pool)
+
+    counts = await repo.usage_counts()
+
+    assert counts == {
+        ("default", "indexation"): 3,
+        ("legal", "indexation"): 0,
+        ("default", "retrieval"): 5,
+    }
+    assert len(pool.executed) == 1

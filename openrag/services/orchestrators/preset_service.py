@@ -200,7 +200,14 @@ class PresetService:
         return row
 
     async def list_presets(self, preset_type: str | None = None) -> list[dict]:
-        return await self._repo.list_all(preset_type=preset_type)
+        """List presets, each annotated with ``used_by_partitions``.
+
+        The count comes from a single bulk aggregate query rather than one
+        count query per preset row.
+        """
+        rows = await self._repo.list_all(preset_type=preset_type)
+        counts = await self._repo.usage_counts()
+        return [{**row, "used_by_partitions": counts.get((row["name"], row["preset_type"]), 0)} for row in rows]
 
     async def update_preset(self, name: str, preset_type: str, **fields: object) -> dict:
         """Update preset config and/or rename it.
@@ -245,7 +252,10 @@ class PresetService:
     async def delete_preset(self, name: str, preset_type: str) -> None:
         """Delete a preset.
 
-        Raises 404 if not found, 422 if any partition references it.
+        Raises 404 if not found, 422 if it's the reserved 'default' preset,
+        409 (ConflictError) if any partition references it — that in-use
+        check is enforced atomically by the repo so a concurrent partition
+        assignment can't race past it.
         """
         existing = await self._repo.get(name, preset_type)
         if existing is None:
@@ -255,13 +265,6 @@ class PresetService:
             raise ValidationError(
                 f"Cannot delete the reserved '{_RESERVED_PRESET_NAME}' {preset_type} preset: "
                 "it is the system fallback every partition resolves to."
-            )
-
-        count = await self._repo.count_partitions_using(name, preset_type)
-        if count > 0:
-            raise ValidationError(
-                f"Cannot delete preset '{name}': {count} partition(s) are using it. "
-                "Reassign them to a different preset first."
             )
 
         await self._repo.delete(name, preset_type)

@@ -281,9 +281,13 @@ class PartitionService:
         ``None`` values are ignored (so partial PATCH semantics work) —
         except for the ``_NULLABLE_COLUMNS`` (``chat_llm``), where an
         explicit ``None`` clears the column back to its default. When a
-        preset reference changes, the merged row is validated *before* the
-        write so an unknown preset name fails fast; likewise an assigned
-        ``chat_llm`` must name a catalogued LLM endpoint.
+        preset reference changes, the merged row is validated against the
+        in-memory cache *before* the write so an unknown preset name fails
+        fast, and an assigned ``chat_llm`` must name a catalogued LLM
+        endpoint; the repository additionally re-checks preset existence
+        atomically under the write's transaction, closing the race with a
+        concurrent preset delete (see
+        :meth:`PgPartitionRepository.update_partition`).
         """
         await self._ensure_partition(partition)
         updates = {k: v for k, v in fields.items() if v is not None or k in _NULLABLE_COLUMNS}

@@ -19,23 +19,29 @@ export const TOKEN_KEY = "openrag_token";
 export class ApiError extends Error {
   status: number;
   body: unknown;
+  code?: string;
 
   constructor(status: number, body: unknown) {
     // API uses two envelopes: {detail: "..."} for FastAPI validation errors,
     // and {error: {message, type, code, request_id}} for domain errors.
-    let msg = `HTTP ${status}`;
+    let raw = `HTTP ${status}`;
     if (typeof body === "object" && body !== null) {
       const b = body as Record<string, unknown>;
       if (typeof b.detail === "string") {
-        msg = b.detail;
+        raw = b.detail;
       } else if (b.error && typeof b.error === "object") {
         const e = b.error as Record<string, unknown>;
-        if (typeof e.message === "string") msg = e.message;
+        if (typeof e.message === "string") raw = e.message;
       }
     }
-    super(msg);
+    // Domain errors arrive as "[CODE]: message" (the legacy detail contract).
+    // Strip the machine code from the human-facing message so toasts read
+    // cleanly, and keep it on `.code` for programmatic use.
+    const match = /^\[([A-Z0-9_]+)\]:\s*([\s\S]*)$/.exec(raw);
+    super(match ? match[2] : raw);
     this.name = "ApiError";
     this.status = status;
+    this.code = match ? match[1] : undefined;
     this.body = body;
   }
 }
