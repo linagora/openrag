@@ -337,7 +337,11 @@ def get_config():
     from core.utils.redaction import redact_secrets
     from fastapi.encoders import jsonable_encoder
 
-    return {**redact_secrets(jsonable_encoder(settings)), "super_admin_mode": SUPER_ADMIN_MODE}
+    return {
+        **redact_secrets(jsonable_encoder(settings)),
+        "super_admin_mode": SUPER_ADMIN_MODE,
+        "chainlit_enabled": WITH_CHAINLIT_UI,
+    }
 
 
 # Router mounts. Phase 10F finished moving these into
