@@ -2,7 +2,11 @@ name: Unit tests
 
 on:
   push:
-    branches: [ main, dev ]
+    branches:
+      - main
+      - dev
+      - "refactor/hexagonal"
+      - "refactor/phase-**"
   pull_request:
 
 jobs:
@@ -42,4 +46,4 @@ jobs:
 
       - name: Run tests
         run: |
-          uv run pytest
+          uv run pytest tests/unit/

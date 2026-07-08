@@ -2,9 +2,16 @@ name: Linting
 
 on:
   push:
-    branches: [ main, dev ]  
+    branches:
+      - main
+      - dev
+      - "refactor/hexagonal"
+      - "refactor/phase-**"
   pull_request:
-    branches: [ main, dev ]
+    branches:
+      - main
+      - dev
+      - "refactor/hexagonal"
 
 jobs:
   lint:

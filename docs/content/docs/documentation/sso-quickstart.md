@@ -12,18 +12,24 @@ Configure OpenRag to delegate authentication to your corporate SSO (LemonLDAP::N
 
 Give them the following information.
 
-> ⚠ **`<openrag-host>` is the OpenRag _backend_ URL, NOT the indexer-ui front.**
-> The OIDC callback and back-channel-logout endpoints are hosted **only** on the backend (the container running `openrag/api.py`). If you point the IdP at the front URL instead, you get an **infinite redirect loop**: the front has no `/auth/callback` route, returns 404/401, which is interpreted as "not authenticated", triggering a new OIDC flow, which again lands on the front, etc.
+> ⚠ **Point the IdP at the _front door_ that serves your UI AND reaches the backend's `/auth/callback`.**
+> The OIDC callback and back-channel-logout endpoints are hosted **only** on the OpenRag API backend container. So the redirect target must either *be* the backend, or be a **reverse proxy that forwards `/auth/*` to it**:
 >
-> In a typical deployment: `https://rag.mycorp.com` (the backend) vs `https://ui.mycorp.com` (the front). **Use the backend URL** for the OIDC endpoints below.
+> - **Bundled admin-ui (nginx)** or any reverse proxy → use **its** host/port. It serves the UI *and* proxies `/auth/callback` to the backend, so it is correct — and it's where you must land after login (the post-login redirect is relative). For the admin-ui that's `http://<host>:<ADMIN_UI_PORT>/auth/callback`.
+> - **Backend directly** (e.g. it serves the Chainlit UI on `APP_PORT`) → use the backend host + `APP_PORT`.
+> - **A _static_ UI front with no proxy** (a bare SPA) → ❌ **never.** It has no `/auth/callback`, so you get an **infinite redirect loop** (404 → "not authenticated" → new OIDC flow → back to the front → …).
+>
+> Common pitfall: pointing at the **bare backend port** when a separate proxy serves your UI. Login *completes* (the backend has the callback) but the relative post-login redirect drops you on the backend port, which doesn't serve the UI — a **silent** landing on a blank page. Match the redirect URI to the origin that serves the UI.
+>
+> **Back-channel logout is different.** Unlike the redirect URI (a *browser* redirect that must land on the UI), `/auth/backchannel-logout` is called **server-to-server by the IdP**, never by the browser. It therefore has no UI requirement — it just needs to reach the backend's logout endpoint. Reusing the same proxy origin is fine *as long as that origin forwards `/auth/backchannel-logout` to the backend and is reachable from the IdP server*; otherwise point it straight at the backend.
 
 | Field                         | Value to give                                                  |
 | ----------------------------- | -------------------------------------------------------------- |
 | **Client type**               | `confidential` (server-to-server token exchange)               |
 | **Grant type**                | `authorization_code`                                           |
 | **Response type**             | `code`                                                         |
-| **Valid redirect URIs**       | `<openrag-backend-host>/auth/callback` _(backend, not front!)_ |
-| **Back-channel logout URI**   | `<openrag-backend-host>/auth/backchannel-logout` _(backend!)_  |
+| **Valid redirect URIs**       | `<front-door-host>/auth/callback` _(the UI's proxy or the backend — see warning)_ |
+| **Back-channel logout URI**   | `<host>/auth/backchannel-logout` _(server-to-server from the IdP — must reach the backend; see warning)_ |
 | **Post-logout redirect URIs** | an optional URL **outside** OpenRag (see §Step 4 below)        |
 | **Allowed scopes**            | `openid`, `email`, `profile`, `offline_access`                 |
 | **Include `sid` in tokens**   | ✅ enabled (required for back-channel logout)                  |
@@ -124,13 +130,21 @@ Each pair is `db_field:oidc_claim`. Only `display_name` and `email` are writable
 
 By default OpenRag reads the claims from the verified ID token (`OIDC_CLAIM_SOURCE=id_token`, no extra HTTP call). Switch to `userinfo` if your IdP only exposes certain claims via the `/userinfo` endpoint.
 
+### Optional: grant partition access from IdP groups
+
+If your IdP models access as groups (e.g. Keycloak groups like `/openrag/project-alpha/editor`),
+OpenRag can map them to partition memberships automatically on every login — set
+`OIDC_CLAIM_GROUPS` and friends. See `docs/oidc.md` →
+[Group → Partition Mapping](/openrag/documentation/oidc/#group--partition-mapping-optional). (`is_admin` is never
+derived from groups.)
+
 ---
 
 ## Step 5 — Pre-provision users
 
 By default, OpenRag **does not auto-create users** on first login. Each user must exist in the database with their OIDC `sub` stored in `external_user_id`.
 
-> **Skip this step entirely** by setting `OIDC_AUTO_PROVISION_LOGIN=true` in your `.env`. The callback then creates a non-admin user from the ID-token claims on first login and keeps `display_name` + `email` in sync with the IdP on every subsequent login. The trade-off: your IdP's user list becomes the source of truth for OpenRag accounts. See the [Auto-provisioning](/openrag/documentation/oidc/#auto-provisioning-optional) section of the OIDC guide for the full trust-model.
+> **Skip this step entirely** by setting `OIDC_AUTO_PROVISION_LOGIN=true` in your `.env`. The callback then creates a non-admin user from the ID-token claims on first login and keeps `display_name` + `email` in sync with the IdP on every subsequent login. The trade-off: your IdP's user list becomes the source of truth for OpenRag accounts. See `docs/oidc.md` → [Auto-provisioning](/openrag/documentation/oidc/#auto-provisioning-optional) for the full trust-model.
 
 Ask the IdP admin for each user's `sub` claim value (stable identifier, NOT the username). Then create the user via the OpenRag admin API — you'll need an admin `AUTH_TOKEN` for this:
 
@@ -168,7 +182,7 @@ docker compose logs openrag --tail 50 | grep -i OIDC
 
 Open your browser at `https://rag.mycorp.com/` → it redirects to your SSO → you log in → you come back authenticated.
 
-If something goes wrong, see the full **[troubleshooting section in the OIDC guide](/openrag/documentation/oidc/#troubleshooting)**. Most issues fall into one of three categories:
+If something goes wrong, see the full **[troubleshooting section in `docs/oidc.md`](/openrag/documentation/oidc/#troubleshooting)**. Most issues fall into one of three categories:
 
 1. **Issuer mismatch** (Step 2 — trailing slash).
 2. **Invalid redirect URI** (Step 1 — must match byte-for-byte).

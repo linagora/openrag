@@ -7,7 +7,8 @@
 **/*chainlit.md
 .venv/
 qdrant_storage/
-vdb/volumes
+vdb/
+db/
 
 # other files and folders
 misc
@@ -59,15 +60,15 @@ volumes/*
 !volumes/.gitkeep # Keep the placeholder
 
 # services
-services/
-services/*
-!services/.gitkeep # Keep the placeholder
+/services/
+/services/*
+!/services/.gitkeep # Keep the placeholder
 
 *.csv
 *.pkl
 
 #helm
-charts/openrag-stack/charts/*.tgz
+infra/charts/openrag-stack/charts/*.tgz
 
 # Planning
 .planning/
@@ -85,6 +86,18 @@ docs/plans/
 # Build artifacts
 *.egg-info/
 
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
 # Local developer overrides (not committed)
 docker-compose.override.yaml
 docker-compose.override.yml
+
+# Chainlit-generated locale files (only en-US and fr are curated/committed;
+# other locales are auto-written at runtime).
+i8n/*.json
+!i8n/en-US.json
+!i8n/fr.json

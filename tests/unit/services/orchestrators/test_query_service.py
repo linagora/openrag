@@ -1,0 +1,520 @@
+"""Unit tests for :class:`QueryService` (Phase 8C.2).
+
+The Ray-backed LLM semaphore and the model-file-backed language detector
+are monkeypatched (both are infra concerns exercised in integration, not
+here). Retrieval is faked; the real ``format_context`` /
+``stream_with_source_filtering`` helpers run against real ``Chunk`` →
+``Document`` conversions.
+"""
+
+from __future__ import annotations
+
+import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
+import pytest
+import services.orchestrators.query_service as qs
+from core.config import load_config
+from core.models.chunk import Chunk
+from services.orchestrators.query_service import QueryService
+
+# Real prompt-template config (dir + key->filename mapping) so QueryService
+# can load its system / contextualizer / spoken-style templates from disk.
+_PROMPT_CFG = load_config()
+
+
+@pytest.fixture(autouse=True)
+def _patch_infra(monkeypatch):
+    @asynccontextmanager
+    async def _noop_sem():
+        yield
+
+    monkeypatch.setattr(qs, "get_llm_semaphore", _noop_sem)
+    monkeypatch.setattr(qs, "detect_language", lambda _t: "en")
+
+
+class FakeLLM:
+    def __init__(self, *, chat_responses=None, gen_text="answer", stream_lines=None):
+        self._chat_responses = list(chat_responses or [])
+        self._gen_text = gen_text
+        self._stream_lines = stream_lines or ['data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', "data: [DONE]\n\n"]
+        self.chat_calls: list = []
+
+    async def chat(self, messages, **kwargs):
+        self.chat_calls.append((messages, kwargs))
+        if self._chat_responses:
+            content = self._chat_responses.pop(0)
+        else:
+            content = "final answer"
+        return {"choices": [{"message": {"content": content}}]}
+
+    async def generate(self, prompt, **kwargs):
+        return {"choices": [{"text": self._gen_text}]}
+
+    async def stream_chat(self, messages, **kwargs):
+        for line in self._stream_lines:
+            yield line
+
+
+class FakeRetrieval:
+    def __init__(self, chunks=None):
+        self._chunks = chunks if chunks is not None else [Chunk(id="c1", text="ctx", metadata={"_id": "c1"})]
+
+    async def retrieve_multi(self, **kwargs):
+        return list(self._chunks)
+
+    async def retrieve_per_query(self, *, queries, **kwargs):
+        return [list(self._chunks) for _ in queries]
+
+    @staticmethod
+    def fuse(doc_lists, top_k=None):
+        return doc_lists[0] if doc_lists else []
+
+
+class FakeWeb:
+    max_tokens = 2000
+
+    def __init__(self, results=None):
+        self._results = results or []
+
+    async def search(self, query):
+        return list(self._results)
+
+
+class FakeWorkspace:
+    async def get_workspace(self, wid):
+        return None
+
+
+def _config(mode="SimpleRag"):
+    return SimpleNamespace(
+        rag=SimpleNamespace(mode=mode, chat_history_depth=4, max_contextualized_query_len=512),
+        reranker=SimpleNamespace(top_k=5),
+        chunker=SimpleNamespace(chunk_size=512),
+        map_reduce=SimpleNamespace(initial_batch_size=2, expansion_batch_size=2, max_total_documents=4),
+        paths=_PROMPT_CFG.paths,
+        prompts=_PROMPT_CFG.prompts,
+        partitions={},
+    )
+
+
+def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None) -> QueryService:
+    return QueryService(
+        retrieval_service=retrieval or FakeRetrieval(),
+        llm=llm or FakeLLM(),
+        config=_config(mode),
+        web_search_service=web or FakeWeb(),
+        workspace_service=FakeWorkspace(),
+        llm_factory=llm_factory,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# chat history depth resolution (per-partition override of the global default)
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_chat_history_depth_uses_partition_value():
+    svc = _svc()  # global default = 4
+    svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=10)}
+    assert svc._resolve_chat_history_depth(["p"]) == 10
+
+
+def test_resolve_chat_history_depth_zero_inherits_global_default():
+    # 0 means "inherit" — never reaches the messages[-depth:] slice (where 0
+    # would select the entire history).
+    svc = _svc()
+    svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=0)}
+    assert svc._resolve_chat_history_depth(["p"]) == 4
+
+
+def test_resolve_chat_history_depth_none_and_unknown_use_default():
+    svc = _svc()
+    svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=9)}
+    assert svc._resolve_chat_history_depth(None) == 4
+    assert svc._resolve_chat_history_depth(["missing"]) == 4
+
+
+def test_resolve_chat_history_depth_all_sentinel_uses_default():
+    # "all" (openrag-all) reaches this layer un-expanded and is not a real
+    # partition name → cross-partition query uses the global default, never a
+    # per-partition value.
+    svc = _svc()  # global default = 4
+    svc._config.partitions = {"a": SimpleNamespace(chat_history_depth=10)}
+    assert svc._resolve_chat_history_depth(["all"]) == 4
+
+
+def test_resolve_chat_history_depth_multi_partition_takes_max_explicit():
+    svc = _svc()
+    svc._config.partitions = {
+        "a": SimpleNamespace(chat_history_depth=6),
+        "b": SimpleNamespace(chat_history_depth=2),
+        "c": SimpleNamespace(chat_history_depth=0),  # inherits → ignored
+    }
+    assert svc._resolve_chat_history_depth(["a", "b", "c"]) == 6
+
+
+# --------------------------------------------------------------------------- #
+# chat LLM resolution (per-partition chat_llm model-endpoint preset)
+# --------------------------------------------------------------------------- #
+
+
+def _partition(chat_llm=None, chat_history_depth=0):
+    return SimpleNamespace(chat_llm=chat_llm, chat_history_depth=chat_history_depth)
+
+
+class RecordingFactory:
+    def __init__(self, llms=None):
+        self._llms = llms or {}
+        self.calls: list[str] = []
+
+    def __call__(self, name: str):
+        self.calls.append(name)
+        if name not in self._llms:
+            raise KeyError(name)
+        return self._llms[name]
+
+
+def test_resolve_llm_uses_partition_preset():
+    preset_llm = FakeLLM()
+    factory = RecordingFactory({"mistral": preset_llm})
+    svc = _svc(llm_factory=factory)
+    svc._config.partitions = {"p": _partition(chat_llm="mistral")}
+    assert svc._resolve_llm(["p"]) is preset_llm
+    assert factory.calls == ["mistral"]
+
+
+def test_resolve_llm_defaults_without_factory_partition_or_preset():
+    default_llm = FakeLLM()
+    factory = RecordingFactory()
+    svc = _svc(llm=default_llm, llm_factory=factory)
+    svc._config.partitions = {"p": _partition(chat_llm=None), "q": _partition(chat_llm="mistral")}
+    assert svc._resolve_llm(None) is default_llm  # direct/web-only mode
+    assert svc._resolve_llm(["all"]) is default_llm  # cross-partition sentinel
+    assert svc._resolve_llm(["p"]) is default_llm  # partition without a preset
+    assert svc._resolve_llm(["missing"]) is default_llm  # unknown partition
+    assert factory.calls == []  # default paths never hit the factory
+    no_factory = _svc(llm=default_llm)
+    no_factory._config.partitions = {"q": _partition(chat_llm="mistral")}
+    assert no_factory._resolve_llm(["q"]) is default_llm
+
+
+def test_resolve_llm_multi_partition_uses_preset_only_when_unanimous():
+    default_llm, preset_llm = FakeLLM(), FakeLLM()
+    factory = RecordingFactory({"mistral": preset_llm})
+    svc = _svc(llm=default_llm, llm_factory=factory)
+    svc._config.partitions = {
+        "a": _partition(chat_llm="mistral"),
+        "b": _partition(chat_llm="mistral"),
+        "c": _partition(chat_llm=None),  # unset → doesn't veto
+        "d": _partition(chat_llm="llama"),
+    }
+    assert svc._resolve_llm(["a", "b", "c"]) is preset_llm  # unanimous among setters
+    assert svc._resolve_llm(["a", "d"]) is default_llm  # conflicting presets → default
+
+
+def test_resolve_llm_unknown_preset_falls_back_to_default():
+    # chat_llm is not validated on assignment (the endpoint may be deleted
+    # afterwards) — an unknown name must not fail the request.
+    default_llm = FakeLLM()
+    factory = RecordingFactory()  # raises KeyError for every name
+    svc = _svc(llm=default_llm, llm_factory=factory)
+    svc._config.partitions = {"p": _partition(chat_llm="deleted")}
+    assert svc._resolve_llm(["p"]) is default_llm
+    assert factory.calls == ["deleted"]
+
+
+@pytest.mark.asyncio
+async def test_chat_answers_with_partition_chat_llm():
+    default_llm = FakeLLM()
+    preset_llm = FakeLLM(chat_responses=["preset answer [Sources: none]"])
+    svc = _svc(llm=default_llm, llm_factory=RecordingFactory({"mistral": preset_llm}))
+    svc._config.partitions = {"p": _partition(chat_llm="mistral")}
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        prepare_sources=lambda d, w: [],
+        model_name="openrag-p",
+    )
+    assert out["choices"][0]["message"]["content"] == "preset answer"
+    assert len(preset_llm.chat_calls) == 1
+    assert default_llm.chat_calls == []  # SimpleRag: no query-gen call either
+
+
+@pytest.mark.asyncio
+async def test_chat_query_generation_uses_partition_chat_llm():
+    # ChatBotRag contextualizes the query with an LLM call — that call must
+    # go through the partition preset too, not just the final answer.
+    default_llm = FakeLLM()
+    query_json = json.dumps({"query_list": [{"query": "rewritten", "temporal_filters": None}]})
+    preset_llm = FakeLLM(chat_responses=[query_json, "preset answer [Sources: none]"])
+    svc = _svc(mode="ChatBotRag", llm=default_llm, llm_factory=RecordingFactory({"mistral": preset_llm}))
+    svc._config.partitions = {"p": _partition(chat_llm="mistral")}
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        prepare_sources=lambda d, w: [],
+        model_name="openrag-p",
+    )
+    assert out["choices"][0]["message"]["content"] == "preset answer"
+    assert len(preset_llm.chat_calls) == 2  # query generation + answer
+    assert default_llm.chat_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# generate_query
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_generate_query_simplerag_uses_last_message():
+    sq = await _svc(mode="SimpleRag").generate_query([{"role": "user", "content": "what is X?"}])
+    assert [q.query for q in sq.query_list] == ["what is X?"]
+
+
+@pytest.mark.asyncio
+async def test_generate_query_chatbotrag_parses_json():
+    payload = json.dumps({"query_list": [{"query": "rewritten", "temporal_filters": None}]})
+    svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
+    sq = await svc.generate_query([{"role": "user", "content": "hi"}])
+    assert sq.query_list[0].query == "rewritten"
+
+
+@pytest.mark.asyncio
+async def test_generate_query_chatbotrag_falls_back_on_garbage():
+    svc = _svc(llm=FakeLLM(chat_responses=["not json", "still not json"]), mode="ChatBotRag")
+    sq = await svc.generate_query([{"role": "user", "content": "raw question"}])
+    assert sq.query_list[0].query == "raw question"  # fallback to raw user query
+
+
+# --------------------------------------------------------------------------- #
+# chat / complete
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_chat_direct_mode_skips_retrieval():
+    retrieval = FakeRetrieval()
+    called = {"n": 0}
+
+    async def _spy(**kwargs):
+        called["n"] += 1
+        return []
+
+    retrieval.retrieve_multi = _spy
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["hello [Sources: none]"]))
+    out = await svc.chat(
+        partitions=None,
+        payload={"messages": [{"role": "user", "content": "hi"}], "metadata": {}},
+        prepare_sources=lambda d, w: [{"source_type": "document"}],
+        model_name="m1",
+    )
+    assert called["n"] == 0  # no retrieval in direct mode
+    assert out["model"] == "m1"
+    assert out["choices"][0]["message"]["content"] == "hello"  # sources tag stripped
+    assert json.loads(out["extra"])["sources"] == []  # [Sources: none] → no sources
+
+
+@pytest.mark.asyncio
+async def test_chat_with_partition_retrieves_and_filters_sources():
+    svc = _svc(llm=FakeLLM(chat_responses=["answer [Sources: 1]"]))
+    sources = [{"source_type": "document", "n": 1}, {"source_type": "document", "n": 2}]
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        prepare_sources=lambda d, w: sources,
+        model_name="m",
+    )
+    filtered = json.loads(out["extra"])["sources"]
+    assert filtered == [{"source_type": "document", "n": 1}]  # only cited source 1
+
+
+@pytest.mark.asyncio
+async def test_complete_strips_and_filters():
+    svc = _svc(llm=FakeLLM(gen_text="text body [Sources: none]"))
+    out = await svc.complete(
+        partitions=None,
+        payload={"prompt": "do x"},
+        prepare_sources=lambda d, w: [{"x": 1}],
+    )
+    assert out["choices"][0]["text"] == "text body"
+    assert json.loads(out["extra"])["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_yields_sse_and_done():
+    svc = _svc(llm=FakeLLM())
+    lines = []
+    async for line in svc.chat_stream(
+        partitions=None,
+        payload={"messages": [{"role": "user", "content": "hi"}], "metadata": {}},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    ):
+        lines.append(line)
+    assert any("[DONE]" in ln for ln in lines)
+
+
+# --------------------------------------------------------------------------- #
+# map-reduce
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_map_reduce_keeps_relevant_drops_irrelevant():
+    rel = json.dumps({"relevancy": True, "summary": "kept"})
+    irr = json.dumps({"relevancy": False, "summary": ""})
+    svc = _svc(llm=FakeLLM(chat_responses=[rel, irr]))
+    docs = [
+        Chunk(id="a", text="A", metadata={"_id": "a"}).to_langchain(),
+        Chunk(id="b", text="B", metadata={"_id": "b"}).to_langchain(),
+    ]
+    out = await svc._map_reduce("q", docs)
+    assert len(out) == 1
+    assert out[0].page_content == "kept"
+
+
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
+
+
+def test_json_slice_extracts_object():
+    assert qs._json_slice('noise {"a": 1} trailing') == '{"a": 1}'
+
+
+def test_dedupe_web_preserves_first_seen():
+    a = SimpleNamespace(url="u1")
+    b = SimpleNamespace(url="u1")
+    c = SimpleNamespace(url="u2")
+    assert qs._dedupe_web([[a, b], [c]]) == [a, c]
+
+
+def test_sampling_strips_transport_keys():
+    out = qs._sampling({"messages": [], "stream": True, "model": "m", "temperature": 0.5})
+    assert out == {"temperature": 0.5}
+
+
+# --------------------------------------------------------------------------- #
+# _sanitize_messages
+# --------------------------------------------------------------------------- #
+
+
+def test_sanitize_valid_alternating_unchanged():
+    """Valid alternating history → identical output."""
+    msgs = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "again"},
+    ]
+    assert QueryService._sanitize_messages(msgs) == msgs
+
+
+def test_sanitize_empty_content_replaced_with_placeholder():
+    """Empty assistant content → replaced with NO_CONTENT, alternation preserved."""
+    msgs = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "second"},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert len(out) == 3
+    assert out[1]["role"] == "assistant"
+    assert out[1]["content"] == "NO_CONTENT"
+
+
+def test_sanitize_whitespace_only_replaced():
+    """Whitespace-only assistant content → replaced with NO_CONTENT."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "   "},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert out[1]["content"] == "NO_CONTENT"
+
+
+def test_sanitize_no_content_key_replaced():
+    """Assistant with no 'content' key → replaced with NO_CONTENT, other keys kept."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "name": "bot"},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert out[1]["content"] == "NO_CONTENT"
+    assert out[1]["name"] == "bot"
+
+
+def test_sanitize_empty_list_content_replaced():
+    """Empty multimodal content list → treated as empty, replaced with NO_CONTENT."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": []},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert out[1]["content"] == "NO_CONTENT"
+
+
+def test_sanitize_assistant_with_tool_calls_untouched():
+    """Empty assistant content is legitimate when carrying tool_calls → untouched."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "type": "function"}]},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert out == msgs
+
+
+def test_sanitize_assistant_with_function_call_untouched():
+    """Empty assistant content is legitimate when carrying function_call → untouched."""
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": None, "function_call": {"name": "f"}},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert out == msgs
+
+
+def test_sanitize_empty_user_not_touched():
+    """User message with empty content → kept as-is (only assistant is patched)."""
+    msgs = [{"role": "user", "content": ""}]
+    assert QueryService._sanitize_messages(msgs) == msgs
+
+
+def test_sanitize_multiple_empty_assistants_all_replaced():
+    """Multiple empty assistants → all replaced, alternation intact."""
+    msgs = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "u3"},
+    ]
+    out = QueryService._sanitize_messages(msgs)
+    assert len(out) == 5
+    assert out[1]["content"] == "NO_CONTENT"
+    assert out[3]["content"] == "NO_CONTENT"
+
+
+def test_sanitize_multimodal_content_untouched():
+    """Non-empty multimodal content list → never replaced."""
+    msgs = [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "desc"}]},
+    ]
+    assert QueryService._sanitize_messages(msgs) == msgs
+
+
+def test_sanitize_empty_list():
+    """Empty input → empty output."""
+    assert QueryService._sanitize_messages([]) == []
+
+
+def test_sanitize_system_message_preserved():
+    """System message in head → preserved untouched."""
+    msgs = [
+        {"role": "system", "content": "You are an assistant."},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    assert QueryService._sanitize_messages(msgs) == msgs

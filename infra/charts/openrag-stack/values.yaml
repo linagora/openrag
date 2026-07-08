@@ -1,0 +1,398 @@
+# === Network isolation ===
+# Default-deny ingress for all pods in the release namespace, allowing only
+# intra-namespace traffic plus the public HTTP ports below. This isolates the
+# unauthenticated Ray dashboard (8265), GCS (6379), Postgres, Milvus, etc. from
+# outside the namespace. Disable only if you manage isolation elsewhere.
+networkPolicy:
+  enabled: true
+  # Ports reachable from outside the namespace (e.g. via the Ingress controller).
+  externalPorts:
+    - 8080  # openrag API/UI
+
+# === Global shared persistence ===
+persistence:
+  enabled: true
+  storageClass: &storageClass longhorn
+  accessMode: ReadWriteMany
+  volumes:
+    modelWeights: { size: 50Gi }
+    data: { size: 20Gi }
+    hydraConfig: { size: 10Mi }
+    logs: { size: 1Gi }
+    venv: { size: 10Gi }
+
+ray:
+  dashboardHost: "127.0.0.1"
+  workers:
+    count: 1
+    replicas: 1
+    minReplicas: 1
+    maxReplicas: 1
+  nodeSelector:
+    gpu-role: serving
+  image:
+    repository: ghcr.io/linagora/openrag-ray
+    # Pin to a release tag (ideally a digest) for reproducible deploys.
+    tag: "1.1.13"
+
+# === PostgreSQL (bitnami) ===
+postgresql:
+  enabled: true
+  auth:
+    username: &pgUser root
+    # Must be supplied at install time; templates fail closed if it is empty.
+    password: &pgPass ""
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: *storageClass
+  service:
+    port: &pgPort 5432
+
+postgresProvisioning:
+  # Keep the bundled PostgreSQL chart self-contained by default. Managed
+  # Postgres deployments should set this to false and point POSTGRES_* values
+  # at a pre-created database.
+  autoCreateDatabase: true
+  # Leave app-start migrations enabled for compose-like installs. Operators can
+  # disable this when they run migrations through the Helm hook below.
+  runMigrationsInApp: true
+  migrationJob:
+    enabled: false
+    backoffLimit: 3
+    hookDeletePolicy: before-hook-creation,hook-succeeded
+
+# === Milvus ===
+milvus:
+  enabled: true
+  image:
+    all: { tag: v2.6.0 }
+  cluster: { enabled: true }
+  pulsarv3: { enabled: false }
+  woodpecker: { enabled: true }
+  streaming: { enabled: true }
+  indexNode: { enabled: false }
+  minio:
+    mode: distributed
+    replicas: 3
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: *storageClass
+  etcd:
+    replicaCount: 2
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: *storageClass
+  proxy:
+    service:
+      type: ClusterIP
+      port: 19530
+
+# === vLLM (embedder) ===
+vllm:
+  embedderModelName: &embedderModel "Qwen/Qwen3-Embedding-0.6B"
+  vlmModelName: &vlmModel "Qwen/Qwen2.5-VL-7B-Instruct"
+  whisperModelName: &whisperModel "openai/whisper-large-v3-turbo"
+  llmModelName: &llmModel "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
+  servingEngineSpec:
+    enableEngine: true
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 10001
+      runAsGroup: 10001
+      fsGroup: 10001
+      seccompProfile:
+        type: RuntimeDefault
+    containerSecurityContext:
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+    # NOTE: the per-model `tag: "latest"` entries below are operator-supplied
+    # serving images — pin each to a specific vLLM release tag (or digest)
+    # before production use for reproducible deploys (see vlm, pinned to v0.11.2).
+    modelSpec:
+      - name: "embedder"
+        repository: "vllm/vllm-openai"
+        tag: "latest"
+        modelURL: *embedderModel
+        replicaCount: 1
+        requestCPU: 4
+        requestMemory: "16Gi"
+        requestGPU: 1
+        limitCPU: 4
+        limitMemory: "16Gi"
+        hf_token:
+          secretName: rag-env-secrets
+          secretKey: HF_TOKEN
+        vllmConfig:
+          gpuMemoryUtilization: 0.3
+          extraArgs: ["--trust-remote-code", "--task", "embed"]
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: gpu-role
+                operator: In
+                values: ["serving"]
+
+      - name: "whisper"
+        repository: "ghcr.io/linagora/vllm-whisper"
+        tag: "latest"
+        modelURL: *whisperModel
+        replicaCount: 1
+        requestCPU: 4
+        requestMemory: "16Gi"
+        requestGPU: 1
+        limitCPU: 4
+        limitMemory: "16Gi"
+        hf_token:
+          secretName: rag-env-secrets
+          secretKey: HF_TOKEN
+        vllmConfig:
+          gpuMemoryUtilization: 0.5
+          extraArgs: ["--trust-remote-code", "--async-scheduling"]
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: gpu-role
+                operator: In
+                values: ["serving"]
+
+      - name: "llm"
+        repository: "vllm/vllm-openai"
+        tag: "latest"
+        modelURL: *llmModel
+        replicaCount: 0
+        requestCPU: 8
+        requestMemory: "32Gi"
+        requestGPU: 2
+        limitCPU: 8
+        limitMemory: "32Gi"
+        hf_token:
+          secretName: rag-env-secrets
+          secretKey: HF_TOKEN
+        vllmConfig:
+          v1: 1
+          tensorParallelSize: 2
+          pipelineParallelSize: 1
+          maxModelLen: 32768
+          extraArgs: ["--trust-remote-code"]
+        shmSize: "20Gi"
+        raySpec:
+          headNode:
+            requestCPU: 8
+            requestMemory: "32Gi"
+            requestGPU: 2
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: gpu-role
+                operator: In
+                values: ["llm"]
+        pvcStorage: "50Gi"
+      - name: "vlm"
+        repository: "vllm/vllm-openai"
+        tag: "v0.11.2"
+        modelURL: *vlmModel
+        replicaCount: 1
+        requestCPU: 8
+        requestMemory: "32Gi"
+        requestGPU: 1
+        limitCPU: 8
+        limitMemory: "32Gi"
+        hf_token:
+          secretName: rag-env-secrets
+          secretKey: HF_TOKEN
+        vllmConfig:
+          v1: 1
+          tensorParallelSize: 1
+          pipelineParallelSize: 1
+          maxModelLen: 8192
+          extraArgs: ["--trust-remote-code"]
+        shmSize: "20Gi"
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: gpu-role
+                operator: In
+                values: ["vlm"]
+  routerSpec:
+    enableRouter: false
+
+# === Infinity reranker ===
+reranker:
+  rerankerModelName: &rerankerModel "Alibaba-NLP/gte-multilingual-reranker-base"
+  servicePort: &rerankerPort 7997
+  image:
+    repository: michaelf34/infinity
+    # Operator-supplied serving image: pin to a specific infinity release tag
+    # (or digest) before production use rather than tracking latest.
+    tag: latest
+  nodeSelector:
+    gpu-role: serving
+  model:
+    id: Alibaba-NLP/gte-multilingual-reranker-base
+  command:
+    - v2
+    - --model-id
+    - *rerankerModel
+    - --port
+    - *rerankerPort
+  replicas: 1
+  runtimeClassName: nvidia
+  service:
+    type: ClusterIP
+    port: *rerankerPort
+  resources:
+    requests:
+      cpu: "4"
+      memory: "16Gi"
+    limits:
+      cpu: "4"
+      memory: "16Gi"
+
+# === Admin UI (React SPA + nginx) ===
+# Static SPA served by the admin-ui container (nginx-unprivileged, :8080). It is
+# same-origin: the SPA makes relative /v1, /auth, … calls that the Ingress routes
+# to the API (see ingress.paths below), so there is no CORS. Runs under the same
+# hardened security context as the rest of the stack.
+adminUi:
+  enabled: true
+  image:
+    repository: linagoraai/openrag-admin-ui
+    # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
+    # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
+    tag: "v2.0.0"
+  imagePullPolicy: IfNotPresent
+  replicaCount: 1
+  service:
+    type: ClusterIP
+    port: 8080
+    targetPort: 8080
+  resources: {}
+
+# === OpenRAG main app ===
+openrag:
+  image:
+    repository: linagoraai/openrag
+    # Pin to a release tag (ideally a digest) for reproducible deploys.
+    tag: "1.1.13"
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: "4"
+      memory: "16Gi"
+    limits:
+      cpu: "4"
+      memory: "16Gi"
+  replicas: 1
+
+ingress:
+  enabled: false
+  className: "nginx"
+  host: ""
+  tls:
+    enabled: false
+    secretName: ""
+
+  paths:
+    openrag:
+      enabled: true
+
+security:
+  automountServiceAccountToken: false
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+# === Shared env (config + secrets) ===
+env:
+  config:
+    # LLM
+    BASE_URL: "http://{{ .Release.Name }}-llm-engine-service/v1/"
+    MODEL: *llmModel
+    LLM_SEMAPHORE: "50"
+
+    # VLM
+    VLM_BASE_URL: "http://{{ .Release.Name }}-vlm-engine-service/v1/"
+    VLM_MODEL: *vlmModel
+    VLM_SEMAPHORE: "50"
+
+    # App
+    APP_PORT: "8080"
+    ENABLE_RAY_SERVE: "true"
+    RAY_SERVE_NUM_REPLICAS: "4"
+    RAY_SERVE_PORT: "80"
+
+    WITH_CHAINLIT_UI: "false"
+    SAVE_UPLOADED_FILES: "false"
+    # HTTP scaling is handled by Ray Serve above (ENABLE_RAY_SERVE +
+    # RAY_SERVE_NUM_REPLICAS), not uvicorn workers — see entrypoint.sh.
+
+    # Vector DB
+    VDB_HOST: "{{ .Release.Name }}-milvus"
+    VDB_PORT: "19530"
+    VDB_CONNECTOR_NAME: "milvus"
+
+    # PostgreSQL
+    POSTGRES_HOST: "{{ .Release.Name }}-postgresql"
+    POSTGRES_PORT: *pgPort
+    POSTGRES_USER: *pgUser
+    # POSTGRES_PASSWORD is a secret — defined under env.secrets, not here in the
+    # (world-readable) ConfigMap.
+    POSTGRES_AUTO_CREATE_DB: "{{ .Values.postgresProvisioning.autoCreateDatabase }}"
+    POSTGRES_RUN_MIGRATIONS: "{{ .Values.postgresProvisioning.runMigrationsInApp }}"
+
+    # Embedder
+    EMBEDDER_MODEL_NAME: *embedderModel
+    EMBEDDER_BASE_URL: "http://{{ .Release.Name }}-embedder-engine-service/v1"
+
+    # Reranker
+    RERANKER_MODEL: *rerankerModel
+    RERANKER_ENABLED: "true"
+    RERANKER_TOP_K: "4"
+    RERANKER_BASE_URL: "http://{{ .Release.Name }}-reranker:{{ .Values.reranker.servicePort }}"
+    RERANKER_MODEL_TYPE: "infinity"
+
+    # Prompts: templates ship inside the package (openrag/prompts/templates);
+    # set PROMPTS_DIR only to override with a custom template directory.
+
+    # Loaders
+    PDFLOADER: "PyMuPDFLoader"
+    XDG_CACHE_HOME: "/app/model_weights"
+    MARKER_MAX_TASKS_PER_CHILD: "10"
+    MARKER_MAX_PROCESSES: "15"
+    MARKER_POOL_SIZE: "3"
+    MARKER_NUM_GPUS: "0.6"
+    TRANSCRIBER_BASE_URL: "http://{{ .Release.Name }}-whisper-engine-service/v1"
+
+    # Ray
+    RAY_POOL_SIZE: "3"
+    RAY_MAX_TASKS_PER_WORKER: "50"
+    RAY_DASHBOARD_PORT: "8265"
+    RAY_ADDRESS: "ray://raycluster-head-svc:10001"
+    RAY_task_retry_delay_ms: "3000"
+    RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
+
+    UV_LINK_MODE: "copy"
+    UV_CACHE_DIR: "/tmp/uv-cache"
+
+  secrets:
+    API_KEY: "" # LLM API KEY
+    VLM_API_KEY: "" # VLM API KEY
+    EMBEDDER_API_KEY: ""
+    TRANSCRIBER_API_KEY: ""
+    POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
+    AUTH_TOKEN: "" # API KEY for OpenRAG
+    HF_TOKEN: "" # HuggingFace token

@@ -1,0 +1,53 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$1
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    # Match the API's own upload cap (MAX_UPLOAD_SIZE_MB, default 1024) so large
+    # document ingestion isn't rejected at the Ingress with a 413 before it ever
+    # reaches the API. ingress-nginx otherwise defaults this to 1m.
+    nginx.ingress.kubernetes.io/proxy-body-size: "1024m"
+
+spec:
+  ingressClassName: {{ .Values.ingress.className | quote }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ required "ingress.host must be set when ingress.tls.enabled=true" .Values.ingress.host | quote }}
+      {{- with .Values.ingress.tls.secretName }}
+      secretName: {{ . | quote }}
+      {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ required "ingress.host must be set when ingress.enabled=true" .Values.ingress.host | quote }}
+      http:
+        paths:
+          {{- if .Values.adminUi.enabled }}
+          # Admin UI SPA (nginx serves it under /app/). Listed first and more
+          # specific than the API catch-all below, so only /app and /app/* reach
+          # the UI pod; the SPA's own same-origin /v1, /auth, … calls fall through
+          # to the API. The trailing `$` anchors the match so sibling paths like
+          # /applications don't get misrouted to the UI (whose baked nginx config
+          # can only reverse-proxy non-/app paths over Docker DNS, unreachable in
+          # k8s) — every non-/app request must land on the API catch-all below.
+          - path: /(app(?:/.*)?)$
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ .Release.Name }}-admin-ui
+                port:
+                  number: {{ .Values.adminUi.service.port }}
+          {{- end }}
+          {{- if .Values.ingress.paths.openrag.enabled }}
+          - path: /(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: raycluster-head-svc
+                port:
+                  number: {{ .Values.env.config.RAY_SERVE_PORT }}
+          {{- end }}
+{{- end }}

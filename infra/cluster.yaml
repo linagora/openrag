@@ -1,0 +1,27 @@
+cluster_name: rag-cluster
+provider:
+  type: local
+  head_ip: 10.0.0.1
+  worker_ips: [10.0.0.2] # Mandatory but does not automatically start the worker nodes for a local cluster
+
+docker:
+  image: ghcr.io/linagora/openrag-ray
+  pull_before_run: true
+  container_name: ray_node
+  run_options:
+    - --gpus all
+    - -v /ray_mount/model_weights:/app/model_weights
+    - -v /ray_mount/data:/app/data
+    - -v /ray_mount/logs:/app/logs
+    - --env-file /ray_mount/.env
+auth:
+  ssh_user: ubuntu
+  ssh_private_key: <path/to/private/key>
+
+head_start_ray_commands:
+    - uv run ray stop
+    # Dashboard/Jobs API is unauthenticated (CVE-2023-48022); bind to localhost by default and front with an auth proxy if remote access is needed.
+    - uv run ray start --head --dashboard-host ${RAY_DASHBOARD_HOST:-127.0.0.1} --dashboard-port ${RAY_DASHBOARD_PORT:-8265} --node-ip-address ${HEAD_NODE_IP} --autoscaling-config=~/ray_bootstrap_config.yaml
+worker_start_ray_commands:
+    - uv run ray stop
+    - uv run ray start --address ${HEAD_NODE_IP:-10.0.0.1}:6379
