@@ -6,7 +6,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 def default_max_tokens():
     from core.config import load_config
 
-    return load_config().llm_context.max_output_tokens
+    config = load_config()
+    # Prefer the default LLM endpoint's admin-configured budget over the global
+    # llm_context fallback (both editable, but the per-endpoint value wins).
+    return config.models.default_llm_output_tokens() or config.llm_context.max_output_tokens
 
 
 class OpenAIMessage(BaseModel):

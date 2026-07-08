@@ -184,6 +184,53 @@ export function mergeModelEndpointApiKeyExtra(
   return prepared;
 }
 
+// LLM token budgets stored in `extra` but surfaced as first-class number fields
+// in the endpoint modal (LLM endpoints only). Kept out of the raw "Extra (JSON)"
+// box, same as the API key. Backend: core/config/model_endpoints.py.
+export const LLM_CONTEXT_SIZE_KEY = "max_llm_context_size";
+export const LLM_OUTPUT_TOKENS_KEY = "max_output_tokens";
+
+export interface LlmContextFields {
+  maxContextSize: string;
+  maxOutputTokens: string;
+}
+
+/** Pull the two LLM budget keys out of `extra` into form-field strings. */
+export function splitModelEndpointLlmContext(extra: Record<string, unknown>): {
+  llmContext: LlmContextFields;
+  extra: Record<string, unknown>;
+} {
+  const { [LLM_CONTEXT_SIZE_KEY]: ctx, [LLM_OUTPUT_TOKENS_KEY]: out, ...rest } = extra;
+  const asField = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? String(v) : "");
+  return {
+    llmContext: { maxContextSize: asField(ctx), maxOutputTokens: asField(out) },
+    extra: rest,
+  };
+}
+
+/** Merge the two LLM budget fields back into `extra`. Blank clears the override
+ *  (deletes the key → server falls back to the global default); a non-blank
+ *  value is sent as a number for the server to validate as a positive int. */
+export function mergeModelEndpointLlmContext(
+  extra: Record<string, unknown>,
+  fields: LlmContextFields,
+): Record<string, unknown> {
+  const result = { ...extra };
+  const apply = (key: string, raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed === "") {
+      delete result[key];
+      return;
+    }
+    const n = Number(trimmed);
+    if (Number.isFinite(n)) result[key] = n;
+    else delete result[key];
+  };
+  apply(LLM_CONTEXT_SIZE_KEY, fields.maxContextSize);
+  apply(LLM_OUTPUT_TOKENS_KEY, fields.maxOutputTokens);
+  return result;
+}
+
 /** List endpoints (bare array). Optionally filter by model type. */
 export function listModelEndpoints(modelType?: ModelType) {
   const qs = modelType ? `?model_type=${enc(modelType)}` : "";

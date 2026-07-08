@@ -12,6 +12,7 @@ import {
   Eye,
   EyeOff,
   Copy,
+  Info,
 } from "lucide-react";
 import {
   listModelEndpoints,
@@ -19,11 +20,13 @@ import {
   updateModelEndpoint,
   deleteModelEndpoint,
   mergeModelEndpointApiKeyExtra,
+  mergeModelEndpointLlmContext,
   prepareModelEndpointExtraForSubmit,
   revealModelEndpointApiKey,
   REDACTED_SECRET,
   setDefaultModelEndpoint,
   splitModelEndpointApiKeyExtra,
+  splitModelEndpointLlmContext,
   validateModelEndpoint,
 } from "@/lib/api/models";
 import type {
@@ -50,6 +53,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatDate, intOr, numOr } from "@/lib/utils";
 
 const MODEL_TYPES = ["embedder", "reranker", "llm", "vlm"] as const;
@@ -61,6 +65,34 @@ type RevealedApiKey = {
 };
 
 const normalizeEndpointUrl = (value: string) => value.trim().replace(/\/+$/, "");
+
+// System-wide fallback values (MAX_LLM_CONTEXT_SIZE / MAX_OUTPUT_TOKENS env
+// vars — see core/config/endpoints.py:LLMContextConfig) shown as placeholders
+// so admins can see what an unset override falls back to.
+const DEFAULT_MAX_CONTEXT_SIZE = "8192";
+const DEFAULT_MAX_OUTPUT_TOKENS = "1024";
+
+function LabelWithInfo({ label, tooltip }: { label: string; tooltip: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <Label>{label}</Label>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className="text-muted-foreground hover:text-foreground"
+              aria-label={`${label} info`}
+            >
+              <Info className="h-3.5 w-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-xs">{tooltip}</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </div>
+  );
+}
 
 export default function ModelsPage() {
   const queryClient = useQueryClient();
@@ -272,7 +304,12 @@ function EndpointDialog({
   const [batchSize, setBatchSize] = useState("32");
   const [timeout, setTimeout] = useState("30");
   const [apiKey, setApiKey] = useState("");
+  const [maxContextSize, setMaxContextSize] = useState("");
+  const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
+
+  // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
+  const isLlm = (editing ? editing.model_type : activeTab) === "llm";
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
   const [validationMsg, setValidationMsg] = useState<string | null>(null);
@@ -294,13 +331,16 @@ function EndpointDialog({
       setApiKeyVisible(false);
       setRevealingApiKey(false);
       if (editing) {
-        const { apiKey: displayApiKey, extra: displayExtra } = splitModelEndpointApiKeyExtra(editing.extra);
+        const { apiKey: displayApiKey, extra: apiExtra } = splitModelEndpointApiKeyExtra(editing.extra);
+        const { llmContext, extra: displayExtra } = splitModelEndpointLlmContext(apiExtra);
         setName(editing.name);
         setEndpoint(editing.endpoint);
         setModelName(editing.model_name || "");
         setBatchSize(String(editing.batch_size));
         setTimeout(String(editing.timeout));
         setApiKey(displayApiKey);
+        setMaxContextSize(llmContext.maxContextSize);
+        setMaxOutputTokens(llmContext.maxOutputTokens);
         setExtraJson(JSON.stringify(displayExtra, null, 2));
         setValidated(true);
         setValidationMsg(
@@ -315,6 +355,8 @@ function EndpointDialog({
         setBatchSize("32");
         setTimeout("30");
         setApiKey("");
+        setMaxContextSize("");
+        setMaxOutputTokens("");
         setExtraJson("{}");
         setValidated(null);
         setValidationMsg(null);
@@ -322,15 +364,18 @@ function EndpointDialog({
     }
   }, [open, editing]);
 
-  // Reset validation when relevant fields change
+  // Reset validation when relevant fields change. The LLM token-budget fields
+  // don't affect endpoint reachability, so they're deliberately excluded — the
+  // raw extra is compared with them stripped out (as the textarea shows them).
   useEffect(() => {
     const editingExtra = editing ? splitModelEndpointApiKeyExtra(editing.extra) : null;
+    const editingRawExtra = editingExtra ? splitModelEndpointLlmContext(editingExtra.extra).extra : null;
     if (
       editing &&
       endpoint === editing.endpoint &&
       (modelName || "") === (editing.model_name || "") &&
       apiKey === editingExtra?.apiKey &&
-      extraJson === JSON.stringify(editingExtra.extra, null, 2)
+      extraJson === JSON.stringify(editingRawExtra, null, 2)
     ) {
       setValidated(true);
       setValidationMsg(
@@ -508,6 +553,9 @@ function EndpointDialog({
       toast.error("Invalid JSON in extra field");
       return;
     }
+    if (isLlm) {
+      extra = mergeModelEndpointLlmContext(extra, { maxContextSize, maxOutputTokens });
+    }
 
     if (editing) {
       const updateData: UpdateModelEndpointRequest = {
@@ -572,6 +620,42 @@ function EndpointDialog({
               <Input type="number" step="0.1" value={timeout} onChange={(e) => setTimeout(e.target.value)} />
             </div>
           </div>
+          {isLlm && (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <LabelWithInfo
+                  label="Max context size"
+                  tooltip="Fallback maximum token limit for chat/completion requests answered by this endpoint. At startup, the /v1/models endpoint is queried for the model's max_model_len; if that query fails this value is used instead. Requests whose total token count (prompt + max_tokens) exceeds the limit are rejected with a 413 error."
+                />
+                <Input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={maxContextSize}
+                  onChange={(e) => setMaxContextSize(e.target.value)}
+                  placeholder={DEFAULT_MAX_CONTEXT_SIZE}
+                />
+              </div>
+              <div className="space-y-2">
+                <LabelWithInfo
+                  label="Max output tokens"
+                  tooltip="Default output-token budget (max_tokens) applied to chat completions answered by this endpoint when the request doesn't set one explicitly."
+                />
+                <Input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={maxOutputTokens}
+                  onChange={(e) => setMaxOutputTokens(e.target.value)}
+                  placeholder={DEFAULT_MAX_OUTPUT_TOKENS}
+                />
+              </div>
+              <p className="col-span-2 text-xs text-muted-foreground">
+                Token budgets for this endpoint. Leave blank to use the system default. Applied when this is the
+                default LLM endpoint.
+              </p>
+            </div>
+          )}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label>API key</Label>
