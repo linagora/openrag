@@ -114,7 +114,11 @@ async def get_workspace(ws=Depends(require_workspace_in_partition)):
     dependencies=[Depends(require_partition_owner)],
 )
 async def delete_workspace(
-    partition: str, workspace_id: str, vectordb=Depends(get_vectordb), _ws=Depends(require_workspace_in_partition)
+    partition: str,
+    workspace_id: str,
+    keep_files: bool = False,
+    vectordb=Depends(get_vectordb),
+    _ws=Depends(require_workspace_in_partition),
 ):
     orphaned = await call_ray_actor_with_timeout(
         vectordb.delete_workspace.remote(workspace_id),
@@ -123,7 +127,12 @@ async def delete_workspace(
     )
     deleted_count = 0
     failed_file_ids: list[str] = []
-    if orphaned:
+    kept_files = 0
+    if orphaned and keep_files:
+        # Orphaned files stay indexed in the partition; only the workspace
+        # and its membership rows are removed.
+        kept_files = len(orphaned)
+    elif orphaned:
         results = await asyncio.gather(
             *[
                 call_ray_actor_with_timeout(
@@ -145,6 +154,7 @@ async def delete_workspace(
         "status": "deleted",
         "orphaned_files_deleted": deleted_count,
         "orphaned_files_failed": failed_file_ids,
+        "kept_files": kept_files,
     }
 
 

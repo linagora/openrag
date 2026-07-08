@@ -148,6 +148,62 @@ class TestWorkspaceFiles:
         assert "shared-file" in files1
         assert "shared-file" in files2
 
+    def test_delete_workspace_default_purges_orphaned_files(self, api_client, workspace_partition, workspace_id):
+        """Byte-compatible default: an orphaned file is purged, kept_files is 0."""
+        file_id = f"file-{uuid.uuid4().hex[:8]}"
+        self._upload_file(api_client, workspace_partition, file_id)
+        api_client.post(
+            f"/partition/{workspace_partition}/workspaces",
+            json={"workspace_id": workspace_id},
+        )
+        api_client.post(
+            f"/partition/{workspace_partition}/workspaces/{workspace_id}/files",
+            json={"file_ids": [file_id]},
+        )
+
+        response = api_client.delete(f"/partition/{workspace_partition}/workspaces/{workspace_id}")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "deleted"
+        assert body["orphaned_files_deleted"] == 1
+        assert body["kept_files"] == 0
+
+    def test_delete_workspace_keep_files(self, api_client, workspace_partition, workspace_id):
+        """keep_files=true removes the workspace/membership but leaves the file indexed."""
+        file_id = f"file-{uuid.uuid4().hex[:8]}"
+        probe_content = "Unique keep files probe content"
+        self._upload_file(api_client, workspace_partition, file_id, content=probe_content)
+        api_client.post(
+            f"/partition/{workspace_partition}/workspaces",
+            json={"workspace_id": workspace_id},
+        )
+        api_client.post(
+            f"/partition/{workspace_partition}/workspaces/{workspace_id}/files",
+            json={"file_ids": [file_id]},
+        )
+
+        response = api_client.delete(
+            f"/partition/{workspace_partition}/workspaces/{workspace_id}",
+            params={"keep_files": "true"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "deleted"
+        assert body["orphaned_files_deleted"] == 0
+        assert body["kept_files"] == 1
+
+        # The workspace is gone.
+        ws_response = api_client.get(f"/partition/{workspace_partition}/workspaces/{workspace_id}")
+        assert ws_response.status_code == 404
+
+        # But the file's chunks are still indexed and searchable in the partition.
+        search_response = api_client.get(
+            f"/partition/{workspace_partition}/file/{file_id}",
+            params={"text": probe_content},
+        )
+        assert search_response.status_code == 200
+        assert len(search_response.json()["documents"]) > 0
+
 
 class TestWorkspaceSearch:
     def test_search_empty_workspace_returns_empty(self, api_client, workspace_partition, workspace_id):
