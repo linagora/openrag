@@ -44,9 +44,11 @@ router = APIRouter()
 if TYPE_CHECKING:
     from core.config.root import Settings
 
-# Cached max model token limit. Populated by ``prime_max_model_tokens``
-# which the application lifespan invokes during startup; ``get_max_model_tokens``
-# falls back to ``config.llm_context.max_llm_context_size`` until then.
+# Auto-probed max model token limit. Populated by ``prime_max_model_tokens``
+# which the application lifespan invokes during startup. It is only the *middle*
+# tier of ``get_max_model_tokens``: an admin-configured context size on the
+# default LLM endpoint takes precedence, and ``config.llm_context`` is the final
+# fallback.
 _max_model_tokens: int | None = None
 
 
@@ -174,11 +176,34 @@ async def _fetch_max_model_tokens(config: "Settings") -> int:
         return default_limit
 
 
+def _default_endpoint_context_size(config: "Settings") -> int | None:
+    """Admin-configured context window of the default LLM endpoint, if set."""
+    models = getattr(config, "models", None)
+    return models.default_llm_context_size() if models is not None else None
+
+
+def _effective_max_output_tokens(config: "Settings") -> int:
+    """Default output-token budget: the default LLM endpoint's admin-configured
+    value when set, else the global ``llm_context`` fallback."""
+    models = getattr(config, "models", None)
+    configured = models.default_llm_output_tokens() if models is not None else None
+    return configured or int(config.llm_context.max_output_tokens)
+
+
 def get_max_model_tokens() -> int:
-    """Return the cached max model token limit (populated at startup)."""
+    """Effective max context size for the token preflight.
+
+    Precedence: the default LLM endpoint's admin-configured
+    ``max_llm_context_size`` (editable in the admin UI) > the value auto-probed
+    from vLLM at startup > the global ``llm_context`` fallback. An explicit admin
+    setting wins over auto-detection so operators can pin the budget.
+    """
+    config = _runtime_config()
+    configured = _default_endpoint_context_size(config)
+    if configured is not None:
+        return configured
     if _max_model_tokens is not None:
         return _max_model_tokens
-    config = _runtime_config()
     return int(config.llm_context.max_llm_context_size)
 
 
@@ -194,7 +219,7 @@ def validate_tokens_limit(
 
         if isinstance(request, OpenAIChatCompletionRequest):
             message_tokens = sum(_length_function(m.content or "") + 4 for m in request.messages)
-            default_output_tokens = int(config.llm_context.max_output_tokens)
+            default_output_tokens = _effective_max_output_tokens(config)
             requested_tokens = request.max_tokens or default_output_tokens
             total_tokens_needed = message_tokens + requested_tokens
             if total_tokens_needed > max_tokens_allowed:
@@ -208,7 +233,7 @@ def validate_tokens_limit(
 
         elif isinstance(request, OpenAICompletionRequest):
             prompt_tokens = _length_function(request.prompt)
-            default_output_tokens = int(config.llm_context.max_output_tokens)
+            default_output_tokens = _effective_max_output_tokens(config)
             requested_tokens = request.max_tokens or default_output_tokens
             total_tokens_needed = prompt_tokens + requested_tokens
             if total_tokens_needed > max_tokens_allowed:

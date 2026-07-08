@@ -5,10 +5,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
+from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY
 from core.utils.redaction import redact_secret_mapping
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm"]
+
+# LLM token budgets that the admin UI edits as first-class fields but stores in
+# ``extra`` — validated here so a typo can't persist a nonsensical value.
+_LLM_TOKEN_EXTRA_KEYS = (LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY)
 
 
 def _normalize_name(value: str) -> str:
@@ -25,6 +30,23 @@ def _normalize_endpoint(value: str) -> str:
     if not normalized:
         raise ValueError("endpoint must be non-empty")
     return normalized
+
+
+def _validate_llm_token_extra(extra: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Reject non-positive-int LLM token budgets carried in ``extra``.
+
+    ``bool`` is an ``int`` subclass in Python, so it is excluded explicitly —
+    ``true`` must not slip through as ``1``.
+    """
+    if not extra:
+        return extra
+    for key in _LLM_TOKEN_EXTRA_KEYS:
+        if key not in extra:
+            continue
+        value = extra[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"extra.{key} must be a positive integer")
+    return extra
 
 
 class CreateModelEndpointRequest(BaseModel):
@@ -53,6 +75,12 @@ class CreateModelEndpointRequest(BaseModel):
         """Normalize the endpoint URL."""
         return _normalize_endpoint(value)
 
+    @field_validator("extra")
+    @classmethod
+    def validate_extra_token_budgets(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Reject non-positive-int LLM token budgets in ``extra``."""
+        return _validate_llm_token_extra(value)
+
 
 class UpdateModelEndpointRequest(BaseModel):
     """Request body for updating a registered model endpoint."""
@@ -80,6 +108,12 @@ class UpdateModelEndpointRequest(BaseModel):
         if value is None:
             return None
         return _normalize_endpoint(value)
+
+    @field_validator("extra")
+    @classmethod
+    def validate_extra_token_budgets(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Reject non-positive-int LLM token budgets in ``extra``."""
+        return _validate_llm_token_extra(value)
 
     @model_validator(mode="after")
     def require_at_least_one_update(self) -> UpdateModelEndpointRequest:

@@ -19,11 +19,13 @@ import {
   updateModelEndpoint,
   deleteModelEndpoint,
   mergeModelEndpointApiKeyExtra,
+  mergeModelEndpointLlmContext,
   prepareModelEndpointExtraForSubmit,
   revealModelEndpointApiKey,
   REDACTED_SECRET,
   setDefaultModelEndpoint,
   splitModelEndpointApiKeyExtra,
+  splitModelEndpointLlmContext,
   validateModelEndpoint,
 } from "@/lib/api/models";
 import type {
@@ -272,7 +274,12 @@ function EndpointDialog({
   const [batchSize, setBatchSize] = useState("32");
   const [timeout, setTimeout] = useState("30");
   const [apiKey, setApiKey] = useState("");
+  const [maxContextSize, setMaxContextSize] = useState("");
+  const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
+
+  // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
+  const isLlm = (editing ? editing.model_type : activeTab) === "llm";
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
   const [validationMsg, setValidationMsg] = useState<string | null>(null);
@@ -294,13 +301,16 @@ function EndpointDialog({
       setApiKeyVisible(false);
       setRevealingApiKey(false);
       if (editing) {
-        const { apiKey: displayApiKey, extra: displayExtra } = splitModelEndpointApiKeyExtra(editing.extra);
+        const { apiKey: displayApiKey, extra: apiExtra } = splitModelEndpointApiKeyExtra(editing.extra);
+        const { llmContext, extra: displayExtra } = splitModelEndpointLlmContext(apiExtra);
         setName(editing.name);
         setEndpoint(editing.endpoint);
         setModelName(editing.model_name || "");
         setBatchSize(String(editing.batch_size));
         setTimeout(String(editing.timeout));
         setApiKey(displayApiKey);
+        setMaxContextSize(llmContext.maxContextSize);
+        setMaxOutputTokens(llmContext.maxOutputTokens);
         setExtraJson(JSON.stringify(displayExtra, null, 2));
         setValidated(true);
         setValidationMsg(
@@ -315,6 +325,8 @@ function EndpointDialog({
         setBatchSize("32");
         setTimeout("30");
         setApiKey("");
+        setMaxContextSize("");
+        setMaxOutputTokens("");
         setExtraJson("{}");
         setValidated(null);
         setValidationMsg(null);
@@ -322,15 +334,18 @@ function EndpointDialog({
     }
   }, [open, editing]);
 
-  // Reset validation when relevant fields change
+  // Reset validation when relevant fields change. The LLM token-budget fields
+  // don't affect endpoint reachability, so they're deliberately excluded — the
+  // raw extra is compared with them stripped out (as the textarea shows them).
   useEffect(() => {
     const editingExtra = editing ? splitModelEndpointApiKeyExtra(editing.extra) : null;
+    const editingRawExtra = editingExtra ? splitModelEndpointLlmContext(editingExtra.extra).extra : null;
     if (
       editing &&
       endpoint === editing.endpoint &&
       (modelName || "") === (editing.model_name || "") &&
       apiKey === editingExtra?.apiKey &&
-      extraJson === JSON.stringify(editingExtra.extra, null, 2)
+      extraJson === JSON.stringify(editingRawExtra, null, 2)
     ) {
       setValidated(true);
       setValidationMsg(
@@ -508,6 +523,9 @@ function EndpointDialog({
       toast.error("Invalid JSON in extra field");
       return;
     }
+    if (isLlm) {
+      extra = mergeModelEndpointLlmContext(extra, { maxContextSize, maxOutputTokens });
+    }
 
     if (editing) {
       const updateData: UpdateModelEndpointRequest = {
@@ -572,6 +590,36 @@ function EndpointDialog({
               <Input type="number" step="0.1" value={timeout} onChange={(e) => setTimeout(e.target.value)} />
             </div>
           </div>
+          {isLlm && (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Max context size</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={maxContextSize}
+                  onChange={(e) => setMaxContextSize(e.target.value)}
+                  placeholder="Default"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Max output tokens</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={maxOutputTokens}
+                  onChange={(e) => setMaxOutputTokens(e.target.value)}
+                  placeholder="Default"
+                />
+              </div>
+              <p className="col-span-2 text-xs text-muted-foreground">
+                Token budgets for this endpoint. Leave blank to use the system default. Applied when this is the
+                default LLM endpoint.
+              </p>
+            </div>
+          )}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label>API key</Label>

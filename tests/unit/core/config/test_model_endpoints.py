@@ -5,7 +5,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from core.config.model_endpoints import ModelEndpointConfig, ModelEndpointRow, ModelsConfig
+from core.config.model_endpoints import (
+    LLM_CONTEXT_SIZE_KEY,
+    LLM_OUTPUT_TOKENS_KEY,
+    ModelEndpointConfig,
+    ModelEndpointRow,
+    ModelsConfig,
+)
 from pydantic import ValidationError
 
 
@@ -62,3 +68,42 @@ def test_model_endpoint_row_non_positive_timeout(timeout: float):
     """Persisted endpoint rows reject non-positive timeouts."""
     with pytest.raises(ValidationError):
         ModelEndpointRow(**_row_payload(timeout=timeout))
+
+
+# --------------------------------------------------------------------------- #
+# Default-LLM-endpoint token budget accessors
+# --------------------------------------------------------------------------- #
+
+
+def _with_default_llm(**extra) -> ModelsConfig:
+    cfg = ModelsConfig()
+    cfg.llm["default"] = ModelEndpointConfig(endpoint="http://vllm:8000/v1", extra=dict(extra))
+    return cfg
+
+
+def test_default_llm_token_budgets_none_when_unregistered():
+    cfg = ModelsConfig()
+    assert cfg.default_llm_extra() == {}
+    assert cfg.default_llm_context_size() is None
+    assert cfg.default_llm_output_tokens() is None
+
+
+def test_default_llm_token_budgets_read_from_extra():
+    cfg = _with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 32768, LLM_OUTPUT_TOKENS_KEY: 2048})
+    assert cfg.default_llm_context_size() == 32768
+    assert cfg.default_llm_output_tokens() == 2048
+
+
+def test_default_llm_token_budgets_none_when_key_absent():
+    cfg = _with_default_llm(implementation="vllm")  # unrelated extra key
+    assert cfg.default_llm_context_size() is None
+    assert cfg.default_llm_output_tokens() is None
+
+
+@pytest.mark.parametrize("bad", [0, -1, "not-a-number", None, 12.5])
+def test_default_llm_token_budgets_coerce_invalid_to_none(bad):
+    # A non-positive / non-int stored value means "no override" — the preflight
+    # falls back to the global default rather than trusting garbage.
+    cfg = _with_default_llm(**{LLM_CONTEXT_SIZE_KEY: bad, LLM_OUTPUT_TOKENS_KEY: bad})
+    assert cfg.default_llm_context_size() is None
+    assert cfg.default_llm_output_tokens() is None

@@ -52,6 +52,32 @@ def test_update_model_endpoint_requires_at_least_one_field():
         UpdateModelEndpointRequest()
 
 
+@pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
+@pytest.mark.parametrize("bad", [0, -1, 2.5, "4096", True])
+def test_create_model_endpoint_rejects_bad_llm_token_budget(key, bad):
+    """LLM token budgets in extra must be positive ints (bool/float/str rejected)."""
+    with pytest.raises(ValidationError, match=key):
+        CreateModelEndpointRequest(name="default", model_type="llm", endpoint="http://host", extra={key: bad})
+
+
+@pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
+@pytest.mark.parametrize("bad", [0, -1, 2.5, "4096", True])
+def test_update_model_endpoint_rejects_bad_llm_token_budget(key, bad):
+    with pytest.raises(ValidationError, match=key):
+        UpdateModelEndpointRequest(extra={key: bad})
+
+
+def test_create_model_endpoint_accepts_valid_llm_token_budgets():
+    request = CreateModelEndpointRequest(
+        name="default",
+        model_type="llm",
+        endpoint="http://host",
+        extra={"max_llm_context_size": 32768, "max_output_tokens": 2048, "implementation": "vllm"},
+    )
+    assert request.extra["max_llm_context_size"] == 32768
+    assert request.extra["max_output_tokens"] == 2048
+
+
 def test_create_preset_accepts_indexation_and_retrieval_configs():
     """Preset creation accepts both supported preset families."""
     indexation = CreatePresetRequest(name="fast", preset_type="indexation", config={"chunk_size": 512})
