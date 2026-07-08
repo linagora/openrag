@@ -242,6 +242,26 @@ async def test_chat_answers_with_partition_chat_llm():
     assert default_llm.chat_calls == []  # SimpleRag: no query-gen call either
 
 
+@pytest.mark.asyncio
+async def test_chat_query_generation_uses_partition_chat_llm():
+    # ChatBotRag contextualizes the query with an LLM call — that call must
+    # go through the partition preset too, not just the final answer.
+    default_llm = FakeLLM()
+    query_json = json.dumps({"query_list": [{"query": "rewritten", "temporal_filters": None}]})
+    preset_llm = FakeLLM(chat_responses=[query_json, "preset answer [Sources: none]"])
+    svc = _svc(mode="ChatBotRag", llm=default_llm, llm_factory=RecordingFactory({"mistral": preset_llm}))
+    svc._config.partitions = {"p": _partition(chat_llm="mistral")}
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        prepare_sources=lambda d, w: [],
+        model_name="openrag-p",
+    )
+    assert out["choices"][0]["message"]["content"] == "preset answer"
+    assert len(preset_llm.chat_calls) == 2  # query generation + answer
+    assert default_llm.chat_calls == []
+
+
 # --------------------------------------------------------------------------- #
 # generate_query
 # --------------------------------------------------------------------------- #
