@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -411,11 +412,27 @@ async def generate_unanswerable(
         }
 
 
-async def get_all_chunks(url: str) -> dict:
+class ChunkFetchError(RuntimeError):
+    """Raised when a partition's chunks can't be fetched, carrying an actionable
+    cause (auth failure, partition not found, unreachable server, or empty
+    partition). Subclasses RuntimeError so any existing broad catch still works;
+    __main__ catches it specifically to exit cleanly instead of dumping a traceback.
+    """
+
+
+async def get_all_chunks(url: str) -> list:
+    """Fetch a partition's chunks, or raise ChunkFetchError with a clear cause.
+
+    Definitive failures (401/403 auth, 404 partition-not-found, empty partition)
+    fail fast — retrying can't fix them. Transient failures (connection errors,
+    timeouts, 5xx) are retried up to ``fetch_retries`` before giving up with the
+    last observed cause.
+    """
     retries = CONFIG.question_gen.fetch_retries
     headers = {}
     if OPENRAG_AUTH_TOKEN:
         headers["Authorization"] = f"Bearer {OPENRAG_AUTH_TOKEN}"
+    last_error = "unknown error"
     # One client (and connection pool) for all attempts — created outside the retry
     # loop rather than re-allocated per attempt.
     async with httpx.AsyncClient(timeout=CONFIG.question_gen.fetch_timeout) as client:
@@ -426,17 +443,39 @@ async def get_all_chunks(url: str) -> dict:
                 # resp.json() parses the full (~1.7GB) body — heavy CPU. Run it off
                 # the event loop so it never blocks a host loop if embedded.
                 payload = await asyncio.to_thread(resp.json)
-                all_chunks_list = payload["chunks"]
+                all_chunks_list = payload.get("chunks")
                 if not all_chunks_list:
-                    raise ValueError("No chunks found.")
+                    # Reachable + authorised, but nothing indexed — retrying won't help.
+                    raise ChunkFetchError(
+                        f"Partition returned no chunks — it is empty or not indexed yet ({url})."
+                    )
                 return all_chunks_list
-            except Exception as e:
-                logger.debug(f"Attempt {attempt + 1} failed: {e}")
-                if attempt < retries - 1:
-                    await asyncio.sleep(1)  # Wait before retrying
-                else:
-                    logger.debug(f"Error fetching chunks after {retries} attempts: {e}")
-                    return None
+            except ChunkFetchError:
+                raise  # already-classified definitive error; don't retry or wrap
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                if code in (401, 403):
+                    raise ChunkFetchError(
+                        f"Authentication failed (HTTP {code}) for {url}. "
+                        "Set a valid AUTH_TOKEN (Bearer token) for the OpenRAG server."
+                    ) from e
+                if code == 404:
+                    raise ChunkFetchError(
+                        f"Partition not found (HTTP 404) at {url}. "
+                        "Check the --partition name and that it exists on the server."
+                    ) from e
+                last_error = f"HTTP {code}"  # 5xx / other: transient, retry
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+                last_error = f"cannot reach server ({type(e).__name__})"
+            except Exception as e:  # noqa: BLE001 — record and retry any other transient error
+                last_error = f"{type(e).__name__}: {e}"
+            logger.debug(f"Attempt {attempt + 1}/{retries} failed: {last_error}")
+            if attempt < retries - 1:
+                await asyncio.sleep(1)  # Wait before retrying
+    raise ChunkFetchError(
+        f"Could not fetch chunks from {url} after {retries} attempts ({last_error}). "
+        "Check the server is running, the partition name, and AUTH_TOKEN."
+    )
 
 
 def _pick_type(rng: random.Random) -> str:
@@ -662,15 +701,12 @@ async def main(
     url = f"{openrag_api_base_url}/partition/{partition}/chunks"
 
     start = time.time()
+    # get_all_chunks returns a non-empty list or raises ChunkFetchError with a
+    # clear cause (auth / partition-not-found / unreachable / empty), handled cleanly
+    # in __main__ — no generic "no chunks" guard needed here.
     all_chunks_list = await get_all_chunks(url)
     pause = time.time()
     logger.info(f"Clusters retrieval time: {pause - start} seconds")
-
-    if not all_chunks_list:
-        raise RuntimeError(
-            f"No chunks fetched from {url} after {CONFIG.question_gen.fetch_retries} attempts — "
-            "cannot generate questions (check the server, partition name, and AUTH_TOKEN)."
-        )
 
     ids, chunk_contents, chunk_embeddings, file_ids = map(
         list,
@@ -861,11 +897,17 @@ if __name__ == "__main__":
     if args.no_typing:
         CONFIG.question_gen.typing.enabled = False
 
-    asyncio.run(
-        main(
-            partition=args.partition,
-            n_questions_per_cluster=args.n_questions_per_cluster,
-            n_unanswerable_per_cluster=args.n_unanswerable_per_cluster,
-            output=args.output,
+    try:
+        asyncio.run(
+            main(
+                partition=args.partition,
+                n_questions_per_cluster=args.n_questions_per_cluster,
+                n_unanswerable_per_cluster=args.n_unanswerable_per_cluster,
+                output=args.output,
+            )
         )
-    )
+    except ChunkFetchError as e:
+        # Expected operational failure (bad token / partition / server down): exit
+        # cleanly with the cause and a non-zero code, not a Python traceback.
+        logger.error(str(e))
+        sys.exit(1)

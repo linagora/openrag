@@ -12,7 +12,7 @@ written to a CSV so you can eyeball whether retrieval is actually pulling its we
 
 Usage:
   python3 context_ablation.py                       # first 5 answerable questions
-  python3 context_ablation.py --limit 10 --partition test3
+  python3 context_ablation.py --limit 10 --partition default
 """
 import argparse
 import asyncio
@@ -86,6 +86,16 @@ async def main(
         tqdm.gather(*with_tasks, desc="With context (OpenRAG)"),
         tqdm.gather(*without_tasks, desc="Without context (closed-book)"),
     )
+
+    # If every OpenRAG query failed there is no "with context" side to compare —
+    # a systematic problem (wrong partition, bad AUTH_TOKEN, server down) rather
+    # than per-row flakiness. Fail loudly instead of writing an empty ablation.
+    if sum(1 for r in with_results if r[0] is not None) == 0:
+        raise RuntimeError(
+            f"All {len(with_results)} OpenRAG queries failed (0 responses) for model "
+            f"'openrag-{partition}'. Check the partition name, AUTH_TOKEN, and that the "
+            f"server at {base_url} is reachable."
+        )
 
     records = []
     for r, with_res, without_ans in zip(rows, with_results, without_results):

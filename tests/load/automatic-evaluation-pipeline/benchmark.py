@@ -55,7 +55,14 @@ from metrics import (
     r_precision,
     recall_at_k,
 )
-from openai import AsyncOpenAI, LengthFinishReasonError
+from openai import (
+    APIConnectionError,
+    AsyncOpenAI,
+    AuthenticationError,
+    LengthFinishReasonError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 from tqdm.asyncio import tqdm
 
 load_dotenv()
@@ -109,6 +116,22 @@ async def retrieve_response_and_docs_openrag(
                 tokens,
                 token_logprobs,
             )
+        except (
+            AuthenticationError,
+            PermissionDeniedError,
+            NotFoundError,
+            APIConnectionError,
+        ) as e:
+            # Systematic failure (bad AUTH_TOKEN, wrong partition, unreachable
+            # server). Surface at WARNING so it isn't lost in debug noise, but still
+            # return None so one row can't abort the whole run — the all-failed
+            # guard in main() turns a run-wide failure into a hard error.
+            latency = time.perf_counter() - start
+            logger.warning(
+                f"OpenRAG query failed ({type(e).__name__}) for model 'openrag-{partition}' — "
+                "check the partition name, AUTH_TOKEN, and that the server is reachable."
+            )
+            return None, [], [], latency, float("nan"), float("nan"), [], []
         except Exception as e:
             latency = time.perf_counter() - start
             logger.debug(f"Error fetching chunks and response: {e}")
@@ -925,6 +948,19 @@ async def main(
     ]
 
     openrag_answer_chunk_ids_l = await tqdm.gather(*tasks, desc="Fetching")
+
+    # If not a single OpenRAG query returned a response, there is nothing to score —
+    # almost always a systematic problem (wrong partition, bad AUTH_TOKEN, or the
+    # server being down) rather than per-row flakiness. Fail loudly instead of
+    # writing an empty, misleading report. (r[0] is the response; None == failed.)
+    n_ok = sum(1 for r in openrag_answer_chunk_ids_l if r[0] is not None)
+    if n_ok == 0:
+        raise RuntimeError(
+            f"All {len(openrag_answer_chunk_ids_l)} OpenRAG queries failed (0 responses) for "
+            f"model 'openrag-{partition}'. Check the partition name, AUTH_TOKEN, and that the "
+            f"server at {openrag_api_base_url} is reachable — see the warnings above."
+        )
+
     hit_rates, MRRs, recalls = [], [], []
     row_judge_tasks = []
     precision_at_5_list = []

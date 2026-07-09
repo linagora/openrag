@@ -1,6 +1,6 @@
 {
-    "run_id": "gen-20260701-132215",
-    "created_at": "2026-07-01T13:29:43.198173+00:00",
+    "run_id": "gen-20260708-082852",
+    "created_at": "2026-07-08T08:38:37.387724+00:00",
     "schema_version": "2.0",
     "prompt_version": "qgen-v2",
     "partition": "test3",
@@ -48,10 +48,10 @@
         }
     },
     "counts": {
-        "total": 302,
-        "answerable": 202,
-        "unanswerable": 100,
-        "failed_critic": 4,
+        "total": 425,
+        "answerable": 285,
+        "unanswerable": 140,
+        "failed_critic": 7,
         "generation_errors": 0
     }
 }

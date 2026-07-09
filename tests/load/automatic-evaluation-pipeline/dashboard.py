@@ -84,6 +84,10 @@ ORCHESTRATOR_SCRIPT = REPO_DIR / "orchestrator.py"
 LOG_DIR = REPORTS_DIR / ".logs"
 DEPLOY_INPUTS_DIR = REPORTS_DIR / ".deploy_inputs"
 SCORE_CSV_PATH = REPORTS_DIR / "score.csv"
+# The separate OpenRAG clone the orchestrator checks out versions in. Sits at the
+# main repo root (this pipeline lives 3 levels down under tests/load/). Computed so
+# it stays correct if the pipeline dir moves; users can override it in the UI.
+DEFAULT_VERSIONS_REPO = str(REPO_DIR.parent.parent.parent / "openrag-versions")
 CONTEXT_ABLATION_CSV_PATH = REPORTS_DIR / "context_ablation.csv"
 
 
@@ -1564,7 +1568,7 @@ def render_sidebar(runs: list[dict]) -> tuple[dict | None, dict | None, bool]:
     )
     versions_repo = st.sidebar.text_input(
         "Versions repo path",
-        value=st.session_state.get("deploy_versions_repo", "../openrag-versions"),
+        value=st.session_state.get("deploy_versions_repo", DEFAULT_VERSIONS_REPO),
         key="deploy_versions_repo",
         help="A second OpenRAG clone used only for checkout + deploy (kept separate from this eval repo).",
     )

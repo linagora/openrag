@@ -10,8 +10,7 @@ from typing import Literal
 @dataclass
 class CommonConfig:
     """Shared across benchmark, ablation, generation, and upload."""
-
-    partition: str = "test3"
+    partition: str = field(default_factory=lambda: os.environ.get("PARTITION", "test3"))
     base_url: str = field(
         default_factory=lambda: os.environ.get("API_BASE_URL", "http://localhost:8080")
     )
@@ -178,7 +177,6 @@ class QuestionGenConfig:
 
     # Chunk retrieval from the partition.
     # Large partitions return all chunks WITH embeddings in one response
-    # (e.g. ~1.7GB / ~114s for test3), so allow well over the observed time.
     fetch_retries: int = 3
     fetch_timeout: int = 600
 
