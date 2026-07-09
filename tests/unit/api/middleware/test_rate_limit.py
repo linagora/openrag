@@ -40,7 +40,15 @@ def _build_app(monkeypatch, **env):
     async def ok(request: Request):
         return PlainTextResponse("ok")
 
-    app = Starlette(routes=[Route("/v1/chat", ok), Route("/auth/login", ok), Route("/other", ok)])
+    app = Starlette(
+        routes=[
+            Route("/v1/chat", ok),
+            Route("/auth/login", ok),
+            Route("/other", ok),
+            Route("/chainlit/ws/socket.io/", ok),
+            Route("/assets/pdf.worker.mjs", ok),
+        ]
+    )
     app.add_middleware(RateLimitMiddleware)
     return app
 
@@ -124,6 +132,50 @@ def test_admin_bypasses_rate_limit(monkeypatch):
     client = TestClient(app)
     for _ in range(5):
         assert client.get("/v1/chat").status_code == 200
+
+
+def test_chainlit_socketio_is_exempt(monkeypatch):
+    # Chainlit's Socket.IO transport falls back to HTTP long-polling behind a proxy
+    # that doesn't forward the upgrade, issuing one request per emitted packet. The
+    # subtree is auth-bypassed, so those requests key on the proxy's IP and would
+    # otherwise exhaust a single shared bucket for every chat user at once.
+    app = _build_app(monkeypatch, RATE_LIMIT_DEFAULT="2/minute")
+    client = TestClient(app)
+    for _ in range(10):
+        assert client.get("/chainlit/ws/socket.io/").status_code == 200
+
+
+def test_chainlit_root_assets_are_exempt(monkeypatch):
+    app = _build_app(monkeypatch, RATE_LIMIT_DEFAULT="2/minute")
+    client = TestClient(app)
+    for _ in range(10):
+        assert client.get("/assets/pdf.worker.mjs").status_code == 200
+
+
+def test_exempt_paths_do_not_widen_to_other_routes(monkeypatch):
+    # The exemption must not leak into the tiers it doesn't name.
+    app = _build_app(monkeypatch, RATE_LIMIT_DEFAULT="1/minute")
+    client = TestClient(app)
+    assert client.get("/other").status_code == 200
+    assert client.get("/other").status_code == 429
+
+
+def test_exempt_paths_env_override_replaces_defaults(monkeypatch):
+    # Naming a different prefix un-exempts /chainlit.
+    app = _build_app(monkeypatch, RATE_LIMIT_DEFAULT="1/minute", RATE_LIMIT_EXEMPT_PATHS="/other")
+    client = TestClient(app)
+    assert client.get("/chainlit/ws/socket.io/").status_code == 200
+    assert client.get("/chainlit/ws/socket.io/").status_code == 429
+    for _ in range(5):
+        assert client.get("/other").status_code == 200
+
+
+def test_exempt_paths_can_be_disabled_with_empty_env(monkeypatch):
+    # Set-but-empty means "no exemptions", distinct from unset (use the defaults).
+    app = _build_app(monkeypatch, RATE_LIMIT_DEFAULT="1/minute", RATE_LIMIT_EXEMPT_PATHS="")
+    client = TestClient(app)
+    assert client.get("/chainlit/ws/socket.io/").status_code == 200
+    assert client.get("/chainlit/ws/socket.io/").status_code == 429
 
 
 if __name__ == "__main__":

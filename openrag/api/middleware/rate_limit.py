@@ -9,8 +9,17 @@ Admin users bypass rate limiting entirely, mirroring the file-quota bypass in
 ``api.dependencies.auth`` — trusted operators (admin UI polling, bulk scripts)
 should not be throttled.
 
+The Chainlit subtree is exempt: ``AuthMiddleware`` bypasses it (Chainlit runs
+its own header-auth callback), so no user ever lands on ``request.state`` and
+every request there keys on the client IP — which behind the admin-ui reverse
+proxy is a single container address shared by every chat user. A per-identity
+limit that cannot tell identities apart throttles the whole deployment at once,
+and Chainlit's Socket.IO transport at ``/chainlit/ws/socket.io`` issues one
+HTTP request per emitted packet whenever it falls back to long-polling.
+
 Env: RATE_LIMIT_ENABLED (true), RATE_LIMIT_DEFAULT (600/minute),
-RATE_LIMIT_AUTH (60/minute, /auth/*), RATE_LIMIT_CHAT (120/minute, /v1/*).
+RATE_LIMIT_AUTH (60/minute, /auth/*), RATE_LIMIT_CHAT (120/minute, /v1/*),
+RATE_LIMIT_EXEMPT_PATHS (/chainlit,/assets/ — CSV of path prefixes).
 """
 
 import os
@@ -26,12 +35,26 @@ from starlette.responses import JSONResponse
 
 logger = get_logger()
 
+# Path prefixes the limiter never touches. Mirrors the ``/chainlit`` + ``/assets/``
+# arm of ``api.middleware.auth.is_bypass_path``: those paths are unauthenticated by
+# design, so they can only ever be keyed by proxy IP. ``/auth/*`` is deliberately
+# NOT here — it is the brute-force surface and IP keying is the point.
+DEFAULT_EXEMPT_PREFIXES: tuple[str, ...] = ("/chainlit", "/assets/")
+
 
 def _env_flag(name: str, default: bool) -> bool:
     val = os.environ.get(name)
     if val is None:
         return default
     return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_prefixes(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """CSV of path prefixes. Unset uses ``default``; set-but-empty disables exemptions."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return tuple(p.strip() for p in raw.split(",") if p.strip())
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -41,6 +64,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.enabled = _env_flag("RATE_LIMIT_ENABLED", True)
         self._limiter = MovingWindowRateLimiter(MemoryStorage())
+        self._exempt = _env_prefixes("RATE_LIMIT_EXEMPT_PATHS", DEFAULT_EXEMPT_PREFIXES)
         # Only parse the limit configs when rate limiting is enabled: a malformed
         # RATE_LIMIT_* value must not crash boot when the feature is turned off
         # (``dispatch`` short-circuits before touching these when disabled).
@@ -54,6 +78,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 default=str(self._default),
                 auth=str(self._auth),
                 chat=str(self._chat),
+                exempt=",".join(self._exempt) or "(none)",
             )
 
     def _limit_for(self, path: str):
@@ -83,13 +108,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not self.enabled:
             return await call_next(request)
 
+        path = request.url.path
+
+        # Exempt prefixes are checked before the admin bypass on purpose: these
+        # paths never run through AuthMiddleware, so request.state.user is unset
+        # and _is_admin() is False even for an admin's browser session.
+        if self._exempt and path.startswith(self._exempt):
+            return await call_next(request)
+
         # Admins bypass rate limiting entirely, mirroring the file-quota bypass
         # in api.dependencies.auth. Unauthenticated paths (/auth/*) have no user
         # on request.state, so this only ever exempts an authenticated admin.
         if self._is_admin(request):
             return await call_next(request)
 
-        path = request.url.path
         limit, tier = self._limit_for(path)
         identity = self._identity(request)
 
