@@ -41,6 +41,11 @@ def test_indexation_pipeline_rejects_unknown_contextualization_mode():
         IndexationPipelineConfig(contextualization_mode="verbose")
 
 
+def test_indexation_pipeline_topic_tagging_defaults_off():
+    """Topic tagging is opt-in: tags are not yet surfaced or used in retrieval."""
+    assert IndexationPipelineConfig().enable_topic_tagging is False
+
+
 def test_retrieval_pipeline_rejects_unknown_type():
     """Retrieval presets reject unsupported retrieval modes."""
     with pytest.raises(ValidationError):
