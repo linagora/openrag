@@ -69,6 +69,7 @@ class OllamaClient(LLM):
             timeout=timeout,
             headers={"Content-Type": "application/json"},
         )
+        logger.bind(model=self._model, endpoint=self._endpoint, timeout=timeout).debug("OllamaClient ready")
 
     @with_circuit_breaker("llm")
     @with_retry(max_attempts=3)

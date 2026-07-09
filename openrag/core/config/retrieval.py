@@ -32,8 +32,13 @@ class OpenAIRerankerConfig(_BaseRerankerConfig):
     base_url: str = "http://reranker:8000/v1"
 
 
+class TEIRerankerConfig(_BaseRerankerConfig):
+    provider: Literal["tei"] = "tei"
+    base_url: str = "http://reranker:8080"
+
+
 RerankerConfig = Annotated[
-    InfinityRerankerConfig | OpenAIRerankerConfig,
+    InfinityRerankerConfig | OpenAIRerankerConfig | TEIRerankerConfig,
     Field(discriminator="provider"),
 ]
 

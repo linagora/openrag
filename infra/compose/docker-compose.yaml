@@ -5,7 +5,7 @@ include:
   - ${TRANSCRIBER_COMPOSE:-../../extern/dummy.yaml}
 
 x-openrag: &openrag_template
-  image: linagoraai/openrag:latest
+  image: linagoraai/openrag:v2.0.0
   # Start as root so entrypoint.sh can grant GID-0 write on the bind-mounted
   # writable dirs (data/, logs/, the HF cache) — which a non-root container
   # can't write when Docker auto-creates them root-owned — then it immediately
@@ -46,7 +46,7 @@ x-openrag: &openrag_template
     # (or a writable host path) override the running code. Uncomment for local
     # development; keep it off in production.
     # - ../../openrag:/app/openrag # For dev mode
-    - /$SHARED_ENV:/ray_mount/.env # Shared environment variables
+    - ${SHARED_ENV:-./.env}:/ray_mount/.env # Shared environment variables (falls back to ./.env)
     - ${LOG_VOLUME:-../../logs}:/app/logs
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
@@ -98,7 +98,7 @@ x-vllm: &vllm_template
 services:
   # ── Admin UI (React SPA + nginx, same-origin reverse proxy to the API) ──
   admin-ui:
-    image: linagoraai/openrag-admin-ui:latest
+    image: linagoraai/openrag-admin-ui:v2.0.0
     build:
       context: ../..
       dockerfile: infra/docker/ui.Dockerfile

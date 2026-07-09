@@ -100,7 +100,10 @@ def test_preset_options_crud_and_rename(api_client):
 
         list_retrieval = api_client.get("/presets/", params={"preset_type": "retrieval"})
         _assert_success(list_retrieval, context="list retrieval presets")
-        assert retrieval_preset_renamed in {row["name"] for row in list_retrieval.json()}
+        rows_by_name = {row["name"]: row for row in list_retrieval.json()}
+        assert retrieval_preset_renamed in rows_by_name
+        # Freshly created preset with no partitions pointing at it yet.
+        assert rows_by_name[retrieval_preset_renamed]["used_by_partitions"] == 0
 
         get_retrieval = api_client.get(f"/presets/retrieval/{retrieval_preset_renamed}")
         _assert_success(get_retrieval, context="get renamed retrieval preset")

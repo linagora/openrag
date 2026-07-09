@@ -105,3 +105,119 @@ async def test_create_partition_existing_row_raises_conflict():
     assert exc.value.status_code == 409
     assert exc.value.code == "PARTITION_EXISTS"
     assert conn.inserted_partition is False
+
+
+# ── update_partition preset-assignment race guard ────────────────────
+
+
+def _full_partition_row(**overrides):
+    row = {
+        "partition": "p1",
+        "description": None,
+        "embedder": "default",
+        "indexation_preset": "legal",
+        "retrieval_preset": "default",
+        "dimension": None,
+        "collection_name": None,
+        "chat_history_depth": 0,
+        "chat_llm": None,
+        "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+        "updated_at": datetime(2026, 1, 1, tzinfo=UTC),
+    }
+    row.update(overrides)
+    return row
+
+
+class _UpdateFakeConn:
+    """Conn/pool double for exercising update_partition's transactional guard.
+
+    ``preset_exists`` models whether the referenced preset row is still present
+    when the guard's follow-up SELECT runs (False simulates a concurrent
+    delete_preset committing while this UPDATE was blocked on its SHARE lock).
+    """
+
+    def __init__(self, *, preset_exists: bool = True):
+        self.preset_exists = preset_exists
+        self.operations: list[tuple[str, tuple]] = []
+        self.transactions = 0
+
+    # pool interface
+    def acquire(self):
+        return _AsyncContext(self)
+
+    async def fetchrow(self, query: str, *params):
+        self.operations.append((query, params))
+        if "UPDATE partitions" in query:
+            # Reflect the assigned columns back so the returned row matches the
+            # write. ``$n`` placeholders are 1-indexed into params ($1 = name).
+            body = query.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+            update = {}
+            for frag in body.split(", "):
+                col, _, ref = frag.strip().partition(" = $")
+                if ref.isdigit():
+                    update[col.strip()] = params[int(ref) - 1]
+            return _full_partition_row(**update)
+        return None
+
+    async def fetchval(self, query: str, *params):
+        self.operations.append((query, params))
+        if "FROM pipeline_presets" in query:
+            return 1 if self.preset_exists else None
+        return None
+
+    # conn interface
+    def transaction(self):
+        self.transactions += 1
+        self.operations.append(("BEGIN", ()))
+        return _AsyncContext(self)
+
+
+@pytest.mark.asyncio
+async def test_update_partition_rolls_back_when_preset_deleted_concurrently():
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _UpdateFakeConn(preset_exists=False)
+    repo = PgPartitionRepository(pool_getter=lambda: conn)
+
+    with pytest.raises(ValidationError) as exc:
+        await repo.update_partition("p1", indexation_preset="just-deleted")
+
+    assert exc.value.code == "PRESET_NOT_FOUND"
+    # The write and the existence check share one transaction, and the write
+    # (partitions) happens before the check (pipeline_presets) — the lock order
+    # that keeps it deadlock-free against delete_preset. Raising inside the
+    # transaction rolls the UPDATE back.
+    assert conn.transactions == 1
+    queries = [q for q, _ in conn.operations]
+    update_i = next(i for i, q in enumerate(queries) if "UPDATE partitions" in q)
+    check_i = next(i for i, q in enumerate(queries) if "FROM pipeline_presets" in q)
+    assert update_i < check_i
+
+
+@pytest.mark.asyncio
+async def test_update_partition_commits_when_preset_exists():
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _UpdateFakeConn(preset_exists=True)
+    repo = PgPartitionRepository(pool_getter=lambda: conn)
+
+    result = await repo.update_partition("p1", indexation_preset="legal")
+
+    assert result["indexation_preset"] == "legal"
+    assert conn.transactions == 1
+    assert any("FROM pipeline_presets" in q for q, _ in conn.operations)
+
+
+@pytest.mark.asyncio
+async def test_update_partition_without_preset_change_skips_the_guard():
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _UpdateFakeConn(preset_exists=False)
+    repo = PgPartitionRepository(pool_getter=lambda: conn)
+
+    result = await repo.update_partition("p1", description="notes")
+
+    # Non-preset updates take the fast path: no transaction, no preset lookup.
+    assert result["description"] == "notes"
+    assert conn.transactions == 0
+    assert not any("FROM pipeline_presets" in q for q, _ in conn.operations)

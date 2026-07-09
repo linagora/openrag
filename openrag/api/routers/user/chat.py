@@ -328,7 +328,10 @@ async def openai_chat_completion(
                 log.warning("OpenRAG error during streaming", code=e.code, error=e.message)
                 yield _make_sse_error(e.message, e.code)
             except Exception as e:
-                log.warning("Error during streaming", error=str(e))
+                # Unexpected (non-OpenRAGError) failure: attach the traceback so the
+                # actual fault is visible, not just its str() — the client only gets
+                # a generic message, so the log is the only record of the root cause.
+                log.opt(exception=e).error("Error during streaming", error=str(e))
                 yield _make_sse_error("An unexpected error occurred during streaming", "UNEXPECTED_ERROR")
 
         return StreamingResponse(stream_response(), media_type="text/event-stream")

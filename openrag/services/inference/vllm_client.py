@@ -76,6 +76,15 @@ class VLLMClient(LLM):
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
+        # Same construction breadcrumb as VLLMEmbedder: the component factories
+        # cache instances per endpoint name, so this fires once per configured
+        # endpoint and shows which base URL/model a preset name resolved to.
+        logger.bind(
+            model=self._model,
+            endpoint=self._endpoint,
+            timeout=timeout,
+            enable_thinking=self._enable_thinking,
+        ).debug(f"{type(self).__name__} ready")
 
     def _resolve_overrides(self, kwargs: dict) -> tuple[str, str, dict[str, str] | None]:
         """Read ``metadata.llm_override`` from *kwargs* without mutating caller data.
@@ -103,7 +112,7 @@ class VLLMClient(LLM):
     def _chat_payload_kwargs(self, kwargs: dict) -> dict:
         payload_kwargs = {**self._defaults, **kwargs}
         enable_thinking = payload_kwargs.pop("enable_thinking", self._enable_thinking)
-        if enable_thinking is not None:
+        if enable_thinking is not None and enable_thinking is True:
             chat_template_kwargs = dict(payload_kwargs.get("chat_template_kwargs") or {})
             chat_template_kwargs.setdefault("enable_thinking", enable_thinking)
             payload_kwargs["chat_template_kwargs"] = chat_template_kwargs

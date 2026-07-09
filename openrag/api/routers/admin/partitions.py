@@ -325,7 +325,7 @@ Accepts partition config fields such as:
 - `indexation_preset`
 - `retrieval_preset`
 - `chat_history_depth`
-- `chat_llm`
+- `chat_llm` (must name a registered LLM endpoint — 422 otherwise; explicit `null` resets to the default LLM)
 
 **Permissions:**
 - Requires partition owner role

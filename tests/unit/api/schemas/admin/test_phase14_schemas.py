@@ -122,3 +122,24 @@ def test_update_partition_rejects_explicit_nulls(field):
     """Partition updates reject null for fields that cannot be cleared."""
     with pytest.raises(ValidationError, match=rf"{field} cannot be null"):
         UpdatePartitionRequest(**{field: None})
+
+
+def test_update_partition_chat_llm_allows_explicit_null_as_reset():
+    """Unlike the other fields, chat_llm=null is a real value: reset to default."""
+    request = UpdatePartitionRequest(chat_llm=None)
+    assert request.chat_llm is None
+    assert "chat_llm" in request.model_fields_set
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_update_partition_chat_llm_normalizes_blank_to_null(blank):
+    """A blank chat_llm means the same as null: reset to the default LLM."""
+    assert UpdatePartitionRequest(chat_llm=blank).chat_llm is None
+
+
+def test_update_partition_chat_llm_strips_whitespace():
+    assert UpdatePartitionRequest(chat_llm="  mistral  ").chat_llm == "mistral"
+
+
+def test_create_partition_chat_llm_normalizes_blank_to_null():
+    assert CreatePartitionRequest(name="legal", chat_llm=" ").chat_llm is None

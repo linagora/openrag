@@ -204,6 +204,7 @@ export const handlers = [
       external_user_id: null,
       email: "admin@example.com",
       is_admin: true,
+      chainlit_enabled: true,
       file_quota: -1,
       indexed_files: 42,
       pending_files: 3,
@@ -662,6 +663,7 @@ export const handlers = [
       // super_admin_mode is a top-level runtime flag on /config (see api/main.py),
       // not nested under auth — the permission layer reads config.super_admin_mode.
       super_admin_mode: true,
+      chainlit_enabled: true,
       auth: { auth_mode: "oidc" },
       milvus: { host: "milvus", port: 19530, database: "openrag" },
       ray: { address: "ray://ray-head:10001", pool_size: 2, max_tasks_per_worker: 2 },

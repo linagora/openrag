@@ -10,6 +10,7 @@ class TestUserManagement:
         assert response.status_code == 200
         data = response.json()
         assert "id" in data
+        assert isinstance(data.get("chainlit_enabled"), bool)
 
     def test_list_users(self, api_client):
         """Test listing users."""

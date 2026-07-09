@@ -17,6 +17,9 @@ export interface PresetResponse {
   config: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+  // Distinct partition count referencing this preset. Only populated by
+  // listPresets(); get/create/update responses default this to 0.
+  used_by_partitions: number;
 }
 
 export interface CreatePresetRequest {

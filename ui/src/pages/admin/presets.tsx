@@ -39,6 +39,13 @@ import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatDate, intOr, numOr } from "@/lib/utils";
+import {
+  type Config,
+  configGet,
+  configSet,
+  applyParsingStrategyChange,
+  PARSING_STRATEGY_INHERIT,
+} from "./preset-config";
 
 const PRESET_TYPES = ["indexation", "retrieval"] as const;
 
@@ -148,7 +155,21 @@ export default function PresetsPage() {
                   .map((preset) => (
                     <Card key={`${preset.preset_type}-${preset.name}`} className="flex flex-col">
                       <CardHeader className="pb-3">
-                        <CardTitle className="text-base">{preset.name}</CardTitle>
+                        <div className="flex items-center justify-between gap-2">
+                          <CardTitle className="text-base">{preset.name}</CardTitle>
+                          <Badge
+                            variant="outline"
+                            className={
+                              preset.used_by_partitions > 0
+                                ? "text-xs h-fit shrink-0 bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/60"
+                                : "text-xs h-fit shrink-0 bg-muted text-muted-foreground border-transparent"
+                            }
+                          >
+                            {preset.used_by_partitions > 0
+                              ? `used by ${preset.used_by_partitions} partition${preset.used_by_partitions === 1 ? "" : "s"}`
+                              : "unused"}
+                          </Badge>
+                        </div>
                       </CardHeader>
                       <CardContent className="flex flex-col flex-1 text-sm">
                         <div className="flex flex-wrap gap-1 flex-1">
@@ -176,7 +197,11 @@ export default function PresetsPage() {
                           </Button>
                           <ConfirmDialog
                             title="Delete preset?"
-                            description={`This will delete "${preset.name}". Partitions using it will fall back to defaults.`}
+                            description={
+                              preset.used_by_partitions > 0
+                                ? `"${preset.name}" is used by ${preset.used_by_partitions} partition${preset.used_by_partitions === 1 ? "" : "s"}. Reassign them to a different preset before deleting.`
+                                : `This will permanently delete "${preset.name}".`
+                            }
                             onConfirm={() =>
                               deleteMut.mutate({ type: preset.preset_type, name: preset.name })
                             }
@@ -211,20 +236,6 @@ export default function PresetsPage() {
       />
     </div>
   );
-}
-
-/* ---------- helpers ---------- */
-
-type Config = Record<string, unknown>;
-
-function configGet<T>(config: Config, key: string, fallback: T): T {
-  const v = config[key];
-  if (v === undefined || v === null) return fallback;
-  return v as T;
-}
-
-function configSet(prev: Config, key: string, value: unknown): Config {
-  return { ...prev, [key]: value };
 }
 
 /* ---------- Indexation form ---------- */
@@ -334,19 +345,14 @@ function IndexationPresetForm({
         <div className="space-y-1.5">
           <Label className="text-xs">Strategy</Label>
           <Select
-            value={configGet(config, "parsing_strategy", "marker")}
-            onValueChange={(v) => {
-              // pymupdf is text-only (no images), so captioning can't apply —
-              // turn it off when switching to it (see the disabled toggle below).
-              let next = configSet(config, "parsing_strategy", v);
-              if (v === "pymupdf") next = configSet(next, "enable_image_captioning", false);
-              onChange(next);
-            }}
+            value={configGet(config, "parsing_strategy", PARSING_STRATEGY_INHERIT)}
+            onValueChange={(v) => onChange(applyParsingStrategyChange(config, v))}
           >
             <SelectTrigger size="sm">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value={PARSING_STRATEGY_INHERIT}>Default (inherit global loader)</SelectItem>
               {parsingStrategies.map((s) => (
                 <SelectItem key={s} value={s}>
                   {s}
@@ -370,7 +376,7 @@ function IndexationPresetForm({
           // reads "off" while the backend still captions during indexing (#453).
           enabled={configGet(config, "enable_image_captioning", true)}
           onToggle={(on) => toggleFeature("enable_image_captioning", "vlm", on)}
-          disabled={configGet<string>(config, "parsing_strategy", "marker") === "pymupdf"}
+          disabled={configGet<string>(config, "parsing_strategy", PARSING_STRATEGY_INHERIT) === "pymupdf"}
           disabledHint="pymupdf extracts text only — use marker or docling for image captioning."
           modelLabel="VLM"
           modelValue={configGet(config, "vlm", "")}

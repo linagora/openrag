@@ -249,7 +249,6 @@ def _install_stubs():
     stub.get_task_state_manager = lambda: _stub_task_state_manager
     stub.get_serializer = lambda: None
     stub.get_indexer = lambda: None
-    stub.get_marker_pool = lambda: None
     sys.modules["utils.dependencies"] = stub
 
     def _logger():

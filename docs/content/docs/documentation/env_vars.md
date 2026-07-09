@@ -6,7 +6,7 @@ title: Environment Variable Configuration
 OpenRAG provides a large range of environment variables that allow you to customize and configure various aspects of the application. This page serves as a comprehensive reference for all available environment variables, providing their types, default values, and descriptions. As new variables are introduced, this page will be updated to reflect the growing configuration options.
 
 :::note
-This page is up-to-date with OpenRAG release version v.1.1.2 but is still a work in progress to later include more accurate descriptions, listing out options available for environment variables, defaults, and improving descriptions.
+This page is up-to-date with OpenRAG v2.0.0. Types and defaults are cross-checked against `conf/config.yaml` and the config loader. Authentication and SSO variables (`AUTH_MODE`, `OIDC_*`) are documented separately in the [OIDC guide](/openrag/documentation/oidc/).
 :::
 
 # Backend
@@ -22,15 +22,16 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | `IMAGE_CAPTIONING_URL` | `bool` | `true` | If `true`, HTTP/HTTPS image URLs in markdown files are fetched and described by the VLM. |
 | `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing is saved. Useful for debugging and verifying the correctness of the generated markdown. |
 |`SAVE_UPLOADED_FILES`|`bool`|`false`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
-| `PDFLoader` | `str` | `MarkerLoader` | Specifies the PDF parsing engine to use. Available options: `PyMuPDFLoader`, `MarkerLoader` and `DotsOCRLoader`.|
+| `PDFLOADER` | `str` | `PyMuPDFLoader` | PDF parsing engine. `PyMuPDFLoader` (default) is a lightweight, fast, CPU-friendly backend for searchable PDFs. Switch to `MarkerLoader` for OCR / scanned documents, complex layouts and embedded images (heavier; GPU-friendly). Other options: `DoclingLoader`, `DotsOCRLoader`.|
+| `PARSE_TIMEOUT` | `int` | `3600` | Outer wall-clock bound (in seconds) for a single file's parse stage, whichever loader runs it. Marker and Docling self-limit via their own timeouts, but `PyMuPDFLoader` has none — this bound stops a wedged parse from stalling indexing: the file fails and is reported instead. |
 
 :::caution
-`PyMuPDFLoader` is a lightweight pdf loader that cannot process non-searchable (image-based) PDFs and does not extract or handle embedded images.
+`PyMuPDFLoader` (the default) is a lightweight PDF loader that cannot process non-searchable (image-based) PDFs and does not extract or handle embedded images. Set `PDFLOADER=MarkerLoader` when you need those.
 :::
 
 #### PDF Loader
 ##### Marker Loader Configuration
-The `MarkerLoader` is the default PDF parsing engine. It can be configured using the following environment variables:
+These settings apply when `MarkerLoader` is selected (`PDFLOADER=MarkerLoader`; the default is `PyMuPDFLoader`). It can be configured using the following environment variables:
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -50,6 +51,15 @@ It also **reduces per-worker GPU memory spikes** on large files. With a reasonab
 :::
 
 
+
+##### Docling Loader Configuration
+These settings apply when `DoclingLoader` is selected (`PDFLOADER=DoclingLoader`):
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `DOCLING_POOL_SIZE` | `int` | 1 | Number of Docling worker actors in the Ray pool |
+| `DOCLING_MAX_TASKS_PER_WORKER` | `int` | 2 | Maximum number of PDFs processed concurrently per Docling worker |
+| `DOCLING_NUM_GPUS` | `float` | 0.01 | Fraction of a GPU reserved per Docling worker in Ray's resource accounting |
 
 ##### OpenAI-Compatible OCR Loader Configuration
 
@@ -87,8 +97,9 @@ For local whisper loader, here are the options to use
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `WHISPER_MODEL` | `str` | `base` | The whisper multilingual model to use depending on [available resources](https://github.com/openai/whisper?tab=readme-ov-file#available-models-and-languages). Other options: `base`, `small`, `large`, `large-v3`, etc. |
-|`WHISPER_N_WORKERS`| `int` | 3 | Number of whisper workers|
+|`WHISPER_N_WORKERS`| `int` | 2 | Number of whisper workers|
 | `WHISPER_CONCURRENCY_PER_WORKER` | `int` | 2 | Maximum number of audio transcription tasks processed concurrently by each Whisper worker. |
+| `WHISPER_NUM_GPUS` | `float` | 0.01 | Fraction of a GPU reserved per Whisper worker in Ray's resource accounting. |
 
 ##### OpenAI-compatible audio Loader ( `OpenAIAudioLoader` )
 The `OpenAIAudioLoader` option, allows to use openai-compatible audio endpoint/service to transcribe audio endpoint by providing the following variables: **`TRANSCRIBER_BASE_URL`, `TRANSCRIBER_API_KEY` and `TRANSCRIBER_MODEL`**
@@ -120,6 +131,7 @@ Here are some other variables related to openai-compatible endpoint.
 | `TRANSCRIBER_TIMEOUT` | `int` | `3600` | Maximum duration in seconds allowed for a single transcription request. |
 | `TRANSCRIBER_DIRECT_UPLOAD_SUFFIXES` | `str` | `.wav\|.flac\|.ogg\|.mp3\|.mp4\|.m4a\|.webm\|.mpeg\|.mpga` | Pipe-delimited list of audio file suffixes uploaded to the transcriber as-is (no WAV conversion). Other formats are re-encoded to WAV before upload. Trim this list when your transcriber backend (e.g. vLLM/libsndfile) only accepts a subset. |
 | `USE_WHISPER_LANG_DETECTOR` | `bool` | `true` | When enabled, uses a local Whisper-based language detector to identify the source audio language before transcription. |
+| `TRANSCRIBER_PORT` | `int` | `8002` | Host port the **bundled** vLLM Whisper service (`TRANSCRIBER_COMPOSE=extern/transcriber.yaml`) is published on (maps to container port 8000). Only read once you uncomment the `ports:` mapping in that compose include — by default the service is reachable over the Docker network only. |
 
 </div>
 
@@ -159,7 +171,10 @@ Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured
 | `EMBEDDER_MODEL_NAME` | `str` | jinaai/jina-embeddings-v3 | HuggingFace Embedding model served by VLLM .i.e `Qwen/Qwen3-Embedding-0.6B` or `jinaai/jina-embeddings-v3`|
 | `EMBEDDER_BASE_URL` | `str` | http://vllm:8000/v1 | Base URL of the embedder (OpenAI-style).|
 | `EMBEDDER_API_KEY`  | `str` | EMPTY | API key for authenticating embedder calls.|
-| `MAX_MODEL_LEN` | `int` | 8192 | Maximum context length (in tokens) supported by the embedding model. If the chunk exceeds this limit, the embedder will truncate it.|
+| `MAX_MODEL_LEN` | `int` | 2047 | Maximum context length (in tokens) supported by the embedding model. Chunks exceeding this limit are truncated (`truncate_prompt_tokens` = this value − 1). Keep it below the model's real context boundary. |
+| `EMBEDDER_TIMEOUT` | `float` | 120.0 | Per-request HTTP timeout (in seconds) for embedding calls. Raise it for slow remote endpoints. |
+| `EMBEDDER_BATCH_SIZE` | `int` | 32 | Number of chunks sent per embedding request; large documents are split into batches of this size. |
+| `EMBEDDER_CONCURRENCY` | `int` | 4 | Maximum number of embedding requests in flight at once. |
 
 If you prefer to use an **external embedding service**, simply comment out the embedder service in the [docker-compose.yaml](https://github.com/linagora/openrag/blob/dev/docker-compose.yaml#L117-L153) and provide the variables above in your environment.
 
@@ -203,6 +218,19 @@ The PostgreSQL database is configured using the following environment variables:
 | `POSTGRES_POOL_MAX_SIZE` | int | 20 | Maximum size of the async PostgreSQL connection pool. |
 | `POSTGRES_COMMAND_TIMEOUT` | int | 30 | Timeout in seconds for PostgreSQL commands issued through the async pool. |
 
+* **`Object Storage (MinIO)`**
+
+Milvus stores its data in a MinIO object store, whose credentials are **required (no default)** — the compose stack refuses to start if they are unset. Generate strong random values (e.g. `openssl rand -hex 16`). The same values are shared between the `minio` service and Milvus, so both sides must match.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `MINIO_ACCESS_KEY` | str | _(required)_ | MinIO access key, shared by the `minio` service and Milvus. No default. |
+| `MINIO_SECRET_KEY` | str | _(required)_ | MinIO secret key, shared by the `minio` service and Milvus. No default. |
+
+:::note
+The separate getting-started stack under `infra/quick_start/` names these credentials `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` instead (also required, no default).
+:::
+
 ### Compose Storage Volumes
 
 The main Docker Compose stack keeps the historical host-path defaults. Set these variables when you want to move state elsewhere, including Docker named volumes.
@@ -234,24 +262,33 @@ The system uses two types of language models:
 These are external services to provide !!!
 
 #### LLM Configuration
-| Variable | Type | Description |
-|----------|------|-------------|
-| `BASE_URL` | str | Base URL of the LLM API endpoint |
-| `MODEL` | str | Model identifier for the LLM |
-| `API_KEY` | str | API key for authenticating with the LLM service |
-| `LLM_ENABLE_THINKING` | bool | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `BASE_URL` | str | _(required)_ | Base URL of the LLM API endpoint |
+| `MODEL` | str | _(required)_ | Model identifier for the LLM |
+| `API_KEY` | str | _(unset)_ | API key for authenticating with the LLM service |
+| `LLM_ENABLE_THINKING` | bool | _(unset)_ | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
 | `LLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the LLM service |
 | `MAX_LLM_CONTEXT_SIZE` | `int` | `8192` | Fallback maximum token limit for chat/completion requests. At startup, the `/v1/models` endpoint is queried for the model's `max_model_len`; if that query fails this value is used instead. Requests whose total token count (prompt + `max_tokens`) exceeds the limit are rejected with a **413** error. |
+| `MAX_OUTPUT_TOKENS` | `int` | `1024` | Default output-token budget (`max_tokens`) applied to chat completions when the request doesn't set one explicitly. |
 
 
 #### VLM Configuration
-| Variable | Type | Description |
-|----------|------|-------------|
-| `VLM_BASE_URL` | str | Base URL of the VLM API endpoint |
-| `VLM_MODEL` | str | Model identifier for the VLM |
-| `VLM_API_KEY` | str | API key for authenticating with the VLM service |
-| `VLM_ENABLE_THINKING` | bool | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `VLM_BASE_URL` | str | _(required)_ | Base URL of the VLM API endpoint |
+| `VLM_MODEL` | str | _(required)_ | Model identifier for the VLM |
+| `VLM_API_KEY` | str | _(unset)_ | API key for authenticating with the VLM service |
+| `VLM_ENABLE_THINKING` | bool | _(unset)_ | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
 | `VLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the VLM service |
+
+### RAG Pipeline Mode
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `RAG_MODE` | `str` | `ChatBotRag` | How the pipeline turns the conversation into search queries. `ChatBotRag` (default) uses the LLM and the chat history to generate contextualized search queries; `SimpleRag` skips query generation and searches directly on the raw last user message. |
 
 ### Retriever Configuration
 
@@ -262,7 +299,12 @@ The retriever fetches relevant documents from the vector database based on query
 | `RETRIEVER_TYPE` | str | single | Retrieval strategy to use. Options: `single`, `multiQuery`, `hyde` |
 | `RETRIEVER_TOP_K` | int | 50 | Number of documents to retrieve before reranking.|
 | `SIMILARITY_THRESHOLD` | float | 0.6 | Minimum similarity score (0.0-1.0) for document retrieval. Documents below this threshold are filtered out |
-| `WITH_SURROUNDING_CHUNKS` | `bool` | true | When enabled, retrieves adjacent chunks (preceding and following) for each matched document to provide additional context.|
+| `WITH_SURROUNDING_CHUNKS` | `bool` | false | When enabled, retrieves adjacent chunks (preceding and following) for each matched document to provide additional context.|
+| `INCLUDE_RELATED` | `bool` | true | Expand results with chunks from files sharing the matched file's `relationship_id` (see [Linked files](/openrag/documentation/linked_files/)). |
+| `INCLUDE_ANCESTORS` | `bool` | true | Expand results with chunks from ancestor files in the parent/child file hierarchy (see [Linked files](/openrag/documentation/linked_files/)). |
+| `RELATED_LIMIT` | `int` | 10 | Maximum number of related/ancestor chunks fetched per matched result when expansion is enabled. |
+| `MAX_DEPTH` | `int` | 10 | Maximum ancestor depth traversed when `INCLUDE_ANCESTORS` is enabled. |
+| `RETRIEVER_ALLOW_FILTERLESS_FALLBACK` | `bool` | true | When a temporally-filtered retrieval returns no documents, re-run the query without the filter. Set to `false` for strict temporal retrieval. |
 
 #### Retrieval Strategies
 
@@ -274,24 +316,27 @@ The retriever fetches relevant documents from the vector database based on query
 
 ### Reranker Configuration
 
-The reranker enhances search quality by re-scoring and reordering retrieved documents according to their relevance to the user's query. Two providers are supported: **Infinity** (default) and **OpenAI-compatible** endpoints.
+The reranker enhances search quality by re-scoring and reordering retrieved documents according to their relevance to the user's query. Three providers are supported: **Infinity** (default), **OpenAI-compatible** endpoints, and **Hugging Face Text Embeddings Inference (TEI)**.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `RERANKER_ENABLED` | `bool` | true | Enable or disable the reranking mechanism |
-| `RERANKER_PROVIDER` | `str` | `infinity` | Reranker backend to use. Accepted values: `infinity`, `openai` |
-| `RERANKER_MODEL` | `str` | Alibaba-NLP/gte-multilingual-reranker-base | Model used for reranking documents.|
+| `RERANKER_PROVIDER` | `str` | `infinity` | Reranker backend to use. Accepted values: `infinity`, `openai`, `tei` |
+| `RERANKER_MODEL` | `str` | Alibaba-NLP/gte-multilingual-reranker-base | Model used for reranking documents. Ignored by the `tei` provider (a TEI instance serves a single fixed model) |
 | `RERANKER_TOP_K` | `int` | 10 | Number of top documents to return after reranking. Increase for better results if your LLM has a wider context window |
 | `RERANKER_BASE_URL` | `str` | `http://reranker:7997` | Base URL of the reranker service |
-| `RERANKER_API_KEY` | `str` | `EMPTY` | API key for the reranker service. Required when using the `openai` provider |
+| `RERANKER_API_KEY` | `str` | `EMPTY` | API key for the reranker service, sent as a `Bearer` token when set. Whether a key is required depends on your endpoint |
+| `RERANKER_TIMEOUT` | `float` | 60.0 | HTTP timeout in seconds for reranker requests |
 | `RERANKER_SEMAPHORE` | `int` | 5 | Maximum number of concurrent reranking requests. Adjust based on your server capacity |
+| `RERANKER_PORT` | `int` | `7997` (infinity) / `8000` (openai) | Host port the **bundled** reranker service is published on. Only read by the compose includes (`extern/reranker/*.yaml`), and only once you uncomment their `ports:` mapping — by default the service is reachable over the Docker network only, so publishing it is just for host-side debugging or direct calls. |
 
 #### Reranker Providers
 
 | Provider | `RERANKER_PROVIDER` value | Description |
 |----------|--------------------------|-------------|
 | **Infinity** | `infinity` | Uses the [Infinity server](https://github.com/michaelfeil/infinity) via its native client. Default port: `7997` |
-| **OpenAI-compatible** | `openai` | Uses any OpenAI-compatible reranker endpoint (e.g. vLLM, LiteLLM, TEI). Default port: `8000` |
+| **OpenAI-compatible** | `openai` | Uses any reranker endpoint implementing the `{model, query, documents, top_n}` → `{results: [...]}` rerank contract (e.g. vLLM, LiteLLM). Default port: `8000` |
+| **TEI** | `tei` | Uses a [Hugging Face Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference) server via its native `/rerank` API (which is **not** OpenAI-compatible: `texts` instead of `documents`, no `model`/`top_n` fields, bare-array response). Default port: `8080`. Requests are batched to 32 texts to fit TEI's default `--max-client-batch-size` |
 
 ## Extra
 ### Prompts
@@ -417,7 +462,7 @@ For multi-node distributed deployments, see [Distributed Deployment in a Ray Clu
 | `RAY_SERVE_NUM_REPLICAS` | int | 1 | Number of service replicas for load balancing |
 | `RAY_SERVE_HOST` | str | 0.0.0.0 | Host address for the Ray Serve deployment |
 | `RAY_SERVE_PORT` | int | 8080 | Port for the Ray Serve FastAPI endpoint |
-| `CHAINLIT_PORT` | int | 8090 | Port for the Chainlit UI interface if ray serve is enable `ENABLE_RAY_SERVE`. If not chainlit UI is simply a subroute (`/chainlit` [see this](/openrag/getting_started/usage/#default-ports)) of the FastAPI **`base_url`**|
+| `CHAINLIT_PORT` | int | 8090 | Port for the Chainlit UI interface if ray serve is enable `ENABLE_RAY_SERVE`. If not chainlit UI is simply a subroute (`/chainlit` [see this](/openrag/getting_started/quickstart/#default-ports)) of the FastAPI **`base_url`**|
 
 
 ### Web Search Configuration
@@ -457,7 +502,7 @@ When `MAP_REDUCE_DEBUG` is enabled, the mechanism logs detailed information to `
 | `MAP_REDUCE_INITIAL_BATCH_SIZE` | `int` | 10 | Number of documents to process in the initial mapping phase |
 | `MAP_REDUCE_EXPANSION_BATCH_SIZE` | `int` | 5 | Number of additional documents to fetch when expanding the search (also used as the threshold for stopping) |
 | `MAP_REDUCE_MAX_TOTAL_DOCUMENTS` | `int` | 20 | Maximum total number of documents (chunks) to process across all iterations |
-| `MAP_REDUCE_DEBUG` | `bool` | true | Enable debug logging for map & reduce operations. Logs are written to `./logs/map_reduce.md` |
+| `MAP_REDUCE_DEBUG` | `bool` | false | Enable debug logging for map & reduce operations. Logs are written to `./logs/map_reduce.md` |
 
 :::danger[Caution]
 While the map & reduce mechanism enables processing more documents for LLMs with limited context lengths (by summarizing relevant documents to free up context space), it comes with trade-offs:
@@ -508,18 +553,52 @@ The following environment variables configure the FastAPI server and control acc
 | `DEFAULT_FILE_QUOTA` | `int` | `-1` | Default per-user file quota. `<0` disables quotas globally; `>=0` sets the default limit when a user has no explicit quota. |
 | `PREFERRED_URL_SCHEME` | `string` | `null` | URL scheme (`http` or `https`) used when generating URLs in API responses (e.g., `task_status_url`). When running behind a reverse proxy that terminates SSL, set this to `https` to ensure generated URLs use the correct scheme. If unset, the scheme from the incoming request is used. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
+| `UVICORN_FORWARDED_ALLOW_IPS` | `string` | `127.0.0.1` | Comma-separated CIDRs/IPs (or `*`) whose `X-Forwarded-*` headers uvicorn trusts. **Required when OpenRAG runs behind a TLS-terminating reverse proxy that lives outside loopback** (typical docker-compose / k8s); otherwise `X-Forwarded-Proto` is dropped and OIDC cookies ship with `Secure=False` even over HTTPS. |
+| `MAX_UPLOAD_SIZE_MB` | `int` | `1024` | Maximum accepted upload size, in MB. `0` or a negative value means unlimited. |
+| `MAX_PARTITIONS_PER_USER` | `int` | `100` | Maximum number of partitions a non-admin user may own. `-1` disables the cap (unlimited). Admin users always bypass it. |
+| `APP_UID` | `int` | `1000` | UID the API container drops to before running the app. Override when your host user is not UID 1000 and bind-mounted folders (`data/`, `logs/`) would otherwise not be writable by the container user. |
+| `WITH_OPENAI_API` | `bool` | `true` | Mount the OpenAI-compatible routers (`/v1/*`). Note: they stay mounted while `WITH_CHAINLIT_UI=true`, since Chainlit consumes them. |
+| `WITH_CHAINLIT_UI` | `bool` | `true` | Mount the bundled Chainlit chat UI under `/chainlit` (plus its root assets, e.g. the pdf.js worker for source previews). |
 
 
 :::caution[Security Notice]
 Always set a strong **`AUTH_TOKEN`** in production environments. Never leave it empty or use default values in production deployments.
 :::
 
+### Rate Limiting
+
+Per-identity request rate limiting, tiered by path prefix. Requests are keyed on the authenticated user id, falling back to the client IP for unauthenticated paths (`/auth/*`). **Admin users bypass rate limiting entirely.** Limits use a moving window and are enforced **per worker/replica** — front OpenRAG with shared storage (e.g. Redis) if you scale out and need a global budget. Exceeding a limit returns **429** with a `Retry-After` header.
+
+Limit values use the `<count>/<period>` format from the [`limits`](https://limits.readthedocs.io/) library (e.g. `120/minute`, `10/second`).
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `RATE_LIMIT_ENABLED` | `bool` | `true` | Master switch for request rate limiting. When `false`, no limits are applied and malformed limit values are ignored. |
+| `RATE_LIMIT_DEFAULT` | `str` | `600/minute` | Limit applied to every path except the tiers below. |
+| `RATE_LIMIT_AUTH` | `str` | `60/minute` | Limit for `/auth/*` (login/callback/logout). Keyed on client IP because callers are unauthenticated there — keep it high enough that a shared corporate/NAT egress IP does not throttle a legitimate login rush. |
+| `RATE_LIMIT_CHAT` | `str` | `120/minute` | Limit for `/v1/*` (chat completions, tools). |
+| `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP (brute-force protection). Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
+
 ### Admin UI
 
-The admin UI is a React SPA served by the `admin-ui` (nginx) container. Every
-`VITE_*` setting is **baked into the bundle at build time** — Vite inlines them
-when the image is built, so they are *not* read at container runtime. After
-changing one, rebuild the image: `docker compose build admin-ui`.
+The admin UI is a React SPA (the document ingestion, indexing & management interface) served by the `admin-ui` (nginx) container. Every `VITE_*` setting is **baked into the bundle at build time** — Vite inlines them when the image is built, so they are *not* read at container runtime. After changing one, rebuild the image: `docker compose build admin-ui`.
+
+**How the UI reaches the API (same-origin).** The browser only ever talks to a single origin — `http://<host>:ADMIN_UI_PORT`. nginx inside the `admin-ui` container serves the static SPA under `/app/` and reverse-proxies every other path (`/v1`, `/auth`, `/chainlit`, `/indexer`, …) to the API at `openrag:8080` over the Docker network. Because the bundle is built with `VITE_API_BASE_URL=""`, its API calls are **relative**, so they land back on that same origin — there is **no CORS**, and the OIDC `openrag_session` cookie is first-party. You don't even need to publish the API's own `APP_PORT` to the host; the UI reaches the backend internally over the compose network. Set `VITE_API_BASE_URL` only for a *browser-direct* build, where the SPA calls the API on a different origin — then also add that origin to `CORS_EXTRA_ORIGINS`.
+
+```mermaid
+flowchart TD
+    B["Browser — single origin<br/>http://HOST:ADMIN_UI_PORT"]
+    subgraph AUC["admin-ui container"]
+        N{"nginx :8080<br/>route by path"}
+        SPA["Static SPA files<br/>(/app/*)"]
+    end
+    API["openrag:8080<br/>API service · Docker network"]
+
+    B -->|"GET /app/ (page load)"| N
+    B -->|"fetch /v1, /auth, /users, /indexer …<br/>relative → same origin, no CORS"| N
+    N -->|"/app/*"| SPA
+    N -->|"everything else"| API
+```
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -539,3 +618,59 @@ changing one, rebuild the image: `docker compose build admin-ui`.
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `DEFAULT_LANGUAGE` | `str` | `` | UI language for Chainlit and the Admin UI (e.g. `en-US`, `fr`). When unset, the browser language is used, with `en-US` as the final fallback. |
+
+### MCP Server (Model Context Protocol)
+
+OpenRAG ships a standalone [Model Context Protocol](https://modelcontextprotocol.io/) server (`openrag/api/mcp/server.py`) that exposes retrieval to MCP clients. It runs as its own process (not part of the default compose stack). These variables configure the FastMCP transport binding and the search-tool defaults/bounds applied before a request reaches the retrieval service.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `OPENRAG_MCP_SERVER_NAME` | `str` | `OpenRAG MCP` | Display name advertised by the MCP server. |
+| `OPENRAG_MCP_HOST` | `str` | `0.0.0.0` | Interface the MCP server binds to. |
+| `OPENRAG_MCP_PORT` | `int` | `8081` | Port the MCP server listens on. |
+| `OPENRAG_MCP_PATH` | `str` | `/mcp` | HTTP path the MCP endpoint is served under. |
+| `OPENRAG_MCP_DEFAULT_TOP_K` | `int` | `5` | Number of chunks the search tool returns when the caller doesn't specify `top_k`. |
+| `OPENRAG_MCP_MAX_TOP_K` | `int` | `50` | Upper bound clamped on a caller-supplied `top_k`. |
+| `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.8` | Minimum similarity score for a chunk to be returned by the search tool. |
+| `OPENRAG_MCP_DOWNLOAD_TIMEOUT` | `float` | `30.0` | Timeout (seconds) for the server-side `index_url` fetch (SSRF/DoS hardening). |
+| `OPENRAG_MCP_MAX_DOWNLOAD_BYTES` | `int` | `104857600` | Maximum bytes downloaded by an `index_url` fetch. Default is 100 MiB. |
+
+### Advanced & Legacy Variables
+
+#### Model-endpoint seed overrides (legacy aliases)
+
+On first startup, OpenRAG seeds its model-endpoint catalog from the canonical variables documented above. The following **legacy aliases** are still read at seed time for backward compatibility and, when set, take precedence over their canonical counterpart **during that initial seeding only**. Prefer the canonical variables in new deployments — do not set both.
+
+| Legacy alias | Falls back to (canonical) |
+|--------------|---------------------------|
+| `LLM_ENDPOINT` | `BASE_URL` |
+| `LLM_MODEL` | `MODEL` |
+| `VLM_ENDPOINT` | `VLM_BASE_URL` |
+| `EMBEDDER_ENDPOINT` | `EMBEDDER_BASE_URL` |
+| `EMBEDDING_MODEL` | `EMBEDDER_MODEL_NAME` |
+| `RERANKER_ENDPOINT` | `RERANKER_BASE_URL` |
+
+(`VLM_MODEL` and `RERANKER_MODEL` are already the canonical names and are also used at seed time.)
+
+#### Operational variables
+
+Deployment-level knobs; most deployments never need to touch these — the compose stack drives the path variables through the [storage volume variables](#compose-storage-volumes) instead.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `OPENRAG_CONF_DIR` | `str` | bundled `conf/` | Directory containing `config.yaml`. Override to run against a custom configuration tree. |
+| `DATA_DIR` | `str` | `/app/data` (container) | Where uploaded files and app data are stored. In compose, relocate it via `DATA_VOLUME` rather than this variable. |
+| `DB_DIR` | `str` | `/app/db` | Local database directory. |
+| `LOG_DIR` | `str` | `/app/logs` | Log directory. In compose, relocate it via `LOG_VOLUME` rather than this variable. |
+| `OPENRAG_CONTAINER_STARTUP_TIMEOUT` | `float` | `max(60, 4 × POSTGRES_COMMAND_TIMEOUT)` (= 120 with defaults) | Seconds the API's service container (DB pools, Ray actors, …) is allowed to initialize at startup before the app fails fast. |
+| `OPENRAG_BANNER` | `bool` | `true` | Set to `false` to suppress the ASCII startup banner. Its colors also auto-disable under the standard `NO_COLOR` / `TERM=dumb` conventions. |
+| `UVICORN_RELOAD` | `bool` | `false` | Development only — starts uvicorn with `--reload` (auto-restart on code changes). Also forces a single worker. Never enable in production. |
+
+#### Monitoring profile (opt-in)
+
+Read only by the opt-in monitoring compose file (`infra/compose/monitoring.docker-compose.yaml`):
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `GRAFANA_ADMIN_USER` | `str` | `admin` | Grafana admin username. |
+| `GRAFANA_ADMIN_PASSWORD` | `str` | _(required)_ | Grafana admin password — compose refuses to start the monitoring profile if unset. |
