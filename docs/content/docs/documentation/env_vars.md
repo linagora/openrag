@@ -553,7 +553,7 @@ The following environment variables configure the FastAPI server and control acc
 | `DEFAULT_FILE_QUOTA` | `int` | `-1` | Default per-user file quota. `<0` disables quotas globally; `>=0` sets the default limit when a user has no explicit quota. |
 | `PREFERRED_URL_SCHEME` | `string` | `null` | URL scheme (`http` or `https`) used when generating URLs in API responses (e.g., `task_status_url`). When running behind a reverse proxy that terminates SSL, set this to `https` to ensure generated URLs use the correct scheme. If unset, the scheme from the incoming request is used. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
-| `UVICORN_FORWARDED_ALLOW_IPS` | `string` | `127.0.0.1` | Comma-separated CIDRs/IPs (or `*`) whose `X-Forwarded-*` headers uvicorn trusts. **Required when OpenRAG runs behind a reverse proxy that lives outside loopback** (typical docker-compose / k8s — including the bundled admin-ui proxy). Otherwise `X-Forwarded-Proto` is dropped and OIDC cookies ship with `Secure=False` even over HTTPS, and `X-Forwarded-For` is dropped so per-user rate limits collapse onto the proxy's single IP. |
+| `UVICORN_FORWARDED_ALLOW_IPS` | `string` | `127.0.0.1` | Comma-separated CIDRs/IPs (or `*`) whose `X-Forwarded-*` headers uvicorn trusts. **Required when OpenRAG runs behind a reverse proxy that lives outside loopback** (typical docker-compose / k8s — including the bundled admin-ui proxy). Otherwise `X-Forwarded-Proto` is dropped and OIDC cookies ship with `Secure=False` even over HTTPS, and `X-Forwarded-For` is dropped so per-user rate limits collapse onto the proxy's single IP. **Set this to your proxy's subnet, not `*`** — see the proxy-trust caution under [Rate Limiting](#rate-limiting) for why `*` can be spoofed. |
 | `MAX_UPLOAD_SIZE_MB` | `int` | `1024` | Maximum accepted upload size, in MB. `0` or a negative value means unlimited. |
 | `MAX_PARTITIONS_PER_USER` | `int` | `100` | Maximum number of partitions a non-admin user may own. `-1` disables the cap (unlimited). Admin users always bypass it. |
 | `APP_UID` | `int` | `1000` | UID the API container drops to before running the app. Override when your host user is not UID 1000 and bind-mounted folders (`data/`, `logs/`) would otherwise not be writable by the container user. |
@@ -578,7 +578,25 @@ Limit values use the `<count>/<period>` format from the [`limits`](https://limit
 | `RATE_LIMIT_AUTH` | `str` | `60/minute` | Limit for `/auth/*` (login/callback/logout). Keyed on client IP because callers are unauthenticated there — keep it high enough that a shared corporate/NAT egress IP does not throttle a legitimate login rush. |
 | `RATE_LIMIT_CHAT` | `str` | `120/minute` | Limit for `/v1/*` (chat completions, tools). |
 | `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP (brute-force protection). Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
-| `RATE_LIMIT_EXEMPT_PATHS` | `str` | `/chainlit,/assets/` | Comma-separated path prefixes the limiter skips. These are auth-bypassed (Chainlit does its own header auth), so requests there carry no user and can only be keyed by IP. Chainlit's Socket.IO transport also issues one HTTP request per packet when it long-polls. Set-but-empty (`RATE_LIMIT_EXEMPT_PATHS=`) removes all exemptions; `/auth/*` is never exempt. |
+| `RATE_LIMIT_EXEMPT_PATHS` | `str` | `/chainlit/,/assets/` | Comma-separated path prefixes the limiter skips, matched with `startswith`. These are auth-bypassed (Chainlit does its own header auth), so requests there carry no user and can only be keyed by IP. Chainlit's Socket.IO transport also issues one HTTP request per packet when it long-polls. Keep the trailing slash so a sibling like `/chainlithack` stays rate-limited rather than being swept into the `/chainlit` exemption. Set-but-empty (`RATE_LIMIT_EXEMPT_PATHS=`) removes all exemptions; `/auth/*` is never exempt. |
+
+:::caution[Behind a reverse proxy, trust the right client IP]
+The `/auth/*` limits and the failed-login budget (`RATE_LIMIT_AUTH_FAILURE`) are keyed **by client IP** — that is how brute-force protection tells attackers apart. Behind a proxy, uvicorn only sees the real client IP if it trusts the proxy's `X-Forwarded-For`, so `UVICORN_FORWARDED_ALLOW_IPS` must name the proxy. Get this wrong in either direction and the per-IP limits stop working:
+
+- **Too narrow** (default `127.0.0.1`, proxy outside loopback): every request keys on the proxy's single address, so one shared bucket throttles the whole deployment at once — one client's failed logins can lock out everyone.
+- **Too wide** (`*`): uvicorn trusts `X-Forwarded-For` from *any* peer. If the API port is reachable directly (the bundled compose publishes `APP_PORT` on `0.0.0.0`), an attacker sends a forged, rotating `X-Forwarded-For` and gets a fresh bucket per request — the brute-force limiter is fully bypassed.
+
+**Recommended:** set `UVICORN_FORWARDED_ALLOW_IPS` to the proxy's subnet (e.g. your compose/k8s network CIDR), **not** `*`. Reserve `*` for deployments where nothing untrusted can reach `APP_PORT` — keep the API on the internal network and expose only the admin-ui proxy (you don't need to publish `APP_PORT` at all).
+
+**Defense in depth (proxy config):** trusting `X-Forwarded-For` only helps if the header can't be forged *through* the proxy. The bundled nginx **appends** to the header (`proxy_add_x_forwarded_for`), and uvicorn reads the left-most value — which a client can inject. For a hard guarantee, have the edge proxy **overwrite** it with the real peer instead of appending:
+
+```nginx
+# openrag-admin.conf — edge proxy: replace any client-supplied X-Forwarded-For
+proxy_set_header X-Forwarded-For $remote_addr;
+```
+
+If nginx itself sits behind another load balancer, use the [real-ip module](https://nginx.org/en/docs/http/ngx_http_realip_module.html) (`set_real_ip_from <lb-subnet>; real_ip_header X-Forwarded-For;`) so the true client is resolved only from that trusted upstream.
+:::
 
 ### Admin UI
 
