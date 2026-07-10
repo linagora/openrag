@@ -19,7 +19,7 @@ HTTP request per emitted packet whenever it falls back to long-polling.
 
 Env: RATE_LIMIT_ENABLED (true), RATE_LIMIT_DEFAULT (600/minute),
 RATE_LIMIT_AUTH (60/minute, /auth/*), RATE_LIMIT_CHAT (120/minute, /v1/*),
-RATE_LIMIT_EXEMPT_PATHS (/chainlit,/assets/ — CSV of path prefixes).
+RATE_LIMIT_EXEMPT_PATHS (/chainlit/,/assets/ — CSV of path prefixes).
 """
 
 import os
@@ -35,11 +35,16 @@ from starlette.responses import JSONResponse
 
 logger = get_logger()
 
-# Path prefixes the limiter never touches. Mirrors the ``/chainlit`` + ``/assets/``
-# arm of ``api.middleware.auth.is_bypass_path``: those paths are unauthenticated by
-# design, so they can only ever be keyed by proxy IP. ``/auth/*`` is deliberately
-# NOT here — it is the brute-force surface and IP keying is the point.
-DEFAULT_EXEMPT_PREFIXES: tuple[str, ...] = ("/chainlit", "/assets/")
+# Path prefixes the limiter never touches, matched with ``str.startswith`` — so the
+# trailing slash is load-bearing. These are the auth-bypassed subtrees from
+# ``api.middleware.auth.is_bypass_path``: unauthenticated by design, so a request
+# there carries no user and can only ever be keyed by the proxy's IP. The prefixes
+# end in ``/`` so a sibling like ``/chainlithack`` is NOT swept into the ``/chainlit``
+# exemption — it stays rate-limited. Bare ``/chainlit`` (the 307 to ``/chainlit/``) is
+# therefore metered at the default tier, but that is one request per page load, so it
+# never bites. ``/auth/*`` is deliberately NOT here: it is the brute-force surface and
+# IP keying is the point.
+DEFAULT_EXEMPT_PREFIXES: tuple[str, ...] = ("/chainlit/", "/assets/")
 
 
 def _env_flag(name: str, default: bool) -> bool:

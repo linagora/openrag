@@ -46,6 +46,7 @@ def _build_app(monkeypatch, **env):
             Route("/auth/login", ok),
             Route("/other", ok),
             Route("/chainlit/ws/socket.io/", ok),
+            Route("/chainlithack", ok),
             Route("/assets/pdf.worker.mjs", ok),
         ]
     )
@@ -158,6 +159,16 @@ def test_exempt_paths_do_not_widen_to_other_routes(monkeypatch):
     client = TestClient(app)
     assert client.get("/other").status_code == 200
     assert client.get("/other").status_code == 429
+
+
+def test_chainlit_prefix_boundary_is_enforced(monkeypatch):
+    # "/chainlithack" starts with "/chainlit" but is not under the "/chainlit/"
+    # subtree, so it must stay rate-limited — the exempt prefix ends in "/" to
+    # keep siblings from being swept in. Guards the trailing-slash boundary.
+    app = _build_app(monkeypatch, RATE_LIMIT_DEFAULT="1/minute")
+    client = TestClient(app)
+    assert client.get("/chainlithack").status_code == 200
+    assert client.get("/chainlithack").status_code == 429
 
 
 def test_exempt_paths_env_override_replaces_defaults(monkeypatch):
