@@ -118,16 +118,29 @@ def _delete_cookie_and_chunks(request, response, name: str, *, paths: tuple[str,
             response.delete_cookie(key=cookie_name, path=path)
 
 
+def _is_request_secure(request) -> bool:
+    if os.environ.get("PREFERRED_URL_SCHEME", "").lower() == "https":
+        return True
+    headers = getattr(request, "headers", {}) or {}
+    xfp = headers.get("x-forwarded-proto", "")
+    if xfp.split(",", 1)[0].strip().lower() == "https":
+        return True
+    url = getattr(request, "url", None)
+    return getattr(url, "scheme", "") == "https"
+
+
 def _clear_chat_logout_cookies(request, response) -> None:
     _delete_cookie_and_chunks(request, response, CHAINLIT_AUTH_COOKIE_NAME, paths=("/", CHAINLIT_TOKEN_COOKIE_PATH))
     _delete_cookie_and_chunks(request, response, CHAINLIT_TOKEN_COOKIE_NAME, paths=(CHAINLIT_TOKEN_COOKIE_PATH,))
     response.delete_cookie(key=OPENRAG_SESSION_COOKIE_NAME, path="/")
+    secure_logout_signal = _is_request_secure(request)
     response.set_cookie(
         key=CHAINLIT_LOGOUT_COOKIE_NAME,
         value="1",
         max_age=CHAINLIT_LOGOUT_COOKIE_MAX_AGE_SECONDS,
         path="/",
-        samesite="lax",
+        secure=secure_logout_signal,
+        samesite="none" if secure_logout_signal else "lax",
     )
 
 

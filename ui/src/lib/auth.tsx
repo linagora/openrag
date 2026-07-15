@@ -7,9 +7,13 @@ import {
   type ReactNode,
 } from "react";
 import { getMyInfo, type MyInfo } from "./api/account";
-import { TOKEN_KEY } from "./api/client";
+import { apiUrl, TOKEN_KEY } from "./api/client";
 
 const CHAINLIT_LOGOUT_COOKIE_NAME = "openrag_chainlit_logout";
+
+type ChainlitLogoutSignalResponse = {
+  logged_out?: boolean;
+};
 
 function hasCookie(name: string): boolean {
   if (typeof document === "undefined") return false;
@@ -21,10 +25,28 @@ function clearCookie(name: string) {
   document.cookie = `${name}=; Max-Age=0; path=/; SameSite=Lax`;
 }
 
-function consumeChainlitLogoutSignal(): boolean {
+function consumeLocalChainlitLogoutSignal(): boolean {
   if (!hasCookie(CHAINLIT_LOGOUT_COOKIE_NAME)) return false;
   clearCookie(CHAINLIT_LOGOUT_COOKIE_NAME);
   return true;
+}
+
+async function consumeRemoteChainlitLogoutSignal(): Promise<boolean> {
+  const response = await fetch(apiUrl("/auth/chainlit-logout-signal"), {
+    credentials: "include",
+  });
+  if (!response.ok) return false;
+  const body = (await response.json()) as ChainlitLogoutSignalResponse;
+  return body.logged_out === true;
+}
+
+async function consumeChainlitLogoutSignal(): Promise<boolean> {
+  if (consumeLocalChainlitLogoutSignal()) return true;
+  try {
+    return await consumeRemoteChainlitLogoutSignal();
+  } catch {
+    return false;
+  }
 }
 
 // Identity comes from the backend, not a decoded token: /users/info resolves the
@@ -52,8 +74,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<MyInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  const applyExternalLogout = useCallback(() => {
-    if (!consumeChainlitLogoutSignal()) return false;
+  const applyExternalLogout = useCallback(async () => {
+    if (!(await consumeChainlitLogoutSignal())) return false;
     localStorage.removeItem(TOKEN_KEY);
     setUser(null);
     return true;
@@ -62,7 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const load = useCallback(async () => {
     setIsLoading(true);
     try {
-      if (applyExternalLogout()) return;
+      if (await applyExternalLogout()) return;
       setUser(await getMyInfo());
     } catch {
       setUser(null);
@@ -77,10 +99,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const handleFocus = () => {
-      applyExternalLogout();
+      void applyExternalLogout();
     };
     const handleVisibilityChange = () => {
-      if (!document.hidden) applyExternalLogout();
+      if (!document.hidden) void applyExternalLogout();
     };
     window.addEventListener("focus", handleFocus);
     document.addEventListener("visibilitychange", handleVisibilityChange);

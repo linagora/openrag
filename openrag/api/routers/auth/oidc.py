@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 from api.dependencies.auth import current_user
 from core.auth.chainlit import (
     CHAINLIT_AUTH_COOKIE_NAME,
+    CHAINLIT_LOGOUT_COOKIE_NAME,
     CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS,
     CHAINLIT_TOKEN_COOKIE_NAME,
     CHAINLIT_TOKEN_COOKIE_PATH,
@@ -266,6 +267,13 @@ async def logout(
         response = JSONResponse(status_code=200, content={"detail": "Logged out"})
     response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
     response.delete_cookie(key=CHAINLIT_TOKEN_COOKIE_NAME, path=CHAINLIT_TOKEN_COOKIE_PATH)
+    return response
+
+
+@router.get("/auth/chainlit-logout-signal", include_in_schema=False)
+async def chainlit_logout_signal(request: Request):
+    response = JSONResponse(content={"logged_out": CHAINLIT_LOGOUT_COOKIE_NAME in request.cookies})
+    response.delete_cookie(key=CHAINLIT_LOGOUT_COOKIE_NAME, path="/")
     return response
 
 

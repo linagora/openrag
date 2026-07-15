@@ -82,6 +82,7 @@ _PREVIOUS_MODULES = _install_dependencies_stub()
 from api.routers.auth.oidc import router as auth_router  # noqa: E402
 from core.auth.chainlit import (  # noqa: E402
     CHAINLIT_AUTH_COOKIE_NAME,
+    CHAINLIT_LOGOUT_COOKIE_NAME,
     CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS,
     CHAINLIT_TOKEN_COOKIE_NAME,
     CHAINLIT_TOKEN_COOKIE_PATH,
@@ -328,6 +329,24 @@ def test_logout_allows_cross_site_top_level_navigation(oidc_env, client, stub):
     )
     assert r.status_code == 302
     assert stub.calls == [("logout", "sess")]
+
+
+def test_chainlit_logout_signal_reports_and_clears_marker_cookie(client):
+    client.cookies.set(CHAINLIT_LOGOUT_COOKIE_NAME, "1", path="/")
+
+    r = client.get("/auth/chainlit-logout-signal")
+
+    assert r.status_code == 200
+    assert r.json() == {"logged_out": True}
+    cookie = next(c for c in _set_cookies(r) if CHAINLIT_LOGOUT_COOKIE_NAME in c)
+    assert "Max-Age=0" in cookie or "expires=" in cookie.lower()
+
+
+def test_chainlit_logout_signal_is_false_without_marker_cookie(client):
+    r = client.get("/auth/chainlit-logout-signal")
+
+    assert r.status_code == 200
+    assert r.json() == {"logged_out": False}
 
 
 # ---------------------------------------------------------------------------

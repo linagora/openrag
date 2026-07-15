@@ -46,6 +46,7 @@ def test_default_bypass_paths_match_legacy_set() -> None:
         "/auth/callback",
         "/auth/backchannel-logout",
         "/auth/logout",
+        "/auth/chainlit-logout-signal",
     }
     assert set(DEFAULT_BYPASS_PATHS) == expected
     assert set(AuthBypassConfig().bypass_paths) == expected

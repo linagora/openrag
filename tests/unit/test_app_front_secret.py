@@ -194,6 +194,22 @@ async def test_chainlit_logout_clears_handoff_and_openrag_session_cookies(monkey
     assert any(f"{module.CHAINLIT_TOKEN_COOKIE_NAME}=" in cookie and "Max-Age=0" in cookie for cookie in cookies)
     assert any(f"{module.OPENRAG_SESSION_COOKIE_NAME}=" in cookie and "Max-Age=0" in cookie for cookie in cookies)
     assert any(f"{module.CHAINLIT_LOGOUT_COOKIE_NAME}=1" in cookie for cookie in cookies)
+    assert any(f"Max-Age={module.CHAINLIT_LOGOUT_COOKIE_MAX_AGE_SECONDS}" in cookie for cookie in cookies)
+
+
+@pytest.mark.asyncio
+async def test_chainlit_logout_signal_cookie_is_cross_site_compatible_on_https(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_logout_cookie_https_test")
+    request = SimpleNamespace(cookies={}, headers={"x-forwarded-proto": "https"})
+    response = Response()
+
+    returned = await module.on_logout(request, response)
+
+    cookies = [value.decode() for key, value in response.raw_headers if key.lower() == b"set-cookie"]
+    assert returned == {"success": True}
+    logout_cookie = next(cookie for cookie in cookies if f"{module.CHAINLIT_LOGOUT_COOKIE_NAME}=1" in cookie)
+    assert "SameSite=none" in logout_cookie
+    assert "Secure" in logout_cookie
 
 
 @pytest.mark.asyncio
