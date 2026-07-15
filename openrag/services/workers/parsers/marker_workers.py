@@ -118,20 +118,30 @@ class MarkerWorker:
 
         self.setup_mp()
 
-    def setup_mp(self):
-        """Initialize ProcessPoolExecutor for PDF processing.
+    def setup_mp(self, old_executor=None):
+        """Initialize (or rebuild) the ProcessPoolExecutor for PDF processing.
 
         We use ProcessPoolExecutor instead of multiprocessing.Pool because:
         - Ray actors run as daemon processes
         - Pool workers are daemonic by default and cannot spawn children
         - The pdftext library (used by Marker) internally spawns processes
         - ProcessPoolExecutor workers are non-daemon, allowing nested process creation
+
+        ``old_executor`` guards against concurrent timeouts cascading: a timeout
+        handler passes the executor it timed out on, and if another handler has
+        already recycled the pool since then (``self.executor`` has moved on), we
+        skip — otherwise the second handler would force-kill the fresh pool the
+        first just built. ``None`` (init / explicit pool reset) always rebuilds.
         """
         from concurrent.futures import ProcessPoolExecutor
 
         import torch.multiprocessing as mp
 
         with self._executor_lock:
+            if old_executor is not None and self.executor is not old_executor:
+                # Another timeout already recycled the pool; nothing wedged to reclaim.
+                return
+
             if self.executor is not None:
                 # Force-kill: a wedged worker won't exit on a plain shutdown, so
                 # it would keep holding its slot and the GPU (#659).
@@ -201,7 +211,8 @@ class MarkerWorker:
 
         def run_with_timeout():
             with self._executor_lock:
-                future = self.executor.submit(self._process_pdf, file_path, converter_config)
+                current_executor = self.executor
+                future = current_executor.submit(self._process_pdf, file_path, converter_config)
             try:
                 result = future.result(timeout=timeout)
                 return result
@@ -209,12 +220,14 @@ class MarkerWorker:
                 # The child is still computing on the GPU and won't stop on its
                 # own; recycle the pool to reclaim the wedged worker's slot so it
                 # isn't lost forever (#659). Sibling parses in this worker are
-                # recycled too and retried by MarkerPool.
+                # recycled too and retried by MarkerPool. Pass the executor we
+                # timed out on so a concurrent timeout can't kill a pool that was
+                # already rebuilt in the meantime.
                 self.logger.exception(
                     "MarkerWorker child process timed out; recycling the pool to reclaim the slot",
                     path=file_path,
                 )
-                self.setup_mp()
+                self.setup_mp(old_executor=current_executor)
                 raise
             except Exception:
                 self.logger.exception("Error processing with MarkerWorker", path=file_path)
