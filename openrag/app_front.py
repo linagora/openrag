@@ -33,6 +33,7 @@ INTERNAL_BASE_URL = f"http://localhost:{port}"  # Default fallback URL
 DEFAULT_LANGUAGE = os.environ.get("DEFAULT_LANGUAGE")
 OPENRAG_API_KEY_SESSION_KEY = "openrag_api_key"
 OPENRAG_AUTH_HANDLE_METADATA_KEY = "openrag_auth_handle"
+OPENRAG_CHAT_PROFILES_METADATA_KEY = "openrag_chat_profiles"
 _OPENRAG_TOKEN_STORE: dict[str, tuple[str, float]] = {}
 
 
@@ -196,20 +197,75 @@ def _current_openrag_auth_provider() -> str | None:
     return _openrag_auth_provider_from_user(user)
 
 
-def _chainlit_user_from_info(data: dict, *, provider: str, api_key: str) -> cl.User:
+def _chat_profile_from_model_id(model_id: str) -> cl.ChatProfile | None:
+    if not model_id.startswith(PARTITION_PREFIX):
+        return None
+    partition = model_id.removeprefix(PARTITION_PREFIX)
+    description_key = "profile_description_all" if partition == "all" else "profile_description_partition"
+    description_template = t(description_key)
+    return cl.ChatProfile(
+        name=model_id,
+        markdown_description=description_template.format(name=model_id, partition=partition),
+        icon="/public/favicon.svg",
+        default=model_id == f"{PARTITION_PREFIX}all",
+    )
+
+
+def _chat_profiles_from_model_ids(model_ids: list[str]) -> list[cl.ChatProfile]:
+    profiles = []
+    for model_id in model_ids:
+        profile = _chat_profile_from_model_id(model_id)
+        if profile:
+            profiles.append(profile)
+    return profiles
+
+
+def _cached_chat_profiles_from_user(user) -> list[cl.ChatProfile]:
+    metadata = getattr(user, "metadata", {}) or {}
+    model_ids = metadata.get(OPENRAG_CHAT_PROFILES_METADATA_KEY)
+    if not isinstance(model_ids, list):
+        return []
+    return _chat_profiles_from_model_ids([model_id for model_id in model_ids if isinstance(model_id, str)])
+
+
+async def _load_openrag_model_ids(client: httpx.AsyncClient, api_key: str) -> list[str]:
+    response = await client.get(
+        url=f"{INTERNAL_BASE_URL}/v1/models",
+        headers=get_headers(api_key),
+    )
+    response.raise_for_status()
+    data = response.json()
+    models = data.get("data", [])
+    if not isinstance(models, list):
+        return []
+    return [
+        model["id"]
+        for model in models
+        if isinstance(model, dict) and isinstance(model.get("id"), str) and model["id"].startswith(PARTITION_PREFIX)
+    ]
+
+
+async def _load_openrag_model_ids_for_metadata(client: httpx.AsyncClient, api_key: str) -> list[str]:
+    try:
+        return await _load_openrag_model_ids(client, api_key)
+    except Exception as e:
+        logger.warning("Could not preload OpenRAG chat profiles for Chainlit", error=str(e))
+        return []
+
+
+def _chainlit_user_from_info(data: dict, *, provider: str, api_key: str, model_ids: list[str] | None = None) -> cl.User:
     metadata = {
         "role": "admin" if data.pop("is_admin", False) else "user",
         "provider": provider,
         "extra": data,
     }
+    if model_ids:
+        metadata[OPENRAG_CHAT_PROFILES_METADATA_KEY] = model_ids
     auth_handle = _remember_openrag_api_key(api_key)
     if auth_handle:
         metadata[OPENRAG_AUTH_HANDLE_METADATA_KEY] = auth_handle
 
-    return cl.User(
-        identifier=data.get("display_name", "user"),
-        metadata=metadata,
-    )
+    return cl.User(identifier=data.get("display_name", "user"), metadata=metadata)
 
 
 async def _load_user_info(client: httpx.AsyncClient, api_key: str) -> dict:
@@ -242,6 +298,7 @@ async def _chainlit_user_from_browser_cookies(headers: dict) -> cl.User | None:
                 api_key = chainlit_token
                 provider = "credentials"
                 data = await _load_user_info(client, api_key)
+            model_ids = await _load_openrag_model_ids_for_metadata(client, api_key)
     except httpx.HTTPStatusError as e:
         logger.info("Session cookie rejected by /users/info", status=e.response.status_code)
         return None
@@ -249,7 +306,7 @@ async def _chainlit_user_from_browser_cookies(headers: dict) -> cl.User | None:
         logger.exception("Chainlit header_auth_callback failure", error=str(e))
         return None
 
-    return _chainlit_user_from_info(data, provider=provider, api_key=api_key)
+    return _chainlit_user_from_info(data, provider=provider, api_key=api_key, model_ids=model_ids)
 
 
 if PERSISTENCY:
@@ -277,8 +334,9 @@ if AUTH_TOKEN and AUTH_MODE != "oidc":
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(4 * 60.0)) as client:
                 data = await _load_user_info(client, password)
+                model_ids = await _load_openrag_model_ids_for_metadata(client, password)
 
-            return _chainlit_user_from_info(data, provider="credentials", api_key=password)
+            return _chainlit_user_from_info(data, provider="credentials", api_key=password, model_ids=model_ids)
 
         except httpx.HTTPStatusError:
             logger.info("Authentication failed", username=mask_email(username))
@@ -313,27 +371,19 @@ def get_external_url():
 async def chat_profile(current_user: cl.User):
     try:
         api_key = _openrag_api_key_from_user_or_context(current_user)
-        client = AsyncOpenAI(base_url=f"{INTERNAL_BASE_URL}/v1", api_key=api_key)
-        output = await client.models.list()
-        models = output.data
-        chat_profiles = []
-        for i, m in enumerate(models, start=1):
-            partition = m.id.split(PARTITION_PREFIX)[1]
-            description_key = "profile_description_all" if partition == "all" else "profile_description_partition"
-            description_template = t(description_key)
-            chat_profiles.append(
-                cl.ChatProfile(
-                    name=m.id,
-                    markdown_description=description_template.format(name=m.id, partition=partition),
-                    icon="/public/favicon.svg",
-                    default=m.id == f"{PARTITION_PREFIX}all",
-                )
-            )
-        return chat_profiles
+        async with httpx.AsyncClient(timeout=httpx.Timeout(4 * 60.0)) as client:
+            model_ids = await _load_openrag_model_ids(client, api_key)
+        return _chat_profiles_from_model_ids(model_ids)
     except MissingOpenRAGCredentialError as e:
+        cached_profiles = _cached_chat_profiles_from_user(current_user)
+        if cached_profiles:
+            return cached_profiles
         await _handle_missing_openrag_credential(e)
         return []
     except Exception as e:
+        cached_profiles = _cached_chat_profiles_from_user(current_user)
+        if cached_profiles:
+            return cached_profiles
         await cl.Message(content=t("error_profiles").format(e)).send()
         return []
 

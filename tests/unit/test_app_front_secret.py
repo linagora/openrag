@@ -78,13 +78,19 @@ async def test_token_mode_header_auth_accepts_chainlit_handoff_cookie(monkeypatc
             "is_admin": True,
         }
 
+    async def fake_load_model_ids(_client, api_key):
+        assert api_key == "or-user-token"
+        return ["openrag-default", "openrag-all"]
+
     monkeypatch.setattr(module, "_load_user_info", fake_load_user_info)
+    monkeypatch.setattr(module, "_load_openrag_model_ids_for_metadata", fake_load_model_ids)
 
     user = await config.code.header_auth_callback({"cookie": f"{module.CHAINLIT_TOKEN_COOKIE_NAME}=or-user-token"})
 
     assert user.identifier == "Token User"
     assert user.metadata["provider"] == "credentials"
     assert user.metadata["role"] == "admin"
+    assert user.metadata[module.OPENRAG_CHAT_PROFILES_METADATA_KEY] == ["openrag-default", "openrag-all"]
     auth_handle = user.metadata[module.OPENRAG_AUTH_HANDLE_METADATA_KEY]
     assert module._OPENRAG_TOKEN_STORE[auth_handle][0] == "or-user-token"
 
@@ -207,6 +213,56 @@ async def test_chat_start_handles_expired_handoff_without_exception_log(monkeypa
     assert [call[0] for call in log_calls] == ["warning"]
 
 
+def test_chainlit_user_metadata_keeps_chat_profiles_but_not_bearer(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_profile_metadata_test")
+
+    user = module._chainlit_user_from_info(
+        {"display_name": "Token User", "is_admin": False},
+        provider="credentials",
+        api_key="or-user-token",
+        model_ids=["openrag-default", "openrag-all"],
+    )
+
+    assert user.metadata[module.OPENRAG_CHAT_PROFILES_METADATA_KEY] == ["openrag-default", "openrag-all"]
+    assert user.metadata["provider"] == "credentials"
+    assert "api_key" not in user.metadata
+    assert "or-user-token" not in str(user.metadata)
+
+
+@pytest.mark.asyncio
+async def test_chat_profiles_use_cached_model_ids_when_handoff_token_is_unavailable(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_cached_profiles_test")
+    sent_messages = []
+
+    class Message:
+        def __init__(self, content):
+            self.content = content
+
+        async def send(self):
+            sent_messages.append(self.content)
+
+    monkeypatch.setattr(module, "t", lambda key: "{name} ({partition})" if key.startswith("profile_") else key)
+    module.cl = SimpleNamespace(Message=Message, ChatProfile=module.cl.ChatProfile)
+    monkeypatch.setattr(
+        module,
+        "_openrag_api_key_from_user_or_context",
+        lambda _user: (_ for _ in ()).throw(module.MissingOpenRAGCredentialError("expired handoff")),
+    )
+
+    profiles = await module.chat_profile(
+        SimpleNamespace(
+            metadata={
+                "provider": "credentials",
+                module.OPENRAG_CHAT_PROFILES_METADATA_KEY: ["openrag-default", "openrag-all"],
+            }
+        )
+    )
+
+    assert [profile.name for profile in profiles] == ["openrag-default", "openrag-all"]
+    assert profiles[-1].default is True
+    assert sent_messages == []
+
+
 @pytest.mark.asyncio
 async def test_chat_profiles_handle_expired_handoff_without_exception_log(monkeypatch):
     module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_profiles_expired_handoff_test")
@@ -282,7 +338,12 @@ async def test_chainlit_cookie_auth_retries_handoff_after_stale_oidc_session(mon
             "is_admin": False,
         }
 
+    async def fake_load_model_ids(_client, api_key):
+        assert api_key == "handoff-token"
+        return ["openrag-handoff", "openrag-all"]
+
     monkeypatch.setattr(module, "_load_user_info", fake_load_user_info)
+    monkeypatch.setattr(module, "_load_openrag_model_ids_for_metadata", fake_load_model_ids)
 
     user = await module._chainlit_user_from_browser_cookies(
         {"cookie": (f"openrag_session=stale-session-token; {module.CHAINLIT_TOKEN_COOKIE_NAME}=handoff-token")}
@@ -291,6 +352,7 @@ async def test_chainlit_cookie_auth_retries_handoff_after_stale_oidc_session(mon
     assert attempts == ["stale-session-token", "handoff-token"]
     assert user.identifier == "Handoff User"
     assert user.metadata["provider"] == "credentials"
+    assert user.metadata[module.OPENRAG_CHAT_PROFILES_METADATA_KEY] == ["openrag-handoff", "openrag-all"]
     auth_handle = user.metadata[module.OPENRAG_AUTH_HANDLE_METADATA_KEY]
     assert module._OPENRAG_TOKEN_STORE[auth_handle][0] == "handoff-token"
 
