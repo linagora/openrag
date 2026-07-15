@@ -11,7 +11,7 @@ import httpx
 from chainlit.config import config as cl_config
 from chainlit.context import get_context
 from consts import PARTITION_PREFIX
-from core.auth.chainlit import CHAINLIT_TOKEN_COOKIE_NAME
+from core.auth.chainlit import CHAINLIT_AUTH_COOKIE_NAME, CHAINLIT_TOKEN_COOKIE_NAME, CHAINLIT_TOKEN_COOKIE_PATH
 from core.utils.logging import get_logger, mask_email
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -34,6 +34,7 @@ DEFAULT_LANGUAGE = os.environ.get("DEFAULT_LANGUAGE")
 OPENRAG_API_KEY_SESSION_KEY = "openrag_api_key"
 OPENRAG_AUTH_HANDLE_METADATA_KEY = "openrag_auth_handle"
 OPENRAG_CHAT_PROFILES_METADATA_KEY = "openrag_chat_profiles"
+OPENRAG_SESSION_COOKIE_NAME = "openrag_session"
 _OPENRAG_TOKEN_STORE: dict[str, tuple[str, float]] = {}
 
 
@@ -102,6 +103,19 @@ def _extract_cookie(cookie_header: str, name: str) -> str | None:
             if k.strip() == name:
                 return v.strip()
     return None
+
+
+def _delete_cookie_and_chunks(request, response, name: str, *, paths: tuple[str, ...]) -> None:
+    cookie_names = {name, *(cookie_name for cookie_name in request.cookies if cookie_name.startswith(f"{name}_"))}
+    for cookie_name in cookie_names:
+        for path in paths:
+            response.delete_cookie(key=cookie_name, path=path)
+
+
+def _clear_chat_logout_cookies(request, response) -> None:
+    _delete_cookie_and_chunks(request, response, CHAINLIT_AUTH_COOKIE_NAME, paths=("/", CHAINLIT_TOKEN_COOKIE_PATH))
+    _delete_cookie_and_chunks(request, response, CHAINLIT_TOKEN_COOKIE_NAME, paths=(CHAINLIT_TOKEN_COOKIE_PATH,))
+    response.delete_cookie(key=OPENRAG_SESSION_COOKIE_NAME, path="/")
 
 
 def _token_store_ttl_seconds() -> int:
@@ -357,6 +371,12 @@ elif AUTH_MODE == "oidc":
     async def header_auth_callback(headers: dict) -> cl.User | None:
         """Authenticate Chainlit users via an OpenRAG browser auth cookie."""
         return await _chainlit_user_from_browser_cookies(headers)
+
+
+@cl.on_logout
+async def on_logout(request, response):
+    _clear_chat_logout_cookies(request, response)
+    return response
 
 
 def get_external_url():

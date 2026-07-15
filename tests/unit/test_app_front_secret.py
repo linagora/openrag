@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from starlette.responses import Response
 
 _FIX_SOURCE = Path(__file__).resolve().parents[2] / "openrag" / "app_front.py"
 _OPENRAG_RUNTIME_PATH = _FIX_SOURCE.parent
@@ -169,6 +170,29 @@ def test_credentials_user_does_not_recover_from_oidc_session_cookie(monkeypatch)
         module._openrag_api_key_from_user_or_context(SimpleNamespace(metadata={"provider": "credentials"}))
 
     assert module.OPENRAG_API_KEY_SESSION_KEY not in user_session.values
+
+
+@pytest.mark.asyncio
+async def test_chainlit_logout_clears_handoff_and_openrag_session_cookies(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_logout_cookie_cleanup_test")
+    request = SimpleNamespace(
+        cookies={
+            module.CHAINLIT_AUTH_COOKIE_NAME: "stale-chainlit-jwt",
+            f"{module.CHAINLIT_AUTH_COOKIE_NAME}_0": "stale-chainlit-jwt-chunk",
+            module.CHAINLIT_TOKEN_COOKIE_NAME: "or-user-token",
+            module.OPENRAG_SESSION_COOKIE_NAME: "oidc-session-token",
+        }
+    )
+    response = Response()
+
+    returned = await module.on_logout(request, response)
+
+    cookies = [value.decode() for key, value in response.raw_headers if key.lower() == b"set-cookie"]
+    assert returned is response
+    assert any(f"{module.CHAINLIT_AUTH_COOKIE_NAME}=" in cookie and "Max-Age=0" in cookie for cookie in cookies)
+    assert any(f"{module.CHAINLIT_AUTH_COOKIE_NAME}_0=" in cookie and "Max-Age=0" in cookie for cookie in cookies)
+    assert any(f"{module.CHAINLIT_TOKEN_COOKIE_NAME}=" in cookie and "Max-Age=0" in cookie for cookie in cookies)
+    assert any(f"{module.OPENRAG_SESSION_COOKIE_NAME}=" in cookie and "Max-Age=0" in cookie for cookie in cookies)
 
 
 @pytest.mark.asyncio
