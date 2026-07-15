@@ -155,7 +155,7 @@ def _openrag_api_key_from_context_cookie(*, prefer_handoff: bool = False) -> str
     session_token = _extract_cookie(cookie_header, "openrag_session")
     handoff_token = _extract_cookie(cookie_header, CHAINLIT_TOKEN_COOKIE_NAME)
     if prefer_handoff:
-        return handoff_token or session_token
+        return handoff_token
     return session_token or handoff_token
 
 

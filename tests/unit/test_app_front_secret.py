@@ -119,6 +119,25 @@ def test_credentials_user_prefers_handoff_cookie_when_session_cookie_is_stale(mo
     assert api_key == "fresh-handoff-token"
 
 
+def test_credentials_user_does_not_recover_from_oidc_session_cookie(monkeypatch):
+    module = _load_app_front(
+        monkeypatch, auth_mode="oidc", module_name="app_front_credentials_no_session_fallback_test"
+    )
+    user_session = SimpleNamespace(values={}, get=lambda key: None)
+    user_session.set = lambda key, value: user_session.values.update({key: value})
+    module.cl = SimpleNamespace(user_session=user_session)
+    monkeypatch.setattr(
+        module,
+        "get_context",
+        lambda: SimpleNamespace(session=SimpleNamespace(environ={"HTTP_COOKIE": "openrag_session=oidc-session-token"})),
+    )
+
+    with pytest.raises(module.MissingOpenRAGCredentialError, match="sign in again"):
+        module._openrag_api_key_from_user_or_context(SimpleNamespace(metadata={"provider": "credentials"}))
+
+    assert module.OPENRAG_API_KEY_SESSION_KEY not in user_session.values
+
+
 def test_oidc_user_prefers_session_cookie_when_handoff_cookie_is_left_over(monkeypatch):
     module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_oidc_cookie_priority_test")
     user_session = SimpleNamespace(values={}, get=lambda key: None)
