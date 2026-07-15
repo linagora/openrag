@@ -121,7 +121,7 @@ class FakeVectorStore:
 
     async def query_chunks_by_filter(self, collection, filters, output_fields=None):
         self.last_chunk_filters = dict(filters)
-        return [row for row in self._rows if all(key not in row or row[key] == value for key, value in filters.items())]
+        return [row for row in self._rows if all(row.get(key) == value for key, value in filters.items())]
 
 
 class FakeUserRepo:
@@ -368,7 +368,7 @@ async def test_get_file_chunks_missing_file_404():
 
 @pytest.mark.asyncio
 async def test_get_file_chunks_strips_text_keeps_id_and_caps_limit():
-    rows = [{"_id": str(i), "text": "body", "page": i} for i in range(5)]
+    rows = [{"_id": str(i), "text": "body", "page": i, "partition": "p", "file_id": "f"} for i in range(5)]
     svc = _svc(
         drepo=FakeDocumentRepo(files={("f", "p")}),
         vstore=FakeVectorStore(rows=rows),
@@ -381,7 +381,7 @@ async def test_get_file_chunks_strips_text_keeps_id_and_caps_limit():
 
 @pytest.mark.asyncio
 async def test_list_all_chunks_excludes_vector_when_no_embedding():
-    rows = [{"text": "t", "_id": "1", "vector": [0.1, 0.2]}]
+    rows = [{"text": "t", "_id": "1", "partition": "p", "vector": [0.1, 0.2]}]
     svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=FakeVectorStore(rows=rows))
     out = await svc.list_all_chunks("p", include_embedding=False)
     assert out[0]["content"] == "t"
@@ -391,7 +391,7 @@ async def test_list_all_chunks_excludes_vector_when_no_embedding():
 
 @pytest.mark.asyncio
 async def test_list_all_chunks_stringifies_vector_when_included():
-    rows = [{"text": "t", "_id": "1", "vector": [0.1, 0.2]}]
+    rows = [{"text": "t", "_id": "1", "partition": "p", "vector": [0.1, 0.2]}]
     svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=FakeVectorStore(rows=rows))
     out = await svc.list_all_chunks("p", include_embedding=True)
     assert isinstance(out[0]["metadata"]["vector"], str)
@@ -399,7 +399,7 @@ async def test_list_all_chunks_stringifies_vector_when_included():
 
 @pytest.mark.asyncio
 async def test_list_all_chunks_without_file_id_filters_partition_only():
-    vstore = FakeVectorStore(rows=[{"text": "t", "_id": "1"}])
+    vstore = FakeVectorStore(rows=[{"text": "t", "_id": "1", "partition": "p"}])
     svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=vstore)
     await svc.list_all_chunks("p", include_embedding=False)
     assert vstore.last_chunk_filters == {"partition": "p"}
@@ -408,7 +408,7 @@ async def test_list_all_chunks_without_file_id_filters_partition_only():
 @pytest.mark.asyncio
 async def test_list_all_chunks_scopes_to_file_id_when_given():
     """file_id is pushed down to the vector store so the detail view is O(file)."""
-    vstore = FakeVectorStore(rows=[{"text": "t", "_id": "1"}])
+    vstore = FakeVectorStore(rows=[{"text": "t", "_id": "1", "partition": "p", "file_id": "f-123"}])
     svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=vstore)
     await svc.list_all_chunks("p", include_embedding=False, file_id="f-123")
     assert vstore.last_chunk_filters == {"partition": "p", "file_id": "f-123"}
@@ -416,7 +416,7 @@ async def test_list_all_chunks_scopes_to_file_id_when_given():
 
 @pytest.mark.asyncio
 async def test_list_all_chunks_applies_limit():
-    rows = [{"text": str(i), "_id": str(i)} for i in range(5)]
+    rows = [{"text": str(i), "_id": str(i), "partition": "p"} for i in range(5)]
     svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=FakeVectorStore(rows=rows))
     out = await svc.list_all_chunks("p", include_embedding=False, limit=2)
     assert len(out) == 2
@@ -424,7 +424,7 @@ async def test_list_all_chunks_applies_limit():
 
 @pytest.mark.asyncio
 async def test_list_all_chunks_rejects_negative_limit():
-    rows = [{"text": str(i), "_id": str(i)} for i in range(5)]
+    rows = [{"text": str(i), "_id": str(i), "partition": "p"} for i in range(5)]
     svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=FakeVectorStore(rows=rows))
     with pytest.raises(ValidationError) as ei:
         await svc.list_all_chunks("p", include_embedding=False, limit=-1)
@@ -433,7 +433,7 @@ async def test_list_all_chunks_rejects_negative_limit():
 
 @pytest.mark.asyncio
 async def test_get_file_chunks_rejects_negative_limit():
-    rows = [{"_id": str(i), "text": "body"} for i in range(5)]
+    rows = [{"_id": str(i), "text": "body", "partition": "p", "file_id": "f"} for i in range(5)]
     svc = _svc(
         drepo=FakeDocumentRepo(files={("f", "p")}),
         vstore=FakeVectorStore(rows=rows),
