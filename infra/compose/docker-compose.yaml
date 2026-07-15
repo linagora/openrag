@@ -15,7 +15,7 @@ x-openrag-env: &openrag_env
   # root-owned venv volume -> every conversion dies with PermissionError. Point
   # the font at a bind-mounted dir the app user owns, so the ~15MB download
   # happens once and persists across restarts.
-  FONT_PATH: /app/data/fonts/GoNotoCurrent-Regular.ttf
+  FONT_PATH: ${FONT_PATH:-/app/data/fonts/GoNotoCurrent-Regular.ttf}
 
 x-openrag: &openrag_template
   image: linagoraai/openrag:v2.0.0
