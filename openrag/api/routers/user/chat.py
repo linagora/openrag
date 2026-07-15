@@ -31,6 +31,7 @@ from api.dependencies.llm import (
 from api.routers.user.source_links import build_document_source_link
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
 from core.config import load_config
+from core.models.preset import resolve_partition_chat_llm
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens, sanitize_text
@@ -46,9 +47,10 @@ if TYPE_CHECKING:
 
 # Auto-probed max model token limit. Populated by ``prime_max_model_tokens``
 # which the application lifespan invokes during startup. It is only the *middle*
-# tier of ``get_max_model_tokens``: an admin-configured context size on the
-# default LLM endpoint takes precedence, and ``config.llm_context`` is the final
-# fallback.
+# tier of ``get_max_model_tokens`` and only applies to the "default" LLM
+# endpoint (it is probed against ``config.llm.model`` specifically): an
+# admin-configured context size on the resolved LLM endpoint takes precedence,
+# and ``config.llm_context`` is the final fallback.
 _max_model_tokens: int | None = None
 
 
@@ -176,33 +178,46 @@ async def _fetch_max_model_tokens(config: "Settings") -> int:
         return default_limit
 
 
-def _default_endpoint_context_size(config: "Settings") -> int | None:
-    """Admin-configured context window of the default LLM endpoint, if set."""
-    models = getattr(config, "models", None)
-    return models.default_llm_context_size() if models is not None else None
+def _resolve_llm_endpoint_name(config: "Settings", partitions: list[str] | None) -> str:
+    """Effective LLM endpoint registry name for *partitions*.
+
+    Delegates to ``resolve_partition_chat_llm`` — the same consensus rule
+    ``QueryService._resolve_llm`` uses to pick the LLM that actually answers
+    the request — so the token preflight is checked against the budget of the
+    model that will really be called, not always the global default. Falls
+    back to the ``"default"`` alias (see ``ModelEndpointService``) when no
+    single partition-scoped preset applies.
+    """
+    return resolve_partition_chat_llm(partitions, config.partitions) or "default"
 
 
-def _effective_max_output_tokens(config: "Settings") -> int:
-    """Default output-token budget: the default LLM endpoint's admin-configured
+def _effective_max_output_tokens(config: "Settings", partitions: list[str] | None = None) -> int:
+    """Default output-token budget: the resolved LLM endpoint's admin-configured
     value when set, else the global ``llm_context`` fallback."""
     models = getattr(config, "models", None)
-    configured = models.default_llm_output_tokens() if models is not None else None
+    configured = (
+        models.llm_output_tokens(_resolve_llm_endpoint_name(config, partitions)) if models is not None else None
+    )
     return configured or int(config.llm_context.max_output_tokens)
 
 
-def get_max_model_tokens() -> int:
+def get_max_model_tokens(partitions: list[str] | None = None, settings: "Settings | None" = None) -> int:
     """Effective max context size for the token preflight.
 
-    Precedence: the default LLM endpoint's admin-configured
-    ``max_llm_context_size`` (editable in the admin UI) > the value auto-probed
-    from vLLM at startup > the global ``llm_context`` fallback. An explicit admin
-    setting wins over auto-detection so operators can pin the budget.
+    Precedence: the resolved LLM endpoint's admin-configured
+    ``max_llm_context_size`` (editable in the admin UI; resolved from the
+    partition's ``chat_llm`` preset when the request is scoped to partitions
+    that agree on one, else the "default" endpoint) > the value auto-probed
+    from vLLM at startup for the default endpoint's model (only applies when
+    no partition-scoped preset was resolved — the probed value is specific to
+    that one model) > the global ``llm_context`` fallback.
     """
-    config = _runtime_config()
-    configured = _default_endpoint_context_size(config)
+    config = _runtime_config(settings)
+    name = _resolve_llm_endpoint_name(config, partitions)
+    configured = config.models.llm_context_size(name)
     if configured is not None:
         return configured
-    if _max_model_tokens is not None:
+    if name == "default" and _max_model_tokens is not None:
         return _max_model_tokens
     return int(config.llm_context.max_llm_context_size)
 
@@ -211,6 +226,7 @@ def validate_tokens_limit(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
     max_tokens_allowed: int,
     settings: "Settings | None" = None,
+    partitions: list[str] | None = None,
 ) -> tuple[bool, str]:
     """Validate if the request respects the maximum token limit."""
     try:
@@ -219,7 +235,7 @@ def validate_tokens_limit(
 
         if isinstance(request, OpenAIChatCompletionRequest):
             message_tokens = sum(_length_function(m.content or "") + 4 for m in request.messages)
-            default_output_tokens = _effective_max_output_tokens(config)
+            default_output_tokens = _effective_max_output_tokens(config, partitions)
             requested_tokens = request.max_tokens or default_output_tokens
             total_tokens_needed = message_tokens + requested_tokens
             if total_tokens_needed > max_tokens_allowed:
@@ -233,7 +249,7 @@ def validate_tokens_limit(
 
         elif isinstance(request, OpenAICompletionRequest):
             prompt_tokens = _length_function(request.prompt)
-            default_output_tokens = _effective_max_output_tokens(config)
+            default_output_tokens = _effective_max_output_tokens(config, partitions)
             requested_tokens = request.max_tokens or default_output_tokens
             total_tokens_needed = prompt_tokens + requested_tokens
             if total_tokens_needed > max_tokens_allowed:
@@ -255,12 +271,14 @@ def check_tokens_limit(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
     log,
     settings: "Settings | None" = None,
+    partitions: list[str] | None = None,
 ):
     """Validate token limit and raise HTTPException(413) if exceeded."""
     is_valid, error_message = validate_tokens_limit(
         request,
-        max_tokens_allowed=get_max_model_tokens(),
+        max_tokens_allowed=get_max_model_tokens(partitions=partitions, settings=settings),
         settings=settings,
+        partitions=partitions,
     )
     if not is_valid:
         log.info("Request exceeds token limit", detail=error_message)
@@ -317,10 +335,6 @@ async def openai_chat_completion(
 
     log.debug("Received chat completion request with messages: {}", truncate(str(request.messages)))
 
-    # Bound the caller's input size in every mode. RAG-injected context is added
-    # server-side and separately capped (max_context_tokens), but the user's own
-    # messages must be limited regardless of direct-LLM vs RAG.
-    check_tokens_limit(request, log, config)
     if is_direct_llm_model(request, config):
         partitions = None
     else:
@@ -331,6 +345,13 @@ async def openai_chat_completion(
             is_admin=user["is_admin"],
         )
         log.debug(f"Using partitions: {partitions}")
+
+    # Bound the caller's input size in every mode, against the resolved
+    # partition's chat_llm preset budget when one applies (else the default
+    # LLM endpoint). RAG-injected context is added server-side and separately
+    # capped (max_context_tokens), but the user's own messages must be limited
+    # regardless of direct-LLM vs RAG.
+    check_tokens_limit(request, log, config, partitions=partitions)
 
     def prep(docs, web):
         return __prepare_sources(request2, docs, web)
@@ -418,8 +439,6 @@ async def openai_completion(
             detail="Streaming is not supported for this endpoint",
         )
 
-    # Bound the caller's input size in every mode (RAG context is capped separately).
-    check_tokens_limit(request, log, config)
     if is_direct_llm_model(request, config):
         partitions = None
     else:
@@ -429,6 +448,11 @@ async def openai_completion(
             partition_service=partition_service,
             is_admin=user["is_admin"],
         )
+
+    # Bound the caller's input size in every mode (RAG context is capped
+    # separately), against the resolved partition's chat_llm preset budget
+    # when one applies.
+    check_tokens_limit(request, log, config, partitions=partitions)
 
     resp = await service.complete(
         partitions=partitions,

@@ -615,8 +615,8 @@ function EndpointDialog({
                 />
               </div>
               <p className="col-span-2 text-xs text-muted-foreground">
-                Token budgets for this endpoint. Leave blank to use the system default. Applied when this is the
-                default LLM endpoint.
+                Token budgets for this endpoint. Leave blank to use the system default. Applied whenever this
+                endpoint answers a request — as the default LLM, or as a partition&apos;s chat LLM preset.
               </p>
             </div>
           )}

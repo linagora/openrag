@@ -63,18 +63,24 @@ class ModelsConfig(ConfigMixin):
     llm: dict[str, ModelEndpointConfig] = Field(default_factory=dict)
     vlm: dict[str, ModelEndpointConfig] = Field(default_factory=dict)
 
-    def default_llm_extra(self) -> dict[str, Any]:
-        """``extra`` payload of the default LLM endpoint (``{}`` if unregistered)."""
-        default = self.llm.get("default")
-        return dict(default.extra) if default is not None else {}
+    def llm_extra(self, name: str = "default") -> dict[str, Any]:
+        """``extra`` payload of the named LLM endpoint (``{}`` if unregistered).
 
-    def default_llm_context_size(self) -> int | None:
-        """Admin-configured context window of the default LLM endpoint, if any."""
-        return _positive_int(self.default_llm_extra().get(LLM_CONTEXT_SIZE_KEY))
+        ``name`` defaults to the ``"default"`` alias (see ``ModelEndpointService``),
+        but any catalogued endpoint name works — in particular a partition's
+        ``chat_llm`` preset, so the token preflight can read that endpoint's
+        budget instead of always falling back to the global default.
+        """
+        endpoint = self.llm.get(name)
+        return dict(endpoint.extra) if endpoint is not None else {}
 
-    def default_llm_output_tokens(self) -> int | None:
-        """Admin-configured max output tokens of the default LLM endpoint, if any."""
-        return _positive_int(self.default_llm_extra().get(LLM_OUTPUT_TOKENS_KEY))
+    def llm_context_size(self, name: str = "default") -> int | None:
+        """Admin-configured context window of the named LLM endpoint, if any."""
+        return _positive_int(self.llm_extra(name).get(LLM_CONTEXT_SIZE_KEY))
+
+    def llm_output_tokens(self, name: str = "default") -> int | None:
+        """Admin-configured max output tokens of the named LLM endpoint, if any."""
+        return _positive_int(self.llm_extra(name).get(LLM_OUTPUT_TOKENS_KEY))
 
 
 class ModelEndpointRow(BaseModel):

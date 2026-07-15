@@ -42,6 +42,7 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
 from core.prompts import (
     SOURCE_SEPARATOR,
@@ -180,20 +181,15 @@ class QueryService:
         unresolvable name here must not fail the chat request; it falls back
         to the default LLM with a warning.
         """
-        if self._llm_factory is None or not partition or "all" in partition:
-            logger.bind(partitions=partition).debug("Answering with the default LLM (no partition-scoped preset)")
+        if self._llm_factory is None:
+            logger.bind(partitions=partition).debug("Answering with the default LLM (no llm_factory wired)")
             return self._llm
-        names = {
-            cfg.chat_llm
-            for name in partition
-            if (cfg := self._config.partitions.get(name)) is not None and cfg.chat_llm
-        }
-        if len(names) != 1:
-            logger.bind(partitions=partition, chat_llm_presets=sorted(names)).debug(
+        chat_llm = resolve_partition_chat_llm(partition, self._config.partitions)
+        if chat_llm is None:
+            logger.bind(partitions=partition).debug(
                 "Answering with the default LLM (no single chat_llm preset among the partitions)"
             )
             return self._llm
-        (chat_llm,) = names
         try:
             llm = self._llm_factory(chat_llm)
         except KeyError:
