@@ -265,10 +265,6 @@ if AUTH_TOKEN and AUTH_MODE != "oidc":
             logger.exception("Unexpected error during authentication", error=str(e))
             return None
 
-    @cl.header_auth_callback
-    async def header_auth_callback(headers: dict) -> cl.User | None:
-        return await _chainlit_user_from_browser_cookies(headers)
-
 elif AUTH_MODE == "oidc":
     if not CHAINLIT_AUTH_SECRET:
         raise RuntimeError(

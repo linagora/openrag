@@ -35,8 +35,8 @@ def test_openrag_bearer_token_is_not_stored_in_chainlit_user_metadata():
     assert '"api_key": password' not in content
 
 
-def test_token_mode_registers_chainlit_header_handoff(monkeypatch):
-    """Token-mode Admin UI users should enter Chainlit through the handoff cookie."""
+def test_token_mode_keeps_chainlit_password_login(monkeypatch):
+    """Token mode must keep Chainlit's manual token login form available."""
     monkeypatch.setenv("AUTH_TOKEN", "test-token")
     monkeypatch.setenv("AUTH_MODE", "token")
     monkeypatch.setenv("CHAINLIT_AUTH_SECRET", "x" * 32)
@@ -52,7 +52,7 @@ def test_token_mode_registers_chainlit_header_handoff(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    assert config.code.header_auth_callback is not None
+    assert config.code.header_auth_callback is None
     assert config.code.password_auth_callback is not None
 
 
