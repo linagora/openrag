@@ -1,5 +1,7 @@
 import json
 import os
+import secrets
+import time
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
@@ -29,6 +31,9 @@ port = os.environ.get("APP_iPORT", "8080")
 INTERNAL_BASE_URL = f"http://localhost:{port}"  # Default fallback URL
 
 DEFAULT_LANGUAGE = os.environ.get("DEFAULT_LANGUAGE")
+OPENRAG_API_KEY_SESSION_KEY = "openrag_api_key"
+OPENRAG_AUTH_HANDLE_METADATA_KEY = "openrag_auth_handle"
+_OPENRAG_TOKEN_STORE: dict[str, tuple[str, float]] = {}
 
 
 def get_user_language() -> str:
@@ -94,6 +99,96 @@ def _extract_cookie(cookie_header: str, name: str) -> str | None:
     return None
 
 
+def _token_store_ttl_seconds() -> int:
+    return int(getattr(cl_config.project, "user_session_timeout", 3600) or 3600)
+
+
+def _cleanup_token_store(now: float | None = None) -> None:
+    now = now if now is not None else time.monotonic()
+    expired = [handle for handle, (_, expires_at) in _OPENRAG_TOKEN_STORE.items() if expires_at <= now]
+    for handle in expired:
+        _OPENRAG_TOKEN_STORE.pop(handle, None)
+
+
+def _remember_openrag_api_key(api_key: str | None) -> str | None:
+    if not api_key:
+        return None
+    _cleanup_token_store()
+    handle = secrets.token_urlsafe(32)
+    _OPENRAG_TOKEN_STORE[handle] = (api_key, time.monotonic() + _token_store_ttl_seconds())
+    return handle
+
+
+def _openrag_api_key_from_user(user) -> str | None:
+    metadata = getattr(user, "metadata", {}) or {}
+    handle = metadata.get(OPENRAG_AUTH_HANDLE_METADATA_KEY)
+    if not handle:
+        return None
+    item = _OPENRAG_TOKEN_STORE.get(handle)
+    if not item:
+        return None
+    api_key, expires_at = item
+    now = time.monotonic()
+    if expires_at <= now:
+        _OPENRAG_TOKEN_STORE.pop(handle, None)
+        return None
+    _OPENRAG_TOKEN_STORE[handle] = (api_key, now + _token_store_ttl_seconds())
+    return api_key
+
+
+def _openrag_api_key_from_context_cookie() -> str | None:
+    try:
+        context = get_context()
+        cookie_header = context.session.environ.get("HTTP_COOKIE", "")
+    except Exception:
+        return None
+    return _extract_cookie(cookie_header, "openrag_session") or _extract_cookie(
+        cookie_header, CHAINLIT_TOKEN_COOKIE_NAME
+    )
+
+
+def _current_openrag_api_key(default: str = "sk-1234") -> str:
+    api_key = cl.user_session.get(OPENRAG_API_KEY_SESSION_KEY)
+    if api_key:
+        return api_key
+
+    user = cl.user_session.get("user")
+    api_key = _openrag_api_key_from_user(user)
+    if api_key:
+        cl.user_session.set(OPENRAG_API_KEY_SESSION_KEY, api_key)
+        return api_key
+    api_key = _openrag_api_key_from_context_cookie()
+    if api_key:
+        cl.user_session.set(OPENRAG_API_KEY_SESSION_KEY, api_key)
+        return api_key
+    return default
+
+
+def _chainlit_user_from_info(data: dict, *, provider: str, api_key: str) -> cl.User:
+    metadata = {
+        "role": "admin" if data.pop("is_admin", False) else "user",
+        "provider": provider,
+        "extra": data,
+    }
+    auth_handle = _remember_openrag_api_key(api_key)
+    if auth_handle:
+        metadata[OPENRAG_AUTH_HANDLE_METADATA_KEY] = auth_handle
+
+    return cl.User(
+        identifier=data.get("display_name", "user"),
+        metadata=metadata,
+    )
+
+
+async def _load_user_info(client: httpx.AsyncClient, api_key: str) -> dict:
+    response = await client.get(
+        url=f"{INTERNAL_BASE_URL}/users/info",
+        headers=get_headers(api_key),
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 if PERSISTENCY:
 
     @cl.on_chat_resume
@@ -113,22 +208,9 @@ if AUTH_TOKEN and AUTH_MODE != "oidc":
     async def auth_callback(username: str, password: str):
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(4 * 60.0)) as client:
-                response = await client.get(
-                    url=f"{INTERNAL_BASE_URL}/users/info",
-                    headers=get_headers(password),
-                )
-                response.raise_for_status()  # raises exception for 4xx/5xx responses
-                data = response.json()
+                data = await _load_user_info(client, password)
 
-            return cl.User(
-                identifier=data.get("display_name", "user"),
-                metadata={
-                    "role": "admin" if data.pop("is_admin") else "user",
-                    "provider": "credentials",
-                    "api_key": password,
-                    "extra": data,
-                },
-            )
+            return _chainlit_user_from_info(data, provider="credentials", api_key=password)
 
         except httpx.HTTPStatusError:
             logger.info("Authentication failed", username=mask_email(username))
@@ -156,14 +238,17 @@ elif AUTH_MODE == "oidc":
             logger.info("No OpenRAG auth cookie in Chainlit request")
             return None
 
+        provider = "oidc" if session_token else "credentials"
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-                response = await client.get(
-                    url=f"{INTERNAL_BASE_URL}/users/info",
-                    headers=get_headers(api_key),
-                )
-                response.raise_for_status()
-                data = response.json()
+                try:
+                    data = await _load_user_info(client, api_key)
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code not in (401, 403) or not session_token or not chainlit_token:
+                        raise
+                    api_key = chainlit_token
+                    provider = "credentials"
+                    data = await _load_user_info(client, api_key)
         except httpx.HTTPStatusError as e:
             logger.info("Session cookie rejected by /users/info", status=e.response.status_code)
             return None
@@ -171,15 +256,7 @@ elif AUTH_MODE == "oidc":
             logger.exception("Chainlit header_auth_callback failure", error=str(e))
             return None
 
-        return cl.User(
-            identifier=data.get("display_name", "user"),
-            metadata={
-                "role": "admin" if data.pop("is_admin", False) else "user",
-                "provider": "oidc" if session_token else "credentials",
-                "api_key": api_key,
-                "extra": data,
-            },
-        )
+        return _chainlit_user_from_info(data, provider=provider, api_key=api_key)
 
 
 def get_external_url():
@@ -192,7 +269,7 @@ def get_external_url():
 
 @cl.set_chat_profiles
 async def chat_profile(current_user: cl.User):
-    api_key = current_user.metadata.get("api_key", "sk-1234") if current_user else "sk-1234"
+    api_key = _openrag_api_key_from_user(current_user) or "sk-1234"
     client = AsyncOpenAI(base_url=f"{INTERNAL_BASE_URL}/v1", api_key=api_key)
     try:
         output = await client.models.list()
@@ -218,8 +295,7 @@ async def chat_profile(current_user: cl.User):
 @cl.on_chat_start
 async def on_chat_start():
     cl.user_session.set("messages", [])
-    user = cl.user_session.get("user")
-    api_key = user.metadata.get("api_key", "sk-1234") if user else "sk-1234"
+    api_key = _current_openrag_api_key()
     logger.debug("New Chat Started", internal_base_url=INTERNAL_BASE_URL)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(4 * 60.0)) as client:
@@ -312,8 +388,7 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
 async def on_message(message: cl.Message):
     messages: list = cl.user_session.get("messages", [])
     model: str = cl.user_session.get("chat_profile")
-    user = cl.user_session.get("user")
-    api_key = user.metadata.get("api_key") if user else "sk-1234"
+    api_key = _current_openrag_api_key()
     client = AsyncOpenAI(
         base_url=f"{INTERNAL_BASE_URL}/v1",
         api_key=api_key,

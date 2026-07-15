@@ -274,6 +274,13 @@ async def chainlit_session(request: Request, _user=Depends(current_user)):
     return response
 
 
+@router.delete("/auth/chainlit-session", include_in_schema=False)
+async def clear_chainlit_session(_user=Depends(current_user)):
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    response.delete_cookie(key=CHAINLIT_TOKEN_COOKIE_NAME, path=CHAINLIT_TOKEN_COOKIE_PATH)
+    return response
+
+
 # ---------------------------------------------------------------------------
 # GET /auth/me  — standard AuthMiddleware applies (route NOT in bypass list)
 # ---------------------------------------------------------------------------

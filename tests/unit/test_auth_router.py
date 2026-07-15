@@ -352,3 +352,12 @@ def test_chainlit_session_is_noop_for_cookie_authenticated_user(authenticated_cl
 
     assert r.status_code == 204
     assert not any(CHAINLIT_TOKEN_COOKIE_NAME in c for c in _set_cookies(r))
+
+
+def test_clear_chainlit_session_deletes_handoff_cookie(authenticated_client):
+    r = authenticated_client.delete("/auth/chainlit-session")
+
+    assert r.status_code == 204
+    cookie = next(c for c in _set_cookies(r) if CHAINLIT_TOKEN_COOKIE_NAME in c)
+    assert f"Path={CHAINLIT_TOKEN_COOKIE_PATH}" in cookie
+    assert "Max-Age=0" in cookie or "expires=" in cookie.lower()

@@ -1,5 +1,5 @@
 import { useAuth } from "@/lib/auth";
-import { apiUrl, request } from "@/lib/api/client";
+import { apiUrl, request, TOKEN_KEY } from "@/lib/api/client";
 import { useNavigate } from "react-router-dom";
 import { LogOut, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -30,11 +30,21 @@ export function Header() {
     if (chatWindow) {
       chatWindow.location.href = chatHref;
     } else {
-      window.open(chatHref, "_blank", "noopener,noreferrer");
+      window.location.assign(chatHref);
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    const wasTokenSession = localStorage.getItem(TOKEN_KEY) !== null;
+    if (wasTokenSession) {
+      try {
+        await request("/auth/chainlit-session", { method: "DELETE" });
+      } catch {
+        // Local token logout should still complete even if the optional chat
+        // cookie cleanup request fails.
+      }
+    }
+
     const wasOidcSession = logout();
     if (wasOidcSession) {
       // Full-page navigation to the backend's RP-initiated logout: it revokes
@@ -72,7 +82,13 @@ export function Header() {
             <Badge className="bg-primary/10 text-primary border-primary/20 hover:bg-primary/15">
               {user.is_admin ? "Admin" : "User"}
             </Badge>
-            <Button variant="ghost" size="icon" onClick={handleLogout} className="text-muted-foreground hover:text-destructive">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleLogout}
+              className="text-muted-foreground hover:text-destructive"
+              aria-label="Log out"
+            >
               <LogOut className="h-4 w-4" />
             </Button>
           </div>

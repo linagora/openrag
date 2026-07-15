@@ -6,6 +6,7 @@ import { TOKEN_KEY } from "@/lib/api/client";
 
 const authState = vi.hoisted(() => ({
   chainlitEnabled: true,
+  logout: vi.fn(() => false),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -17,7 +18,7 @@ vi.mock("@/lib/auth", () => ({
       is_admin: true,
       chainlit_enabled: authState.chainlitEnabled,
     },
-    logout: vi.fn(),
+    logout: authState.logout,
   }),
 }));
 
@@ -53,6 +54,7 @@ describe("Header", () => {
     localStorage.clear();
     fetchMock.mockReset();
     openMock.mockReset();
+    authState.logout.mockImplementation(() => false);
     fetchMock.mockResolvedValue(fakeResponse());
   });
 
@@ -82,10 +84,10 @@ describe("Header", () => {
           headers: expect.objectContaining({ Authorization: "Bearer or-user-token" }),
         }),
       );
+      expect(openedWindow.location.href).toBe("/chainlit/");
     });
     expect(openMock).toHaveBeenCalledWith("about:blank", "_blank");
     expect(openedWindow.opener).toBeNull();
-    expect(openedWindow.location.href).toBe("/chainlit/");
   });
 
   it("uses the configured API origin for Chainlit in browser-direct builds", async () => {
@@ -116,5 +118,32 @@ describe("Header", () => {
     );
 
     expect(screen.queryByRole("button", { name: /open chat in a new tab/i })).toBeNull();
+  });
+
+  it("clears the Chainlit handoff cookie before token logout", async () => {
+    localStorage.setItem(TOKEN_KEY, "or-user-token");
+    authState.logout.mockImplementation(() => {
+      localStorage.removeItem(TOKEN_KEY);
+      return false;
+    });
+
+    render(
+      <MemoryRouter>
+        <Header />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /log out/i }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/auth/chainlit-session",
+        expect.objectContaining({
+          method: "DELETE",
+          headers: expect.objectContaining({ Authorization: "Bearer or-user-token" }),
+        }),
+      );
+    });
+    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
   });
 });

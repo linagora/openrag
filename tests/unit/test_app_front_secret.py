@@ -24,6 +24,14 @@ def test_no_hardcoded_default_secret_assignment_in_source():
     )
 
 
+def test_openrag_bearer_token_is_not_stored_in_chainlit_user_metadata():
+    with open(_FIX_SOURCE) as f:
+        content = f.read()
+
+    assert '"api_key": api_key' not in content
+    assert '"api_key": password' not in content
+
+
 def test_app_front_raises_when_secret_missing(monkeypatch):
     """Importing app_front.py without CHAINLIT_AUTH_SECRET must raise."""
     monkeypatch.setenv("AUTH_TOKEN", "test-token")
