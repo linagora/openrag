@@ -100,6 +100,7 @@ class FakeVectorStore:
         self._rows = rows or []
         self._exists = exists
         self.deleted_ids: list[str] = []
+        self.deleted_filters: list[dict] = []
         self.last_chunk_filters: dict | None = None
 
     async def collection_exists(self, name) -> bool:
@@ -112,9 +113,15 @@ class FakeVectorStore:
         self.deleted_ids.extend(ids)
         return len(ids)
 
+    async def delete_by_filter(self, filters) -> int:
+        self.deleted_filters.append(dict(filters))
+        before = len(self._rows)
+        self._rows = [row for row in self._rows if not all(row.get(key) == value for key, value in filters.items())]
+        return len(self._ids) or before - len(self._rows)
+
     async def query_chunks_by_filter(self, collection, filters, output_fields=None):
         self.last_chunk_filters = dict(filters)
-        return list(self._rows)
+        return [row for row in self._rows if all(key not in row or row[key] == value for key, value in filters.items())]
 
 
 class FakeUserRepo:
@@ -230,12 +237,7 @@ async def test_delete_partition_missing_raises_404():
 
 
 @pytest.mark.asyncio
-async def test_delete_partition_deletes_rows_before_vectors():
-    """Regression for #379: partition deletion from database happens first.
-
-    If database cleanup succeeds but vector store delete fails, the data model remains
-    consistent (partition is gone from database, orphaned chunks logged for reconciliation).
-    """
+async def test_delete_partition_deletes_vectors_before_rows():
     prepo = FakePartitionRepo(existing={"p1"})
     vstore = FakeVectorStore(ids=["c1", "c2"])
     call_order = []
@@ -247,18 +249,19 @@ async def test_delete_partition_deletes_rows_before_vectors():
         return await prepo_delete_orig(*args, **kwargs)
 
     prepo.delete_partition = tracked_prepo_delete
-    vstore_delete_orig = vstore.delete
+    vstore_delete_orig = vstore.delete_by_filter
 
     async def tracked_vstore_delete(*args, **kwargs):
-        call_order.append("vstore_delete")
+        call_order.append("vstore_delete_by_filter")
         return await vstore_delete_orig(*args, **kwargs)
 
-    vstore.delete = tracked_vstore_delete
+    vstore.delete_by_filter = tracked_vstore_delete
 
     await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
 
-    assert call_order == ["prepo_delete", "vstore_delete"]
-    assert vstore.deleted_ids == ["c1", "c2"]
+    assert call_order == ["vstore_delete_by_filter", "prepo_delete"]
+    assert vstore.deleted_filters == [{"partition": "p1"}]
+    assert vstore.deleted_ids == []
     assert prepo.deleted == ["p1"]
 
 
@@ -267,8 +270,28 @@ async def test_delete_partition_no_vectors_still_deletes_rows():
     prepo = FakePartitionRepo(existing={"p1"})
     vstore = FakeVectorStore(ids=[])
     await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
+    assert vstore.deleted_filters == [{"partition": "p1"}]
     assert vstore.deleted_ids == []
     assert prepo.deleted == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_cleans_vectors_before_partition_name_reuse():
+    prepo = FakePartitionRepo(existing={"p1"})
+    vstore = FakeVectorStore(
+        rows=[
+            {"partition": "p1", "file_id": "old-file", "text": "old tenant data"},
+            {"partition": "other", "file_id": "keep-file", "text": "other data"},
+        ]
+    )
+
+    await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
+    await _svc(prepo=prepo, vstore=vstore).create_partition("p1", user_id=42)
+
+    assert await vstore.query_chunks_by_filter("vdb", {"partition": "p1"}) == []
+    assert await vstore.query_chunks_by_filter("vdb", {"partition": "other"}) == [
+        {"partition": "other", "file_id": "keep-file", "text": "other data"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -291,6 +314,10 @@ async def test_delete_partition_skips_vectors_when_collection_absent():
             self.delete_called = True
             raise AssertionError("must not delete vectors when collection doesn't exist")
 
+        async def delete_by_filter(self, filters) -> int:
+            self.delete_called = True
+            raise AssertionError("must not delete vectors when collection doesn't exist")
+
     vstore = ExplodingVectorStore(exists=False)
     await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
     assert prepo.deleted == ["p1"]
@@ -299,25 +326,19 @@ async def test_delete_partition_skips_vectors_when_collection_absent():
 
 
 @pytest.mark.asyncio
-async def test_delete_partition_logs_error_if_vector_store_delete_fails():
-    """Regression for #379: if vector store delete fails after database cleanup,
-    log an error for reconciliation but don't raise (data model is consistent)."""
+async def test_delete_partition_keeps_rows_if_vector_store_delete_fails():
     prepo = FakePartitionRepo(existing={"p1"})
 
     class FailingVectorStore(FakeVectorStore):
-        async def delete(self, ids, collection="default") -> int:
+        async def delete_by_filter(self, filters) -> int:
             raise Exception("Milvus connection failed")
 
     vstore = FailingVectorStore(ids=["c1", "c2"])
 
-    with pytest.importorskip("unittest.mock").patch("services.orchestrators.partition_service.logger") as mock_logger:
+    with pytest.raises(Exception, match="Milvus connection failed"):
         await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
 
-        mock_logger.error.assert_called_once()
-        call_args = mock_logger.error.call_args
-        assert "reconciliation task required" in call_args[0][0]
-        assert call_args[1]["partition"] == "p1"
-        assert call_args[1]["chunk_count"] == 2
+    assert prepo.deleted == []
 
 
 # --------------------------------------------------------------------------- #

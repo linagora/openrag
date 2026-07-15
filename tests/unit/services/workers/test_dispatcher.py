@@ -39,6 +39,8 @@ def _vector_store() -> MagicMock:
         ]
     )
     store.delete = AsyncMock()
+    store.delete_by_filter = AsyncMock(return_value=2)
+    store.collection_exists = AsyncMock(return_value=True)
     store.upsert_entities = AsyncMock()
     store.insert_entities = AsyncMock()
     return store
@@ -167,8 +169,8 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
     await dispatcher.update_file_metadata("file-1", {"title": "new"}, "tenant-a", user={"id": 7})
     await dispatcher.copy_file("file-1", {"file_id": "copy-1", "partition": "tenant-b"}, "tenant-b", user=None)
 
-    vector_store.query_ids_by_filter.assert_called_once_with("default", {"partition": "tenant-a", "file_id": "file-1"})
-    vector_store.delete.assert_called_once_with(["1", "2"], "default")
+    vector_store.delete_by_filter.assert_called_once_with({"partition": "tenant-a", "file_id": "file-1"})
+    vector_store.delete.assert_not_called()
     workspace_repo.remove_file_from_all_workspaces.assert_called_once_with("file-1", "tenant-a")
     document_repo.remove_file_from_partition.assert_called_once_with(file_id="file-1", partition="tenant-a")
     document_repo.update_file_metadata_in_db.assert_called_once_with(
@@ -238,12 +240,7 @@ async def test_cancel_task_marks_cancelled_even_if_worker_finished_first() -> No
 
 
 @pytest.mark.asyncio
-async def test_delete_file_cleans_database_before_vector_store() -> None:
-    """Regression for #378: database cleanup happens first, vector store cleanup after.
-
-    If database cleanup succeeds but vector store delete fails, the data model remains
-    consistent (file is gone from database, orphaned chunks logged for reconciliation).
-    """
+async def test_delete_file_cleans_vector_store_before_database() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     vector_store = _vector_store()
@@ -264,20 +261,15 @@ async def test_delete_file_cleans_database_before_vector_store() -> None:
         side_effect=lambda *a, **k: call_order.append("workspace")
     )
     document_repo.remove_file_from_partition = AsyncMock(side_effect=lambda *a, **k: call_order.append("document"))
-    vector_store.query_ids_by_filter = AsyncMock(
-        return_value=["1", "2"], side_effect=lambda *a, **k: call_order.append("query") or ["1", "2"]
-    )
-    vector_store.delete = AsyncMock(side_effect=lambda *a, **k: call_order.append("delete") or None)
+    vector_store.delete_by_filter = AsyncMock(side_effect=lambda *a, **k: call_order.append("delete_by_filter") or 2)
 
     await dispatcher.delete_file("file-1", "tenant-a")
 
-    assert call_order == ["workspace", "document", "query", "delete"]
+    assert call_order == ["delete_by_filter", "workspace", "document"]
 
 
 @pytest.mark.asyncio
-async def test_delete_file_logs_error_if_vector_store_delete_fails() -> None:
-    """Regression for #378: if vector store delete fails after database cleanup,
-    log an error for reconciliation but don't raise (data model is consistent)."""
+async def test_delete_file_does_not_remove_database_row_if_vector_store_delete_fails() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     vector_store = _vector_store()
@@ -293,15 +285,10 @@ async def test_delete_file_logs_error_if_vector_store_delete_fails() -> None:
         collection="default",
     )
 
-    vector_store.query_ids_by_filter = AsyncMock(return_value=["1", "2"])
-    vector_store.delete = AsyncMock(side_effect=Exception("Milvus connection failed"))
+    vector_store.delete_by_filter = AsyncMock(side_effect=Exception("Milvus connection failed"))
 
-    with patch("services.workers.dispatcher.logger") as mock_logger:
+    with pytest.raises(Exception, match="Milvus connection failed"):
         await dispatcher.delete_file("file-1", "tenant-a")
 
-        mock_logger.error.assert_called_once()
-        call_args = mock_logger.error.call_args
-        assert "reconciliation task required" in call_args[0][0]
-        assert call_args[1]["file_id"] == "file-1"
-        assert call_args[1]["partition"] == "tenant-a"
-        assert call_args[1]["chunk_count"] == 2
+    workspace_repo.remove_file_from_all_workspaces.assert_not_called()
+    document_repo.remove_file_from_partition.assert_not_called()

@@ -117,24 +117,10 @@ class WorkerDispatcher(IndexingDispatcher):
         return task_id
 
     async def delete_file(self, file_id: str, partition: str) -> None:
+        if await self._vector_store.collection_exists(self._collection):
+            await self._vector_store.delete_by_filter({"partition": partition, "file_id": file_id})
         await self._workspace_repo.remove_file_from_all_workspaces(file_id, partition)
         await self._document_repo.remove_file_from_partition(file_id=file_id, partition=partition)
-        ids = await self._vector_store.query_ids_by_filter(
-            self._collection,
-            {"partition": partition, "file_id": file_id},
-        )
-        if ids:
-            try:
-                await self._vector_store.delete(ids, self._collection)
-            except Exception as e:
-                logger.error(
-                    "Failed to delete chunks from vector store after removing from database; "
-                    "reconciliation task required",
-                    file_id=file_id,
-                    partition=partition,
-                    chunk_count=len(ids),
-                    error=str(e),
-                )
 
     async def update_file_metadata(
         self,

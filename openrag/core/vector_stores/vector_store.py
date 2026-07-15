@@ -59,6 +59,11 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
+    async def delete_by_filter(self, filters: dict[str, Any]) -> int:
+        """Delete chunks matching the given filter expression. Returns count."""
+        ...
+
+    @abstractmethod
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
         """Create collection if it doesn't exist."""
         ...

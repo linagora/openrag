@@ -6,10 +6,9 @@ Phase 7 repositories and the :class:`VectorStore` port directly; it does
 not depend on Ray or pymilvus.
 
 ``delete_partition`` is the one cross-cutting method — it must drop the
-partition's vectors from the store *and* the relational rows. It is
-performed through the clean :class:`VectorStore` port
-(``query_ids_by_filter`` + ``delete``) rather than a Milvus-specific
-filter delete, so PartitionService stays backend-agnostic.
+partition's vectors from the store *and* the relational rows. Vector cleanup
+runs first through :class:`VectorStore.delete_by_filter`, so a failed vector
+delete does not leave catalog rows removed while chunks remain queryable.
 
 Chunk reads return plain dicts (never LangChain ``Document`` objects —
 8H forbids LangChain in orchestrators); the thin router builds the
@@ -245,34 +244,24 @@ class PartitionService:
     async def delete_partition(self, partition: str) -> None:
         """Drop a partition's vectors *and* relational rows (cross-cutting)."""
         await self._ensure_partition(partition)
-        await self._partition_repo.delete_partition(name=partition)
         # The shared Milvus collection is created lazily on the first insert
         # system-wide, so on a fresh stack (nothing ever indexed) it doesn't
-        # exist; querying it would raise (e.g. DescribeCollectionException) and
-        # fail the whole delete *after* the relational rows are already gone.
+        # exist; deleting by filter would raise (e.g. DescribeCollectionException)
+        # even though there are no chunks to clean up.
         # No collection means no chunks to clean up — skip the vector cleanup.
-        if not await self._vector_store.collection_exists(self._collection):
+        if await self._vector_store.collection_exists(self._collection):
+            deleted = await self._vector_store.delete_by_filter({"partition": partition})
             logger.info(
-                "Partition deleted; no vector collection to clean up",
+                "Deleted points from partition",
+                partition=partition,
+                count=deleted,
+            )
+        else:
+            logger.info(
+                "No vector collection to clean up before deleting partition",
                 partition=partition,
             )
-            return
-        ids = await self._vector_store.query_ids_by_filter(
-            self._collection,
-            {"partition": partition},
-        )
-        if ids:
-            try:
-                deleted = await self._vector_store.delete(ids, self._collection)
-                logger.info("Deleted points from partition", partition=partition, count=deleted)
-            except Exception as e:
-                logger.error(
-                    "Failed to delete chunks from vector store after removing partition from database; "
-                    "reconciliation task required",
-                    partition=partition,
-                    chunk_count=len(ids),
-                    error=str(e),
-                )
+        await self._partition_repo.delete_partition(name=partition)
         logger.info("Partition successfully deleted.", partition=partition)
 
     async def update_partition(self, partition: str, **fields: object) -> dict | None:

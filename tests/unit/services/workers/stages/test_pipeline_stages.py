@@ -113,6 +113,9 @@ class FakeVectorStore(VectorStore):
     async def delete(self, ids: list[str], collection: str = "default") -> int:
         return 0
 
+    async def delete_by_filter(self, filters: dict) -> int:
+        return 0
+
     async def ensure_collection(self, name: str, dimension: int, **kwargs) -> None:
         self.ensure_calls.append((name, dimension))
         return None
