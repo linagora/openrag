@@ -146,15 +146,17 @@ def _openrag_auth_provider_from_user(user) -> str | None:
     return provider if isinstance(provider, str) else None
 
 
-def _openrag_api_key_from_context_cookie() -> str | None:
+def _openrag_api_key_from_context_cookie(*, prefer_handoff: bool = False) -> str | None:
     try:
         context = get_context()
         cookie_header = context.session.environ.get("HTTP_COOKIE", "")
     except Exception:
         return None
-    return _extract_cookie(cookie_header, "openrag_session") or _extract_cookie(
-        cookie_header, CHAINLIT_TOKEN_COOKIE_NAME
-    )
+    session_token = _extract_cookie(cookie_header, "openrag_session")
+    handoff_token = _extract_cookie(cookie_header, CHAINLIT_TOKEN_COOKIE_NAME)
+    if prefer_handoff:
+        return handoff_token or session_token
+    return session_token or handoff_token
 
 
 def _current_openrag_api_key(default: str = "sk-1234") -> str:
@@ -171,7 +173,9 @@ def _openrag_api_key_from_user_or_context(user, default: str = "sk-1234") -> str
     if api_key:
         cl.user_session.set(OPENRAG_API_KEY_SESSION_KEY, api_key)
         return api_key
-    api_key = _openrag_api_key_from_context_cookie()
+    api_key = _openrag_api_key_from_context_cookie(
+        prefer_handoff=_openrag_auth_provider_from_user(user) == "credentials"
+    )
     if api_key:
         cl.user_session.set(OPENRAG_API_KEY_SESSION_KEY, api_key)
         return api_key

@@ -64,7 +64,7 @@ def test_token_mode_keeps_chainlit_password_login(monkeypatch):
 
 def test_api_key_falls_back_to_chainlit_cookie_when_auth_handle_is_missing(monkeypatch):
     module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_cookie_fallback_test")
-    monkeypatch.setattr(module, "_openrag_api_key_from_context_cookie", lambda: "or-cookie-token")
+    monkeypatch.setattr(module, "_openrag_api_key_from_context_cookie", lambda **_kwargs: "or-cookie-token")
 
     class UserSession:
         def __init__(self):
@@ -87,12 +87,61 @@ def test_api_key_falls_back_to_chainlit_cookie_when_auth_handle_is_missing(monke
 
 def test_api_key_requires_reauth_when_user_token_cannot_be_recovered(monkeypatch):
     module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_missing_token_test")
-    monkeypatch.setattr(module, "_openrag_api_key_from_context_cookie", lambda: None)
+    monkeypatch.setattr(module, "_openrag_api_key_from_context_cookie", lambda **_kwargs: None)
 
     with pytest.raises(module.MissingOpenRAGCredentialError, match="sign in again"):
         module._openrag_api_key_from_user_or_context(
             SimpleNamespace(metadata={module.OPENRAG_AUTH_HANDLE_METADATA_KEY: "missing-handle"})
         )
+
+
+def test_credentials_user_prefers_handoff_cookie_when_session_cookie_is_stale(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_handoff_cookie_priority_test")
+    user_session = SimpleNamespace(values={}, get=lambda key: None)
+    user_session.set = lambda key, value: user_session.values.update({key: value})
+    module.cl = SimpleNamespace(user_session=user_session)
+    monkeypatch.setattr(
+        module,
+        "get_context",
+        lambda: SimpleNamespace(
+            session=SimpleNamespace(
+                environ={
+                    "HTTP_COOKIE": (
+                        f"openrag_session=stale-session-token; {module.CHAINLIT_TOKEN_COOKIE_NAME}=fresh-handoff-token"
+                    )
+                }
+            )
+        ),
+    )
+
+    api_key = module._openrag_api_key_from_user_or_context(SimpleNamespace(metadata={"provider": "credentials"}))
+
+    assert api_key == "fresh-handoff-token"
+
+
+def test_oidc_user_prefers_session_cookie_when_handoff_cookie_is_left_over(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_oidc_cookie_priority_test")
+    user_session = SimpleNamespace(values={}, get=lambda key: None)
+    user_session.set = lambda key, value: user_session.values.update({key: value})
+    module.cl = SimpleNamespace(user_session=user_session)
+    monkeypatch.setattr(
+        module,
+        "get_context",
+        lambda: SimpleNamespace(
+            session=SimpleNamespace(
+                environ={
+                    "HTTP_COOKIE": (
+                        f"openrag_session=current-session-token; "
+                        f"{module.CHAINLIT_TOKEN_COOKIE_NAME}=left-over-handoff-token"
+                    )
+                }
+            )
+        ),
+    )
+
+    api_key = module._openrag_api_key_from_user_or_context(SimpleNamespace(metadata={"provider": "oidc"}))
+
+    assert api_key == "current-session-token"
 
 
 @pytest.mark.parametrize("stale_status", [401, 403])
