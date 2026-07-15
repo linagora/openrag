@@ -53,10 +53,6 @@ class IndexingPipeline:
     embedder: Embedder
     vector_store: VectorStore
     vlm: VLM | None = None
-    # Global gate for captioning images *embedded* in other documents
-    # (mirrors ``config.loader.image_captioning``). Standalone image files are
-    # always captioned when a VLM is available, regardless of this flag.
-    image_captioning: bool = True
     contextualizer: ChunkContextualizer | None = None
     topic_tagger: TopicTagger | None = None
     timeouts: PipelineTimeouts = PipelineTimeouts()
@@ -312,14 +308,17 @@ class IndexingPipeline:
 
         A standalone image file's caption is its only text content, so it is
         always captioned when a VLM is available (legacy ``ImageLoader``
-        parity). Images embedded in other documents are gated by the global
-        ``image_captioning`` flag and the per-partition setting.
+        parity). Images embedded in other documents are gated solely by the
+        per-partition ``enable_image_captioning`` setting — the deployment's
+        ``IMAGE_CAPTIONING`` env flag only seeds that setting's default on the
+        ``default`` preset at first boot (see ``PresetService._finalize_seed``);
+        it is not re-checked here, so a preset can enable/disable captioning
+        independent of the current env value.
         """
         document = row.get("document")
         if isinstance(document, Document) and document.content_type is DocumentType.IMAGE:
             return True
-        per_partition = config.enable_image_captioning if config is not None else True
-        return self.image_captioning and per_partition
+        return config.enable_image_captioning if config is not None else True
 
     def _select_contextualizer(
         self, config: IndexationPipelineConfig | None
@@ -367,7 +366,6 @@ def build_indexing_pipeline(
     embedder: Embedder,
     vector_store: VectorStore,
     vlm: VLM | None = None,
-    image_captioning: bool = True,
     contextualizer: ChunkContextualizer | None = None,
     topic_tagger: TopicTagger | None = None,
     timeouts: PipelineTimeouts | None = None,
@@ -387,7 +385,6 @@ def build_indexing_pipeline(
         embedder=embedder,
         vector_store=vector_store,
         vlm=vlm,
-        image_captioning=image_captioning,
         contextualizer=contextualizer,
         topic_tagger=topic_tagger,
         timeouts=timeouts or PipelineTimeouts(),
