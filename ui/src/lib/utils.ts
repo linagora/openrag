@@ -39,9 +39,17 @@ export function numOr(value: string, fallback: number): number {
  * Copy text to the clipboard, working outside secure contexts too.
  * navigator.clipboard is only available over HTTPS/localhost; over plain HTTP
  * it's undefined, so fall back to a hidden textarea + execCommand("copy").
+ *
+ * `anchor` (typically the clicked button) anchors the hidden textarea inside
+ * the same DOM subtree instead of `document.body`. This matters when the
+ * caller lives inside a focus-trapped container (e.g. a Radix Dialog): the
+ * trap treats a `document.body` child as "outside" and yanks focus straight
+ * back before `execCommand("copy")` can read the selection, so the command
+ * silently copies nothing while still reporting success.
+ *
  * Returns whether the copy succeeded.
  */
-export async function copyToClipboard(text: string): Promise<boolean> {
+export async function copyToClipboard(text: string, anchor?: Element | null): Promise<boolean> {
   if (navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(text);
@@ -51,15 +59,16 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     }
   }
   try {
+    const container = anchor?.parentElement ?? document.body;
     const ta = document.createElement("textarea");
     ta.value = text;
     ta.style.position = "fixed";
     ta.style.opacity = "0";
-    document.body.appendChild(ta);
+    container.appendChild(ta);
     ta.focus();
     ta.select();
     const ok = document.execCommand("copy");
-    document.body.removeChild(ta);
+    container.removeChild(ta);
     return ok;
   } catch {
     return false;
