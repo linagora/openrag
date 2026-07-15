@@ -186,6 +186,11 @@ def _openrag_api_key_from_user_or_context(user, default: str = "sk-1234") -> str
     return default
 
 
+async def _handle_missing_openrag_credential(error: MissingOpenRAGCredentialError) -> None:
+    logger.warning("OpenRAG Chat session expired", error=str(error))
+    await cl.Message(content=str(error)).send()
+
+
 def _current_openrag_auth_provider() -> str | None:
     user = cl.user_session.get("user")
     return _openrag_auth_provider_from_user(user)
@@ -338,6 +343,8 @@ async def on_chat_start():
             print(response.text)
         commands = t("commands")
         await cl.context.emitter.set_commands(commands if isinstance(commands, list) else [])
+    except MissingOpenRAGCredentialError as e:
+        await _handle_missing_openrag_credential(e)
     except Exception as e:
         logger.exception("An error occured while checking the API health", error=str(e))
         await cl.Message(content=t("error_health").format(e)).send()
@@ -473,6 +480,9 @@ async def on_message(message: cl.Message):
                 s = "\n\n" + "-" * 50 + f"\n\n{t('sources_label')}: \n" + "\n".join(source_names)
                 await msg.stream_token(s)
                 await msg.update()
+        except MissingOpenRAGCredentialError as e:
+            logger.warning("OpenRAG Chat session expired during chat completion", error=str(e))
+            await cl.Message(content=str(e)).send()
         except Exception as e:
             logger.exception("Error during chat completion", error=str(e))
             await cl.Message(content=t("error_chat").format(e)).send()

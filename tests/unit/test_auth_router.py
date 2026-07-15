@@ -347,6 +347,23 @@ def test_chainlit_session_sets_short_lived_cookie_for_bearer(authenticated_clien
     assert "SameSite=lax" in cookie
 
 
+def test_chainlit_session_allows_secure_cross_origin_handoff_cookie(authenticated_client):
+    r = authenticated_client.post(
+        "/auth/chainlit-session",
+        headers={
+            "Authorization": "Bearer or-user-token",
+            "Host": "api.example.test",
+            "Origin": "https://admin.example.test",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+
+    assert r.status_code == 204
+    cookie = next(c for c in _set_cookies(r) if CHAINLIT_TOKEN_COOKIE_NAME in c)
+    assert "SameSite=none" in cookie
+    assert "Secure" in cookie
+
+
 def test_chainlit_session_is_noop_for_cookie_authenticated_user(authenticated_client):
     r = authenticated_client.post("/auth/chainlit-session")
 

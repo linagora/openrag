@@ -24,6 +24,7 @@ the Secure-flag heuristic, and mapping :class:`OIDCFlowError` to responses.
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
 from api.dependencies.auth import current_user
 from core.auth.chainlit import (
@@ -72,6 +73,22 @@ def _is_request_secure(request: Request) -> bool:
     if xfp.split(",", 1)[0].strip().lower() == "https":
         return True
     return request.url.scheme == "https"
+
+
+def _is_cross_origin_request(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if not origin:
+        return False
+    origin_host = urlparse(origin).hostname
+    request_host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    request_host = urlparse(f"//{request_host}").hostname
+    return bool(origin_host and request_host and origin_host != request_host)
+
+
+def _chainlit_handoff_cookie_samesite(request: Request) -> str:
+    if _is_request_secure(request) and _is_cross_origin_request(request):
+        return "none"
+    return "lax"
 
 
 def _delete_state_cookie(response: Response) -> None:
@@ -268,7 +285,7 @@ async def chainlit_session(request: Request, _user=Depends(current_user)):
         max_age=CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS,
         httponly=True,
         secure=_is_request_secure(request),
-        samesite="lax",
+        samesite=_chainlit_handoff_cookie_samesite(request),
         path=CHAINLIT_TOKEN_COOKIE_PATH,
     )
     return response

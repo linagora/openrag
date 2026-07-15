@@ -138,6 +138,48 @@ def test_credentials_user_does_not_recover_from_oidc_session_cookie(monkeypatch)
     assert module.OPENRAG_API_KEY_SESSION_KEY not in user_session.values
 
 
+@pytest.mark.asyncio
+async def test_chat_start_handles_expired_handoff_without_exception_log(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_chat_start_expired_handoff_test")
+    sent_messages = []
+    log_calls = []
+
+    class UserSession:
+        def __init__(self):
+            self.values = {}
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def set(self, key, value):
+            self.values[key] = value
+
+    class Message:
+        def __init__(self, content):
+            self.content = content
+
+        async def send(self):
+            sent_messages.append(self.content)
+
+    logger = SimpleNamespace(
+        debug=lambda *args, **kwargs: None,
+        warning=lambda *args, **kwargs: log_calls.append(("warning", args, kwargs)),
+        exception=lambda *args, **kwargs: log_calls.append(("exception", args, kwargs)),
+    )
+    module.logger = logger
+    module.cl = SimpleNamespace(user_session=UserSession(), Message=Message)
+    monkeypatch.setattr(
+        module,
+        "_current_openrag_api_key",
+        lambda: (_ for _ in ()).throw(module.MissingOpenRAGCredentialError("expired handoff")),
+    )
+
+    await module.on_chat_start()
+
+    assert sent_messages == ["expired handoff"]
+    assert [call[0] for call in log_calls] == ["warning"]
+
+
 def test_oidc_user_prefers_session_cookie_when_handoff_cookie_is_left_over(monkeypatch):
     module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_oidc_cookie_priority_test")
     user_session = SimpleNamespace(values={}, get=lambda key: None)
