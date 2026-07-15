@@ -16,6 +16,7 @@ function user(is_admin: boolean): MyInfo {
 
 afterEach(() => {
   localStorage.clear();
+  document.cookie = "openrag_chainlit_logout=; Max-Age=0; path=/";
   vi.clearAllMocks();
 });
 
@@ -98,5 +99,35 @@ describe("useAuth (token model)", () => {
     });
     expect(wasOidc).toBe(true);
     expect(result.current.isAuthenticated).toBe(false);
+  });
+
+  it("clears token auth when Chainlit logout signal is present on load", async () => {
+    localStorage.setItem("openrag_token", "or-abc123");
+    document.cookie = "openrag_chainlit_logout=1; path=/";
+    mockInfo.mockResolvedValue(user(true));
+
+    const { result } = renderHook(() => useAuth(), { wrapper });
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(localStorage.getItem("openrag_token")).toBeNull();
+    expect(result.current.isAuthenticated).toBe(false);
+    expect(document.cookie).not.toContain("openrag_chainlit_logout=1");
+    expect(mockInfo).not.toHaveBeenCalled();
+  });
+
+  it("clears an already-open Admin UI tab after Chainlit logout", async () => {
+    localStorage.setItem("openrag_token", "or-abc123");
+    mockInfo.mockResolvedValue(user(true));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isAuthenticated).toBe(true));
+
+    document.cookie = "openrag_chainlit_logout=1; path=/";
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+
+    expect(localStorage.getItem("openrag_token")).toBeNull();
+    expect(result.current.isAuthenticated).toBe(false);
+    expect(document.cookie).not.toContain("openrag_chainlit_logout=1");
   });
 });

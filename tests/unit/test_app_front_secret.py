@@ -193,6 +193,7 @@ async def test_chainlit_logout_clears_handoff_and_openrag_session_cookies(monkey
     assert any(f"{module.CHAINLIT_AUTH_COOKIE_NAME}_0=" in cookie and "Max-Age=0" in cookie for cookie in cookies)
     assert any(f"{module.CHAINLIT_TOKEN_COOKIE_NAME}=" in cookie and "Max-Age=0" in cookie for cookie in cookies)
     assert any(f"{module.OPENRAG_SESSION_COOKIE_NAME}=" in cookie and "Max-Age=0" in cookie for cookie in cookies)
+    assert any(f"{module.CHAINLIT_LOGOUT_COOKIE_NAME}=1" in cookie for cookie in cookies)
 
 
 @pytest.mark.asyncio

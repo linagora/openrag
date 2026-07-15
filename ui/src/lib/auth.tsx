@@ -9,6 +9,24 @@ import {
 import { getMyInfo, type MyInfo } from "./api/account";
 import { TOKEN_KEY } from "./api/client";
 
+const CHAINLIT_LOGOUT_COOKIE_NAME = "openrag_chainlit_logout";
+
+function hasCookie(name: string): boolean {
+  if (typeof document === "undefined") return false;
+  return document.cookie.split(";").some((cookie) => cookie.trim().startsWith(`${name}=`));
+}
+
+function clearCookie(name: string) {
+  if (typeof document === "undefined") return;
+  document.cookie = `${name}=; Max-Age=0; path=/; SameSite=Lax`;
+}
+
+function consumeChainlitLogoutSignal(): boolean {
+  if (!hasCookie(CHAINLIT_LOGOUT_COOKIE_NAME)) return false;
+  clearCookie(CHAINLIT_LOGOUT_COOKIE_NAME);
+  return true;
+}
+
 // Identity comes from the backend, not a decoded token: /users/info resolves the
 // current principal from either a stored bearer token (AUTH_MODE=token) or the
 // same-origin OIDC session cookie. The capability layer reads `isAdmin` from here.
@@ -34,20 +52,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<MyInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
+  const applyExternalLogout = useCallback(() => {
+    if (!consumeChainlitLogoutSignal()) return false;
+    localStorage.removeItem(TOKEN_KEY);
+    setUser(null);
+    return true;
+  }, []);
+
   const load = useCallback(async () => {
     setIsLoading(true);
     try {
+      if (applyExternalLogout()) return;
       setUser(await getMyInfo());
     } catch {
       setUser(null);
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [applyExternalLogout]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const handleFocus = () => {
+      applyExternalLogout();
+    };
+    const handleVisibilityChange = () => {
+      if (!document.hidden) applyExternalLogout();
+    };
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [applyExternalLogout]);
 
   const loginWithToken = useCallback(async (token: string) => {
     localStorage.setItem(TOKEN_KEY, token.trim());
