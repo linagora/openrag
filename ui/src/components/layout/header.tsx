@@ -1,16 +1,38 @@
 import { useAuth } from "@/lib/auth";
-import { apiUrl } from "@/lib/api/client";
+import { apiUrl, request } from "@/lib/api/client";
 import { useNavigate } from "react-router-dom";
 import { LogOut, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { toast } from "sonner";
 
 export function Header() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const chatHref = apiUrl("/chainlit/");
+
+  const handleOpenChat = async () => {
+    const chatWindow = window.open("about:blank", "_blank");
+    if (chatWindow) {
+      chatWindow.opener = null;
+    }
+
+    try {
+      await request("/auth/chainlit-session", { method: "POST" });
+    } catch {
+      // Keep the previous fallback behavior: if the handoff cannot be prepared,
+      // still let Chainlit handle its own login flow.
+      toast.error("Could not prepare Chat session. Opening Chat login instead.");
+    }
+
+    if (chatWindow) {
+      chatWindow.location.href = chatHref;
+    } else {
+      window.open(chatHref, "_blank", "noopener,noreferrer");
+    }
+  };
 
   const handleLogout = () => {
     const wasOidcSession = logout();
@@ -34,11 +56,9 @@ export function Header() {
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Button variant="outline" size="sm" asChild>
-                    <a href={chatHref} target="_blank" rel="noopener noreferrer" aria-label="Open Chat in a new tab">
-                      <MessageSquare className="h-4 w-4" />
-                      Chat
-                    </a>
+                  <Button variant="outline" size="sm" onClick={handleOpenChat} aria-label="Open Chat in a new tab">
+                    <MessageSquare className="h-4 w-4" />
+                    Chat
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>Open Chat in a new tab</TooltipContent>

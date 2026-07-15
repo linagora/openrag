@@ -35,6 +35,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
+from core.auth.chainlit import CHAINLIT_TOKEN_COOKIE_NAME
 from core.config.auth import AuthBypassConfig
 from core.utils.logging import get_logger
 from fastapi import Request
@@ -261,6 +262,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             "OIDC session check failed on chainlit bypass; redirecting to login"
                         )
                         session_valid = False
+                if not session_valid:
+                    chainlit_token = request.cookies.get(CHAINLIT_TOKEN_COOKIE_NAME)
+                    if chainlit_token:
+                        try:
+                            auth_service = self._get_auth_service(request)
+                            user = await auth_service.get_user_by_token_for_request(chainlit_token)
+                            session_valid = user is not None
+                        except Exception as e:
+                            logger.bind(error=str(e)).warning(
+                                "Chainlit token handoff check failed; redirecting to login"
+                            )
+                            session_valid = False
                 if not session_valid:
                     next_path = path
                     if request.url.query:

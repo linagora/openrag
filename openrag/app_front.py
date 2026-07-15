@@ -9,6 +9,7 @@ import httpx
 from chainlit.config import config as cl_config
 from chainlit.context import get_context
 from consts import PARTITION_PREFIX
+from core.auth.chainlit import CHAINLIT_TOKEN_COOKIE_NAME
 from core.utils.logging import get_logger, mask_email
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -146,18 +147,20 @@ elif AUTH_MODE == "oidc":
 
     @cl.header_auth_callback
     async def header_auth_callback(headers: dict) -> cl.User | None:
-        """Authenticate Chainlit users via the openrag_session cookie posted by /auth/callback."""
+        """Authenticate Chainlit users via an OpenRAG browser auth cookie."""
         cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
         session_token = _extract_cookie(cookie_header, "openrag_session")
-        if not session_token:
-            logger.info("No openrag_session cookie in Chainlit request")
+        chainlit_token = _extract_cookie(cookie_header, CHAINLIT_TOKEN_COOKIE_NAME)
+        api_key = session_token or chainlit_token
+        if not api_key:
+            logger.info("No OpenRAG auth cookie in Chainlit request")
             return None
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
                 response = await client.get(
                     url=f"{INTERNAL_BASE_URL}/users/info",
-                    headers=get_headers(session_token),
+                    headers=get_headers(api_key),
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -172,8 +175,8 @@ elif AUTH_MODE == "oidc":
             identifier=data.get("display_name", "user"),
             metadata={
                 "role": "admin" if data.pop("is_admin", False) else "user",
-                "provider": "oidc",
-                "api_key": session_token,  # opaque cookie value — used as Bearer for internal calls
+                "provider": "oidc" if session_token else "credentials",
+                "api_key": api_key,
                 "extra": data,
             },
         )

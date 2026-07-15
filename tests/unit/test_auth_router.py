@@ -80,6 +80,11 @@ def _restore_dependencies_stub(previous_modules: dict[str, types.ModuleType | No
 _PREVIOUS_MODULES = _install_dependencies_stub()
 
 from api.routers.auth.oidc import router as auth_router  # noqa: E402
+from core.auth.chainlit import (  # noqa: E402
+    CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS,
+    CHAINLIT_TOKEN_COOKIE_NAME,
+    CHAINLIT_TOKEN_COOKIE_PATH,
+)
 from di.providers import get_auth_service  # noqa: E402
 from services.orchestrators.auth_service import (  # noqa: E402
     SESSION_COOKIE_NAME,
@@ -153,6 +158,19 @@ def client(stub: StubAuthService) -> TestClient:
     app = FastAPI()
     app.include_router(auth_router)
     app.dependency_overrides[get_auth_service] = lambda: stub
+    return TestClient(app)
+
+
+@pytest.fixture
+def authenticated_client() -> TestClient:
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def bind_user(request, call_next):
+        request.state.user = {"id": 7, "display_name": "Token User"}
+        return await call_next(request)
+
+    app.include_router(auth_router)
     return TestClient(app)
 
 
@@ -309,3 +327,28 @@ def test_logout_allows_cross_site_top_level_navigation(oidc_env, client, stub):
     )
     assert r.status_code == 302
     assert stub.calls == [("logout", "sess")]
+
+
+# ---------------------------------------------------------------------------
+# POST /auth/chainlit-session
+# ---------------------------------------------------------------------------
+
+
+def test_chainlit_session_sets_short_lived_cookie_for_bearer(authenticated_client):
+    r = authenticated_client.post("/auth/chainlit-session", headers={"Authorization": "Bearer or-user-token"})
+
+    assert r.status_code == 204
+    cookies = _set_cookies(r)
+    cookie = next(c for c in cookies if CHAINLIT_TOKEN_COOKIE_NAME in c)
+    assert "or-user-token" in cookie
+    assert "HttpOnly" in cookie
+    assert f"Max-Age={CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS}" in cookie
+    assert f"Path={CHAINLIT_TOKEN_COOKIE_PATH}" in cookie
+    assert "SameSite=lax" in cookie
+
+
+def test_chainlit_session_is_noop_for_cookie_authenticated_user(authenticated_client):
+    r = authenticated_client.post("/auth/chainlit-session")
+
+    assert r.status_code == 204
+    assert not any(CHAINLIT_TOKEN_COOKIE_NAME in c for c in _set_cookies(r))
