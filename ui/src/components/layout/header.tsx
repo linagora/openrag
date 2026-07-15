@@ -8,6 +8,8 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 
+const CHAT_HANDOFF_TIMEOUT_MS = 3000;
+
 export function Header() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -20,7 +22,17 @@ export function Header() {
     }
 
     try {
-      await request("/auth/chainlit-session", { method: "POST" });
+      const result = await Promise.race([
+        request("/auth/chainlit-session", { method: "POST" })
+          .then(() => "ready" as const)
+          .catch(() => "failed" as const),
+        new Promise<"timeout">((resolve) => {
+          window.setTimeout(() => resolve("timeout"), CHAT_HANDOFF_TIMEOUT_MS);
+        }),
+      ]);
+      if (result !== "ready") {
+        throw new Error("Chainlit handoff was not ready");
+      }
     } catch {
       // Keep the previous fallback behavior: if the handoff cannot be prepared,
       // still let Chainlit handle its own login flow.

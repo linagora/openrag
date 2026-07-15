@@ -56,6 +56,37 @@ def test_token_mode_registers_chainlit_header_handoff(monkeypatch):
     assert config.code.password_auth_callback is not None
 
 
+def test_api_key_falls_back_to_chainlit_cookie_when_auth_handle_is_missing(monkeypatch):
+    monkeypatch.setenv("AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("CHAINLIT_AUTH_SECRET", "x" * 32)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
+    monkeypatch.syspath_prepend(str(_OPENRAG_RUNTIME_PATH))
+
+    spec = importlib.util.spec_from_file_location("app_front_cookie_fallback_test", _FIX_SOURCE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_openrag_api_key_from_context_cookie", lambda: "or-cookie-token")
+
+    class UserSession:
+        def __init__(self):
+            self.values = {}
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def set(self, key, value):
+            self.values[key] = value
+
+    user_session = UserSession()
+    module.cl = SimpleNamespace(user_session=user_session)
+
+    api_key = module._openrag_api_key_from_user_or_context(SimpleNamespace(metadata={}))
+
+    assert api_key == "or-cookie-token"
+    assert user_session.values[module.OPENRAG_API_KEY_SESSION_KEY] == "or-cookie-token"
+
+
 @pytest.mark.asyncio
 async def test_oidc_token_handoff_keeps_bearer_on_static_source_urls(monkeypatch):
     monkeypatch.setenv("AUTH_TOKEN", "test-token")

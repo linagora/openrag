@@ -159,6 +159,10 @@ def _current_openrag_api_key(default: str = "sk-1234") -> str:
         return api_key
 
     user = cl.user_session.get("user")
+    return _openrag_api_key_from_user_or_context(user, default=default)
+
+
+def _openrag_api_key_from_user_or_context(user, default: str = "sk-1234") -> str:
     api_key = _openrag_api_key_from_user(user)
     if api_key:
         cl.user_session.set(OPENRAG_API_KEY_SESSION_KEY, api_key)
@@ -289,7 +293,7 @@ def get_external_url():
 
 @cl.set_chat_profiles
 async def chat_profile(current_user: cl.User):
-    api_key = _openrag_api_key_from_user(current_user) or "sk-1234"
+    api_key = _openrag_api_key_from_user_or_context(current_user)
     client = AsyncOpenAI(base_url=f"{INTERNAL_BASE_URL}/v1", api_key=api_key)
     try:
         output = await client.models.list()

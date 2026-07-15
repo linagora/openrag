@@ -59,6 +59,7 @@ describe("Header", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
   });
@@ -106,6 +107,27 @@ describe("Header", () => {
     await waitFor(() => {
       expect(openedWindow.location.href).toBe("https://api.example.test/chainlit/");
     });
+  });
+
+  it("opens chat after the handoff timeout if the session request stalls", async () => {
+    vi.useFakeTimers();
+    const openedWindow = { opener: {}, location: { href: "" } };
+    openMock.mockReturnValue(openedWindow);
+    fetchMock.mockReturnValue(new Promise(() => undefined));
+
+    render(
+      <MemoryRouter>
+        <Header />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /open chat in a new tab/i }));
+
+    expect(openedWindow.location.href).toBe("");
+
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(openedWindow.location.href).toBe("/chainlit/");
   });
 
   it("hides the Chainlit chat link when Chainlit is disabled", () => {
