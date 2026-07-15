@@ -305,7 +305,8 @@ def _chainlit_user_from_info(data: dict, *, provider: str, api_key: str, model_i
     if auth_handle:
         metadata[OPENRAG_AUTH_HANDLE_METADATA_KEY] = auth_handle
 
-    return cl.User(identifier=data.get("display_name", "user"), metadata=metadata)
+    identifier = data.get("display_name") or data.get("email") or f"User #{data.get('id')}"
+    return cl.User(identifier=identifier, metadata=metadata)
 
 
 async def _load_user_info(client: httpx.AsyncClient, api_key: str) -> dict:
