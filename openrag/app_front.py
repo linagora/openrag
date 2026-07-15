@@ -306,9 +306,9 @@ def get_external_url():
 
 @cl.set_chat_profiles
 async def chat_profile(current_user: cl.User):
-    api_key = _openrag_api_key_from_user_or_context(current_user)
-    client = AsyncOpenAI(base_url=f"{INTERNAL_BASE_URL}/v1", api_key=api_key)
     try:
+        api_key = _openrag_api_key_from_user_or_context(current_user)
+        client = AsyncOpenAI(base_url=f"{INTERNAL_BASE_URL}/v1", api_key=api_key)
         output = await client.models.list()
         models = output.data
         chat_profiles = []
@@ -325,8 +325,12 @@ async def chat_profile(current_user: cl.User):
                 )
             )
         return chat_profiles
+    except MissingOpenRAGCredentialError as e:
+        await _handle_missing_openrag_credential(e)
+        return []
     except Exception as e:
         await cl.Message(content=t("error_profiles").format(e)).send()
+        return []
 
 
 @cl.on_chat_start
