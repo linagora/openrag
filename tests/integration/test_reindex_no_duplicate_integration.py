@@ -160,3 +160,35 @@ async def test_reindex_does_not_touch_other_files(store: MilvusVectorStore) -> N
 
     assert await _count_chunks(store, partition, "file-a") == 2
     assert await _count_chunks(store, partition, "file-b") == 2
+
+
+@pytest.mark.asyncio
+async def test_reindex_is_scoped_by_partition(store: MilvusVectorStore) -> None:
+    # Cleanup is filtered by (partition, file_id): the SAME file_id in a different
+    # partition must be untouched when one partition's copy is re-indexed.
+    file_id = "shared-id"
+    pipeline = build_indexing_pipeline(
+        parser=_FakeParser(n_blocks=2),
+        chunker=_FakeChunker(),
+        embedder=_FakeEmbedder(),
+        vector_store=store,
+    )
+
+    def _row(partition: str, replace: bool) -> dict:
+        return {
+            "document": Document(id=file_id, filename="doc.txt", text="x", partition=partition),
+            "partition": partition,
+            "replace": replace,
+        }
+
+    await pipeline.run(_row("tenant-a", replace=False))
+    await pipeline.run(_row("tenant-b", replace=False))
+    tenant_b_ids = set(await store.query_ids_by_filter("default", {"partition": "tenant-b", "file_id": file_id}))
+    assert len(tenant_b_ids) == 2
+
+    # Re-index the file in tenant-a only.
+    await pipeline.run(_row("tenant-a", replace=True))
+
+    assert await _count_chunks(store, "tenant-a", file_id) == 2
+    # tenant-b's chunks are the exact same rows as before — untouched.
+    assert set(await store.query_ids_by_filter("default", {"partition": "tenant-b", "file_id": file_id})) == tenant_b_ids

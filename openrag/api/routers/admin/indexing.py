@@ -275,8 +275,10 @@ async def put_file(
 
     # No Milvus deletion here. The indexing pipeline is insert-before-delete on
     # replace: it snapshots the file's existing chunk ids, stores the new chunks,
-    # then deletes the old set (see ``IndexingPipeline.run``, #657) — so the file
-    # is never left in a half-replaced state.
+    # then deletes the old set (see ``IndexingPipeline.run``, #657). The guarantee
+    # is "no empty window" — a failed/crashed re-index keeps the old chunks rather
+    # than zero — not atomicity: a crash between store and delete can leave stale
+    # duplicates behind (recoverable; #658/#660 reconciliation covers that).
     original_filename = file.filename
     file.filename = sanitize_filename(file.filename)
     file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)

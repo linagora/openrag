@@ -15,6 +15,7 @@ from core.models.document import Document, DocumentType
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
+from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.caption import caption_stage
 from services.workers.stages.chunk import chunk_stage
 from services.workers.stages.contextualize import contextualize_stage
@@ -209,10 +210,16 @@ class IndexingPipeline:
         file_id, partition = _replace_target(row)
         if not file_id or not partition:
             return []
-        try:
+
+        async def _lookup() -> list[str]:
             if not await self.vector_store.collection_exists("default"):
                 return []
             return await self.vector_store.query_ids_by_filter("default", {"partition": partition, "file_id": file_id})
+
+        try:
+            # Bound the lookup by the store budget so a stalled Milvus can't hang
+            # replace indexing indefinitely (a timeout just skips cleanup).
+            return await run_with_optional_timeout(_lookup, self.timeouts.store)
         except Exception as exc:  # noqa: BLE001 - cleanup lookup must not fail the index
             logger.bind(task_id=row.get("task_id"), file_id=file_id, partition=partition).warning(
                 f"re-index: could not snapshot existing chunks; skipping stale-chunk cleanup: {exc}"
@@ -227,7 +234,11 @@ class IndexingPipeline:
         reconciliation), mirroring ``WorkerDispatcher.delete_file``.
         """
         try:
-            deleted = await self.vector_store.delete(ids, "default")
+            # Bound by the store budget: the new chunks are already stored, so a
+            # stalled delete must not hang the task — it degrades to duplicates.
+            deleted = await run_with_optional_timeout(
+                lambda: self.vector_store.delete(ids, "default"), self.timeouts.store
+            )
             logger.bind(task_id=row.get("task_id")).debug(f"re-index: removed {deleted} stale chunk(s) after replace")
         except Exception as exc:  # noqa: BLE001 - new chunks are stored; cleanup is best-effort
             logger.bind(task_id=row.get("task_id")).error(
