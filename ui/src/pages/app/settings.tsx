@@ -22,9 +22,9 @@ export default function SettingsPage() {
     onError: (e) => toast.error(e.message),
   });
 
-  const copyToken = async () => {
+  const copyToken = async (e: React.MouseEvent<HTMLButtonElement>) => {
     if (token) {
-      const ok = await copyToClipboard(token);
+      const ok = await copyToClipboard(token, e.currentTarget);
       toast[ok ? "success" : "error"](
         ok ? "Token copied to clipboard" : "Couldn't copy — copy it manually",
       );

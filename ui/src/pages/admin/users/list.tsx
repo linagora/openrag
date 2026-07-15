@@ -215,9 +215,9 @@ function PreProvisionDialog({
     onError: (e) => toast.error((e as Error).message),
   });
 
-  const copyToken = async () => {
+  const copyToken = async (e: React.MouseEvent<HTMLButtonElement>) => {
     if (created?.token) {
-      const ok = await copyToClipboard(created.token);
+      const ok = await copyToClipboard(created.token, e.currentTarget);
       toast[ok ? "success" : "error"](
         ok ? "Token copied to clipboard" : "Couldn't copy — copy it manually",
       );
