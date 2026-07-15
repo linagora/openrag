@@ -267,6 +267,11 @@ if AUTH_TOKEN and AUTH_MODE != "oidc":
             "and set it in your environment."
         )
 
+    @cl.header_auth_callback
+    async def header_auth_callback(headers: dict) -> cl.User | None:
+        """Authenticate Chat from the short-lived Admin UI handoff cookie."""
+        return await _chainlit_user_from_browser_cookies(headers)
+
     @cl.password_auth_callback
     async def auth_callback(username: str, password: str):
         try:

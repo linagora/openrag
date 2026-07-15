@@ -50,7 +50,7 @@ def test_openrag_bearer_token_is_not_stored_in_chainlit_user_metadata():
 
 
 def test_token_mode_keeps_chainlit_password_login(monkeypatch):
-    """Token mode must keep Chainlit's manual token login form available."""
+    """Token mode keeps manual login while allowing Admin UI handoff."""
     from chainlit.config import config
 
     monkeypatch.setattr(config.code, "header_auth_callback", None)
@@ -58,8 +58,35 @@ def test_token_mode_keeps_chainlit_password_login(monkeypatch):
 
     _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_token_mode_test")
 
-    assert config.code.header_auth_callback is None
+    assert config.code.header_auth_callback is not None
     assert config.code.password_auth_callback is not None
+
+
+@pytest.mark.asyncio
+async def test_token_mode_header_auth_accepts_chainlit_handoff_cookie(monkeypatch):
+    from chainlit.config import config
+
+    monkeypatch.setattr(config.code, "header_auth_callback", None)
+    monkeypatch.setattr(config.code, "password_auth_callback", None)
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_token_handoff_test")
+
+    async def fake_load_user_info(_client, api_key):
+        assert api_key == "or-user-token"
+        return {
+            "display_name": "Token User",
+            "email": "token@example.test",
+            "is_admin": True,
+        }
+
+    monkeypatch.setattr(module, "_load_user_info", fake_load_user_info)
+
+    user = await config.code.header_auth_callback({"cookie": f"{module.CHAINLIT_TOKEN_COOKIE_NAME}=or-user-token"})
+
+    assert user.identifier == "Token User"
+    assert user.metadata["provider"] == "credentials"
+    assert user.metadata["role"] == "admin"
+    auth_handle = user.metadata[module.OPENRAG_AUTH_HANDLE_METADATA_KEY]
+    assert module._OPENRAG_TOKEN_STORE[auth_handle][0] == "or-user-token"
 
 
 def test_api_key_falls_back_to_chainlit_cookie_when_auth_handle_is_missing(monkeypatch):
