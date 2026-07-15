@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import re
+import threading
 import time
 
 import pypdfium2
@@ -22,6 +23,36 @@ from marker.converters.pdf import PdfConverter
 from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 
 logger = get_logger()
+
+
+def _force_kill_executor(executor, log) -> None:
+    """SIGKILL an executor's worker processes, then shut it down.
+
+    ``ProcessPoolExecutor.shutdown()`` only asks workers to exit *after* their
+    current task finishes. A worker wedged on a pathological PDF never finishes,
+    so a plain shutdown leaves it running — holding its pool slot and the GPU
+    indefinitely (#659). Killing the OS processes directly is the only way to
+    reclaim a wedged worker; the whole pool is recycled because
+    ``ProcessPoolExecutor`` doesn't expose which worker ran a given task.
+    """
+    if executor is None:
+        return
+    # Snapshot before shutdown(): the shutdown machinery clears ``_processes``.
+    procs = list(getattr(executor, "_processes", {}).values())
+    for proc in procs:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001 - one unkillable proc must not block the rest
+            log.warning("Failed to kill Marker worker process", exc_info=True)
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+    except Exception:  # noqa: BLE001 - teardown is best-effort; a fresh pool follows
+        log.warning("Failed to shut down Marker executor", exc_info=True)
+    for proc in procs:
+        try:
+            proc.join(timeout=5)
+        except Exception:  # noqa: BLE001 - a stuck join must not block the rebuild
+            pass
 
 
 def _marker_num_gpus(config) -> float:
@@ -72,6 +103,9 @@ class MarkerWorker:
         os.environ["RAY_ADDRESS"] = "auto"
 
         self.executor = None
+        # Serializes executor submit vs. teardown/rebuild: a parse timeout can
+        # reset the pool from a worker thread while other threads are submitting.
+        self._executor_lock = threading.Lock()
         self.init_resources()
 
     def init_resources(self):
@@ -97,27 +131,30 @@ class MarkerWorker:
 
         import torch.multiprocessing as mp
 
-        if self.executor:
-            self.logger.warning("Resetting ProcessPoolExecutor")
-            self.executor.shutdown(wait=False, cancel_futures=True)
-            self.executor = None
+        with self._executor_lock:
+            if self.executor is not None:
+                # Force-kill: a wedged worker won't exit on a plain shutdown, so
+                # it would keep holding its slot and the GPU (#659).
+                self.logger.warning("Resetting ProcessPoolExecutor (killing worker processes)")
+                _force_kill_executor(self.executor, self.logger)
+                self.executor = None
 
-        # Ensure spawn method for CUDA compatibility
-        try:
-            if mp.get_start_method(allow_none=True) != "spawn":
-                mp.set_start_method("spawn", force=True)
-        except RuntimeError:
-            self.logger.warning("Process start method already set, using existing method")
+            # Ensure spawn method for CUDA compatibility
+            try:
+                if mp.get_start_method(allow_none=True) != "spawn":
+                    mp.set_start_method("spawn", force=True)
+            except RuntimeError:
+                self.logger.warning("Process start method already set, using existing method")
 
-        self.logger.info(f"Initializing MarkerWorker with {self._workers} workers")
-        self.executor = ProcessPoolExecutor(
-            max_workers=self._workers,
-            initializer=self._worker_init,
-            initargs=(self.model_dict,),
-            mp_context=mp.get_context("spawn"),
-            max_tasks_per_child=self.config.loader.marker_max_tasks_per_child,
-        )
-        self.logger.info("MarkerWorker initialized with ProcessPoolExecutor")
+            self.logger.info(f"Initializing MarkerWorker with {self._workers} workers")
+            self.executor = ProcessPoolExecutor(
+                max_workers=self._workers,
+                initializer=self._worker_init,
+                initargs=(self.model_dict,),
+                mp_context=mp.get_context("spawn"),
+                max_tasks_per_child=self.config.loader.marker_max_tasks_per_child,
+            )
+            self.logger.info("MarkerWorker initialized with ProcessPoolExecutor")
 
     @staticmethod
     def _worker_init(model_dict):
@@ -163,12 +200,21 @@ class MarkerWorker:
         timeout = self.config.loader.marker_timeout
 
         def run_with_timeout():
-            future = self.executor.submit(self._process_pdf, file_path, converter_config)
+            with self._executor_lock:
+                future = self.executor.submit(self._process_pdf, file_path, converter_config)
             try:
                 result = future.result(timeout=timeout)
                 return result
             except FuturesTimeoutError:
-                self.logger.exception("MarkerWorker child process timed out", path=file_path)
+                # The child is still computing on the GPU and won't stop on its
+                # own; recycle the pool to reclaim the wedged worker's slot so it
+                # isn't lost forever (#659). Sibling parses in this worker are
+                # recycled too and retried by MarkerPool.
+                self.logger.exception(
+                    "MarkerWorker child process timed out; recycling the pool to reclaim the slot",
+                    path=file_path,
+                )
+                self.setup_mp()
                 raise
             except Exception:
                 self.logger.exception("Error processing with MarkerWorker", path=file_path)
@@ -184,11 +230,15 @@ class MarkerWorker:
         return self.executor is None or bool(getattr(self.executor, "_broken", False))
 
     def __del__(self):
-        """Clean up ProcessPoolExecutor on actor destruction"""
+        """Clean up ProcessPoolExecutor on actor destruction.
+
+        Force-kill so a worker still wedged on a parse doesn't outlive the actor
+        and keep holding the GPU (#659).
+        """
         executor = getattr(self, "executor", None)
         if executor:
             try:
-                executor.shutdown(wait=False, cancel_futures=True)
+                _force_kill_executor(executor, self.logger)
             except Exception:
                 pass  # Best effort cleanup
 
