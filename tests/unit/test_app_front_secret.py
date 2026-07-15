@@ -8,10 +8,24 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 _FIX_SOURCE = Path(__file__).resolve().parents[2] / "openrag" / "app_front.py"
 _OPENRAG_RUNTIME_PATH = _FIX_SOURCE.parent
+
+
+def _load_app_front(monkeypatch, *, auth_mode: str, module_name: str):
+    monkeypatch.setenv("AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("AUTH_MODE", auth_mode)
+    monkeypatch.setenv("CHAINLIT_AUTH_SECRET", "x" * 32)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
+    monkeypatch.syspath_prepend(str(_OPENRAG_RUNTIME_PATH))
+
+    spec = importlib.util.spec_from_file_location(module_name, _FIX_SOURCE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_no_hardcoded_default_secret_assignment_in_source():
@@ -37,35 +51,19 @@ def test_openrag_bearer_token_is_not_stored_in_chainlit_user_metadata():
 
 def test_token_mode_keeps_chainlit_password_login(monkeypatch):
     """Token mode must keep Chainlit's manual token login form available."""
-    monkeypatch.setenv("AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("AUTH_MODE", "token")
-    monkeypatch.setenv("CHAINLIT_AUTH_SECRET", "x" * 32)
-    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
-    monkeypatch.syspath_prepend(str(_OPENRAG_RUNTIME_PATH))
-
     from chainlit.config import config
 
-    config.code.header_auth_callback = None
-    config.code.password_auth_callback = None
+    monkeypatch.setattr(config.code, "header_auth_callback", None)
+    monkeypatch.setattr(config.code, "password_auth_callback", None)
 
-    spec = importlib.util.spec_from_file_location("app_front_token_mode_test", _FIX_SOURCE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_token_mode_test")
 
     assert config.code.header_auth_callback is None
     assert config.code.password_auth_callback is not None
 
 
 def test_api_key_falls_back_to_chainlit_cookie_when_auth_handle_is_missing(monkeypatch):
-    monkeypatch.setenv("AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("AUTH_MODE", "oidc")
-    monkeypatch.setenv("CHAINLIT_AUTH_SECRET", "x" * 32)
-    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
-    monkeypatch.syspath_prepend(str(_OPENRAG_RUNTIME_PATH))
-
-    spec = importlib.util.spec_from_file_location("app_front_cookie_fallback_test", _FIX_SOURCE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_cookie_fallback_test")
     monkeypatch.setattr(module, "_openrag_api_key_from_context_cookie", lambda: "or-cookie-token")
 
     class UserSession:
@@ -87,17 +85,40 @@ def test_api_key_falls_back_to_chainlit_cookie_when_auth_handle_is_missing(monke
     assert user_session.values[module.OPENRAG_API_KEY_SESSION_KEY] == "or-cookie-token"
 
 
+@pytest.mark.parametrize("stale_status", [401, 403])
+@pytest.mark.asyncio
+async def test_chainlit_cookie_auth_retries_handoff_after_stale_oidc_session(monkeypatch, stale_status):
+    module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_cookie_retry_test")
+    attempts = []
+
+    async def fake_load_user_info(_client, api_key):
+        attempts.append(api_key)
+        if api_key == "stale-session-token":
+            request = httpx.Request("GET", "http://internal/users/info")
+            response = httpx.Response(stale_status, request=request)
+            raise httpx.HTTPStatusError("Unauthorized", request=request, response=response)
+        return {
+            "display_name": "Handoff User",
+            "email": "handoff@example.test",
+            "is_admin": False,
+        }
+
+    monkeypatch.setattr(module, "_load_user_info", fake_load_user_info)
+
+    user = await module._chainlit_user_from_browser_cookies(
+        {"cookie": (f"openrag_session=stale-session-token; {module.CHAINLIT_TOKEN_COOKIE_NAME}=handoff-token")}
+    )
+
+    assert attempts == ["stale-session-token", "handoff-token"]
+    assert user.identifier == "Handoff User"
+    assert user.metadata["provider"] == "credentials"
+    auth_handle = user.metadata[module.OPENRAG_AUTH_HANDLE_METADATA_KEY]
+    assert module._OPENRAG_TOKEN_STORE[auth_handle][0] == "handoff-token"
+
+
 @pytest.mark.asyncio
 async def test_oidc_token_handoff_keeps_bearer_on_static_source_urls(monkeypatch):
-    monkeypatch.setenv("AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("AUTH_MODE", "oidc")
-    monkeypatch.setenv("CHAINLIT_AUTH_SECRET", "x" * 32)
-    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
-    monkeypatch.syspath_prepend(str(_OPENRAG_RUNTIME_PATH))
-
-    spec = importlib.util.spec_from_file_location("app_front_source_token_test", _FIX_SOURCE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_source_token_test")
     module.INTERNAL_BASE_URL = "http://internal:8080"
     monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
 
@@ -132,15 +153,7 @@ async def test_oidc_token_handoff_keeps_bearer_on_static_source_urls(monkeypatch
 
 @pytest.mark.asyncio
 async def test_oidc_session_does_not_put_bearer_on_static_source_urls(monkeypatch):
-    monkeypatch.setenv("AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("AUTH_MODE", "oidc")
-    monkeypatch.setenv("CHAINLIT_AUTH_SECRET", "x" * 32)
-    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
-    monkeypatch.syspath_prepend(str(_OPENRAG_RUNTIME_PATH))
-
-    spec = importlib.util.spec_from_file_location("app_front_source_oidc_test", _FIX_SOURCE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_source_oidc_test")
     module.INTERNAL_BASE_URL = "http://internal:8080"
     monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
 
