@@ -83,6 +83,7 @@ from api.routers.auth.oidc import router as auth_router  # noqa: E402
 from core.auth.chainlit import (  # noqa: E402
     CHAINLIT_AUTH_COOKIE_NAME,
     CHAINLIT_LOGOUT_COOKIE_NAME,
+    CHAINLIT_LOGOUT_SIGNAL_HEADER,
     CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS,
     CHAINLIT_TOKEN_COOKIE_NAME,
     CHAINLIT_TOKEN_COOKIE_PATH,
@@ -334,7 +335,7 @@ def test_logout_allows_cross_site_top_level_navigation(oidc_env, client, stub):
 def test_chainlit_logout_signal_reports_and_clears_marker_cookie(client):
     client.cookies.set(CHAINLIT_LOGOUT_COOKIE_NAME, "1", path="/")
 
-    r = client.get("/auth/chainlit-logout-signal")
+    r = client.get("/auth/chainlit-logout-signal", headers={CHAINLIT_LOGOUT_SIGNAL_HEADER: "1"})
 
     assert r.status_code == 200
     assert r.json() == {"logged_out": True}
@@ -343,10 +344,20 @@ def test_chainlit_logout_signal_reports_and_clears_marker_cookie(client):
 
 
 def test_chainlit_logout_signal_is_false_without_marker_cookie(client):
+    r = client.get("/auth/chainlit-logout-signal", headers={CHAINLIT_LOGOUT_SIGNAL_HEADER: "1"})
+
+    assert r.status_code == 200
+    assert r.json() == {"logged_out": False}
+
+
+def test_chainlit_logout_signal_plain_get_does_not_clear_marker_cookie(client):
+    client.cookies.set(CHAINLIT_LOGOUT_COOKIE_NAME, "1", path="/")
+
     r = client.get("/auth/chainlit-logout-signal")
 
     assert r.status_code == 200
     assert r.json() == {"logged_out": False}
+    assert not any(CHAINLIT_LOGOUT_COOKIE_NAME in c and "Max-Age=0" in c for c in _set_cookies(r))
 
 
 # ---------------------------------------------------------------------------

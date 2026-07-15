@@ -155,7 +155,10 @@ describe("useAuth (token model)", () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(fetchMock).toHaveBeenCalledWith(
       "/auth/chainlit-logout-signal",
-      expect.objectContaining({ credentials: "include" }),
+      expect.objectContaining({
+        credentials: "include",
+        headers: expect.objectContaining({ "x-openrag-chainlit-logout-signal": "1" }),
+      }),
     );
     expect(localStorage.getItem("openrag_token")).toBeNull();
     expect(result.current.isAuthenticated).toBe(false);

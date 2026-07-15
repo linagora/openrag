@@ -10,6 +10,7 @@ import { getMyInfo, type MyInfo } from "./api/account";
 import { apiUrl, TOKEN_KEY } from "./api/client";
 
 const CHAINLIT_LOGOUT_COOKIE_NAME = "openrag_chainlit_logout";
+const CHAINLIT_LOGOUT_SIGNAL_HEADER = "x-openrag-chainlit-logout-signal";
 
 type ChainlitLogoutSignalResponse = {
   logged_out?: boolean;
@@ -34,6 +35,9 @@ function consumeLocalChainlitLogoutSignal(): boolean {
 async function consumeRemoteChainlitLogoutSignal(): Promise<boolean> {
   const response = await fetch(apiUrl("/auth/chainlit-logout-signal"), {
     credentials: "include",
+    headers: {
+      [CHAINLIT_LOGOUT_SIGNAL_HEADER]: "1",
+    },
   });
   if (!response.ok) return false;
   const body = (await response.json()) as ChainlitLogoutSignalResponse;
