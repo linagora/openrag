@@ -376,7 +376,7 @@ elif AUTH_MODE == "oidc":
 @cl.on_logout
 async def on_logout(request, response):
     _clear_chat_logout_cookies(request, response)
-    return response
+    return {"success": True}
 
 
 def get_external_url():

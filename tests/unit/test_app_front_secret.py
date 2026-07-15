@@ -188,7 +188,7 @@ async def test_chainlit_logout_clears_handoff_and_openrag_session_cookies(monkey
     returned = await module.on_logout(request, response)
 
     cookies = [value.decode() for key, value in response.raw_headers if key.lower() == b"set-cookie"]
-    assert returned is response
+    assert returned == {"success": True}
     assert any(f"{module.CHAINLIT_AUTH_COOKIE_NAME}=" in cookie and "Max-Age=0" in cookie for cookie in cookies)
     assert any(f"{module.CHAINLIT_AUTH_COOKIE_NAME}_0=" in cookie and "Max-Age=0" in cookie for cookie in cookies)
     assert any(f"{module.CHAINLIT_TOKEN_COOKIE_NAME}=" in cookie and "Max-Age=0" in cookie for cookie in cookies)
