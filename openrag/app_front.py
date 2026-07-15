@@ -189,6 +189,37 @@ async def _load_user_info(client: httpx.AsyncClient, api_key: str) -> dict:
     return response.json()
 
 
+async def _chainlit_user_from_browser_cookies(headers: dict) -> cl.User | None:
+    """Authenticate Chainlit from the browser cookies OpenRAG owns."""
+    cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
+    session_token = _extract_cookie(cookie_header, "openrag_session")
+    chainlit_token = _extract_cookie(cookie_header, CHAINLIT_TOKEN_COOKIE_NAME)
+    api_key = session_token or chainlit_token
+    if not api_key:
+        logger.info("No OpenRAG auth cookie in Chainlit request")
+        return None
+
+    provider = "oidc" if session_token else "credentials"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            try:
+                data = await _load_user_info(client, api_key)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code not in (401, 403) or not session_token or not chainlit_token:
+                    raise
+                api_key = chainlit_token
+                provider = "credentials"
+                data = await _load_user_info(client, api_key)
+    except httpx.HTTPStatusError as e:
+        logger.info("Session cookie rejected by /users/info", status=e.response.status_code)
+        return None
+    except Exception as e:
+        logger.exception("Chainlit header_auth_callback failure", error=str(e))
+        return None
+
+    return _chainlit_user_from_info(data, provider=provider, api_key=api_key)
+
+
 if PERSISTENCY:
 
     @cl.on_chat_resume
@@ -219,6 +250,10 @@ if AUTH_TOKEN and AUTH_MODE != "oidc":
             logger.exception("Unexpected error during authentication", error=str(e))
             return None
 
+    @cl.header_auth_callback
+    async def header_auth_callback(headers: dict) -> cl.User | None:
+        return await _chainlit_user_from_browser_cookies(headers)
+
 elif AUTH_MODE == "oidc":
     if not CHAINLIT_AUTH_SECRET:
         raise RuntimeError(
@@ -230,33 +265,7 @@ elif AUTH_MODE == "oidc":
     @cl.header_auth_callback
     async def header_auth_callback(headers: dict) -> cl.User | None:
         """Authenticate Chainlit users via an OpenRAG browser auth cookie."""
-        cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
-        session_token = _extract_cookie(cookie_header, "openrag_session")
-        chainlit_token = _extract_cookie(cookie_header, CHAINLIT_TOKEN_COOKIE_NAME)
-        api_key = session_token or chainlit_token
-        if not api_key:
-            logger.info("No OpenRAG auth cookie in Chainlit request")
-            return None
-
-        provider = "oidc" if session_token else "credentials"
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-                try:
-                    data = await _load_user_info(client, api_key)
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code not in (401, 403) or not session_token or not chainlit_token:
-                        raise
-                    api_key = chainlit_token
-                    provider = "credentials"
-                    data = await _load_user_info(client, api_key)
-        except httpx.HTTPStatusError as e:
-            logger.info("Session cookie rejected by /users/info", status=e.response.status_code)
-            return None
-        except Exception as e:
-            logger.exception("Chainlit header_auth_callback failure", error=str(e))
-            return None
-
-        return _chainlit_user_from_info(data, provider=provider, api_key=api_key)
+        return await _chainlit_user_from_browser_cookies(headers)
 
 
 def get_external_url():
