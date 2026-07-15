@@ -81,6 +81,7 @@ _PREVIOUS_MODULES = _install_dependencies_stub()
 
 from api.routers.auth.oidc import router as auth_router  # noqa: E402
 from core.auth.chainlit import (  # noqa: E402
+    CHAINLIT_AUTH_COOKIE_NAME,
     CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS,
     CHAINLIT_TOKEN_COOKIE_NAME,
     CHAINLIT_TOKEN_COOKIE_PATH,
@@ -335,6 +336,8 @@ def test_logout_allows_cross_site_top_level_navigation(oidc_env, client, stub):
 
 
 def test_chainlit_session_sets_short_lived_cookie_for_bearer(authenticated_client):
+    authenticated_client.cookies.set(CHAINLIT_AUTH_COOKIE_NAME, "stale-chainlit-jwt", path="/")
+
     r = authenticated_client.post("/auth/chainlit-session", headers={"Authorization": "Bearer or-user-token"})
 
     assert r.status_code == 204
@@ -345,6 +348,8 @@ def test_chainlit_session_sets_short_lived_cookie_for_bearer(authenticated_clien
     assert f"Max-Age={CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS}" in cookie
     assert f"Path={CHAINLIT_TOKEN_COOKIE_PATH}" in cookie
     assert "SameSite=lax" in cookie
+    stale_chainlit_cookie = next(c for c in cookies if CHAINLIT_AUTH_COOKIE_NAME in c and "Max-Age=0" in c)
+    assert "Path=/" in stale_chainlit_cookie
 
 
 def test_chainlit_session_allows_secure_cross_origin_handoff_cookie(authenticated_client):
@@ -364,11 +369,26 @@ def test_chainlit_session_allows_secure_cross_origin_handoff_cookie(authenticate
     assert "Secure" in cookie
 
 
+def test_chainlit_session_clears_chunked_stale_chainlit_auth_cookie(authenticated_client):
+    authenticated_client.cookies.set(f"{CHAINLIT_AUTH_COOKIE_NAME}_0", "stale-jwt-part-1", path="/")
+    authenticated_client.cookies.set(f"{CHAINLIT_AUTH_COOKIE_NAME}_1", "stale-jwt-part-2", path="/")
+
+    r = authenticated_client.post("/auth/chainlit-session", headers={"Authorization": "Bearer or-user-token"})
+
+    assert r.status_code == 204
+    cookies = _set_cookies(r)
+    assert any(f"{CHAINLIT_AUTH_COOKIE_NAME}_0=" in c and "Max-Age=0" in c for c in cookies)
+    assert any(f"{CHAINLIT_AUTH_COOKIE_NAME}_1=" in c and "Max-Age=0" in c for c in cookies)
+
+
 def test_chainlit_session_is_noop_for_cookie_authenticated_user(authenticated_client):
+    authenticated_client.cookies.set(CHAINLIT_AUTH_COOKIE_NAME, "stale-chainlit-jwt", path="/")
+
     r = authenticated_client.post("/auth/chainlit-session")
 
     assert r.status_code == 204
     assert not any(CHAINLIT_TOKEN_COOKIE_NAME in c for c in _set_cookies(r))
+    assert any(CHAINLIT_AUTH_COOKIE_NAME in c and "Max-Age=0" in c for c in _set_cookies(r))
 
 
 def test_chainlit_session_does_not_handoff_bearer_when_oidc_session_authenticated():
@@ -390,9 +410,13 @@ def test_chainlit_session_does_not_handoff_bearer_when_oidc_session_authenticate
 
 
 def test_clear_chainlit_session_deletes_handoff_cookie(authenticated_client):
+    authenticated_client.cookies.set(CHAINLIT_AUTH_COOKIE_NAME, "stale-chainlit-jwt", path="/")
+
     r = authenticated_client.delete("/auth/chainlit-session")
 
     assert r.status_code == 204
-    cookie = next(c for c in _set_cookies(r) if CHAINLIT_TOKEN_COOKIE_NAME in c)
+    cookies = _set_cookies(r)
+    cookie = next(c for c in cookies if CHAINLIT_TOKEN_COOKIE_NAME in c)
     assert f"Path={CHAINLIT_TOKEN_COOKIE_PATH}" in cookie
     assert "Max-Age=0" in cookie or "expires=" in cookie.lower()
+    assert any(CHAINLIT_AUTH_COOKIE_NAME in c and "Max-Age=0" in c for c in cookies)

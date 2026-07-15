@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 
 from api.dependencies.auth import current_user
 from core.auth.chainlit import (
+    CHAINLIT_AUTH_COOKIE_NAME,
     CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS,
     CHAINLIT_TOKEN_COOKIE_NAME,
     CHAINLIT_TOKEN_COOKIE_PATH,
@@ -93,6 +94,16 @@ def _chainlit_handoff_cookie_samesite(request: Request) -> str:
 
 def _delete_state_cookie(response: Response) -> None:
     response.delete_cookie(key=StateCookieSerializer.COOKIE_NAME, path="/")
+
+
+def _clear_chainlit_auth_cookie(request: Request, response: Response) -> None:
+    cookie_names = {
+        CHAINLIT_AUTH_COOKIE_NAME,
+        *(name for name in request.cookies if name.startswith(f"{CHAINLIT_AUTH_COOKIE_NAME}_")),
+    }
+    for cookie_name in cookie_names:
+        response.delete_cookie(key=cookie_name, path="/")
+        response.delete_cookie(key=cookie_name, path=CHAINLIT_TOKEN_COOKIE_PATH)
 
 
 def _json_error(status_code: int, detail: str, *, delete_state_cookie: bool = False) -> JSONResponse:
@@ -275,6 +286,7 @@ async def chainlit_session(request: Request, _user=Depends(current_user)):
     """
 
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    _clear_chainlit_auth_cookie(request, response)
     token = _bearer_token(request)
     if not token or getattr(request.state, "oidc_session", None) is not None:
         return response
@@ -292,9 +304,10 @@ async def chainlit_session(request: Request, _user=Depends(current_user)):
 
 
 @router.delete("/auth/chainlit-session", include_in_schema=False)
-async def clear_chainlit_session(_user=Depends(current_user)):
+async def clear_chainlit_session(request: Request, _user=Depends(current_user)):
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
     response.delete_cookie(key=CHAINLIT_TOKEN_COOKIE_NAME, path=CHAINLIT_TOKEN_COOKIE_PATH)
+    _clear_chainlit_auth_cookie(request, response)
     return response
 
 
