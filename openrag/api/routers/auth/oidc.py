@@ -259,7 +259,7 @@ async def chainlit_session(request: Request, _user=Depends(current_user)):
 
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
     token = _bearer_token(request)
-    if not token:
+    if not token or getattr(request.state, "oidc_session", None) is not None:
         return response
 
     response.set_cookie(

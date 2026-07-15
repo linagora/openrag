@@ -354,6 +354,24 @@ def test_chainlit_session_is_noop_for_cookie_authenticated_user(authenticated_cl
     assert not any(CHAINLIT_TOKEN_COOKIE_NAME in c for c in _set_cookies(r))
 
 
+def test_chainlit_session_does_not_handoff_bearer_when_oidc_session_authenticated():
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def bind_oidc_user(request, call_next):
+        request.state.user = {"id": 7, "display_name": "OIDC User"}
+        request.state.oidc_session = {"id": 42, "user_id": 7}
+        return await call_next(request)
+
+    app.include_router(auth_router)
+    c = TestClient(app)
+
+    r = c.post("/auth/chainlit-session", headers={"Authorization": "Bearer stale-or-different-token"})
+
+    assert r.status_code == 204
+    assert not any(CHAINLIT_TOKEN_COOKIE_NAME in cookie for cookie in _set_cookies(r))
+
+
 def test_clear_chainlit_session_deletes_handoff_cookie(authenticated_client):
     r = authenticated_client.delete("/auth/chainlit-session")
 
