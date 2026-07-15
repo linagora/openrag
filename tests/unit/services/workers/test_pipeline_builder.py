@@ -678,3 +678,124 @@ async def test_pipeline_breadcrumb_reflects_resolved_named_endpoints(monkeypatch
     assert recorder.debug_bound["contextualization_llm"] == "ctx-llm"
     assert recorder.debug_bound["topic_tagging_llm"] == "topic-llm"
     assert recorder.debug_bound["embedder"] == "embed-fast"
+
+
+class RecordingVectorStore:
+    """Vector store fake that logs call order so tests can assert the re-index
+    insert-before-delete contract (#657)."""
+
+    def __init__(self, existing_ids: list[str] | None = None) -> None:
+        self.existing_ids = list(existing_ids or [])
+        self.events: list[str] = []
+        self.query_filters: list[dict] = []
+        self.deleted: list[list[str]] = []
+        self.collection_exists_result = True
+        self.query_error: Exception | None = None
+        self.delete_error: Exception | None = None
+
+    async def collection_exists(self, name: str) -> bool:
+        return self.collection_exists_result
+
+    async def query_ids_by_filter(self, collection: str, filters: dict) -> list[str]:
+        self.events.append("query")
+        self.query_filters.append(filters)
+        if self.query_error is not None:
+            raise self.query_error
+        return list(self.existing_ids)
+
+    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+        self.events.append("upsert")
+        return len(chunks)
+
+    async def ensure_collection(self, name: str, dimension: int, **kwargs) -> None:
+        pass
+
+    async def delete(self, ids: list[str], collection: str = "default") -> int:
+        self.events.append("delete")
+        if self.delete_error is not None:
+            raise self.delete_error
+        self.deleted.append(list(ids))
+        return len(ids)
+
+
+def _reindex_pipeline(vector_store):
+    document = Document(filename="note.txt", text="hi", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hi")])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hi", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=vector_store,
+    )
+    return pipeline, document
+
+
+@pytest.mark.asyncio
+async def test_reindex_deletes_prior_chunks_only_after_storing_new():
+    # #657: replace=True must snapshot the file's existing chunks, store the new
+    # set, then delete exactly the old set — insert-before-delete, so a re-index
+    # never leaves an empty window and never duplicates chunks.
+    vs = RecordingVectorStore(existing_ids=["101", "102"])
+    pipeline, document = _reindex_pipeline(vs)
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+
+    # Snapshot is scoped to this file + partition only.
+    assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
+    # Old chunks removed, and strictly after the new insert.
+    assert vs.deleted == [["101", "102"]]
+    assert vs.events == ["query", "upsert", "delete"]
+
+
+@pytest.mark.asyncio
+async def test_reindex_no_delete_when_file_had_no_prior_chunks():
+    vs = RecordingVectorStore(existing_ids=[])
+    pipeline, document = _reindex_pipeline(vs)
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+
+    assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
+    assert vs.deleted == []
+    assert "delete" not in vs.events
+
+
+@pytest.mark.asyncio
+async def test_first_time_index_never_queries_or_deletes():
+    # Without replace, the plain insert path is untouched (no snapshot, no delete).
+    vs = RecordingVectorStore(existing_ids=["999"])
+    pipeline, document = _reindex_pipeline(vs)
+
+    await pipeline.run({"document": document, "partition": "tenant-a"})
+
+    assert vs.query_filters == []
+    assert vs.deleted == []
+    assert vs.events == ["upsert"]
+
+
+@pytest.mark.asyncio
+async def test_reindex_snapshot_failure_skips_cleanup_but_still_indexes():
+    # A snapshot lookup failure must not lose the new indexing: duplicates are
+    # recoverable, deleting blindly is not. Indexing completes; cleanup is skipped.
+    vs = RecordingVectorStore(existing_ids=["1"])
+    vs.query_error = RuntimeError("milvus unavailable")
+    pipeline, document = _reindex_pipeline(vs)
+
+    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+
+    assert row["stage"] == "stored"
+    assert "upsert" in vs.events
+    assert vs.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_reindex_delete_failure_is_best_effort():
+    # New chunks are already stored, so a cleanup delete failure must not fail the
+    # re-index (mirrors WorkerDispatcher.delete_file's best-effort cleanup).
+    vs = RecordingVectorStore(existing_ids=["1"])
+    vs.delete_error = RuntimeError("delete failed")
+    pipeline, document = _reindex_pipeline(vs)
+
+    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+
+    assert row["stage"] == "stored"
+    assert vs.events == ["query", "upsert", "delete"]
