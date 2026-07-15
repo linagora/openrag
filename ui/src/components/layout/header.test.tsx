@@ -146,4 +146,24 @@ describe("Header", () => {
     });
     expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
   });
+
+  it("does not wait for Chainlit cookie cleanup before local token logout", () => {
+    localStorage.setItem(TOKEN_KEY, "or-user-token");
+    authState.logout.mockImplementation(() => {
+      localStorage.removeItem(TOKEN_KEY);
+      return false;
+    });
+    fetchMock.mockReturnValue(new Promise(() => undefined));
+
+    render(
+      <MemoryRouter>
+        <Header />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /log out/i }));
+
+    expect(authState.logout).toHaveBeenCalled();
+    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
+  });
 });

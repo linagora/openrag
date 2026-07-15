@@ -35,17 +35,20 @@ export function Header() {
   };
 
   const handleLogout = async () => {
-    const wasTokenSession = localStorage.getItem(TOKEN_KEY) !== null;
-    if (wasTokenSession) {
-      try {
-        await request("/auth/chainlit-session", { method: "DELETE" });
-      } catch {
-        // Local token logout should still complete even if the optional chat
-        // cookie cleanup request fails.
-      }
-    }
+    const token = localStorage.getItem(TOKEN_KEY);
+    const clearChainlitSession =
+      token !== null
+        ? request("/auth/chainlit-session", {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${token}` },
+          }).catch(() => {
+            // Local token logout should still complete even if the optional
+            // chat cookie cleanup request fails.
+          })
+        : undefined;
 
     const wasOidcSession = logout();
+    void clearChainlitSession;
     if (wasOidcSession) {
       // Full-page navigation to the backend's RP-initiated logout: it revokes
       // the server session, clears the cookie, and redirects on to the IdP.

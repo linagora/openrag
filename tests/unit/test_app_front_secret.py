@@ -6,6 +6,7 @@ default secret.
 import importlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -53,6 +54,92 @@ def test_token_mode_registers_chainlit_header_handoff(monkeypatch):
 
     assert config.code.header_auth_callback is not None
     assert config.code.password_auth_callback is not None
+
+
+@pytest.mark.asyncio
+async def test_oidc_token_handoff_keeps_bearer_on_static_source_urls(monkeypatch):
+    monkeypatch.setenv("AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("CHAINLIT_AUTH_SECRET", "x" * 32)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
+    monkeypatch.syspath_prepend(str(_OPENRAG_RUNTIME_PATH))
+
+    spec = importlib.util.spec_from_file_location("app_front_source_token_test", _FIX_SOURCE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.INTERNAL_BASE_URL = "http://internal:8080"
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+
+    class UserSession:
+        def get(self, key):
+            if key == "user":
+                return SimpleNamespace(metadata={"provider": "credentials"})
+            return None
+
+    module.cl = SimpleNamespace(
+        user_session=UserSession(),
+        Pdf=lambda **kwargs: SimpleNamespace(**kwargs),
+        Text=lambda **kwargs: SimpleNamespace(**kwargs),
+        Image=lambda **kwargs: SimpleNamespace(**kwargs),
+        Video=lambda **kwargs: SimpleNamespace(**kwargs),
+        Audio=lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    elements, _ = await module._format_sources(
+        [
+            {
+                "filename": "document.pdf",
+                "file_url": "http://internal:8080/static/source-id",
+                "page": "1",
+            }
+        ],
+        api_key="or-user-token",
+    )
+
+    assert elements[0].url == "https://openrag.example/static/source-id?token=or-user-token"
+
+
+@pytest.mark.asyncio
+async def test_oidc_session_does_not_put_bearer_on_static_source_urls(monkeypatch):
+    monkeypatch.setenv("AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("AUTH_MODE", "oidc")
+    monkeypatch.setenv("CHAINLIT_AUTH_SECRET", "x" * 32)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None)
+    monkeypatch.syspath_prepend(str(_OPENRAG_RUNTIME_PATH))
+
+    spec = importlib.util.spec_from_file_location("app_front_source_oidc_test", _FIX_SOURCE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.INTERNAL_BASE_URL = "http://internal:8080"
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+
+    class UserSession:
+        def get(self, key):
+            if key == "user":
+                return SimpleNamespace(metadata={"provider": "oidc"})
+            return None
+
+    module.cl = SimpleNamespace(
+        user_session=UserSession(),
+        Pdf=lambda **kwargs: SimpleNamespace(**kwargs),
+        Text=lambda **kwargs: SimpleNamespace(**kwargs),
+        Image=lambda **kwargs: SimpleNamespace(**kwargs),
+        Video=lambda **kwargs: SimpleNamespace(**kwargs),
+        Audio=lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    elements, _ = await module._format_sources(
+        [
+            {
+                "filename": "document.pdf",
+                "file_url": "http://internal:8080/static/source-id",
+                "page": "1",
+            }
+        ],
+        api_key="opaque-session-token",
+    )
+
+    assert elements[0].url == "https://openrag.example/static/source-id"
 
 
 def test_app_front_raises_when_secret_missing(monkeypatch):

@@ -136,6 +136,12 @@ def _openrag_api_key_from_user(user) -> str | None:
     return api_key
 
 
+def _openrag_auth_provider_from_user(user) -> str | None:
+    metadata = getattr(user, "metadata", {}) or {}
+    provider = metadata.get("provider")
+    return provider if isinstance(provider, str) else None
+
+
 def _openrag_api_key_from_context_cookie() -> str | None:
     try:
         context = get_context()
@@ -162,6 +168,11 @@ def _current_openrag_api_key(default: str = "sk-1234") -> str:
         cl.user_session.set(OPENRAG_API_KEY_SESSION_KEY, api_key)
         return api_key
     return default
+
+
+def _current_openrag_auth_provider() -> str | None:
+    user = cl.user_session.get("user")
+    return _openrag_auth_provider_from_user(user)
 
 
 def _chainlit_user_from_info(data: dict, *, provider: str, api_key: str) -> cl.User:
@@ -354,9 +365,10 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
         # Referer headers). In OIDC mode the browser already sends the
         # openrag_session cookie on same-origin file fetches, which the auth
         # middleware accepts — so the token query param is unnecessary. In token
-        # mode there is no such cookie, so it remains the only way for the
-        # browser to authenticate the fetch.
-        if AUTH_MODE != "oidc":
+        # mode, or for a token handoff inside an OIDC deployment, there is no
+        # cookie on /static, so it remains the only way for the browser to
+        # authenticate the fetch.
+        if api_key and (AUTH_MODE != "oidc" or _current_openrag_auth_provider() == "credentials"):
             file_url = f"{file_url}?token={api_key}"
         page = s["page"]
         source_name = f"{filename}" + (
