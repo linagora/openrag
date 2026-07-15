@@ -85,6 +85,16 @@ def test_api_key_falls_back_to_chainlit_cookie_when_auth_handle_is_missing(monke
     assert user_session.values[module.OPENRAG_API_KEY_SESSION_KEY] == "or-cookie-token"
 
 
+def test_api_key_requires_reauth_when_user_token_cannot_be_recovered(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_missing_token_test")
+    monkeypatch.setattr(module, "_openrag_api_key_from_context_cookie", lambda: None)
+
+    with pytest.raises(module.MissingOpenRAGCredentialError, match="sign in again"):
+        module._openrag_api_key_from_user_or_context(
+            SimpleNamespace(metadata={module.OPENRAG_AUTH_HANDLE_METADATA_KEY: "missing-handle"})
+        )
+
+
 @pytest.mark.parametrize("stale_status", [401, 403])
 @pytest.mark.asyncio
 async def test_chainlit_cookie_auth_retries_handoff_after_stale_oidc_session(monkeypatch, stale_status):

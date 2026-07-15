@@ -36,6 +36,10 @@ OPENRAG_AUTH_HANDLE_METADATA_KEY = "openrag_auth_handle"
 _OPENRAG_TOKEN_STORE: dict[str, tuple[str, float]] = {}
 
 
+class MissingOpenRAGCredentialError(RuntimeError):
+    pass
+
+
 def get_user_language() -> str:
     """Return the active language: env override if set, otherwise browser's Accept-Language."""
     if DEFAULT_LANGUAGE:
@@ -171,6 +175,10 @@ def _openrag_api_key_from_user_or_context(user, default: str = "sk-1234") -> str
     if api_key:
         cl.user_session.set(OPENRAG_API_KEY_SESSION_KEY, api_key)
         return api_key
+    if user is not None:
+        raise MissingOpenRAGCredentialError(
+            "Your OpenRAG Chat session expired. Please sign out of Chat and sign in again."
+        )
     return default
 
 
@@ -315,9 +323,9 @@ async def chat_profile(current_user: cl.User):
 @cl.on_chat_start
 async def on_chat_start():
     cl.user_session.set("messages", [])
-    api_key = _current_openrag_api_key()
     logger.debug("New Chat Started", internal_base_url=INTERNAL_BASE_URL)
     try:
+        api_key = _current_openrag_api_key()
         async with httpx.AsyncClient(timeout=httpx.Timeout(4 * 60.0)) as client:
             response = await client.get(
                 url=f"{INTERNAL_BASE_URL}/health_check",
@@ -409,11 +417,6 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
 async def on_message(message: cl.Message):
     messages: list = cl.user_session.get("messages", [])
     model: str = cl.user_session.get("chat_profile")
-    api_key = _current_openrag_api_key()
-    client = AsyncOpenAI(
-        base_url=f"{INTERNAL_BASE_URL}/v1",
-        api_key=api_key,
-    )
 
     messages.append({"role": "user", "content": message.content})
     data = {
@@ -437,6 +440,11 @@ async def on_message(message: cl.Message):
         await msg.send()
 
         try:
+            api_key = _current_openrag_api_key()
+            client = AsyncOpenAI(
+                base_url=f"{INTERNAL_BASE_URL}/v1",
+                api_key=api_key,
+            )
             # Stream the response using OpenAI client directly
             stream = await client.chat.completions.create(**data)
             async for chunk in stream:
