@@ -29,3 +29,13 @@ def test_admin_ui_nginx_preserves_public_host_header_for_api_redirects():
 
     assert re.search(r"proxy_set_header\s+Host\s+\$http_host;", config)
     assert re.search(r"proxy_set_header\s+X-Forwarded-Host\s+\$http_host;", config)
+
+
+def test_admin_ui_nginx_preserves_websocket_upgrades_for_chainlit():
+    nginx_conf = Path(__file__).resolve().parents[3] / "infra/compose/nginx/openrag-admin.conf"
+    config = nginx_conf.read_text(encoding="utf-8")
+
+    assert re.search(r"map\s+\$http_upgrade\s+\$connection_upgrade\s+\{", config)
+    assert re.search(r"proxy_http_version\s+1\.1;", config)
+    assert re.search(r"proxy_set_header\s+Upgrade\s+\$http_upgrade;", config)
+    assert re.search(r"proxy_set_header\s+Connection\s+\$connection_upgrade;", config)
