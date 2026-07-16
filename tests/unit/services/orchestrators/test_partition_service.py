@@ -140,6 +140,7 @@ def _svc(
     vstore=None,
     urepo=None,
     collection="vdb",
+    tsm=None,
 ) -> PartitionService:
     return PartitionService(
         partition_repo=prepo or FakePartitionRepo(),
@@ -148,6 +149,7 @@ def _svc(
         vector_store=vstore or FakeVectorStore(),
         user_repo=urepo or FakeUserRepo(),
         collection=collection,
+        task_state_manager=tsm,
     )
 
 
@@ -259,8 +261,8 @@ async def test_delete_partition_deletes_vectors_before_rows():
 
     await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
 
-    assert call_order == ["vstore_delete_by_filter", "prepo_delete"]
-    assert vstore.deleted_filters == [{"partition": "p1"}]
+    assert call_order == ["vstore_delete_by_filter", "prepo_delete", "vstore_delete_by_filter"]
+    assert vstore.deleted_filters == [{"partition": "p1"}, {"partition": "p1"}]
     assert vstore.deleted_ids == []
     assert prepo.deleted == ["p1"]
 
@@ -270,7 +272,7 @@ async def test_delete_partition_no_vectors_still_deletes_rows():
     prepo = FakePartitionRepo(existing={"p1"})
     vstore = FakeVectorStore(ids=[])
     await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
-    assert vstore.deleted_filters == [{"partition": "p1"}]
+    assert vstore.deleted_filters == [{"partition": "p1"}, {"partition": "p1"}]
     assert vstore.deleted_ids == []
     assert prepo.deleted == ["p1"]
 
@@ -323,6 +325,26 @@ async def test_delete_partition_skips_vectors_when_collection_absent():
     assert prepo.deleted == ["p1"]
     assert vstore.deleted_ids == []
     assert vstore.delete_called is False
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_cancels_active_indexing_tasks_before_cleanup():
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    prepo = FakePartitionRepo(existing={"p1"})
+    ref = object()
+    tsm = MagicMock()
+    tsm.get_matching_active_task_refs = MagicMock()
+    tsm.get_matching_active_task_refs.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
+    tsm.set_state = MagicMock()
+    tsm.set_state.remote = AsyncMock(return_value=None)
+
+    with patch("ray.cancel") as cancel:
+        await _svc(prepo=prepo, tsm=tsm).delete_partition("p1")
+
+    tsm.get_matching_active_task_refs.remote.assert_called_once_with(partition="p1", file_id=None)
+    cancel.assert_called_once_with(ref, recursive=True)
+    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
 
 
 @pytest.mark.asyncio

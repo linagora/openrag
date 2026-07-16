@@ -6,6 +6,8 @@ from typing import Any
 
 import ray
 
+ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"})
+
 try:
     from core.config import load_config as _load_config
 
@@ -115,6 +117,26 @@ class TaskStateManager:
             info = self.tasks.get(task_id)
             return info.object_ref if info else None
 
+    @ray.method(concurrency_group="get")
+    async def get_matching_active_task_refs(
+        self,
+        *,
+        partition: str,
+        file_id: str | None = None,
+    ) -> dict[str, ray.ObjectRef | None]:
+        async with self.lock:
+            matches = {}
+            for task_id, info in self.tasks.items():
+                if info.state not in ACTIVE_INDEXING_STATES:
+                    continue
+                details = info.details or {}
+                if details.get("partition") != partition:
+                    continue
+                if file_id is not None and details.get("file_id") != file_id:
+                    continue
+                matches[task_id] = info.object_ref
+            return matches
+
     @ray.method(concurrency_group="queue_info")
     async def get_all_states(self) -> dict[str, str | None]:
         async with self.lock:
@@ -158,8 +180,7 @@ class TaskStateManager:
     async def get_user_pending_task_count(self, user_id: int) -> int:
         async with self.lock:
             task_ids = self.user_index.get(user_id, set())
-            pending_states = {"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"}
-            return sum(1 for tid in task_ids if (info := self.tasks.get(tid)) and info.state in pending_states)
+            return sum(1 for tid in task_ids if (info := self.tasks.get(tid)) and info.state in ACTIVE_INDEXING_STATES)
 
 
-__all__ = ["TaskInfo", "TaskStateManager"]
+__all__ = ["ACTIVE_INDEXING_STATES", "TaskInfo", "TaskStateManager"]

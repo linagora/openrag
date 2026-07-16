@@ -5,6 +5,7 @@ from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
 from core.utils.logging import get_logger
+from services.workers.task_cancellation import cancel_active_indexing_tasks
 
 logger = get_logger()
 
@@ -117,10 +118,22 @@ class WorkerDispatcher(IndexingDispatcher):
         return task_id
 
     async def delete_file(self, file_id: str, partition: str) -> None:
-        if await self._vector_store.collection_exists(self._collection):
+        cancelled = await cancel_active_indexing_tasks(
+            self._tsm,
+            partition=partition,
+            file_id=file_id,
+            timeout=self._timeout,
+        )
+        if cancelled:
+            logger.info("Cancelled active indexing tasks before deleting file", file_id=file_id, partition=partition)
+
+        collection_exists = await self._vector_store.collection_exists(self._collection)
+        if collection_exists:
             await self._vector_store.delete_by_filter({"partition": partition, "file_id": file_id})
         await self._workspace_repo.remove_file_from_all_workspaces(file_id, partition)
         await self._document_repo.remove_file_from_partition(file_id=file_id, partition=partition)
+        if collection_exists:
+            await self._vector_store.delete_by_filter({"partition": partition, "file_id": file_id})
 
     async def update_file_metadata(
         self,

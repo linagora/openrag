@@ -50,6 +50,7 @@ class FakeVectorStore:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
         self.ensure_calls: list[tuple[str, int]] = []
+        self.deleted_filters: list[dict[str, Any]] = []
 
     async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
         self.calls.append((chunks, collection, indexed_at))
@@ -57,6 +58,13 @@ class FakeVectorStore:
 
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
         self.ensure_calls.append((name, dimension))
+
+    async def collection_exists(self, name: str) -> bool:
+        return True
+
+    async def delete_by_filter(self, filters: dict[str, Any]) -> int:
+        self.deleted_filters.append(dict(filters))
+        return 1
 
 
 def _fake_tsm() -> MagicMock:
@@ -346,6 +354,7 @@ async def test_process_file_creates_catalog_record_after_successful_pipeline(tmp
         "user_id": 42,
         "relationship_id": "rel",
         "parent_id": "parent",
+        "require_existing_partition": True,
     }
     assert repo.update_calls == []
 
@@ -493,6 +502,41 @@ async def test_process_file_catalog_failure_sets_failed_state(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_process_file_cleans_vectors_when_catalog_write_loses_delete_race(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class StoredPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    class MissingCatalogRepo:
+        async def add_file_to_partition(self, **kwargs: Any) -> bool:
+            return False
+
+    vector_store = FakeVectorStore()
+    worker = IndexerWorker(
+        pipeline=StoredPipeline(),
+        task_state_manager=_fake_tsm(),
+        document_repo=MissingCatalogRepo(),
+        vector_store=vector_store,
+        collection="vdb",
+    )
+
+    with pytest.raises(RuntimeError, match="Catalog row was not written"):
+        await worker.process_file(
+            task_id="t-race",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+        )
+
+    assert vector_store.deleted_filters == [{"partition": "p", "file_id": "f1"}]
+
+
+@pytest.mark.asyncio
 async def test_process_file_replaces_topic_tags_after_successful_pipeline(tmp_path: Path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")
@@ -571,10 +615,14 @@ async def test_process_file_rejects_malformed_topic_tags_before_delete(tmp_path:
             return row
 
     repo = FakeTopicTagRepo()
+    document_repo = FakeDocumentRepo()
+    vector_store = FakeVectorStore()
     worker = IndexerWorker(
         pipeline=BrokenTaggingPipeline(),
         task_state_manager=tsm,
+        document_repo=document_repo,
         topic_tag_repo=repo,
+        vector_store=vector_store,
     )
 
     with pytest.raises(TypeError, match="topic_tags"):
@@ -587,4 +635,6 @@ async def test_process_file_rejects_malformed_topic_tags_before_delete(tmp_path:
 
     assert repo.deleted == []
     assert repo.inserted == []
+    assert len(document_repo.add_calls) == 1
+    assert vector_store.deleted_filters == []
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()

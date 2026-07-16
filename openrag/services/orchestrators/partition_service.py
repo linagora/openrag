@@ -24,6 +24,7 @@ raised). The container supplies both from settings/the catalog store.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -39,6 +40,7 @@ from core.utils.exceptions import (
     ValidationError,
 )
 from core.utils.logging import get_logger
+from services.workers.task_cancellation import cancel_active_indexing_tasks
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -85,6 +87,9 @@ class PartitionService:
         user_repo: UserRepository,
         collection: str,
         config: Settings | None = None,
+        task_state_manager: Any = None,
+        task_state_manager_factory: Callable[[], Any] | None = None,
+        task_cancel_timeout: float = 60.0,
     ) -> None:
         self._partition_repo = partition_repo
         self._membership_repo = membership_repo
@@ -93,6 +98,9 @@ class PartitionService:
         self._user_repo = user_repo
         self._collection = collection
         self._config = config
+        self._task_state_manager = task_state_manager
+        self._task_state_manager_factory = task_state_manager_factory
+        self._task_cancel_timeout = task_cancel_timeout
 
     # ------------------------------------------------------------------
     # Existence guards (mirror the legacy _check_* helpers, core exceptions)
@@ -244,12 +252,25 @@ class PartitionService:
     async def delete_partition(self, partition: str) -> None:
         """Drop a partition's vectors *and* relational rows (cross-cutting)."""
         await self._ensure_partition(partition)
+        task_state_manager = self._task_state_manager
+        if task_state_manager is None and self._task_state_manager_factory is not None:
+            task_state_manager = self._task_state_manager_factory()
+        if task_state_manager is not None:
+            cancelled = await cancel_active_indexing_tasks(
+                task_state_manager,
+                partition=partition,
+                timeout=self._task_cancel_timeout,
+            )
+            if cancelled:
+                logger.info("Cancelled active indexing tasks before deleting partition", partition=partition)
+
         # The shared Milvus collection is created lazily on the first insert
         # system-wide, so on a fresh stack (nothing ever indexed) it doesn't
         # exist; deleting by filter would raise (e.g. DescribeCollectionException)
         # even though there are no chunks to clean up.
         # No collection means no chunks to clean up — skip the vector cleanup.
-        if await self._vector_store.collection_exists(self._collection):
+        collection_exists = await self._vector_store.collection_exists(self._collection)
+        if collection_exists:
             deleted = await self._vector_store.delete_by_filter({"partition": partition})
             logger.info(
                 "Deleted points from partition",
@@ -262,6 +283,13 @@ class PartitionService:
                 partition=partition,
             )
         await self._partition_repo.delete_partition(name=partition)
+        if collection_exists:
+            deleted = await self._vector_store.delete_by_filter({"partition": partition})
+            logger.info(
+                "Deleted race-leftover points from partition",
+                partition=partition,
+                count=deleted,
+            )
         logger.info("Partition successfully deleted.", partition=partition)
 
     async def update_partition(self, partition: str, **fields: object) -> dict | None:

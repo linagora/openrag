@@ -34,11 +34,15 @@ class IndexerWorker:
         task_state_manager: Any,
         document_repo: Any = None,
         topic_tag_repo: Any = None,
+        vector_store: Any = None,
+        collection: str = "default",
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
         self._document_repo = document_repo
         self._topic_tag_repo = topic_tag_repo
+        self._vector_store = vector_store
+        self._collection = collection
 
     async def process_file(
         self,
@@ -60,6 +64,8 @@ class IndexerWorker:
         is re-raised so the Ray task is marked as errored.
         """
         await self._tsm.set_state.remote(task_id, "SERIALIZING")
+        row: dict[str, Any] | None = None
+        catalog_written = False
         try:
             document = await _load_document(path, metadata, partition)
             # One indexation timestamp for this file, shared by the Milvus chunks
@@ -80,7 +86,7 @@ class IndexerWorker:
             indexed_at = row.get("indexed_at")
 
             if self._document_repo is not None:
-                await _write_catalog_record(
+                wrote_catalog = await _write_catalog_record(
                     doc_repo=self._document_repo,
                     metadata=metadata,
                     partition=partition,
@@ -89,6 +95,9 @@ class IndexerWorker:
                     indexation_config=indexation_config,
                     indexed_at=indexed_at,
                 )
+                if not wrote_catalog:
+                    raise RuntimeError("Catalog row was not written after vector indexing")
+                catalog_written = True
             if self._topic_tag_repo is not None:
                 await _replace_topic_tags_if_needed(
                     topic_tag_repo=self._topic_tag_repo,
@@ -100,6 +109,13 @@ class IndexerWorker:
             await self._tsm.set_state.remote(task_id, "COMPLETED")
             return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
         except Exception:
+            if not catalog_written and row is not None and row.get("stored_count", 0) > 0:
+                await _cleanup_indexed_vectors(
+                    vector_store=self._vector_store,
+                    collection=self._collection,
+                    metadata=metadata,
+                    partition=partition,
+                )
             tb = traceback.format_exc()
             await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
             raise
@@ -118,12 +134,12 @@ async def _write_catalog_record(
     replace: bool,
     indexation_config: dict[str, Any] | None,
     indexed_at: datetime | None = None,
-) -> None:
+) -> bool:
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
     config_kwargs = {"indexation_config": indexation_config} if indexation_config is not None else {}
     if replace:
-        await doc_repo.update_file_in_partition(
+        return await doc_repo.update_file_in_partition(
             file_id=file_id,
             partition=partition,
             file_metadata=file_metadata,
@@ -132,9 +148,8 @@ async def _write_catalog_record(
             indexed_at=indexed_at,
             **config_kwargs,
         )
-        return
 
-    await doc_repo.add_file_to_partition(
+    return await doc_repo.add_file_to_partition(
         file_id=file_id,
         partition=partition,
         file_metadata=file_metadata,
@@ -142,8 +157,28 @@ async def _write_catalog_record(
         relationship_id=metadata.get("relationship_id"),
         parent_id=metadata.get("parent_id"),
         indexed_at=indexed_at,
+        require_existing_partition=True,
         **config_kwargs,
     )
+
+
+async def _cleanup_indexed_vectors(
+    *,
+    vector_store: Any,
+    collection: str,
+    metadata: dict[str, Any],
+    partition: str,
+) -> None:
+    file_id = metadata.get("file_id")
+    if vector_store is None or not file_id:
+        return
+    try:
+        if await vector_store.collection_exists(collection):
+            await vector_store.delete_by_filter({"partition": partition, "file_id": file_id})
+    except Exception:
+        # Preserve the original indexing failure; cleanup errors are logged by
+        # the caller's failed task state and can be retried through delete.
+        return
 
 
 async def _replace_topic_tags_if_needed(

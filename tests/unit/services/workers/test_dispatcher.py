@@ -68,6 +68,7 @@ def _task_state_manager() -> MagicMock:
     tsm.get_state = _remote_mock("SERIALIZING")
     tsm.get_error = _remote_mock("traceback")
     tsm.get_object_ref = _remote_mock({"ref": object()})
+    tsm.get_matching_active_task_refs = _remote_mock({})
     return tsm
 
 
@@ -169,7 +170,10 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
     await dispatcher.update_file_metadata("file-1", {"title": "new"}, "tenant-a", user={"id": 7})
     await dispatcher.copy_file("file-1", {"file_id": "copy-1", "partition": "tenant-b"}, "tenant-b", user=None)
 
-    vector_store.delete_by_filter.assert_called_once_with({"partition": "tenant-a", "file_id": "file-1"})
+    assert [call.args for call in vector_store.delete_by_filter.call_args_list] == [
+        ({"partition": "tenant-a", "file_id": "file-1"},),
+        ({"partition": "tenant-a", "file_id": "file-1"},),
+    ]
     vector_store.delete.assert_not_called()
     workspace_repo.remove_file_from_all_workspaces.assert_called_once_with("file-1", "tenant-a")
     document_repo.remove_file_from_partition.assert_called_once_with(file_id="file-1", partition="tenant-a")
@@ -265,7 +269,31 @@ async def test_delete_file_cleans_vector_store_before_database() -> None:
 
     await dispatcher.delete_file("file-1", "tenant-a")
 
-    assert call_order == ["delete_by_filter", "workspace", "document"]
+    assert call_order == ["delete_by_filter", "workspace", "document", "delete_by_filter"]
+
+
+@pytest.mark.asyncio
+async def test_delete_file_cancels_active_matching_indexing_task_before_cleanup() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = object()
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs = _remote_mock({"task-1": {"ref": ref}})
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("ray.cancel") as cancel:
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    tsm.get_matching_active_task_refs.remote.assert_called_once_with(partition="tenant-a", file_id="file-1")
+    cancel.assert_called_once_with(ref, recursive=True)
+    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
 
 
 @pytest.mark.asyncio
