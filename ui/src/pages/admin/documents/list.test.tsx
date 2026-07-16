@@ -97,6 +97,13 @@ describe("DocumentListPage", () => {
     toastSuccessMock.mockClear();
   });
 
+  it("labels row icon actions", async () => {
+    renderDocuments();
+
+    expect(await screen.findByRole("link", { name: /view a\.pdf/i })).not.toBeNull();
+    expect(screen.getByRole("button", { name: /delete a\.pdf/i })).not.toBeNull();
+  });
+
   it("selects all documents from the table header and deletes the selected files", async () => {
     renderDocuments();
 

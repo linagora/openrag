@@ -159,6 +159,7 @@ function ActorsTab() {
                     size="icon"
                     className="h-7 w-7 flex-shrink-0"
                     disabled={restartMut.isPending}
+                    aria-label={`Restart ${a.name}`}
                     title="Restart actor"
                   >
                     <RotateCcw className="h-3.5 w-3.5" />
