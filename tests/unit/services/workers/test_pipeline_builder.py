@@ -483,9 +483,10 @@ async def test_pipeline_propagates_non_keyerror_contextualizer_factory_error():
 
 
 @pytest.mark.asyncio
-async def test_pipeline_always_captions_standalone_image_even_when_globally_off():
+async def test_pipeline_always_captions_standalone_image_even_when_partition_disables_it():
     # A standalone image file's caption is its only text content, so it is
-    # captioned even when global image captioning is off (legacy parity).
+    # captioned even when the partition's enable_image_captioning is off
+    # (legacy parity).
     document = Document(filename="logo.png", content_type=DocumentType.IMAGE, raw_bytes=b"img")
     processed = ProcessedDocument(
         document_id=document.id,
@@ -499,7 +500,7 @@ async def test_pipeline_always_captions_standalone_image_even_when_globally_off(
         embedder=FakeEmbedder([[1.0]]),
         vector_store=FakeVectorStore(),
         vlm=vlm,
-        image_captioning=False,
+        indexation_config=IndexationPipelineConfig(enable_image_captioning=False),
     )
     row = {"document": document, "partition": "tenant-a", "filename": "logo.png"}
 
@@ -509,8 +510,9 @@ async def test_pipeline_always_captions_standalone_image_even_when_globally_off(
 
 
 @pytest.mark.asyncio
-async def test_pipeline_skips_embedded_image_caption_when_globally_off():
-    # Images embedded in a non-image document stay gated by the global flag.
+async def test_pipeline_skips_embedded_image_caption_when_partition_disables_it():
+    # Images embedded in a non-image document stay gated by the per-partition
+    # (preset) enable_image_captioning setting.
     document = Document(filename="note.txt", text="hello", partition="tenant-a")
     processed = ProcessedDocument(
         document_id=document.id,
@@ -524,7 +526,7 @@ async def test_pipeline_skips_embedded_image_caption_when_globally_off():
         embedder=FakeEmbedder([[1.0]]),
         vector_store=FakeVectorStore(),
         vlm=vlm,
-        image_captioning=False,
+        indexation_config=IndexationPipelineConfig(enable_image_captioning=False),
     )
     row = {"document": document, "partition": "tenant-a", "filename": "note.txt"}
 

@@ -68,7 +68,6 @@ class IndexerWorkerActor:
             embedder=embedder,
             vector_store=self._vector_store,
             vlm=vlm,
-            image_captioning=cfg.loader.image_captioning,
             timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
             parser_factory=parser_factory,

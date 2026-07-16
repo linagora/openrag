@@ -1002,7 +1002,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
             batch_size=32,
             embed_concurrency=2,
         ),
-        loader=SimpleNamespace(image_captioning=True, parse_timeout=3600, save_uploaded_files=True),
+        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )
