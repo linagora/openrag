@@ -16,10 +16,15 @@ from __future__ import annotations
 import os
 from threading import Lock
 
+import httpx
+from core.utils.logging import get_logger
+from core.utils.string_utils import str_to_bool
 from services.auth.oidc_client import OIDCClient
 
 _client: OIDCClient | None = None
 _lock = Lock()
+
+logger = get_logger()
 
 
 def get_oidc_client() -> OIDCClient:
@@ -34,6 +39,8 @@ def get_oidc_client() -> OIDCClient:
       - OIDC_CLIENT_SECRET
       - OIDC_REDIRECT_URI
       - OIDC_SCOPES (default ``openid email profile offline_access``)
+      - SSL_NO_VERIFY (default ``false``; set to ``true`` to skip TLS certificate
+        verification on requests to the IdP, e.g. for a self-signed Keycloak in dev)
     """
     global _client
     if _client is not None:
@@ -41,17 +48,25 @@ def get_oidc_client() -> OIDCClient:
     with _lock:
         if _client is not None:
             return _client
+
+        _ssl_verify = not str_to_bool(os.getenv("SSL_NO_VERIFY", "false"))
+        if not _ssl_verify:
+            logger.warning("SSL certificate verification is DISABLED for the OIDC client.")
+
         issuer = os.environ["OIDC_ENDPOINT"]
         client_id = os.environ["OIDC_CLIENT_ID"]
         client_secret = os.environ["OIDC_CLIENT_SECRET"]
         redirect_uri = os.environ["OIDC_REDIRECT_URI"]
         scopes = os.getenv("OIDC_SCOPES", "openid email profile offline_access")
+
+        http_client = httpx.AsyncClient(timeout=10.0, verify=_ssl_verify)
         _client = OIDCClient(
             issuer=issuer,
             client_id=client_id,
             client_secret=client_secret,
             redirect_uri=redirect_uri,
             scopes=scopes,
+            http_client=http_client,
         )
     return _client
 
