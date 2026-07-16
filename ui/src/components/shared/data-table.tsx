@@ -31,6 +31,8 @@ interface BaseDataTableProps<TData, TValue> {
   initialSorting?: SortingState;
   /** Render a leading checkbox column. */
   enableSelection?: boolean;
+  /** Optional row-level selection guard for pages with state-dependent bulk actions. */
+  canSelectRow?: (row: TData) => boolean;
   /** Stable row id (e.g. file_id) so selection survives a data refetch. */
   getRowId?: (row: TData) => string;
 }
@@ -54,6 +56,7 @@ export function DataTable<TData, TValue>({
   pageSize = 10,
   initialSorting = [],
   enableSelection = false,
+  canSelectRow,
   getRowId,
   rowSelection: controlledRowSelection,
   onRowSelectionChange,
@@ -85,6 +88,7 @@ export function DataTable<TData, TValue>({
         <Checkbox
           checked={row.getIsSelected()}
           onCheckedChange={(value) => row.toggleSelected(!!value)}
+          disabled={!row.getCanSelect()}
           aria-label="Select row"
         />
       ),
@@ -103,7 +107,9 @@ export function DataTable<TData, TValue>({
     onColumnFiltersChange: setColumnFilters,
     onPaginationChange: setPagination,
     onRowSelectionChange: setRowSelection,
-    enableRowSelection: enableSelection,
+    enableRowSelection: enableSelection
+      ? (row) => (canSelectRow ? canSelectRow(row.original) : true)
+      : false,
     getRowId,
     // Keep the user on their current page when the rows change underneath them
     // (e.g. deleting a row refetches the list). TanStack resets pageIndex to 0

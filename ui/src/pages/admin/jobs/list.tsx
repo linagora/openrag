@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import type { ColumnDef } from "@tanstack/react-table";
-import { RefreshCw, Search } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { ColumnDef, RowSelectionState } from "@tanstack/react-table";
+import { Ban, RefreshCw, Search } from "lucide-react";
+import { toast } from "sonner";
 import { usePermissions } from "@/lib/permissions";
 
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
+import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { listTasks, type TaskListItem } from "@/lib/api/jobs";
+import { cancelTask, isActiveState, listTasks, type TaskListItem } from "@/lib/api/jobs";
 
 // OpenRag exposes per-file indexing tasks (TaskStateManager), not batch "jobs".
 const STATUS_TABS = ["ALL", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED"] as const;
@@ -49,9 +51,11 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
 
 export default function JobListPage() {
   const { isAdmin } = usePermissions();
+  const queryClient = useQueryClient();
   const [statusTab, setStatusTab] = useState<string>("ALL");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [manualRefreshing, setManualRefreshing] = useState(false);
 
   useEffect(() => {
@@ -78,11 +82,31 @@ export default function JobListPage() {
       );
     });
   }, [tasks, debouncedSearch]);
+  const selectedActiveTasks = useMemo(
+    () => filteredTasks.filter((task) => rowSelection[task.task_id] && isActiveState(task.state)),
+    [filteredTasks, rowSelection],
+  );
+
+  const bulkCancelMutation = useMutation({
+    mutationFn: async (taskIds: string[]) => {
+      const results = await Promise.allSettled(taskIds.map((taskId) => cancelTask(taskId)));
+      const ok = results.filter((result) => result.status === "fulfilled").length;
+      return { ok, failed: results.length - ok };
+    },
+    onSuccess: ({ ok, failed }) => {
+      if (ok) toast.success(`${ok} task(s) cancelled`);
+      if (failed) toast.error(`${failed} task(s) failed to cancel`);
+      setRowSelection({});
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (error: Error) => toast.error(`Bulk cancel failed: ${error.message}`),
+  });
 
   const handleStatusTabChange = (value: string) => {
     setStatusTab(value);
     setSearch("");
     setDebouncedSearch("");
+    setRowSelection({});
   };
 
   return (
@@ -104,6 +128,25 @@ export default function JobListPage() {
             <p className="text-sm text-muted-foreground">
               {filteredTasks.length} job{filteredTasks.length === 1 ? "" : "s"}
             </p>
+            {selectedActiveTasks.length > 0 && (
+              <>
+                <ConfirmDialog
+                  title="Cancel selected tasks?"
+                  description={`Send a cancellation signal for ${selectedActiveTasks.length} active task(s)? Already-completed work is not rolled back.`}
+                  onConfirm={() =>
+                    bulkCancelMutation.mutate(selectedActiveTasks.map((task) => task.task_id))
+                  }
+                >
+                  <Button variant="outline" size="sm" disabled={bulkCancelMutation.isPending}>
+                    <Ban className="h-4 w-4" />
+                    Cancel selected
+                  </Button>
+                </ConfirmDialog>
+                <p className="text-sm text-muted-foreground">
+                  {selectedActiveTasks.length} selected
+                </p>
+              </>
+            )}
             <Button
               variant="outline"
               size="icon-sm"
@@ -138,7 +181,16 @@ export default function JobListPage() {
               </div>
             ) : (
               // Remounting resets pagination for a new tab/search context; sort state resets with it.
-              <DataTable key={`${statusTab}:${debouncedSearch}`} columns={columns} data={filteredTasks} />
+              <DataTable
+                key={`${statusTab}:${debouncedSearch}`}
+                columns={columns}
+                data={filteredTasks}
+                enableSelection
+                canSelectRow={(task) => isActiveState(task.state)}
+                getRowId={(task) => task.task_id}
+                rowSelection={rowSelection}
+                onRowSelectionChange={setRowSelection}
+              />
             )}
           </TabsContent>
         ))}
