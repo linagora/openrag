@@ -18,7 +18,7 @@ jobs:
   build-and-push-dev-image:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
       attestations: write
     steps:
@@ -71,90 +71,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Create development release (nightly only)
-        if: github.event_name == 'schedule'
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ steps.dev_version.outputs.version }}
-          name: "🌙 Nightly Release ${{ steps.dev_version.outputs.version }}"
-          body: |
-            ## 🌙 Nightly Development Release
-
-            This is an automated nightly release built from the latest `dev` branch.
-
-            **⚠️ This is a development build - not recommended for production use**
-
-            ### Docker Image
-            ```bash
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.dev_version.outputs.version }}
-            # or
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly
-            ```
-
-            ### Build Information
-            - **Branch**: `dev`
-            - **Commit**: `${{ github.sha }}`
-            - **Build Date**: `$(date -u)`
-            - **Triggered by**: Nightly schedule
-
-            Full changelog: https://github.com/${{ github.repository }}/compare/main...dev
-          generateReleaseNotes: false
-          draft: false
-          prerelease: true
-          makeLatest: false
-
-  cleanup-old-dev-releases:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
-    needs: [build-and-push-dev-image]
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Clean up old nightly releases
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const releases = await github.rest.repos.listReleases({
-              owner,
-              repo,
-              per_page: 100
-            });
-
-            // Keep only the last 7 nightly releases
-            const nightlyReleases = releases.data
-              .filter(release => release.tag_name.startsWith('nightly-'))
-              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-              .slice(7); // Keep first 7, delete the rest
-
-            for (const release of nightlyReleases) {
-              console.log(`Deleting old nightly release: ${release.tag_name}`);
-              
-              // Delete the release
-              await github.rest.repos.deleteRelease({
-                owner,
-                repo,
-                release_id: release.id
-              });
-              
-              // Delete the tag
-              try {
-                await github.rest.git.deleteRef({
-                  owner,
-                  repo,
-                  ref: `tags/${release.tag_name}`
-                });
-              } catch (error) {
-                console.log(`Could not delete tag ${release.tag_name}: ${error.message}`);
-              }
-            }
-
   build-and-push-dev-image-ray:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
       attestations: write
     steps:
@@ -206,35 +126,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Create development release (nightly only)
-        if: github.event_name == 'schedule'
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ steps.dev_version.outputs.version }}
-          name: "🌙 Nightly Release ${{ steps.dev_version.outputs.version }}"
-          body: |
-            ## 🌙 Nightly Development Release
-
-            This is an automated nightly release built from the latest `dev` branch.
-
-            **⚠️ This is a development build - not recommended for production use**
-
-            ### Docker Image
-            ```bash
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ray:${{ steps.dev_version.outputs.version }}
-            # or
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ray:nightly
-            ```
-
-            ### Build Information
-            - **Branch**: `dev`
-            - **Commit**: `${{ github.sha }}`
-            - **Build Date**: `$(date -u)`
-            - **Triggered by**: Nightly schedule
-
-            Full changelog: https://github.com/${{ github.repository }}/compare/main...dev
-          generateReleaseNotes: false
-          draft: false
-          prerelease: true
-          makeLatest: false
