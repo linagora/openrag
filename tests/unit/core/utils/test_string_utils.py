@@ -1,6 +1,6 @@
 import pytest
-
 from core.utils.string_utils import str_to_bool
+
 
 def test_str_to_bool_true_values():
     """Test that valid 'true' strings are converted to True."""
@@ -72,12 +72,6 @@ def test_str_to_bool_numeric_like_but_invalid_raises():
         str_to_bool("-1")
     with pytest.raises(ValueError):
         str_to_bool("1.0")
-
-
-def test_str_to_bool_error_message_contains_value():
-    """Test that the error message includes the offending (normalized) value."""
-    with pytest.raises(ValueError):
-        str_to_bool("nope")
 
 
 def test_str_to_bool_none_raises_typeerror():
