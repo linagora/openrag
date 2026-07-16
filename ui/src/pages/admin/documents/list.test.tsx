@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { Action } from "sonner";
 import { deleteFile, uploadFile } from "@/lib/api/indexing";
+import { downloadCsv } from "@/lib/csv";
 import DocumentListPage from "./list";
 
 vi.mock("sonner", () => ({
@@ -63,8 +64,13 @@ vi.mock("@/lib/api/indexing", () => ({
   newFileId: vi.fn(() => "new-file-id"),
 }));
 
+vi.mock("@/lib/csv", () => ({
+  downloadCsv: vi.fn(),
+}));
+
 const deleteFileMock = vi.mocked(deleteFile);
 const uploadFileMock = vi.mocked(uploadFile);
+const downloadCsvMock = vi.mocked(downloadCsv);
 const toastSuccessMock = vi.mocked(toast.success);
 
 function LocationProbe() {
@@ -94,6 +100,7 @@ describe("DocumentListPage", () => {
   beforeEach(() => {
     deleteFileMock.mockClear();
     uploadFileMock.mockReset();
+    downloadCsvMock.mockClear();
     toastSuccessMock.mockClear();
   });
 
@@ -110,6 +117,26 @@ describe("DocumentListPage", () => {
     const fileLink = await screen.findByRole("link", { name: "a.pdf" });
     expect(fileLink.getAttribute("title")).toBe("a.pdf");
     expect(fileLink.className).toContain("truncate");
+  });
+
+  it("filters documents by file name and indexed date before exporting", async () => {
+    renderDocuments();
+
+    expect(await screen.findByText("a.pdf")).not.toBeNull();
+    await userEvent.type(screen.getByPlaceholderText("Search files..."), "b");
+    await userEvent.type(screen.getByLabelText("Indexed since"), "2026-01-02");
+
+    expect(screen.queryByText("a.pdf")).toBeNull();
+    expect(screen.getByText("b.pdf")).not.toBeNull();
+    expect(screen.getByText("1 of 2 file(s)")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    expect(downloadCsvMock).toHaveBeenCalledWith(
+      "openrag-documents-docs.csv",
+      expect.any(Array),
+      [expect.objectContaining({ file_id: "file-b" })],
+    );
   });
 
   it("selects all documents from the table header and deletes the selected files", async () => {

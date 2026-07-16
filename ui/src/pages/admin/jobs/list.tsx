@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
-import { RefreshCw, Search } from "lucide-react";
+import { Download, RefreshCw, Search } from "lucide-react";
 import { usePermissions } from "@/lib/permissions";
 
 import { PageHeader } from "@/components/shared/page-header";
@@ -11,8 +11,16 @@ import { StatusBadge } from "@/components/shared/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { getQueueInfo, listTasks, type QueueInfo, type TaskListItem } from "@/lib/api/jobs";
+import { downloadCsv } from "@/lib/csv";
 
 // OpenRag exposes per-file indexing tasks (TaskStateManager), not batch "jobs".
 const STATUS_TABS = ["ALL", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED"] as const;
@@ -114,6 +122,7 @@ export default function JobListPage() {
   const [statusTab, setStatusTab] = useState<string>("ALL");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [partitionFilter, setPartitionFilter] = useState("__all__");
   const [manualRefreshing, setManualRefreshing] = useState(false);
 
   useEffect(() => {
@@ -134,18 +143,40 @@ export default function JobListPage() {
   });
 
   const tasks = useMemo(() => tasksQuery.data?.tasks ?? [], [tasksQuery.data?.tasks]);
+  const partitionOptions = useMemo(
+    () =>
+      Array.from(new Set(tasks.map((task) => str(task.details?.partition)).filter(Boolean))).sort(),
+    [tasks],
+  );
   const filteredTasks = useMemo(() => {
     const q = debouncedSearch.trim().toLowerCase();
-    if (!q) return tasks;
     return tasks.filter((task) => {
       const filename = str(task.details?.metadata?.filename);
       const fileId = str(task.details?.file_id);
       const partition = str(task.details?.partition);
-      return [task.task_id, task.state, filename, fileId, partition].some((value) =>
-        str(value).toLowerCase().includes(q),
-      );
+      const matchesSearch =
+        !q ||
+        [task.task_id, task.state, filename, fileId, partition].some((value) =>
+          str(value).toLowerCase().includes(q),
+        );
+      const matchesPartition = partitionFilter === "__all__" || partition === partitionFilter;
+      return matchesSearch && matchesPartition;
     });
-  }, [tasks, debouncedSearch]);
+  }, [tasks, debouncedSearch, partitionFilter]);
+
+  const exportJobs = () => {
+    downloadCsv(
+      "openrag-jobs.csv",
+      [
+        { header: "task_id", value: (task) => task.task_id },
+        { header: "state", value: (task) => task.state },
+        { header: "filename", value: (task) => str(task.details?.metadata?.filename) },
+        { header: "file_id", value: (task) => str(task.details?.file_id) },
+        { header: "partition", value: (task) => str(task.details?.partition) },
+      ],
+      filteredTasks,
+    );
+  };
 
   const handleStatusTabChange = (value: string) => {
     setStatusTab(value);
@@ -158,7 +189,7 @@ export default function JobListPage() {
       <PageHeader title="Jobs" description={isAdmin ? "Monitor indexing tasks" : "Monitor your indexing tasks"} />
 
       <Tabs value={statusTab} onValueChange={handleStatusTabChange}>
-        <div className="mb-4 mt-0 flex items-center gap-2">
+        <div className="mb-4 mt-0 flex flex-wrap items-center gap-2">
           <div className="relative max-w-sm">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -168,6 +199,19 @@ export default function JobListPage() {
               className="pl-9"
             />
           </div>
+          <Select value={partitionFilter} onValueChange={setPartitionFilter}>
+            <SelectTrigger className="w-[180px]" aria-label="Filter jobs by partition">
+              <SelectValue placeholder="All partitions" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">All partitions</SelectItem>
+              {partitionOptions.map((partition) => (
+                <SelectItem key={partition} value={partition}>
+                  {partition}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             <p className="text-sm text-muted-foreground">
               {filteredTasks.length} job{filteredTasks.length === 1 ? "" : "s"}
@@ -179,6 +223,16 @@ export default function JobListPage() {
                 isError={queueInfoQuery.isError}
               />
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={exportJobs}
+              disabled={!filteredTasks.length}
+              title="Export filtered jobs"
+            >
+              <Download className="h-4 w-4" />
+              Export CSV
+            </Button>
             <Button
               variant="outline"
               size="icon-sm"
