@@ -30,11 +30,11 @@ async def cancel_active_indexing_tasks(
         remote = task_state_manager.get_matching_active_task_refs.remote
     except AttributeError:
         logger.warning(
-            "TaskStateManager does not expose active-task lookup; delete will continue without task cancellation",
+            "TaskStateManager does not expose active-task lookup; refusing delete cleanup",
             partition=partition,
             file_id=file_id,
         )
-        return 0
+        raise RuntimeError("TaskStateManager does not expose active-task lookup for delete cleanup")
 
     deadline = monotonic() + timeout
     cancelled = 0
@@ -45,37 +45,14 @@ async def cancel_active_indexing_tasks(
             timeout=remaining,
             task_description=f"get_matching_active_task_refs({partition}, {file_id})",
         )
-        pending_without_ref: list[str] = []
-        for task_id, object_ref in matches.items():
-            ref = _task_ref(object_ref)
-            if ref is None:
-                pending_without_ref.append(task_id)
-                continue
-            try:
-                ray.cancel(ref, recursive=True)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to cancel active indexing task",
-                    task_id=task_id,
-                    partition=partition,
-                    file_id=file_id,
-                    error=str(exc),
-                )
-                raise RuntimeError(f"Failed to cancel active indexing task {task_id}") from exc
-            await _wait_for_task_to_settle(
-                ref,
-                task_id=task_id,
-                deadline=deadline,
-                partition=partition,
-                file_id=file_id,
-            )
-            remaining = _remaining_timeout(deadline, partition=partition, file_id=file_id)
-            await call_ray_actor_with_timeout(
-                future=task_state_manager.set_state.remote(task_id, "CANCELLED"),
-                timeout=remaining,
-                task_description=f"set_state({task_id}, CANCELLED)",
-            )
-            cancelled += 1
+        cancelled_now, pending_without_ref = await _cancel_refs(
+            task_state_manager,
+            matches,
+            deadline=deadline,
+            partition=partition,
+            file_id=file_id,
+        )
+        cancelled += cancelled_now
         if not pending_without_ref:
             return cancelled
         logger.info(
@@ -88,6 +65,22 @@ async def cancel_active_indexing_tasks(
         if remaining <= _REF_WAIT_INTERVAL:
             if remaining > 0:
                 await asyncio.sleep(remaining)
+            final_matches = await call_ray_actor_with_timeout(
+                future=remote(partition=partition, file_id=file_id),
+                timeout=_STATE_UPDATE_TIMEOUT,
+                task_description=f"get_matching_active_task_refs({partition}, {file_id}) final",
+            )
+            final_deadline = monotonic() + _STATE_UPDATE_TIMEOUT
+            cancelled_now, pending_without_ref = await _cancel_refs(
+                task_state_manager,
+                final_matches,
+                deadline=final_deadline,
+                partition=partition,
+                file_id=file_id,
+            )
+            cancelled += cancelled_now
+            if not pending_without_ref:
+                return cancelled
             await _mark_ref_less_tasks_failed(
                 task_state_manager,
                 pending_without_ref,
@@ -96,6 +89,49 @@ async def cancel_active_indexing_tasks(
             )
             return cancelled
         await asyncio.sleep(_REF_WAIT_INTERVAL)
+
+
+async def _cancel_refs(
+    task_state_manager: Any,
+    matches: dict[str, Any],
+    *,
+    deadline: float,
+    partition: str,
+    file_id: str | None,
+) -> tuple[int, list[str]]:
+    cancelled = 0
+    pending_without_ref: list[str] = []
+    for task_id, object_ref in matches.items():
+        ref = _task_ref(object_ref)
+        if ref is None:
+            pending_without_ref.append(task_id)
+            continue
+        try:
+            ray.cancel(ref, recursive=True)
+        except Exception as exc:
+            logger.warning(
+                "Failed to cancel active indexing task",
+                task_id=task_id,
+                partition=partition,
+                file_id=file_id,
+                error=str(exc),
+            )
+            raise RuntimeError(f"Failed to cancel active indexing task {task_id}") from exc
+        await _wait_for_task_to_settle(
+            ref,
+            task_id=task_id,
+            deadline=deadline,
+            partition=partition,
+            file_id=file_id,
+        )
+        remaining = _remaining_timeout(deadline, partition=partition, file_id=file_id)
+        await call_ray_actor_with_timeout(
+            future=task_state_manager.set_state.remote(task_id, "CANCELLED"),
+            timeout=remaining,
+            task_description=f"set_state({task_id}, CANCELLED)",
+        )
+        cancelled += 1
+    return cancelled, pending_without_ref
 
 
 def _task_ref(object_ref: Any) -> Any | None:

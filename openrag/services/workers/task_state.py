@@ -88,10 +88,11 @@ class TaskStateManager:
             self.user_index.setdefault(user_id, set()).add(task_id)
 
     @ray.method(concurrency_group="set")
-    async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> None:
+    async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
         async with self.lock:
             info = await self._ensure_task(task_id)
             info.object_ref = object_ref
+            return info.state in ACTIVE_INDEXING_STATES
 
     @ray.method(concurrency_group="get")
     async def get_state(self, task_id: str) -> str | None:

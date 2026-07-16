@@ -460,7 +460,17 @@ async def test_get_file_chunks_missing_file_404():
 
 @pytest.mark.asyncio
 async def test_get_file_chunks_strips_text_keeps_id_and_caps_limit():
-    rows = [{"_id": str(i), "text": "body", "page": i, "partition": "p", "file_id": "f"} for i in range(5)]
+    rows = [
+        {
+            "_id": str(i),
+            "text": "body",
+            "page": i,
+            "partition": "p",
+            "file_id": "f",
+            "_openrag_indexing_task_id": "task-1",
+        }
+        for i in range(5)
+    ]
     svc = _svc(
         drepo=FakeDocumentRepo(files={("f", "p")}),
         vstore=FakeVectorStore(rows=rows),
@@ -469,16 +479,26 @@ async def test_get_file_chunks_strips_text_keeps_id_and_caps_limit():
     assert len(out) == 3
     assert all("text" not in r for r in out)
     assert all("_id" in r for r in out)
+    assert all("_openrag_indexing_task_id" not in r for r in out)
 
 
 @pytest.mark.asyncio
 async def test_list_all_chunks_excludes_vector_when_no_embedding():
-    rows = [{"text": "t", "_id": "1", "partition": "p", "vector": [0.1, 0.2]}]
+    rows = [
+        {
+            "text": "t",
+            "_id": "1",
+            "partition": "p",
+            "vector": [0.1, 0.2],
+            "_openrag_indexing_task_id": "task-1",
+        }
+    ]
     svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=FakeVectorStore(rows=rows))
     out = await svc.list_all_chunks("p", include_embedding=False)
     assert out[0]["content"] == "t"
     assert "vector" not in out[0]["metadata"]
     assert "text" not in out[0]["metadata"]
+    assert "_openrag_indexing_task_id" not in out[0]["metadata"]
 
 
 @pytest.mark.asyncio

@@ -62,6 +62,7 @@ _RESERVED_PARTITION_NAMES = frozenset({"all"})
 # "reset to default"), not the omitted-field sentinel that the None-filter
 # in ``update_partition`` gives every other column.
 _NULLABLE_COLUMNS = frozenset({"chat_llm"})
+_INTERNAL_METADATA_PREFIX = "_openrag"
 
 
 def _validate_limit(limit: int | None) -> None:
@@ -72,6 +73,10 @@ def _validate_limit(limit: int | None) -> None:
     """
     if limit is not None and limit < 0:
         raise ValidationError("`limit` must be greater than or equal to 0.", code="INVALID_LIMIT")
+
+
+def _is_internal_metadata_key(key: Any) -> bool:
+    return isinstance(key, str) and key.startswith(_INTERNAL_METADATA_PREFIX)
 
 
 class PartitionService:
@@ -487,7 +492,7 @@ class PartitionService:
         )
         if len(rows) > limit:
             rows = rows[:limit]
-        return [{k: v for k, v in row.items() if k != "text"} for row in rows]
+        return [{k: v for k, v in row.items() if k != "text" and not _is_internal_metadata_key(k)} for row in rows]
 
     async def list_all_chunks(
         self,
@@ -522,6 +527,8 @@ class PartitionService:
             meta: dict[str, Any] = {}
             for k, v in row.items():
                 if k in excluded:
+                    continue
+                if _is_internal_metadata_key(k):
                     continue
                 if k == "vector":
                     # Legacy surfaced the embedding as a flat string.

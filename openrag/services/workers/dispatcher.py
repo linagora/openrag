@@ -6,6 +6,8 @@ from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
 from core.utils.logging import get_logger
+from ray.exceptions import TaskCancelledError
+from services.workers.ray_utils import call_ray_actor_with_timeout
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 
 logger = get_logger()
@@ -32,6 +34,7 @@ class WorkerDispatcher(IndexingDispatcher):
             "next_section_id",
         }
     )
+    _INTERNAL_METADATA_PREFIX = "_openrag"
 
     def __init__(
         self,
@@ -92,6 +95,7 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=f"set_details({task_id})",
         )
 
+        task: Any | None = None
         try:
             # ``IndexerPool`` is a Ray actor; ``submit`` returns ``[worker_ref]``
             # (wrapped so Ray doesn't auto-dereference and block on the worker task).
@@ -113,11 +117,15 @@ class WorkerDispatcher(IndexingDispatcher):
             )
             task = submitted[0]
 
-            await self._call(
+            registered = await self._call(
                 self._tsm.set_object_ref.remote(task_id, {"ref": task}),
                 task_description=f"set_object_ref({task_id})",
             )
+            if registered is False:
+                raise RuntimeError(f"Task {task_id} was cancelled before worker ref registration")
         except Exception:
+            if task is not None:
+                await self._cancel_submitted_task(task_id, task)
             await self._mark_submit_failed(task_id, traceback.format_exc())
             raise
         return task_id
@@ -134,6 +142,38 @@ class WorkerDispatcher(IndexingDispatcher):
             self._tsm.set_state.remote(task_id, "FAILED"),
             task_description=f"set_state({task_id}, FAILED)",
         )
+
+    async def _cancel_submitted_task(self, task_id: str, task: Any) -> None:
+        import ray
+
+        try:
+            ray.cancel(task, recursive=True)
+        except Exception as exc:
+            logger.warning(
+                "Failed to cancel submitted indexing task after dispatch failure",
+                task_id=task_id,
+                error=str(exc),
+            )
+            return
+        try:
+            await call_ray_actor_with_timeout(
+                future=task,
+                timeout=self._timeout,
+                task_description=f"cancel_submitted_task({task_id})",
+            )
+        except TaskCancelledError:
+            return
+        except TimeoutError:
+            logger.warning(
+                "Timed out waiting for submitted indexing task to settle after dispatch failure",
+                task_id=task_id,
+            )
+        except Exception as exc:
+            logger.info(
+                "Submitted indexing task settled after dispatch failure cancellation request",
+                task_id=task_id,
+                error=str(exc),
+            )
 
     async def delete_file(self, file_id: str, partition: str) -> None:
         cancelled = await cancel_active_indexing_tasks(
@@ -178,7 +218,7 @@ class WorkerDispatcher(IndexingDispatcher):
 
         entities = []
         for row in rows:
-            entity = dict(row)
+            entity = self._strip_internal_metadata(row)
             entity.update(metadata)
             entities.append(entity)
 
@@ -205,7 +245,7 @@ class WorkerDispatcher(IndexingDispatcher):
 
         entities = []
         for row in rows:
-            entity = dict(row)
+            entity = self._strip_internal_metadata(row)
             entity.pop("_id", None)
             entity.update(metadata)
             entities.append(entity)
@@ -238,7 +278,19 @@ class WorkerDispatcher(IndexingDispatcher):
         await insert_entities(entities, self._collection)
 
     def _file_metadata_from_chunk(self, chunk: dict[str, Any]) -> dict[str, Any]:
-        return {k: v for k, v in chunk.items() if k not in self._FILE_METADATA_EXCLUDED_KEYS}
+        return {
+            k: v
+            for k, v in chunk.items()
+            if k not in self._FILE_METADATA_EXCLUDED_KEYS and not self._is_internal_metadata_key(k)
+        }
+
+    @classmethod
+    def _strip_internal_metadata(cls, row: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in row.items() if not cls._is_internal_metadata_key(k)}
+
+    @classmethod
+    def _is_internal_metadata_key(cls, key: Any) -> bool:
+        return isinstance(key, str) and key.startswith(cls._INTERNAL_METADATA_PREFIX)
 
     async def get_task_state(self, task_id: str) -> str | None:
         return await self._call(
