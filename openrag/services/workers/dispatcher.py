@@ -136,6 +136,7 @@ class WorkerDispatcher(IndexingDispatcher):
         embedder_name: str | None = None,
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
+        quota_reserved: bool = False,
     ) -> str:
         task_id = uuid.uuid4().hex
 
@@ -165,6 +166,9 @@ class WorkerDispatcher(IndexingDispatcher):
                 "replace": replace,
                 "indexation_config": indexation_config,
                 "embedder_name": embedder_name,
+                # #664: tells the worker it owns the reserved file slot and must
+                # release it if the file never reaches the catalog.
+                "quota_reserved": quota_reserved,
             }
             if require_existing_partition:
                 submit_kwargs[_REQUIRE_EXISTING_PARTITION_KWARG] = True
@@ -382,14 +386,15 @@ class WorkerDispatcher(IndexingDispatcher):
         metadata: dict,
         partition: str,
         user: dict | None,
-    ) -> None:
+    ) -> bool:
+        """Copy the file's chunks + catalog row; return whether a row was created."""
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
             output_fields=["*", "vector"],
         )
         if not rows:
-            return
+            return False
 
         public_metadata = strip_internal_metadata(metadata)
         entities = []
@@ -405,13 +410,15 @@ class WorkerDispatcher(IndexingDispatcher):
         target_partition = metadata.get("partition", partition)
         file_metadata = self._file_metadata_from_chunk(rows[0])
         file_metadata.update(public_metadata)
-        await self._document_repo.add_file_to_partition(
-            file_id=target_file_id,
-            partition=target_partition,
-            file_metadata=file_metadata,
-            user_id=user.get("id") if user else None,
-            relationship_id=file_metadata.get("relationship_id"),
-            parent_id=file_metadata.get("parent_id"),
+        return bool(
+            await self._document_repo.add_file_to_partition(
+                file_id=target_file_id,
+                partition=target_partition,
+                file_metadata=file_metadata,
+                user_id=user.get("id") if user else None,
+                relationship_id=file_metadata.get("relationship_id"),
+                parent_id=file_metadata.get("parent_id"),
+            )
         )
 
     async def _upsert_entities(self, entities: list[dict[str, Any]]) -> None:

@@ -211,6 +211,59 @@ class PgUserRepository(UserRepository):
             "api_keys table is on the post-refactoring roadmap; use users.token until then.",
         )
 
+    # ── File-quota reserve / release (issue #664) ────────────────────
+
+    async def try_reserve_file_slot(self, user_id: int, *, default_quota: int) -> int | None:
+        """Atomically claim one file slot; ``None`` when the quota is full.
+
+        A single conditional UPDATE is the whole point: the read (is there
+        room?) and the write (take the room) happen in one statement, under
+        the row lock, so concurrent admits serialise instead of all
+        observing the same pre-increment ``file_count`` (issue #664).
+
+        The predicate reproduces the resolved-quota semantics documented on
+        ``AuthService.validate_file_quota``:
+
+        * ``is_admin`` → always granted (admins bypass quotas);
+        * ``COALESCE(file_quota, $2)`` → a ``NULL`` per-user quota falls back
+          to the global default, so an *explicit* per-user limit is honored
+          even when the global default is negative;
+        * resolved quota ``< 0`` → unlimited;
+        * otherwise room exists only while ``file_count < resolved quota``.
+
+        Admins and unlimited users are incremented too (unconditionally), so
+        ``file_count`` stays the truthful per-uploader total it has always
+        been — release is then symmetric for every caller.
+        """
+        new_count = await self.pool.fetchval(
+            """
+            UPDATE users
+               SET file_count = file_count + 1
+             WHERE id = $1
+               AND (
+                        is_admin
+                     OR COALESCE(file_quota, $2::int) < 0
+                     OR file_count < COALESCE(file_quota, $2::int)
+                   )
+         RETURNING file_count
+            """,
+            user_id,
+            default_quota,
+        )
+        return new_count
+
+    async def release_file_slot(self, user_id: int) -> None:
+        """Return one reserved slot to the user's budget.
+
+        Clamped at zero so a double release (or a release racing the legacy
+        delete-path decrement) can never drive ``file_count`` negative and
+        hand out free quota.
+        """
+        await self.pool.execute(
+            "UPDATE users SET file_count = GREATEST(file_count - 1, 0) WHERE id = $1",
+            user_id,
+        )
+
     # ── Legacy method names used by the Phase 7C shim ────────────────
 
     async def create_legacy_user(

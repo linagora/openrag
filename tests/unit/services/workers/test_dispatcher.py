@@ -170,6 +170,7 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         replace=True,
         indexation_config={"parsing_strategy": "pymupdf"},
         embedder_name="embed-fast",
+        quota_reserved=False,
         require_existing_partition=True,
     )
     tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})

@@ -35,6 +35,11 @@ class IndexerWorker:
 
     Callers are responsible for setting ``QUEUED`` *before* dispatching
     the task, and for storing the object ref via ``set_object_ref``.
+
+    Since #664 the worker is also the owner of the uploader's reserved
+    quota slot: when the caller admitted the upload it already charged one
+    ``users.file_count`` slot, and this worker either consumes it (by
+    writing the catalog row) or releases it — see ``process_file``.
     """
 
     def __init__(
@@ -45,6 +50,7 @@ class IndexerWorker:
         topic_tag_repo: Any = None,
         vector_store: Any = None,
         collection: str = "default",
+        user_repo: Any = None,
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
@@ -52,6 +58,7 @@ class IndexerWorker:
         self._topic_tag_repo = topic_tag_repo
         self._vector_store = vector_store
         self._collection = collection
+        self._user_repo = user_repo
 
     async def process_file(
         self,
@@ -66,13 +73,28 @@ class IndexerWorker:
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
         require_existing_partition: bool = False,
+        quota_reserved: bool = False,
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
         Returns a plain dict ``{"stored_count": int, "stage": "stored"}``
         on success.  On failure, state is set to FAILED and the exception
         is re-raised so the Ray task is marked as errored.
+
+        When ``quota_reserved`` is set, the admission gate already charged
+        one ``users.file_count`` slot to the uploader (#664) and this call
+        owns it. The slot is *consumed* the moment ``add_file_to_partition``
+        reports a new catalog row; on every other outcome — pipeline
+        failure, cancellation, or the duplicate-at-catalog race where the
+        insert reports ``False`` — the ``finally`` below hands it back, so a
+        rejected upload can never permanently eat a slot.
         """
+        # Released in ``finally`` unless the catalog write claims it. A flag
+        # plus ``finally`` (rather than an ``except``) is what makes
+        # cancellation safe: ray.cancel raises ``asyncio.CancelledError``, a
+        # BaseException that ``except Exception`` would sail straight past.
+        release_slot = bool(quota_reserved)
+        user_id = (user or {}).get("id")
         await self._tsm.set_state.remote(task_id, "SERIALIZING")
         row: dict[str, Any] | None = None
         catalog_written = False
@@ -114,6 +136,20 @@ class IndexerWorker:
                     row=row,
                     timeout=getattr(getattr(self._pipeline, "timeouts", None), "store", None),
                 )
+                if not replace:
+                    # A *new* catalog row now exists for this reservation, so it
+                    # is consumed; releasing it would hand the user free quota.
+                    # ``replace`` reuses an existing row and creates nothing, but
+                    # it also never reserves (only ``add_file`` does), so there is
+                    # no slot to consume on that branch.
+                    #
+                    # The duplicate-at-catalog race no longer reaches here at all:
+                    # ``add_file_to_partition`` returns False for an existing row,
+                    # which the fail-closed check above turns into a raise, and
+                    # ``process_file``'s ``finally`` releases the slot on the way
+                    # out. Same outcome as the pre-rebase ``if created:`` gate,
+                    # reached by a different path.
+                    release_slot = False
             if self._topic_tag_repo is not None:
                 await _replace_topic_tags_if_needed(
                     topic_tag_repo=self._topic_tag_repo,
@@ -139,6 +175,9 @@ class IndexerWorker:
             tb = traceback.format_exc()
             await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
             raise
+        finally:
+            if release_slot:
+                await _release_quota_slot(self._user_repo, user_id)
         # The raw upload is purged (when configured) by the enclosing actor, not
         # here: cleanup must also cover failures that happen *before* this method
         # runs (catalog/registry init, the SERIALIZING state update). See
@@ -156,6 +195,20 @@ async def _write_catalog_record(
     indexed_at: datetime | None = None,
     require_existing_partition: bool = False,
 ) -> bool:
+    """Write the file's catalog row; return whether the write landed.
+
+    True means the catalog now holds a row for this task -- an updated one on a
+    ``replace`` re-index, a newly inserted one otherwise. False means the write
+    did not land, which the caller treats as fatal.
+
+    Note this is *not* "a new file was created". Before the rebase onto #671
+    this returned that instead, so a ``replace`` reported False and the caller
+    read it as "reservation unconsumed". #671 added a fail-closed
+    ``if not wrote_catalog: raise`` on the same value, which those False returns
+    would have turned into a hard failure of every ``replace`` re-index. The two
+    questions are now separate: this one reports the write, and the caller
+    derives the quota verdict from ``replace`` (#664).
+    """
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
     config_kwargs = {"indexation_config": indexation_config} if indexation_config is not None else {}
@@ -310,6 +363,27 @@ def _display_filename(path: str, metadata: dict[str, Any]) -> str:
     if filename:
         return str(filename)
     return Path(path).name
+
+
+async def _release_quota_slot(user_repo: Any, user_id: int | None) -> None:
+    """Give the uploader's reserved file slot back, swallowing any error.
+
+    Runs on cleanup paths only. A release that raises would replace the real
+    indexing error with a database error, so failures are swallowed — but
+    loudly, because a lost release leaves ``file_count`` one too high and
+    permanently narrows that user's quota until an admin reconciles it.
+    """
+    if user_repo is None or user_id is None:
+        return
+    try:
+        await user_repo.release_file_slot(user_id)
+    except Exception:  # noqa: BLE001 - cleanup must never mask the indexing error
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "Failed to release reserved file slot for user %s; file_count is now one too high.",
+            user_id,
+        )
 
 
 async def delete_uploaded_file(path: str, logger: Any) -> None:

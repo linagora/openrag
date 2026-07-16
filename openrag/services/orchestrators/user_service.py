@@ -134,6 +134,14 @@ class UserService:
         a negative *global default* only makes users unlimited when they
         have no per-user override). ``file_quota`` is surfaced as ``-1``
         when unlimited.
+
+        Since #664 ``file_count`` is a *reserved + completed* counter: a
+        slot is charged at admission, so an upload that is still indexing is
+        already inside ``file_count``. ``total_files`` is therefore just
+        ``file_count`` — adding the in-memory pending count on top, as this
+        did before, would double-count every in-flight upload and report a
+        usage the quota gate does not actually enforce. ``pending_files``
+        stays as informational "how many of those are still indexing".
         """
         is_admin = user.get("is_admin", False)
         if is_admin:
@@ -146,14 +154,14 @@ class UserService:
                 user_quota = float("inf")
 
         file_count = user.get("file_count", 0)
+        # Informational only — never a correctness input (see #664).
         pending_count = await self._job_service.get_user_pending_task_count(user.get("id"))
-        total = file_count + pending_count
 
         return {
             **user,
             "file_count": file_count,
             "pending_files": pending_count,
-            "total_files": total,
+            "total_files": file_count,
             "file_quota": -1 if user_quota == float("inf") else user_quota,
         }
 

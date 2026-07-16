@@ -559,6 +559,53 @@ class AuthService:
             case _:
                 raise ValueError(f"Unknown authorization action: {action!r}")
 
+    # ── File quota ────────────────────────────────────────────────────
+
+    async def reserve_file_slot(self, user_id: int, *, default_quota: int) -> int:
+        """Atomically admit one upload against the user's quota (issue #664).
+
+        Admission used to be read-then-check: every concurrent request read
+        the same pre-increment ``file_count`` (plus a volatile in-memory
+        pending count) and all of them passed. Reserving DB-side collapses
+        the check and the admit into one statement, so a burst of ``K``
+        uploads at quota ``N`` admits exactly the slots that are free.
+
+        Returns the post-reserve ``file_count``. Raises
+        :class:`~core.utils.exceptions.OpenRAGError` (``FILE_QUOTA_EXCEEDED``,
+        403) when no slot is available — the same code/status the previous
+        :meth:`validate_file_quota` raised, so the API contract is unchanged.
+
+        The caller **owns** the returned reservation: it must either be
+        consumed (a ``files`` row gets created for it) or handed back via
+        :meth:`release_file_slot`.
+        """
+        new_count = await self._user_repo.try_reserve_file_slot(user_id, default_quota=default_quota)
+        if new_count is None:
+            raise OpenRAGError(
+                "File quota exceeded. Delete a file or ask an administrator to raise your quota.",
+                code="FILE_QUOTA_EXCEEDED",
+                status_code=403,
+            )
+        return new_count
+
+    async def release_file_slot(self, user_id: int) -> None:
+        """Hand a reserved-but-unused slot back (never raises).
+
+        Release runs on cleanup paths (upload rejected after admission,
+        indexing failed, task cancelled), where a raising cleanup would mask
+        the original error. A *failed* release only costs the user one slot
+        until an admin fixes the count; a raised exception here would lose
+        the real failure, so we log loudly and swallow.
+        """
+        try:
+            await self._user_repo.release_file_slot(user_id)
+        except Exception as exc:  # noqa: BLE001 — cleanup must never mask the real error
+            logger.bind(user_id=user_id).error(
+                "Failed to release a reserved file slot; the user's file_count is now "
+                "one too high and must be reconciled manually.",
+                error=str(exc),
+            )
+
     @classmethod
     def validate_file_quota(
         cls,
@@ -568,6 +615,13 @@ class AuthService:
         default_quota: int,
     ) -> None:
         """Pure quota check (the pending-task count is supplied by the caller).
+
+        .. deprecated:: issue #664
+           Superseded by :meth:`reserve_file_slot` for *admission* — this
+           read-then-check shape is exactly the TOCTOU race #664 fixes and
+           must not gate uploads again. Retained only as the pure-function
+           expression of the quota rules (and for read-only callers that
+           want to report quota state without reserving).
 
         Quota semantics (shared with ``check_user_file_quota``): admins
         bypass; a per-user ``file_quota`` of ``None`` falls back to the

@@ -385,10 +385,27 @@ async def test_current_user_info_specific_quota_and_pending():
 
     assert out["file_count"] == 4
     assert out["pending_files"] == 3
-    assert out["total_files"] == 7
+    # #664: file_count already includes slots reserved at admission, so the
+    # in-flight uploads counted by ``pending_files`` are inside it. Adding
+    # them again would report 7/5 for a user the gate considers 4/5.
+    assert out["total_files"] == 4
     assert out["file_quota"] == 5
     assert out["id"] == 7  # original fields preserved
     assert job.calls == [7]
+
+
+@pytest.mark.asyncio
+async def test_current_user_info_pending_is_never_added_to_total():
+    """Regression guard for the #664 double-count.
+
+    ``pending_files`` is informational; the durable, already-reserved
+    ``file_count`` is the only number the quota gate acts on, so it must be
+    what ``total_files`` reports no matter how many tasks are in flight.
+    """
+    svc = _svc(FakeUserRepo(), default_quota=10, job_service=FakeJobService(pending=99))
+    out = await svc.get_current_user_info({"id": 7, "is_admin": False, "file_quota": 5, "file_count": 2})
+    assert out["pending_files"] == 99
+    assert out["total_files"] == 2
 
 
 @pytest.mark.asyncio
@@ -396,7 +413,7 @@ async def test_current_user_info_admin_is_unlimited():
     svc = _svc(FakeUserRepo(), default_quota=10, job_service=FakeJobService(pending=1))
     out = await svc.get_current_user_info({"id": 1, "is_admin": True, "file_count": 2})
     assert out["file_quota"] == -1
-    assert out["total_files"] == 3
+    assert out["total_files"] == 2
 
 
 @pytest.mark.asyncio

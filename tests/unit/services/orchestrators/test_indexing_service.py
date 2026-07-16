@@ -53,9 +53,11 @@ class FakeDispatcher:
         embedder_name=None,
         require_existing_partition=False,
         allow_legacy_require_existing_partition_retry=False,
+        quota_reserved=False,
     ):
         self.dispatched.append(
             {
+                "quota_reserved": quota_reserved,
                 "path": path,
                 "metadata": metadata,
                 "partition": partition,
