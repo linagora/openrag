@@ -17,12 +17,14 @@ import os
 from threading import Lock
 
 import httpx
+from core.utils.logging import get_logger
 from core.utils.string_utils import str_to_bool
 from services.auth.oidc_client import OIDCClient
 
 _client: OIDCClient | None = None
 _lock = Lock()
 
+logger = get_logger()
 
 def get_oidc_client() -> OIDCClient:
     """Return the shared OIDCClient instance, creating it on first call.
@@ -45,12 +47,17 @@ def get_oidc_client() -> OIDCClient:
     with _lock:
         if _client is not None:
             return _client
+
+        _ssl_verify = not str_to_bool(os.getenv("SSL_NO_VERIFY", "false"))
+        if not _ssl_verify:
+          logger.warning("SSL certificate verification is DISABLED for the OIDC client.")
+
         issuer = os.environ["OIDC_ENDPOINT"]
         client_id = os.environ["OIDC_CLIENT_ID"]
         client_secret = os.environ["OIDC_CLIENT_SECRET"]
         redirect_uri = os.environ["OIDC_REDIRECT_URI"]
         scopes = os.getenv("OIDC_SCOPES", "openid email profile offline_access")
-        _ssl_verify = not str_to_bool(os.getenv("SSL_NO_VERIFY", "false"))
+
         http_client = httpx.AsyncClient(timeout=10.0, verify=_ssl_verify)
         _client = OIDCClient(
             issuer=issuer,
