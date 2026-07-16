@@ -80,6 +80,14 @@ def _restore_dependencies_stub(previous_modules: dict[str, types.ModuleType | No
 _PREVIOUS_MODULES = _install_dependencies_stub()
 
 from api.routers.auth.oidc import router as auth_router  # noqa: E402
+from core.auth.chainlit import (  # noqa: E402
+    CHAINLIT_AUTH_COOKIE_NAME,
+    CHAINLIT_LOGOUT_COOKIE_NAME,
+    CHAINLIT_LOGOUT_SIGNAL_HEADER,
+    CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS,
+    CHAINLIT_TOKEN_COOKIE_NAME,
+    CHAINLIT_TOKEN_COOKIE_PATH,
+)
 from di.providers import get_auth_service  # noqa: E402
 from services.orchestrators.auth_service import (  # noqa: E402
     SESSION_COOKIE_NAME,
@@ -153,6 +161,19 @@ def client(stub: StubAuthService) -> TestClient:
     app = FastAPI()
     app.include_router(auth_router)
     app.dependency_overrides[get_auth_service] = lambda: stub
+    return TestClient(app)
+
+
+@pytest.fixture
+def authenticated_client() -> TestClient:
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def bind_user(request, call_next):
+        request.state.user = {"id": 7, "display_name": "Token User"}
+        return await call_next(request)
+
+    app.include_router(auth_router)
     return TestClient(app)
 
 
@@ -309,3 +330,123 @@ def test_logout_allows_cross_site_top_level_navigation(oidc_env, client, stub):
     )
     assert r.status_code == 302
     assert stub.calls == [("logout", "sess")]
+
+
+def test_chainlit_logout_signal_reports_and_clears_marker_cookie(client):
+    client.cookies.set(CHAINLIT_LOGOUT_COOKIE_NAME, "1", path="/")
+
+    r = client.get("/auth/chainlit-logout-signal", headers={CHAINLIT_LOGOUT_SIGNAL_HEADER: "1"})
+
+    assert r.status_code == 200
+    assert r.json() == {"logged_out": True}
+    cookie = next(c for c in _set_cookies(r) if CHAINLIT_LOGOUT_COOKIE_NAME in c)
+    assert "Max-Age=0" in cookie or "expires=" in cookie.lower()
+
+
+def test_chainlit_logout_signal_is_false_without_marker_cookie(client):
+    r = client.get("/auth/chainlit-logout-signal", headers={CHAINLIT_LOGOUT_SIGNAL_HEADER: "1"})
+
+    assert r.status_code == 200
+    assert r.json() == {"logged_out": False}
+
+
+def test_chainlit_logout_signal_plain_get_does_not_clear_marker_cookie(client):
+    client.cookies.set(CHAINLIT_LOGOUT_COOKIE_NAME, "1", path="/")
+
+    r = client.get("/auth/chainlit-logout-signal")
+
+    assert r.status_code == 200
+    assert r.json() == {"logged_out": False}
+    assert not any(CHAINLIT_LOGOUT_COOKIE_NAME in c and "Max-Age=0" in c for c in _set_cookies(r))
+
+
+# ---------------------------------------------------------------------------
+# POST /auth/chainlit-session
+# ---------------------------------------------------------------------------
+
+
+def test_chainlit_session_sets_short_lived_cookie_for_bearer(authenticated_client):
+    authenticated_client.cookies.set(CHAINLIT_AUTH_COOKIE_NAME, "stale-chainlit-jwt", path="/")
+
+    r = authenticated_client.post("/auth/chainlit-session", headers={"Authorization": "Bearer or-user-token"})
+
+    assert r.status_code == 204
+    cookies = _set_cookies(r)
+    cookie = next(c for c in cookies if CHAINLIT_TOKEN_COOKIE_NAME in c)
+    assert "or-user-token" in cookie
+    assert "HttpOnly" in cookie
+    assert f"Max-Age={CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS}" in cookie
+    assert f"Path={CHAINLIT_TOKEN_COOKIE_PATH}" in cookie
+    assert "SameSite=lax" in cookie
+    stale_chainlit_cookie = next(c for c in cookies if CHAINLIT_AUTH_COOKIE_NAME in c and "Max-Age=0" in c)
+    assert "Path=/" in stale_chainlit_cookie
+
+
+def test_chainlit_session_allows_secure_cross_origin_handoff_cookie(authenticated_client):
+    r = authenticated_client.post(
+        "/auth/chainlit-session",
+        headers={
+            "Authorization": "Bearer or-user-token",
+            "Host": "api.example.test",
+            "Origin": "https://admin.example.test",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+
+    assert r.status_code == 204
+    cookie = next(c for c in _set_cookies(r) if CHAINLIT_TOKEN_COOKIE_NAME in c)
+    assert "SameSite=none" in cookie
+    assert "Secure" in cookie
+
+
+def test_chainlit_session_clears_chunked_stale_chainlit_auth_cookie(authenticated_client):
+    authenticated_client.cookies.set(f"{CHAINLIT_AUTH_COOKIE_NAME}_0", "stale-jwt-part-1", path="/")
+    authenticated_client.cookies.set(f"{CHAINLIT_AUTH_COOKIE_NAME}_1", "stale-jwt-part-2", path="/")
+
+    r = authenticated_client.post("/auth/chainlit-session", headers={"Authorization": "Bearer or-user-token"})
+
+    assert r.status_code == 204
+    cookies = _set_cookies(r)
+    assert any(f"{CHAINLIT_AUTH_COOKIE_NAME}_0=" in c and "Max-Age=0" in c for c in cookies)
+    assert any(f"{CHAINLIT_AUTH_COOKIE_NAME}_1=" in c and "Max-Age=0" in c for c in cookies)
+
+
+def test_chainlit_session_is_noop_for_cookie_authenticated_user(authenticated_client):
+    authenticated_client.cookies.set(CHAINLIT_AUTH_COOKIE_NAME, "stale-chainlit-jwt", path="/")
+
+    r = authenticated_client.post("/auth/chainlit-session")
+
+    assert r.status_code == 204
+    assert not any(CHAINLIT_TOKEN_COOKIE_NAME in c for c in _set_cookies(r))
+    assert any(CHAINLIT_AUTH_COOKIE_NAME in c and "Max-Age=0" in c for c in _set_cookies(r))
+
+
+def test_chainlit_session_does_not_handoff_bearer_when_oidc_session_authenticated():
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def bind_oidc_user(request, call_next):
+        request.state.user = {"id": 7, "display_name": "OIDC User"}
+        request.state.oidc_session = {"id": 42, "user_id": 7}
+        return await call_next(request)
+
+    app.include_router(auth_router)
+    c = TestClient(app)
+
+    r = c.post("/auth/chainlit-session", headers={"Authorization": "Bearer stale-or-different-token"})
+
+    assert r.status_code == 204
+    assert not any(CHAINLIT_TOKEN_COOKIE_NAME in cookie for cookie in _set_cookies(r))
+
+
+def test_clear_chainlit_session_deletes_handoff_cookie(authenticated_client):
+    authenticated_client.cookies.set(CHAINLIT_AUTH_COOKIE_NAME, "stale-chainlit-jwt", path="/")
+
+    r = authenticated_client.delete("/auth/chainlit-session")
+
+    assert r.status_code == 204
+    cookies = _set_cookies(r)
+    cookie = next(c for c in cookies if CHAINLIT_TOKEN_COOKIE_NAME in c)
+    assert f"Path={CHAINLIT_TOKEN_COOKIE_PATH}" in cookie
+    assert "Max-Age=0" in cookie or "expires=" in cookie.lower()
+    assert any(CHAINLIT_AUTH_COOKIE_NAME in c and "Max-Age=0" in c for c in cookies)

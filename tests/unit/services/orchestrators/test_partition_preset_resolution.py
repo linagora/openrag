@@ -275,6 +275,99 @@ async def test_update_partition_missing_raises_404():
 
 
 # ------------------------------------------------------------------
+# chat_llm assignment (model-endpoint reference)
+# ------------------------------------------------------------------
+
+
+def _settings_with_llm(*names: str):
+    from core.config.model_endpoints import ModelEndpointConfig
+
+    s = _settings()
+    s.models.llm.update({n: ModelEndpointConfig(endpoint="http://llm:8000/v1") for n in names})
+    return s
+
+
+@pytest.mark.asyncio
+async def test_update_partition_rejects_unknown_chat_llm():
+    from core.utils.exceptions import ValidationError
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo, settings=_settings_with_llm("mistral"))
+
+    with pytest.raises(ValidationError, match="LLM endpoint 'ghost'") as exc:
+        await svc.update_partition("p1", chat_llm="ghost")
+    assert exc.value.status_code == 422
+    assert exc.value.code == "MODEL_ENDPOINT_NOT_FOUND"
+    assert repo._store["p1"]["chat_llm"] is None  # nothing was written
+
+
+@pytest.mark.asyncio
+async def test_update_partition_accepts_catalogued_chat_llm():
+    settings = _settings_with_llm("mistral")
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo, settings=settings)
+
+    await svc.update_partition("p1", chat_llm="mistral")
+
+    assert repo._store["p1"]["chat_llm"] == "mistral"
+    assert settings.partitions["p1"].chat_llm == "mistral"
+
+
+@pytest.mark.asyncio
+async def test_update_partition_explicit_none_clears_chat_llm():
+    # The UI resets to the default LLM by PATCHing chat_llm=null — the
+    # None-filter that gives other columns partial-PATCH semantics must
+    # not swallow it.
+    settings = _settings_with_llm("mistral")
+    repo = _FakePartitionRepo(rows=[_full_row("p1", chat_llm="mistral")])
+    svc = _make_service(repo, settings=settings)
+
+    await svc.update_partition("p1", chat_llm=None)
+
+    assert repo._store["p1"]["chat_llm"] is None
+    assert settings.partitions["p1"].chat_llm is None
+
+
+@pytest.mark.asyncio
+async def test_update_partition_stale_stored_chat_llm_does_not_block_other_updates():
+    # Endpoint deleted after assignment: the stored name is stale, but a
+    # PATCH that doesn't touch chat_llm must still succeed (runtime falls
+    # back to the default LLM for the stale name).
+    repo = _FakePartitionRepo(rows=[_full_row("p1", chat_llm="deleted-endpoint")])
+    svc = _make_service(repo, settings=_settings_with_llm("mistral"))
+
+    await svc.update_partition("p1", description="new")
+
+    assert repo._store["p1"]["description"] == "new"
+    assert repo._store["p1"]["chat_llm"] == "deleted-endpoint"
+
+
+@pytest.mark.asyncio
+async def test_create_partition_rejects_unknown_chat_llm():
+    from core.utils.exceptions import ValidationError
+
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo, settings=_settings_with_llm("mistral"))
+
+    with pytest.raises(ValidationError, match="LLM endpoint 'ghost'") as exc:
+        await svc.create_partition("p1", user_id=1, chat_llm="ghost")
+    assert exc.value.code == "MODEL_ENDPOINT_NOT_FOUND"
+    assert not await repo.partition_exists("p1")
+
+
+@pytest.mark.asyncio
+async def test_create_partition_accepts_catalogued_chat_llm():
+    settings = _settings_with_llm("mistral")
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo, settings=settings)
+
+    await svc.create_partition("p1", user_id=1, chat_llm="mistral")
+
+    assert repo._store["p1"]["chat_llm"] == "mistral"
+    assert settings.partitions["p1"].chat_llm == "mistral"
+
+
+# ------------------------------------------------------------------
 # get_partition_config / update_partition_config (PartitionDetailResponse)
 # ------------------------------------------------------------------
 

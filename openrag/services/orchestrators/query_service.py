@@ -107,9 +107,11 @@ class QueryService:
         config: Settings,
         web_search_service: Any | None,
         workspace_service: WorkspaceService,
+        llm_factory: Callable[[str], LLM] | None = None,
     ) -> None:
         self._retrieval = retrieval_service
         self._llm = llm
+        self._llm_factory = llm_factory
         self._web = web_search_service
         self._workspace = workspace_service
 
@@ -156,11 +158,60 @@ class QueryService:
                 return max(explicit)
         return self._default_chat_history_depth
 
+    def _resolve_llm(self, partition: list[str] | None) -> LLM:
+        """Effective LLM for this request — query generation and answering.
+
+        Honors a partition's configured ``chat_llm`` model-endpoint preset
+        (set via the admin API) over the default LLM. Resolved once per
+        request (``chat`` / ``chat_stream`` / ``complete``) and used for
+        both the query-contextualization call and the final answer;
+        map-reduce stays on the default LLM until its post-release
+        refactor. Same partition semantics as
+        ``_resolve_chat_history_depth``: no partition and the ``"all"``
+        sentinel use the default; a multi-partition request uses the
+        preset only when every partition that sets one names the same
+        endpoint — with conflicting presets there is no single owning
+        partition, so the default applies.
+
+        ``chat_llm`` is validated against the endpoint catalog when it is
+        assigned (``PartitionService`` rejects an unknown name at create /
+        PATCH time), but a stored name can still go stale afterwards — the
+        endpoint may be renamed or deleted after assignment — so an
+        unresolvable name here must not fail the chat request; it falls back
+        to the default LLM with a warning.
+        """
+        if self._llm_factory is None or not partition or "all" in partition:
+            logger.bind(partitions=partition).debug("Answering with the default LLM (no partition-scoped preset)")
+            return self._llm
+        names = {
+            cfg.chat_llm
+            for name in partition
+            if (cfg := self._config.partitions.get(name)) is not None and cfg.chat_llm
+        }
+        if len(names) != 1:
+            logger.bind(partitions=partition, chat_llm_presets=sorted(names)).debug(
+                "Answering with the default LLM (no single chat_llm preset among the partitions)"
+            )
+            return self._llm
+        (chat_llm,) = names
+        try:
+            llm = self._llm_factory(chat_llm)
+        except KeyError:
+            logger.warning(
+                "Partition chat_llm preset not found in the model-endpoint catalog — using the default LLM",
+                chat_llm=chat_llm,
+                partitions=partition,
+            )
+            return self._llm
+        logger.bind(chat_llm=chat_llm, partitions=partition).debug("Answering with the partition's chat_llm preset")
+        return llm
+
     # ------------------------------------------------------------------
     # Query generation (was RagPipeline.generate_query — no LangChain)
     # ------------------------------------------------------------------
 
-    async def generate_query(self, messages: list[dict]) -> SearchQueries:
+    async def generate_query(self, messages: list[dict], llm: LLM | None = None) -> SearchQueries:
+        llm = llm or self._llm
         last_user = messages[-1]["content"]
         if RAGMODE(self._rag_mode) is RAGMODE.SIMPLERAG:
             return SearchQueries(query_list=[Query(query=last_user)])
@@ -180,7 +231,7 @@ class QueryService:
         }
         for attempt in (1, 2):
             try:
-                resp = await self._llm.chat(llm_messages, **params)
+                resp = await llm.chat(llm_messages, **params)
                 content = resp["choices"][0]["message"]["content"]
                 return SearchQueries.model_validate_json(_json_slice(content))
             except Exception as exc:
@@ -198,6 +249,9 @@ class QueryService:
     # ------------------------------------------------------------------
 
     async def _infer_relevancy(self, query: str, doc) -> tuple[bool, str]:
+        # Deliberately pinned to the default LLM: map-reduce is slated for a
+        # full post-release refactor, and routing it through the partition
+        # chat_llm preset is part of that work.
         async with get_llm_semaphore():
             try:
                 resp = await self._llm.chat(
@@ -246,9 +300,9 @@ class QueryService:
     # Preparation (was RagPipeline._prepare_for_chat_completion)
     # ------------------------------------------------------------------
 
-    async def _prepare_chat(self, partition: list[str] | None, payload: dict):
+    async def _prepare_chat(self, partition: list[str] | None, payload: dict, llm: LLM | None = None):
         messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
-        queries = await self.generate_query(messages)
+        queries = await self.generate_query(messages, llm=llm)
 
         metadata = payload.get("metadata") or {}
         use_map_reduce = metadata.get("use_map_reduce", False)
@@ -334,9 +388,9 @@ class QueryService:
         doc_lists, web_lists = await asyncio.gather(rag, web)
         return doc_lists, web_lists
 
-    async def _prepare_completions(self, partition: list[str], payload: dict):
+    async def _prepare_completions(self, partition: list[str], payload: dict, llm: LLM | None = None):
         prompt = payload["prompt"]
-        queries = await self.generate_query([{"role": "user", "content": prompt}])
+        queries = await self.generate_query([{"role": "user", "content": prompt}], llm=llm)
         chunks = await self._retrieval.retrieve_multi(partitions=partition, search_queries=queries)
         docs = [c.to_langchain() for c in chunks]
         context, included = format_context(
@@ -416,14 +470,15 @@ class QueryService:
     ) -> dict:
         """Non-streaming chat completion → finalized OpenAI dict."""
         metadata = payload.get("metadata") or {}
+        llm = self._resolve_llm(partitions)
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results = [], []
         else:
-            payload, docs, web_results = await self._prepare_chat(partitions, payload)
+            payload, docs, web_results = await self._prepare_chat(partitions, payload, llm)
         sources = prepare_sources(docs, web_results)
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
-        chunk = await self._llm.chat(payload["messages"], **_sampling(payload))
+        chunk = await llm.chat(payload["messages"], **_sampling(payload))
         chunk["model"] = model_name
         content = chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
         clean, citations = extract_and_strip_sources_block(content)
@@ -441,14 +496,15 @@ class QueryService:
     ) -> AsyncIterator[str]:
         """Streaming chat completion → SSE strings with filtered sources."""
         metadata = payload.get("metadata") or {}
+        llm = self._resolve_llm(partitions)
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results = [], []
         else:
-            payload, docs, web_results = await self._prepare_chat(partitions, payload)
+            payload, docs, web_results = await self._prepare_chat(partitions, payload, llm)
         sources = prepare_sources(docs, web_results)
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
-        llm_stream = self._llm.stream_chat(payload["messages"], **_sampling(payload))
+        llm_stream = llm.stream_chat(payload["messages"], **_sampling(payload))
         async for sse_line in stream_with_source_filtering(llm_stream, sources, model_name):
             yield sse_line
 
@@ -460,13 +516,14 @@ class QueryService:
         prepare_sources: PrepareSources,
     ) -> dict:
         """Non-streaming text completion → finalized OpenAI dict."""
+        llm = self._resolve_llm(partitions)
         if partitions is None:
             docs = []
         else:
-            payload, docs = await self._prepare_completions(partitions, payload)
+            payload, docs = await self._prepare_completions(partitions, payload, llm)
         sources = prepare_sources(docs, [])
 
-        resp = await self._llm.generate(payload["prompt"], **_sampling(payload, key="prompt"))
+        resp = await llm.generate(payload["prompt"], **_sampling(payload, key="prompt"))
         text = resp.get("choices", [{}])[0].get("text", "") or ""
         clean, citations = extract_and_strip_sources_block(text)
         resp["choices"][0]["text"] = clean

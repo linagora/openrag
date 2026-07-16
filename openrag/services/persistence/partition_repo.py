@@ -26,6 +26,14 @@ if TYPE_CHECKING:
 else:  # pragma: no cover - import shape only matters at runtime
     import asyncpg
 
+# Partition columns that reference a pipeline_presets row, mapped to the
+# preset_type they point at. Assigning either column must be guarded against a
+# concurrent preset delete (see update_partition).
+_PRESET_COLUMN_TYPES = {
+    "indexation_preset": "indexation",
+    "retrieval_preset": "retrieval",
+}
+
 
 class PgPartitionRepository(PartitionRepository):
     """asyncpg-backed implementation of :class:`PartitionRepository`."""
@@ -182,6 +190,23 @@ class PgPartitionRepository(PartitionRepository):
         return [self._row_to_full_dict(r) for r in rows]
 
     async def update_partition(self, name: str, **fields: object) -> dict | None:
+        """Update a partition's config columns.
+
+        When the update assigns a preset column (``indexation_preset`` /
+        ``retrieval_preset``), the write and a DB-authoritative existence check
+        run in one transaction that touches ``partitions`` before
+        ``pipeline_presets`` — the same lock order :meth:`PgPresetRepository.delete`
+        uses (it ``LOCK``s ``partitions`` ``IN SHARE MODE``, then ``DELETE``s the
+        preset). That makes an assign and a concurrent delete of the same preset
+        serialize without deadlocking, so a partition can never end up pointing
+        at a preset that no longer exists:
+
+        * if this UPDATE commits first, the delete's ``COUNT`` sees the reference
+          and refuses with 409;
+        * if the delete commits first, this UPDATE blocks on its ``SHARE`` lock,
+          then the follow-up ``SELECT`` sees the vanished preset and the
+          transaction rolls the write back (raising ``PRESET_NOT_FOUND``).
+        """
         _ALLOWED = frozenset(
             {
                 "description",
@@ -204,12 +229,30 @@ class PgPartitionRepository(PartitionRepository):
             idx = len(params) + 1
             sets.append(f"{col} = ${idx}")
             params.append(val)
+        sql = f"UPDATE partitions SET {', '.join(sets)}, updated_at = now() WHERE partition = $1 RETURNING *"
 
-        row = await self.pool.fetchrow(
-            f"UPDATE partitions SET {', '.join(sets)}, updated_at = now() WHERE partition = $1 RETURNING *",
-            *params,
-        )
-        return self._row_to_full_dict(row) if row else None
+        preset_refs = {col: _PRESET_COLUMN_TYPES[col] for col in updates if col in _PRESET_COLUMN_TYPES}
+        if not preset_refs:
+            row = await self.pool.fetchrow(sql, *params)
+            return self._row_to_full_dict(row) if row else None
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(sql, *params)
+                if row is None:
+                    return None
+                for col, preset_type in preset_refs.items():
+                    exists = await conn.fetchval(
+                        "SELECT 1 FROM pipeline_presets WHERE name = $1 AND preset_type = $2",
+                        updates[col],
+                        preset_type,
+                    )
+                    if not exists:
+                        raise ValidationError(
+                            f"{preset_type.capitalize()} preset '{updates[col]}' does not exist.",
+                            code="PRESET_NOT_FOUND",
+                        )
+                return self._row_to_full_dict(row)
 
     # ── Legacy method names used by the Phase 7C shim ────────────────
 

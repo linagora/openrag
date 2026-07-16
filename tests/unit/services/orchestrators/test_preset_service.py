@@ -60,6 +60,11 @@ class _FakePresetRepo:
 
     async def delete(self, name: str, preset_type: str) -> bool:
         self.calls.append(("delete", (name, preset_type)))
+        count = self._partition_counts.get((name, preset_type), 0)
+        if count:
+            from core.utils.exceptions import ConflictError
+
+            raise ConflictError(f"Preset '{name}' is used by {count} partition(s); reassign them before deleting.")
         return self._store.pop((name, preset_type), None) is not None
 
     async def rename(self, old_name: str, new_name: str, preset_type: str, config: dict) -> dict:
@@ -72,6 +77,10 @@ class _FakePresetRepo:
     async def count_partitions_using(self, name: str, preset_type: str) -> int:
         self.calls.append(("count_partitions_using", (name, preset_type)))
         return self._partition_counts.get((name, preset_type), 0)
+
+    async def usage_counts(self) -> dict[tuple[str, str], int]:
+        self.calls.append(("usage_counts", ()))
+        return dict(self._partition_counts)
 
 
 class _FakePartitionService:
@@ -91,6 +100,44 @@ def _make_service(repo=None, rows=None, settings=None, partition_service=None):
         config=settings or Settings(),
         partition_service=partition_service,
     )
+
+
+# ------------------------------------------------------------------
+# list_presets
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_presets_annotates_used_by_partitions():
+    rows = [
+        _make_row("default", "indexation"),
+        _make_row("legal", "indexation"),
+        _make_row("default", "retrieval"),
+    ]
+    repo = _FakePresetRepo(rows=rows)
+    repo._partition_counts[("default", "indexation")] = 3
+    repo._partition_counts[("legal", "indexation")] = 0
+    repo._partition_counts[("default", "retrieval")] = 1
+    svc = _make_service(repo)
+
+    result = await svc.list_presets()
+
+    # Two rows share the name "default" (different preset_type) — key on both.
+    by_key = {(r["name"], r["preset_type"]): r["used_by_partitions"] for r in result}
+    assert by_key[("default", "indexation")] == 3
+    assert by_key[("legal", "indexation")] == 0
+    assert by_key[("default", "retrieval")] == 1
+
+
+@pytest.mark.asyncio
+async def test_list_presets_defaults_to_zero_when_unused():
+    existing = _make_row("legal", "indexation")
+    repo = _FakePresetRepo(rows=[existing])
+    svc = _make_service(repo)
+
+    result = await svc.list_presets()
+
+    assert result[0]["used_by_partitions"] == 0
 
 
 # ------------------------------------------------------------------
@@ -393,16 +440,18 @@ async def test_delete_preset_raises_404_when_missing():
 
 
 @pytest.mark.asyncio
-async def test_delete_preset_raises_422_when_in_use():
-    from core.utils.exceptions import ValidationError
+async def test_delete_preset_raises_409_when_in_use():
+    from core.utils.exceptions import ConflictError
 
     existing = _make_row("legal", "indexation")
     repo = _FakePresetRepo(rows=[existing])
     repo._partition_counts[("legal", "indexation")] = 2
     svc = _make_service(repo)
 
-    with pytest.raises(ValidationError, match="2 partition"):
+    with pytest.raises(ConflictError, match="2 partition") as exc_info:
         await svc.delete_preset("legal", "indexation")
+    assert exc_info.value.status_code == 409
+    assert ("legal", "indexation") in repo._store
 
 
 @pytest.mark.asyncio

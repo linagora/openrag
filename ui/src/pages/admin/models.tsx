@@ -165,11 +165,11 @@ export default function ModelsPage() {
                     return (
                       <Card key={`${ep.model_type}-${ep.name}`}>
                         <CardHeader className="pb-3">
-                          <div className="flex items-center justify-between">
-                            <CardTitle className="text-base truncate">
+                          <div className="flex items-center justify-between gap-2">
+                            <CardTitle className="text-base truncate min-w-0">
                               {ep.name}
                             </CardTitle>
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5 shrink-0">
                               {isDefault && (
                                 <Badge variant="secondary" className="text-xs">Default</Badge>
                               )}
@@ -197,7 +197,7 @@ export default function ModelsPage() {
                           <div className="text-xs text-muted-foreground">
                             Updated {formatDate(ep.updated_at)}
                           </div>
-                          <div className="flex gap-2 pt-2">
+                          <div className="flex flex-wrap gap-2 pt-2">
                             {!isDefault && (
                               <Button
                                 size="sm"
@@ -645,7 +645,7 @@ function EndpointDialog({
             </p>
           )}
 
-          <DialogFooter className="gap-2 sm:gap-0">
+          <DialogFooter className="gap-2">
             <Button
               type="button"
               variant="outline"

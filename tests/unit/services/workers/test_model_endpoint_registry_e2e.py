@@ -320,23 +320,26 @@ async def test_indexing_uses_named_vlm_loaded_from_model_endpoint_registry():
 
 
 @pytest.mark.asyncio
-async def test_indexing_fails_for_missing_named_vlm_when_image_captioning_is_enabled():
+async def test_indexing_falls_back_to_default_vlm_when_named_vlm_is_missing():
+    # A named VLM endpoint deleted/renamed after assignment must not fail the
+    # indexing job — captioning falls back to the legacy default VLM with a
+    # warning (parity with the contextualizer/topic-tagger selectors).
     settings = _settings()
     vlm_factory = _build_vlm_factory(settings)
     await _hydrate(settings, _FakeEndpointRepo())
     default_vlm = _DefaultVLM()
 
-    with pytest.raises(KeyError, match="Unknown vlm 'missing-vlm'"):
-        await _run_pipeline(
-            settings=settings,
-            vlm_name="missing-vlm",
-            image_captioning=True,
-            default_vlm=default_vlm,
-            vlm_factory=vlm_factory,
-        )
+    row, _, returned_vlm = await _run_pipeline(
+        settings=settings,
+        vlm_name="missing-vlm",
+        image_captioning=True,
+        default_vlm=default_vlm,
+        vlm_factory=vlm_factory,
+    )
 
-    assert default_vlm.calls == []
-    assert _RecordingVLM.instances == []
+    assert returned_vlm is default_vlm
+    assert default_vlm.calls == [b"png"]  # captioned via the legacy fallback
+    assert _RecordingVLM.instances == []  # the named endpoint never resolved
 
 
 @pytest.mark.asyncio

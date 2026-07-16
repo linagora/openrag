@@ -15,6 +15,7 @@ service once the queue is de-Ray'd.
 """
 
 from api.dependencies.auth import current_user, require_admin, require_admin_or_self
+from api.runtime_flags import WITH_CHAINLIT_UI
 from api.schemas.admin.users import UserCreate, UserPublic, UserUpdate
 from core.utils.logging import get_logger
 from di.providers import get_user_service
@@ -63,6 +64,7 @@ Returns current user details including:
 - `id`: User identifier
 - `display_name`: User's display name
 - `is_admin`: Admin status
+- `chainlit_enabled`: Whether this deployment exposes the Chainlit chat UI
 - Additional user metadata
     - indexed_files: Number of files currently indexed for this user
     - pending_files: Number of files pending indexing for this user
@@ -79,9 +81,11 @@ async def get_current_user_info(
     service=Depends(get_user_service),
 ):
     """Get current authenticated user info"""
+    content = await service.get_current_user_info(user)
+    content["chainlit_enabled"] = WITH_CHAINLIT_UI
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content=await service.get_current_user_info(user),
+        content=content,
     )
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 from api.error_handlers import _STATUS_MAP, _status_for, register_error_handlers
 from core.utils.exceptions import (
+    ConflictError,
     DocumentNotFoundError,
     NotFoundError,
     OpenRAGError,
@@ -42,6 +43,10 @@ def app() -> FastAPI:
     @app.get("/raise/validation")
     async def _raise_validation() -> None:
         raise ValidationError("bad input")
+
+    @app.get("/raise/conflict")
+    async def _raise_conflict() -> None:
+        raise ConflictError("already in use")
 
     @app.get("/raise/unknown")
     async def _raise_unknown() -> None:
@@ -90,6 +95,13 @@ def test_quota_exceeded_maps_to_429(client: TestClient) -> None:
 def test_validation_error_maps_to_422(client: TestClient) -> None:
     response = client.get("/raise/validation")
     assert response.status_code == 422
+
+
+def test_conflict_error_maps_to_409(client: TestClient) -> None:
+    response = client.get("/raise/conflict")
+    assert response.status_code == 409
+    body = response.json()
+    assert body["detail"] == "[CONFLICT]: already in use"
 
 
 def test_unknown_exception_returns_500_with_legacy_body(client: TestClient) -> None:

@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - dev
+      - develop
     paths:
       - "infra/charts/**"
   workflow_dispatch:

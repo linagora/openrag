@@ -4,7 +4,7 @@ description: A Helm chart for Kubernetes
 type: application
 
 version: 0.6.0
-appVersion: "v2.0.0-rc.1"
+appVersion: "v2.0.0"
 
 maintainers:
   - name: linagora
@@ -14,6 +14,7 @@ maintainers:
 home: https://github.com/linagora/openrag
 sources:
   - https://github.com/linagora/openrag
+
 
 dependencies:
   - name: kuberay-operator

@@ -2,7 +2,7 @@ name: API Tests
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, develop]
   pull_request:
 
 jobs:

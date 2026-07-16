@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { ColumnDef } from "@tanstack/react-table";
-import { Plus, Eye, Trash2 } from "lucide-react";
+import type { ColumnDef, OnChangeFn, RowSelectionState } from "@tanstack/react-table";
+import { Plus, Eye, Trash2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/shared/page-header";
@@ -40,6 +40,7 @@ const fileLabel = (f: PartitionFile) => (f.filename as string) || f.file_id;
 
 export default function DocumentListPage() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { canWrite } = usePermissions();
 
   // OpenRag has no flat/cross-partition file list — files live inside a
@@ -53,6 +54,11 @@ export default function DocumentListPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [fileSelection, setFileSelection] = useState<{
+    partition: string;
+    rows: RowSelectionState;
+  }>({ partition: "", rows: {} });
+  const [manualRefreshing, setManualRefreshing] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
@@ -90,6 +96,7 @@ export default function DocumentListPage() {
   }, [selected, searchParams, setSearchParams]);
 
   const selectPartition = (p: string) => {
+    setFileSelection({ partition: p, rows: {} });
     sessionStorage.setItem("documents.partition", p);
     setSearchParams((prev) => {
       prev.set("partition", p);
@@ -112,7 +119,32 @@ export default function DocumentListPage() {
     // refetchIntervalInBackground defaults false, so it only polls when focused.
     refetchInterval: 5000,
   });
-  const fileRows = filesQuery.data?.files ?? [];
+  const fileRows = useMemo(() => filesQuery.data?.files ?? [], [filesQuery.data?.files]);
+  const fileRowSelection = useMemo(
+    () => (fileSelection.partition === selected ? fileSelection.rows : {}),
+    [fileSelection.partition, fileSelection.rows, selected],
+  );
+  const setFileRowSelection = useCallback<OnChangeFn<RowSelectionState>>(
+    (updater) => {
+      setFileSelection((current) => {
+        const currentRows = current.partition === selected ? current.rows : {};
+        const rows = typeof updater === "function" ? updater(currentRows) : updater;
+        return { partition: selected, rows };
+      });
+    },
+    [selected],
+  );
+  const selectedFiles = useMemo(
+    () => fileRows.filter((file) => fileRowSelection[file.file_id]),
+    [fileRows, fileRowSelection],
+  );
+
+  useEffect(() => {
+    if (!writable && Object.keys(fileRowSelection).length > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Clear stale controlled selection when write access is lost.
+      setFileRowSelection({});
+    }
+  }, [fileRowSelection, setFileRowSelection, writable]);
 
   const deleteMutation = useMutation({
     mutationFn: (fileId: string) => deleteFile(selected, fileId),
@@ -139,7 +171,10 @@ export default function DocumentListPage() {
       queryClient.invalidateQueries({ queryKey: ["partition-files", selected] });
     },
     onError: (err: Error) => toast.error(`Bulk delete failed: ${err.message}`),
-    onSettled: () => setBulkDeleting(false),
+    onSettled: () => {
+      setBulkDeleting(false);
+      setFileRowSelection({});
+    },
   });
 
   // OpenRag indexes one file per request; multi-file upload is a client-side
@@ -164,7 +199,14 @@ export default function DocumentListPage() {
       return { ok, errors };
     },
     onSuccess: ({ ok, errors }) => {
-      if (ok) toast.success(`${ok} file(s) queued for indexing — track progress in Jobs.`);
+      if (ok) {
+        toast.success(`${ok} file(s) queued for indexing.`, {
+          action: {
+            label: "View Jobs",
+            onClick: () => navigate("/jobs"),
+          },
+        });
+      }
       if (errors.length) toast.error(`${errors.length} upload(s) failed: ${errors[0]}`);
       setUploadOpen(false);
       setFiles([]);
@@ -294,9 +336,55 @@ export default function DocumentListPage() {
             ))}
           </SelectContent>
         </Select>
-        {filesQuery.data && (
-          <p className="text-sm text-muted-foreground ml-auto">{fileRows.length} file(s)</p>
+        {writable && selectedFiles.length > 0 && (
+          <>
+            <ConfirmDialog
+              title="Delete files"
+              description={
+                selectedFiles.length <= 5
+                  ? `Delete ${selectedFiles.length} file(s)? This cannot be undone: ${selectedFiles.map(fileLabel).join(", ")}`
+                  : `Delete ${selectedFiles.length} files? This cannot be undone.`
+              }
+              onConfirm={() => {
+                bulkDeleteMutation.mutate(selectedFiles.map((file) => file.file_id));
+              }}
+            >
+              <Button
+                variant="outline"
+                size="icon-sm"
+                disabled={bulkDeleting}
+                aria-label="Delete selected files"
+                title="Delete selected files"
+              >
+                <Trash2 className="h-3.5 w-3.5 text-destructive" />
+              </Button>
+            </ConfirmDialog>
+            <p className="text-sm text-muted-foreground">
+              {selectedFiles.length} selected
+            </p>
+          </>
         )}
+        <div className="ml-auto flex items-center gap-2">
+          {filesQuery.data && (
+            <p className="text-sm text-muted-foreground">{fileRows.length} file(s)</p>
+          )}
+          <Button
+            variant="outline"
+            size="icon-sm"
+            onClick={() => {
+              setManualRefreshing(true);
+              Promise.all([
+                partitionsQuery.refetch(),
+                selected ? filesQuery.refetch() : Promise.resolve(),
+              ]).finally(() => setManualRefreshing(false));
+            }}
+            disabled={manualRefreshing}
+            aria-label="Refresh documents"
+            title="Refresh documents"
+          >
+            <RefreshCw className={manualRefreshing ? "animate-spin" : ""} />
+          </Button>
+        </div>
       </div>
 
       {!selected ? (
@@ -328,38 +416,8 @@ export default function DocumentListPage() {
           initialSorting={[{ id: "indexed_at", desc: true }]}
           enableSelection={writable}
           getRowId={(f) => f.file_id}
-          renderBulkActions={({ selected: rows, total, allSelected, selectAll, clear }) => {
-            const names = rows.map(fileLabel);
-            const description =
-              names.length <= 5
-                ? `Delete ${names.length} file(s)? This cannot be undone: ${names.join(", ")}`
-                : `Delete ${names.length} files? This cannot be undone.`;
-            return (
-              <>
-                <span className="text-sm font-medium text-primary">{rows.length} selected</span>
-                <ConfirmDialog
-                  title="Delete files"
-                  description={description}
-                  onConfirm={() => {
-                    bulkDeleteMutation.mutate(rows.map((r) => r.file_id));
-                    clear();
-                  }}
-                >
-                  <Button variant="destructive" size="sm" disabled={bulkDeleting}>
-                    <Trash2 className="h-3.5 w-3.5" /> Delete selected
-                  </Button>
-                </ConfirmDialog>
-                <Button variant="ghost" size="sm" onClick={clear}>
-                  Clear
-                </Button>
-                {!allSelected && rows.length < total && (
-                  <Button variant="link" size="sm" className="ml-auto" onClick={selectAll}>
-                    Select all {total}
-                  </Button>
-                )}
-              </>
-            );
-          }}
+          rowSelection={fileRowSelection}
+          onRowSelectionChange={setFileRowSelection}
         />
       )}
     </div>

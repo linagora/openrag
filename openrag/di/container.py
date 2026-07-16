@@ -531,8 +531,11 @@ class ServiceContainer:
         """QueryService — lazily built, cached for the container's lifetime.
 
         Shares the same core LLM construction as ``retrieval_service``
-        (built from ``settings.llm``); the web-search service comes from
-        the ``WebSearchFactory`` (provider is ``None`` when
+        (built from ``settings.llm``); the named ``llm_factory`` lets the
+        service honor a partition's ``chat_llm`` model-endpoint preset for
+        query generation and answer generation. The web-search service
+        comes from the
+        ``WebSearchFactory`` (provider is ``None`` when
         ``WEBSEARCH_API_TOKEN`` is unset — web search silently disabled).
         """
         if self._query_service is None:
@@ -554,6 +557,7 @@ class ServiceContainer:
                 config=settings,
                 web_search_service=WebSearchFactory.create_service(settings),
                 workspace_service=self.workspace_service,
+                llm_factory=self.llm_factory,
             )
         return self._query_service
 

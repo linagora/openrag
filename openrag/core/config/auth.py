@@ -249,6 +249,7 @@ DEFAULT_BYPASS_PATHS: tuple[str, ...] = (
     "/auth/callback",
     "/auth/backchannel-logout",
     "/auth/logout",
+    "/auth/chainlit-logout-signal",
 )
 
 # REST API prefixes. Unauthenticated requests here get JSON 401/403,

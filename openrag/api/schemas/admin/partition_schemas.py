@@ -42,6 +42,14 @@ class CreatePartitionRequest(BaseModel):
         """Normalize non-null partition and preset names."""
         return _normalize_name(value)
 
+    @field_validator("chat_llm")
+    @classmethod
+    def normalize_chat_llm(cls, value: str | None) -> str | None:
+        """Blank and null both mean "use the default LLM" (stored as NULL)."""
+        if value is None:
+            return None
+        return value.strip() or None
+
 
 class UpdatePartitionRequest(BaseModel):
     """Request body for updating partition preset assignments."""
@@ -72,6 +80,15 @@ class UpdatePartitionRequest(BaseModel):
     def reject_null_chat_history_depth(cls, value: int | None) -> int:
         """Reject explicit null for chat history depth updates."""
         return _reject_explicit_null("chat_history_depth", value)
+
+    @field_validator("chat_llm")
+    @classmethod
+    def normalize_chat_llm(cls, value: str | None) -> str | None:
+        """Normalize ``chat_llm`` — unlike the other fields, explicit null is
+        allowed: it (or a blank string) resets the partition to the default LLM."""
+        if value is None:
+            return None
+        return value.strip() or None
 
     @model_validator(mode="after")
     def require_at_least_one_update(self) -> UpdatePartitionRequest:

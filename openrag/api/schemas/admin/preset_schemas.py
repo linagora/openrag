@@ -77,6 +77,10 @@ class PresetResponse(BaseModel):
     config: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+    # Distinct partition count referencing this preset. Only populated by
+    # list_presets; other endpoints (get/create/update) default to 0 since
+    # usage isn't relevant there.
+    used_by_partitions: int = 0
 
 
 class PresetOptionsResponse(BaseModel):
