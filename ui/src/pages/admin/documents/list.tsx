@@ -389,6 +389,7 @@ export default function DocumentListPage() {
             value={fileSearch}
             onChange={(e) => setFileSearch(e.target.value)}
             className="pl-9"
+            aria-label="Search files"
           />
         </div>
         <Input

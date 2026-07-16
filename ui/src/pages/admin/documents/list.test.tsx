@@ -123,7 +123,7 @@ describe("DocumentListPage", () => {
     renderDocuments();
 
     expect(await screen.findByText("a.pdf")).not.toBeNull();
-    await userEvent.type(screen.getByPlaceholderText("Search files..."), "b");
+    await userEvent.type(screen.getByLabelText("Search files"), "b");
     await userEvent.type(screen.getByLabelText("Indexed since"), "2026-01-02");
 
     expect(screen.queryByText("a.pdf")).toBeNull();

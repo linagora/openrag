@@ -182,6 +182,7 @@ export default function JobListPage() {
     setStatusTab(value);
     setSearch("");
     setDebouncedSearch("");
+    setPartitionFilter("__all__");
   };
 
   return (

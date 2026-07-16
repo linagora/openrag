@@ -197,5 +197,8 @@ describe("JobListPage filters", () => {
       expect.any(Array),
       [expect.objectContaining({ task_id: "archive-task" })],
     );
+
+    await userEvent.click(screen.getByRole("tab", { name: "FAILED" }));
+    await waitFor(() => expect(screen.getByText("docs.pdf")).not.toBeNull());
   });
 });
