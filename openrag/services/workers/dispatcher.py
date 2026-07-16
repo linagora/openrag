@@ -228,16 +228,19 @@ class WorkerDispatcher(IndexingDispatcher):
         if not rows:
             return
 
+        public_metadata = self._strip_internal_metadata(metadata)
         entities = []
         for row in rows:
-            entity = self._strip_internal_metadata(row)
-            entity.update(metadata)
+            internal_metadata = {k: v for k, v in row.items() if self._is_internal_metadata_key(k)}
+            entity = dict(row)
+            entity.update(public_metadata)
+            entity.update(internal_metadata)
             entities.append(entity)
 
         await self._upsert_entities(entities)
 
         file_metadata = self._file_metadata_from_chunk(rows[0])
-        file_metadata.update(metadata)
+        file_metadata.update(public_metadata)
         await self._document_repo.update_file_metadata_in_db(file_id, partition, file_metadata)
 
     async def copy_file(
@@ -255,11 +258,12 @@ class WorkerDispatcher(IndexingDispatcher):
         if not rows:
             return
 
+        public_metadata = self._strip_internal_metadata(metadata)
         entities = []
         for row in rows:
             entity = self._strip_internal_metadata(row)
             entity.pop("_id", None)
-            entity.update(metadata)
+            entity.update(public_metadata)
             entities.append(entity)
 
         await self._insert_entities(entities)
@@ -267,7 +271,7 @@ class WorkerDispatcher(IndexingDispatcher):
         target_file_id = metadata.get("file_id", file_id)
         target_partition = metadata.get("partition", partition)
         file_metadata = self._file_metadata_from_chunk(rows[0])
-        file_metadata.update(metadata)
+        file_metadata.update(public_metadata)
         await self._document_repo.add_file_to_partition(
             file_id=target_file_id,
             partition=target_partition,

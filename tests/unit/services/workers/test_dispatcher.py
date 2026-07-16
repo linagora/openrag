@@ -422,7 +422,12 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
     )
 
     await dispatcher.delete_file("file-1", "tenant-a")
-    await dispatcher.update_file_metadata("file-1", {"title": "new"}, "tenant-a", user={"id": 7})
+    await dispatcher.update_file_metadata(
+        "file-1",
+        {"title": "new", "_openrag_indexing_task_id": "from-user-metadata"},
+        "tenant-a",
+        user={"id": 7},
+    )
     await dispatcher.copy_file("file-1", {"file_id": "copy-1", "partition": "tenant-b"}, "tenant-b", user=None)
 
     assert [call.args for call in vector_store.delete_by_filter.call_args_list] == [
@@ -447,7 +452,7 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
     )
     vector_store.upsert_entities.assert_awaited_once()
     vector_store.insert_entities.assert_awaited_once()
-    assert "_openrag_indexing_task_id" not in vector_store.upsert_entities.await_args.args[0][0]
+    assert vector_store.upsert_entities.await_args.args[0][0]["_openrag_indexing_task_id"] == "task-1"
     assert "_openrag_indexing_task_id" not in vector_store.insert_entities.await_args.args[0][0]
 
 

@@ -287,7 +287,9 @@ class PartitionService:
                 "No vector collection to clean up before deleting partition",
                 partition=partition,
             )
-        await self._partition_repo.delete_partition(name=partition)
+        deleted = await self._partition_repo.delete_partition(name=partition)
+        if deleted and self._config is not None:
+            self._config.partitions.pop(partition, None)
         if collection_exists:
             try:
                 deleted = await self._vector_store.delete_by_filter({"partition": partition})
