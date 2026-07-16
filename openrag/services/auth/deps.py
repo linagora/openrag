@@ -26,6 +26,7 @@ _lock = Lock()
 
 logger = get_logger()
 
+
 def get_oidc_client() -> OIDCClient:
     """Return the shared OIDCClient instance, creating it on first call.
 
@@ -50,7 +51,7 @@ def get_oidc_client() -> OIDCClient:
 
         _ssl_verify = not str_to_bool(os.getenv("SSL_NO_VERIFY", "false"))
         if not _ssl_verify:
-          logger.warning("SSL certificate verification is DISABLED for the OIDC client.")
+            logger.warning("SSL certificate verification is DISABLED for the OIDC client.")
 
         issuer = os.environ["OIDC_ENDPOINT"]
         client_id = os.environ["OIDC_CLIENT_ID"]
