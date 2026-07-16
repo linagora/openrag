@@ -324,6 +324,17 @@ async def test_store_stage_upserts_to_default_collection_with_chunk_partitions()
 
 
 @pytest.mark.asyncio
+async def test_store_stage_stamps_task_id_on_chunks_for_precise_cleanup():
+    chunks = [Chunk(id="c1", text="alpha", embedding=[1.0])]
+    store = FakeVectorStore(count=1)
+    row = {"task_id": "task-1", "chunks": chunks}
+
+    await store_stage(row, store)
+
+    assert chunks[0].metadata["_openrag_indexing_task_id"] == "task-1"
+
+
+@pytest.mark.asyncio
 async def test_store_stage_rejects_chunks_without_embeddings():
     chunks = [Chunk(id="c1", text="alpha")]
     store = FakeVectorStore(count=0)

@@ -533,7 +533,7 @@ async def test_process_file_cleans_vectors_when_catalog_write_loses_delete_race(
             partition="p",
         )
 
-    assert vector_store.deleted_filters == [{"partition": "p", "file_id": "f1"}]
+    assert vector_store.deleted_filters == [{"partition": "p", "file_id": "f1", "_openrag_indexing_task_id": "t-race"}]
 
 
 @pytest.mark.asyncio

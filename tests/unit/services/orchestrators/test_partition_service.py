@@ -363,6 +363,25 @@ async def test_delete_partition_keeps_rows_if_vector_store_delete_fails():
     assert prepo.deleted == []
 
 
+@pytest.mark.asyncio
+async def test_delete_partition_keeps_success_when_post_delete_cleanup_fails():
+    prepo = FakePartitionRepo(existing={"p1"})
+
+    class FailingSecondSweepVectorStore(FakeVectorStore):
+        async def delete_by_filter(self, filters) -> int:
+            self.deleted_filters.append(dict(filters))
+            if len(self.deleted_filters) == 2:
+                raise Exception("Milvus connection failed")
+            return 1
+
+    vstore = FailingSecondSweepVectorStore()
+
+    await _svc(prepo=prepo, vstore=vstore).delete_partition("p1")
+
+    assert prepo.deleted == ["p1"]
+    assert vstore.deleted_filters == [{"partition": "p1"}, {"partition": "p1"}]
+
+
 # --------------------------------------------------------------------------- #
 # file / chunk reads
 # --------------------------------------------------------------------------- #

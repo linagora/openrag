@@ -284,12 +284,20 @@ class PartitionService:
             )
         await self._partition_repo.delete_partition(name=partition)
         if collection_exists:
-            deleted = await self._vector_store.delete_by_filter({"partition": partition})
-            logger.info(
-                "Deleted race-leftover points from partition",
-                partition=partition,
-                count=deleted,
-            )
+            try:
+                deleted = await self._vector_store.delete_by_filter({"partition": partition})
+            except Exception as exc:
+                logger.warning(
+                    "Post-delete vector cleanup failed after partition row removal",
+                    partition=partition,
+                    error=str(exc),
+                )
+            else:
+                logger.info(
+                    "Deleted race-leftover points from partition",
+                    partition=partition,
+                    count=deleted,
+                )
         logger.info("Partition successfully deleted.", partition=partition)
 
     async def update_partition(self, partition: str, **fields: object) -> dict | None:

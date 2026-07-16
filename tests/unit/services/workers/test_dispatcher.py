@@ -320,3 +320,28 @@ async def test_delete_file_does_not_remove_database_row_if_vector_store_delete_f
 
     workspace_repo.remove_file_from_all_workspaces.assert_not_called()
     document_repo.remove_file_from_partition.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_file_keeps_success_when_post_delete_cleanup_fails() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    vector_store = _vector_store()
+    document_repo = _document_repo()
+    workspace_repo = _workspace_repo()
+
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=workspace_repo,
+        collection="default",
+    )
+
+    vector_store.delete_by_filter = AsyncMock(side_effect=[2, Exception("Milvus connection failed")])
+
+    await dispatcher.delete_file("file-1", "tenant-a")
+
+    workspace_repo.remove_file_from_all_workspaces.assert_called_once_with("file-1", "tenant-a")
+    document_repo.remove_file_from_partition.assert_called_once_with(file_id="file-1", partition="tenant-a")

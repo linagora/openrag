@@ -133,7 +133,15 @@ class WorkerDispatcher(IndexingDispatcher):
         await self._workspace_repo.remove_file_from_all_workspaces(file_id, partition)
         await self._document_repo.remove_file_from_partition(file_id=file_id, partition=partition)
         if collection_exists:
-            await self._vector_store.delete_by_filter({"partition": partition, "file_id": file_id})
+            try:
+                await self._vector_store.delete_by_filter({"partition": partition, "file_id": file_id})
+            except Exception as exc:
+                logger.warning(
+                    "Post-delete vector cleanup failed after file catalog removal",
+                    file_id=file_id,
+                    partition=partition,
+                    error=str(exc),
+                )
 
     async def update_file_metadata(
         self,

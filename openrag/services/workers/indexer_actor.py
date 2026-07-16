@@ -8,6 +8,7 @@ from typing import Any
 
 from core.models.document import Document
 from services.workers.pipeline_builder import IndexingPipeline
+from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
 
 class IndexerWorker:
@@ -115,6 +116,7 @@ class IndexerWorker:
                     collection=self._collection,
                     metadata=metadata,
                     partition=partition,
+                    task_id=task_id,
                 )
             tb = traceback.format_exc()
             await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
@@ -168,16 +170,23 @@ async def _cleanup_indexed_vectors(
     collection: str,
     metadata: dict[str, Any],
     partition: str,
+    task_id: str,
 ) -> None:
     file_id = metadata.get("file_id")
-    if vector_store is None or not file_id:
+    if vector_store is None or not file_id or not task_id:
         return
     try:
         if await vector_store.collection_exists(collection):
-            await vector_store.delete_by_filter({"partition": partition, "file_id": file_id})
+            await vector_store.delete_by_filter(
+                {
+                    "partition": partition,
+                    "file_id": file_id,
+                    INDEXING_TASK_ID_METADATA_KEY: str(task_id),
+                }
+            )
     except Exception:
-        # Preserve the original indexing failure; cleanup errors are logged by
-        # the caller's failed task state and can be retried through delete.
+        # Preserve the original indexing failure. A later file delete still runs
+        # the broader partition/file cleanup path if this best-effort sweep fails.
         return
 
 
