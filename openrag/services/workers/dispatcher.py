@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import time
 import traceback
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
+from core.models.catalog import DocumentStatus, IndexationJob
 from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
@@ -16,6 +19,16 @@ logger = get_logger()
 
 DEFAULT_TIMEOUT = 60.0
 _REQUIRE_EXISTING_PARTITION_KWARG = "require_existing_partition"
+
+# Retention for the durable ``jobs`` table (issue #660). Terminal jobs are swept
+# opportunistically from the dispatch path rather than by a background task: a
+# sweep is only ever needed *because* jobs are being created, and piggybacking on
+# dispatch keeps this out of the app lifecycle (no extra task to own, cancel and
+# reason about across API replicas). The interval throttle means a burst of a
+# thousand uploads still costs one DELETE.
+JOB_RETENTION_SECONDS = 7 * 24 * 3600
+JOB_RETENTION_MAX_ROWS = 10_000
+JOB_PURGE_INTERVAL_SECONDS = 300.0
 
 
 class WorkerDispatcher(IndexingDispatcher):
@@ -48,6 +61,7 @@ class WorkerDispatcher(IndexingDispatcher):
         workspace_repo: Any,
         collection: str,
         timeout: float = DEFAULT_TIMEOUT,
+        job_repo: Any = None,
     ) -> None:
         self._pool = pool
         self._tsm = task_state_manager
@@ -56,6 +70,12 @@ class WorkerDispatcher(IndexingDispatcher):
         self._workspace_repo = workspace_repo
         self._collection = collection
         self._timeout = timeout
+        # Optional so the dispatcher still runs against a catalog store without a
+        # job repository (and so tests can build one without Postgres). When it
+        # is absent, job state degrades to the in-memory actor — the pre-#660
+        # behaviour.
+        self._job_repo = job_repo
+        self._last_job_purge_at: float | None = None
 
     async def _call(self, future: Any, task_description: str) -> Any:
         from services.workers.ray_utils import call_ray_actor_with_timeout
@@ -153,6 +173,33 @@ class WorkerDispatcher(IndexingDispatcher):
                 f"Task {task_id} was rejected because file {metadata.get('file_id')!r} "
                 f"in partition {partition!r} is being deleted"
             )
+
+        # The durable row is written *before* the task is submitted, so a crash
+        # between submit and the worker's first state write still leaves the job
+        # visible (as QUEUED) rather than silently in-flight and unobservable.
+        #
+        # It is written *after* the admission gate above, not before, because
+        # #671 made admission refusable: ``_set_queued_details`` returns False
+        # when a delete fence covers this file, and forces the in-memory state to
+        # CANCELLED. A job that was never admitted has no work to record, so
+        # writing QUEUED here would leave a durable row that no worker will ever
+        # settle -- non-terminal forever, since retention sweeps terminal rows
+        # only, and counted active in ``/queue/info`` for good.
+        await self._record_job(
+            "create",
+            task_id,
+            lambda: self._job_repo.create_job(
+                IndexationJob(
+                    id=task_id,
+                    status=DocumentStatus.QUEUED,
+                    partition=partition,
+                    file_id=metadata.get("file_id"),
+                    user_id=user.get("id") if user else None,
+                    job_metadata=user_metadata,
+                )
+            ),
+        )
+        await self._maybe_purge_jobs()
 
         task: Any | None = None
         try:
@@ -302,6 +349,52 @@ class WorkerDispatcher(IndexingDispatcher):
         )
         return False
 
+    async def _record_job(self, action: str, task_id: str, call: Any) -> Any:
+        """Run a durable job write, degrading to a warning on failure.
+
+        Postgres is the source of truth for job state, but it is not on the
+        critical path of *indexing*: failing an upload because the audit row
+        could not be written would turn a monitoring outage into a data-ingest
+        outage. The in-memory actor still has the state, so we log loudly and
+        continue.
+        """
+        if self._job_repo is None:
+            return None
+        try:
+            return await call()
+        except Exception as exc:  # noqa: BLE001 - durable bookkeeping must not fail indexing
+            logger.warning(
+                "Durable job state write failed; job history for this task may be incomplete",
+                action=action,
+                task_id=task_id,
+                error=str(exc),
+            )
+            return None
+
+    async def _maybe_purge_jobs(self) -> None:
+        """Sweep terminal jobs at most once per ``JOB_PURGE_INTERVAL_SECONDS``."""
+        if self._job_repo is None:
+            return
+        now = time.monotonic()
+        if self._last_job_purge_at is not None and now - self._last_job_purge_at < JOB_PURGE_INTERVAL_SECONDS:
+            return
+        # Stamped before the call so a slow or failing purge cannot be retried on
+        # every single dispatch.
+        self._last_job_purge_at = now
+        purged = await self._record_job(
+            "purge",
+            "-",
+            lambda: self._job_repo.purge_terminal_jobs(
+                older_than_seconds=JOB_RETENTION_SECONDS,
+                keep_last=JOB_RETENTION_MAX_ROWS,
+            ),
+        )
+        if purged:
+            logger.info("Purged terminal indexation jobs past retention", purged=purged)
+
+    async def _get_job(self, task_id: str) -> Any:
+        return await self._record_job("get", task_id, lambda: self._job_repo.get_job(task_id))
+
     async def delete_file(self, file_id: str, partition: str) -> None:
         await self._begin_file_delete_fence(file_id=file_id, partition=partition)
         delete_failed = False
@@ -441,16 +534,30 @@ class WorkerDispatcher(IndexingDispatcher):
         }
 
     async def get_task_state(self, task_id: str) -> str | None:
-        return await self._call(
+        """Read a task's state, hot cache first, Postgres second.
+
+        A miss is not "unknown task": the actor evicts settled tasks and loses
+        everything on restart, so the durable row is what makes a task's outcome
+        observable afterwards.
+        """
+        state = await self._call(
             self._tsm.get_state.remote(task_id),
             task_description=f"get_state({task_id})",
         )
+        if state is not None:
+            return state
+        job = await self._get_job(task_id)
+        return job.status.value if job else None
 
     async def get_task_error(self, task_id: str) -> str | None:
-        return await self._call(
+        error = await self._call(
             self._tsm.get_error.remote(task_id),
             task_description=f"get_error({task_id})",
         )
+        if error is not None:
+            return error
+        job = await self._get_job(task_id)
+        return job.error if job else None
 
     async def cancel_task(self, task_id: str) -> bool:
         import ray
@@ -472,9 +579,21 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=f"set_cancelled_if_active({task_id})",
         )
         if not cancelled:
+            # Already terminal (or evicted): the task reached its own outcome
+            # first. Returning before the durable write is what keeps a job that
+            # actually COMPLETED from being recorded as CANCELLED in `jobs`.
             return False
 
         ray.cancel(obj_ref["ref"], recursive=True)
+        await self._record_job(
+            "cancel",
+            task_id,
+            lambda: self._job_repo.update_job(
+                task_id,
+                status=DocumentStatus.CANCELLED,
+                completed_at=datetime.now(UTC),
+            ),
+        )
         return True
 
 
@@ -486,6 +605,7 @@ def from_ray_namespace(
     document_repo: Any,
     workspace_repo: Any,
     collection: str,
+    job_repo: Any = None,
 ) -> WorkerDispatcher:
     import ray
     from services.workers.indexer_pool import build_indexer_pool
@@ -498,6 +618,7 @@ def from_ray_namespace(
         workspace_repo=workspace_repo,
         collection=collection,
         timeout=timeout,
+        job_repo=job_repo,
     )
 
 

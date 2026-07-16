@@ -140,13 +140,22 @@ async def test_cancellation_releases_the_slot(tmp_path):
 async def test_duplicate_at_catalog_releases_the_slot(tmp_path):
     """The 409 check is pre-dispatch, so two racers can both reach the insert.
 
-    ``add_file_to_partition`` returns False for the loser: no file was
-    created for its reservation, so the slot must go back.
+    ``add_file_to_partition`` returns False for the loser: no file was created
+    for its reservation, so the slot must go back.
+
+    Since the rebase onto #671 the loser gets there by a different route. That
+    branch added a fail-closed ``if not wrote_catalog: raise`` on the catalog
+    write, so a False no longer falls through to a ``created``-gated release --
+    it raises, and ``process_file``'s ``finally`` releases on the way out. The
+    invariant this test exists for is unchanged and still the point: whatever
+    the route, a reservation that produced no file row goes back. Both halves
+    are asserted so neither can regress silently.
     """
     user_repo = FakeUserRepo()
     doc_repo = FakeDocumentRepo(add_result=False)
 
-    await _run(_worker(_Pipeline(), doc_repo, user_repo), tmp_path)
+    with pytest.raises(RuntimeError, match="Catalog row was not written"):
+        await _run(_worker(_Pipeline(), doc_repo, user_repo), tmp_path)
 
     assert len(doc_repo.add_calls) == 1
     assert user_repo.released == [42]

@@ -140,6 +140,7 @@ async def postgres_store(test_rdb_config: RDBConfig) -> PostgresStore:
 
 _TRUNCATE_SQL = """
 TRUNCATE TABLE
+    jobs,
     oidc_sessions,
     workspace_files,
     workspaces,

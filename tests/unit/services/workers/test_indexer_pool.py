@@ -1013,6 +1013,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
         topic_tag_repo = object()
         # #664: the worker needs a user_repo to release reserved quota slots.
         user_repo = object()
+        job_repo = object()
 
     class Worker:
         def __init__(self, **kwargs):

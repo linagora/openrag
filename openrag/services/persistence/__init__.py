@@ -11,9 +11,11 @@ Public entry points:
             ``PgDocumentRepository``, ``PgUserRepository``,
             ``PgPartitionRepository``, ``PgPartitionMembershipRepository``,
             ``PgOIDCSessionRepository``, ``PgWorkspaceRepository``.
+        - Real (durable indexation job state, issue #660):
+            ``PgJobRepository``.
         - Stubs (post-refactoring features — raise
           :class:`StubRepositoryError` on every call):
-            ``PgJobRepository``, ``PgChunkRepository``,
+            ``PgChunkRepository``,
             ``PgPromptRepository``, ``PgConversationRepository``,
             ``PgAuditLogRepository``, ``PgIdempotencyRepository``,
             ``PgEntityRepository``, ``PgTopicTagRepository``,

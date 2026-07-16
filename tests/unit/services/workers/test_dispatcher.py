@@ -1342,3 +1342,163 @@ async def test_delete_file_reports_failure_when_post_delete_cleanup_fails() -> N
     workspace_repo.remove_file_from_all_workspaces.assert_called_once_with("file-1", "tenant-a")
     document_repo.remove_file_from_partition.assert_called_once_with(file_id="file-1", partition="tenant-a")
     assert vector_store.delete_by_filter.await_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Durable job records (issue #660)
+# ---------------------------------------------------------------------------
+
+
+def _job_repo() -> MagicMock:
+    repo = MagicMock()
+    repo.create_job = AsyncMock(side_effect=lambda job: job)
+    repo.update_job = AsyncMock(return_value=None)
+    repo.get_job = AsyncMock(return_value=None)
+    repo.purge_terminal_jobs = AsyncMock(return_value=0)
+    return repo
+
+
+def _dispatcher_with_job_repo(job_repo: Any, tsm: Any = None, ref: object | None = None) -> Any:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    return WorkerDispatcher(
+        pool=_pool_with_ref(ref if ref is not None else object()),
+        task_state_manager=tsm or _task_state_manager(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        job_repo=job_repo,
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_persists_a_queued_job_before_submitting() -> None:
+    from core.models.catalog import DocumentStatus
+
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    job = job_repo.create_job.await_args.args[0]
+    assert job.id == "task-1"
+    assert job.status is DocumentStatus.QUEUED
+    assert job.partition == "tenant-a"
+    assert job.file_id == "file-1"
+    assert job.user_id == 42
+    assert job.job_metadata == {"filename": "report.txt"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_survives_a_job_repo_outage() -> None:
+    job_repo = _job_repo()
+    job_repo.create_job = AsyncMock(side_effect=RuntimeError("postgres down"))
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    task_id = await dispatcher.dispatch_indexing(
+        path="/data/report.txt",
+        metadata={"file_id": "file-1"},
+        partition="tenant-a",
+        user=None,
+        workspace_ids=None,
+        replace=False,
+    )
+
+    assert task_id
+    # indexing still went out to the pool despite the durable write failing
+    dispatcher._pool.submit.remote.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_marks_the_durable_job_cancelled() -> None:
+    from core.models.catalog import DocumentStatus
+
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    with patch("ray.cancel"):
+        assert await dispatcher.cancel_task("task-1") is True
+
+    job_repo.update_job.assert_awaited_once()
+    assert job_repo.update_job.await_args.args[0] == "task-1"
+    assert job_repo.update_job.await_args.kwargs["status"] is DocumentStatus.CANCELLED
+    assert job_repo.update_job.await_args.kwargs["completed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_get_task_state_falls_back_to_postgres_after_a_restart() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    tsm.get_state.remote = AsyncMock(return_value=None)  # cache lost the entry
+    job_repo = _job_repo()
+    job_repo.get_job = AsyncMock(return_value=IndexationJob(id="task-1", status=DocumentStatus.COMPLETED))
+    dispatcher = _dispatcher_with_job_repo(job_repo, tsm=tsm)
+
+    assert await dispatcher.get_task_state("task-1") == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_get_task_error_falls_back_to_postgres_after_a_restart() -> None:
+    from core.models.catalog import IndexationJob
+
+    tsm = _task_state_manager()
+    tsm.get_error.remote = AsyncMock(return_value=None)
+    job_repo = _job_repo()
+    job_repo.get_job = AsyncMock(return_value=IndexationJob(id="task-1", error="boom"))
+    dispatcher = _dispatcher_with_job_repo(job_repo, tsm=tsm)
+
+    assert await dispatcher.get_task_error("task-1") == "boom"
+
+
+@pytest.mark.asyncio
+async def test_hot_cache_hit_does_not_query_postgres() -> None:
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    assert await dispatcher.get_task_state("task-1") == "SERIALIZING"
+    job_repo.get_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_purges_terminal_jobs_at_most_once_per_interval() -> None:
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    for _ in range(3):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1"},
+            partition="tenant-a",
+            user=None,
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert job_repo.purge_terminal_jobs.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_purge_failure_never_fails_a_dispatch() -> None:
+    job_repo = _job_repo()
+    job_repo.purge_terminal_jobs = AsyncMock(side_effect=RuntimeError("purge blew up"))
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    assert await dispatcher.dispatch_indexing(
+        path="/data/report.txt",
+        metadata={"file_id": "file-1"},
+        partition="tenant-a",
+        user=None,
+        workspace_ids=None,
+        replace=False,
+    )

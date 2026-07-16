@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
 import ray
 from core.models.catalog import TERMINAL_TASK_STATES, DocumentStatus
+from core.utils.text import MAX_ERROR_TEXT_CHARS, truncate_error_text
 
 ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"})
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
@@ -27,6 +30,26 @@ except (ImportError, AttributeError) as _cfg_err:
     _MAX_TASKS_PER_WORKER = 1
 
 
+# This actor is created with ``lifetime="detached"`` (see ``bootstrap.py``), so it
+# outlives the API process and used to be insert-only: every file ever dispatched
+# left a permanent ``TaskInfo`` (plus a full traceback on failure) until the actor
+# OOM-ed (issue #660). Postgres now holds the durable record, which frees this
+# actor to be what its callers actually need — a hot cache of recent tasks.
+#
+# Only *terminal* tasks are evictable: an in-flight task still owns the
+# ``object_ref`` that ``cancel_task`` needs, and that ref is not serializable, so
+# it cannot live anywhere but here. In-flight tasks are self-limiting (the pool
+# has bounded capacity and every task eventually settles), terminal ones are not.
+#
+# Both bounds apply. The cap is the hard memory guarantee; the TTL keeps a quiet
+# deployment from serving hours-old state out of the cache. Reads that miss fall
+# back to Postgres (see ``WorkerDispatcher.get_task_state`` / ``JobService``).
+_TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+_MAX_TERMINAL_TASKS = 2000
+_TERMINAL_TTL_SECONDS = 3600.0
+_MAX_ERROR_CHARS = MAX_ERROR_TEXT_CHARS
+
+
 @dataclass
 class TaskInfo:
     state: str | None = None
@@ -41,6 +64,9 @@ class TaskStateManager:
         self.tasks: dict[str, TaskInfo] = {}
         self.user_index: dict[int | None, set[str]] = {}
         self.file_delete_fences: dict[tuple[str, str], int] = {}
+        # task_id -> monotonic timestamp of the terminal transition, in
+        # insertion order so eviction is FIFO (oldest settled task first).
+        self.terminal_at: OrderedDict[str, float] = OrderedDict()
         self.lock = asyncio.Lock()
 
     async def _ensure_task(self, task_id: str) -> TaskInfo:
@@ -87,6 +113,45 @@ class TaskStateManager:
             else:
                 self.file_delete_fences.pop(key, None)
 
+    def _mark_terminal(self, task_id: str, state: str | None) -> None:
+        """Record (or clear) a task's terminal transition, then evict.
+
+        Called with ``self.lock`` held, from every state write.
+        """
+        if state in _TERMINAL_STATES:
+            self.terminal_at[task_id] = time.monotonic()
+            self.terminal_at.move_to_end(task_id)
+            self._evict_terminal()
+        else:
+            # A task that leaves a terminal state (a re-dispatch reusing the id)
+            # must stop being a candidate for eviction.
+            self.terminal_at.pop(task_id, None)
+
+    def _evict_terminal(self) -> None:
+        """Drop terminal tasks that are over the cap or past the TTL."""
+        now = time.monotonic()
+        while self.terminal_at:
+            task_id, settled_at = next(iter(self.terminal_at.items()))
+            over_cap = len(self.terminal_at) > _MAX_TERMINAL_TASKS
+            expired = now - settled_at > _TERMINAL_TTL_SECONDS
+            if not (over_cap or expired):
+                # FIFO: the head is the oldest, so nothing behind it can qualify.
+                break
+            self.terminal_at.popitem(last=False)
+            self._forget(task_id)
+
+    def _forget(self, task_id: str) -> None:
+        info = self.tasks.pop(task_id, None)
+        if info is None:
+            return
+        user_id = info.details.get("user_id")
+        task_ids = self.user_index.get(user_id)
+        if task_ids is None:
+            return
+        task_ids.discard(task_id)
+        if not task_ids:
+            del self.user_index[user_id]
+
     @ray.method(concurrency_group="set")
     async def set_state(self, task_id: str, state: str) -> None:
         async with self.lock:
@@ -94,12 +159,13 @@ class TaskStateManager:
             if info.state == DocumentStatus.CANCELLED and state != DocumentStatus.CANCELLED:
                 return
             info.state = state
+            self._mark_terminal(task_id, state)
 
     @ray.method(concurrency_group="set")
     async def set_error(self, task_id: str, tb_str: str) -> None:
         async with self.lock:
             info = await self._ensure_task(task_id)
-            info.error = tb_str
+            info.error = truncate_error_text(tb_str, _MAX_ERROR_CHARS)
 
     @ray.method(concurrency_group="set")
     async def set_failed_if_not_cancelled(self, task_id: str, tb_str: str) -> bool:
@@ -109,7 +175,8 @@ class TaskStateManager:
             if info is None or info.state == "CANCELLED":
                 return False
             info.state = "FAILED"
-            info.error = tb_str
+            info.error = truncate_error_text(tb_str, _MAX_ERROR_CHARS)
+            self._mark_terminal(task_id, "FAILED")
             return True
 
     @ray.method(concurrency_group="set")

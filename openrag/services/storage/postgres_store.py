@@ -84,9 +84,10 @@ class PostgresStore(CatalogStore):
         self._oidc_session_repo = PgOIDCSessionRepository(pool_getter)
         self._workspace_repo = PgWorkspaceRepository(pool_getter)
 
+        self._job_repo = PgJobRepository(pool_getter)
+
         # Stubs — every method raises StubRepositoryError until the matching
         # table exists. Listed in the post-refactoring roadmap.
-        self._job_repo = PgJobRepository(pool_getter)
         self._chunk_repo = PgChunkRepository(pool_getter)
         self._prompt_repo = PgPromptRepository(pool_getter)
         self._conversation_repo = PgConversationRepository(pool_getter)

@@ -118,6 +118,7 @@ class IndexerWorkerActor:
             # #664: the worker owns the uploader's reserved file slot and
             # releases it when the file never reaches the catalog.
             user_repo=self._catalog_store.user_repo,
+            job_repo=self._catalog_store.job_repo,
         )
         # When False (e.g. Twake, which keeps its own copy), the raw upload is
         # purged from ``paths.data_dir`` once indexing settles. Enforced at this

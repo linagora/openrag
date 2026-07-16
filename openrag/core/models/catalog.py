@@ -53,12 +53,32 @@ class DocumentRecord(BaseModel):
 
 
 class IndexationJob(BaseModel):
-    """An indexation job tracking batch document processing."""
+    """A durable indexation job — one row per dispatched indexing task.
+
+    The record mirrors what the in-memory ``TaskStateManager`` Ray actor holds,
+    but survives restarts and is operator-visible (issue #660). ``id`` is the
+    dispatcher's ``task_id``, so the durable row and the hot-cache entry share
+    one identity.
+
+    ``status`` reuses :class:`DocumentStatus` rather than :class:`JobStatus`
+    because a job here tracks exactly one file and must reproduce the actor's
+    state taxonomy verbatim (``QUEUED`` -> ``SERIALIZING`` -> ... ->
+    ``COMPLETED`` / ``FAILED`` / ``CANCELLED``); :class:`JobStatus` is the
+    coarser roll-up reserved for a future batch-level job entity.
+
+    ``error`` is bounded at write time (see
+    :func:`core.utils.text.truncate_error_text`) — a full traceback is
+    unbounded input and this row is retained.
+    """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    status: JobStatus = JobStatus.QUEUED
-    total_documents: int = 0
+    status: DocumentStatus = DocumentStatus.QUEUED
     partition: str = "default"
+    file_id: str | None = None
+    user_id: int | None = None
+    job_metadata: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

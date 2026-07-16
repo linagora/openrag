@@ -814,3 +814,113 @@ async def test_process_file_rejects_malformed_topic_tags_before_delete(tmp_path:
     assert len(document_repo.add_calls) == 1
     assert vector_store.deleted_filters == []
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Durable job lifecycle writes (issue #660)
+# ---------------------------------------------------------------------------
+
+
+class FakeJobRepo:
+    def __init__(self) -> None:
+        self.updates: list[tuple[str, dict[str, Any]]] = []
+        self.raise_on_update = False
+
+    async def update_job(self, job_id: str, **fields: Any):
+        if self.raise_on_update:
+            raise RuntimeError("postgres down")
+        self.updates.append((job_id, fields))
+        return None
+
+
+def _statuses(job_repo: FakeJobRepo) -> list[str]:
+    return [fields["status"].value for _, fields in job_repo.updates]
+
+
+def _trivial_pipeline() -> Any:
+    return _make_pipeline(
+        ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")]),
+        [Chunk(id="c1", text="content", partition="p")],
+    )
+
+
+def _worker_with_job_repo(tmp_path: Path, job_repo: FakeJobRepo, pipeline: Any = None) -> IndexerWorker:
+    return IndexerWorker(
+        pipeline=pipeline if pipeline is not None else _trivial_pipeline(),
+        task_state_manager=_fake_tsm(),
+        job_repo=job_repo,
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_file_records_serializing_then_completed_durably(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"hello")
+    job_repo = FakeJobRepo()
+    worker = _worker_with_job_repo(tmp_path, job_repo)
+
+    await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert _statuses(job_repo) == ["SERIALIZING", "COMPLETED"]
+    assert job_repo.updates[0][1]["started_at"] is not None
+    assert job_repo.updates[-1][1]["completed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_process_file_records_the_failure_and_its_traceback(tmp_path: Path) -> None:
+    """The traceback is handed over whole; the bound is applied by the store.
+
+    ``PgJobRepository.update_job`` truncates ``error`` (see
+    ``tests/unit/services/persistence/test_job_repo.py``) so the cap holds for
+    every writer, not just this one.
+    """
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"hello")
+    job_repo = FakeJobRepo()
+
+    class BoomPipeline:
+        async def run(self, row):
+            raise RuntimeError("kaboom")
+
+    worker = _worker_with_job_repo(tmp_path, job_repo, pipeline=BoomPipeline())
+
+    with pytest.raises(RuntimeError):
+        await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert _statuses(job_repo) == ["SERIALIZING", "FAILED"]
+    assert "kaboom" in job_repo.updates[-1][1]["error"]
+    assert job_repo.updates[-1][1]["completed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_process_file_does_not_overwrite_a_cancelled_job(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"hello")
+    job_repo = FakeJobRepo()
+    tsm = _fake_tsm()
+    # the user cancelled while the pipeline was running
+    tsm.set_failed_if_not_cancelled.remote = AsyncMock(return_value=False)
+
+    class BoomPipeline:
+        async def run(self, row):
+            raise RuntimeError("boom")
+
+    worker = IndexerWorker(pipeline=BoomPipeline(), task_state_manager=tsm, job_repo=job_repo)
+
+    with pytest.raises(RuntimeError):
+        await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert _statuses(job_repo) == ["SERIALIZING"]
+
+
+@pytest.mark.asyncio
+async def test_durable_write_failure_never_fails_indexing(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"hello")
+    job_repo = FakeJobRepo()
+    job_repo.raise_on_update = True
+    worker = _worker_with_job_repo(tmp_path, job_repo)
+
+    result = await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert result["stored_count"] == 1
