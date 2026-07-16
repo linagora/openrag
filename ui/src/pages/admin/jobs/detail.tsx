@@ -32,10 +32,7 @@ function errorSummary(lines: string[]): string {
 function failedStage(details: unknown): string {
   if (!details || typeof details !== "object") return "";
   const record = details as Record<string, unknown>;
-  const metadata = record.metadata && typeof record.metadata === "object"
-    ? (record.metadata as Record<string, unknown>)
-    : undefined;
-  return str(record.failed_stage ?? record.stage ?? metadata?.failed_stage ?? metadata?.stage);
+  return str(record.failed_stage);
 }
 
 export default function JobDetailPage() {

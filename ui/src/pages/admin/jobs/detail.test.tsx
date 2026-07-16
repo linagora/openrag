@@ -54,13 +54,15 @@ function renderJobDetail(taskId = "task-1") {
 
 describe("JobDetailPage failed diagnostics", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     getTaskStatusMock.mockResolvedValue({
       task_id: "task-1",
       task_state: "FAILED",
       details: {
         file_id: "file-1",
         partition: "docs",
-        metadata: { filename: "failed.pdf", failed_stage: "chunking" },
+        failed_stage: "chunking",
+        metadata: { filename: "failed.pdf" },
         user_id: 1,
       },
     });
@@ -74,7 +76,6 @@ describe("JobDetailPage failed diagnostics", () => {
     });
     cancelTaskMock.mockResolvedValue({ message: "cancelled" });
     copyToClipboardMock.mockResolvedValue(true);
-    toastSuccessMock.mockClear();
   });
 
   it("shows readable failed-job diagnostics and copies them", async () => {
@@ -95,5 +96,31 @@ describe("JobDetailPage failed diagnostics", () => {
     expect(copyToClipboardMock.mock.calls[0][0]).toContain("ValueError: parser failed");
     expect(copyToClipboardMock.mock.calls[0][0]).toContain("Failed stage: chunking");
     expect(toastSuccessMock).toHaveBeenCalledWith("Diagnostics copied to clipboard");
+  });
+
+  it("does not treat user metadata as the failed stage", async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "FAILED",
+      details: {
+        file_id: "file-1",
+        partition: "docs",
+        metadata: { filename: "failed.pdf", stage: "draft", failed_stage: "user-tag" },
+        user_id: 1,
+      },
+    });
+
+    renderJobDetail();
+
+    expect(await screen.findByText("ValueError: parser failed")).not.toBeNull();
+    expect(screen.queryByText("draft")).toBeNull();
+    expect(screen.queryByText("user-tag")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /copy diagnostics/i }));
+
+    await waitFor(() => expect(copyToClipboardMock).toHaveBeenCalled());
+    expect(copyToClipboardMock.mock.calls[0][0]).not.toContain("Failed stage:");
+    expect(copyToClipboardMock.mock.calls[0][0]).not.toContain("draft");
+    expect(copyToClipboardMock.mock.calls[0][0]).not.toContain("user-tag");
   });
 });

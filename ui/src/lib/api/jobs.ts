@@ -35,6 +35,7 @@ export interface TaskDetails {
   partition: string;
   metadata: Record<string, unknown>;
   user_id: number;
+  failed_stage?: string;
 }
 
 /** Row from GET /queue/tasks — note `state` (vs `task_state` in the detail). */
