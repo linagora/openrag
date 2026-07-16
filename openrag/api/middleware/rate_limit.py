@@ -19,7 +19,9 @@ HTTP request per emitted packet whenever it falls back to long-polling.
 
 Env: RATE_LIMIT_ENABLED (true), RATE_LIMIT_DEFAULT (600/minute),
 RATE_LIMIT_AUTH (60/minute, /auth/*), RATE_LIMIT_CHAT (120/minute, /v1/*),
-RATE_LIMIT_EXEMPT_PATHS (/chainlit/,/assets/ — CSV of path prefixes).
+RATE_LIMIT_EXEMPT_PATHS (/chainlit/,/assets/ — CSV of path prefixes). Any
+configured prefix that would cover /auth/ is dropped (with a warning) so the
+brute-force surface can never be exempted, even by operator misconfiguration.
 """
 
 import os
@@ -46,6 +48,11 @@ logger = get_logger()
 # IP keying is the point.
 DEFAULT_EXEMPT_PREFIXES: tuple[str, ...] = ("/chainlit/", "/assets/")
 
+# The one prefix RATE_LIMIT_EXEMPT_PATHS is never allowed to cover, even via a
+# misconfigured operator override (e.g. "/auth/" or an overly broad "/"): it is
+# the brute-force surface and must always stay rate-limited.
+_PROTECTED_PREFIX = "/auth/"
+
 
 def _env_flag(name: str, default: bool) -> bool:
     val = os.environ.get(name)
@@ -69,7 +76,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.enabled = _env_flag("RATE_LIMIT_ENABLED", True)
         self._limiter = MovingWindowRateLimiter(MemoryStorage())
-        self._exempt = _env_prefixes("RATE_LIMIT_EXEMPT_PATHS", DEFAULT_EXEMPT_PREFIXES)
+        exempt = _env_prefixes("RATE_LIMIT_EXEMPT_PATHS", DEFAULT_EXEMPT_PREFIXES)
+        # A prefix that is itself a prefix of "/auth/" (e.g. "/auth/", "/a", "/")
+        # would exempt the brute-force surface via path.startswith() below — drop
+        # those regardless of where they came from, so /auth/ can never be opted
+        # out of rate limiting by RATE_LIMIT_EXEMPT_PATHS.
+        unsafe = tuple(p for p in exempt if _PROTECTED_PREFIX.startswith(p))
+        if unsafe:
+            logger.warning(
+                "Ignoring RATE_LIMIT_EXEMPT_PATHS entries that would exempt /auth/",
+                prefixes=",".join(unsafe),
+            )
+        self._exempt = tuple(p for p in exempt if p not in unsafe)
         # Only parse the limit configs when rate limiting is enabled: a malformed
         # RATE_LIMIT_* value must not crash boot when the feature is turned off
         # (``dispatch`` short-circuits before touching these when disabled).

@@ -189,5 +189,24 @@ def test_exempt_paths_can_be_disabled_with_empty_env(monkeypatch):
     assert client.get("/chainlit/ws/socket.io/").status_code == 429
 
 
+def test_auth_cannot_be_exempted_via_env_override(monkeypatch):
+    # RATE_LIMIT_EXEMPT_PATHS is operator-controlled; a value that covers /auth/
+    # (accidentally, e.g. while tuning the chainlit/assets exemptions, or via an
+    # overly broad prefix) must not disable the brute-force limit on login routes.
+    app = _build_app(monkeypatch, RATE_LIMIT_AUTH="1/minute", RATE_LIMIT_EXEMPT_PATHS="/auth/")
+    client = TestClient(app)
+    assert client.get("/auth/login").status_code == 200
+    assert client.get("/auth/login").status_code == 429
+
+
+def test_auth_cannot_be_exempted_via_broad_prefix_override(monkeypatch):
+    # A prefix broader than "/auth/" (e.g. bare "/") would also swallow it via
+    # startswith() — must be dropped too, not just an exact "/auth/" match.
+    app = _build_app(monkeypatch, RATE_LIMIT_AUTH="1/minute", RATE_LIMIT_EXEMPT_PATHS="/")
+    client = TestClient(app)
+    assert client.get("/auth/login").status_code == 200
+    assert client.get("/auth/login").status_code == 429
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
