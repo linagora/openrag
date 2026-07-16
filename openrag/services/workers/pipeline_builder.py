@@ -15,6 +15,7 @@ from core.models.document import Document, DocumentType
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
+from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.caption import caption_stage
 from services.workers.stages.chunk import chunk_stage
 from services.workers.stages.contextualize import contextualize_stage
@@ -156,6 +157,27 @@ class IndexingPipeline:
                     per_chunk_timeout=self.timeouts.embed_per_chunk,
                 ),
             )
+            # Re-index (``replace=True``) is insert-before-delete: snapshot the
+            # file's existing chunk ids *before* the store stage inserts the new
+            # set, then delete exactly that old set *after* a successful insert.
+            # The Milvus collection is ``auto_id``, so a plain insert can never
+            # overwrite the previous chunks — without this cleanup every re-index
+            # duplicates the whole file (#657). Insert-before-delete also means a
+            # re-index that fails before/at store leaves the old chunks intact
+            # (never an empty window).
+            #
+            # KNOWN SEAMS (Milvus has no transactions — both are strictly better
+            # than the pre-fix behaviour, which duplicated on every re-index):
+            #   * Not atomic under concurrency. Two overlapping re-indexes of the
+            #     *same* file snapshot the same old ids and both keep their new
+            #     set, leaving duplicates. Serializing replace per (partition,
+            #     file_id) belongs with the durable job/lifecycle work (#658/#660).
+            #   * A crash between store and delete orphans the old chunks with no
+            #     reconciler yet (the delete below logs for reconciliation, same
+            #     best-effort contract as WorkerDispatcher.delete_file) — the
+            #     reconciliation job is tracked in #658/#660.
+            replace = bool(row.get("replace"))
+            old_chunk_ids = await self._existing_chunk_ids(row) if replace else []
             await _timed(
                 "store",
                 store_stage(
@@ -165,6 +187,19 @@ class IndexingPipeline:
                     per_chunk_timeout=self.timeouts.store_per_chunk,
                 ),
             )
+            # BUG (#657 follow-up): ``store_stage`` completes successfully even
+            # when it stores zero chunks — an empty/whitespace-only file, a
+            # parser that extracts no text, etc. all legitimately chunk down to
+            # ``[]`` without raising (see chunk_stage / BaseChunker.chunk). If the
+            # delete below fired on ``old_chunk_ids`` alone, a re-index that
+            # produces no new chunks would delete the *entire* previous chunk set
+            # and leave the file with zero chunks in Milvus — worse than the
+            # pre-fix duplication bug, and a violation of the "no empty window"
+            # guarantee this whole insert-before-delete design is built on.
+            # Gating on ``stored_count`` ensures cleanup only runs once we know
+            # the new set actually replaced the old one.
+            if replace and old_chunk_ids and row.get("stored_count"):
+                await self._delete_replaced_chunks(row, old_chunk_ids)
             return row
         finally:
             logger.bind(
@@ -174,6 +209,53 @@ class IndexingPipeline:
                 **{f"ms_{name}": round(value) for name, value in timings.items()},
                 ms_total=round(sum(timings.values())),
             ).info("indexing stage timings (ms)")
+
+    async def _existing_chunk_ids(self, row: MutableMapping[str, Any]) -> list[str]:
+        """Snapshot the chunk ids currently stored for this file (re-index only).
+
+        Returns an empty list — skipping stale-chunk cleanup — when the target
+        can't be resolved or the lookup fails. A snapshot failure must never lose
+        the newly-indexed chunks: leftover duplicates are recoverable, deleting
+        blindly is not.
+        """
+        file_id, partition = _replace_target(row)
+        if not file_id or not partition:
+            return []
+
+        async def _lookup() -> list[str]:
+            if not await self.vector_store.collection_exists("default"):
+                return []
+            return await self.vector_store.query_ids_by_filter("default", {"partition": partition, "file_id": file_id})
+
+        try:
+            # Bound the lookup by the store budget so a stalled Milvus can't hang
+            # replace indexing indefinitely (a timeout just skips cleanup).
+            return await run_with_optional_timeout(_lookup, self.timeouts.store)
+        except Exception as exc:  # noqa: BLE001 - cleanup lookup must not fail the index
+            logger.bind(task_id=row.get("task_id"), file_id=file_id, partition=partition).warning(
+                f"re-index: could not snapshot existing chunks; skipping stale-chunk cleanup: {exc}"
+            )
+            return []
+
+    async def _delete_replaced_chunks(self, row: MutableMapping[str, Any], ids: list[str]) -> None:
+        """Delete the pre-re-index chunk set after the new chunks are stored.
+
+        Best-effort: the new chunks are already safely inserted, so a delete
+        failure only leaves recoverable duplicates behind (logged for
+        reconciliation), mirroring ``WorkerDispatcher.delete_file``.
+        """
+        try:
+            # Bound by the store budget: the new chunks are already stored, so a
+            # stalled delete must not hang the task — it degrades to duplicates.
+            deleted = await run_with_optional_timeout(
+                lambda: self.vector_store.delete(ids, "default"), self.timeouts.store
+            )
+            logger.bind(task_id=row.get("task_id")).debug(f"re-index: removed {deleted} stale chunk(s) after replace")
+        except Exception as exc:  # noqa: BLE001 - new chunks are stored; cleanup is best-effort
+            logger.bind(task_id=row.get("task_id")).error(
+                f"re-index: stored new chunks but failed to delete {len(ids)} stale chunk(s); "
+                f"duplicates remain until reconciliation: {exc}"
+            )
 
     def _effective_indexation_config(self, row: MutableMapping[str, Any]) -> IndexationPipelineConfig | None:
         raw_config = row.get("indexation_config", self.indexation_config)
@@ -317,6 +399,19 @@ def build_indexing_pipeline(
         contextualizer_factory=contextualizer_factory,
         topic_tagger_factory=topic_tagger_factory,
     )
+
+
+def _replace_target(row: MutableMapping[str, Any]) -> tuple[str | None, str | None]:
+    """Resolve ``(file_id, partition)`` for a re-index row.
+
+    ``file_id`` is the document's identity (``Document.id`` == ``Chunk.file_id``
+    in Milvus); ``partition`` scopes the delete so only this file's chunks in
+    this partition are ever touched.
+    """
+    document = row.get("document")
+    file_id = getattr(document, "id", None)
+    partition = row.get("partition") or getattr(document, "partition", None)
+    return file_id, partition
 
 
 __all__ = ["IndexingPipeline", "PipelineTimeouts", "build_indexing_pipeline"]
