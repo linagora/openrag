@@ -15,7 +15,7 @@ long-lived branches, plus short-lived branches for features, releases, and hotfi
 | `release/X.Y.Z` | Stabilize a version before shipping. | `develop` | `main` **and** `develop` |
 | `hotfix/*` | Urgent production fix that can't wait for the next release. | `main` | `main` **and** `develop` |
 
-```
+```text
 feature/*  ──► develop ──► release/X.Y.Z ──► main   (tag vX.Y.Z)
                    ▲                            │
 hotfix/*  ─────────┴────────── main ────────────┘
