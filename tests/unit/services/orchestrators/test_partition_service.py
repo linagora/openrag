@@ -141,6 +141,7 @@ def _svc(
     urepo=None,
     collection="vdb",
     tsm=None,
+    task_cancel_timeout=60.0,
 ) -> PartitionService:
     return PartitionService(
         partition_repo=prepo or FakePartitionRepo(),
@@ -150,6 +151,7 @@ def _svc(
         user_repo=urepo or FakeUserRepo(),
         collection=collection,
         task_state_manager=tsm,
+        task_cancel_timeout=task_cancel_timeout,
     )
 
 
@@ -345,6 +347,27 @@ async def test_delete_partition_cancels_active_indexing_tasks_before_cleanup():
     tsm.get_matching_active_task_refs.remote.assert_called_once_with(partition="p1", file_id=None)
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_does_not_cleanup_when_matching_task_has_no_ref():
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    prepo = FakePartitionRepo(existing={"p1"})
+    vstore = FakeVectorStore()
+    tsm = MagicMock()
+    tsm.get_matching_active_task_refs = MagicMock()
+    tsm.get_matching_active_task_refs.remote = AsyncMock(return_value={"task-1": {"ref": None}})
+    tsm.set_state = MagicMock()
+    tsm.set_state.remote = AsyncMock(return_value=None)
+
+    with pytest.raises(TimeoutError, match="become cancellable"), patch("ray.cancel") as cancel:
+        await _svc(prepo=prepo, vstore=vstore, tsm=tsm, task_cancel_timeout=0.01).delete_partition("p1")
+
+    cancel.assert_not_called()
+    tsm.set_state.remote.assert_not_called()
+    assert vstore.deleted_filters == []
+    assert prepo.deleted == []
 
 
 @pytest.mark.asyncio
