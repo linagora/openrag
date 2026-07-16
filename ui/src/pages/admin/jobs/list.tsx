@@ -8,10 +8,11 @@ import { usePermissions } from "@/lib/permissions";
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { listTasks, type TaskListItem } from "@/lib/api/jobs";
+import { getQueueInfo, listTasks, type QueueInfo, type TaskListItem } from "@/lib/api/jobs";
 
 // OpenRag exposes per-file indexing tasks (TaskStateManager), not batch "jobs".
 const STATUS_TABS = ["ALL", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED"] as const;
@@ -19,6 +20,47 @@ const JOBS_REFETCH_INTERVAL_MS = 5000;
 const JOB_SEARCH_DEBOUNCE_MS = 250;
 
 const str = (v: unknown) => (v == null ? "" : String(v));
+
+function QueuePressureSummary({
+  queueInfo,
+  isLoading,
+  isError,
+}: {
+  queueInfo?: QueueInfo;
+  isLoading: boolean;
+  isError: boolean;
+}) {
+  if (isLoading) {
+    return <p className="text-sm text-muted-foreground">Queue: loading...</p>;
+  }
+  if (isError || !queueInfo) {
+    return (
+      <p className="text-sm text-muted-foreground" title="Queue information is currently unavailable">
+        Queue unavailable
+      </p>
+    );
+  }
+
+  const totalSlots = queueInfo.workers.total_slots;
+  const queued = queueInfo.tasks.active_statuses.QUEUED ?? 0;
+  const running = Math.max(0, queueInfo.tasks.active - queued);
+  const saturated = totalSlots > 0 && queued > 0 && running >= totalSlots;
+  const busy = running > 0 || queued > 0;
+  const status = saturated ? "Saturated" : busy ? "Busy" : "Idle";
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground" aria-label="Queue pressure">
+      <Badge variant="outline" className={saturated ? "text-destructive" : undefined}>
+        {status}
+      </Badge>
+      <span>Queued {queued}</span>
+      <span>Running {running}/{totalSlots}</span>
+      <span>
+        Workers {queueInfo.workers.pool_size} x {queueInfo.workers.max_per_actor}
+      </span>
+    </div>
+  );
+}
 
 const columns: ColumnDef<TaskListItem, unknown>[] = [
   {
@@ -64,6 +106,11 @@ export default function JobListPage() {
     queryFn: () => listTasks(statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab),
     refetchInterval: JOBS_REFETCH_INTERVAL_MS, // poll — OpenRag has no task SSE
   });
+  const queueInfoQuery = useQuery({
+    queryKey: ["queue-info"],
+    queryFn: getQueueInfo,
+    refetchInterval: JOBS_REFETCH_INTERVAL_MS,
+  });
 
   const tasks = useMemo(() => tasksQuery.data?.tasks ?? [], [tasksQuery.data?.tasks]);
   const filteredTasks = useMemo(() => {
@@ -100,16 +147,23 @@ export default function JobListPage() {
               className="pl-9"
             />
           </div>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             <p className="text-sm text-muted-foreground">
               {filteredTasks.length} job{filteredTasks.length === 1 ? "" : "s"}
             </p>
+            <QueuePressureSummary
+              queueInfo={queueInfoQuery.data}
+              isLoading={queueInfoQuery.isLoading}
+              isError={queueInfoQuery.isError}
+            />
             <Button
               variant="outline"
               size="icon-sm"
               onClick={() => {
                 setManualRefreshing(true);
-                tasksQuery.refetch().finally(() => setManualRefreshing(false));
+                Promise.allSettled([tasksQuery.refetch(), queueInfoQuery.refetch()]).finally(() =>
+                  setManualRefreshing(false),
+                );
               }}
               disabled={manualRefreshing}
               aria-label="Refresh jobs"
