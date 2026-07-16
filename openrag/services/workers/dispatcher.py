@@ -124,9 +124,11 @@ class WorkerDispatcher(IndexingDispatcher):
             if registered is False:
                 raise RuntimeError(f"Task {task_id} was cancelled before worker ref registration")
         except Exception:
+            mark_submit_failed = True
             if task is not None:
-                await self._cancel_submitted_task(task_id, task)
-            await self._mark_submit_failed(task_id, traceback.format_exc())
+                mark_submit_failed = await self._cancel_submitted_task(task_id, task)
+            if mark_submit_failed:
+                await self._mark_submit_failed(task_id, traceback.format_exc())
             raise
         return task_id
 
@@ -143,7 +145,7 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=f"set_state({task_id}, FAILED)",
         )
 
-    async def _cancel_submitted_task(self, task_id: str, task: Any) -> None:
+    async def _cancel_submitted_task(self, task_id: str, task: Any) -> bool:
         import ray
 
         try:
@@ -154,7 +156,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 task_id=task_id,
                 error=str(exc),
             )
-            return
+            raise RuntimeError(f"Failed to cancel submitted indexing task {task_id}") from exc
         try:
             await call_ray_actor_with_timeout(
                 future=task,
@@ -162,18 +164,27 @@ class WorkerDispatcher(IndexingDispatcher):
                 task_description=f"cancel_submitted_task({task_id})",
             )
         except TaskCancelledError:
-            return
-        except TimeoutError:
+            return True
+        except TimeoutError as exc:
             logger.warning(
                 "Timed out waiting for submitted indexing task to settle after dispatch failure",
                 task_id=task_id,
             )
+            raise TimeoutError(
+                f"Timed out waiting for submitted indexing task {task_id} to settle after dispatch failure"
+            ) from exc
         except Exception as exc:
             logger.info(
                 "Submitted indexing task settled after dispatch failure cancellation request",
                 task_id=task_id,
                 error=str(exc),
             )
+            return False
+        logger.info(
+            "Submitted indexing task completed before dispatch failure cancellation took effect",
+            task_id=task_id,
+        )
+        return False
 
     async def delete_file(self, file_id: str, partition: str) -> None:
         cancelled = await cancel_active_indexing_tasks(

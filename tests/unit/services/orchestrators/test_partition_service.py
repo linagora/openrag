@@ -353,6 +353,45 @@ async def test_delete_partition_cancels_active_indexing_tasks_before_cleanup():
 
 
 @pytest.mark.asyncio
+async def test_delete_partition_uses_legacy_task_state_lookup_when_matching_api_missing():
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    prepo = FakePartitionRepo(existing={"p1"})
+    vstore = FakeVectorStore()
+    ref = asyncio.get_running_loop().create_future()
+    ref.set_result(None)
+    tsm = MagicMock()
+    del tsm.get_matching_active_task_refs
+    tsm.get_all_info = MagicMock()
+    tsm.get_all_info.remote = AsyncMock(
+        return_value={
+            "task-1": {
+                "state": "SERIALIZING",
+                "details": {"partition": "p1", "file_id": "f1"},
+            },
+            "other": {
+                "state": "SERIALIZING",
+                "details": {"partition": "p2", "file_id": "f2"},
+            },
+        }
+    )
+    tsm.get_object_ref = MagicMock()
+    tsm.get_object_ref.remote = AsyncMock(return_value={"ref": ref})
+    tsm.set_state = MagicMock()
+    tsm.set_state.remote = AsyncMock(return_value=None)
+
+    with patch("ray.cancel") as cancel:
+        await _svc(prepo=prepo, vstore=vstore, tsm=tsm).delete_partition("p1")
+
+    tsm.get_all_info.remote.assert_called_once_with()
+    tsm.get_object_ref.remote.assert_called_once_with("task-1")
+    cancel.assert_called_once_with(ref, recursive=True)
+    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    assert vstore.deleted_filters == [{"partition": "p1"}, {"partition": "p1"}]
+    assert prepo.deleted == ["p1"]
+
+
+@pytest.mark.asyncio
 async def test_delete_partition_does_not_cleanup_when_cancelled_task_does_not_settle():
     from unittest.mock import AsyncMock, MagicMock, patch
 
