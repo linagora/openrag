@@ -191,4 +191,6 @@ async def test_reindex_is_scoped_by_partition(store: MilvusVectorStore) -> None:
 
     assert await _count_chunks(store, "tenant-a", file_id) == 2
     # tenant-b's chunks are the exact same rows as before — untouched.
-    assert set(await store.query_ids_by_filter("default", {"partition": "tenant-b", "file_id": file_id})) == tenant_b_ids
+    assert (
+        set(await store.query_ids_by_filter("default", {"partition": "tenant-b", "file_id": file_id})) == tenant_b_ids
+    )
