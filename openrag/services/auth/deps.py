@@ -13,13 +13,12 @@ trusts them.
 
 from __future__ import annotations
 
-import httpx
 import os
 from threading import Lock
 
-from services.auth.oidc_client import OIDCClient
-
+import httpx
 from core.utils.string_utils import str_to_bool
+from services.auth.oidc_client import OIDCClient
 
 _client: OIDCClient | None = None
 _lock = Lock()
