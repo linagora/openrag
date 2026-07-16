@@ -187,7 +187,18 @@ class IndexingPipeline:
                     per_chunk_timeout=self.timeouts.store_per_chunk,
                 ),
             )
-            if replace and old_chunk_ids:
+            # BUG (#657 follow-up): ``store_stage`` completes successfully even
+            # when it stores zero chunks — an empty/whitespace-only file, a
+            # parser that extracts no text, etc. all legitimately chunk down to
+            # ``[]`` without raising (see chunk_stage / BaseChunker.chunk). If the
+            # delete below fired on ``old_chunk_ids`` alone, a re-index that
+            # produces no new chunks would delete the *entire* previous chunk set
+            # and leave the file with zero chunks in Milvus — worse than the
+            # pre-fix duplication bug, and a violation of the "no empty window"
+            # guarantee this whole insert-before-delete design is built on.
+            # Gating on ``stored_count`` ensures cleanup only runs once we know
+            # the new set actually replaced the old one.
+            if replace and old_chunk_ids and row.get("stored_count"):
                 await self._delete_replaced_chunks(row, old_chunk_ids)
             return row
         finally:

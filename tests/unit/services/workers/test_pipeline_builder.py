@@ -799,3 +799,29 @@ async def test_reindex_delete_failure_is_best_effort():
 
     assert row["stage"] == "stored"
     assert vs.events == ["query", "upsert", "delete"]
+
+
+@pytest.mark.asyncio
+async def test_reindex_with_zero_new_chunks_keeps_old_chunks():
+    # Regression guard: a blank/whitespace-only file, or a parser that extracts
+    # no text, legitimately chunks down to [] without raising (chunk_stage /
+    # BaseChunker.chunk both treat this as success). If the old snapshot were
+    # deleted whenever it was merely non-empty, a re-index that stores zero new
+    # chunks would wipe the file's entire previous chunk set — worse than the
+    # pre-fix duplication bug, and a violation of the "no empty window"
+    # guarantee. The old chunks must survive when nothing new was stored.
+    vs = RecordingVectorStore(existing_ids=["101", "102"])
+    document = Document(filename="blank.txt", text="", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([]),
+        embedder=FakeEmbedder([]),
+        vector_store=vs,
+    )
+
+    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+
+    assert row["stored_count"] == 0
+    assert vs.deleted == []
+    assert "delete" not in vs.events
