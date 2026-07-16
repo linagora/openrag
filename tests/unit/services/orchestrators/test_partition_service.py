@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from core.utils.exceptions import NotFoundError, PartitionNotFoundError, UserNotFoundError, ValidationError
 from services.orchestrators.partition_service import PartitionService
@@ -334,7 +336,8 @@ async def test_delete_partition_cancels_active_indexing_tasks_before_cleanup():
     from unittest.mock import AsyncMock, MagicMock, patch
 
     prepo = FakePartitionRepo(existing={"p1"})
-    ref = object()
+    ref = asyncio.get_running_loop().create_future()
+    ref.set_result(None)
     tsm = MagicMock()
     tsm.get_matching_active_task_refs = MagicMock()
     tsm.get_matching_active_task_refs.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
@@ -347,6 +350,28 @@ async def test_delete_partition_cancels_active_indexing_tasks_before_cleanup():
     tsm.get_matching_active_task_refs.remote.assert_called_once_with(partition="p1", file_id=None)
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_does_not_cleanup_when_cancelled_task_does_not_settle():
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    prepo = FakePartitionRepo(existing={"p1"})
+    vstore = FakeVectorStore()
+    ref = asyncio.get_running_loop().create_future()
+    tsm = MagicMock()
+    tsm.get_matching_active_task_refs = MagicMock()
+    tsm.get_matching_active_task_refs.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
+    tsm.set_state = MagicMock()
+    tsm.set_state.remote = AsyncMock(return_value=None)
+
+    with pytest.raises(TimeoutError, match="settle after cancellation request"), patch("ray.cancel") as cancel:
+        await _svc(prepo=prepo, vstore=vstore, tsm=tsm, task_cancel_timeout=0.01).delete_partition("p1")
+
+    assert cancel.call_count >= 1
+    tsm.set_state.remote.assert_not_called()
+    assert vstore.deleted_filters == []
+    assert prepo.deleted == []
 
 
 @pytest.mark.asyncio

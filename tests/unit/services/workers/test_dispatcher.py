@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,6 +20,12 @@ def _pool_with_ref(ref: object) -> MagicMock:
     # awaits the call and takes element 0).
     pool.submit = _remote_mock([ref])
     return pool
+
+
+def _settled_ref() -> asyncio.Future[None]:
+    ref = asyncio.get_running_loop().create_future()
+    ref.set_result(None)
+    return ref
 
 
 def _vector_store() -> MagicMock:
@@ -276,7 +283,7 @@ async def test_delete_file_cleans_vector_store_before_database() -> None:
 async def test_delete_file_cancels_active_matching_indexing_task_before_cleanup() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
-    ref = object()
+    ref = _settled_ref()
     tsm = _task_state_manager()
     tsm.get_matching_active_task_refs = _remote_mock({"task-1": {"ref": ref}})
     dispatcher = WorkerDispatcher(
@@ -300,7 +307,7 @@ async def test_delete_file_cancels_active_matching_indexing_task_before_cleanup(
 async def test_delete_file_waits_for_matching_task_ref_before_cleanup() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
-    ref = object()
+    ref = _settled_ref()
     tsm = _task_state_manager()
     tsm.get_matching_active_task_refs.remote = AsyncMock(
         side_effect=[
@@ -325,6 +332,66 @@ async def test_delete_file_waits_for_matching_task_ref_before_cleanup() -> None:
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
     assert vector_store.delete_by_filter.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_file_waits_for_cancelled_task_to_settle_before_cleanup() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    settled = asyncio.Event()
+    ref = asyncio.create_task(settled.wait())
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs = _remote_mock({"task-1": {"ref": ref}})
+    vector_store = _vector_store()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=vector_store,
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("ray.cancel") as cancel:
+        delete_task = asyncio.create_task(dispatcher.delete_file("file-1", "tenant-a"))
+        await asyncio.sleep(0)
+        assert vector_store.delete_by_filter.await_count == 0
+        settled.set()
+        await delete_task
+
+    cancel.assert_called_once_with(ref, recursive=True)
+    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    assert vector_store.delete_by_filter.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_file_does_not_cleanup_when_cancelled_task_does_not_settle() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = asyncio.get_running_loop().create_future()
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs = _remote_mock({"task-1": {"ref": ref}})
+    vector_store = _vector_store()
+    document_repo = _document_repo()
+    workspace_repo = _workspace_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=workspace_repo,
+        collection="default",
+        timeout=0.01,
+    )
+
+    with pytest.raises(TimeoutError, match="settle after cancellation request"), patch("ray.cancel") as cancel:
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    assert cancel.call_count >= 1
+    tsm.set_state.remote.assert_not_called()
+    vector_store.delete_by_filter.assert_not_called()
+    workspace_repo.remove_file_from_all_workspaces.assert_not_called()
+    document_repo.remove_file_from_partition.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -360,7 +427,7 @@ async def test_delete_file_does_not_cleanup_when_matching_task_has_no_ref() -> N
 async def test_delete_file_does_not_cleanup_when_matching_task_cancel_fails() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
-    ref = object()
+    ref = _settled_ref()
     tsm = _task_state_manager()
     tsm.get_matching_active_task_refs.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
     vector_store = _vector_store()

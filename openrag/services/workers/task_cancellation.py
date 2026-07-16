@@ -6,6 +6,7 @@ from typing import Any
 
 import ray
 from core.utils.logging import get_logger
+from ray.exceptions import TaskCancelledError
 from services.workers.ray_utils import call_ray_actor_with_timeout
 
 logger = get_logger()
@@ -57,6 +58,13 @@ async def cancel_active_indexing_tasks(
                     error=str(exc),
                 )
                 raise RuntimeError(f"Failed to cancel active indexing task {task_id}") from exc
+            await _wait_for_task_to_settle(
+                ref,
+                task_id=task_id,
+                deadline=deadline,
+                partition=partition,
+                file_id=file_id,
+            )
             remaining = _remaining_timeout(deadline, partition=partition, file_id=file_id)
             await call_ray_actor_with_timeout(
                 future=task_state_manager.set_state.remote(task_id, "CANCELLED"),
@@ -82,6 +90,38 @@ async def cancel_active_indexing_tasks(
 
 def _task_ref(object_ref: Any) -> Any | None:
     return object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+
+
+async def _wait_for_task_to_settle(
+    ref: Any,
+    *,
+    task_id: str,
+    deadline: float,
+    partition: str,
+    file_id: str | None,
+) -> None:
+    try:
+        await call_ray_actor_with_timeout(
+            future=ref,
+            timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
+            task_description=f"wait_for_cancelled_indexing_task({task_id})",
+        )
+    except TaskCancelledError:
+        return
+    except TimeoutError as exc:
+        raise TimeoutError(
+            "Timed out waiting for active indexing task to settle after cancellation request "
+            f"before deleting partition={partition!r}, file_id={file_id!r}, task_id={task_id!r}"
+        ) from exc
+    except Exception as exc:
+        logger.info(
+            "Active indexing task settled after cancellation request",
+            task_id=task_id,
+            partition=partition,
+            file_id=file_id,
+            result="failed",
+            error=str(exc),
+        )
 
 
 def _remaining_timeout(deadline: float, *, partition: str, file_id: str | None) -> float:
