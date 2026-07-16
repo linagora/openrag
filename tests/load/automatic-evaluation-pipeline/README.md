@@ -80,12 +80,12 @@ All tunable behaviour lives in `config.py` as a single `CONFIG` object built fro
 | Section | Used by | Key knobs |
 |---------|---------|-----------|
 | `common` | all scripts | `partition`, `dataset_path`, `output_dir` |
-| `benchmark` | `benchmark.py` | target/judge sampling, concurrency, `label_language`, `cot_audit_fraction`, `faithfulness_fraction`, `limit` |
+| `benchmark` | `benchmark.py` | target/judge sampling, concurrency, `label_language`, `cot_audit_fraction`, `faithfulness_fraction`, `limit`, `ablation_limit` |
 | `ablation` | `context_ablation.py` | `temperature`, `timeout`, `limit`, concurrency, `csv_name` |
 | `question_gen` | `generate_questions.py` | gen sampling, question mix, `language` (en/fr), `schema_version` / `prompt_version`, `clustering` (method + UMAP / KMeans / DBSCAN params), `filtration` (critic thresholds + retries), `typing` (question-type distribution) |
 | `upload` | `upload_files.py` | `dir_path`, retries, timeouts, SCORE poll interval / timeout |
 
-Every script accepts `--partition` to override `common.partition` for a single run. `benchmark.py` and `context_ablation.py` additionally take `--base-url`, `--dataset`, `--output-dir`, and `--limit`. `benchmark.py` also takes `--no-retrieval` (skip ID-based retrieval metrics). `orchestrator.py` is driven entirely by CLI flags (below), reading only `common.partition` / `common.dataset_path` as defaults.
+Every script accepts `--partition` to override `common.partition` for a single run. `benchmark.py` and `context_ablation.py` additionally take `--base-url`, `--dataset`, `--output-dir`, and `--limit`. `benchmark.py` also takes `--no-retrieval` (skip ID-based retrieval metrics) and `--ablation` / `--ablation-limit` (run the context-contribution ablation inline after the benchmark; see §5). `orchestrator.py` is driven entirely by CLI flags (below), reading only `common.partition` / `common.dataset_path` as defaults.
 
 ---
 
@@ -160,12 +160,12 @@ Output (per run, timestamped in `reports/`): a JSON summary the dashboard reads,
 If you already have a curated dataset and the matching documents are already indexed in the partition, skip steps 1–2:
 
 ```bash
-./run_all.sh --golden /path/to/my_golden.json -- --partition *your_partition*
+PARTITION=*your_partition* ./run_all.sh --golden /path/to/my_golden.json
 # or equivalently
-GOLDEN_DATASET=/path/to/my_golden.json ./run_all.sh -- --partition *your_partition*
+PARTITION=*your_partition* GOLDEN_DATASET=/path/to/my_golden.json ./run_all.sh
 ```
 
-`run_all.sh` forwards extra args after `--` straight to `benchmark.py`.
+Override the partition with the `PARTITION` env var (it defaults to `common.partition` in `config.py`). Any unrecognised args are forwarded straight to `benchmark.py` — e.g. `./run_all.sh --golden g.json --limit 20 --no-retrieval`. Don't pass `--partition` this way: `run_all.sh` already injects its own, so use the `PARTITION` env var instead.
 
 ### 5. Context-contribution ablation
 
@@ -176,6 +176,12 @@ python context_ablation.py --partition *your_partition* --limit 10
 ```
 
 For N random answerable questions, captures both the OpenRAG answer (with retrieved chunks) and the same generator model answering the bare question (no chunks). Writes `reports/context_ablation.csv` for side-by-side inspection in the dashboard.
+
+You can also run this **inline after a benchmark** without a separate invocation — `benchmark.py --ablation` runs the ablation once the benchmark completes, sampling `--ablation-limit` questions (default `benchmark.ablation_limit` in `config.py`):
+
+```bash
+python benchmark.py --partition *your_partition* --ablation [--ablation-limit 10]
+```
 
 ### 6. Orchestrated multi-version runs (deploy → eval → teardown)
 

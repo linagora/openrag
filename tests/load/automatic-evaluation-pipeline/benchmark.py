@@ -910,6 +910,27 @@ async def run_single_query(
     return result
 
 
+async def _preflight_openrag(base_url: str, timeout: float = 5.0) -> None:
+    """Fail fast if the OpenRAG server is unreachable, before running the full dataset.
+
+    Hits the auth-free ``/health_check`` endpoint with a short timeout. Any HTTP
+    response (even 404/401/500) means the server is *up* and only that matters here;
+    only a transport-level failure (connection refused, DNS, timeout) means it's
+    down. Raising here turns a slow, all-failed run into a ~1s clear error.
+    """
+    url = f"{base_url.rstrip('/')}/health_check"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url)
+        logger.info(f"Pre-flight: OpenRAG reachable at {base_url} (HTTP {resp.status_code}).")
+    except httpx.RequestError as e:
+        raise RuntimeError(
+            f"OpenRAG server at {base_url} is not reachable ({type(e).__name__}: {e}). "
+            "Start the instance (e.g. `docker compose up -d`) and retry — aborting now "
+            "instead of running the whole dataset against a down server."
+        ) from e
+
+
 async def main(
     partition: str = CONFIG.common.partition,
     base_url: str = os.environ.get("API_BASE_URL"),
@@ -923,6 +944,10 @@ async def main(
 ):
     run_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     os.makedirs(output_dir, exist_ok=True)
+
+    # Fail fast (~1s) if the target is down, rather than grinding through the whole
+    # dataset of retrying connection errors before the all-failed guard below.
+    await _preflight_openrag(base_url)
 
     eval_dataset = _load_and_validate_dataset(dataset_path)
 
