@@ -200,6 +200,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     partition=partition,
                     error=str(exc),
                 )
+                raise
 
     async def update_file_metadata(
         self,

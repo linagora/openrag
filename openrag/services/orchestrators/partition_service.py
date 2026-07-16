@@ -297,6 +297,7 @@ class PartitionService:
                     partition=partition,
                     error=str(exc),
                 )
+                raise
             else:
                 logger.info(
                     "Deleted race-leftover points from partition",

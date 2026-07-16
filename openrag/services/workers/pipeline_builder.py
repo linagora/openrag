@@ -169,9 +169,8 @@ class IndexingPipeline:
             #     set, leaving duplicates. Serializing replace per (partition,
             #     file_id) belongs with the durable job/lifecycle work (#658/#660).
             #   * A crash between store and delete orphans the old chunks with no
-            #     reconciler yet (the delete below logs for reconciliation, same
-            #     best-effort contract as WorkerDispatcher.delete_file) — the
-            #     reconciliation job is tracked in #658/#660.
+            #     reconciler yet (the delete below logs for reconciliation) —
+            #     the reconciliation job is tracked in #658/#660.
             replace = bool(row.get("replace"))
             old_chunk_ids = await self._existing_chunk_ids(row) if replace else []
             await _timed(
@@ -238,7 +237,7 @@ class IndexingPipeline:
 
         Best-effort: the new chunks are already safely inserted, so a delete
         failure only leaves recoverable duplicates behind (logged for
-        reconciliation), mirroring ``WorkerDispatcher.delete_file``.
+        reconciliation).
         """
         try:
             # Bound by the store budget: the new chunks are already stored, so a
