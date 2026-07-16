@@ -132,6 +132,9 @@ class TaskStateManager:
                 if info.state not in ACTIVE_INDEXING_STATES:
                     continue
                 details = info.details or {}
+                if not details:
+                    matches[task_id] = info.object_ref
+                    continue
                 if details.get("partition") != partition:
                     continue
                 if file_id is not None and details.get("file_id") != file_id:

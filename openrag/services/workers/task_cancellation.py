@@ -145,6 +145,16 @@ async def _get_matching_active_task_refs_legacy(
         details = info.get("details") or {}
         if not isinstance(details, dict):
             continue
+        if not details:
+            object_ref = None
+            if get_object_ref_remote is not None:
+                object_ref = await call_ray_actor_with_timeout(
+                    future=get_object_ref_remote(task_id),
+                    timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
+                    task_description=f"get_object_ref({task_id}) for delete cleanup",
+                )
+            matches[task_id] = object_ref
+            continue
         if details.get("partition") != partition:
             continue
         if file_id is not None and details.get("file_id") != file_id:

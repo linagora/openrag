@@ -757,6 +757,45 @@ async def test_delete_file_uses_legacy_task_state_lookup_when_matching_api_missi
 
 
 @pytest.mark.asyncio
+async def test_delete_file_legacy_lookup_blocks_detail_less_active_task() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = _settled_ref()
+    tsm = _task_state_manager()
+    del tsm.get_matching_active_task_refs
+    tsm.get_all_info = _remote_mock(
+        {
+            "task-1": {
+                "state": "QUEUED",
+                "details": {},
+            },
+            "other-partition": {
+                "state": "SERIALIZING",
+                "details": {"partition": "tenant-b", "file_id": "file-1"},
+            },
+        }
+    )
+    tsm.get_object_ref = _remote_mock({"ref": ref})
+    vector_store = _vector_store()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=vector_store,
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("ray.cancel") as cancel:
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    tsm.get_object_ref.remote.assert_called_once_with("task-1")
+    cancel.assert_called_once_with(ref, recursive=True)
+    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    assert vector_store.delete_by_filter.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_delete_file_does_not_cleanup_when_cancelled_task_does_not_settle() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
