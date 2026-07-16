@@ -1,10 +1,20 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import type { MouseEvent as ReactMouseEvent } from "react";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { deleteFile } from "@/lib/api/indexing";
+import { toast } from "sonner";
+import type { Action } from "sonner";
+import { deleteFile, uploadFile } from "@/lib/api/indexing";
 import DocumentListPage from "./list";
+
+vi.mock("sonner", () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+  },
+}));
 
 vi.mock("@/lib/permissions", () => ({
   usePermissions: () => ({
@@ -54,6 +64,13 @@ vi.mock("@/lib/api/indexing", () => ({
 }));
 
 const deleteFileMock = vi.mocked(deleteFile);
+const uploadFileMock = vi.mocked(uploadFile);
+const toastSuccessMock = vi.mocked(toast.success);
+
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location">{location.pathname}</output>;
+}
 
 function renderDocuments() {
   const queryClient = new QueryClient({
@@ -67,14 +84,17 @@ function renderDocuments() {
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
         <DocumentListPage />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
-describe("DocumentListPage bulk actions", () => {
+describe("DocumentListPage", () => {
   beforeEach(() => {
     deleteFileMock.mockClear();
+    uploadFileMock.mockReset();
+    toastSuccessMock.mockClear();
   });
 
   it("selects all documents from the table header and deletes the selected files", async () => {
@@ -92,5 +112,34 @@ describe("DocumentListPage bulk actions", () => {
 
     await waitFor(() => expect(deleteFileMock).toHaveBeenCalledWith("docs", "file-a"));
     expect(deleteFileMock).toHaveBeenCalledWith("docs", "file-b");
+  });
+
+  it("summarizes queued files and links directly to the jobs view", async () => {
+    uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-1" });
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    const files = [
+      new File(["first"], "first.txt", { type: "text/plain" }),
+      new File(["second"], "second.txt", { type: "text/plain" }),
+    ];
+    await userEvent.upload(screen.getByLabelText("Files"), files);
+    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    await waitFor(() => expect(uploadFileMock).toHaveBeenCalledTimes(2));
+    expect(toastSuccessMock).toHaveBeenCalledWith(
+      "2 file(s) queued for indexing.",
+      expect.objectContaining({
+        action: expect.objectContaining({ label: "View Jobs" }),
+      }),
+    );
+
+    const options = toastSuccessMock.mock.calls[0][1];
+    const action = options?.action as unknown as Action;
+    act(() => action.onClick({} as ReactMouseEvent<HTMLButtonElement>));
+
+    expect(screen.getByTestId("location").textContent).toBe("/jobs");
   });
 });

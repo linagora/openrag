@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef, OnChangeFn, RowSelectionState } from "@tanstack/react-table";
 import { Plus, Eye, Trash2, RefreshCw } from "lucide-react";
@@ -40,6 +40,7 @@ const fileLabel = (f: PartitionFile) => (f.filename as string) || f.file_id;
 
 export default function DocumentListPage() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { canWrite } = usePermissions();
 
   // OpenRag has no flat/cross-partition file list — files live inside a
@@ -198,7 +199,14 @@ export default function DocumentListPage() {
       return { ok, errors };
     },
     onSuccess: ({ ok, errors }) => {
-      if (ok) toast.success(`${ok} file(s) queued for indexing — track progress in Jobs.`);
+      if (ok) {
+        toast.success(`${ok} file(s) queued for indexing.`, {
+          action: {
+            label: "View Jobs",
+            onClick: () => navigate("/jobs"),
+          },
+        });
+      }
       if (errors.length) toast.error(`${errors.length} upload(s) failed: ${errors[0]}`);
       setUploadOpen(false);
       setFiles([]);
