@@ -103,6 +103,14 @@ describe("PartitionListPage bulk actions", () => {
     expect(screen.getByRole("button", { name: "Create" })).not.toBeNull();
   });
 
+  it("labels row icon actions", async () => {
+    permissions.canManagePartitions = true;
+    renderPartitions();
+
+    expect(await screen.findByRole("link", { name: /edit owned-a/i })).not.toBeNull();
+    expect(screen.getByRole("button", { name: /delete owned-a/i })).not.toBeNull();
+  });
+
   it("selects all deletable partitions and deletes only those partitions", async () => {
     renderPartitions();
 
