@@ -117,6 +117,8 @@ All variables must be set when `AUTH_MODE=oidc`. If any required variable is mis
 | `OIDC_AUTO_PROVISION_LOGIN` | No | `false` | When `true`, an unknown `sub` triggers creation of a non-admin user from the ID-token claims instead of returning `403 User not registered`. Also keeps the user's `display_name` and `email` in sync with the claims on every subsequent login. See [Auto-provisioning](#auto-provisioning-optional). |
 | `OIDC_SCOPES` | No | `openid email profile offline_access` | Space-separated OIDC scopes; include `offline_access` for refresh tokens |
 | `OIDC_POST_LOGOUT_REDIRECT_URI` | No | — | URL the IdP sends the user to after RP-initiated logout. **No default**: if unset AND the IdP doesn't have an `end_session_endpoint`, `/auth/logout` returns a plain 200 confirming the logout. Avoid pointing this to an OpenRag URL (triggers re-auth — silent SSO loop). |
+| `SSL_NO_VERIFY` | No | false | set to ``true`` to skip TLS certificate verification on requests to the IdP, e.g. for a self-signed Keycloak in dev |
+
 
 \* Required when `AUTH_MODE=oidc`
 
@@ -191,6 +193,7 @@ OIDC_POST_LOGOUT_REDIRECT_URI=/
 # Optional — sync display name and email from IdP on every login:
 # OIDC_CLAIM_SOURCE=id_token      # or 'userinfo'
 # OIDC_CLAIM_MAPPING=display_name:name,email:email
+# SSL_NO_VERIFY=False # or true to skip SSL verification 
 ```
 
 ---
