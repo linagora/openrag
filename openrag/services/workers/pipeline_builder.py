@@ -26,6 +26,9 @@ from services.workers.stages.topic_tag import topic_tag_stage
 
 logger = get_logger()
 
+REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY = "_replace_old_chunk_collection"
+REPLACE_OLD_CHUNK_IDS_ROW_KEY = "_replace_old_chunk_ids"
+
 
 @dataclass(slots=True, frozen=True)
 class PipelineTimeouts:
@@ -155,7 +158,8 @@ class IndexingPipeline:
             )
             # Re-index (``replace=True``) is insert-before-delete: snapshot the
             # file's existing chunk ids *before* the store stage inserts the new
-            # set, then delete exactly that old set *after* a successful insert.
+            # set, then let the worker delete exactly that old set *after* the
+            # catalog row is successfully written.
             # The Milvus collection is ``auto_id``, so a plain insert can never
             # overwrite the previous chunks — without this cleanup every re-index
             # duplicates the whole file (#657). Insert-before-delete also means a
@@ -168,9 +172,11 @@ class IndexingPipeline:
             #     *same* file snapshot the same old ids and both keep their new
             #     set, leaving duplicates. Serializing replace per (partition,
             #     file_id) belongs with the durable job/lifecycle work (#658/#660).
-            #   * A crash between store and delete orphans the old chunks with no
-            #     reconciler yet (the delete below logs for reconciliation) —
-            #     the reconciliation job is tracked in #658/#660.
+            #   * A crash between store and the worker's post-catalog cleanup
+            #     can orphan the old chunks with no reconciler yet — the
+            #     reconciliation job is tracked in #658/#660.
+            row.pop(REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY, None)
+            row.pop(REPLACE_OLD_CHUNK_IDS_ROW_KEY, None)
             replace = bool(row.get("replace"))
             old_chunk_ids = await self._existing_chunk_ids(row) if replace else []
             await _timed(
@@ -191,10 +197,11 @@ class IndexingPipeline:
             # and leave the file with zero chunks in Milvus — worse than the
             # pre-fix duplication bug, and a violation of the "no empty window"
             # guarantee this whole insert-before-delete design is built on.
-            # Gating on ``stored_count`` ensures cleanup only runs once we know
-            # the new set actually replaced the old one.
+            # Gating on ``stored_count`` ensures cleanup is only scheduled once
+            # we know the new set actually replaced the old one.
             if replace and old_chunk_ids and row.get("stored_count"):
-                await self._delete_replaced_chunks(row, old_chunk_ids)
+                row[REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY] = "default"
+                row[REPLACE_OLD_CHUNK_IDS_ROW_KEY] = old_chunk_ids
             return row
         finally:
             logger.bind(
@@ -231,26 +238,6 @@ class IndexingPipeline:
                 f"re-index: could not snapshot existing chunks; skipping stale-chunk cleanup: {exc}"
             )
             return []
-
-    async def _delete_replaced_chunks(self, row: MutableMapping[str, Any], ids: list[str]) -> None:
-        """Delete the pre-re-index chunk set after the new chunks are stored.
-
-        Best-effort: the new chunks are already safely inserted, so a delete
-        failure only leaves recoverable duplicates behind (logged for
-        reconciliation).
-        """
-        try:
-            # Bound by the store budget: the new chunks are already stored, so a
-            # stalled delete must not hang the task — it degrades to duplicates.
-            deleted = await run_with_optional_timeout(
-                lambda: self.vector_store.delete(ids, "default"), self.timeouts.store
-            )
-            logger.bind(task_id=row.get("task_id")).debug(f"re-index: removed {deleted} stale chunk(s) after replace")
-        except Exception as exc:  # noqa: BLE001 - new chunks are stored; cleanup is best-effort
-            logger.bind(task_id=row.get("task_id")).error(
-                f"re-index: stored new chunks but failed to delete {len(ids)} stale chunk(s); "
-                f"duplicates remain until reconciliation: {exc}"
-            )
 
     def _effective_indexation_config(self, row: MutableMapping[str, Any]) -> IndexationPipelineConfig | None:
         raw_config = row.get("indexation_config", self.indexation_config)

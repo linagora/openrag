@@ -265,7 +265,7 @@ async def test_search_rejects_file_id_with_slash():
 
 @pytest.mark.asyncio
 async def test_search_shapes_chunks():
-    chunks = [FakeChunk(_id=11, text="body", metadata={"file_id": "f1"})]
+    chunks = [FakeChunk(_id=11, text="body", metadata={"file_id": "f1", "_openrag_indexing_task_id": "t1"})]
     out = await _service(retrieval=FakeRetrieval(chunks=chunks)).search_documents(
         query="hi", partitions=["a"], top_k=3, allowed_partitions=["a"]
     )
@@ -274,6 +274,7 @@ async def test_search_shapes_chunks():
     assert doc["chunk_id"] == 11
     assert doc["content"] == "body"
     assert doc["metadata"]["file_id"] == "f1"
+    assert "_openrag_indexing_task_id" not in doc["metadata"]
 
 
 # ---------------------------------------------------------------------------
@@ -311,11 +312,20 @@ async def test_get_file_info_not_found():
 
 @pytest.mark.asyncio
 async def test_get_file_info_strips_id_text_vector_from_metadata():
-    rows = [{"_id": 1, "file_id": "f1", "page": 2, "text": "body", "vector": [0.1, 0.2]}]
+    rows = [
+        {
+            "_id": 1,
+            "file_id": "f1",
+            "page": 2,
+            "text": "body",
+            "vector": [0.1, 0.2],
+            "_openrag_indexing_task_id": "t1",
+        }
+    ]
     svc = _service(partitions=FakePartitions(exists=True), vector_store=FakeVectorStore(rows=rows))
     out = await svc.get_file_info(partition="a", file_id="f1", allowed_partitions=["a"])
     assert out["chunk_count"] == 1
-    assert {"_id", "text", "vector"}.isdisjoint(out["metadata"])
+    assert {"_id", "text", "vector", "_openrag_indexing_task_id"}.isdisjoint(out["metadata"])
     assert out["metadata"]["file_id"] == "f1"
 
 
@@ -330,7 +340,10 @@ async def test_get_file_info_count_not_capped():
 
 @pytest.mark.asyncio
 async def test_get_file_chunks_paginates_with_content():
-    rows = [{"_id": i, "text": f"c{i}", "file_id": "f1", "partition": "a"} for i in range(5)]
+    rows = [
+        {"_id": i, "text": f"c{i}", "file_id": "f1", "partition": "a", "_openrag_indexing_task_id": "t1"}
+        for i in range(5)
+    ]
     svc = _service(vector_store=FakeVectorStore(rows=rows))
     out = await svc.get_file_chunks(partition="a", file_id="f1", allowed_partitions=["a"], offset=1, limit=2)
     assert out["total_chunks"] == 5
@@ -338,6 +351,7 @@ async def test_get_file_chunks_paginates_with_content():
     assert [c["chunk_id"] for c in out["chunks"]] == [1, 2]
     assert out["chunks"][0]["content"] == "c1"
     assert "text" not in out["chunks"][0]["metadata"]
+    assert "_openrag_indexing_task_id" not in out["chunks"][0]["metadata"]
 
 
 @pytest.mark.asyncio

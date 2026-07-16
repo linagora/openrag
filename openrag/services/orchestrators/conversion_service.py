@@ -87,8 +87,18 @@ class ConversionService:
         row = rows[0]
         return {
             "page_content": row["text"],
-            "metadata": {k: v for k, v in row.items() if k not in ("text", "vector")},
+            "metadata": _public_chunk_metadata(row),
         }
 
 
 __all__ = ["ConversionService"]
+
+
+def _public_chunk_metadata(row: dict) -> dict:
+    return {
+        key: value for key, value in row.items() if key not in ("text", "vector") and not _is_internal_metadata_key(key)
+    }
+
+
+def _is_internal_metadata_key(key: object) -> bool:
+    return isinstance(key, str) and key.startswith("_openrag")

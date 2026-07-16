@@ -733,20 +733,21 @@ def _reindex_pipeline(vector_store):
 
 
 @pytest.mark.asyncio
-async def test_reindex_deletes_prior_chunks_only_after_storing_new():
+async def test_reindex_defers_prior_chunk_cleanup_until_catalog_commit():
     # #657: replace=True must snapshot the file's existing chunks, store the new
-    # set, then delete exactly the old set — insert-before-delete, so a re-index
-    # never leaves an empty window and never duplicates chunks.
+    # set, then expose exactly that old set for the worker to delete after the
+    # catalog write succeeds.
     vs = RecordingVectorStore(existing_ids=["101", "102"])
     pipeline, document = _reindex_pipeline(vs)
 
-    await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
 
     # Snapshot is scoped to this file + partition only.
     assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
-    # Old chunks removed, and strictly after the new insert.
-    assert vs.deleted == [["101", "102"]]
-    assert vs.events == ["query", "upsert", "delete"]
+    assert row["_replace_old_chunk_collection"] == "default"
+    assert row["_replace_old_chunk_ids"] == ["101", "102"]
+    assert vs.deleted == []
+    assert vs.events == ["query", "upsert"]
 
 
 @pytest.mark.asyncio
@@ -790,9 +791,10 @@ async def test_reindex_snapshot_failure_skips_cleanup_but_still_indexes():
 
 
 @pytest.mark.asyncio
-async def test_reindex_delete_failure_is_best_effort():
-    # New chunks are already stored, so a cleanup delete failure must not fail the
-    # re-index (mirrors WorkerDispatcher.delete_file's best-effort cleanup).
+async def test_reindex_defers_cleanup_delete_to_worker():
+    # The pipeline must not delete stale chunks itself. The worker does that
+    # after the catalog write, so a later catalog failure cannot leave the file
+    # with neither the old nor the new vector set.
     vs = RecordingVectorStore(existing_ids=["1"])
     vs.delete_error = RuntimeError("delete failed")
     pipeline, document = _reindex_pipeline(vs)
@@ -800,7 +802,8 @@ async def test_reindex_delete_failure_is_best_effort():
     row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
 
     assert row["stage"] == "stored"
-    assert vs.events == ["query", "upsert", "delete"]
+    assert row["_replace_old_chunk_ids"] == ["1"]
+    assert vs.events == ["query", "upsert"]
 
 
 @pytest.mark.asyncio

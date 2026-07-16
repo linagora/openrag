@@ -7,8 +7,16 @@ from pathlib import Path
 from typing import Any
 
 from core.models.document import Document
-from services.workers.pipeline_builder import IndexingPipeline
+from core.utils.logging import get_logger
+from services.workers.pipeline_builder import (
+    REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY,
+    REPLACE_OLD_CHUNK_IDS_ROW_KEY,
+    IndexingPipeline,
+)
+from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
+
+logger = get_logger()
 
 
 class IndexerWorker:
@@ -99,6 +107,11 @@ class IndexerWorker:
                 if not wrote_catalog:
                     raise RuntimeError("Catalog row was not written after vector indexing")
                 catalog_written = True
+                await _delete_replaced_chunks_after_catalog(
+                    vector_store=self._vector_store or getattr(self._pipeline, "vector_store", None),
+                    row=row,
+                    timeout=getattr(getattr(self._pipeline, "timeouts", None), "store", None),
+                )
             if self._topic_tag_repo is not None:
                 await _replace_topic_tags_if_needed(
                     topic_tag_repo=self._topic_tag_repo,
@@ -110,9 +123,12 @@ class IndexerWorker:
             await self._tsm.set_state.remote(task_id, "COMPLETED")
             return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
         except Exception:
-            if not catalog_written and row is not None and row.get("stored_count", 0) > 0:
+            should_cleanup_vectors = row is not None and (
+                row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"
+            )
+            if not catalog_written and should_cleanup_vectors:
                 await _cleanup_indexed_vectors(
-                    vector_store=self._vector_store,
+                    vector_store=self._vector_store or getattr(self._pipeline, "vector_store", None),
                     collection=self._collection,
                     metadata=metadata,
                     partition=partition,
@@ -188,6 +204,26 @@ async def _cleanup_indexed_vectors(
         # Preserve the original indexing failure. A later file delete still runs
         # the broader partition/file cleanup path if this best-effort sweep fails.
         return
+
+
+async def _delete_replaced_chunks_after_catalog(
+    *,
+    vector_store: Any,
+    row: dict[str, Any],
+    timeout: float | None,
+) -> None:
+    ids = row.get(REPLACE_OLD_CHUNK_IDS_ROW_KEY)
+    if vector_store is None or not isinstance(ids, list) or not ids:
+        return
+    collection = row.get(REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY) or "default"
+    try:
+        deleted = await run_with_optional_timeout(lambda: vector_store.delete(ids, collection), timeout)
+        logger.bind(task_id=row.get("task_id")).debug(f"re-index: removed {deleted} stale chunk(s) after replace")
+    except Exception as exc:  # noqa: BLE001 - cleanup is best-effort after catalog commit
+        logger.bind(task_id=row.get("task_id")).error(
+            f"re-index: catalog was updated but failed to delete {len(ids)} stale chunk(s); "
+            f"duplicates remain until reconciliation: {exc}"
+        )
 
 
 async def _replace_topic_tags_if_needed(
