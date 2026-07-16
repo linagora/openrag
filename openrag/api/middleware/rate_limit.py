@@ -77,11 +77,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.enabled = _env_flag("RATE_LIMIT_ENABLED", True)
         self._limiter = MovingWindowRateLimiter(MemoryStorage())
         exempt = _env_prefixes("RATE_LIMIT_EXEMPT_PATHS", DEFAULT_EXEMPT_PREFIXES)
-        # A prefix that is itself a prefix of "/auth/" (e.g. "/auth/", "/a", "/")
-        # would exempt the brute-force surface via path.startswith() below — drop
-        # those regardless of where they came from, so /auth/ can never be opted
-        # out of rate limiting by RATE_LIMIT_EXEMPT_PATHS.
-        unsafe = tuple(p for p in exempt if _PROTECTED_PREFIX.startswith(p))
+        # Drop any prefix that overlaps "/auth/" in either direction: one that is
+        # itself a prefix of it (e.g. "/auth/", "/a", "/" — too broad, swallows the
+        # whole subtree) and one that starts with it (e.g. "/auth/login" — narrow,
+        # but still carves a brute-forceable route out of the auth tier). Either
+        # shape lets path.startswith() below exempt a request under /auth/.
+        unsafe = tuple(p for p in exempt if _PROTECTED_PREFIX.startswith(p) or p.startswith(_PROTECTED_PREFIX))
         if unsafe:
             logger.warning(
                 "Ignoring RATE_LIMIT_EXEMPT_PATHS entries that would exempt /auth/",

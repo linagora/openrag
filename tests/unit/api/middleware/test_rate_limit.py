@@ -208,5 +208,17 @@ def test_auth_cannot_be_exempted_via_broad_prefix_override(monkeypatch):
     assert client.get("/auth/login").status_code == 429
 
 
+def test_auth_login_cannot_be_exempted_via_narrower_prefix_override(monkeypatch):
+    # The reverse shape of the broad-prefix case: a prefix *more specific* than
+    # "/auth/" (e.g. "/auth/login") isn't a prefix of "/auth/", so it survives a
+    # check that only looks for "/auth/".startswith(p) — but it still carves the
+    # login route itself out of the auth tier via path.startswith(p). Must be
+    # dropped too.
+    app = _build_app(monkeypatch, RATE_LIMIT_AUTH="1/minute", RATE_LIMIT_EXEMPT_PATHS="/auth/login")
+    client = TestClient(app)
+    assert client.get("/auth/login").status_code == 200
+    assert client.get("/auth/login").status_code == 429
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
