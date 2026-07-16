@@ -10,17 +10,23 @@ describe("toCsv", () => {
         { filename: "+sum(1,2)" },
         { filename: "-10" },
         { filename: "@admin" },
+        { filename: "\t=cmd" },
+        { filename: "\r=cmd" },
+        { filename: "\n=cmd" },
         { filename: "safe.pdf" },
       ],
     );
 
-    expect(csv.split("\n")).toEqual([
+    expect(csv).toBe([
       "filename",
       "'=cmd|' /C calc'!A0",
       "\"'+sum(1,2)\"",
       "'-10",
       "'@admin",
+      "'\t=cmd",
+      "\"'\r=cmd\"",
+      "\"'\n=cmd\"",
       "safe.pdf",
-    ]);
+    ].join("\n"));
   });
 });

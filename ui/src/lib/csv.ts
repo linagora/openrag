@@ -3,7 +3,7 @@ type CsvColumn<T> = {
   value: (row: T) => unknown;
 };
 
-const FORMULA_PREFIX = /^[=+\-@]/;
+const FORMULA_PREFIX = /^[=+\-@\t\r\n]/;
 
 function csvCell(value: unknown): string {
   const raw = value == null ? "" : String(value);
