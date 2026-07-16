@@ -7,6 +7,7 @@ from typing import Any
 import ray
 
 ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"})
+TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
 
 try:
     from core.config import load_config as _load_config
@@ -92,7 +93,7 @@ class TaskStateManager:
         async with self.lock:
             info = await self._ensure_task(task_id)
             info.object_ref = object_ref
-            return info.state in ACTIVE_INDEXING_STATES
+            return info.state in ACTIVE_INDEXING_STATES or info.state in TERMINAL_INDEXING_STATES
 
     @ray.method(concurrency_group="get")
     async def get_state(self, task_id: str) -> str | None:
@@ -184,4 +185,4 @@ class TaskStateManager:
             return sum(1 for tid in task_ids if (info := self.tasks.get(tid)) and info.state in ACTIVE_INDEXING_STATES)
 
 
-__all__ = ["ACTIVE_INDEXING_STATES", "TaskInfo", "TaskStateManager"]
+__all__ = ["ACTIVE_INDEXING_STATES", "TERMINAL_INDEXING_STATES", "TaskInfo", "TaskStateManager"]

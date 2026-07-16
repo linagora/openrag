@@ -230,6 +230,72 @@ async def test_dispatch_indexing_cancels_worker_when_ref_registration_fails() ->
 
 
 @pytest.mark.asyncio
+async def test_dispatch_indexing_keeps_fast_finished_task_when_ref_registration_is_settled() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = _settled_ref()
+    pool = _pool_with_ref(ref)
+    tsm = _task_state_manager()
+    tsm.set_object_ref.remote = AsyncMock(return_value=True)
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid, patch("ray.cancel") as cancel:
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        task_id = await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert task_id == "task-1"
+    cancel.assert_not_called()
+    tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_cancels_worker_when_ref_registration_is_rejected() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = _settled_ref()
+    pool = _pool_with_ref(ref)
+    tsm = _task_state_manager()
+    tsm.set_object_ref.remote = AsyncMock(return_value=False)
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid, patch("ray.cancel") as cancel:
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        with pytest.raises(RuntimeError, match="cancelled before worker ref registration"):
+            await dispatcher.dispatch_indexing(
+                path="/data/report.txt",
+                metadata={"file_id": "file-1", "source": "/data/report.txt"},
+                partition="tenant-a",
+                user={"id": 42},
+                workspace_ids=None,
+                replace=False,
+            )
+
+    cancel.assert_called_once_with(ref, recursive=True)
+    tsm.set_failed_if_not_cancelled.remote.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
