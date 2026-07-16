@@ -62,12 +62,25 @@ function QueuePressureSummary({
   );
 }
 
+function TruncatedValue({ value, className = "max-w-[320px]" }: { value: string; className?: string }) {
+  if (!value) return "—";
+  return (
+    <span className={`block truncate ${className}`} title={value}>
+      {value}
+    </span>
+  );
+}
+
 const columns: ColumnDef<TaskListItem, unknown>[] = [
   {
     accessorKey: "task_id",
     header: "Task",
     cell: ({ row }) => (
-      <Link to={`/jobs/${row.original.task_id}`} className="text-primary hover:underline font-mono text-sm">
+      <Link
+        to={`/jobs/${row.original.task_id}`}
+        className="text-primary hover:underline font-mono text-sm"
+        title={row.original.task_id}
+      >
         {row.original.task_id.slice(0, 8)}
       </Link>
     ),
@@ -80,12 +93,19 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
   {
     id: "file",
     header: "File",
-    cell: ({ row }) => str(row.original.details?.metadata?.filename) || str(row.original.details?.file_id) || "—",
+    cell: ({ row }) => (
+      <TruncatedValue
+        value={str(row.original.details?.metadata?.filename) || str(row.original.details?.file_id)}
+        className="max-w-[280px] sm:max-w-[360px] lg:max-w-[440px]"
+      />
+    ),
   },
   {
     id: "partition",
     header: "Partition",
-    cell: ({ row }) => str(row.original.details?.partition) || "—",
+    cell: ({ row }) => (
+      <TruncatedValue value={str(row.original.details?.partition)} className="max-w-[180px] sm:max-w-[240px]" />
+    ),
   },
 ];
 
