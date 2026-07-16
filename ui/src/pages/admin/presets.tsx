@@ -156,7 +156,7 @@ export default function PresetsPage() {
                     <Card key={`${preset.preset_type}-${preset.name}`} className="flex flex-col">
                       <CardHeader className="pb-3">
                         <div className="flex items-center justify-between gap-2">
-                          <CardTitle className="text-base">{preset.name}</CardTitle>
+                          <CardTitle className="text-base truncate min-w-0">{preset.name}</CardTitle>
                           <Badge
                             variant="outline"
                             className={
@@ -174,7 +174,11 @@ export default function PresetsPage() {
                       <CardContent className="flex flex-col flex-1 text-sm">
                         <div className="flex flex-wrap gap-1 flex-1">
                           {summarizeConfig(preset.config).map((s, i) => (
-                            <Badge key={i} variant="secondary" className="text-xs h-fit">
+                            <Badge
+                              key={i}
+                              variant="secondary"
+                              className="text-xs h-fit max-w-full whitespace-normal break-words text-left"
+                            >
                               {s}
                             </Badge>
                           ))}
@@ -187,7 +191,7 @@ export default function PresetsPage() {
                         <div className="text-xs text-muted-foreground mt-3">
                           Updated {formatDate(preset.updated_at)}
                         </div>
-                        <div className="flex gap-2 pt-3">
+                        <div className="flex flex-wrap gap-2 pt-3">
                           <Button
                             size="sm"
                             variant="outline"
