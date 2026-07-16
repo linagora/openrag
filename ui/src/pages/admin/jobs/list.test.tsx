@@ -6,9 +6,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getQueueInfo, listTasks } from "@/lib/api/jobs";
 import JobListPage from "./list";
 
+const permissions = vi.hoisted(() => ({ isAdmin: true }));
+
 vi.mock("@/lib/permissions", () => ({
   usePermissions: () => ({
-    isAdmin: true,
+    isAdmin: permissions.isAdmin,
   }),
 }));
 
@@ -50,6 +52,8 @@ function renderJobs() {
 
 describe("JobListPage filters", () => {
   beforeEach(() => {
+    permissions.isAdmin = true;
+    vi.clearAllMocks();
     getQueueInfoMock.mockResolvedValue({
       workers: { total_slots: 4, pool_size: 2, max_per_actor: 2 },
       tasks: {
@@ -114,5 +118,22 @@ describe("JobListPage filters", () => {
 
     expect(await screen.findByText("Queue unavailable")).not.toBeNull();
     expect(await screen.findByText("completed.pdf")).not.toBeNull();
+  });
+
+  it("does not fetch admin-only queue information for non-admin users", async () => {
+    permissions.isAdmin = false;
+
+    renderJobs();
+
+    expect(await screen.findByText("completed.pdf")).not.toBeNull();
+    expect(screen.queryByLabelText("Queue pressure")).toBeNull();
+    expect(screen.queryByText("Queue unavailable")).toBeNull();
+    expect(getQueueInfoMock).not.toHaveBeenCalled();
+
+    const initialTaskRequests = listTasksMock.mock.calls.length;
+    await userEvent.click(screen.getByRole("button", { name: "Refresh jobs" }));
+
+    await waitFor(() => expect(listTasksMock.mock.calls.length).toBeGreaterThan(initialTaskRequests));
+    expect(getQueueInfoMock).not.toHaveBeenCalled();
   });
 });

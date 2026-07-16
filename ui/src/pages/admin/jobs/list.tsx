@@ -109,6 +109,7 @@ export default function JobListPage() {
   const queueInfoQuery = useQuery({
     queryKey: ["queue-info"],
     queryFn: getQueueInfo,
+    enabled: isAdmin,
     refetchInterval: JOBS_REFETCH_INTERVAL_MS,
   });
 
@@ -151,19 +152,21 @@ export default function JobListPage() {
             <p className="text-sm text-muted-foreground">
               {filteredTasks.length} job{filteredTasks.length === 1 ? "" : "s"}
             </p>
-            <QueuePressureSummary
-              queueInfo={queueInfoQuery.data}
-              isLoading={queueInfoQuery.isLoading}
-              isError={queueInfoQuery.isError}
-            />
+            {isAdmin && (
+              <QueuePressureSummary
+                queueInfo={queueInfoQuery.data}
+                isLoading={queueInfoQuery.isLoading}
+                isError={queueInfoQuery.isError}
+              />
+            )}
             <Button
               variant="outline"
               size="icon-sm"
               onClick={() => {
                 setManualRefreshing(true);
-                Promise.allSettled([tasksQuery.refetch(), queueInfoQuery.refetch()]).finally(() =>
-                  setManualRefreshing(false),
-                );
+                const refreshes: Promise<unknown>[] = [tasksQuery.refetch()];
+                if (isAdmin) refreshes.push(queueInfoQuery.refetch());
+                Promise.allSettled(refreshes).finally(() => setManualRefreshing(false));
               }}
               disabled={manualRefreshing}
               aria-label="Refresh jobs"
