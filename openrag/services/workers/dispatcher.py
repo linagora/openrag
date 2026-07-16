@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 import uuid
 from typing import Any
 
@@ -91,31 +92,48 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=f"set_details({task_id})",
         )
 
-        # ``IndexerPool`` is a Ray actor; ``submit`` returns ``[worker_ref]``
-        # (wrapped so Ray doesn't auto-dereference and block on the worker task).
-        # Awaiting the submit call yields that list; element 0 is the worker ref
-        # that ``cancel_task``/``ray.cancel`` must target.
-        submitted = await self._call(
-            self._pool.submit.remote(
-                task_id=task_id,
-                path=path,
-                metadata=metadata,
-                partition=partition,
-                user=user,
-                workspace_ids=workspace_ids,
-                replace=replace,
-                indexation_config=indexation_config,
-                embedder_name=embedder_name,
-            ),
-            task_description=f"submit({task_id})",
-        )
-        task = submitted[0]
+        try:
+            # ``IndexerPool`` is a Ray actor; ``submit`` returns ``[worker_ref]``
+            # (wrapped so Ray doesn't auto-dereference and block on the worker task).
+            # Awaiting the submit call yields that list; element 0 is the worker ref
+            # that ``cancel_task``/``ray.cancel`` must target.
+            submitted = await self._call(
+                self._pool.submit.remote(
+                    task_id=task_id,
+                    path=path,
+                    metadata=metadata,
+                    partition=partition,
+                    user=user,
+                    workspace_ids=workspace_ids,
+                    replace=replace,
+                    indexation_config=indexation_config,
+                    embedder_name=embedder_name,
+                ),
+                task_description=f"submit({task_id})",
+            )
+            task = submitted[0]
 
-        await self._call(
-            self._tsm.set_object_ref.remote(task_id, {"ref": task}),
-            task_description=f"set_object_ref({task_id})",
-        )
+            await self._call(
+                self._tsm.set_object_ref.remote(task_id, {"ref": task}),
+                task_description=f"set_object_ref({task_id})",
+            )
+        except Exception:
+            await self._mark_submit_failed(task_id, traceback.format_exc())
+            raise
         return task_id
+
+    async def _mark_submit_failed(self, task_id: str, tb: str) -> None:
+        set_failed = getattr(self._tsm, "set_failed_if_not_cancelled", None)
+        if set_failed is not None:
+            await self._call(
+                set_failed.remote(task_id, tb),
+                task_description=f"set_failed_if_not_cancelled({task_id})",
+            )
+            return
+        await self._call(
+            self._tsm.set_state.remote(task_id, "FAILED"),
+            task_description=f"set_state({task_id}, FAILED)",
+        )
 
     async def delete_file(self, file_id: str, partition: str) -> None:
         cancelled = await cancel_active_indexing_tasks(

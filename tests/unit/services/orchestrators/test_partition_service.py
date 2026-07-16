@@ -375,7 +375,7 @@ async def test_delete_partition_does_not_cleanup_when_cancelled_task_does_not_se
 
 
 @pytest.mark.asyncio
-async def test_delete_partition_does_not_cleanup_when_matching_task_has_no_ref():
+async def test_delete_partition_marks_stale_ref_less_task_failed_before_cleanup():
     from unittest.mock import AsyncMock, MagicMock, patch
 
     prepo = FakePartitionRepo(existing={"p1"})
@@ -383,16 +383,19 @@ async def test_delete_partition_does_not_cleanup_when_matching_task_has_no_ref()
     tsm = MagicMock()
     tsm.get_matching_active_task_refs = MagicMock()
     tsm.get_matching_active_task_refs.remote = AsyncMock(return_value={"task-1": {"ref": None}})
+    tsm.set_failed_if_not_cancelled = MagicMock()
+    tsm.set_failed_if_not_cancelled.remote = AsyncMock(return_value=True)
     tsm.set_state = MagicMock()
     tsm.set_state.remote = AsyncMock(return_value=None)
 
-    with pytest.raises(TimeoutError, match="become cancellable"), patch("ray.cancel") as cancel:
+    with patch("ray.cancel") as cancel:
         await _svc(prepo=prepo, vstore=vstore, tsm=tsm, task_cancel_timeout=0.01).delete_partition("p1")
 
     cancel.assert_not_called()
+    tsm.set_failed_if_not_cancelled.remote.assert_called_once()
     tsm.set_state.remote.assert_not_called()
-    assert vstore.deleted_filters == []
-    assert prepo.deleted == []
+    assert vstore.deleted_filters == [{"partition": "p1"}, {"partition": "p1"}]
+    assert prepo.deleted == ["p1"]
 
 
 @pytest.mark.asyncio

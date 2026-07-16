@@ -12,6 +12,10 @@ from services.workers.ray_utils import call_ray_actor_with_timeout
 logger = get_logger()
 
 _REF_WAIT_INTERVAL = 0.05
+_STATE_UPDATE_TIMEOUT = 5.0
+_STALE_REFLESS_TASK_ERROR = (
+    "Indexing task never exposed a cancellable worker ref before delete cleanup; marking it failed as stale."
+)
 
 
 async def cancel_active_indexing_tasks(
@@ -80,12 +84,18 @@ async def cancel_active_indexing_tasks(
             file_id=file_id,
             task_ids=pending_without_ref,
         )
-        await asyncio.sleep(
-            min(
-                _REF_WAIT_INTERVAL,
-                _remaining_timeout(deadline, partition=partition, file_id=file_id),
+        remaining = deadline - monotonic()
+        if remaining <= _REF_WAIT_INTERVAL:
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            await _mark_ref_less_tasks_failed(
+                task_state_manager,
+                pending_without_ref,
+                partition=partition,
+                file_id=file_id,
             )
-        )
+            return cancelled
+        await asyncio.sleep(_REF_WAIT_INTERVAL)
 
 
 def _task_ref(object_ref: Any) -> Any | None:
@@ -122,6 +132,42 @@ async def _wait_for_task_to_settle(
             result="failed",
             error=str(exc),
         )
+
+
+async def _mark_ref_less_tasks_failed(
+    task_state_manager: Any,
+    task_ids: list[str],
+    *,
+    partition: str,
+    file_id: str | None,
+) -> None:
+    set_failed = getattr(task_state_manager, "set_failed_if_not_cancelled", None)
+    if set_failed is not None:
+        for task_id in task_ids:
+            await call_ray_actor_with_timeout(
+                future=set_failed.remote(task_id, _STALE_REFLESS_TASK_ERROR),
+                timeout=_STATE_UPDATE_TIMEOUT,
+                task_description=f"set_failed_if_not_cancelled({task_id})",
+            )
+        logger.warning(
+            "Marked stale ref-less indexing tasks as failed before delete cleanup",
+            partition=partition,
+            file_id=file_id,
+            task_ids=task_ids,
+        )
+        return
+    for task_id in task_ids:
+        await call_ray_actor_with_timeout(
+            future=task_state_manager.set_state.remote(task_id, "FAILED"),
+            timeout=_STATE_UPDATE_TIMEOUT,
+            task_description=f"set_state({task_id}, FAILED)",
+        )
+    logger.warning(
+        "Marked stale ref-less indexing tasks as failed before delete cleanup",
+        partition=partition,
+        file_id=file_id,
+        task_ids=task_ids,
+    )
 
 
 def _remaining_timeout(deadline: float, *, partition: str, file_id: str | None) -> float:

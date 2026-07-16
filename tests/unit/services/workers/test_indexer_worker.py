@@ -354,7 +354,7 @@ async def test_process_file_creates_catalog_record_after_successful_pipeline(tmp
         "user_id": 42,
         "relationship_id": "rel",
         "parent_id": "parent",
-        "require_existing_partition": True,
+        "require_existing_partition": False,
     }
     assert repo.update_calls == []
 
@@ -408,6 +408,7 @@ async def test_process_file_stores_indexation_config_snapshot_on_new_file(tmp_pa
     )
 
     assert repo.add_calls[0]["indexation_config"] == indexation_config
+    assert repo.add_calls[0]["require_existing_partition"] is True
 
 
 @pytest.mark.asyncio

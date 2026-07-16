@@ -159,7 +159,7 @@ async def _write_catalog_record(
         relationship_id=metadata.get("relationship_id"),
         parent_id=metadata.get("parent_id"),
         indexed_at=indexed_at,
-        require_existing_partition=True,
+        require_existing_partition=indexation_config is not None,
         **config_kwargs,
     )
 
