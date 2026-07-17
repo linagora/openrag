@@ -227,6 +227,14 @@ class IndexerWorkerActor:
                 # reserved quota slot (#664), so release it here — the worker's
                 # own finally will never run. ``BaseException`` because a
                 # cancellation during setup must release too.
+                #
+                # Best-effort, and honestly so: this releases through the very
+                # store whose initialization may have just failed. A cancellation
+                # or a registry-refresh failure releases fine, but an unreachable
+                # Postgres — ``_ensure_catalog``'s most likely failure — fails the
+                # release too, and ``release_quota_slot`` swallows it, leaking the
+                # slot. Nothing local can fix that (the DB *is* the counter);
+                # recovering it needs the reconciliation sweep tracked in #676.
                 if quota_reserved:
                     await release_quota_slot(self._catalog_store.user_repo, (user or {}).get("id"))
                 raise

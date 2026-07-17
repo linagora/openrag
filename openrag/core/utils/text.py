@@ -61,6 +61,14 @@ def truncate_error_text(text: str | None, max_chars: int = MAX_ERROR_TEXT_CHARS)
     marker line naming the number of dropped characters followed by the last
     ``max_chars`` characters, which makes the truncation auditable rather than
     silent.
+
+    ``max_chars`` bounds the retained *original* text, not the returned string:
+    the audit marker is overhead on top, so the result runs ~35 characters
+    longer. The point is to stop unbounded growth, and the caller's column is
+    unbounded ``VARCHAR`` — a hard ceiling on the return value would have to
+    either eat into the tail (the exception message lives at the very end, and
+    is the whole reason the tail is what we keep) or iterate to a fixed point
+    against the marker's own digit count. Neither is worth it here.
     """
     if text is None:
         return None
