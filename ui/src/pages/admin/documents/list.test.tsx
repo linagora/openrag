@@ -69,7 +69,7 @@ const toastSuccessMock = vi.mocked(toast.success);
 
 function LocationProbe() {
   const location = useLocation();
-  return <output data-testid="location">{location.pathname}</output>;
+  return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
 }
 
 function renderDocuments(initialEntries = ["/documents"]) {
@@ -92,6 +92,7 @@ function renderDocuments(initialEntries = ["/documents"]) {
 
 describe("DocumentListPage", () => {
   beforeEach(() => {
+    sessionStorage.clear();
     deleteFileMock.mockClear();
     uploadFileMock.mockReset();
     toastSuccessMock.mockClear();
@@ -115,10 +116,19 @@ describe("DocumentListPage", () => {
   it("opens the upload dialog for a partition upload link", async () => {
     renderDocuments(["/documents?partition=docs&upload=1"]);
 
-    expect(await screen.findByRole("dialog")).not.toBeNull();
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).not.toBeNull();
     expect(screen.getByText(/Index one or more files into/i)).not.toBeNull();
-    expect(screen.getByText("docs")).not.toBeNull();
-    expect(screen.getByTestId("location").textContent).toBe("/documents");
+    expect(dialog.textContent).toContain("docs");
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toBe("/documents?partition=docs"));
+  });
+
+  it("does not open upload when the requested partition falls back", async () => {
+    renderDocuments(["/documents?partition=missing&upload=1"]);
+
+    expect(await screen.findByText("a.pdf")).not.toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toBe("/documents?partition=docs"));
   });
 
   it("selects all documents from the table header and deletes the selected files", async () => {

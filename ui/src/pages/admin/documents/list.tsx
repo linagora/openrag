@@ -72,11 +72,9 @@ export default function DocumentListPage() {
   // must stop treating the (unverifiable) candidate as sticky, or the view stays
   // stuck on a phantom partition with the error swallowed. On error `partitions`
   // is [], so this resolves to "" → the empty-state branch surfaces the error.
-  const selected = resolveDocumentsPartition(
-    candidate,
-    partitions,
-    partitionsQuery.isSuccess || partitionsQuery.isError,
-  );
+  const partitionsSettled = partitionsQuery.isSuccess || partitionsQuery.isError;
+  const selected = resolveDocumentsPartition(candidate, partitions, partitionsSettled);
+  const selectedPartitionExists = partitions.some((p) => p.partition === selected);
   const role = partitions.find((p) => p.partition === selected)?.role;
   const writable = canWrite(role);
 
@@ -86,22 +84,26 @@ export default function DocumentListPage() {
     if (!selected) return;
     sessionStorage.setItem("documents.partition", selected);
     const urlPartition = searchParams.get("partition");
-    const shouldOpenUpload = searchParams.get("upload") === "1" && writable;
+    const requestedUpload = searchParams.get("upload") === "1";
+    const shouldOpenUpload = requestedUpload && urlPartition === selected && selectedPartitionExists && writable;
     if (shouldOpenUpload) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- Open the existing upload dialog from the route action.
       setUploadOpen(true);
     }
-    if ((urlPartition && urlPartition !== selected) || shouldOpenUpload) {
+    const shouldUpdateRoute =
+      partitionsSettled && (requestedUpload || (urlPartition && urlPartition !== selected));
+    if (shouldUpdateRoute) {
       setSearchParams(
         (prev) => {
-          prev.set("partition", selected);
-          prev.delete("upload");
-          return prev;
+          const next = new URLSearchParams(prev);
+          next.set("partition", selected);
+          next.delete("upload");
+          return next;
         },
         { replace: true },
       );
     }
-  }, [selected, searchParams, setSearchParams, writable]);
+  }, [selected, searchParams, selectedPartitionExists, partitionsSettled, setSearchParams, writable]);
 
   const selectPartition = (p: string) => {
     setFileSelection({ partition: p, rows: {} });
@@ -117,7 +119,7 @@ export default function DocumentListPage() {
     queryFn: () => listPartitionFiles(selected),
     // Only fetch once we've confirmed `selected` is a real, still-existing
     // partition — avoids a 404 flash for a stale/deleted selection during load.
-    enabled: !!selected && partitions.some((p) => p.partition === selected),
+    enabled: !!selected && selectedPartitionExists,
     // A file only appears here once its indexing job finishes (the catalog row
     // is written post-indexing), so poll to pick up freshly-indexed files
     // without the user having to switch partitions. Mirrors the Jobs page;
