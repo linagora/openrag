@@ -156,6 +156,17 @@ async def test_seed_defaults_inserts_six_presets_when_empty():
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_indexation_leaves_topic_tagging_off():
+    repo = _FakePresetRepo()
+    svc = _make_service(repo)
+    await svc.seed_defaults()
+
+    idx = [r for r in repo._store.values() if r["preset_type"] == "indexation"]
+    assert idx  # sanity: indexation presets were seeded
+    assert all(r["config"].get("enable_topic_tagging", False) is False for r in idx)
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_retrieval_inherits_reranker_enabled():
     from core.config.root import Settings
 
