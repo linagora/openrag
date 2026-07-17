@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 from services.workers.parsers import marker_workers
@@ -51,6 +52,9 @@ class _NullLogger:
     def warning(self, *args, **kwargs) -> None:
         pass
 
+    def info(self, *args, **kwargs) -> None:
+        pass
+
 
 def test_force_kill_executor_kills_every_worker_then_shuts_down():
     procs = [_FakeProc(), _FakeProc(), _FakeProc()]
@@ -80,3 +84,76 @@ def test_force_kill_executor_survives_a_kill_error():
 
     assert ok.killed
     assert executor.shutdown_kwargs == {"wait": False, "cancel_futures": True}
+
+
+# ---------------------------------------------------------------------------
+# MarkerWorker.setup_mp(old_executor=...) — concurrent-timeout guard (#674)
+# ---------------------------------------------------------------------------
+
+
+def _bare_marker_worker():
+    """A MarkerWorker instance with __init__ skipped (no real models/pool)."""
+    actor_class = marker_workers.MarkerWorker.__ray_metadata__.modified_class
+    worker = actor_class.__new__(actor_class)
+    worker.logger = _NullLogger()
+    worker._executor_lock = threading.Lock()
+    worker._workers = 1
+    worker.model_dict = {}
+    worker.config = SimpleNamespace(loader=SimpleNamespace(marker_max_tasks_per_child=1))
+    return worker
+
+
+def test_setup_mp_skips_rebuild_when_pool_already_recycled(monkeypatch):
+    """If another timeout handler already recycled the pool, a second handler
+    racing on the same stale executor must not force-kill the fresh one."""
+    worker = _bare_marker_worker()
+    stale_executor = _FakeExecutor([_FakeProc()])
+    fresh_executor = _FakeExecutor([_FakeProc()])
+    worker.executor = fresh_executor  # already rebuilt by the "winning" handler
+
+    monkeypatch.setattr("torch.multiprocessing.get_start_method", lambda allow_none=False: "spawn")
+    built = []
+    monkeypatch.setattr(
+        "concurrent.futures.ProcessPoolExecutor",
+        lambda *a, **k: built.append(1) or _FakeExecutor([]),
+    )
+
+    worker.setup_mp(old_executor=stale_executor)
+
+    assert worker.executor is fresh_executor  # left untouched
+    assert fresh_executor.shutdown_kwargs is None  # never force-killed
+    assert not built  # no pool was rebuilt
+
+
+def test_setup_mp_rebuilds_when_old_executor_is_still_current(monkeypatch):
+    """A timeout handler racing against nothing else must still reclaim the
+    wedged worker: kill the current pool and build a fresh one."""
+    worker = _bare_marker_worker()
+    current_executor = _FakeExecutor([_FakeProc()])
+    worker.executor = current_executor
+
+    monkeypatch.setattr("torch.multiprocessing.get_start_method", lambda allow_none=False: "spawn")
+    new_executor = _FakeExecutor([])
+    monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", lambda *a, **k: new_executor)
+
+    worker.setup_mp(old_executor=current_executor)
+
+    assert current_executor.shutdown_kwargs == {"wait": False, "cancel_futures": True}
+    assert worker.executor is new_executor
+
+
+def test_setup_mp_always_rebuilds_when_old_executor_is_none(monkeypatch):
+    """Explicit resets (init, MarkerPool health-check) always rebuild,
+    regardless of what's currently installed."""
+    worker = _bare_marker_worker()
+    current_executor = _FakeExecutor([_FakeProc()])
+    worker.executor = current_executor
+
+    monkeypatch.setattr("torch.multiprocessing.get_start_method", lambda allow_none=False: "spawn")
+    new_executor = _FakeExecutor([])
+    monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", lambda *a, **k: new_executor)
+
+    worker.setup_mp()
+
+    assert current_executor.shutdown_kwargs == {"wait": False, "cancel_futures": True}
+    assert worker.executor is new_executor
