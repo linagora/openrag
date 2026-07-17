@@ -1489,6 +1489,68 @@ async def test_dispatch_purges_terminal_jobs_at_most_once_per_interval() -> None
 
 
 @pytest.mark.asyncio
+async def test_the_purge_runs_again_once_the_interval_has_passed(monkeypatch) -> None:
+    """The throttle must rate-limit the sweep, not disable it after one run.
+
+    Without this, an implementation that purges exactly once per process — and
+    so lets the table grow unbounded forever after — passes the at-most-once
+    test above.
+    """
+    from services.workers import dispatcher as dispatcher_module
+
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(dispatcher_module.time, "monotonic", lambda: clock["now"])
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    async def _dispatch():
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1"},
+            partition="tenant-a",
+            user=None,
+            workspace_ids=None,
+            replace=False,
+        )
+
+    await _dispatch()
+    assert job_repo.purge_terminal_jobs.await_count == 1
+
+    clock["now"] += dispatcher_module.JOB_PURGE_INTERVAL_SECONDS - 1
+    await _dispatch()
+    assert job_repo.purge_terminal_jobs.await_count == 1, "still inside the interval"
+
+    clock["now"] += 2
+    await _dispatch()
+    assert job_repo.purge_terminal_jobs.await_count == 2, "the interval has elapsed"
+
+
+@pytest.mark.asyncio
+async def test_the_purge_uses_the_documented_retention_bounds() -> None:
+    """Pin the shipped retention window and row cap.
+
+    These are the only thing standing between the durable store and the
+    unbounded growth #660 exists to fix, and no other test asserts their values.
+    """
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    await dispatcher.dispatch_indexing(
+        path="/data/report.txt",
+        metadata={"file_id": "file-1"},
+        partition="tenant-a",
+        user=None,
+        workspace_ids=None,
+        replace=False,
+    )
+
+    job_repo.purge_terminal_jobs.assert_awaited_once_with(
+        older_than_seconds=7 * 24 * 3600,
+        keep_last=10_000,
+    )
+
+
+@pytest.mark.asyncio
 async def test_purge_failure_never_fails_a_dispatch() -> None:
     job_repo = _job_repo()
     job_repo.purge_terminal_jobs = AsyncMock(side_effect=RuntimeError("purge blew up"))
