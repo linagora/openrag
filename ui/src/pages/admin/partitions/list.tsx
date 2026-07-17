@@ -275,12 +275,11 @@ export default function PartitionListPage() {
     return items;
   }, [partitionsQuery.data, search, sortDir, sortColumn]);
 
-  // Show a delete affordance for anyone the backend (`require_partition_owner`)
-  // would allow: admins (satisfied via SUPER_ADMIN_MODE) and partition owners.
-  // `canConfigurePartition(role)` is `superAdmin || role === "owner"`, so a
-  // non-admin owner can delete their own partition — not just admins.
+  // Show the actions column whenever the row has at least one available row
+  // action: upload for writable partitions, or edit/delete for admins/owners.
   const showActions =
-    canManagePartitions || filteredAndSorted.some((p) => canConfigurePartition(p.role));
+    canManagePartitions ||
+    filteredAndSorted.some((p) => canWrite(p.role) || canConfigurePartition(p.role));
 
   const pageCount = Math.ceil(filteredAndSorted.length / PARTITIONS_PAGE_SIZE);
   useEffect(() => {

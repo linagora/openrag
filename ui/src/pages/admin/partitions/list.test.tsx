@@ -132,6 +132,17 @@ describe("PartitionListPage bulk actions", () => {
     expect(partitionLink.className).toContain("truncate");
   });
 
+  it("shows the upload action for editor-only partitions", async () => {
+    listPartitionsMock.mockResolvedValue({
+      partitions: [makePartition("editable-docs", "editor")],
+    });
+
+    renderPartitions();
+
+    expect(await screen.findByRole("link", { name: /upload documents to editable-docs/i })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: /delete editable-docs/i })).toBeNull();
+  });
+
   it("selects all deletable partitions and deletes only those partitions", async () => {
     renderPartitions();
 
