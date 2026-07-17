@@ -107,8 +107,11 @@ describe("PartitionListPage bulk actions", () => {
     permissions.canManagePartitions = true;
     renderPartitions();
 
-    expect(await screen.findByRole("link", { name: /edit owned-a/i })).not.toBeNull();
-    expect(screen.getByRole("button", { name: /delete owned-a/i })).not.toBeNull();
+    const edit = await screen.findByRole("link", { name: /edit owned-a/i });
+    const deleteAction = screen.getByRole("button", { name: /delete owned-a/i });
+
+    expect(edit.getAttribute("data-size")).toBe("icon-xs");
+    expect(deleteAction.getAttribute("data-size")).toBe("icon-xs");
   });
 
   it("keeps long partition names constrained while exposing the full name", async () => {

@@ -80,13 +80,13 @@ function RowActions({
   return (
     <div className="flex items-center gap-1">
       {showEdit && (
-        <Button variant="ghost" size="sm" asChild>
+        <Button variant="ghost" size="icon-xs" asChild>
           <Link
             to={partitionDetailPath(partition.name)}
             aria-label={`Edit ${partition.name}`}
             title={`Edit ${partition.name}`}
           >
-            <Pencil className="h-3 w-3" />
+            <Pencil className="h-3.5 w-3.5" />
           </Link>
         </Button>
       )}
@@ -98,12 +98,12 @@ function RowActions({
         >
           <Button
             variant="ghost"
-            size="sm"
+            size="icon-xs"
             disabled={deleteMutation.isPending}
             aria-label={`Delete ${partition.name}`}
             title={`Delete ${partition.name}`}
           >
-            <Trash2 className="h-3 w-3 text-destructive" />
+            <Trash2 className="h-3.5 w-3.5 text-destructive" />
           </Button>
         </ConfirmDialog>
       )}
