@@ -135,6 +135,13 @@ class JobService:
 
         The router decorates each row with the status / error URLs.
         """
+        if not is_admin and user_id is None:
+            # Fail closed. list_jobs(user_id=None) means "every job", so an
+            # anonymous non-admin would otherwise be handed the whole table.
+            # Unreachable today (the HTTP path always resolves an id), but the
+            # unset default of the MCP _USER_ID ContextVar is exactly None,
+            # so the escalating value is one wiring change away.
+            return []
         jobs = await self._from_jobs(
             "list_jobs",
             lambda: self._job_repo.list_jobs(

@@ -259,3 +259,18 @@ async def test_get_user_pending_task_count_stays_on_the_in_memory_cache():
     svc = JobService(task_state_manager=FakeTSM(info=info), job_repo=repo)
 
     assert await svc.get_user_pending_task_count(7) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_fails_closed_for_an_anonymous_non_admin():
+    """list_jobs(user_id=None) means *every* job — never hand that to a user.
+
+    The durable read scopes with user_id=None if is_admin else user_id, so a
+    non-admin arriving without an id would select the whole table. Guard here
+    rather than trust every caller to have resolved one.
+    """
+    repo = FakeJobRepo(jobs=[_job(id="t1", user_id=1), _job(id="t2", user_id=2)])
+    svc = JobService(task_state_manager=FakeTSM(), job_repo=repo)
+
+    assert await svc.list_tasks(is_admin=False, user_id=None) == []
+    assert repo.list_calls == []
