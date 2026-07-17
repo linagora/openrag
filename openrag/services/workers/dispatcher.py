@@ -30,6 +30,7 @@ class WorkerDispatcher(IndexingDispatcher):
             "next_section_id",
         }
     )
+    _TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 
     def __init__(
         self,
@@ -230,6 +231,13 @@ class WorkerDispatcher(IndexingDispatcher):
     async def cancel_task(self, task_id: str) -> bool:
         import ray
 
+        state = await self._call(
+            self._tsm.get_state.remote(task_id),
+            task_description=f"get_state({task_id})",
+        )
+        if state in self._TERMINAL_STATES:
+            return False
+
         obj_ref = await self._call(
             self._tsm.get_object_ref.remote(task_id),
             task_description=f"get_object_ref({task_id})",
@@ -237,12 +245,18 @@ class WorkerDispatcher(IndexingDispatcher):
         if obj_ref is None:
             return False
 
-        ray.cancel(obj_ref["ref"], recursive=True)
-        await self._call(
-            self._tsm.set_state.remote(task_id, "CANCELLED"),
-            task_description=f"set_state({task_id})",
+        state = await self._call(
+            self._tsm.get_state.remote(task_id),
+            task_description=f"get_state({task_id})",
         )
-        return True
+        if state in self._TERMINAL_STATES:
+            return False
+
+        ray.cancel(obj_ref["ref"], recursive=True)
+        return await self._call(
+            self._tsm.set_cancelled_if_active.remote(task_id),
+            task_description=f"set_cancelled_if_active({task_id})",
+        )
 
 
 def from_ray_namespace(

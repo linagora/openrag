@@ -66,6 +66,15 @@ class TaskStateManager:
             return True
 
     @ray.method(concurrency_group="set")
+    async def set_cancelled_if_active(self, task_id: str) -> bool:
+        async with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None or info.state in {"COMPLETED", "FAILED", "CANCELLED"}:
+                return False
+            info.state = "CANCELLED"
+            return True
+
+    @ray.method(concurrency_group="set")
     async def set_details(
         self,
         task_id: str,

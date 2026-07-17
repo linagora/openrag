@@ -557,5 +557,11 @@ async def cancel_task(
 ):
     cancelled = await service.cancel_task(task_id)
     if not cancelled:
+        task_state = await service.get_task_state(task_id)
+        if task_state in {"COMPLETED", "FAILED", "CANCELLED"}:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Task {task_id} is already {task_state.lower()} and cannot be cancelled",
+            )
         raise HTTPException(404, f"No ObjectRef stored for task {task_id}")
     return {"message": f"Cancellation signal sent for task {task_id}"}

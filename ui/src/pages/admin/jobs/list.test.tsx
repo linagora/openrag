@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
+import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cancelTask, getQueueInfo, listTasks, type TaskState } from "@/lib/api/jobs";
 import JobListPage from "./list";
@@ -34,6 +35,7 @@ vi.mock("@/lib/api/jobs", async () => {
 const cancelTaskMock = vi.mocked(cancelTask);
 const getQueueInfoMock = vi.mocked(getQueueInfo);
 const listTasksMock = vi.mocked(listTasks);
+const toastErrorMock = vi.mocked(toast.error);
 
 const task = (task_id: string, state: TaskState, filename: string) => ({
   task_id,
@@ -129,6 +131,43 @@ describe("JobListPage filters", () => {
 
     await waitFor(() => expect(cancelTaskMock).toHaveBeenCalledWith("queued-task"));
     expect(cancelTaskMock).not.toHaveBeenCalledWith("completed-task");
+  });
+
+  it("rechecks selected jobs before bulk cancelling", async () => {
+    let tasks = [task("queued-task", "QUEUED", "queued.pdf")];
+    listTasksMock.mockImplementation(async () => ({ tasks }));
+
+    renderJobs();
+
+    expect(await screen.findByText("queued.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /select row/i }));
+    expect(screen.getByText("1 selected")).not.toBeNull();
+
+    tasks = [task("queued-task", "COMPLETED", "queued.pdf")];
+
+    await userEvent.click(screen.getByRole("button", { name: /cancel selected/i }));
+    await userEvent.click(screen.getByRole("button", { name: /confirm/i }));
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith("1 task(s) were no longer active"));
+    expect(cancelTaskMock).not.toHaveBeenCalled();
+  });
+
+  it("clears selected jobs when the search changes", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [task("queued-task", "QUEUED", "queued.pdf"), task("other-task", "QUEUED", "other.pdf")],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByText("queued.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getAllByRole("checkbox", { name: /select row/i })[0]);
+    expect(screen.getByText("1 selected")).not.toBeNull();
+
+    await userEvent.type(screen.getByPlaceholderText("Search jobs..."), "other");
+
+    await waitFor(() => expect(screen.queryByText("1 selected")).toBeNull());
   });
 
   it("shows queue and worker pressure from the backend", async () => {

@@ -61,6 +61,7 @@ def _workspace_repo() -> MagicMock:
 def _task_state_manager() -> MagicMock:
     tsm = MagicMock()
     tsm.set_state = _remote_mock()
+    tsm.set_cancelled_if_active = _remote_mock(True)
     tsm.set_details = _remote_mock()
     tsm.set_object_ref = _remote_mock()
     tsm.get_state = _remote_mock("SERIALIZING")
@@ -210,11 +211,11 @@ async def test_cancel_task_uses_stored_pool_object_ref() -> None:
 
     assert result is True
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_called_once_with("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
 
 
 @pytest.mark.asyncio
-async def test_cancel_task_marks_cancelled_even_if_worker_finished_first() -> None:
+async def test_cancel_task_does_not_cancel_terminal_task() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     ref = object()
@@ -230,11 +231,12 @@ async def test_cancel_task_marks_cancelled_even_if_worker_finished_first() -> No
         collection="default",
     )
 
-    with patch("ray.cancel"):
+    with patch("ray.cancel") as cancel:
         result = await dispatcher.cancel_task("task-1")
 
-    assert result is True
-    tsm.set_state.remote.assert_called_once_with("task-1", "CANCELLED")
+    assert result is False
+    cancel.assert_not_called()
+    tsm.set_cancelled_if_active.remote.assert_not_called()
 
 
 @pytest.mark.asyncio

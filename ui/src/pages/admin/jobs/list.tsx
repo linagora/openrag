@@ -99,6 +99,7 @@ export default function JobListPage() {
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [manualRefreshing, setManualRefreshing] = useState(false);
+  const taskStatusFilter = statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab;
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedSearch(search), JOB_SEARCH_DEBOUNCE_MS);
@@ -107,7 +108,7 @@ export default function JobListPage() {
 
   const tasksQuery = useQuery({
     queryKey: ["tasks", statusTab],
-    queryFn: () => listTasks(statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab),
+    queryFn: () => listTasks(taskStatusFilter),
     refetchInterval: JOBS_REFETCH_INTERVAL_MS, // poll — OpenRag has no task SSE
   });
   const queueInfoQuery = useQuery({
@@ -137,13 +138,19 @@ export default function JobListPage() {
 
   const bulkCancelMutation = useMutation({
     mutationFn: async (taskIds: string[]) => {
-      const results = await Promise.allSettled(taskIds.map((taskId) => cancelTask(taskId)));
+      const latestTasks = await listTasks(taskStatusFilter);
+      const selectedIds = new Set(taskIds);
+      const activeTaskIds = latestTasks.tasks
+        .filter((task) => selectedIds.has(task.task_id) && isActiveState(task.state))
+        .map((task) => task.task_id);
+      const results = await Promise.allSettled(activeTaskIds.map((taskId) => cancelTask(taskId)));
       const ok = results.filter((result) => result.status === "fulfilled").length;
-      return { ok, failed: results.length - ok };
+      return { ok, failed: results.length - ok, skipped: taskIds.length - activeTaskIds.length };
     },
-    onSuccess: ({ ok, failed }) => {
+    onSuccess: ({ ok, failed, skipped }) => {
       if (ok) toast.success(`${ok} task(s) cancelled`);
       if (failed) toast.error(`${failed} task(s) failed to cancel`);
+      if (skipped) toast.error(`${skipped} task(s) were no longer active`);
       setRowSelection({});
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
     },
@@ -168,7 +175,10 @@ export default function JobListPage() {
             <Input
               placeholder="Search jobs..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setRowSelection({});
+              }}
               className="pl-9"
             />
           </div>
