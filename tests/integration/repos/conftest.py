@@ -1,7 +1,7 @@
 """Shared fixtures for the Phase 7F persistence-layer integration tests.
 
 The whole suite auto-skips when a Postgres instance is not reachable. We try
-the explicit ``POSTGRES_TEST_DSN`` env var first, then fall back to the local
+the explicit ``POSTGRES_TEST_ADMIN_DSN`` env var first, then fall back to the local
 docker-compose ``rdb`` container (the dev DB the rest of the project assumes
 is up). One ephemeral test database is created at session start, Alembic
 migrations run once, and individual tests share the same
