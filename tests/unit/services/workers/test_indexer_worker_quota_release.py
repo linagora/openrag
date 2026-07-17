@@ -213,3 +213,30 @@ async def test_release_failure_does_not_mask_the_indexing_error(tmp_path):
             _worker(_Pipeline(error=RuntimeError("embedder exploded")), FakeDocumentRepo(), user_repo),
             tmp_path,
         )
+
+
+@pytest.mark.asyncio
+async def test_state_write_failure_releases_the_slot(tmp_path):
+    """The SERIALIZING write can fail — the slot must still go back.
+
+    ``set_state`` talks to a detached Ray actor that can be unreachable
+    (restart, OOM, node loss). It runs *before* the try block that owns the
+    release, and ``IndexerWorkerActor.process_file`` only guards the
+    catalog/registry setup, so nothing else covers this window: the request
+    already handed the slot off at dispatch and will not release it.
+    """
+    user_repo = FakeUserRepo()
+    tsm = _tsm()
+    tsm.set_state.remote = AsyncMock(side_effect=RuntimeError("actor unreachable"))
+    worker = IndexerWorker(
+        pipeline=_Pipeline(),
+        task_state_manager=tsm,
+        document_repo=FakeDocumentRepo(),
+        topic_tag_repo=None,
+        user_repo=user_repo,
+    )
+
+    with pytest.raises(RuntimeError, match="actor unreachable"):
+        await _run(worker, tmp_path)
+
+    assert user_repo.released == [42]

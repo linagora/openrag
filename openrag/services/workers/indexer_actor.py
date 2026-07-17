@@ -103,20 +103,23 @@ class IndexerWorker:
         # BaseException that ``except Exception`` would sail straight past.
         release_slot = bool(quota_reserved)
         user_id = (user or {}).get("id")
-        await self._tsm.set_state.remote(task_id, "SERIALIZING")
         row: dict[str, Any] | None = None
         catalog_written = False
-        await _update_job(
-            self._job_repo,
-            task_id,
-            status=DocumentStatus.SERIALIZING,
-            started_at=datetime.now(UTC),
-        )
         try:
+            # Inside the release scope: ``set_state`` talks to a detached actor
+            # that can be unreachable, and by this point the request has already
+            # handed the slot over at dispatch, so nothing else would give it back.
+            await self._tsm.set_state.remote(task_id, "SERIALIZING")
+            await _update_job(
+                self._job_repo,
+                task_id,
+                status=DocumentStatus.SERIALIZING,
+                started_at=datetime.now(UTC),
+            )
             document = await _load_document(path, metadata, partition)
             # One indexation timestamp for this file, shared by the Milvus chunks
             # (via the store stage) and the Postgres catalog row, so they agree.
-            row: dict[str, Any] = {
+            row = {
                 "task_id": task_id,
                 "document": document,
                 "partition": partition,
