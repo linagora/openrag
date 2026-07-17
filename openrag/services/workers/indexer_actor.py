@@ -19,6 +19,8 @@ from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
 logger = get_logger()
 
+logger = get_logger()
+
 
 class IndexerWorker:
     """Pure-Python core of the thin indexer actor.
@@ -206,7 +208,7 @@ class IndexerWorker:
             raise
         finally:
             if release_slot:
-                await _release_quota_slot(self._user_repo, user_id)
+                await release_quota_slot(self._user_repo, user_id)
         # The raw upload is purged (when configured) by the enclosing actor, not
         # here: cleanup must also cover failures that happen *before* this method
         # runs (catalog/registry init, the SERIALIZING state update). See
@@ -226,9 +228,7 @@ async def _update_job(job_repo: Any, task_id: str, **fields: Any) -> None:
     try:
         await job_repo.update_job(task_id, **fields)
     except Exception as exc:  # noqa: BLE001 - durable bookkeeping must not fail indexing
-        from core.utils.logging import get_logger
-
-        get_logger().warning(
+        logger.warning(
             "Durable job state write failed; job history for this task may be incomplete",
             task_id=task_id,
             status=fields.get("status"),
@@ -417,7 +417,7 @@ def _display_filename(path: str, metadata: dict[str, Any]) -> str:
     return Path(path).name
 
 
-async def _release_quota_slot(user_repo: Any, user_id: int | None) -> None:
+async def release_quota_slot(user_repo: Any, user_id: int | None) -> None:
     """Give the uploader's reserved file slot back, swallowing any error.
 
     Runs on cleanup paths only. A release that raises would replace the real
@@ -430,11 +430,10 @@ async def _release_quota_slot(user_repo: Any, user_id: int | None) -> None:
     try:
         await user_repo.release_file_slot(user_id)
     except Exception:  # noqa: BLE001 - cleanup must never mask the indexing error
-        import logging
-
-        logging.getLogger(__name__).exception(
-            "Failed to release reserved file slot for user %s; file_count is now one too high.",
-            user_id,
+        logger.exception(
+            "Failed to release a reserved file slot; the user file_count is now one too high "
+            "and must be reconciled manually.",
+            user_id=user_id,
         )
 
 

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import ray
-from services.workers.indexer_actor import IndexerWorker, _release_quota_slot, delete_uploaded_file
+from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file, release_quota_slot
 
 from openrag.core.config.root import Settings
 
@@ -228,7 +228,7 @@ class IndexerWorkerActor:
                 # own finally will never run. ``BaseException`` because a
                 # cancellation during setup must release too.
                 if quota_reserved:
-                    await _release_quota_slot(self._catalog_store.user_repo, (user or {}).get("id"))
+                    await release_quota_slot(self._catalog_store.user_repo, (user or {}).get("id"))
                 raise
             result = await self._worker.process_file(
                 task_id=task_id,
