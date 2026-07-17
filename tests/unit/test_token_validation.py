@@ -175,7 +175,7 @@ class TestGetMaxModelTokens:
 
         s = _settings_with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 32768})
         monkeypatch.setattr(chat, "load_config", lambda: s)
-        monkeypatch.setattr(chat, "_max_model_tokens", 8000)  # auto-probed value present
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 8000})  # auto-probed value present
         assert chat.get_max_model_tokens() == 32768
 
     def test_primed_used_when_no_endpoint_config(self, monkeypatch):
@@ -183,7 +183,7 @@ class TestGetMaxModelTokens:
 
         s = _settings_with_default_llm()  # no override
         monkeypatch.setattr(chat, "load_config", lambda: s)
-        monkeypatch.setattr(chat, "_max_model_tokens", 8000)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 8000})
         assert chat.get_max_model_tokens() == 8000
 
     def test_global_fallback_when_nothing_configured(self, monkeypatch):
@@ -191,8 +191,117 @@ class TestGetMaxModelTokens:
 
         s = _settings_with_default_llm()  # no override
         monkeypatch.setattr(chat, "load_config", lambda: s)
-        monkeypatch.setattr(chat, "_max_model_tokens", None)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
         assert chat.get_max_model_tokens() == int(s.llm_context.max_llm_context_size)
+
+
+class _FakeOpenAIModel:
+    """Minimal stand-in for the openai SDK's Model object — needs .id and
+    either .model_dump() or .dict() reporting max_model_len."""
+
+    def __init__(self, id: str, max_model_len: int):
+        self.id = id
+        self._max_model_len = max_model_len
+
+    def model_dump(self):
+        return {"id": self.id, "max_model_len": self._max_model_len}
+
+
+class TestPrimeMaxModelTokens:
+    """prime_max_model_tokens probes every registered LLM endpoint's
+    /v1/models for max_model_len — not just the default — caching per
+    endpoint name so a partition's chat_llm preset gets its own auto-probed
+    budget (the '639' fix)."""
+
+    async def test_probes_each_distinct_endpoint_and_caches_by_name(self, monkeypatch):
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+        from core.config.root import Settings
+
+        s = Settings()
+        s.models.llm["default"] = ModelEndpointConfig(endpoint="http://default:8000/v1", model_name="model-a")
+        s.models.llm["mistral"] = ModelEndpointConfig(endpoint="http://mistral:8000/v1", model_name="model-b")
+        calls = []
+
+        async def fake_get_openai_models(base_url, api_key, timeout=30):
+            calls.append(base_url)
+            return {
+                "http://default:8000/v1": [_FakeOpenAIModel("model-a", 8192)],
+                "http://mistral:8000/v1": [_FakeOpenAIModel("model-b", 32768)],
+            }[base_url]
+
+        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+
+        await chat.prime_max_model_tokens(s)
+
+        assert chat._max_model_tokens_by_name == {"default": 8192, "mistral": 32768}
+        assert sorted(calls) == ["http://default:8000/v1", "http://mistral:8000/v1"]
+
+    async def test_dedupes_aliased_default_endpoint(self, monkeypatch):
+        """The "default" name always aliases whichever endpoint is is_default
+        (same ModelEndpointConfig object) — it must be probed once, and the
+        result cached under both names."""
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+        from core.config.root import Settings
+
+        s = Settings()
+        shared = ModelEndpointConfig(endpoint="http://default:8000/v1", model_name="model-a")
+        s.models.llm["default"] = shared
+        s.models.llm["model-a"] = shared
+        calls = []
+
+        async def fake_get_openai_models(base_url, api_key, timeout=30):
+            calls.append(base_url)
+            return [_FakeOpenAIModel("model-a", 8192)]
+
+        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+
+        await chat.prime_max_model_tokens(s)
+
+        assert chat._max_model_tokens_by_name == {"default": 8192, "model-a": 8192}
+        assert calls == ["http://default:8000/v1"]
+
+    async def test_endpoint_without_model_name_is_skipped(self, monkeypatch):
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+        from core.config.root import Settings
+
+        s = Settings()
+        s.models.llm["default"] = ModelEndpointConfig(endpoint="http://default:8000/v1")  # no model_name
+
+        async def fake_get_openai_models(base_url, api_key, timeout=30):
+            pytest.fail("must not probe an endpoint with no model_name")
+
+        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+
+        await chat.prime_max_model_tokens(s)
+
+        assert chat._max_model_tokens_by_name == {}
+
+    async def test_one_endpoint_probe_failure_does_not_affect_others(self, monkeypatch):
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+        from core.config.root import Settings
+
+        s = Settings()
+        s.models.llm["default"] = ModelEndpointConfig(endpoint="http://default:8000/v1", model_name="model-a")
+        s.models.llm["broken"] = ModelEndpointConfig(endpoint="http://broken:8000/v1", model_name="model-b")
+
+        async def fake_get_openai_models(base_url, api_key, timeout=30):
+            if base_url == "http://broken:8000/v1":
+                raise RuntimeError("connection refused")
+            return [_FakeOpenAIModel("model-a", 8192)]
+
+        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+
+        await chat.prime_max_model_tokens(s)
+
+        assert chat._max_model_tokens_by_name == {"default": 8192}
 
 
 def _partition_config(chat_llm=None):
@@ -224,22 +333,39 @@ class TestPartitionResolvedMaxModelTokens:
             extra={LLM_CONTEXT_SIZE_KEY: 32768, LLM_OUTPUT_TOKENS_KEY: 4096},
         )
         s.partitions["p"] = _partition_config(chat_llm="mistral")
-        monkeypatch.setattr(chat, "_max_model_tokens", 8000)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 8000, "mistral": 16000})
 
         assert chat.get_max_model_tokens(partitions=["p"], settings=s) == 32768
         # No partition (direct-LLM) still resolves the default endpoint.
         assert chat.get_max_model_tokens(partitions=None, settings=s) == 8192
 
-    def test_auto_probed_value_not_reused_for_a_non_default_preset(self, monkeypatch):
-        """The startup-primed value is specific to the default endpoint's model —
-        it must not leak into a differently-configured partition preset."""
+    def test_partition_preset_uses_its_own_probed_value(self, monkeypatch):
+        """Each endpoint's auto-probed max_model_len is cached under its own
+        name (prime_max_model_tokens probes every registered LLM endpoint,
+        not just the default) — a partition preset with no admin override
+        gets its own probed budget, not the default endpoint's."""
         import api.routers.user.chat as chat
         from core.config.model_endpoints import ModelEndpointConfig
 
         s = _settings_with_default_llm()  # no explicit context size configured
         s.models.llm["mistral"] = ModelEndpointConfig(endpoint="http://mistral:8000/v1")
         s.partitions["p"] = _partition_config(chat_llm="mistral")
-        monkeypatch.setattr(chat, "_max_model_tokens", 8000)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 8000, "mistral": 32768})
+
+        assert chat.get_max_model_tokens(partitions=["p"], settings=s) == 32768
+        assert chat.get_max_model_tokens(partitions=None, settings=s) == 8000
+
+    def test_unprobed_preset_falls_back_to_global_not_default_probed_value(self, monkeypatch):
+        """A resolved endpoint with neither an admin override nor a
+        successful probe of its own must not silently borrow the default
+        endpoint's cached probe — it falls straight to the global default."""
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+
+        s = _settings_with_default_llm()  # no explicit context size configured
+        s.models.llm["mistral"] = ModelEndpointConfig(endpoint="http://mistral:8000/v1")
+        s.partitions["p"] = _partition_config(chat_llm="mistral")
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 8000})  # "mistral" never probed
 
         assert chat.get_max_model_tokens(partitions=["p"], settings=s) == int(s.llm_context.max_llm_context_size)
         assert chat.get_max_model_tokens(partitions=None, settings=s) == 8000
@@ -255,7 +381,7 @@ class TestPartitionResolvedMaxModelTokens:
         s.models.llm["llama"] = ModelEndpointConfig(endpoint="http://llama:8000/v1", extra={LLM_CONTEXT_SIZE_KEY: 4096})
         s.partitions["a"] = _partition_config(chat_llm="mistral")
         s.partitions["b"] = _partition_config(chat_llm="llama")
-        monkeypatch.setattr(chat, "_max_model_tokens", None)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
 
         assert chat.get_max_model_tokens(partitions=["a", "b"], settings=s) == 8192
 

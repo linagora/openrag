@@ -8,6 +8,7 @@ delegated to the service resolved from the DI container.
 from datetime import UTC, datetime
 
 from api.dependencies.auth import require_admin
+from api.routers.user.chat import prime_max_model_tokens
 from api.schemas.admin.model_endpoint_schemas import (
     CreateModelEndpointRequest,
     ModelEndpointResponse,
@@ -31,6 +32,27 @@ def _same_endpoint_url(left: str, right: str) -> bool:
     return left.strip().rstrip("/") == right.strip().rstrip("/")
 
 
+async def _reprime_llm_token_cache(model_type: str) -> None:
+    """Refresh the auto-probed ``max_model_len`` cache after an LLM endpoint
+    write (create/update/delete/set-default).
+
+    ``config.models.llm`` itself is already refreshed synchronously inside
+    the service call (``ModelEndpointService.load_all()``), but the
+    ``/v1/models`` auto-probe cache (``chat._max_model_tokens_by_name``) is
+    a separate cache that ``prime_max_model_tokens`` otherwise only
+    populates once at process startup — without this, a newly added or
+    edited LLM endpoint keeps falling back to the global context-size
+    default until the next restart. No-op for non-LLM endpoint types.
+    Best-effort: a probe failure must not fail the admin's CRUD request.
+    """
+    if model_type != "llm":
+        return
+    try:
+        await prime_max_model_tokens()
+    except Exception:
+        logger.exception("Failed to refresh auto-probed LLM token cache after endpoint write")
+
+
 @router.post(
     "/",
     response_model=ModelEndpointResponse,
@@ -43,7 +65,9 @@ async def create_model_endpoint(
     """Register a named inference endpoint."""
     now = datetime.now(UTC)
     row = ModelEndpointRow(**body.model_dump(), created_at=now, updated_at=now)
-    return await service.create_model_endpoint(row)
+    result = await service.create_model_endpoint(row)
+    await _reprime_llm_token_cache(body.model_type)
+    return result
 
 
 @router.get("/", response_model=list[ModelEndpointResponse])
@@ -76,11 +100,13 @@ async def update_model_endpoint(
     fields = body.model_dump(exclude_unset=True)
     if "name" in fields:
         fields["new_name"] = fields.pop("name")
-    return await service.update_model_endpoint(
+    result = await service.update_model_endpoint(
         name=name,
         model_type=model_type,
         **fields,
     )
+    await _reprime_llm_token_cache(model_type)
+    return result
 
 
 @router.delete("/{model_type}/{name}", status_code=status.HTTP_204_NO_CONTENT)
@@ -91,6 +117,7 @@ async def delete_model_endpoint(
 ):
     """Delete a registered inference endpoint."""
     await service.delete_model_endpoint(name=name, model_type=model_type)
+    await _reprime_llm_token_cache(model_type)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -102,6 +129,7 @@ async def set_default_model_endpoint(
 ):
     """Promote a registered endpoint to the default for its type."""
     await service.set_default(model_type=model_type, name=name)
+    await _reprime_llm_token_cache(model_type)
     return await service.get_model_endpoint(name=name, model_type=model_type)
 
 

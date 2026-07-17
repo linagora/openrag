@@ -45,13 +45,13 @@ router = APIRouter()
 if TYPE_CHECKING:
     from core.config.root import Settings
 
-# Auto-probed max model token limit. Populated by ``prime_max_model_tokens``
-# which the application lifespan invokes during startup. It is only the *middle*
-# tier of ``get_max_model_tokens`` and only applies to the "default" LLM
-# endpoint (it is probed against ``config.llm.model`` specifically): an
-# admin-configured context size on the resolved LLM endpoint takes precedence,
-# and ``config.llm_context`` is the final fallback.
-_max_model_tokens: int | None = None
+# Auto-probed max model token limits, keyed by LLM endpoint registry name.
+# Populated by ``prime_max_model_tokens`` which the application lifespan
+# invokes during startup, once the model-endpoint registry is loaded. It is
+# only the *middle* tier of ``get_max_model_tokens``: an admin-configured
+# context size on the resolved LLM endpoint takes precedence, and
+# ``config.llm_context`` is the final fallback.
+_max_model_tokens_by_name: dict[str, int] = {}
 
 
 def _runtime_config(settings: "Settings | None" = None) -> "Settings":
@@ -59,14 +59,39 @@ def _runtime_config(settings: "Settings | None" = None) -> "Settings":
 
 
 async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
-    """Populate the cached max model token limit.
+    """Populate the per-endpoint auto-probed max model token cache.
 
     Called once from the FastAPI lifespan in ``api/main.py`` (replaces the
-    deprecated ``@router.on_event("startup")`` hook). Safe to call again —
-    it just refreshes the cache.
+    deprecated ``@router.on_event("startup")`` hook), after the model-endpoint
+    registry is loaded. Probes every registered LLM endpoint's ``/v1/models``
+    for ``max_model_len`` — not just the default — so a partition's
+    ``chat_llm`` preset gets its own auto-probed budget instead of silently
+    falling back to the global ``llm_context`` default. Endpoints that alias
+    the same underlying config (the ``"default"`` name always points at
+    whichever endpoint is ``is_default``) are probed once and the result
+    cached under every alias; endpoints with no ``model_name`` can't be
+    matched in the ``/v1/models`` listing and are skipped. One endpoint's
+    probe failure doesn't affect the others. Safe to call again — it just
+    refreshes the cache.
     """
-    global _max_model_tokens
-    _max_model_tokens = await _fetch_max_model_tokens(_runtime_config(settings))
+    global _max_model_tokens_by_name
+    config = _runtime_config(settings)
+    probed_by_identity: dict[int, int | None] = {}
+    results: dict[str, int] = {}
+    for name, endpoint in config.models.llm.items():
+        if not endpoint.model_name:
+            continue
+        identity = id(endpoint)
+        if identity not in probed_by_identity:
+            probed_by_identity[identity] = await _fetch_max_model_tokens(
+                base_url=endpoint.endpoint,
+                model_id=endpoint.model_name,
+                api_key=endpoint.extra.get("api_key", ""),
+            )
+        value = probed_by_identity[identity]
+        if value is not None:
+            results[name] = value
+    _max_model_tokens_by_name = results
 
 
 def _make_sse_error(message: str, code: str) -> str:
@@ -153,29 +178,33 @@ def is_direct_llm_model(
     return request.model is None or request.model == "" or request.model == config.llm.model
 
 
-async def _fetch_max_model_tokens(config: "Settings") -> int:
-    """Fetch the max model token limit from vLLM's OpenAI server.
+async def _fetch_max_model_tokens(*, base_url: str, model_id: str, api_key: str) -> int | None:
+    """Fetch one endpoint's max model token limit from its ``/v1/models`` listing.
 
-    Falls back to ``config.llm_context.max_llm_context_size`` if unavailable.
+    Returns ``None`` — not a fallback value — when the endpoint is
+    unreachable, doesn't serve ``model_id``, or doesn't report
+    ``max_model_len``: this probes a single endpoint among potentially many,
+    so the fallback decision belongs to the caller (``get_max_model_tokens``),
+    not this helper.
     """
-    default_limit = int(config.llm_context.max_llm_context_size)
-    model_id = config.llm.model
     try:
-        openai_models = await get_openai_models(base_url=config.llm.base_url, api_key=config.llm.api_key)
+        openai_models = await get_openai_models(base_url=base_url, api_key=api_key)
         model = next((m for m in openai_models if m.id == model_id), None)
         if model is None:
-            logger.warning(f"No model found for {model_id}. Using default context size.")
-            return default_limit
+            logger.warning(f"No model found for {model_id} at {base_url}.")
+            return None
         model_data = model.model_dump() if hasattr(model, "model_dump") else model.dict()
         max_len = model_data.get("max_model_len") or model_data.get("model_extra", {}).get("max_model_len")
         if max_len is None:
-            logger.warning(f"max_model_len not found for {model_id}. Using default context size.")
-            return default_limit
-        logger.info("Fetched max_model_len from vLLM at startup", model=model_id, max_model_len=int(max_len))
+            logger.warning(f"max_model_len not found for {model_id} at {base_url}.")
+            return None
+        logger.info(
+            "Fetched max_model_len from vLLM at startup", model=model_id, base_url=base_url, max_model_len=int(max_len)
+        )
         return int(max_len)
     except Exception as e:
-        logger.warning("Failed to query /v1/models for max_model_len; using default", error=str(e))
-        return default_limit
+        logger.warning("Failed to query /v1/models for max_model_len", base_url=base_url, model=model_id, error=str(e))
+        return None
 
 
 def _resolve_llm_endpoint_name(config: "Settings", partitions: list[str] | None) -> str:
@@ -208,17 +237,18 @@ def get_max_model_tokens(partitions: list[str] | None = None, settings: "Setting
     ``max_llm_context_size`` (editable in the admin UI; resolved from the
     partition's ``chat_llm`` preset when the request is scoped to partitions
     that agree on one, else the "default" endpoint) > the value auto-probed
-    from vLLM at startup for the default endpoint's model (only applies when
-    no partition-scoped preset was resolved — the probed value is specific to
-    that one model) > the global ``llm_context`` fallback.
+    from that same endpoint's ``/v1/models`` at startup (see
+    ``prime_max_model_tokens`` — cached per endpoint name, not just the
+    default) > the global ``llm_context`` fallback.
     """
     config = _runtime_config(settings)
     name = _resolve_llm_endpoint_name(config, partitions)
     configured = config.models.llm_context_size(name)
     if configured is not None:
         return configured
-    if name == "default" and _max_model_tokens is not None:
-        return _max_model_tokens
+    probed = _max_model_tokens_by_name.get(name)
+    if probed is not None:
+        return probed
     return int(config.llm_context.max_llm_context_size)
 
 
