@@ -108,6 +108,24 @@ async def test_update_job_sets_only_allowlisted_fields():
     assert job.status is DocumentStatus.COMPLETED
 
 
+async def test_update_job_upper_cases_a_lower_case_status():
+    """A lower-case status must never reach the ``ck_jobs_status`` CHECK.
+
+    ``update_job`` takes ``**fields`` from the worker path, so unlike
+    ``create_job`` (whose ``IndexationJob.status`` pydantic validates to a
+    ``DocumentStatus``) it can receive a plain string. Every durable write is
+    best-effort, so a CHECK violation here would be swallowed and the job would
+    silently freeze at its previous status — permanently, if the dropped write
+    was the terminal one.
+    """
+    pool = _FakePool(row=_db_row(status="COMPLETED"))
+    await _repo(pool).update_job("task-1", status="completed")
+
+    _, params = pool.executed[0]
+    assert "COMPLETED" in params
+    assert "completed" not in params
+
+
 async def test_update_job_truncates_error_text():
     pool = _FakePool(row=_db_row(status="FAILED", error="x"))
     await _repo(pool).update_job("task-1", status=DocumentStatus.FAILED, error="y" * 50_000)
