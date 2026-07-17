@@ -720,7 +720,7 @@ class RecordingVectorStore:
         return len(ids)
 
 
-def _reindex_pipeline(vector_store):
+def _reindex_pipeline(vector_store, *, defer_replace_cleanup: bool = False):
     document = Document(filename="note.txt", text="hi", partition="tenant-a")
     processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hi")])
     pipeline = build_indexing_pipeline(
@@ -728,21 +728,37 @@ def _reindex_pipeline(vector_store):
         chunker=FakeChunker([Chunk(id="c1", text="hi", partition="tenant-a")]),
         embedder=FakeEmbedder([[1.0]]),
         vector_store=vector_store,
+        defer_replace_cleanup=defer_replace_cleanup,
     )
     return pipeline, document
 
 
 @pytest.mark.asyncio
-async def test_reindex_defers_prior_chunk_cleanup_until_catalog_commit():
+async def test_reindex_direct_pipeline_deletes_prior_chunks_after_store():
     # #657: replace=True must snapshot the file's existing chunks, store the new
-    # set, then expose exactly that old set for the worker to delete after the
-    # catalog write succeeds.
+    # set, then delete exactly that old set for direct pipeline callers.
     vs = RecordingVectorStore(existing_ids=["101", "102"])
     pipeline, document = _reindex_pipeline(vs)
 
     row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
 
     # Snapshot is scoped to this file + partition only.
+    assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
+    assert "_replace_old_chunk_collection" not in row
+    assert "_replace_old_chunk_ids" not in row
+    assert vs.deleted == [["101", "102"]]
+    assert vs.events == ["query", "upsert", "delete"]
+
+
+@pytest.mark.asyncio
+async def test_reindex_deferred_pipeline_exposes_prior_chunks_for_worker_cleanup():
+    # Worker indexing updates the catalog after storing vectors. In that path,
+    # cleanup is deferred so a catalog failure cannot remove the old chunk set.
+    vs = RecordingVectorStore(existing_ids=["101", "102"])
+    pipeline, document = _reindex_pipeline(vs, defer_replace_cleanup=True)
+
+    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+
     assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
     assert row["_replace_old_chunk_collection"] == "default"
     assert row["_replace_old_chunk_ids"] == ["101", "102"]
@@ -797,7 +813,7 @@ async def test_reindex_defers_cleanup_delete_to_worker():
     # with neither the old nor the new vector set.
     vs = RecordingVectorStore(existing_ids=["1"])
     vs.delete_error = RuntimeError("delete failed")
-    pipeline, document = _reindex_pipeline(vs)
+    pipeline, document = _reindex_pipeline(vs, defer_replace_cleanup=True)
 
     row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
 

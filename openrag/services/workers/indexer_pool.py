@@ -75,6 +75,7 @@ class IndexerWorkerActor:
             vlm_factory=vlm_factory,
             contextualizer_factory=contextualizer_factory,
             topic_tagger_factory=topic_tagger_factory,
+            defer_replace_cleanup=True,
         )
         rdb_cfg = cfg.rdb.model_copy(update={"database": f"partitions_for_collection_{cfg.vectordb.collection_name}"})
         self._catalog_store = PostgresStore(rdb_cfg, run_migrations=False)
