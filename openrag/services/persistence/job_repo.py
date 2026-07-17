@@ -223,7 +223,16 @@ def _expand_status(status: str | None) -> list[str] | None:
 
 
 def _status_value(status: Any) -> str:
-    return status.value if hasattr(status, "value") else str(status)
+    """Normalize a status to the exact spelling the ``ck_jobs_status`` CHECK allows.
+
+    Upper-cased for the same reason :func:`_expand_status` does it: a lower-case
+    string would fail the CHECK, and every durable write is best-effort, so the
+    violation would be swallowed and the job would silently freeze at its
+    previous status — permanently, if the dropped write was the terminal one.
+    Enum members already carry the right value; plain strings may not.
+    """
+    value = status.value if hasattr(status, "value") else str(status)
+    return value.upper()
 
 
 def _row_to_job(row: asyncpg.Record | None) -> IndexationJob | None:
