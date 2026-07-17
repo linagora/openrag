@@ -240,8 +240,8 @@ class WorkerDispatcher(IndexingDispatcher):
         # Atomically claim the cancellation first: if ray.cancel() ran before
         # this and the RPC then failed, a killed worker could never report
         # back and the task would be stuck active forever (a zombie).
-        # Claiming first means a failed ray.cancel() just leaves a task
-        # marked CANCELLED that later self-corrects to COMPLETED/FAILED.
+        # TaskStateManager keeps CANCELLED sticky, so a worker that starts in
+        # this small window cannot report active/success after the cancel claim.
         cancelled = await self._call(
             self._tsm.set_cancelled_if_active.remote(task_id),
             task_description=f"set_cancelled_if_active({task_id})",
