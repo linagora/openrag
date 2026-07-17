@@ -1,8 +1,22 @@
+from contextlib import asynccontextmanager
+
 import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from services.workers.pipeline_builder import build_indexing_pipeline
+from services.workers.stages import caption as caption_module
+
+
+@pytest.fixture(autouse=True)
+def _noop_vlm_semaphore(monkeypatch):
+    """Stub the cluster-wide VLM semaphore so caption tests don't boot Ray."""
+
+    @asynccontextmanager
+    async def _noop():
+        yield
+
+    monkeypatch.setattr(caption_module, "get_vlm_semaphore", _noop)
 
 
 class FakeParser:
@@ -57,9 +71,11 @@ class FakeVectorStore:
 class FakeVLM:
     def __init__(self) -> None:
         self.calls: list[bytes] = []
+        self.prompts: list[str | None] = []
 
     async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
         self.calls.append(image_bytes)
+        self.prompts.append(prompt)
         return "caption"
 
 
@@ -173,6 +189,45 @@ async def test_pipeline_indexation_config_disables_caption_and_contextualization
     assert vlm.calls == []
     assert contextualizer.calls == []
     assert row["stage"] == "stored"
+
+
+def _caption_pipeline(vlm: FakeVLM, caption_prompt: str | None):
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        caption_prompt=caption_prompt,
+    )
+    return pipeline, document
+
+
+@pytest.mark.asyncio
+async def test_pipeline_injects_configured_caption_prompt():
+    # The captioning template configured on the pipeline (image_describer) must
+    # reach the VLM instead of its bare built-in fallback.
+    vlm = FakeVLM()
+    pipeline, document = _caption_pipeline(vlm, caption_prompt="DESCRIBE THE IMAGE TEMPLATE")
+    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "note.txt"})
+    assert vlm.prompts == ["DESCRIBE THE IMAGE TEMPLATE"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_row_caption_prompt_overrides_configured_default():
+    # An explicit per-row caption_prompt wins over the pipeline default.
+    vlm = FakeVLM()
+    pipeline, document = _caption_pipeline(vlm, caption_prompt="DEFAULT TEMPLATE")
+    await pipeline.run(
+        {"document": document, "partition": "tenant-a", "filename": "note.txt", "caption_prompt": "ROW OVERRIDE"}
+    )
+    assert vlm.prompts == ["ROW OVERRIDE"]
 
 
 @pytest.mark.asyncio
