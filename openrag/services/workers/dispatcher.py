@@ -608,6 +608,15 @@ class WorkerDispatcher(IndexingDispatcher):
                 completed_at=datetime.now(UTC),
             ),
         )
+        # The reserved quota slot (#664) is deliberately not released here.
+        # A task cancelled mid-flight gives its slot back in
+        # ``IndexerWorker.process_file``'s ``finally``; releasing here too
+        # would double-release. But a task that ``ray.cancel`` retires
+        # *before* that body runs never executes the ``finally``, so its slot
+        # leaks -- and the CANCELLED row written just above is terminal, hence
+        # indistinguishable from a clean cancel. Recovering it needs the #676
+        # reconciliation to *recount* ``file_count`` (completed files + active
+        # job rows), not merely sweep orphaned active rows.
         return True
 
 
