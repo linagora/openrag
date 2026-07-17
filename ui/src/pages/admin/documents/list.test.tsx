@@ -16,10 +16,13 @@ vi.mock("sonner", () => ({
   },
 }));
 
+const permissions = vi.hoisted(() => ({
+  canWrite: vi.fn(() => true),
+  superAdminModeResolved: true,
+}));
+
 vi.mock("@/lib/permissions", () => ({
-  usePermissions: () => ({
-    canWrite: () => true,
-  }),
+  usePermissions: () => permissions,
 }));
 
 vi.mock("@/lib/api/partitions", () => ({
@@ -80,19 +83,25 @@ function renderDocuments(initialEntries = ["/documents"]) {
     },
   });
 
-  return render(
+  const ui = () => (
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={initialEntries}>
         <DocumentListPage />
         <LocationProbe />
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const view = render(ui());
+  return Object.assign(view, {
+    rerenderDocuments: () => view.rerender(ui()),
+  });
 }
 
 describe("DocumentListPage", () => {
   beforeEach(() => {
     sessionStorage.clear();
+    permissions.canWrite.mockImplementation(() => true);
+    permissions.superAdminModeResolved = true;
     deleteFileMock.mockClear();
     uploadFileMock.mockReset();
     toastSuccessMock.mockClear();
@@ -125,6 +134,53 @@ describe("DocumentListPage", () => {
 
   it("does not open upload when the requested partition falls back", async () => {
     renderDocuments(["/documents?partition=missing&upload=1"]);
+
+    expect(await screen.findByText("a.pdf")).not.toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toBe("/documents?partition=docs"));
+  });
+
+  it("keeps the upload route while super-admin write access is still resolving", async () => {
+    permissions.canWrite.mockImplementation(() => false);
+    permissions.superAdminModeResolved = false;
+
+    renderDocuments(["/documents?partition=docs&upload=1"]);
+
+    expect(await screen.findByText("a.pdf")).not.toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByTestId("location").textContent).toBe("/documents?partition=docs&upload=1");
+  });
+
+  it("opens the upload dialog when delayed write access resolves", async () => {
+    permissions.canWrite.mockImplementation(() => false);
+    permissions.superAdminModeResolved = false;
+    const view = renderDocuments(["/documents?partition=docs&upload=1"]);
+
+    expect(await screen.findByText("a.pdf")).not.toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByTestId("location").textContent).toBe("/documents?partition=docs&upload=1");
+
+    permissions.canWrite.mockImplementation(() => true);
+    permissions.superAdminModeResolved = true;
+    view.rerenderDocuments();
+
+    expect(await screen.findByRole("dialog")).not.toBeNull();
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toBe("/documents?partition=docs"));
+  });
+
+  it("clears the upload route after write access is rejected", async () => {
+    permissions.canWrite.mockImplementation(() => false);
+    permissions.superAdminModeResolved = true;
+
+    renderDocuments(["/documents?partition=docs&upload=1"]);
+
+    expect(await screen.findByText("a.pdf")).not.toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toBe("/documents?partition=docs"));
+  });
+
+  it("clears upload-only routes without opening a fallback partition", async () => {
+    renderDocuments(["/documents?upload=1"]);
 
     expect(await screen.findByText("a.pdf")).not.toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();

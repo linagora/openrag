@@ -41,7 +41,7 @@ const fileLabel = (f: PartitionFile) => (f.filename as string) || f.file_id;
 export default function DocumentListPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const { canWrite } = usePermissions();
+  const { canWrite, superAdminModeResolved } = usePermissions();
 
   // OpenRag has no flat/cross-partition file list — files live inside a
   // partition, so the view is partition-scoped (pick one, see its files). The
@@ -85,13 +85,21 @@ export default function DocumentListPage() {
     sessionStorage.setItem("documents.partition", selected);
     const urlPartition = searchParams.get("partition");
     const requestedUpload = searchParams.get("upload") === "1";
+    const uploadPermissionResolved = writable || superAdminModeResolved;
     const shouldOpenUpload = requestedUpload && urlPartition === selected && selectedPartitionExists && writable;
     if (shouldOpenUpload) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- Open the existing upload dialog from the route action.
       setUploadOpen(true);
     }
+    const shouldClearUpload =
+      requestedUpload &&
+      partitionsSettled &&
+      (shouldOpenUpload ||
+        !urlPartition ||
+        urlPartition !== selected ||
+        (selectedPartitionExists && uploadPermissionResolved));
     const shouldUpdateRoute =
-      partitionsSettled && (requestedUpload || (urlPartition && urlPartition !== selected));
+      partitionsSettled && (shouldClearUpload || (urlPartition && urlPartition !== selected));
     if (shouldUpdateRoute) {
       setSearchParams(
         (prev) => {
@@ -103,7 +111,15 @@ export default function DocumentListPage() {
         { replace: true },
       );
     }
-  }, [selected, searchParams, selectedPartitionExists, partitionsSettled, setSearchParams, writable]);
+  }, [
+    selected,
+    searchParams,
+    selectedPartitionExists,
+    partitionsSettled,
+    setSearchParams,
+    superAdminModeResolved,
+    writable,
+  ]);
 
   const selectPartition = (p: string) => {
     setFileSelection({ partition: p, rows: {} });
