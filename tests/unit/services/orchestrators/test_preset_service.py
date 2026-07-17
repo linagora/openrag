@@ -213,6 +213,34 @@ async def test_seed_defaults_default_indexation_inherits_contextual_retrieval_en
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_default_indexation_inherits_image_captioning_disabled():
+    from core.config.root import Settings
+
+    settings = Settings(loader={"image_captioning": False})
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    default_idx = repo._store[("default", "indexation")]["config"]
+    assert default_idx["enable_image_captioning"] is False
+    # Named presets keep their explicit seed value regardless of the global flag.
+    assert repo._store[("legal", "indexation")]["config"]["enable_image_captioning"] is True
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_default_indexation_inherits_image_captioning_enabled():
+    from core.config.root import Settings
+
+    settings = Settings(loader={"image_captioning": True})
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    default_idx = repo._store[("default", "indexation")]["config"]
+    assert default_idx["enable_image_captioning"] is True
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_preserves_existing_default_indexation_admin_choice():
     from core.config.root import Settings
 

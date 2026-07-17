@@ -13,6 +13,7 @@ import pytest
 
 API_BASE_URL = os.environ.get("OPENRAG_API_URL", "http://localhost:8080")
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN")
+HTTP_LIMITS = httpx.Limits(max_keepalive_connections=0)
 
 
 def is_auth_enabled():
@@ -26,7 +27,7 @@ def api_client():
     headers = {}
     if is_auth_enabled():
         headers["Authorization"] = f"Bearer {AUTH_TOKEN}"
-    with httpx.Client(base_url=API_BASE_URL, timeout=60.0, headers=headers) as client:
+    with httpx.Client(base_url=API_BASE_URL, timeout=60.0, headers=headers, limits=HTTP_LIMITS) as client:
         yield client
 
 
@@ -59,7 +60,7 @@ def created_user(api_client):
 def user_client(created_user):
     """Create HTTP client authenticated as the created regular user."""
     headers = {"Authorization": f"Bearer {created_user['token']}"}
-    with httpx.Client(base_url=API_BASE_URL, timeout=60.0, headers=headers) as client:
+    with httpx.Client(base_url=API_BASE_URL, timeout=60.0, headers=headers, limits=HTTP_LIMITS) as client:
         yield client
 
 

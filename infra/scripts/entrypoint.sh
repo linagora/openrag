@@ -50,5 +50,13 @@ else
   if [[ "${UVICORN_RELOAD}" == "true" ]]; then
     RELOAD_ARGS+=("--reload")
   fi
-  uv run --no-dev "${ENV_ARGS[@]}" uvicorn api.main:app --host 0.0.0.0 --port "${APP_iPORT:-8080}" "${RELOAD_ARGS[@]}" --workers 1
+  # uvicorn only honours X-Forwarded-* from peers listed in --forwarded-allow-ips
+  # (default: 127.0.0.1), so a reverse proxy outside loopback — the admin-ui
+  # container, a k8s ingress — is ignored: request.client.host stays the proxy's
+  # address (collapsing every user into one rate-limit bucket) and
+  # X-Forwarded-Proto is dropped. Forward the same UVICORN_FORWARDED_ALLOW_IPS
+  # that api.main's __main__ block reads, so one documented variable covers both
+  # entrypoints — the bare `uvicorn` CLI otherwise only reads FORWARDED_ALLOW_IPS.
+  uv run --no-dev "${ENV_ARGS[@]}" uvicorn api.main:app --host 0.0.0.0 --port "${APP_iPORT:-8080}" "${RELOAD_ARGS[@]}" --workers 1 \
+    --proxy-headers --forwarded-allow-ips "${UVICORN_FORWARDED_ALLOW_IPS:-127.0.0.1}"
 fi

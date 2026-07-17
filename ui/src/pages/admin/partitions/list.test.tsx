@@ -87,6 +87,30 @@ describe("PartitionListPage bulk actions", () => {
     });
   });
 
+  it("keeps the create dialog actions reachable with a scrollable form body", async () => {
+    renderPartitions();
+
+    await userEvent.click(screen.getByRole("button", { name: /create personal partition/i }));
+
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.className).toContain("max-h-[calc(100vh-2rem)]");
+    expect(dialog.className).toContain("overflow-hidden");
+
+    const form = dialog.querySelector("form");
+    expect(form?.className).toContain("min-h-0");
+    expect(form?.firstElementChild?.className).toContain("overflow-y-auto");
+    expect(screen.getByRole("button", { name: "Cancel" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Create" })).not.toBeNull();
+  });
+
+  it("labels row icon actions", async () => {
+    permissions.canManagePartitions = true;
+    renderPartitions();
+
+    expect(await screen.findByRole("link", { name: /edit owned-a/i })).not.toBeNull();
+    expect(screen.getByRole("button", { name: /delete owned-a/i })).not.toBeNull();
+  });
+
   it("selects all deletable partitions and deletes only those partitions", async () => {
     renderPartitions();
 

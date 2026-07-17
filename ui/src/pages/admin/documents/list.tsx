@@ -247,7 +247,11 @@ export default function DocumentListPage() {
       cell: ({ row }) => (
         <div className="flex items-center gap-1">
           <Button variant="ghost" size="icon-xs" asChild>
-            <Link to={fileHref(selected, row.original.file_id)}>
+            <Link
+              to={fileHref(selected, row.original.file_id)}
+              aria-label={`View ${fileLabel(row.original)}`}
+              title={`View ${fileLabel(row.original)}`}
+            >
               <Eye className="h-3.5 w-3.5" />
             </Link>
           </Button>
@@ -257,7 +261,12 @@ export default function DocumentListPage() {
               description={`Delete "${fileLabel(row.original)}"? This cannot be undone.`}
               onConfirm={() => deleteMutation.mutate(row.original.file_id)}
             >
-              <Button variant="ghost" size="icon-xs">
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`Delete ${fileLabel(row.original)}`}
+                title={`Delete ${fileLabel(row.original)}`}
+              >
                 <Trash2 className="h-3.5 w-3.5 text-destructive" />
               </Button>
             </ConfirmDialog>
