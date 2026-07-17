@@ -4,7 +4,6 @@ import uuid
 from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
-from core.models.catalog import TERMINAL_TASK_STATES
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -238,21 +237,20 @@ class WorkerDispatcher(IndexingDispatcher):
         if obj_ref is None:
             return False
 
-        # Re-checked atomically in set_cancelled_if_active below; this early
-        # check just avoids an unnecessary ray.cancel() call on a task that
-        # has already reached a terminal state.
-        state = await self._call(
-            self._tsm.get_state.remote(task_id),
-            task_description=f"get_state({task_id})",
-        )
-        if state in TERMINAL_TASK_STATES:
-            return False
-
-        ray.cancel(obj_ref["ref"], recursive=True)
-        return await self._call(
+        # Atomically claim the cancellation first: if ray.cancel() ran before
+        # this and the RPC then failed, a killed worker could never report
+        # back and the task would be stuck active forever (a zombie).
+        # Claiming first means a failed ray.cancel() just leaves a task
+        # marked CANCELLED that later self-corrects to COMPLETED/FAILED.
+        cancelled = await self._call(
             self._tsm.set_cancelled_if_active.remote(task_id),
             task_description=f"set_cancelled_if_active({task_id})",
         )
+        if not cancelled:
+            return False
+
+        ray.cancel(obj_ref["ref"], recursive=True)
+        return True
 
 
 def from_ray_namespace(

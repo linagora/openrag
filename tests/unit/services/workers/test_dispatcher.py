@@ -196,7 +196,6 @@ async def test_cancel_task_uses_stored_pool_object_ref() -> None:
     ref = object()
     tsm = _task_state_manager()
     tsm.get_object_ref.remote = AsyncMock(return_value={"ref": ref})
-    tsm.get_state.remote = AsyncMock(return_value="SERIALIZING")
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
@@ -210,8 +209,8 @@ async def test_cancel_task_uses_stored_pool_object_ref() -> None:
         result = await dispatcher.cancel_task("task-1")
 
     assert result is True
-    cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
+    cancel.assert_called_once_with(ref, recursive=True)
 
 
 @pytest.mark.asyncio
@@ -221,7 +220,7 @@ async def test_cancel_task_does_not_cancel_terminal_task() -> None:
     ref = object()
     tsm = _task_state_manager()
     tsm.get_object_ref.remote = AsyncMock(return_value={"ref": ref})
-    tsm.get_state.remote = AsyncMock(return_value="COMPLETED")
+    tsm.set_cancelled_if_active.remote = AsyncMock(return_value=False)
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
@@ -235,8 +234,8 @@ async def test_cancel_task_does_not_cancel_terminal_task() -> None:
         result = await dispatcher.cancel_task("task-1")
 
     assert result is False
+    tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
     cancel.assert_not_called()
-    tsm.set_cancelled_if_active.remote.assert_not_called()
 
 
 @pytest.mark.asyncio
