@@ -37,6 +37,15 @@ API_KEY = os.environ["API_KEY"]
 MODEL = os.environ["MODEL"]
 OPENRAG_AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
 
+# Filtration-critic endpoint. Defaults to the generation model/endpoint, but can be
+# pointed at a different (ideally stronger) model: a model critiquing its OWN output
+# suffers self-preference bias and shares its own blind spots, which most undermines
+# the `faithful` and `unanswerable` verdicts. Mirrors the JUDGE_MODEL /
+# JUDGE_BASE_URL / JUDGE_API_KEY convention in benchmark.py.
+CRITIC_MODEL = os.environ.get("CRITIC_MODEL") or MODEL
+CRITIC_BASE_URL = os.environ.get("CRITIC_BASE_URL") or BASE_URL
+CRITIC_API_KEY = os.environ.get("CRITIC_API_KEY") or API_KEY
+
 settings = {
     "temperature": CONFIG.question_gen.temperature,
     "max_retries": CONFIG.question_gen.max_retries,
@@ -49,14 +58,32 @@ settings = {
 
 llm = ChatOpenAI(**settings).with_retry(stop_after_attempt=CONFIG.question_gen.stop_after_attempt)
 
-# Critic LLM for the filtration pass. Same endpoint/model, but low temperature for
-# deterministic scoring. The critic is prompted to emit strict JSON and parsed
-# defensively (no native structured-output / function-calling dependency), so it
-# works against any OpenAI-compatible proxy.
-critic_settings = {**settings, "temperature": CONFIG.question_gen.filtration.critic_temperature}
+# Critic LLM for the filtration pass. Low temperature for deterministic scoring, and
+# its own model/endpoint (defaulting to the generator's — see CRITIC_MODEL above).
+# The critic is prompted to emit strict JSON and parsed defensively (no native
+# structured-output / function-calling dependency), so it works against any
+# OpenAI-compatible proxy.
+critic_settings = {
+    **settings,
+    "model": CRITIC_MODEL,
+    "base_url": CRITIC_BASE_URL,
+    "api_key": CRITIC_API_KEY,
+    "temperature": CONFIG.question_gen.filtration.critic_temperature,
+}
 critic_llm = ChatOpenAI(**critic_settings).with_retry(
     stop_after_attempt=CONFIG.question_gen.stop_after_attempt
 )
+
+if CONFIG.question_gen.filtration.enabled:
+    logger.info(f"Filtration critic: {CRITIC_MODEL} @ {CRITIC_BASE_URL}")
+    if CRITIC_MODEL == MODEL and CRITIC_BASE_URL == BASE_URL:
+        # Not fatal — the critic still catches plenty — but self-judging inflates
+        # `faithful`/`unanswerable` verdicts, so make the caveat visible in the logs.
+        logger.warning(
+            "Filtration critic is the SAME model as the generator — it is judging its own "
+            "output (self-preference bias / shared blind spots). Set CRITIC_MODEL "
+            "(and optionally CRITIC_BASE_URL / CRITIC_API_KEY) to use a different model."
+        )
 
 # Per-type generation spec: difficulty label, minimum chunks required, and whether
 # the type is inherently multi-hop. Keys MUST match
@@ -596,6 +623,10 @@ def _write_manifest(output_path: str, ctx: GenCtx, questions: list[dict], counts
         "partition": ctx.partition,
         "generator_model": MODEL,
         "base_url": BASE_URL,
+        # Which model produced the quality verdicts, and whether it self-judged.
+        "critic_model": CRITIC_MODEL,
+        "critic_base_url": CRITIC_BASE_URL,
+        "critic_is_generator": CRITIC_MODEL == MODEL and CRITIC_BASE_URL == BASE_URL,
         "language": ctx.language,
         "clustering": {"method": ctx.clustering_method, **asdict(qg.clustering)},
         "generation_params": {
