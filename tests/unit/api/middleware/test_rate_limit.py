@@ -40,7 +40,16 @@ def _build_app(monkeypatch, **env):
     async def ok(request: Request):
         return PlainTextResponse("ok")
 
-    app = Starlette(routes=[Route("/v1/chat", ok), Route("/auth/login", ok), Route("/other", ok)])
+    app = Starlette(
+        routes=[
+            Route("/v1/chat", ok),
+            Route("/auth/login", ok),
+            Route("/other", ok),
+            Route("/chainlit/ws/socket.io/", ok),
+            Route("/chainlithack", ok),
+            Route("/assets/pdf.worker.mjs", ok),
+        ]
+    )
     app.add_middleware(RateLimitMiddleware)
     return app
 
@@ -124,6 +133,91 @@ def test_admin_bypasses_rate_limit(monkeypatch):
     client = TestClient(app)
     for _ in range(5):
         assert client.get("/v1/chat").status_code == 200
+
+
+def test_chainlit_socketio_is_exempt(monkeypatch):
+    # Chainlit's Socket.IO transport falls back to HTTP long-polling behind a proxy
+    # that doesn't forward the upgrade, issuing one request per emitted packet. The
+    # subtree is auth-bypassed, so those requests key on the proxy's IP and would
+    # otherwise exhaust a single shared bucket for every chat user at once.
+    app = _build_app(monkeypatch, RATE_LIMIT_DEFAULT="2/minute")
+    client = TestClient(app)
+    for _ in range(10):
+        assert client.get("/chainlit/ws/socket.io/").status_code == 200
+
+
+def test_chainlit_root_assets_are_exempt(monkeypatch):
+    app = _build_app(monkeypatch, RATE_LIMIT_DEFAULT="2/minute")
+    client = TestClient(app)
+    for _ in range(10):
+        assert client.get("/assets/pdf.worker.mjs").status_code == 200
+
+
+def test_exempt_paths_do_not_widen_to_other_routes(monkeypatch):
+    # The exemption must not leak into the tiers it doesn't name.
+    app = _build_app(monkeypatch, RATE_LIMIT_DEFAULT="1/minute")
+    client = TestClient(app)
+    assert client.get("/other").status_code == 200
+    assert client.get("/other").status_code == 429
+
+
+def test_chainlit_prefix_boundary_is_enforced(monkeypatch):
+    # "/chainlithack" starts with "/chainlit" but is not under the "/chainlit/"
+    # subtree, so it must stay rate-limited — the exempt prefix ends in "/" to
+    # keep siblings from being swept in. Guards the trailing-slash boundary.
+    app = _build_app(monkeypatch, RATE_LIMIT_DEFAULT="1/minute")
+    client = TestClient(app)
+    assert client.get("/chainlithack").status_code == 200
+    assert client.get("/chainlithack").status_code == 429
+
+
+def test_exempt_paths_env_override_replaces_defaults(monkeypatch):
+    # Naming a different prefix un-exempts /chainlit.
+    app = _build_app(monkeypatch, RATE_LIMIT_DEFAULT="1/minute", RATE_LIMIT_EXEMPT_PATHS="/other")
+    client = TestClient(app)
+    assert client.get("/chainlit/ws/socket.io/").status_code == 200
+    assert client.get("/chainlit/ws/socket.io/").status_code == 429
+    for _ in range(5):
+        assert client.get("/other").status_code == 200
+
+
+def test_exempt_paths_can_be_disabled_with_empty_env(monkeypatch):
+    # Set-but-empty means "no exemptions", distinct from unset (use the defaults).
+    app = _build_app(monkeypatch, RATE_LIMIT_DEFAULT="1/minute", RATE_LIMIT_EXEMPT_PATHS="")
+    client = TestClient(app)
+    assert client.get("/chainlit/ws/socket.io/").status_code == 200
+    assert client.get("/chainlit/ws/socket.io/").status_code == 429
+
+
+def test_auth_cannot_be_exempted_via_env_override(monkeypatch):
+    # RATE_LIMIT_EXEMPT_PATHS is operator-controlled; a value that covers /auth/
+    # (accidentally, e.g. while tuning the chainlit/assets exemptions, or via an
+    # overly broad prefix) must not disable the brute-force limit on login routes.
+    app = _build_app(monkeypatch, RATE_LIMIT_AUTH="1/minute", RATE_LIMIT_EXEMPT_PATHS="/auth/")
+    client = TestClient(app)
+    assert client.get("/auth/login").status_code == 200
+    assert client.get("/auth/login").status_code == 429
+
+
+def test_auth_cannot_be_exempted_via_broad_prefix_override(monkeypatch):
+    # A prefix broader than "/auth/" (e.g. bare "/") would also swallow it via
+    # startswith() — must be dropped too, not just an exact "/auth/" match.
+    app = _build_app(monkeypatch, RATE_LIMIT_AUTH="1/minute", RATE_LIMIT_EXEMPT_PATHS="/")
+    client = TestClient(app)
+    assert client.get("/auth/login").status_code == 200
+    assert client.get("/auth/login").status_code == 429
+
+
+def test_auth_login_cannot_be_exempted_via_narrower_prefix_override(monkeypatch):
+    # The reverse shape of the broad-prefix case: a prefix *more specific* than
+    # "/auth/" (e.g. "/auth/login") isn't a prefix of "/auth/", so it survives a
+    # check that only looks for "/auth/".startswith(p) — but it still carves the
+    # login route itself out of the auth tier via path.startswith(p). Must be
+    # dropped too.
+    app = _build_app(monkeypatch, RATE_LIMIT_AUTH="1/minute", RATE_LIMIT_EXEMPT_PATHS="/auth/login")
+    client = TestClient(app)
+    assert client.get("/auth/login").status_code == 200
+    assert client.get("/auth/login").status_code == 429
 
 
 if __name__ == "__main__":
