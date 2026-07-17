@@ -268,7 +268,9 @@ Consequences to respect when touching this code:
   `check_user_file_quota` yield-teardown releases it unless the router calls
   `commit_quota_reservation(...)`. After dispatch it is the worker's:
   `IndexerWorker.process_file` releases it in a `finally` unless the catalog write
-  reports a new row. Both quota-gated routes (`add_file`, `copy_file`) reserve;
+  reports a new row. Both quota-gated routes (`add_file`, `copy_file`) reserve, and
+  so do the MCP tools that create rows (`MCPService.index_url`, `MCPService.copy_file`),
+  which have no dependency chain and therefore reserve inline;
   `put_file` (replace re-index) does not, since it reuses an existing row.
 - Any new early return between admission and dispatch is automatically covered by the
   teardown — but any new code path that *creates a file row without reserving*, or

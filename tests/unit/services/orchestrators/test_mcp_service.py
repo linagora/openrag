@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from core.utils.exceptions import ValidationError
+from core.utils.exceptions import OpenRAGError, ValidationError
 from services.orchestrators.mcp_service import MCPService
 
 # ---------------------------------------------------------------------------
@@ -87,9 +87,10 @@ class RaceLostPartitions(FakePartitions):
 
 
 class FakeIndexing:
-    def __init__(self, *, state="COMPLETED", error="boom"):
+    def __init__(self, *, state="COMPLETED", error="boom", copy_created=True):
         self._state = state
         self._error = error
+        self.copy_created = copy_created
         self.deleted: list[tuple[str, str]] = []
         self.updated: list[tuple] = []
         self.copied: list[dict] = []
@@ -109,10 +110,37 @@ class FakeIndexing:
 
     async def copy_file(self, **kwargs):
         self.copied.append(kwargs)
+        return self.copy_created
 
     async def add_file(self, **kwargs):
         self.added.append(kwargs)
         return "task-123"
+
+
+class FakeAuth:
+    """Records reserve/release so tests can assert the slot is settled.
+
+    Mirrors ``AuthService``: reserving over quota raises ``FILE_QUOTA_EXCEEDED``
+    (403), releasing never raises.
+    """
+
+    def __init__(self, *, over_quota: bool = False) -> None:
+        self.over_quota = over_quota
+        self.reserved: list[int] = []
+        self.released: list[int] = []
+
+    async def reserve_file_slot(self, user_id: int, *, default_quota: int) -> int:
+        if self.over_quota:
+            raise OpenRAGError(
+                "File quota exceeded.",
+                code="FILE_QUOTA_EXCEEDED",
+                status_code=403,
+            )
+        self.reserved.append(user_id)
+        return len(self.reserved)
+
+    async def release_file_slot(self, user_id: int) -> None:
+        self.released.append(user_id)
 
 
 class FakeJobs:
@@ -153,7 +181,9 @@ def _service(
     indexing=None,
     jobs=None,
     conversion=None,
+    auth=None,
     vector_store=None,
+    default_file_quota=-1,
     default_top_k=5,
     max_top_k=50,
     similarity_threshold=0.8,
@@ -164,8 +194,10 @@ def _service(
         indexing_service=indexing or FakeIndexing(),
         job_service=jobs or FakeJobs(),
         conversion_service=conversion or FakeConversion(),
+        auth_service=auth or FakeAuth(),
         vector_store=vector_store or FakeVectorStore(),
         collection="chunks",
+        default_file_quota=default_file_quota,
         default_top_k=default_top_k,
         max_top_k=max_top_k,
         similarity_threshold=similarity_threshold,
@@ -834,3 +866,176 @@ async def test_get_file_chunks_caps_page_size():
     out = await svc.get_file_chunks(partition="a", file_id="f1", allowed_partitions=["a"], offset=0, limit=-1)
     assert len(out["chunks"]) == _MAX_CHUNKS_PER_CALL
     assert out["has_more"] is True
+
+
+# ---------------------------------------------------------------------------
+# File-quota admission (issue #664)
+# ---------------------------------------------------------------------------
+#
+# ``users.file_count`` is a reserved+completed counter and there is no
+# completion-time increment any more, so a path that writes a ``files`` row
+# without reserving is invisible to the quota — while the delete path still
+# decrements unconditionally, driving the count *below* reality and handing out
+# free slots. These two tools create rows, so they must reserve like the HTTP
+# routes do in ``check_user_file_quota``.
+
+
+class _CopySourceOnly(FakePartitions):
+    """Source file exists, destination does not — copy_file's happy path."""
+
+    async def file_exists(self, file_id, partition):
+        return file_id == "src"
+
+
+async def _ok_download(url, dest):
+    dest.write_bytes(b"data")
+
+
+def _url_svc(auth, indexing, *, partitions=None):
+    return _service(
+        auth=auth,
+        indexing=indexing,
+        partitions=partitions or FakePartitions(exists=False, partition_exists=False),
+    )
+
+
+@pytest.mark.asyncio
+async def test_index_url_reserves_a_slot_and_hands_it_to_the_worker(monkeypatch):
+    auth, indexing = FakeAuth(), FakeIndexing()
+    svc = _url_svc(auth, indexing)
+    monkeypatch.setattr(svc, "_safe_download", _ok_download)
+
+    out = await svc.index_url(
+        url="https://example.com/r.pdf", partition="p", file_id="f1", allowed_partitions=["all"], user_id=7
+    )
+
+    assert out["task_id"] == "task-123"
+    assert auth.reserved == [7]
+    # Dispatched — the worker owns the slot now and must not have it taken back.
+    assert auth.released == []
+    assert indexing.added[0]["quota_reserved"] is True
+
+
+@pytest.mark.asyncio
+async def test_index_url_over_quota_is_rejected_before_any_download(monkeypatch):
+    auth, indexing = FakeAuth(over_quota=True), FakeIndexing()
+    svc = _url_svc(auth, indexing)
+
+    async def never(url, dest):
+        raise AssertionError("must not download when the quota already refused")
+
+    monkeypatch.setattr(svc, "_safe_download", never)
+
+    with pytest.raises(OpenRAGError) as exc:
+        await svc.index_url(
+            url="https://example.com/r.pdf", partition="p", file_id="f1", allowed_partitions=["all"], user_id=7
+        )
+
+    assert exc.value.code == "FILE_QUOTA_EXCEEDED"
+    assert indexing.added == []
+    assert auth.released == []  # the reserve refused; there is nothing to give back
+
+
+@pytest.mark.asyncio
+async def test_index_url_releases_the_slot_when_the_download_fails(monkeypatch):
+    auth, indexing = FakeAuth(), FakeIndexing()
+    svc = _url_svc(auth, indexing)
+
+    async def boom(url, dest):
+        raise httpx.ConnectError("nope")
+
+    monkeypatch.setattr(svc, "_safe_download", boom)
+
+    with pytest.raises(RuntimeError):
+        await svc.index_url(
+            url="https://example.com/r.pdf", partition="p", file_id="f1", allowed_partitions=["all"], user_id=7
+        )
+
+    assert auth.reserved == [7] and auth.released == [7]
+    assert indexing.added == []
+
+
+@pytest.mark.asyncio
+async def test_index_url_releases_the_slot_when_dispatch_fails(monkeypatch):
+    class BoomIndexing(FakeIndexing):
+        async def add_file(self, **kwargs):
+            raise RuntimeError("pool unreachable")
+
+    auth = FakeAuth()
+    svc = _url_svc(auth, BoomIndexing())
+    monkeypatch.setattr(svc, "_safe_download", _ok_download)
+
+    with pytest.raises(RuntimeError, match="pool unreachable"):
+        await svc.index_url(
+            url="https://example.com/r.pdf", partition="p", file_id="f1", allowed_partitions=["all"], user_id=7
+        )
+
+    assert auth.released == [7]
+
+
+@pytest.mark.asyncio
+async def test_index_url_without_a_user_reserves_nothing(monkeypatch):
+    auth, indexing = FakeAuth(), FakeIndexing()
+    svc = _url_svc(auth, indexing)
+    monkeypatch.setattr(svc, "_safe_download", _ok_download)
+
+    await svc.index_url(
+        url="https://example.com/r.pdf", partition="p", file_id="f1", allowed_partitions=["all"], user_id=None
+    )
+
+    assert auth.reserved == [] and auth.released == []
+    assert indexing.added[0]["quota_reserved"] is False
+
+
+@pytest.mark.asyncio
+async def test_copy_file_reserves_and_consumes_the_slot():
+    auth, indexing = FakeAuth(), FakeIndexing(copy_created=True)
+    svc = _service(auth=auth, indexing=indexing, partitions=_CopySourceOnly())
+
+    await svc.copy_file(
+        source_partition="p1",
+        source_file_id="src",
+        dest_partition="p1",
+        dest_file_id="dst",
+        allowed_partitions=["all"],
+        user_id=7,
+    )
+
+    assert auth.reserved == [7] and auth.released == []
+
+
+@pytest.mark.asyncio
+async def test_copy_file_releases_the_slot_when_no_row_is_created():
+    """An empty source writes no catalog row, so the reservation is unconsumed."""
+    auth, indexing = FakeAuth(), FakeIndexing(copy_created=False)
+    svc = _service(auth=auth, indexing=indexing, partitions=_CopySourceOnly())
+
+    await svc.copy_file(
+        source_partition="p1",
+        source_file_id="src",
+        dest_partition="p1",
+        dest_file_id="dst",
+        allowed_partitions=["all"],
+        user_id=7,
+    )
+
+    assert auth.reserved == [7] and auth.released == [7]
+
+
+@pytest.mark.asyncio
+async def test_copy_file_over_quota_is_rejected_before_copying():
+    auth, indexing = FakeAuth(over_quota=True), FakeIndexing()
+    svc = _service(auth=auth, indexing=indexing, partitions=_CopySourceOnly())
+
+    with pytest.raises(OpenRAGError) as exc:
+        await svc.copy_file(
+            source_partition="p1",
+            source_file_id="src",
+            dest_partition="p1",
+            dest_file_id="dst",
+            allowed_partitions=["all"],
+            user_id=7,
+        )
+
+    assert exc.value.code == "FILE_QUOTA_EXCEEDED"
+    assert indexing.copied == []

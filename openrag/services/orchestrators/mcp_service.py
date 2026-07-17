@@ -42,6 +42,7 @@ from core.utils.url_safety import is_blocked_address, is_safe_url
 
 if TYPE_CHECKING:
     from core.vector_stores import VectorStore
+    from services.orchestrators.auth_service import AuthService
     from services.orchestrators.conversion_service import ConversionService
     from services.orchestrators.indexing_service import IndexingService
     from services.orchestrators.job_service import JobService
@@ -88,8 +89,10 @@ class MCPService:
         indexing_service: IndexingService,
         job_service: JobService,
         conversion_service: ConversionService,
+        auth_service: AuthService,
         vector_store: VectorStore,
         collection: str,
+        default_file_quota: int,
         default_top_k: int = 5,
         max_top_k: int = 50,
         similarity_threshold: float = 0.8,
@@ -101,8 +104,12 @@ class MCPService:
         self._indexing = indexing_service
         self._jobs = job_service
         self._conversion = conversion_service
+        # Required, not optional: these tools create ``files`` rows, and a row
+        # created without a reservation silently bypasses the file quota (#664).
+        self._auth = auth_service
         self._vector_store = vector_store
         self._collection = collection
+        self._default_file_quota = default_file_quota
         self.default_top_k = default_top_k
         self.max_top_k = max_top_k
         self.similarity_threshold = similarity_threshold
@@ -557,14 +564,25 @@ class MCPService:
         if await self._partitions.file_exists(dest_file_id, dest_partition):
             raise FileExistsError(f"File '{dest_file_id}' already exists in partition '{dest_partition}'")
 
-        await self._indexing.copy_file(
-            source_file_id=source_file_id,
-            source_partition=source_partition,
-            target_file_id=dest_file_id,
-            target_partition=dest_partition,
-            metadata=_strip_protected_metadata(extra_metadata),
-            user={"id": user_id} if user_id is not None else None,
-        )
+        # Admission gate (#664) — same reasoning as ``index_url``. The copy is
+        # synchronous, so the slot is consumed here or handed straight back:
+        # ``created`` is False for an empty source or an already-existing target.
+        reserved_user_id = user_id
+        if reserved_user_id is not None:
+            await self._auth.reserve_file_slot(reserved_user_id, default_quota=self._default_file_quota)
+        created = False
+        try:
+            created = await self._indexing.copy_file(
+                source_file_id=source_file_id,
+                source_partition=source_partition,
+                target_file_id=dest_file_id,
+                target_partition=dest_partition,
+                metadata=_strip_protected_metadata(extra_metadata),
+                user={"id": user_id} if user_id is not None else None,
+            )
+        finally:
+            if reserved_user_id is not None and not created:
+                await self._auth.release_file_slot(reserved_user_id)
         return {
             "source_partition": source_partition,
             "source_file_id": source_file_id,
@@ -605,31 +623,51 @@ class MCPService:
         if await self._partitions.file_exists(file_id, partition):
             raise FileExistsError(f"File '{file_id}' already exists in partition '{partition}'")
 
-        filename = Path(urlparse(url).path.rstrip("/")).name or file_id
-        suffix = Path(filename).suffix or ""
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp_path = Path(tmp.name)
+        # Admission gate (#664). ``users.file_count`` is a reserved+completed
+        # counter and there is no completion-time increment any more, so a path
+        # that creates a ``files`` row without reserving is invisible to the
+        # quota — while the delete path still decrements it, driving the count
+        # *below* reality and handing out free slots. The HTTP ``add_file`` route
+        # reserves in a FastAPI dependency; this tool has no dependency chain and
+        # must reserve itself. Done before the download so an over-quota call
+        # costs no bandwidth.
+        reserved_user_id = user_id
+        if reserved_user_id is not None:
+            await self._auth.reserve_file_slot(reserved_user_id, default_quota=self._default_file_quota)
+        dispatched = False
         try:
-            await self._safe_download(url, tmp_path)
-        except Exception as exc:
-            tmp_path.unlink(missing_ok=True)
-            raise RuntimeError(f"Failed to download '{url}': {exc}") from exc
+            filename = Path(urlparse(url).path.rstrip("/")).name or file_id
+            suffix = Path(filename).suffix or ""
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp_path = Path(tmp.name)
+            try:
+                await self._safe_download(url, tmp_path)
+            except Exception as exc:
+                tmp_path.unlink(missing_ok=True)
+                raise RuntimeError(f"Failed to download '{url}': {exc}") from exc
 
-        metadata = _strip_protected_metadata(extra_metadata)
-        metadata["source_url"] = url
-        guessed_mime, _ = mimetypes.guess_type(filename)
-        if guessed_mime and "mimetype" not in metadata:
-            metadata["mimetype"] = guessed_mime
+            metadata = _strip_protected_metadata(extra_metadata)
+            metadata["source_url"] = url
+            guessed_mime, _ = mimetypes.guess_type(filename)
+            if guessed_mime and "mimetype" not in metadata:
+                metadata["mimetype"] = guessed_mime
 
-        task_id = await self._indexing.add_file(
-            file_path=str(tmp_path),
-            file_id=file_id,
-            partition=partition,
-            metadata=metadata,
-            sanitized_filename=filename,
-            original_filename=filename,
-            user={"id": user_id, "is_admin": is_admin} if user_id is not None else None,
-        )
+            task_id = await self._indexing.add_file(
+                file_path=str(tmp_path),
+                file_id=file_id,
+                partition=partition,
+                metadata=metadata,
+                sanitized_filename=filename,
+                original_filename=filename,
+                user={"id": user_id, "is_admin": is_admin} if user_id is not None else None,
+                quota_reserved=reserved_user_id is not None,
+            )
+            # Queued: the worker owns the slot from here and releases it if the
+            # file never reaches the catalog.
+            dispatched = True
+        finally:
+            if reserved_user_id is not None and not dispatched:
+                await self._auth.release_file_slot(reserved_user_id)
         return {
             "partition": partition,
             "file_id": file_id,
