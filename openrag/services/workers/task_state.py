@@ -41,9 +41,15 @@ except (ImportError, AttributeError) as _cfg_err:
 # it cannot live anywhere but here. In-flight tasks are self-limiting (the pool
 # has bounded capacity and every task eventually settles), terminal ones are not.
 #
-# Both bounds apply. The cap is the hard memory guarantee; the TTL keeps a quiet
-# deployment from serving hours-old state out of the cache. Reads that miss fall
-# back to Postgres (see ``WorkerDispatcher.get_task_state`` / ``JobService``).
+# Both bounds apply, and both are enforced lazily: the sweep runs only when a
+# task settles, never on a timer (this is a Ray actor; a background loop would be
+# another thing to own). The cap is therefore the real memory guarantee — it is
+# checked exactly when growth happens. The TTL only retires stale entries once
+# *some* task settles, so a fully idle deployment keeps its last few terminal
+# tasks cached indefinitely. That is harmless: a terminal state is immutable, so
+# a stale read is not a wrong read, and the cap still bounds the memory.
+# Reads that miss fall back to Postgres (``WorkerDispatcher.get_task_state`` /
+# ``JobService``), which is the durable record either way.
 _TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 _MAX_TERMINAL_TASKS = 2000
 _TERMINAL_TTL_SECONDS = 3600.0
@@ -70,6 +76,18 @@ class TaskStateManager:
         self.lock = asyncio.Lock()
 
     async def _ensure_task(self, task_id: str) -> TaskInfo:
+        """Create the entry for a task we are hearing about for the first time.
+
+        Only ``set_state`` may do this: it is the dispatcher's first write for a
+        task id (``QUEUED``, before ``set_details``/``set_object_ref``), so it is
+        the one caller for which "not present" legitimately means "new".
+
+        Every *other* writer must go through :meth:`_live_task`. Creating an
+        entry from a late write would resurrect an evicted task with
+        ``state=None``, which never re-enters ``terminal_at`` and is therefore
+        never evictable again — an unbounded leak on a detached actor, i.e. the
+        exact failure #660 exists to fix.
+        """
         if task_id not in self.tasks:
             self.tasks[task_id] = TaskInfo()
         return self.tasks[task_id]
@@ -112,6 +130,16 @@ class TaskStateManager:
                 self.file_delete_fences[key] = remaining
             else:
                 self.file_delete_fences.pop(key, None)
+
+    def _live_task(self, task_id: str) -> TaskInfo | None:
+        """The entry for ``task_id``, or ``None`` if it is unknown or evicted.
+
+        A write for a task that is no longer cached is dropped: the durable
+        ``jobs`` row is the record of what happened, and this actor is only a
+        hot cache of recent tasks. See :meth:`_ensure_task` for why recreating
+        it here would be a leak.
+        """
+        return self.tasks.get(task_id)
 
     def _mark_terminal(self, task_id: str, state: str | None) -> None:
         """Record (or clear) a task's terminal transition, then evict.
@@ -164,7 +192,9 @@ class TaskStateManager:
     @ray.method(concurrency_group="set")
     async def set_error(self, task_id: str, tb_str: str) -> None:
         async with self.lock:
-            info = await self._ensure_task(task_id)
+            info = self._live_task(task_id)
+            if info is None:
+                return
             info.error = truncate_error_text(tb_str, _MAX_ERROR_CHARS)
 
     @ray.method(concurrency_group="set")
@@ -199,7 +229,11 @@ class TaskStateManager:
         user_id: int | None,
     ) -> None:
         async with self.lock:
-            info = await self._ensure_task(task_id)
+            info = self._live_task(task_id)
+            if info is None:
+                # Dropping the details also keeps ``user_index`` from growing an
+                # entry that ``_forget`` will never be able to clean up.
+                return
             self._record_details(
                 task_id,
                 info,
@@ -240,7 +274,9 @@ class TaskStateManager:
     @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
         async with self.lock:
-            info = await self._ensure_task(task_id)
+            info = self._live_task(task_id)
+            if info is None:
+                return
             info.object_ref = object_ref
             details = info.details or {}
             if self._file_delete_fenced(partition=details.get("partition"), file_id=details.get("file_id")):

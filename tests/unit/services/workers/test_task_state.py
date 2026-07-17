@@ -303,3 +303,90 @@ async def test_failing_after_eviction_does_not_resurrect_the_task(monkeypatch, s
 
     assert await mgr.set_failed_if_not_cancelled("t0", "late") is False
     assert mgr.tasks == {}
+
+
+async def test_cancelled_state_is_not_overwritten_by_worker_transitions() -> None:
+    """A cancel claim is sticky: a worker still in flight cannot report over it (#685)."""
+    mgr = _manager()
+
+    await mgr.set_state("task-1", "QUEUED")
+    assert await mgr.set_cancelled_if_active("task-1") is True
+
+    await mgr.set_state("task-1", "SERIALIZING")
+    await mgr.set_state("task-1", "COMPLETED")
+
+    assert await mgr.get_state("task-1") == "CANCELLED"
+
+
+def _late_writes():
+    """Every setter except ``set_state``, which alone may create a task."""
+    return {
+        "set_error": lambda mgr: mgr.set_error("t0", "late"),
+        "set_details": lambda mgr: mgr.set_details("t0", file_id="f", partition="p", metadata={}, user_id=7),
+        "set_object_ref": lambda mgr: mgr.set_object_ref("t0", {"ref": object()}),
+    }
+
+
+@pytest.mark.parametrize("writer", list(_late_writes()))
+async def test_a_late_write_does_not_resurrect_an_evicted_task(monkeypatch, writer):
+    """A write for an evicted task is dropped, not turned into a new entry.
+
+    Regression: these setters used to go through ``_ensure_task``, which
+    recreates on miss. The recreated ``TaskInfo`` has ``state=None``, so it never
+    enters ``terminal_at`` and is never evictable again — an unbounded leak on a
+    detached actor, which is the whole failure #660 exists to fix.
+    """
+    monkeypatch.setattr(task_state_module, "_MAX_TERMINAL_TASKS", 0)
+    mgr = _manager()
+
+    await _dispatch(mgr, "t0", user_id=7)
+    await mgr.set_state("t0", "COMPLETED")
+    assert mgr.tasks == {}, "precondition: the task is evicted"
+
+    await _late_writes()[writer](mgr)
+
+    assert mgr.tasks == {}, f"{writer} resurrected an evicted task"
+    assert mgr.terminal_at == {}
+    assert mgr.user_index == {}
+
+
+async def test_a_late_write_for_an_unknown_task_is_dropped():
+    """The same guard, without eviction: an id we never dispatched stays unknown."""
+    mgr = _manager()
+
+    await mgr.set_error("never-dispatched", "boom")
+
+    assert mgr.tasks == {}
+    assert await mgr.get_state("never-dispatched") is None
+
+
+async def test_the_shipped_bounds_are_the_documented_ones():
+    """Pin the production values; every other test here monkeypatches them.
+
+    Without this, narrowing the cap to something that no longer bounds memory —
+    or widening it back to the unbounded behaviour of #660 — breaks no test.
+    """
+    assert task_state_module._MAX_TERMINAL_TASKS == 2000
+    assert task_state_module._TERMINAL_TTL_SECONDS == 3600.0
+
+
+async def test_an_idle_deployment_keeps_its_last_terminal_task_cached(monkeypatch):
+    """The TTL is swept lazily, on settle — not on a timer. Reads do not check age.
+
+    This pins the documented trade-off rather than an aspiration: with no new
+    task settling, an expired entry stays cached. That is harmless (a terminal
+    state is immutable, so a stale read is not a wrong read) and the cap still
+    bounds memory — but a reader must not assume the TTL has retired anything.
+    """
+    clock = {"now": 0.0}
+    monkeypatch.setattr(task_state_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TTL_SECONDS", 10.0)
+    mgr = _manager()
+
+    await _dispatch(mgr, "only")
+    await mgr.set_state("only", "COMPLETED")
+
+    clock["now"] = 10_000.0  # long past the TTL, but nothing else settles
+
+    assert await mgr.get_state("only") == "COMPLETED"
+    assert "only" in mgr.tasks
