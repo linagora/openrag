@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import ray
+from core.models.catalog import TERMINAL_TASK_STATES
 
 try:
     from core.config import load_config as _load_config
@@ -69,7 +70,7 @@ class TaskStateManager:
     async def set_cancelled_if_active(self, task_id: str) -> bool:
         async with self.lock:
             info = self.tasks.get(task_id)
-            if info is None or info.state in {"COMPLETED", "FAILED", "CANCELLED"}:
+            if info is None or info.state in TERMINAL_TASK_STATES:
                 return False
             info.state = "CANCELLED"
             return True

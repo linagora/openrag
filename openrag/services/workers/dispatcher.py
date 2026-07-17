@@ -4,6 +4,7 @@ import uuid
 from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
+from core.models.catalog import TERMINAL_TASK_STATES
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -30,7 +31,6 @@ class WorkerDispatcher(IndexingDispatcher):
             "next_section_id",
         }
     )
-    _TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 
     def __init__(
         self,
@@ -231,13 +231,6 @@ class WorkerDispatcher(IndexingDispatcher):
     async def cancel_task(self, task_id: str) -> bool:
         import ray
 
-        state = await self._call(
-            self._tsm.get_state.remote(task_id),
-            task_description=f"get_state({task_id})",
-        )
-        if state in self._TERMINAL_STATES:
-            return False
-
         obj_ref = await self._call(
             self._tsm.get_object_ref.remote(task_id),
             task_description=f"get_object_ref({task_id})",
@@ -245,11 +238,14 @@ class WorkerDispatcher(IndexingDispatcher):
         if obj_ref is None:
             return False
 
+        # Re-checked atomically in set_cancelled_if_active below; this early
+        # check just avoids an unnecessary ray.cancel() call on a task that
+        # has already reached a terminal state.
         state = await self._call(
             self._tsm.get_state.remote(task_id),
             task_description=f"get_state({task_id})",
         )
-        if state in self._TERMINAL_STATES:
+        if state in TERMINAL_TASK_STATES:
             return False
 
         ray.cancel(obj_ref["ref"], recursive=True)
