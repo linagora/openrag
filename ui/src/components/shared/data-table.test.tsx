@@ -119,4 +119,18 @@ describe("DataTable selection", () => {
     fireEvent.click(screen.getAllByRole("checkbox")[0]);
     expect(screen.queryByText(/selected/)).toBeNull();
   });
+
+  it("disables select-all when the visible rows cannot be selected", () => {
+    render(
+      <DataTable
+        columns={columns}
+        data={makeRows(2)}
+        enableSelection
+        canSelectRow={() => false}
+        getRowId={(r) => String(r.id)}
+      />,
+    );
+
+    expect(screen.getByRole("checkbox", { name: /select visible rows/i }).hasAttribute("disabled")).toBe(true);
+  });
 });

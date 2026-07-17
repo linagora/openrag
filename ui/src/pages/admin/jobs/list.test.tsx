@@ -21,13 +21,15 @@ vi.mock("@/lib/permissions", () => ({
   }),
 }));
 
-vi.mock("@/lib/api/jobs", () => ({
-  cancelTask: vi.fn(),
-  getQueueInfo: vi.fn(),
-  isActiveState: (state: string) => ["QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"].includes(state),
-  isTerminalState: (state: string) => ["COMPLETED", "FAILED", "CANCELLED"].includes(state),
-  listTasks: vi.fn(),
-}));
+vi.mock("@/lib/api/jobs", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api/jobs")>("@/lib/api/jobs");
+  return {
+    ...actual,
+    cancelTask: vi.fn(),
+    getQueueInfo: vi.fn(),
+    listTasks: vi.fn(),
+  };
+});
 
 const cancelTaskMock = vi.mocked(cancelTask);
 const getQueueInfoMock = vi.mocked(getQueueInfo);

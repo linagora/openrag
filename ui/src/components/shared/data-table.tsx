@@ -74,16 +74,20 @@ export function DataTable<TData, TValue>({
     const selectColumn: ColumnDef<TData, TValue> = {
       id: "__select",
       enableSorting: false,
-      header: ({ table }) => (
-        <Checkbox
-          checked={
-            table.getIsAllPageRowsSelected() ||
-            (table.getIsSomePageRowsSelected() && "indeterminate")
-          }
-          onCheckedChange={(value) => table.toggleAllPageRowsSelected(!!value)}
-          aria-label="Select visible rows"
-        />
-      ),
+      header: ({ table }) => {
+        const hasSelectablePageRows = table.getRowModel().rows.some((row) => row.getCanSelect());
+        return (
+          <Checkbox
+            checked={
+              table.getIsAllPageRowsSelected() ||
+              (table.getIsSomePageRowsSelected() && "indeterminate")
+            }
+            onCheckedChange={(value) => table.toggleAllPageRowsSelected(!!value)}
+            disabled={!hasSelectablePageRows}
+            aria-label="Select visible rows"
+          />
+        );
+      },
       cell: ({ row }) => (
         <Checkbox
           checked={row.getIsSelected()}
