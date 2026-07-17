@@ -178,6 +178,7 @@ describe("JobListPage filters", () => {
       tasks: [
         task("docs-task", "COMPLETED", "docs.pdf", "docs"),
         task("archive-task", "FAILED", "archive.pdf", "archive"),
+        task("all-named-task", "COMPLETED", "all-named.pdf", "__all__"),
       ],
     });
 
@@ -196,6 +197,21 @@ describe("JobListPage filters", () => {
       "openrag-jobs.csv",
       expect.any(Array),
       [expect.objectContaining({ task_id: "archive-task" })],
+    );
+
+    await userEvent.click(screen.getByRole("combobox", { name: /filter jobs by partition/i }));
+    await userEvent.click(await screen.findByRole("option", { name: "__all__" }));
+
+    expect(screen.queryByText("docs.pdf")).toBeNull();
+    expect(screen.queryByText("archive.pdf")).toBeNull();
+    expect(screen.getByText("all-named.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    expect(downloadCsvMock).toHaveBeenLastCalledWith(
+      "openrag-jobs.csv",
+      expect.any(Array),
+      [expect.objectContaining({ task_id: "all-named-task" })],
     );
 
     await userEvent.click(screen.getByRole("tab", { name: "FAILED" }));

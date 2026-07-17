@@ -26,6 +26,7 @@ import { downloadCsv } from "@/lib/csv";
 const STATUS_TABS = ["ALL", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED"] as const;
 const JOBS_REFETCH_INTERVAL_MS = 5000;
 const JOB_SEARCH_DEBOUNCE_MS = 250;
+const ALL_PARTITIONS_FILTER = "__openrag/all_partitions__";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
 
@@ -122,7 +123,7 @@ export default function JobListPage() {
   const [statusTab, setStatusTab] = useState<string>("ALL");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [partitionFilter, setPartitionFilter] = useState("__all__");
+  const [partitionFilter, setPartitionFilter] = useState(ALL_PARTITIONS_FILTER);
   const [manualRefreshing, setManualRefreshing] = useState(false);
 
   useEffect(() => {
@@ -159,7 +160,7 @@ export default function JobListPage() {
         [task.task_id, task.state, filename, fileId, partition].some((value) =>
           str(value).toLowerCase().includes(q),
         );
-      const matchesPartition = partitionFilter === "__all__" || partition === partitionFilter;
+      const matchesPartition = partitionFilter === ALL_PARTITIONS_FILTER || partition === partitionFilter;
       return matchesSearch && matchesPartition;
     });
   }, [tasks, debouncedSearch, partitionFilter]);
@@ -182,7 +183,7 @@ export default function JobListPage() {
     setStatusTab(value);
     setSearch("");
     setDebouncedSearch("");
-    setPartitionFilter("__all__");
+    setPartitionFilter(ALL_PARTITIONS_FILTER);
   };
 
   return (
@@ -205,7 +206,7 @@ export default function JobListPage() {
               <SelectValue placeholder="All partitions" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="__all__">All partitions</SelectItem>
+              <SelectItem value={ALL_PARTITIONS_FILTER}>All partitions</SelectItem>
               {partitionOptions.map((partition) => (
                 <SelectItem key={partition} value={partition}>
                   {partition}
