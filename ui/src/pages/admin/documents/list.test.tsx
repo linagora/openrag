@@ -104,6 +104,14 @@ describe("DocumentListPage", () => {
     expect(screen.getByRole("button", { name: /delete a\.pdf/i })).not.toBeNull();
   });
 
+  it("keeps filenames constrained while exposing the full name", async () => {
+    renderDocuments();
+
+    const fileLink = await screen.findByRole("link", { name: "a.pdf" });
+    expect(fileLink.getAttribute("title")).toBe("a.pdf");
+    expect(fileLink.className).toContain("truncate");
+  });
+
   it("selects all documents from the table header and deletes the selected files", async () => {
     renderDocuments();
 

@@ -526,10 +526,11 @@ export default function PartitionListPage() {
                       </TableCell>
                     )}
                     <TableCell>
-                      <div className="flex items-center gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
                         <Link
                           to={partitionDetailPath(p.name)}
-                          className="font-medium text-primary hover:underline"
+                          className="block max-w-[220px] truncate font-medium text-primary hover:underline"
+                          title={p.name}
                         >
                           {p.name}
                         </Link>
@@ -554,11 +555,25 @@ export default function PartitionListPage() {
                     <TableCell>{p.document_count}</TableCell>
                     {canManagePartitions && (
                       <TableCell className="text-sm">
-                        {resolveEmbedderName(p.embedder, embedderEndpoints)}
+                        <span className="block max-w-[180px] truncate" title={resolveEmbedderName(p.embedder, embedderEndpoints)}>
+                          {resolveEmbedderName(p.embedder, embedderEndpoints)}
+                        </span>
                       </TableCell>
                     )}
-                    {canManagePartitions && <TableCell>{p.indexation_preset}</TableCell>}
-                    {canManagePartitions && <TableCell>{p.retrieval_preset}</TableCell>}
+                    {canManagePartitions && (
+                      <TableCell>
+                        <span className="block max-w-[180px] truncate" title={p.indexation_preset}>
+                          {p.indexation_preset}
+                        </span>
+                      </TableCell>
+                    )}
+                    {canManagePartitions && (
+                      <TableCell>
+                        <span className="block max-w-[180px] truncate" title={p.retrieval_preset}>
+                          {p.retrieval_preset}
+                        </span>
+                      </TableCell>
+                    )}
                     <TableCell className="text-sm text-muted-foreground">
                       {p.created_at
                         ? new Date(p.created_at).toLocaleDateString()
