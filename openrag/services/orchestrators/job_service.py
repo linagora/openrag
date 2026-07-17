@@ -65,6 +65,13 @@ class JobService:
         Any repository failure is a fallback trigger, not a request failure: the
         actor still holds recent state, and a queue view is a diagnostic surface
         — the moment it 500s is exactly the moment it is being looked at.
+
+        ``None`` means "the durable read did not happen". It does **not** mean
+        "no rows": the aggregate readers treat an *empty* result as a miss too
+        and fall through to the cache on their own, because the table starts
+        empty while the detached actor is already holding live tasks. The
+        single-row reader (:meth:`get_task_details`) keeps the ``is not None``
+        test — there, ``None`` already is the miss.
         """
         if self._job_repo is None:
             return None
@@ -103,7 +110,12 @@ class JobService:
 
     async def get_queue_info(self) -> dict:
         status_counts = await self._from_jobs("count_by_status", lambda: self._job_repo.count_by_status())
-        if status_counts is None:
+        if not status_counts:
+            # Empty, not just failed: an unpopulated ``jobs`` table is a durable
+            # *miss*, not an authoritative "nothing is running". The actor is
+            # detached, so it outlives the API restart that first deploys this —
+            # every task dispatched before the cutover has no row, and reporting
+            # zero active while workers are indexing is worse than a stale count.
             all_states: dict = await self._call(self._tsm.get_all_states.remote(), "get_all_states")
             status_counts = Counter(all_states.values())
 
@@ -150,9 +162,15 @@ class JobService:
                 user_id=None if is_admin else user_id,
             ),
         )
-        if jobs is not None:
+        if jobs:
             # Filtering happened in SQL; the fallback below has to do it itself.
             return [{"task_id": j.id, "state": j.status.value, "details": self._job_details(j)} for j in jobs]
+
+        # No rows is a durable *miss*, not proof of an empty queue — fall through
+        # to the cache rather than answer ``[]`` authoritatively. See the note in
+        # ``get_queue_info``: the detached actor holds tasks the table never got.
+        # The cost is one actor call on a genuinely-empty query, which is exactly
+        # what this route did before the durable store existed.
 
         if is_admin:
             all_info: dict[str, dict] = await self._call(self._tsm.get_all_info.remote(), "get_all_info")
@@ -172,18 +190,19 @@ class JobService:
     async def get_user_pending_task_count(self, user_id: int | None) -> int:
         """Pending (not-yet-completed) indexing tasks for one user.
 
-        Used by UserService for the quota-usage block of ``/users/info``
-        (the legacy router called the actor directly from the handler).
+        Purely informational: UserService reports it as ``pending_files`` in the
+        quota-usage block of ``/users/info``. It is **not** a correctness input
+        anywhere — since #664 admission reserves a slot in ``users.file_count``
+        directly, so an in-flight upload is already charged and adding this on
+        top would double-count it. Do not reintroduce it into a quota decision.
 
-        Deliberately *not* served from the durable store, unlike every other
-        read here. This count gates uploads (``check_user_file_quota``), and a
-        job row only leaves the active states when a worker writes a terminal
-        transition — so a job orphaned by a crash mid-dispatch would occupy the
-        user's quota permanently (retention only sweeps terminal rows). The
-        in-memory count is wrong in the opposite, self-healing direction: a
-        restart clears it. Moving this to Postgres is safe once orphaned
-        in-flight jobs are reconciled at startup, which #664 tracks together
-        with the rest of the quota TOCTOU fix.
+        Deliberately *not* served from the durable store, unlike every other read
+        here. A job row only leaves the active states when a worker writes a
+        terminal transition, so a job orphaned by a crash would be reported as
+        pending forever (retention only sweeps terminal rows). The in-memory
+        count is wrong in the opposite, self-healing direction: a restart clears
+        it. Serving this from Postgres is safe once orphaned in-flight jobs are
+        reconciled at startup — tracked in #676.
         """
         return await self._call(
             self._tsm.get_user_pending_task_count.remote(user_id),

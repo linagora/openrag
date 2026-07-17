@@ -262,6 +262,58 @@ async def test_get_user_pending_task_count_stays_on_the_in_memory_cache():
 
 
 @pytest.mark.asyncio
+async def test_list_tasks_falls_back_to_the_cache_when_postgres_has_no_rows():
+    """An empty ``jobs`` table is a durable *miss*, not an empty queue.
+
+    The actor is detached, so it outlives the API restart that first deploys the
+    durable store: every task dispatched before the cutover has no row. Answering
+    ``[]`` authoritatively hides work that is actively indexing — and the same
+    happens for any task whose best-effort ``create_job`` was swallowed.
+    """
+    info = {"t1": {"state": "QUEUED", "details": {"file_id": "f"}, "user": 1}}
+    repo = FakeJobRepo(jobs=[])
+    svc = JobService(task_state_manager=FakeTSM(info=info), job_repo=repo)
+
+    rows = await svc.list_tasks(is_admin=True, user_id=1)
+
+    assert rows == [{"task_id": "t1", "state": "QUEUED", "details": {"file_id": "f"}}]
+    assert repo.list_calls, "the durable store should still be consulted first"
+
+
+@pytest.mark.asyncio
+async def test_get_queue_info_falls_back_to_the_cache_when_postgres_has_no_rows():
+    """Same miss-vs-empty distinction for the roll-up: never report 0 active
+    while the cache is holding live tasks."""
+    svc = JobService(
+        task_state_manager=FakeTSM(states={"a": "QUEUED", "b": "SERIALIZING"}),
+        job_repo=FakeJobRepo(counts={}),
+    )
+
+    tasks = (await svc.get_queue_info())["tasks"]
+
+    assert tasks["active"] == 2
+    assert tasks["active_statuses"] == {"QUEUED": 1, "SERIALIZING": 1, "CHUNKING": 0, "INSERTING": 0}
+
+
+@pytest.mark.asyncio
+async def test_a_populated_postgres_still_wins_over_the_cache():
+    """The fallback is for misses only — it must not resurrect evicted entries.
+
+    Guards the obvious over-correction: falling back whenever the durable result
+    looks small would let the actor's stale copy shadow the source of truth.
+    """
+    repo = FakeJobRepo(jobs=[_job(id="durable")])
+    svc = JobService(
+        task_state_manager=FakeTSM(info={"stale": {"state": "QUEUED", "details": {}, "user": 1}}),
+        job_repo=repo,
+    )
+
+    rows = await svc.list_tasks(is_admin=True, user_id=1)
+
+    assert [r["task_id"] for r in rows] == ["durable"]
+
+
+@pytest.mark.asyncio
 async def test_list_tasks_fails_closed_for_an_anonymous_non_admin():
     """list_jobs(user_id=None) means *every* job — never hand that to a user.
 
