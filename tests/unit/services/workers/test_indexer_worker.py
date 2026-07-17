@@ -414,10 +414,38 @@ async def test_process_file_stores_indexation_config_snapshot_on_new_file(tmp_pa
         partition="p",
         user={"id": 42},
         indexation_config=indexation_config,
+        require_existing_partition=True,
     )
 
     assert repo.add_calls[0]["indexation_config"] == indexation_config
     assert repo.add_calls[0]["require_existing_partition"] is True
+
+
+@pytest.mark.asyncio
+async def test_process_file_does_not_use_indexation_config_as_partition_policy(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    repo = FakeDocumentRepo()
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=_fake_tsm(),
+        document_repo=repo,
+    )
+    indexation_config = {"parsing_strategy": "pymupdf"}
+
+    await worker.process_file(
+        task_id="t-new",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+        user={"id": 42},
+        indexation_config=indexation_config,
+    )
+
+    assert repo.add_calls[0]["indexation_config"] == indexation_config
+    assert repo.add_calls[0]["require_existing_partition"] is False
 
 
 @pytest.mark.asyncio

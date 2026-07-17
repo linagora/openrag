@@ -65,6 +65,7 @@ class IndexerWorker:
         replace: bool = False,
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
+        require_existing_partition: bool = False,
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
@@ -103,6 +104,7 @@ class IndexerWorker:
                     replace=replace,
                     indexation_config=indexation_config,
                     indexed_at=indexed_at,
+                    require_existing_partition=require_existing_partition,
                 )
                 if not wrote_catalog:
                     raise RuntimeError("Catalog row was not written after vector indexing")
@@ -152,6 +154,7 @@ async def _write_catalog_record(
     replace: bool,
     indexation_config: dict[str, Any] | None,
     indexed_at: datetime | None = None,
+    require_existing_partition: bool = False,
 ) -> bool:
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
@@ -175,7 +178,7 @@ async def _write_catalog_record(
         relationship_id=metadata.get("relationship_id"),
         parent_id=metadata.get("parent_id"),
         indexed_at=indexed_at,
-        require_existing_partition=indexation_config is not None,
+        require_existing_partition=require_existing_partition,
         **config_kwargs,
     )
 

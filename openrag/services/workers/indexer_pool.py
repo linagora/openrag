@@ -211,6 +211,7 @@ class IndexerWorkerActor:
         replace: bool = False,
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
+        require_existing_partition: bool = False,
     ) -> dict[str, Any]:
         try:
             await self._ensure_catalog()
@@ -225,6 +226,7 @@ class IndexerWorkerActor:
                 replace=replace,
                 indexation_config=indexation_config,
                 embedder_name=embedder_name,
+                require_existing_partition=require_existing_partition,
             )
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:

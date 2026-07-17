@@ -197,6 +197,7 @@ class IndexingService:
             original_filename=original_filename,
         )
         await self._ensure_partition_exists(partition, user)
+        require_existing_partition = bool(self._partition_configs())
         indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
         return await self._dispatcher.dispatch_indexing(
             path=file_path,
@@ -207,6 +208,7 @@ class IndexingService:
             replace=replace,
             indexation_config=indexation_config,
             embedder_name=embedder_name,
+            require_existing_partition=require_existing_partition,
         )
 
     async def delete_file(self, file_id: str, partition: str) -> None:

@@ -5,6 +5,7 @@ import uuid
 from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
+from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
 from services.workers.ray_utils import call_ray_actor_with_timeout
@@ -34,7 +35,6 @@ class WorkerDispatcher(IndexingDispatcher):
             "next_section_id",
         }
     )
-    _INTERNAL_METADATA_PREFIX = "_openrag"
 
     def __init__(
         self,
@@ -75,6 +75,7 @@ class WorkerDispatcher(IndexingDispatcher):
         replace: bool,
         indexation_config: dict | None = None,
         embedder_name: str | None = None,
+        require_existing_partition: bool = False,
     ) -> str:
         task_id = uuid.uuid4().hex
 
@@ -112,6 +113,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     replace=replace,
                     indexation_config=indexation_config,
                     embedder_name=embedder_name,
+                    require_existing_partition=require_existing_partition,
                 ),
                 task_description=f"submit({task_id})",
             )
@@ -228,10 +230,10 @@ class WorkerDispatcher(IndexingDispatcher):
         if not rows:
             return
 
-        public_metadata = self._strip_internal_metadata(metadata)
+        public_metadata = strip_internal_metadata(metadata)
         entities = []
         for row in rows:
-            internal_metadata = {k: v for k, v in row.items() if self._is_internal_metadata_key(k)}
+            internal_metadata = {k: v for k, v in row.items() if is_internal_metadata_key(k)}
             entity = dict(row)
             entity.update(public_metadata)
             entity.update(internal_metadata)
@@ -258,10 +260,10 @@ class WorkerDispatcher(IndexingDispatcher):
         if not rows:
             return
 
-        public_metadata = self._strip_internal_metadata(metadata)
+        public_metadata = strip_internal_metadata(metadata)
         entities = []
         for row in rows:
-            entity = self._strip_internal_metadata(row)
+            entity = strip_internal_metadata(row)
             entity.pop("_id", None)
             entity.update(public_metadata)
             entities.append(entity)
@@ -297,16 +299,8 @@ class WorkerDispatcher(IndexingDispatcher):
         return {
             k: v
             for k, v in chunk.items()
-            if k not in self._FILE_METADATA_EXCLUDED_KEYS and not self._is_internal_metadata_key(k)
+            if k not in self._FILE_METADATA_EXCLUDED_KEYS and not is_internal_metadata_key(k)
         }
-
-    @classmethod
-    def _strip_internal_metadata(cls, row: dict[str, Any]) -> dict[str, Any]:
-        return {k: v for k, v in row.items() if not cls._is_internal_metadata_key(k)}
-
-    @classmethod
-    def _is_internal_metadata_key(cls, key: Any) -> bool:
-        return isinstance(key, str) and key.startswith(cls._INTERNAL_METADATA_PREFIX)
 
     async def get_task_state(self, task_id: str) -> str | None:
         return await self._call(

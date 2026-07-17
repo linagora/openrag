@@ -49,6 +49,7 @@ class FakeDispatcher:
         replace,
         indexation_config=None,
         embedder_name=None,
+        require_existing_partition=False,
     ):
         self.dispatched.append(
             {
@@ -60,6 +61,7 @@ class FakeDispatcher:
                 "replace": replace,
                 "indexation_config": indexation_config,
                 "embedder_name": embedder_name,
+                "require_existing_partition": require_existing_partition,
             }
         )
         return "task-abc"
@@ -218,6 +220,7 @@ async def test_add_file_builds_metadata_and_dispatches(tmp_path):
     assert sent["partition"] == "p1"
     assert sent["workspace_ids"] == ["w1"]
     assert sent["replace"] is False
+    assert sent["require_existing_partition"] is False
     md = sent["metadata"]
     assert md["author"] == "alice"
     assert md["source"] == str(f)
@@ -269,6 +272,7 @@ async def test_add_file_dispatches_partition_indexation_config_and_embedder(tmp_
     assert sent["indexation_config"]["enable_image_captioning"] is False
     assert sent["indexation_config"]["enable_contextualization"] is True
     assert sent["indexation_config"]["contextualization_llm"] == "llm-context"
+    assert sent["require_existing_partition"] is True
 
 
 @pytest.mark.asyncio

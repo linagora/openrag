@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from core.utils.conts import is_internal_metadata_key
 from core.utils.logging import get_logger
 from core.utils.text import sanitize_extracted_text
 
@@ -96,9 +97,5 @@ __all__ = ["ConversionService"]
 
 def _public_chunk_metadata(row: dict) -> dict:
     return {
-        key: value for key, value in row.items() if key not in ("text", "vector") and not _is_internal_metadata_key(key)
+        key: value for key, value in row.items() if key not in ("text", "vector") and not is_internal_metadata_key(key)
     }
-
-
-def _is_internal_metadata_key(key: object) -> bool:
-    return isinstance(key, str) and key.startswith("_openrag")

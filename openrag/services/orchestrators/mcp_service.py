@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from core.utils.conts import is_internal_metadata_key
 from core.utils.exceptions import ValidationError
 from core.utils.log_tail import collect_task_logs
 from core.utils.logging import get_logger
@@ -697,8 +698,4 @@ __all__ = ["MCPService"]
 
 
 def _public_chunk_metadata(row: dict[str, Any], *, exclude: tuple[str, ...]) -> dict[str, Any]:
-    return {key: value for key, value in row.items() if key not in exclude and not _is_internal_metadata_key(key)}
-
-
-def _is_internal_metadata_key(key: Any) -> bool:
-    return isinstance(key, str) and key.startswith("_openrag")
+    return {key: value for key, value in row.items() if key not in exclude and not is_internal_metadata_key(key)}
