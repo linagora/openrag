@@ -71,7 +71,7 @@ def test_model_endpoint_row_non_positive_timeout(timeout: float):
 
 
 # --------------------------------------------------------------------------- #
-# Default-LLM-endpoint token budget accessors
+# Named-LLM-endpoint token budget accessors
 # --------------------------------------------------------------------------- #
 
 
@@ -81,29 +81,44 @@ def _with_default_llm(**extra) -> ModelsConfig:
     return cfg
 
 
-def test_default_llm_token_budgets_none_when_unregistered():
+def test_llm_token_budgets_none_when_unregistered():
     cfg = ModelsConfig()
-    assert cfg.default_llm_extra() == {}
-    assert cfg.default_llm_context_size() is None
-    assert cfg.default_llm_output_tokens() is None
+    assert cfg.llm_extra() == {}
+    assert cfg.llm_context_size() is None
+    assert cfg.llm_output_tokens() is None
 
 
-def test_default_llm_token_budgets_read_from_extra():
+def test_llm_token_budgets_read_from_extra():
     cfg = _with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 32768, LLM_OUTPUT_TOKENS_KEY: 2048})
-    assert cfg.default_llm_context_size() == 32768
-    assert cfg.default_llm_output_tokens() == 2048
+    assert cfg.llm_context_size() == 32768
+    assert cfg.llm_output_tokens() == 2048
 
 
-def test_default_llm_token_budgets_none_when_key_absent():
+def test_llm_token_budgets_none_when_key_absent():
     cfg = _with_default_llm(implementation="vllm")  # unrelated extra key
-    assert cfg.default_llm_context_size() is None
-    assert cfg.default_llm_output_tokens() is None
+    assert cfg.llm_context_size() is None
+    assert cfg.llm_output_tokens() is None
 
 
 @pytest.mark.parametrize("bad", [0, -1, "not-a-number", None, 12.5])
-def test_default_llm_token_budgets_coerce_invalid_to_none(bad):
+def test_llm_token_budgets_coerce_invalid_to_none(bad):
     # A non-positive / non-int stored value means "no override" — the preflight
     # falls back to the global default rather than trusting garbage.
     cfg = _with_default_llm(**{LLM_CONTEXT_SIZE_KEY: bad, LLM_OUTPUT_TOKENS_KEY: bad})
-    assert cfg.default_llm_context_size() is None
-    assert cfg.default_llm_output_tokens() is None
+    assert cfg.llm_context_size() is None
+    assert cfg.llm_output_tokens() is None
+
+
+def test_llm_token_budgets_resolved_by_name():
+    # A partition's chat_llm preset names a catalogued endpoint other than
+    # "default" — the accessor must read that endpoint's extra, not the
+    # default alias's.
+    cfg = ModelsConfig()
+    cfg.llm["default"] = ModelEndpointConfig(endpoint="http://vllm:8000/v1", extra={LLM_CONTEXT_SIZE_KEY: 8192})
+    cfg.llm["mistral"] = ModelEndpointConfig(
+        endpoint="http://mistral:8000/v1", extra={LLM_CONTEXT_SIZE_KEY: 32768, LLM_OUTPUT_TOKENS_KEY: 4096}
+    )
+    assert cfg.llm_context_size("mistral") == 32768
+    assert cfg.llm_output_tokens("mistral") == 4096
+    assert cfg.llm_context_size("default") == 8192
+    assert cfg.llm_context_size("unregistered") is None

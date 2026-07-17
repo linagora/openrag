@@ -195,6 +195,71 @@ class TestGetMaxModelTokens:
         assert chat.get_max_model_tokens() == int(s.llm_context.max_llm_context_size)
 
 
+def _partition_config(chat_llm=None):
+    from core.config.indexation_pipeline import IndexationPipelineConfig
+    from core.config.retrieval_pipeline import RetrievalPipelineConfig
+    from core.models.preset import PartitionConfig
+
+    return PartitionConfig(
+        name="p",
+        indexation=IndexationPipelineConfig(),
+        retrieval=RetrievalPipelineConfig(),
+        chat_llm=chat_llm,
+    )
+
+
+class TestPartitionResolvedMaxModelTokens:
+    """get_max_model_tokens resolves the partition's chat_llm preset endpoint
+    over the default when the request is scoped to a partition that sets one —
+    the '639' fix: checking against the LLM that will actually answer, not
+    always the global default."""
+
+    def test_partition_preset_endpoint_budget_wins_over_default(self, monkeypatch):
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY, ModelEndpointConfig
+
+        s = _settings_with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 8192})
+        s.models.llm["mistral"] = ModelEndpointConfig(
+            endpoint="http://mistral:8000/v1",
+            extra={LLM_CONTEXT_SIZE_KEY: 32768, LLM_OUTPUT_TOKENS_KEY: 4096},
+        )
+        s.partitions["p"] = _partition_config(chat_llm="mistral")
+        monkeypatch.setattr(chat, "_max_model_tokens", 8000)
+
+        assert chat.get_max_model_tokens(partitions=["p"], settings=s) == 32768
+        # No partition (direct-LLM) still resolves the default endpoint.
+        assert chat.get_max_model_tokens(partitions=None, settings=s) == 8192
+
+    def test_auto_probed_value_not_reused_for_a_non_default_preset(self, monkeypatch):
+        """The startup-primed value is specific to the default endpoint's model —
+        it must not leak into a differently-configured partition preset."""
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+
+        s = _settings_with_default_llm()  # no explicit context size configured
+        s.models.llm["mistral"] = ModelEndpointConfig(endpoint="http://mistral:8000/v1")
+        s.partitions["p"] = _partition_config(chat_llm="mistral")
+        monkeypatch.setattr(chat, "_max_model_tokens", 8000)
+
+        assert chat.get_max_model_tokens(partitions=["p"], settings=s) == int(s.llm_context.max_llm_context_size)
+        assert chat.get_max_model_tokens(partitions=None, settings=s) == 8000
+
+    def test_conflicting_partition_presets_fall_back_to_default(self, monkeypatch):
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, ModelEndpointConfig
+
+        s = _settings_with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 8192})
+        s.models.llm["mistral"] = ModelEndpointConfig(
+            endpoint="http://mistral:8000/v1", extra={LLM_CONTEXT_SIZE_KEY: 32768}
+        )
+        s.models.llm["llama"] = ModelEndpointConfig(endpoint="http://llama:8000/v1", extra={LLM_CONTEXT_SIZE_KEY: 4096})
+        s.partitions["a"] = _partition_config(chat_llm="mistral")
+        s.partitions["b"] = _partition_config(chat_llm="llama")
+        monkeypatch.setattr(chat, "_max_model_tokens", None)
+
+        assert chat.get_max_model_tokens(partitions=["a", "b"], settings=s) == 8192
+
+
 class TestDefaultMaxTokensFactory:
     """The request-schema default_factory prefers the default endpoint's budget."""
 

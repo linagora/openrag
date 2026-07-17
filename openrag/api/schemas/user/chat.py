@@ -9,7 +9,10 @@ def default_max_tokens():
     config = load_config()
     # Prefer the default LLM endpoint's admin-configured budget over the global
     # llm_context fallback (both editable, but the per-endpoint value wins).
-    return config.models.default_llm_output_tokens() or config.llm_context.max_output_tokens
+    # This factory runs at request-body parse time, before the partition is
+    # resolved, so it can only ever see the default endpoint — the
+    # partition-aware check happens later in check_tokens_limit.
+    return config.models.llm_output_tokens() or config.llm_context.max_output_tokens
 
 
 class OpenAIMessage(BaseModel):
