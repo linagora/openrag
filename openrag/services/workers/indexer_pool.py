@@ -358,7 +358,7 @@ def _required_llm_names(indexation_config: dict[str, Any] | None) -> list[str]:
     names: list[str] = []
     if indexation_config.get("enable_contextualization"):
         names.append(indexation_config.get("contextualization_llm") or "default")
-    if indexation_config.get("enable_topic_tagging", True):
+    if indexation_config.get("enable_topic_tagging", False):
         names.append(indexation_config.get("topic_tagging_llm") or "default")
     return names
 

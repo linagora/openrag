@@ -52,8 +52,10 @@ class IndexationPipelineConfig(BaseModel):
         default_factory=lambda: ["person", "organization", "location", "event"],
     )
 
-    # Topic tagging
-    enable_topic_tagging: bool = True
+    # Topic tagging. Off by default: the generated tags are not yet surfaced in
+    # the API or used for retrieval, so enabling it only buys an extra LLM call
+    # per document. Partitions that want the tags opt in on their preset.
+    enable_topic_tagging: bool = False
     max_topic_tags: int = Field(default=7, ge=1, le=50)
     topic_tagging_llm: str | None = None
 

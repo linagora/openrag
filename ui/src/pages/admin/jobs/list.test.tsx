@@ -37,12 +37,12 @@ const getQueueInfoMock = vi.mocked(getQueueInfo);
 const listTasksMock = vi.mocked(listTasks);
 const toastErrorMock = vi.mocked(toast.error);
 
-const task = (task_id: string, state: TaskState, filename: string) => ({
+const task = (task_id: string, state: TaskState, filename: string, partition = "docs") => ({
   task_id,
   state,
   details: {
     file_id: task_id,
-    partition: "docs",
+    partition,
     metadata: { filename },
     user_id: 1,
   },
@@ -168,6 +168,21 @@ describe("JobListPage filters", () => {
     await userEvent.type(screen.getByPlaceholderText("Search jobs..."), "other");
 
     await waitFor(() => expect(screen.queryByText("1 selected")).toBeNull());
+  });
+
+  it("keeps long job values constrained while exposing full names", async () => {
+    const longTaskId = "task-" + "1234567890".repeat(5);
+    const longFilename = "benchmark-run-with-a-very-long-document-name-that-should-not-stretch-the-table.pdf";
+    const longPartition = "benchmark-partition-with-a-very-long-name-for-regression-testing";
+    listTasksMock.mockResolvedValue({
+      tasks: [task(longTaskId, "COMPLETED", longFilename, longPartition)],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByTitle(longTaskId)).not.toBeNull();
+    expect(screen.getByTitle(longFilename).className).toContain("truncate");
+    expect(screen.getByTitle(longPartition).className).toContain("truncate");
   });
 
   it("shows queue and worker pressure from the backend", async () => {
