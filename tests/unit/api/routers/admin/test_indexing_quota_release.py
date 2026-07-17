@@ -64,6 +64,7 @@ class FakeIndexingService:
         self.copy_result = copy_result
         self.copy_error = copy_error
         self.dispatched = 0
+        self.add_kwargs: dict = {}
 
     async def file_exists(self, file_id: str, partition: str) -> bool:
         return self.exists
@@ -74,6 +75,7 @@ class FakeIndexingService:
     async def add_file(self, **kwargs):
         if self.add_error is not None:
             raise self.add_error
+        self.add_kwargs = kwargs
         self.dispatched += 1
         return "task-1"
 
@@ -130,6 +132,33 @@ async def test_successful_dispatch_keeps_the_slot(tmp_path):
     assert service.dispatched == 1
     assert auth.reserved == [42]
     assert auth.released == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tells_the_worker_the_slot_is_already_reserved(tmp_path):
+    """The handoff is a *signal*, and nothing else pins that it is sent.
+
+    ``commit_quota_reservation`` only stops the request's teardown from
+    releasing; it is ``quota_reserved=True`` that makes the worker take
+    ownership and release on failure/cancellation. Drop the flag and the two
+    halves disagree: teardown declines to release because the reservation was
+    committed, and the worker declines because it was never told it owns one —
+    so every failed upload leaks a slot permanently, in silence.
+
+    The rest of this module asserts the release paths; this asserts the wire
+    between them, which the release tests cannot see because they never reach
+    a worker.
+    """
+    service = FakeIndexingService()
+
+    resp = await _post(
+        _build_app(tmp_path, RecordingAuthService(), service),
+        "/indexer/partition/p1/file/f1",
+        data={"_": "1"},
+    )
+
+    assert resp.status_code == 201
+    assert service.add_kwargs.get("quota_reserved") is True
 
 
 @pytest.mark.asyncio
