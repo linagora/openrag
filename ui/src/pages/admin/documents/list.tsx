@@ -77,6 +77,8 @@ export default function DocumentListPage() {
     partitions,
     partitionsQuery.isSuccess || partitionsQuery.isError,
   );
+  const role = partitions.find((p) => p.partition === selected)?.role;
+  const writable = canWrite(role);
 
   // Keep the remembered partition in sync, and heal a stale ?partition= URL so a
   // refresh / shared link doesn't re-trigger the not-found error.
@@ -84,16 +86,22 @@ export default function DocumentListPage() {
     if (!selected) return;
     sessionStorage.setItem("documents.partition", selected);
     const urlPartition = searchParams.get("partition");
-    if (urlPartition && urlPartition !== selected) {
+    const shouldOpenUpload = searchParams.get("upload") === "1" && writable;
+    if (shouldOpenUpload) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Open the existing upload dialog from the route action.
+      setUploadOpen(true);
+    }
+    if ((urlPartition && urlPartition !== selected) || shouldOpenUpload) {
       setSearchParams(
         (prev) => {
           prev.set("partition", selected);
+          prev.delete("upload");
           return prev;
         },
         { replace: true },
       );
     }
-  }, [selected, searchParams, setSearchParams]);
+  }, [selected, searchParams, setSearchParams, writable]);
 
   const selectPartition = (p: string) => {
     setFileSelection({ partition: p, rows: {} });
@@ -103,9 +111,6 @@ export default function DocumentListPage() {
       return prev;
     });
   };
-
-  const role = partitions.find((p) => p.partition === selected)?.role;
-  const writable = canWrite(role);
 
   const filesQuery = useQuery({
     queryKey: ["partition-files", selected],

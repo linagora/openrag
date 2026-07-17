@@ -72,7 +72,7 @@ function LocationProbe() {
   return <output data-testid="location">{location.pathname}</output>;
 }
 
-function renderDocuments() {
+function renderDocuments(initialEntries = ["/documents"]) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
@@ -82,7 +82,7 @@ function renderDocuments() {
 
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={initialEntries}>
         <DocumentListPage />
         <LocationProbe />
       </MemoryRouter>
@@ -110,6 +110,15 @@ describe("DocumentListPage", () => {
     const fileLink = await screen.findByRole("link", { name: "a.pdf" });
     expect(fileLink.getAttribute("title")).toBe("a.pdf");
     expect(fileLink.className).toContain("truncate");
+  });
+
+  it("opens the upload dialog for a partition upload link", async () => {
+    renderDocuments(["/documents?partition=docs&upload=1"]);
+
+    expect(await screen.findByRole("dialog")).not.toBeNull();
+    expect(screen.getByText(/Index one or more files into/i)).not.toBeNull();
+    expect(screen.getByText("docs")).not.toBeNull();
+    expect(screen.getByTestId("location").textContent).toBe("/documents");
   });
 
   it("selects all documents from the table header and deletes the selected files", async () => {
