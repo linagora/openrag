@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import ray
+from core.models.catalog import TERMINAL_TASK_STATES, DocumentStatus
 
 try:
     from core.config import load_config as _load_config
@@ -46,6 +47,8 @@ class TaskStateManager:
     async def set_state(self, task_id: str, state: str) -> None:
         async with self.lock:
             info = await self._ensure_task(task_id)
+            if info.state == DocumentStatus.CANCELLED and state != DocumentStatus.CANCELLED:
+                return
             info.state = state
 
     @ray.method(concurrency_group="set")
@@ -63,6 +66,15 @@ class TaskStateManager:
                 return False
             info.state = "FAILED"
             info.error = tb_str
+            return True
+
+    @ray.method(concurrency_group="set")
+    async def set_cancelled_if_active(self, task_id: str) -> bool:
+        async with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None or info.state in TERMINAL_TASK_STATES:
+                return False
+            info.state = "CANCELLED"
             return True
 
     @ray.method(concurrency_group="set")

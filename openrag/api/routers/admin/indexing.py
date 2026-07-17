@@ -30,6 +30,7 @@ from api.dependencies.files import (
     validate_metadata,
 )
 from api.routers.admin.task_logs import collect_task_logs
+from core.models.catalog import TERMINAL_TASK_STATES
 from core.utils.exceptions import OpenRAGError
 from core.utils.filename import sanitize_filename
 from core.utils.log_tail import app_log_file
@@ -557,5 +558,11 @@ async def cancel_task(
 ):
     cancelled = await service.cancel_task(task_id)
     if not cancelled:
+        task_state = await service.get_task_state(task_id)
+        if task_state in TERMINAL_TASK_STATES:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Task {task_id} is already {task_state.lower()} and cannot be cancelled",
+            )
         raise HTTPException(404, f"No ObjectRef stored for task {task_id}")
     return {"message": f"Cancellation signal sent for task {task_id}"}

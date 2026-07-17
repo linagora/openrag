@@ -20,6 +20,13 @@ class DocumentStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+# States a task/document cannot leave once reached. Single source of truth for
+# the cancellation guard shared by the indexing route, dispatcher, and
+# TaskStateManager — keep those in sync via this constant rather than
+# re-declaring the set.
+TERMINAL_TASK_STATES = frozenset({DocumentStatus.COMPLETED, DocumentStatus.FAILED, DocumentStatus.CANCELLED})
+
+
 class JobStatus(str, Enum):
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
