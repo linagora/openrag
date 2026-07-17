@@ -225,6 +225,20 @@ class WorkerDispatcher(IndexingDispatcher):
                 allow_legacy_retry=allow_legacy_require_existing_partition_retry,
             )
 
+            # #671 made this call fail closed: it returns False when a delete
+            # fence covers the file, and the handler below then cancels the
+            # worker we just started and sweeps its vectors.
+            #
+            # This is where 4ec0a634 ("don't report a dispatch failure once the
+            # worker has started") used to swallow the failure, on the grounds
+            # that the worker owns the reserved slot from submit onwards and
+            # would run to completion regardless. #671 invalidated that premise:
+            # the worker no longer runs to completion, it is rolled back, so the
+            # error is truthful and must propagate. The residual cost is a
+            # double release (the cancelled worker's finally and the request
+            # teardown both give the slot back), which under-counts rather than
+            # leaks -- the direction this branch already chose deliberately, and
+            # which #700 closes.
             registered = await self._call(
                 self._tsm.set_object_ref.remote(task_id, {"ref": task}),
                 task_description=f"set_object_ref({task_id})",
