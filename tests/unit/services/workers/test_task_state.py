@@ -13,6 +13,7 @@ def _task_state_manager() -> Any:
 
 @pytest.mark.asyncio
 async def test_cancelled_state_is_not_overwritten_by_worker_transitions() -> None:
+    """A cancel claim is sticky: a worker still in flight cannot report over it (#685)."""
     manager = _task_state_manager()
 
     await manager.set_state("task-1", "QUEUED")
@@ -328,19 +329,6 @@ async def test_failing_after_eviction_does_not_resurrect_the_task(monkeypatch, s
 
     assert await mgr.set_failed_if_not_cancelled("t0", "late") is False
     assert mgr.tasks == {}
-
-
-async def test_cancelled_state_is_not_overwritten_by_worker_transitions() -> None:
-    """A cancel claim is sticky: a worker still in flight cannot report over it (#685)."""
-    mgr = _manager()
-
-    await mgr.set_state("task-1", "QUEUED")
-    assert await mgr.set_cancelled_if_active("task-1") is True
-
-    await mgr.set_state("task-1", "SERIALIZING")
-    await mgr.set_state("task-1", "COMPLETED")
-
-    assert await mgr.get_state("task-1") == "CANCELLED"
 
 
 def _late_writes():
