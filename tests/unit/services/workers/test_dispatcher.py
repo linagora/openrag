@@ -1572,6 +1572,33 @@ async def test_the_purge_uses_the_documented_retention_bounds() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failing_purge_is_not_retried_on_every_dispatch() -> None:
+    """The throttle timestamp is stamped *before* the sweep, not after it.
+
+    Stamped afterwards, a purge that raises never records an attempt, so every
+    subsequent upload pays another failing round-trip to a database that is
+    already unhealthy — turning a bounded 5-minute sweep into per-request load
+    at exactly the worst moment. ``test_purge_failure_never_fails_a_dispatch``
+    covers that the failure is swallowed; this covers that it is not repeated.
+    """
+    job_repo = _job_repo()
+    job_repo.purge_terminal_jobs = AsyncMock(side_effect=RuntimeError("purge blew up"))
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    for _ in range(3):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1"},
+            partition="tenant-a",
+            user=None,
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert job_repo.purge_terminal_jobs.await_count == 1, "a failing purge was retried on every dispatch"
+
+
+@pytest.mark.asyncio
 async def test_purge_failure_never_fails_a_dispatch() -> None:
     job_repo = _job_repo()
     job_repo.purge_terminal_jobs = AsyncMock(side_effect=RuntimeError("purge blew up"))
