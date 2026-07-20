@@ -8,6 +8,7 @@ import ray
 from core.models.catalog import TASK_FINISHED_AT_METADATA_KEY, TERMINAL_TASK_STATES
 
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
+_REFLESS_RECOVERY_POLL_SECONDS = 5.0
 
 
 class TaskCompletionTracker:
@@ -56,8 +57,44 @@ class TaskCompletionTracker:
                     object_ref = await task_state_manager.get_object_ref.remote(task_id)
                     if isinstance(object_ref, dict) and object_ref.get("ref") is not None:
                         tracker.track.remote(task_id, object_ref)
+                    else:
+                        tracker.recover_refless.remote(task_id)
             except Exception as exc:
                 self._logger.warning("Failed to recover indexing completion tracking", error=str(exc))
+
+    async def recover_refless(self, task_id: str, poll_interval: float = _REFLESS_RECOVERY_POLL_SECONDS) -> None:
+        """Watch a recovered active task whose ObjectRef has not been stored yet."""
+        if task_id in self._tracked_task_ids:
+            return
+        self._tracked_task_ids.add(task_id)
+        try:
+            while True:
+                task_state_manager = self._task_state_manager()
+                details = await task_state_manager.get_details.remote(task_id)
+                if _has_finished_at(details):
+                    return
+
+                state = await task_state_manager.get_state.remote(task_id)
+                if state in _TERMINAL_STATES:
+                    await self._record_finished_at(task_id)
+                    return
+
+                object_ref = await task_state_manager.get_object_ref.remote(task_id)
+                ref = object_ref.get("ref") if isinstance(object_ref, dict) else None
+                if ref is not None:
+                    await asyncio.gather(ref, return_exceptions=True)
+                    await self._record_finished_at(task_id)
+                    return
+
+                await asyncio.sleep(poll_interval)
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to recover ref-less indexing task completion tracking",
+                task_id=task_id,
+                error=str(exc),
+            )
+        finally:
+            self._tracked_task_ids.discard(task_id)
 
     async def _record_finished_at(self, task_id: str) -> None:
         task_state_manager = self._task_state_manager()

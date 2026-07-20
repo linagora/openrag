@@ -13,10 +13,16 @@ def _remote_mock(return_value: Any = None) -> MagicMock:
     return method
 
 
-def _task_state_manager(*, all_info: dict[str, dict] | None = None, object_ref: Any = None) -> MagicMock:
+def _task_state_manager(
+    *,
+    all_info: dict[str, dict] | None = None,
+    object_ref: Any = None,
+    state: str | None = None,
+) -> MagicMock:
     tsm = MagicMock()
     tsm.get_all_info = _remote_mock(all_info or {})
     tsm.get_object_ref = _remote_mock(object_ref)
+    tsm.get_state = _remote_mock(state)
     tsm.get_details = _remote_mock()
     tsm.set_details = _remote_mock()
     return tsm
@@ -86,6 +92,67 @@ async def test_tracker_recovers_active_task_after_restart() -> None:
 
     tsm.get_object_ref.remote.assert_awaited_once_with("task-1")
     tracker_handle.track.remote.assert_called_once_with("task-1", {"ref": ref})
+
+
+@pytest.mark.asyncio
+async def test_tracker_retries_active_task_without_stored_ref_after_restart() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    details = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {"_openrag_job_created_at": "2026-07-20T08:00:00+00:00"},
+        "user_id": 42,
+    }
+    tsm = _task_state_manager(
+        all_info={"task-1": {"state": "INSERTING", "details": details}},
+        object_ref=None,
+    )
+    tracker_handle = MagicMock()
+
+    def get_actor(name: str, namespace: str):
+        assert namespace == "openrag"
+        return tsm if name == "TaskStateManager" else tracker_handle
+
+    with patch("services.workers.task_completion.ray.get_actor", side_effect=get_actor):
+        tracker = TaskCompletionTracker()
+        await tracker.recover()
+
+    tracker_handle.recover_refless.remote.assert_called_once_with("task-1")
+
+
+@pytest.mark.asyncio
+async def test_tracker_records_recovered_refless_task_when_it_reaches_terminal_state() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    details = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {"_openrag_job_created_at": "2026-07-20T08:00:00+00:00"},
+        "user_id": 42,
+    }
+    tsm = _task_state_manager(object_ref=None)
+    tsm.get_details.remote.return_value = details
+    tsm.get_state.remote.side_effect = ["INSERTING", "COMPLETED"]
+
+    with (
+        patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
+        patch("services.workers.task_completion._utc_now_iso", return_value="2026-07-20T08:01:05+00:00"),
+        patch("services.workers.task_completion.asyncio.sleep", AsyncMock()),
+    ):
+        tracker = TaskCompletionTracker()
+        await tracker.recover_refless("task-1", poll_interval=0)
+
+    tsm.set_details.remote.assert_awaited_once_with(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={
+            "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
+            "_openrag_job_finished_at": "2026-07-20T08:01:05+00:00",
+        },
+        user_id=42,
+    )
 
 
 @pytest.mark.asyncio
