@@ -303,6 +303,16 @@ class WorkerDispatcher(IndexingDispatcher):
         # (wrapped so Ray doesn't auto-dereference and block on the worker task).
         # Awaiting the submit call yields that list; element 0 is the worker ref
         # that ``cancel_task``/``ray.cancel`` must target.
+        #
+        # A timeout here is ambiguous about ownership of the reserved slot: the
+        # submit may have started the worker (which then owns it) or not (in
+        # which case the request's teardown must release it), and the caller
+        # cannot tell which. The wrapper cancels the future and raises, so the
+        # router skips ``commit_quota_reservation`` and teardown releases --
+        # correct for the overwhelmingly common case that submit never ran, and
+        # off by one the other way. Both directions undercount rather than
+        # leak, which is the side this branch errs on, and both self-heal under
+        # the #676 recount.
         submitted = await self._call(
             self._pool.submit.remote(**submit_kwargs),
             task_description=f"submit({task_id})",
