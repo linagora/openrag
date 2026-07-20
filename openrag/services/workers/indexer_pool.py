@@ -366,6 +366,17 @@ class IndexerPool:
             if renewal_task is not None:
                 renewal_task.cancel()
                 await asyncio.gather(renewal_task, return_exceptions=True)
+            if claim is not None:
+                try:
+                    repo = await self._claim_document_repo()
+                    await repo.release_content_sha256_claim(**claim)
+                except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
+                    from core.utils.logging import get_logger
+
+                    get_logger().bind(file_id=claim["file_id"], partition=claim["partition"]).warning(
+                        "Failed to release settled content deduplication claim.",
+                        error=str(exc),
+                    )
             self._inflight[idx] -= 1
 
     async def _claim_document_repo(self) -> Any:

@@ -888,6 +888,8 @@ def _bare_pool(workers: list) -> object:
     pool._workers = list(workers)
     pool._inflight = [0] * len(workers)
     pool._release_tasks = set()
+    pool._claim_store = None
+    pool._claim_store_lock = asyncio.Lock()
     return pool
 
 
@@ -988,7 +990,10 @@ async def test_pool_renews_content_claim_while_task_is_active(monkeypatch: pytes
         renewed.set()
         return True
 
-    repo = SimpleNamespace(renew_content_sha256_claim=AsyncMock(side_effect=renew))
+    repo = SimpleNamespace(
+        renew_content_sha256_claim=AsyncMock(side_effect=renew),
+        release_content_sha256_claim=AsyncMock(),
+    )
     pool._claim_store = SimpleNamespace(document_repo=repo)
     pool._claim_store_lock = asyncio.Lock()
     monkeypatch.setattr(module, "_CONTENT_CLAIM_RENEW_INTERVAL_SECONDS", 0.001)
@@ -1007,6 +1012,38 @@ async def test_pool_renews_content_claim_while_task_is_active(monkeypatch: pytes
         "partition": "tenant-a",
         "content_sha256": "abc123",
     }
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+    )
+
+
+@pytest.mark.asyncio
+async def test_pool_keeps_content_claim_until_cancelled_task_settles() -> None:
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    repo = SimpleNamespace(
+        renew_content_sha256_claim=AsyncMock(return_value=True),
+        release_content_sha256_claim=AsyncMock(),
+    )
+    pool._claim_store = SimpleNamespace(document_repo=repo)
+
+    await pool.submit(
+        task_id="task-1",
+        partition="tenant-a",
+        metadata={"file_id": "file-1", "content_sha256": "abc123"},
+    )
+
+    worker.futures[0].cancel()
+    assert repo.release_content_sha256_claim.await_count == 0
+    await _settle_pool_release_tasks(pool)
+
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+    )
 
 
 def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPatch) -> None:

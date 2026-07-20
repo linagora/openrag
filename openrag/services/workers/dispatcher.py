@@ -192,8 +192,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     content_sha256=content_sha256,
                 )
             raise RuntimeError(
-                f"Task {task_id} was rejected because file {file_id!r} "
-                f"in partition {partition!r} is being deleted"
+                f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
             )
 
         task: Any | None = None
@@ -540,10 +539,6 @@ class WorkerDispatcher(IndexingDispatcher):
     async def cancel_task(self, task_id: str) -> bool:
         import ray
 
-        details = await self._call(
-            self._tsm.get_details.remote(task_id),
-            task_description=f"get_details({task_id})",
-        )
         obj_ref = await self._call(
             self._tsm.get_object_ref.remote(task_id),
             task_description=f"get_object_ref({task_id})",
@@ -564,16 +559,6 @@ class WorkerDispatcher(IndexingDispatcher):
             return False
 
         ray.cancel(obj_ref["ref"], recursive=True)
-        metadata = (details or {}).get("metadata") or {}
-        content_sha256 = metadata.get("content_sha256")
-        file_id = (details or {}).get("file_id")
-        partition = (details or {}).get("partition")
-        if content_sha256 and file_id and partition:
-            await self._document_repo.release_content_sha256_claim(
-                file_id=file_id,
-                partition=partition,
-                content_sha256=content_sha256,
-            )
         return True
 
 

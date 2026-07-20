@@ -877,15 +877,10 @@ async def test_cancel_task_uses_stored_pool_object_ref() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_task_releases_content_claim() -> None:
+async def test_cancel_task_leaves_content_claim_for_task_settlement() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     tsm = _task_state_manager()
-    tsm.get_details.remote.return_value = {
-        "file_id": "file-1",
-        "partition": "tenant-a",
-        "metadata": {"content_sha256": "abc123"},
-    }
     repo = _document_repo()
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
@@ -900,11 +895,8 @@ async def test_cancel_task_releases_content_claim() -> None:
     with patch("ray.cancel"):
         assert await dispatcher.cancel_task("task-1") is True
 
-    repo.release_content_sha256_claim.assert_awaited_once_with(
-        file_id="file-1",
-        partition="tenant-a",
-        content_sha256="abc123",
-    )
+    repo.release_content_sha256_claim.assert_not_awaited()
+    tsm.get_details.remote.assert_not_awaited()
 
 
 @pytest.mark.asyncio
