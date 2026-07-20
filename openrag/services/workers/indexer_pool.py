@@ -47,7 +47,14 @@ class IndexerWorkerActor:
         parser = build_parser_dispatcher(cfg)
         parser_factory = _build_parser_factory(parser)
         vlm = build_caption_vlm(cfg)
-        caption_prompt = load_caption_prompt(cfg) if vlm is not None else None
+        # Loaded unconditionally: a preset can caption through a *named* VLM
+        # endpoint (resolved per-row via vlm_factory, see
+        # IndexingPipeline._select_vlm) even when no global default is
+        # configured, so gating this on `vlm is not None` would silently skip
+        # the prompt for that deployment shape. load_caption_prompt already
+        # degrades to None on any load failure, so there's no safety
+        # trade-off in always calling it.
+        caption_prompt = load_caption_prompt(cfg)
         chunker = _build_chunker(cfg)
         embedder_factory = _build_embedder_factory(cfg)
         vlm_factory = _build_vlm_factory(cfg)
