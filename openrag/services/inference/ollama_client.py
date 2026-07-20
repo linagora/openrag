@@ -17,7 +17,9 @@ from core.embeddings import Embedder, embedder_registry
 from core.llm import LLM, llm_registry
 from core.utils.exceptions import (
     EmbeddingAPIError,
+    EmbeddingConnectionError,
     EmbeddingResponseError,
+    EmbeddingTimeoutError,
     InferenceConnectionError,
     InferenceError,
     InferenceTimeoutError,
@@ -163,15 +165,16 @@ class OllamaEmbedder(Embedder):
         try:
             resp = await self._client.post(f"{self._endpoint}/embeddings", json=body)
             resp.raise_for_status()
+        # Retryable statuses so @with_retry above actually fires (#704).
         except httpx.ConnectError as exc:
-            raise EmbeddingAPIError(
+            raise EmbeddingConnectionError(
                 f"Cannot reach Ollama embedder at {self._endpoint}",
                 model_name=self._model,
                 base_url=self._endpoint,
                 error=str(exc),
             ) from exc
         except httpx.TimeoutException as exc:
-            raise EmbeddingAPIError(
+            raise EmbeddingTimeoutError(
                 f"Ollama embedder request timed out at {self._endpoint}",
                 model_name=self._model,
                 base_url=self._endpoint,
@@ -180,6 +183,7 @@ class OllamaEmbedder(Embedder):
         except httpx.HTTPStatusError as exc:
             raise EmbeddingAPIError(
                 f"Ollama embedder API error ({exc.response.status_code})",
+                status_code=exc.response.status_code,
                 model_name=self._model,
                 base_url=self._endpoint,
                 error=_error_snippet(exc.response.text),
