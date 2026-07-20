@@ -1436,6 +1436,27 @@ async def test_cancel_task_marks_the_durable_job_cancelled() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_task_leaves_the_durable_job_alone_when_already_terminal() -> None:
+    """A cancel that loses the race must not rewrite a COMPLETED job as CANCELLED.
+
+    ``get_object_ref`` still answers for a finished task (the ref is only dropped
+    when the entry is evicted), so a late ``DELETE /task/{id}`` reaches this path
+    for work that already succeeded. The durable row is the operator-visible
+    record of the outcome (#660), so it must reflect what actually happened.
+    """
+    tsm = _task_state_manager()
+    tsm.set_cancelled_if_active = _remote_mock(False)  # worker got there first
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo, tsm=tsm)
+
+    with patch("ray.cancel") as cancel:
+        assert await dispatcher.cancel_task("task-1") is False
+
+    job_repo.update_job.assert_not_awaited()
+    cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_get_task_state_falls_back_to_postgres_after_a_restart() -> None:
     from core.models.catalog import DocumentStatus, IndexationJob
 
