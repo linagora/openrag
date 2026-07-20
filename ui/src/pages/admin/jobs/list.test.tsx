@@ -37,7 +37,13 @@ const getQueueInfoMock = vi.mocked(getQueueInfo);
 const listTasksMock = vi.mocked(listTasks);
 const toastErrorMock = vi.mocked(toast.error);
 
-const task = (task_id: string, state: TaskState, filename: string, partition = "docs") => ({
+const task = (
+  task_id: string,
+  state: TaskState,
+  filename: string,
+  partition = "docs",
+  timing: { created_at?: string; duration_ms?: number } = {},
+) => ({
   task_id,
   state,
   details: {
@@ -46,6 +52,7 @@ const task = (task_id: string, state: TaskState, filename: string, partition = "
     metadata: { filename },
     user_id: 1,
   },
+  ...timing,
   url: `/indexer/task/${task_id}`,
 });
 
@@ -183,6 +190,18 @@ describe("JobListPage filters", () => {
     expect(await screen.findByTitle(longTaskId)).not.toBeNull();
     expect(screen.getByTitle(longFilename).className).toContain("truncate");
     expect(screen.getByTitle(longPartition).className).toContain("truncate");
+  });
+
+  it("shows task creation time and duration", async () => {
+    const createdAt = "2026-07-20T08:00:00+00:00";
+    listTasksMock.mockResolvedValue({
+      tasks: [task("timed-task", "COMPLETED", "timed.pdf", "docs", { created_at: createdAt, duration_ms: 65_000 })],
+    });
+
+    renderJobs();
+
+    expect((await screen.findByTitle(createdAt)).textContent).toBe(new Date(createdAt).toLocaleString());
+    expect(screen.getByText("1m 5s")).not.toBeNull();
   });
 
   it("shows queue and worker pressure from the backend", async () => {

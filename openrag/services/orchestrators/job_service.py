@@ -75,7 +75,7 @@ class JobService:
         user_id: int | None,
         task_status: str | None = None,
     ) -> list[dict]:
-        """Return ``{task_id, state, details}`` rows, filtered.
+        """Return task rows with details and lifecycle timing, filtered.
 
         - admins see every task; regular users only their own
         - ``task_status='active'`` → QUEUED|SERIALIZING|CHUNKING|INSERTING
@@ -97,7 +97,16 @@ class JobService:
         else:
             filtered = [(tid, i) for tid, i in all_info.items() if i["state"].lower() == task_status.lower()]
 
-        return [{"task_id": tid, "state": i["state"], "details": i["details"]} for tid, i in filtered]
+        return [
+            {
+                "task_id": tid,
+                "state": i["state"],
+                "details": i["details"],
+                "created_at": i.get("created_at"),
+                "duration_ms": i.get("duration_ms"),
+            }
+            for tid, i in filtered
+        ]
 
     async def get_user_pending_task_count(self, user_id: int | None) -> int:
         """Pending (not-yet-completed) indexing tasks for one user.

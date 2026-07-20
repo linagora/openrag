@@ -72,12 +72,22 @@ async def test_get_queue_info_rolls_up_states():
 @pytest.mark.asyncio
 async def test_list_tasks_admin_sees_all():
     info = {
-        "t1": {"state": "QUEUED", "details": {"f": 1}, "user": 1},
+        "t1": {
+            "state": "QUEUED",
+            "details": {"f": 1},
+            "user": 1,
+            "created_at": "2026-07-20T08:00:00+00:00",
+            "duration_ms": 1200,
+        },
         "t2": {"state": "COMPLETED", "details": {"f": 2}, "user": 2},
     }
     rows = await JobService(FakeTSM(info=info)).list_tasks(is_admin=True, user_id=1)
     assert {r["task_id"] for r in rows} == {"t1", "t2"}
     assert rows[0]["details"] == {"f": 1}
+    assert rows[0]["created_at"] == "2026-07-20T08:00:00+00:00"
+    assert rows[0]["duration_ms"] == 1200
+    assert rows[1]["created_at"] is None
+    assert rows[1]["duration_ms"] is None
 
 
 @pytest.mark.asyncio

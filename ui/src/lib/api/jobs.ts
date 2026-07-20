@@ -43,6 +43,8 @@ export interface TaskListItem {
   task_id: string;
   state: TaskState;
   details: TaskDetails;
+  created_at?: string | null;
+  duration_ms?: number | null;
   url: string;
   error_url?: string;
 }

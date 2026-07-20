@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import ray
@@ -29,6 +30,8 @@ class TaskInfo:
     error: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     object_ref: ray.ObjectRef | None = None
+    created_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 @ray.remote(concurrency_groups={"set": 1000, "get": 1000, "queue_info": 1000})
@@ -38,10 +41,32 @@ class TaskStateManager:
         self.user_index: dict[int, set[str]] = {}
         self.lock = asyncio.Lock()
 
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(UTC)
+
     async def _ensure_task(self, task_id: str) -> TaskInfo:
         if task_id not in self.tasks:
-            self.tasks[task_id] = TaskInfo()
+            self.tasks[task_id] = TaskInfo(created_at=self._now())
         return self.tasks[task_id]
+
+    def _finish_if_terminal(self, info: TaskInfo, state: str) -> None:
+        if state in TERMINAL_TASK_STATES and info.finished_at is None:
+            info.finished_at = self._now()
+
+    def _task_payload(self, info: TaskInfo, now: datetime) -> dict[str, Any]:
+        created_at = info.created_at
+        duration_ms = None
+        if created_at is not None:
+            end = info.finished_at or now
+            duration_ms = max(0, int((end - created_at).total_seconds() * 1000))
+        return {
+            "state": info.state,
+            "error": info.error,
+            "details": info.details,
+            "created_at": created_at.isoformat() if created_at else None,
+            "duration_ms": duration_ms,
+        }
 
     @ray.method(concurrency_group="set")
     async def set_state(self, task_id: str, state: str) -> None:
@@ -50,6 +75,7 @@ class TaskStateManager:
             if info.state == DocumentStatus.CANCELLED and state != DocumentStatus.CANCELLED:
                 return
             info.state = state
+            self._finish_if_terminal(info, state)
 
     @ray.method(concurrency_group="set")
     async def set_error(self, task_id: str, tb_str: str) -> None:
@@ -66,6 +92,7 @@ class TaskStateManager:
                 return False
             info.state = "FAILED"
             info.error = tb_str
+            self._finish_if_terminal(info, "FAILED")
             return True
 
     @ray.method(concurrency_group="set")
@@ -75,6 +102,7 @@ class TaskStateManager:
             if info is None or info.state in TERMINAL_TASK_STATES:
                 return False
             info.state = "CANCELLED"
+            self._finish_if_terminal(info, "CANCELLED")
             return True
 
     @ray.method(concurrency_group="set")
@@ -135,28 +163,15 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def get_all_info(self) -> dict[str, dict]:
         async with self.lock:
-            return {
-                task_id: {
-                    "state": info.state,
-                    "error": info.error,
-                    "details": info.details,
-                }
-                for task_id, info in self.tasks.items()
-            }
+            now = self._now()
+            return {task_id: self._task_payload(info, now) for task_id, info in self.tasks.items()}
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_user_info(self, user_id: int) -> dict[str, dict]:
         async with self.lock:
             task_ids = self.user_index.get(user_id, set())
-            return {
-                tid: {
-                    "state": self.tasks[tid].state,
-                    "error": self.tasks[tid].error,
-                    "details": self.tasks[tid].details,
-                }
-                for tid in task_ids
-                if tid in self.tasks
-            }
+            now = self._now()
+            return {tid: self._task_payload(self.tasks[tid], now) for tid in task_ids if tid in self.tasks}
 
     @ray.method(concurrency_group="queue_info")
     async def get_pool_info(self) -> dict[str, int]:
