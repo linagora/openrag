@@ -1173,3 +1173,93 @@ async def test_actor_keeps_upload_on_pre_worker_failure_when_saving(tmp_path) ->
         await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
 
     assert path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Setup-failure quota release (#664)
+# ---------------------------------------------------------------------------
+
+
+class _FakeUserRepo:
+    def __init__(self) -> None:
+        self.released: list[int] = []
+
+    async def release_file_slot(self, user_id: int) -> None:
+        self.released.append(user_id)
+
+
+class _FakeCatalogStore:
+    def __init__(self, user_repo) -> None:
+        self.user_repo = user_repo
+
+
+def _pool_with_broken_setup(user_repo, *, error: BaseException):
+    """A pool whose ``_ensure_catalog`` fails before the worker can take over."""
+    from services.workers.indexer_pool import IndexerWorkerActor
+
+    cls = IndexerWorkerActor.__ray_metadata__.modified_class
+    pool = cls.__new__(cls)
+    pool._catalog_store = _FakeCatalogStore(user_repo)
+
+    async def _boom() -> None:
+        raise error
+
+    async def _fresh(_names) -> None:
+        return None
+
+    pool._ensure_catalog = _boom
+    pool._ensure_registry_fresh = _fresh
+    pool._worker = None  # must never be reached
+    # Keep the upload on disk so the cleanup finally is a no-op here; the raw-file
+    # purge has its own coverage and is not what these tests are pinning.
+    pool._save_uploaded_files = True
+    pool._logger = None
+    return pool
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("catalog init failed"), asyncio.CancelledError()],
+    ids=["exception", "cancellation"],
+)
+async def test_setup_failure_releases_the_reserved_slot(error):
+    """Setup blew up before the worker owned the slot, so the pool must release it.
+
+    The worker's own ``finally`` never runs when ``_ensure_catalog`` /
+    ``_ensure_registry_fresh`` raise, so without this release the upload
+    permanently narrows the user's quota. ``BaseException`` is deliberate:
+    a cancellation during setup must release too, and ``CancelledError`` is not
+    an ``Exception``.
+    """
+    user_repo = _FakeUserRepo()
+    pool = _pool_with_broken_setup(user_repo, error=error)
+
+    with pytest.raises(type(error)):
+        await pool.process_file(
+            task_id="t1",
+            path="/tmp/doc.txt",
+            metadata={"file_id": "f1"},
+            partition="p1",
+            user={"id": 42},
+            quota_reserved=True,
+        )
+
+    assert user_repo.released == [42], "a setup failure leaked the reserved quota slot"
+
+
+async def test_setup_failure_releases_nothing_when_no_slot_was_reserved():
+    """The other half: no reservation, no release (``put_file`` never reserves)."""
+    user_repo = _FakeUserRepo()
+    pool = _pool_with_broken_setup(user_repo, error=RuntimeError("catalog init failed"))
+
+    with pytest.raises(RuntimeError):
+        await pool.process_file(
+            task_id="t1",
+            path="/tmp/doc.txt",
+            metadata={"file_id": "f1"},
+            partition="p1",
+            user={"id": 42},
+            quota_reserved=False,
+        )
+
+    assert user_repo.released == []
