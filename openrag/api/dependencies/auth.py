@@ -254,40 +254,90 @@ def require_admin_or_self(
     )
 
 
+class QuotaReservation:
+    """One reserved file slot, owned by the request that admitted it.
+
+    Issue #664: admission increments ``users.file_count`` *before* the
+    upload is dispatched, so the counter is now "reserved + completed"
+    rather than "completed". That makes the reservation a resource with an
+    owner — it must either be **consumed** (a ``files`` row is created for
+    it) or **released**.
+
+    The handover point is dispatch: until the job is queued the request
+    owns the slot and :func:`check_user_file_quota`'s teardown releases it
+    on any error; once ``commit()`` is called the indexing worker owns it
+    and is responsible for releasing on failure/cancellation. So the
+    router must call ``commit()`` — via :func:`commit_quota_reservation` —
+    at exactly the moment responsibility transfers, and never earlier.
+    """
+
+    __slots__ = ("user_id", "committed")
+
+    def __init__(self, user_id: int) -> None:
+        self.user_id = user_id
+        self.committed = False
+
+    def commit(self) -> None:
+        """Hand the slot off to the worker; teardown will not release it."""
+        self.committed = True
+
+
+def commit_quota_reservation(reservation: object) -> None:
+    """Commit ``reservation`` when it is a real one; no-op otherwise.
+
+    Routers receive whatever ``check_user_file_quota`` yields, and tests
+    routinely override that dependency with a plain stub. Guarding on the
+    type here keeps the routers free of ``if ... is not None`` noise and
+    keeps an overridden dependency from turning into an AttributeError.
+    """
+    if isinstance(reservation, QuotaReservation):
+        reservation.commit()
+
+
 async def check_user_file_quota(
     user=Depends(current_user),
     auth_service=Depends(get_auth_service),
-    job_service=Depends(get_job_service),
     config=Depends(get_config),
 ):
-    """Check if user has reached their file quota."""
-    default_file_quota = config.rdb.default_file_quota
-    if user.get("is_admin", False):
-        return user
-    user_quota = user.get("file_quota")
-    effective_quota = default_file_quota if user_quota is None else user_quota
-    if effective_quota < 0:
-        return user
+    """Atomically reserve one file slot for this upload, or reject it.
 
+    This is the admission gate for the two quota-bearing routes (``add_file``
+    and ``copy_file``). It replaces the pre-#664 read-then-check, which
+    compared the request's stale ``file_count`` snapshot plus an in-memory
+    pending-task count against the quota and admitted every racer.
+
+    The in-memory ``TaskStateManager`` count is deliberately **not** an
+    input any more: it is not durable (a restart zeroes it, reopening the
+    gate) and it is no longer needed — a reserved slot is already counted
+    in the durable ``file_count``.
+
+    Yields a :class:`QuotaReservation`; on the way out, an uncommitted
+    reservation is released. That covers every path between admission and
+    dispatch — a 409 duplicate, a rejected/oversize upload, workspace
+    validation, a dispatch error, or a client disconnect — because FastAPI
+    propagates the endpoint's exception into this generator.
+    """
     user_id = user.get("id")
-    pending_count = await job_service.get_user_pending_task_count(user_id)
-
-    logger.debug(
-        "User file quota check",
-        user_id=user_id,
-        pending_count=pending_count,
-    )
+    if user_id is None:
+        # No durable identity to charge (e.g. auth disabled). Nothing to
+        # reserve, so nothing can be enforced or leaked.
+        yield None
+        return
 
     try:
-        auth_service.validate_file_quota(
-            user,
-            pending_task_count=pending_count,
-            default_quota=default_file_quota,
+        new_count = await auth_service.reserve_file_slot(
+            user_id,
+            default_quota=config.rdb.default_file_quota,
         )
     except OpenRAGError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
+        logger.bind(user_id=user_id).info("Upload rejected: file quota exceeded.")
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
-    return user
+    logger.bind(user_id=user_id, file_count=new_count).debug("Reserved a file slot.")
+    reservation = QuotaReservation(user_id)
+    try:
+        yield reservation
+    finally:
+        if not reservation.committed:
+            logger.bind(user_id=user_id).debug("Releasing an unconsumed file-slot reservation.")
+            await auth_service.release_file_slot(user_id)

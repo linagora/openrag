@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import traceback
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from core.models.catalog import DocumentStatus
 from core.models.document import Document
 from core.utils.logging import get_logger
 from services.workers.pipeline_builder import (
@@ -15,6 +16,8 @@ from services.workers.pipeline_builder import (
 )
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
+
+logger = get_logger()
 
 logger = get_logger()
 
@@ -35,6 +38,14 @@ class IndexerWorker:
 
     Callers are responsible for setting ``QUEUED`` *before* dispatching
     the task, and for storing the object ref via ``set_object_ref``.
+
+    Since #664 the worker is also the owner of the uploader's reserved
+    quota slot: when the caller admitted the upload it already charged one
+    ``users.file_count`` slot, and this worker either consumes it (by
+    writing the catalog row) or releases it — see ``process_file``.
+
+    Every transition is mirrored to *job_repo* (issue #660) so the outcome of a
+    file survives a restart of this worker or of the state actor.
     """
 
     def __init__(
@@ -45,6 +56,8 @@ class IndexerWorker:
         topic_tag_repo: Any = None,
         vector_store: Any = None,
         collection: str = "default",
+        user_repo: Any = None,
+        job_repo: Any = None,
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
@@ -52,6 +65,8 @@ class IndexerWorker:
         self._topic_tag_repo = topic_tag_repo
         self._vector_store = vector_store
         self._collection = collection
+        self._user_repo = user_repo
+        self._job_repo = job_repo
 
     async def process_file(
         self,
@@ -66,21 +81,45 @@ class IndexerWorker:
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
         require_existing_partition: bool = False,
+        quota_reserved: bool = False,
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
         Returns a plain dict ``{"stored_count": int, "stage": "stored"}``
         on success.  On failure, state is set to FAILED and the exception
         is re-raised so the Ray task is marked as errored.
+
+        When ``quota_reserved`` is set, the admission gate already charged
+        one ``users.file_count`` slot to the uploader (#664) and this call
+        owns it. The slot is *consumed* the moment ``add_file_to_partition``
+        reports a new catalog row; on every other outcome — pipeline
+        failure, cancellation, or the duplicate-at-catalog race where the
+        insert reports ``False`` — the ``finally`` below hands it back, so a
+        rejected upload can never permanently eat a slot.
         """
-        await self._tsm.set_state.remote(task_id, "SERIALIZING")
+        # Released in ``finally`` unless the catalog write claims it. A flag
+        # plus ``finally`` (rather than an ``except``) is what makes
+        # cancellation safe: ray.cancel raises ``asyncio.CancelledError``, a
+        # BaseException that ``except Exception`` would sail straight past.
+        release_slot = bool(quota_reserved)
+        user_id = (user or {}).get("id")
         row: dict[str, Any] | None = None
         catalog_written = False
         try:
+            # Inside the release scope: ``set_state`` talks to a detached actor
+            # that can be unreachable, and by this point the request has already
+            # handed the slot over at dispatch, so nothing else would give it back.
+            await self._tsm.set_state.remote(task_id, "SERIALIZING")
+            await _update_job(
+                self._job_repo,
+                task_id,
+                status=DocumentStatus.SERIALIZING,
+                started_at=datetime.now(UTC),
+            )
             document = await _load_document(path, metadata, partition)
             # One indexation timestamp for this file, shared by the Milvus chunks
             # (via the store stage) and the Postgres catalog row, so they agree.
-            row: dict[str, Any] = {
+            row = {
                 "task_id": task_id,
                 "document": document,
                 "partition": partition,
@@ -114,6 +153,20 @@ class IndexerWorker:
                     row=row,
                     timeout=getattr(getattr(self._pipeline, "timeouts", None), "store", None),
                 )
+                if not replace:
+                    # A *new* catalog row now exists for this reservation, so it
+                    # is consumed; releasing it would hand the user free quota.
+                    # ``replace`` reuses an existing row and creates nothing, but
+                    # it also never reserves (only ``add_file`` does), so there is
+                    # no slot to consume on that branch.
+                    #
+                    # The duplicate-at-catalog race no longer reaches here at all:
+                    # ``add_file_to_partition`` returns False for an existing row,
+                    # which the fail-closed check above turns into a raise, and
+                    # ``process_file``'s ``finally`` releases the slot on the way
+                    # out. Same outcome as the pre-rebase ``if created:`` gate,
+                    # reached by a different path.
+                    release_slot = False
             if self._topic_tag_repo is not None:
                 await _replace_topic_tags_if_needed(
                     topic_tag_repo=self._topic_tag_repo,
@@ -123,6 +176,12 @@ class IndexerWorker:
                     indexation_config=indexation_config,
                 )
             await self._tsm.set_state.remote(task_id, "COMPLETED")
+            await _update_job(
+                self._job_repo,
+                task_id,
+                status=DocumentStatus.COMPLETED,
+                completed_at=datetime.now(UTC),
+            )
             return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
         except Exception:
             should_cleanup_vectors = row is not None and (
@@ -137,12 +196,108 @@ class IndexerWorker:
                     task_id=task_id,
                 )
             tb = traceback.format_exc()
-            await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
+            # Keep the hot cache in step, but do not let its verdict decide the
+            # durable write. ``set_failed_if_not_cancelled`` returns False both
+            # for a real cancellation *and* for an entry the actor no longer has
+            # (restart, TTL eviction, lost node), and skipping the write in the
+            # second case strands the row in SERIALIZING forever — retention
+            # sweeps terminal rows only. Postgres arbitrates instead: it is the
+            # one participant guaranteed to still know what the user asked for.
+            # Which is why this one is guarded: unguarded, an actor that is gone
+            # (restart, lost node) raises straight out of this handler and takes
+            # ``_mark_job_failed`` with it, stranding the row exactly as above —
+            # so the hot cache would decide the durable outcome after all.
+            try:
+                await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
+            except Exception as exc:  # noqa: BLE001 - hot-cache write must not block the durable one
+                logger.warning(
+                    "Hot-cache FAILED write lost; the durable job row arbitrates.",
+                    task_id=task_id,
+                    error=str(exc),
+                )
+            await _mark_job_failed(
+                self._job_repo,
+                task_id,
+                error=tb,
+                completed_at=datetime.now(UTC),
+            )
             raise
+        finally:
+            if release_slot:
+                await release_quota_slot(self._user_repo, user_id)
         # The raw upload is purged (when configured) by the enclosing actor, not
         # here: cleanup must also cover failures that happen *before* this method
         # runs (catalog/registry init, the SERIALIZING state update). See
         # ``delete_uploaded_file`` and ``IndexerWorkerActor.process_file``.
+
+
+async def _update_job(job_repo: Any, task_id: str, **fields: Any) -> None:
+    """Mirror a lifecycle transition to the durable ``jobs`` row.
+
+    Best-effort by design: this is bookkeeping about the work, not the work. A
+    Postgres blip must not fail a file that indexed correctly (nor mask the real
+    exception on the failure path, where this runs inside an ``except`` block).
+    The repository truncates the stored traceback.
+    """
+    if job_repo is None:
+        return
+    try:
+        await job_repo.update_job(task_id, **fields)
+    except Exception as exc:  # noqa: BLE001 - durable bookkeeping must not fail indexing
+        logger.warning(
+            "Durable job state write failed; job history for this task may be incomplete",
+            task_id=task_id,
+            status=fields.get("status"),
+            error=str(exc),
+        )
+
+
+async def _mark_job_failed(job_repo: Any, task_id: str, *, error: str, completed_at: datetime) -> None:
+    """Mirror a FAILED outcome to the durable row, with the cancel check in SQL.
+
+    Same best-effort contract as :func:`_update_job` — a Postgres blip must not
+    mask the exception this runs inside. The CANCELLED guard is part of the
+    UPDATE, so a state actor that lost the task cannot leave the row non-terminal.
+    """
+    if job_repo is None:
+        return
+    try:
+        await job_repo.mark_failed_if_not_cancelled(task_id, error=error, completed_at=completed_at)
+    except Exception as exc:  # noqa: BLE001 - durable bookkeeping must not fail indexing
+        logger.warning(
+            "Durable job state write failed; job history for this task may be incomplete",
+            task_id=task_id,
+            status="FAILED",
+            error=str(exc),
+        )
+
+
+async def mark_dispatch_orphan_failed(task_state_manager: Any, job_repo: Any, task_id: str) -> None:
+    """Drive a task that never reached :class:`IndexerWorker` to a terminal FAILED.
+
+    Used by the pool actor when setup (catalog / model-endpoint registry) blows
+    up before ``process_file`` is entered. Both stores hold the task as QUEUED
+    at that point and nothing else will ever write it, so both need settling —
+    otherwise the entry is unevictable in the detached actor (eviction is driven
+    off ``terminal_at``, which only a terminal state enters) and the row is
+    unsweepable by retention, which takes terminal rows only.
+
+    Both writes swallow ``Exception`` so a bookkeeping failure does not mask
+    the setup exception the caller must actually see; neither swallows
+    ``BaseException``, so a cancellation arriving here still propagates.
+    Both carry the CANCELLED guard, so a user who cancelled during setup
+    keeps their outcome.
+    """
+    error = "Indexing setup failed before the file reached a worker."
+    try:
+        await task_state_manager.set_failed_if_not_cancelled.remote(task_id, error)
+    except Exception as exc:  # noqa: BLE001 - settling an orphan must not mask the real failure
+        logger.warning(
+            "Hot-cache FAILED write lost while settling a dispatch orphan; the task may stay QUEUED",
+            task_id=task_id,
+            error=str(exc),
+        )
+    await _mark_job_failed(job_repo, task_id, error=error, completed_at=datetime.now(UTC))
 
 
 async def _write_catalog_record(
@@ -156,6 +311,20 @@ async def _write_catalog_record(
     indexed_at: datetime | None = None,
     require_existing_partition: bool = False,
 ) -> bool:
+    """Write the file's catalog row; return whether the write landed.
+
+    True means the catalog now holds a row for this task -- an updated one on a
+    ``replace`` re-index, a newly inserted one otherwise. False means the write
+    did not land, which the caller treats as fatal.
+
+    Note this is *not* "a new file was created". Before the rebase onto #671
+    this returned that instead, so a ``replace`` reported False and the caller
+    read it as "reservation unconsumed". #671 added a fail-closed
+    ``if not wrote_catalog: raise`` on the same value, which those False returns
+    would have turned into a hard failure of every ``replace`` re-index. The two
+    questions are now separate: this one reports the write, and the caller
+    derives the quota verdict from ``replace`` (#664).
+    """
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
     config_kwargs = {"indexation_config": indexation_config} if indexation_config is not None else {}
@@ -310,6 +479,26 @@ def _display_filename(path: str, metadata: dict[str, Any]) -> str:
     if filename:
         return str(filename)
     return Path(path).name
+
+
+async def release_quota_slot(user_repo: Any, user_id: int | None) -> None:
+    """Give the uploader's reserved file slot back, swallowing any error.
+
+    Runs on cleanup paths only. A release that raises would replace the real
+    indexing error with a database error, so failures are swallowed — but
+    loudly, because a lost release leaves ``file_count`` one too high and
+    permanently narrows that user's quota until an admin reconciles it.
+    """
+    if user_repo is None or user_id is None:
+        return
+    try:
+        await user_repo.release_file_slot(user_id)
+    except Exception:  # noqa: BLE001 - cleanup must never mask the indexing error
+        logger.exception(
+            "Failed to release a reserved file slot; the user file_count is now one too high "
+            "and must be reconciled manually.",
+            user_id=user_id,
+        )
 
 
 async def delete_uploaded_file(path: str, logger: Any) -> None:

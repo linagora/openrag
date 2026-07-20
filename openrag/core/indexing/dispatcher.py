@@ -39,8 +39,14 @@ class IndexingDispatcher(ABC):
         embedder_name: str | None = None,
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
+        quota_reserved: bool = False,
     ) -> str:
-        """Queue an (re)indexing job, register its task state, return its id."""
+        """Queue an (re)indexing job, register its task state, return its id.
+
+        ``quota_reserved`` marks that one ``users.file_count`` slot was
+        charged at admission (#664) and now belongs to the job: the worker
+        releases it if the file never reaches the catalog.
+        """
         ...
 
     @abstractmethod
@@ -66,8 +72,13 @@ class IndexingDispatcher(ABC):
         metadata: dict,
         partition: str,
         user: dict | None,
-    ) -> None:
-        """Copy a file's chunks into another partition / file id."""
+    ) -> bool:
+        """Copy a file's chunks into another partition / file id.
+
+        Returns whether a catalog row was actually created (False for an
+        empty source or an already-existing target) — the caller needs it to
+        settle the reserved quota slot (#664).
+        """
         ...
 
     @abstractmethod

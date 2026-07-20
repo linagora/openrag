@@ -7,7 +7,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import ray
-from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
+from services.workers.indexer_actor import (
+    IndexerWorker,
+    delete_uploaded_file,
+    mark_dispatch_orphan_failed,
+    release_quota_slot,
+)
 
 from openrag.core.config.root import Settings
 
@@ -62,6 +67,10 @@ class IndexerWorkerActor:
         )
         self._vector_store = MilvusVectorStore(cfg.vectordb)
         task_state_manager = ray.get_actor("TaskStateManager", namespace="openrag")
+        # Kept on the actor as well as handed to the worker: setup can fail
+        # before the worker is ever entered, and that path has to settle the
+        # task itself (see ``process_file``).
+        self._task_state_manager = task_state_manager
         pipeline = build_indexing_pipeline(
             parser=parser,
             chunker=chunker,
@@ -115,6 +124,10 @@ class IndexerWorkerActor:
             topic_tag_repo=self._catalog_store.topic_tag_repo,
             vector_store=self._vector_store,
             collection=cfg.vectordb.collection_name,
+            # #664: the worker owns the uploader's reserved file slot and
+            # releases it when the file never reaches the catalog.
+            user_repo=self._catalog_store.user_repo,
+            job_repo=self._catalog_store.job_repo,
         )
         # When False (e.g. Twake, which keeps its own copy), the raw upload is
         # purged from ``paths.data_dir`` once indexing settles. Enforced at this
@@ -212,10 +225,48 @@ class IndexerWorkerActor:
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
         require_existing_partition: bool = False,
+        quota_reserved: bool = False,
     ) -> dict[str, Any]:
         try:
-            await self._ensure_catalog()
-            await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
+            try:
+                await self._ensure_catalog()
+                await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
+            except BaseException:
+                # Setup blew up before the worker could take ownership of the
+                # reserved quota slot (#664), so release it here — the worker's
+                # own finally will never run. ``BaseException`` because a
+                # cancellation during setup must release too.
+                #
+                # Best-effort, and honestly so: this releases through the very
+                # store whose initialization may have just failed. A cancellation
+                # or a registry-refresh failure releases fine, but an unreachable
+                # Postgres — ``_ensure_catalog``'s most likely failure — fails the
+                # release too, and ``release_quota_slot`` swallows it, leaking the
+                # slot. Nothing local can fix that (the DB *is* the counter);
+                # recovering it needs the reconciliation sweep tracked in #676.
+                if quota_reserved:
+                    await release_quota_slot(self._catalog_store.user_repo, (user or {}).get("id"))
+                # The task is QUEUED in both stores and ``IndexerWorker`` --
+                # the only writer of SERIALIZING/COMPLETED/FAILED -- is never
+                # entered, so without this it stays non-terminal forever:
+                # unevictable in the detached actor (eviction reads
+                # ``terminal_at``, which only a terminal state enters) and
+                # unsweepable in Postgres (retention takes terminal rows only),
+                # counted active in ``/queue/info`` for good. The client has
+                # already been handed a 201 and a ``task_status_url`` that would
+                # answer QUEUED forever.
+                #
+                # Best-effort and, like the release above, honestly so: the
+                # durable half writes through the very store whose init may have
+                # just failed. The hot-cache half is independent of it, so an
+                # unreachable Postgres still leaves an evictable, terminal
+                # ``TaskInfo`` rather than a pinned one.
+                await mark_dispatch_orphan_failed(
+                    self._task_state_manager,
+                    self._catalog_store.job_repo,
+                    task_id,
+                )
+                raise
             result = await self._worker.process_file(
                 task_id=task_id,
                 path=path,
@@ -227,6 +278,7 @@ class IndexerWorkerActor:
                 indexation_config=indexation_config,
                 embedder_name=embedder_name,
                 require_existing_partition=require_existing_partition,
+                quota_reserved=quota_reserved,
             )
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:

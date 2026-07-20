@@ -199,11 +199,18 @@ class IndexingService:
         user: dict | None,
         workspace_ids: list[str] | None = None,
         replace: bool = False,
+        quota_reserved: bool = False,
     ) -> str:
         """Assemble metadata and queue an (re)indexing job; return its task id.
 
         Workspace association happens inside the worker's ``add_file``
         after a successful index — the router only pre-validates the ids.
+
+        ``quota_reserved`` tells the worker that the caller already charged
+        one slot to ``users.file_count`` at admission (#664), so the worker
+        must give it back if the file never lands in the catalog. It is
+        False for ``replace`` re-indexing, which reuses an existing row and
+        therefore never reserves.
         """
         full_metadata = self._build_metadata(
             metadata=metadata,
@@ -228,6 +235,7 @@ class IndexingService:
                 embedder_name=embedder_name,
                 require_existing_partition=require_existing_partition,
                 allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
+                quota_reserved=quota_reserved,
             )
 
     async def delete_file(self, file_id: str, partition: str) -> None:
@@ -253,11 +261,18 @@ class IndexingService:
         target_partition: str,
         metadata: dict,
         user: dict | None,
-    ) -> None:
+    ) -> bool:
+        """Copy a file into another partition; return whether a row was created.
+
+        The boolean is what the router needs to decide the fate of the quota
+        slot it reserved at admission (#664): a copy that writes no catalog
+        row (empty source, or the target file already exists) consumed no
+        slot and must not keep one.
+        """
         metadata = dict(metadata or {})
         metadata["file_id"] = target_file_id
         metadata["partition"] = target_partition
-        await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user)
+        return bool(await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user))
 
     # ------------------------------------------------------------------
     # Task state

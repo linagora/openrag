@@ -170,6 +170,7 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         replace=True,
         indexation_config={"parsing_strategy": "pymupdf"},
         embedder_name="embed-fast",
+        quota_reserved=False,
         require_existing_partition=True,
     )
     tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})
@@ -1341,3 +1342,394 @@ async def test_delete_file_reports_failure_when_post_delete_cleanup_fails() -> N
     workspace_repo.remove_file_from_all_workspaces.assert_called_once_with("file-1", "tenant-a")
     document_repo.remove_file_from_partition.assert_called_once_with(file_id="file-1", partition="tenant-a")
     assert vector_store.delete_by_filter.await_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Durable job records (issue #660)
+# ---------------------------------------------------------------------------
+
+
+def _job_repo() -> MagicMock:
+    repo = MagicMock()
+    repo.create_job = AsyncMock(side_effect=lambda job: job)
+    repo.update_job = AsyncMock(return_value=None)
+    repo.get_job = AsyncMock(return_value=None)
+    repo.purge_terminal_jobs = AsyncMock(return_value=0)
+    return repo
+
+
+def _dispatcher_with_job_repo(job_repo: Any, tsm: Any = None, ref: object | None = None) -> Any:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    return WorkerDispatcher(
+        pool=_pool_with_ref(ref if ref is not None else object()),
+        task_state_manager=tsm or _task_state_manager(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        job_repo=job_repo,
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_persists_a_queued_job_before_submitting() -> None:
+    from core.models.catalog import DocumentStatus
+
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    job = job_repo.create_job.await_args.args[0]
+    assert job.id == "task-1"
+    assert job.status is DocumentStatus.QUEUED
+    assert job.partition == "tenant-a"
+    assert job.file_id == "file-1"
+    assert job.user_id == 42
+    assert job.job_metadata == {"filename": "report.txt"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_survives_a_job_repo_outage() -> None:
+    job_repo = _job_repo()
+    job_repo.create_job = AsyncMock(side_effect=RuntimeError("postgres down"))
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    task_id = await dispatcher.dispatch_indexing(
+        path="/data/report.txt",
+        metadata={"file_id": "file-1"},
+        partition="tenant-a",
+        user=None,
+        workspace_ids=None,
+        replace=False,
+    )
+
+    assert task_id
+    # indexing still went out to the pool despite the durable write failing
+    dispatcher._pool.submit.remote.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_marks_the_durable_job_cancelled() -> None:
+    from core.models.catalog import DocumentStatus
+
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    with patch("ray.cancel"):
+        assert await dispatcher.cancel_task("task-1") is True
+
+    job_repo.update_job.assert_awaited_once()
+    assert job_repo.update_job.await_args.args[0] == "task-1"
+    assert job_repo.update_job.await_args.kwargs["status"] is DocumentStatus.CANCELLED
+    assert job_repo.update_job.await_args.kwargs["completed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_leaves_the_durable_job_alone_when_already_terminal() -> None:
+    """A cancel that loses the race must not rewrite a COMPLETED job as CANCELLED.
+
+    ``get_object_ref`` still answers for a finished task (the ref is only dropped
+    when the entry is evicted), so a late ``DELETE /task/{id}`` reaches this path
+    for work that already succeeded. The durable row is the operator-visible
+    record of the outcome (#660), so it must reflect what actually happened.
+    """
+    tsm = _task_state_manager()
+    tsm.set_cancelled_if_active = _remote_mock(False)  # worker got there first
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo, tsm=tsm)
+
+    with patch("ray.cancel") as cancel:
+        assert await dispatcher.cancel_task("task-1") is False
+
+    job_repo.update_job.assert_not_awaited()
+    cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_task_state_falls_back_to_postgres_after_a_restart() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    tsm.get_state.remote = AsyncMock(return_value=None)  # cache lost the entry
+    job_repo = _job_repo()
+    job_repo.get_job = AsyncMock(return_value=IndexationJob(id="task-1", status=DocumentStatus.COMPLETED))
+    dispatcher = _dispatcher_with_job_repo(job_repo, tsm=tsm)
+
+    assert await dispatcher.get_task_state("task-1") == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_get_task_error_falls_back_to_postgres_after_a_restart() -> None:
+    from core.models.catalog import IndexationJob
+
+    tsm = _task_state_manager()
+    tsm.get_error.remote = AsyncMock(return_value=None)
+    job_repo = _job_repo()
+    job_repo.get_job = AsyncMock(return_value=IndexationJob(id="task-1", error="boom"))
+    dispatcher = _dispatcher_with_job_repo(job_repo, tsm=tsm)
+
+    assert await dispatcher.get_task_error("task-1") == "boom"
+
+
+@pytest.mark.asyncio
+async def test_hot_cache_hit_does_not_query_postgres() -> None:
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    assert await dispatcher.get_task_state("task-1") == "SERIALIZING"
+    job_repo.get_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_purges_terminal_jobs_at_most_once_per_interval() -> None:
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    for _ in range(3):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1"},
+            partition="tenant-a",
+            user=None,
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert job_repo.purge_terminal_jobs.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_the_purge_runs_again_once_the_interval_has_passed(monkeypatch) -> None:
+    """The throttle must rate-limit the sweep, not disable it after one run.
+
+    Without this, an implementation that purges exactly once per process — and
+    so lets the table grow unbounded forever after — passes the at-most-once
+    test above.
+    """
+    from services.workers import dispatcher as dispatcher_module
+
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(dispatcher_module.time, "monotonic", lambda: clock["now"])
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    async def _dispatch():
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1"},
+            partition="tenant-a",
+            user=None,
+            workspace_ids=None,
+            replace=False,
+        )
+
+    await _dispatch()
+    assert job_repo.purge_terminal_jobs.await_count == 1
+
+    clock["now"] += dispatcher_module.JOB_PURGE_INTERVAL_SECONDS - 1
+    await _dispatch()
+    assert job_repo.purge_terminal_jobs.await_count == 1, "still inside the interval"
+
+    clock["now"] += 2
+    await _dispatch()
+    assert job_repo.purge_terminal_jobs.await_count == 2, "the interval has elapsed"
+
+
+@pytest.mark.asyncio
+async def test_the_purge_uses_the_documented_retention_bounds() -> None:
+    """Pin the shipped retention window and row cap.
+
+    These are the only thing standing between the durable store and the
+    unbounded growth #660 exists to fix, and no other test asserts their values.
+    """
+    job_repo = _job_repo()
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    await dispatcher.dispatch_indexing(
+        path="/data/report.txt",
+        metadata={"file_id": "file-1"},
+        partition="tenant-a",
+        user=None,
+        workspace_ids=None,
+        replace=False,
+    )
+
+    job_repo.purge_terminal_jobs.assert_awaited_once_with(
+        older_than_seconds=7 * 24 * 3600,
+        keep_last=10_000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failing_purge_is_not_retried_on_every_dispatch() -> None:
+    """The throttle timestamp is stamped *before* the sweep, not after it.
+
+    Stamped afterwards, a purge that raises never records an attempt, so every
+    subsequent upload pays another failing round-trip to a database that is
+    already unhealthy — turning a bounded 5-minute sweep into per-request load
+    at exactly the worst moment. ``test_purge_failure_never_fails_a_dispatch``
+    covers that the failure is swallowed; this covers that it is not repeated.
+    """
+    job_repo = _job_repo()
+    job_repo.purge_terminal_jobs = AsyncMock(side_effect=RuntimeError("purge blew up"))
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    for _ in range(3):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1"},
+            partition="tenant-a",
+            user=None,
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert job_repo.purge_terminal_jobs.await_count == 1, "a failing purge was retried on every dispatch"
+
+
+@pytest.mark.asyncio
+async def test_purge_failure_never_fails_a_dispatch() -> None:
+    job_repo = _job_repo()
+    job_repo.purge_terminal_jobs = AsyncMock(side_effect=RuntimeError("purge blew up"))
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    assert await dispatcher.dispatch_indexing(
+        path="/data/report.txt",
+        metadata={"file_id": "file-1"},
+        partition="tenant-a",
+        user=None,
+        workspace_ids=None,
+        replace=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_writes_the_durable_row_before_killing_the_worker() -> None:
+    """The durable CANCELLED must be written before ``ray.cancel``, not after.
+
+    ``ray.cancel`` kills the only other writer of the row, and the write that
+    follows it has no successor that could heal it: ``_record_job`` catches
+    ``Exception``, but a client disconnect raises ``asyncio.CancelledError`` —
+    a ``BaseException`` — straight through. Writing after the kill therefore
+    left the actor CANCELLED and the row stuck on its last active status
+    forever: non-terminal, so retention never sweeps it and it is counted
+    active for good, while the actor-first and durable-first read paths answer
+    differently for the same task id.
+    """
+    order: list[str] = []
+    job_repo = _job_repo()
+    job_repo.update_job = AsyncMock(side_effect=lambda *a, **k: order.append("durable"))
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    with patch("ray.cancel", side_effect=lambda *a, **k: order.append("ray.cancel")):
+        assert await dispatcher.cancel_task("task-1") is True
+
+    assert order == ["durable", "ray.cancel"], order
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_during_the_durable_write_still_kills_the_worker() -> None:
+    """A ``BaseException`` out of the durable write must not skip ``ray.cancel``.
+
+    The user asked for a cancellation and the actor already claimed it; leaving
+    the worker running would contradict both records.
+    """
+    job_repo = _job_repo()
+    job_repo.update_job = AsyncMock(side_effect=asyncio.CancelledError())
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    with patch("ray.cancel") as cancel:
+        with pytest.raises(asyncio.CancelledError):
+            await dispatcher.cancel_task("task-1")
+
+    cancel.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_submit_settles_the_task_terminally_in_both_stores() -> None:
+    """A dispatch that never reaches a worker must not leave a QUEUED orphan.
+
+    Nothing else can reclaim it: actor eviction is driven entirely off
+    ``terminal_at`` (which only a terminal state enters) and the detached actor
+    survives API restarts, while ``purge_terminal_jobs`` sweeps terminal rows
+    only. One permanent leak in each store per failed dispatch — verbatim the
+    unbounded growth #660 exists to fix.
+    """
+    tsm = _task_state_manager()
+    tsm.set_failed_if_not_cancelled = _remote_mock(True)
+    job_repo = _job_repo()
+    job_repo.mark_failed_if_not_cancelled = AsyncMock(return_value=True)
+    dispatcher = _dispatcher_with_job_repo(job_repo, tsm=tsm)
+    dispatcher._pool.submit = _remote_mock()
+    dispatcher._pool.submit.remote = AsyncMock(side_effect=RuntimeError("pool is down"))
+
+    with pytest.raises(RuntimeError, match="pool is down"):
+        await dispatcher.dispatch_indexing(
+            path="/tmp/f.txt",
+            metadata={"file_id": "f1"},
+            partition="default",
+            user={"id": 7},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    tsm.set_failed_if_not_cancelled.remote.assert_awaited_once()
+    job_repo.mark_failed_if_not_cancelled.assert_awaited_once()
+    assert job_repo.mark_failed_if_not_cancelled.await_args.kwargs["completed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_settling_a_failed_dispatch_never_masks_the_dispatch_error() -> None:
+    """The caller must see why the dispatch failed, not why the cleanup did."""
+    tsm = _task_state_manager()
+    tsm.set_failed_if_not_cancelled = _remote_mock()
+    tsm.set_failed_if_not_cancelled.remote = AsyncMock(side_effect=RuntimeError("actor is gone"))
+    job_repo = _job_repo()
+    job_repo.mark_failed_if_not_cancelled = AsyncMock(side_effect=RuntimeError("postgres is down"))
+    dispatcher = _dispatcher_with_job_repo(job_repo, tsm=tsm)
+    dispatcher._pool.submit = _remote_mock()
+    dispatcher._pool.submit.remote = AsyncMock(side_effect=RuntimeError("pool is down"))
+
+    with pytest.raises(RuntimeError, match="pool is down"):
+        await dispatcher.dispatch_indexing(
+            path="/tmp/f.txt",
+            metadata={"file_id": "f1"},
+            partition="default",
+            user={"id": 7},
+            workspace_ids=None,
+            replace=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_empty_source_copies_nothing_and_reports_no_row():
+    """A source with no chunks must report False so the slot goes back.
+
+    ``copy_file``'s return value is what the router commits the reservation
+    on (#664): a True here would commit a slot for a copy that never wrote a
+    catalog row, permanently narrowing the user's quota. The MCP copy path
+    has this pinned; the dispatcher's own empty-source probe did not.
+    """
+    dispatcher = _dispatcher_with_job_repo(_job_repo())
+    dispatcher._vector_store.query_chunks_by_filter = AsyncMock(return_value=[])
+
+    created = await dispatcher.copy_file(
+        file_id="src",
+        metadata={},
+        partition="p1",
+        user={"id": 42},
+    )
+
+    assert created is False
+    dispatcher._document_repo.add_file_to_partition.assert_not_awaited()

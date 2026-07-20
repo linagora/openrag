@@ -51,6 +51,30 @@ class UserRepository(ABC):
     @abstractmethod
     async def count_users(self) -> int: ...
 
+    # ── File-quota reserve / release ──────────────────────────────────
+    #
+    # ``users.file_count`` is a *reserved + completed* counter (issue #664).
+    # Admission reserves a slot with a single conditional UPDATE so N
+    # concurrent uploads can never overshoot the quota; whoever holds an
+    # unconsumed reservation must release it.
+
+    @abstractmethod
+    async def try_reserve_file_slot(self, user_id: int, *, default_quota: int) -> int | None:
+        """Atomically claim one file slot against the user's quota.
+
+        Returns the post-increment ``file_count`` when the slot was
+        granted, or ``None`` when the user is at (or over) quota — or does
+        not exist. Quota semantics: admins bypass; a ``NULL`` per-user
+        ``file_quota`` falls back to ``default_quota``; a *resolved* quota
+        ``< 0`` means unlimited.
+        """
+        ...
+
+    @abstractmethod
+    async def release_file_slot(self, user_id: int) -> None:
+        """Give back one reserved slot (clamped at zero). Idempotent-ish."""
+        ...
+
     # ── API keys ──────────────────────────────────────────────────────
 
     @abstractmethod

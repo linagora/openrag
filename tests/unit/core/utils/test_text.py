@@ -74,3 +74,25 @@ def test_get_num_tokens_does_not_pass_enable_thinking_to_chatopenai(monkeypatch)
 
     assert length_function("hello") == 1
     assert "enable_thinking" not in captured
+
+
+def test_truncate_error_text_keeps_the_tail_not_the_head():
+    """Which end survives is the whole point, and nothing pinned it.
+
+    A Python traceback puts the exception type and message *last*, so a
+    head-truncating implementation would retain the same dispatcher frames
+    on every task and discard the only line an operator needs. Assertions on
+    the length and the marker alone are satisfied by that implementation too,
+    which is why this asserts on the surviving end specifically.
+    """
+    from core.utils.text import truncate_error_text
+
+    head = "OUTERMOST_FRAME_MARKER"
+    tail = "ValueError: the actual cause"
+    tb = head + ('  File "x.py", line 1, in f\n' * 2000) + tail
+
+    out = truncate_error_text(tb, 200)
+
+    assert out.endswith(tail), "the exception message must survive truncation"
+    assert out.endswith(tb[-200:]), "the retained slice must be the trailing one"
+    assert head not in out, "the outermost frames are the part to drop"

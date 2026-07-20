@@ -17,6 +17,7 @@ from typing import Any
 
 from api.dependencies.auth import (
     check_user_file_quota,
+    commit_quota_reservation,
     current_user,
     current_user_partitions,
     ensure_partition_role,
@@ -182,7 +183,13 @@ async def add_file(
         original_filename=original_filename,
         user=user,
         workspace_ids=parsed_workspace_ids,
+        quota_reserved=True,
     )
+    # The job is queued: the worker now owns the reserved file slot and
+    # releases it if indexing fails or is cancelled. Committing before this
+    # point would leak the slot on a dispatch error; committing is skipped
+    # on every early return above, which releases it instead (#664).
+    commit_quota_reservation(_quota_check)
 
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
@@ -400,7 +407,7 @@ async def copy_file_between_partitions(
         partition_service=partition_service,
     )
 
-    await service.copy_file(
+    created = await service.copy_file(
         source_file_id=source_file_id,
         source_partition=source_partition,
         target_file_id=file_id,
@@ -408,6 +415,12 @@ async def copy_file_between_partitions(
         metadata=metadata,
         user=user,
     )
+    # Copy is synchronous, so the reservation is consumed here or not at all.
+    # ``created`` is False when no catalog row was written — the source had no
+    # chunks, or the target already existed (duplicate-at-catalog race) — in
+    # which case the slot goes back rather than leaking (#664).
+    if created:
+        commit_quota_reservation(_quota_check)
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
         content={"message": "File copied successfully."},

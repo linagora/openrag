@@ -176,6 +176,65 @@ topic_tags = Table(
 )
 
 
+# Durable indexation-job records (issue #660). Previously job state lived only
+# in the detached ``TaskStateManager`` Ray actor, so an API restart made every
+# in-flight batch unobservable and un-cancellable. One row per dispatched task;
+# ``id`` is the dispatcher's ``task_id``.
+#
+# ``partition`` deliberately carries no FK to ``partitions.partition``: a job
+# row is a historical audit record and must outlive the partition it targeted
+# (and a terminal job must not block a partition delete). ``user_id`` mirrors
+# ``files.created_by`` with ``ondelete="SET NULL"`` for the same reason.
+#
+# Rows are bounded by retention, not by the table (see
+# ``PgJobRepository.purge_terminal_jobs``).
+jobs = Table(
+    "jobs",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("status", String, nullable=False),
+    Column("partition", String, nullable=False),
+    Column("file_id", String, nullable=True),
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
+    Column("job_metadata", JSONB, server_default=text("'{}'::jsonb"), nullable=False),
+    Column("error", String, nullable=True),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+    ),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+    ),
+    CheckConstraint(
+        "status IN ('QUEUED','SERIALIZING','CHUNKING','INSERTING','COMPLETED','FAILED','CANCELLED')",
+        name="ck_jobs_status",
+    ),
+    # Admin queue views filter by status and order by recency.
+    Index("ix_jobs_status_created_at", "status", "created_at"),
+    # Per-user task listing and the pending-task count.
+    Index("ix_jobs_user_status", "user_id", "status"),
+    # Retention sweeps terminal rows by *settle* time, which is
+    # ``COALESCE(completed_at, created_at)`` — a row whose terminal write raced a
+    # failure has no ``completed_at`` and is aged out on ``created_at`` instead.
+    # The index has to match that expression: a plain b-tree on bare
+    # ``completed_at`` can serve neither the filter nor the ordering the sweep
+    # uses, so it would be maintained on every insert and read by nothing.
+    Index("ix_jobs_settled_at", text("COALESCE(completed_at, created_at)")),
+)
+
+
 users = Table(
     "users",
     metadata,
@@ -304,6 +363,7 @@ __all__ = [
     "topic_tags",
     "partitions",
     "files",
+    "jobs",
     "users",
     "oidc_sessions",
     "partition_memberships",

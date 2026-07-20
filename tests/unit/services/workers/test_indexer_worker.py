@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from core.models.catalog import DocumentStatus
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from services.workers.indexer_actor import IndexerWorker, _load_document
@@ -814,3 +815,244 @@ async def test_process_file_rejects_malformed_topic_tags_before_delete(tmp_path:
     assert len(document_repo.add_calls) == 1
     assert vector_store.deleted_filters == []
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Durable job lifecycle writes (issue #660)
+# ---------------------------------------------------------------------------
+
+
+class FakeJobRepo:
+    def __init__(self) -> None:
+        self.updates: list[tuple[str, dict[str, Any]]] = []
+        self.raise_on_update = False
+        # Job ids the durable store already holds as CANCELLED. Standing in for
+        # the ``status <> 'CANCELLED'`` guard that lives in SQL.
+        self.cancelled: set[str] = set()
+
+    async def update_job(self, job_id: str, **fields: Any):
+        if self.raise_on_update:
+            raise RuntimeError("postgres down")
+        self.updates.append((job_id, fields))
+        return None
+
+    async def mark_failed_if_not_cancelled(self, job_id: str, *, error: str, completed_at: Any) -> bool:
+        if self.raise_on_update:
+            raise RuntimeError("postgres down")
+        if job_id in self.cancelled:
+            return False
+        self.updates.append((job_id, {"status": DocumentStatus.FAILED, "error": error, "completed_at": completed_at}))
+        return True
+
+
+def _statuses(job_repo: FakeJobRepo) -> list[str]:
+    return [fields["status"].value for _, fields in job_repo.updates]
+
+
+def _trivial_pipeline() -> Any:
+    return _make_pipeline(
+        ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")]),
+        [Chunk(id="c1", text="content", partition="p")],
+    )
+
+
+def _worker_with_job_repo(tmp_path: Path, job_repo: FakeJobRepo, pipeline: Any = None) -> IndexerWorker:
+    return IndexerWorker(
+        pipeline=pipeline if pipeline is not None else _trivial_pipeline(),
+        task_state_manager=_fake_tsm(),
+        job_repo=job_repo,
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_file_records_serializing_then_completed_durably(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"hello")
+    job_repo = FakeJobRepo()
+    worker = _worker_with_job_repo(tmp_path, job_repo)
+
+    await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert _statuses(job_repo) == ["SERIALIZING", "COMPLETED"]
+    assert job_repo.updates[0][1]["started_at"] is not None
+    assert job_repo.updates[-1][1]["completed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_process_file_records_the_failure_and_its_traceback(tmp_path: Path) -> None:
+    """The traceback is handed over whole; the bound is applied by the store.
+
+    ``PgJobRepository.update_job`` truncates ``error`` (see
+    ``tests/unit/services/persistence/test_job_repo.py``) so the cap holds for
+    every writer, not just this one.
+    """
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"hello")
+    job_repo = FakeJobRepo()
+
+    class BoomPipeline:
+        async def run(self, row):
+            raise RuntimeError("kaboom")
+
+    worker = _worker_with_job_repo(tmp_path, job_repo, pipeline=BoomPipeline())
+
+    with pytest.raises(RuntimeError):
+        await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert _statuses(job_repo) == ["SERIALIZING", "FAILED"]
+    assert "kaboom" in job_repo.updates[-1][1]["error"]
+    assert job_repo.updates[-1][1]["completed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_process_file_does_not_overwrite_a_cancelled_job(tmp_path: Path) -> None:
+    """A cancellation the user already saw survives a late failure write."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"hello")
+    job_repo = FakeJobRepo()
+    job_repo.cancelled.add("t1")  # the user cancelled while the pipeline ran
+
+    class BoomPipeline:
+        async def run(self, row):
+            raise RuntimeError("boom")
+
+    worker = IndexerWorker(pipeline=BoomPipeline(), task_state_manager=_fake_tsm(), job_repo=job_repo)
+
+    with pytest.raises(RuntimeError):
+        await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert _statuses(job_repo) == ["SERIALIZING"]
+
+
+@pytest.mark.asyncio
+async def test_failure_is_recorded_even_when_the_state_actor_lost_the_task(tmp_path: Path) -> None:
+    """A forgetful state actor must not strand the durable row in SERIALIZING.
+
+    ``set_failed_if_not_cancelled`` answers False both for a real cancellation
+    and for a task the actor no longer has (restart, TTL eviction). Gating the
+    durable write on it left the row non-terminal forever, since retention only
+    sweeps terminal rows. Postgres now arbitrates, so this still reaches FAILED.
+    """
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"hello")
+    job_repo = FakeJobRepo()  # nothing cancelled: the row is live
+    tsm = _fake_tsm()
+    tsm.set_failed_if_not_cancelled.remote = AsyncMock(return_value=False)  # entry evicted
+
+    class BoomPipeline:
+        async def run(self, row):
+            raise RuntimeError("boom")
+
+    worker = IndexerWorker(pipeline=BoomPipeline(), task_state_manager=tsm, job_repo=job_repo)
+
+    with pytest.raises(RuntimeError):
+        await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert _statuses(job_repo) == ["SERIALIZING", "FAILED"]
+    assert "boom" in job_repo.updates[-1][1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_durable_write_failure_never_fails_indexing(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"hello")
+    job_repo = FakeJobRepo()
+    job_repo.raise_on_update = True
+    worker = _worker_with_job_repo(tmp_path, job_repo)
+
+    result = await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert result["stored_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_state_actor_still_writes_the_durable_failure(tmp_path: Path) -> None:
+    """The hot-cache write must not be able to take ``_mark_job_failed`` with it.
+
+    The failure handler talks to the detached ``TaskStateManager`` first. Left
+    unguarded, an actor that is gone (restart, lost node) raises straight out of
+    the ``except`` block and the durable write never runs — leaving the row
+    non-terminal, which ``purge_terminal_jobs`` never sweeps. Every file
+    dispatched during an actor outage would strand one row forever: the
+    unbounded growth #660 exists to fix, on the durable side.
+    """
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+
+    tsm = _fake_tsm()
+    tsm.set_failed_if_not_cancelled.remote = AsyncMock(side_effect=RuntimeError("actor gone"))
+
+    class BrokenRepo:
+        async def add_file_to_partition(self, **kwargs: Any) -> bool:
+            raise RuntimeError("pg down")
+
+    class RecordingJobRepo:
+        def __init__(self) -> None:
+            self.failed: list[dict[str, Any]] = []
+
+        async def update_job(self, job_id: str, **fields: Any) -> None:
+            return None
+
+        async def mark_failed_if_not_cancelled(self, job_id: str, **kwargs: Any) -> bool:
+            self.failed.append({"job_id": job_id, **kwargs})
+            return True
+
+    job_repo = RecordingJobRepo()
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=tsm,
+        document_repo=BrokenRepo(),
+        job_repo=job_repo,
+    )
+
+    # The original pipeline error must survive, not the actor's.
+    with pytest.raises(RuntimeError, match="pg down"):
+        await worker.process_file(
+            task_id="t-actor-gone",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+        )
+
+    assert [row["job_id"] for row in job_repo.failed] == ["t-actor-gone"], (
+        "the durable FAILED write was lost when the state actor was unreachable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_replace_reindex_updates_the_row_without_creating_one():
+    """A ``replace`` re-index reuses an existing row, and must say the write landed.
+
+    This pins the contract that the rebase onto #671 had to settle. Before it,
+    ``_write_catalog_record`` returned "a *new* row was created", so ``replace``
+    reported False and the caller read that as "the reservation was not
+    consumed". #671 added a fail-closed ``if not wrote_catalog: raise`` on the
+    same value, which would have turned every ``replace`` re-index into a hard
+    failure.
+
+    The two questions are now separate: this returns whether the catalog write
+    landed (True on either branch), and the quota verdict is derived from
+    ``replace`` at the call site. So the assertion here is that a replace
+    updates rather than inserts, and still reports success --
+    ``test_replace_reindex_never_releases`` covers the quota half.
+    """
+    from services.workers.indexer_actor import _write_catalog_record
+
+    doc_repo = MagicMock()
+    doc_repo.update_file_in_partition = AsyncMock(return_value=True)
+    doc_repo.add_file_to_partition = AsyncMock(return_value=True)
+
+    wrote_catalog = await _write_catalog_record(
+        doc_repo=doc_repo,
+        metadata={"file_id": "f1"},
+        partition="p1",
+        user={"id": 42},
+        replace=True,
+        indexation_config=None,
+    )
+
+    assert wrote_catalog is True, "a replace must report the write as landed, or #671 fails it closed"
+    doc_repo.update_file_in_partition.assert_awaited_once()
+    doc_repo.add_file_to_partition.assert_not_awaited()

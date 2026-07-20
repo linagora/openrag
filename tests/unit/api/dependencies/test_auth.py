@@ -1,13 +1,15 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 from api.dependencies.auth import (
     check_user_file_quota,
+    commit_quota_reservation,
     ensure_partition_role,
     require_partitions_viewer,
     require_task_owner,
 )
-from core.utils.exceptions import AuthError
+from core.utils.exceptions import AuthError, OpenRAGError
 from fastapi import HTTPException
 from services.orchestrators.auth_service import AuthService
 
@@ -231,57 +233,162 @@ async def test_require_task_owner_rejects_non_owner_non_admin():
     assert exc.value.status_code == 403
 
 
-@pytest.mark.asyncio
-async def test_check_user_file_quota_reads_pending_count_through_job_service():
-    job_service = FakeJobService(pending_count=2)
+class RecordingAuthService(FakeAuthService):
+    """Stands in for AuthService's reserve/release pair (#664)."""
 
-    user = await check_user_file_quota(
-        user={"id": 7, "file_count": 1, "file_quota": 5},
-        auth_service=FakeAuthService,
-        job_service=job_service,
+    def __init__(self, *, grant: bool = True, raise_on_release: bool = False) -> None:
+        self.grant = grant
+        self.raise_on_release = raise_on_release
+        self.reserved: list[tuple[int, int]] = []
+        self.released: list[int] = []
+
+    async def reserve_file_slot(self, user_id: int, *, default_quota: int) -> int:
+        self.reserved.append((user_id, default_quota))
+        if not self.grant:
+            raise OpenRAGError(
+                "File quota exceeded.",
+                code="FILE_QUOTA_EXCEEDED",
+                status_code=403,
+            )
+        return len(self.reserved)
+
+    async def release_file_slot(self, user_id: int) -> None:
+        self.released.append(user_id)
+
+
+async def _drive_quota_dep(auth_service, user, default_quota: int, *, commit: bool, boom: Exception | None = None):
+    """Run the dependency generator the way FastAPI's exit stack does."""
+    gen = check_user_file_quota(
+        user=user,
+        auth_service=auth_service,
+        config=_config(default_file_quota=default_quota),
+    )
+    reservation = await gen.__anext__()
+    if commit:
+        commit_quota_reservation(reservation)
+    try:
+        if boom is not None:
+            # FastAPI throws the endpoint's exception back into the generator.
+            await gen.athrow(boom)
+        else:
+            await gen.__anext__()
+    except StopAsyncIteration:
+        pass
+    except type(boom) if boom is not None else ():
+        pass
+    return reservation
+
+
+@pytest.mark.asyncio
+async def test_check_user_file_quota_reserves_a_slot_atomically():
+    auth_service = RecordingAuthService()
+
+    reservation = await _drive_quota_dep(
+        auth_service,
+        {"id": 7, "file_count": 1, "file_quota": 5},
+        default_quota=10,
+        commit=True,
+    )
+
+    assert auth_service.reserved == [(7, 10)]
+    assert reservation.user_id == 7
+    assert reservation.committed is True
+
+
+@pytest.mark.asyncio
+async def test_check_user_file_quota_rejects_with_403_when_no_slot():
+    """No row from the conditional UPDATE ⇒ the upload is refused."""
+    auth_service = RecordingAuthService(grant=False)
+
+    gen = check_user_file_quota(
+        user={"id": 8, "file_count": 5, "file_quota": 5},
+        auth_service=auth_service,
         config=_config(default_file_quota=10),
     )
-
-    assert user["id"] == 7
-    assert job_service.pending_checks == [7]
-
-
-@pytest.mark.asyncio
-async def test_check_user_file_quota_skips_pending_count_when_default_is_unlimited():
-    """Skip queue I/O when the resolved quota is unlimited."""
-    job_service = FakeJobService(pending_count=2)
-
-    user = await check_user_file_quota(
-        user={"id": 7, "file_count": 1, "file_quota": None},
-        auth_service=FakeAuthService,
-        job_service=job_service,
-        config=_config(default_file_quota=-1),
-    )
-
-    assert user["id"] == 7
-    assert job_service.pending_checks == []
-
-
-@pytest.mark.asyncio
-async def test_check_user_file_quota_default_zero_enforces_zero():
-    allowed_job_service = FakeJobService(pending_count=0)
-    user = await check_user_file_quota(
-        user={"id": 7, "file_count": 0, "file_quota": 1},
-        auth_service=EnforcingAuthService,
-        job_service=allowed_job_service,
-        config=_config(default_file_quota=0),
-    )
-    assert user["id"] == 7
-    assert allowed_job_service.pending_checks == [7]
-
-    denied_job_service = FakeJobService(pending_count=0)
     with pytest.raises(HTTPException) as exc:
-        await check_user_file_quota(
-            user={"id": 8, "file_count": 1, "file_quota": None},
-            auth_service=EnforcingAuthService,
-            job_service=denied_job_service,
-            config=_config(default_file_quota=0),
-        )
+        await gen.__anext__()
+
     assert exc.value.status_code == 403
-    assert exc.value.detail == "File quota exceeded"
-    assert denied_job_service.pending_checks == [8]
+    assert "quota" in exc.value.detail.lower()
+    # A rejected reserve took nothing, so there is nothing to hand back.
+    assert auth_service.released == []
+
+
+@pytest.mark.asyncio
+async def test_committed_reservation_is_not_released():
+    """After dispatch the worker owns the slot; teardown must keep its hands off."""
+    auth_service = RecordingAuthService()
+
+    await _drive_quota_dep(auth_service, {"id": 7}, default_quota=5, commit=True)
+
+    assert auth_service.released == []
+
+
+@pytest.mark.asyncio
+async def test_uncommitted_reservation_is_released_on_teardown():
+    """The route returned early (e.g. 409 duplicate) — the slot goes back."""
+    auth_service = RecordingAuthService()
+
+    await _drive_quota_dep(auth_service, {"id": 7}, default_quota=5, commit=False)
+
+    assert auth_service.released == [7]
+
+
+@pytest.mark.asyncio
+async def test_reservation_is_released_when_the_endpoint_raises():
+    """FastAPI throws the endpoint error into the dependency; cleanup still runs."""
+    auth_service = RecordingAuthService()
+
+    await _drive_quota_dep(
+        auth_service,
+        {"id": 7},
+        default_quota=5,
+        commit=False,
+        boom=HTTPException(status_code=409, detail="already exists"),
+    )
+
+    assert auth_service.released == [7]
+
+
+@pytest.mark.asyncio
+async def test_reservation_is_released_when_the_client_disconnects():
+    """A cancelled request must not leak the slot it admitted."""
+    auth_service = RecordingAuthService()
+
+    await _drive_quota_dep(
+        auth_service,
+        {"id": 7},
+        default_quota=5,
+        commit=False,
+        boom=asyncio.CancelledError(),
+    )
+
+    assert auth_service.released == [7]
+
+
+@pytest.mark.asyncio
+async def test_check_user_file_quota_no_op_without_a_user_id():
+    """Nothing durable to charge (auth disabled) ⇒ no reserve, no release."""
+    auth_service = RecordingAuthService()
+
+    reservation = await _drive_quota_dep(auth_service, {}, default_quota=5, commit=False)
+
+    assert reservation is None
+    assert auth_service.reserved == []
+    assert auth_service.released == []
+
+
+@pytest.mark.asyncio
+async def test_admin_reservation_still_counts_but_is_never_rejected():
+    """Admins bypass the *limit*, not the counter — the SQL predicate decides."""
+    auth_service = RecordingAuthService()
+
+    await _drive_quota_dep(auth_service, {"id": 1, "is_admin": True}, default_quota=0, commit=True)
+
+    assert auth_service.reserved == [(1, 0)]
+
+
+def test_commit_quota_reservation_ignores_non_reservations():
+    """Tests routinely override the dependency with a plain stub."""
+    commit_quota_reservation(None)
+    commit_quota_reservation({"id": 1})

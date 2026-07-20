@@ -69,13 +69,28 @@ class TestDelete:
         """Regression: ``files.partition_name`` has no DB-level CASCADE, so the
         repo must delete file rows itself before dropping the partition. Also
         verifies the per-uploader ``file_count`` decrement.
+
+        The two slots are *reserved* first, because since #664 ``file_count`` is
+        a reserved+completed counter: admission charges the slot and
+        ``add_file_to_partition`` only consumes it. Without the reservations the
+        count would start at 0 and this would assert a vacuous 0 → 0.
         """
         partition_repo = postgres_store.partition_repo
         document_repo = postgres_store.document_repo
         user_repo = postgres_store.user_repo
 
-        uploader = await user_repo.create_legacy_user(display_name="Uploader")
+        uploader = await user_repo.create_legacy_user(
+            display_name="Uploader",
+            external_user_id=None,
+            email=None,
+            is_admin=False,
+            file_quota=None,
+        )
         uploader_id = uploader["id"]
+
+        # Admission: two uploads charged against an unlimited quota.
+        assert await user_repo.try_reserve_file_slot(uploader_id, default_quota=-1) == 1
+        assert await user_repo.try_reserve_file_slot(uploader_id, default_quota=-1) == 2
 
         await partition_repo.create_partition("cascade-me")
         await document_repo.add_file_to_partition(
@@ -89,6 +104,9 @@ class TestDelete:
             user_id=uploader_id,
         )
         assert await partition_repo.get_partition_file_count("cascade-me") == 2
+        # Consumed, not double-counted: the inserts must not have re-incremented.
+        before = await user_repo.get_user_dict_by_id(uploader_id)
+        assert before["file_count"] == 2
 
         assert await partition_repo.delete_partition("cascade-me") is True
 

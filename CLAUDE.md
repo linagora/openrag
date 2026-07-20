@@ -248,12 +248,36 @@ Per-user file quota enforcement tracked via the `file_count` and `file_quota` co
 
 **How it works:**
 - `files.created_by` records which user uploaded each file (nullable for pre-migration files)
-- `users.file_count` is incremented/decremented in application code (in `PartitionFileManager`) — no SQL triggers
-- Decrements use `func.greatest(file_count - N, 0)` to prevent negative values from race conditions
+- `users.file_count` is incremented/decremented in application code — no SQL triggers
+- Decrements use `GREATEST(file_count - N, 0)` to prevent negative values from race conditions
 - `delete_partition` queries per-uploader counts before cascade delete, then bulk decrements
-- Quota check (`check_user_file_quota` in `openrag/api/dependencies/auth.py`) runs on upload, considering both indexed files and pending tasks
 
-**Quota logic (`file_quota` column):**
+**Atomic reserve/release (issue #664).** `file_count` is a **reserved + completed**
+counter, not a "completed files" counter. Admission (`check_user_file_quota` in
+`openrag/api/dependencies/auth.py`) charges a slot with one conditional UPDATE
+(`UserRepository.try_reserve_file_slot`) so concurrent uploads cannot all read the
+same pre-increment count and overshoot the quota. There is **no** completion-time
+increment — `add_file_to_partition` only consumes the existing reservation.
+
+Consequences to respect when touching this code:
+- The in-memory `TaskStateManager` pending count is **not** an admission input. It is
+  volatile (a restart zeroes it) and reserved uploads are already inside `file_count`.
+  Never add it back into a quota decision, and never add it to `file_count` when
+  reporting usage — that double-counts in-flight uploads.
+- A reservation has an **owner**. Before dispatch it is the request's: the
+  `check_user_file_quota` yield-teardown releases it unless the router calls
+  `commit_quota_reservation(...)`. After dispatch it is the worker's:
+  `IndexerWorker.process_file` releases it in a `finally` unless the catalog write
+  reports a new row. Both quota-gated routes (`add_file`, `copy_file`) reserve, and
+  so do the MCP tools that create rows (`MCPService.index_url`, `MCPService.copy_file`),
+  which have no dependency chain and therefore reserve inline;
+  `put_file` (replace re-index) does not, since it reuses an existing row.
+- Any new early return between admission and dispatch is automatically covered by the
+  teardown — but any new code path that *creates a file row without reserving*, or
+  *reserves without either committing or releasing*, leaks the counter. A leak is
+  silent and permanently narrows the user's quota.
+
+**Quota logic (`file_quota` column)** — the reserve SQL predicate reproduces exactly this:
 - `None` → use global default (`DEFAULT_FILE_QUOTA` env var, default `-1`)
 - `< 0` → unlimited
 - `>= 0` → specific limit

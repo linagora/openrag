@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import time
 import traceback
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
+from core.models.catalog import DocumentStatus, IndexationJob
 from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
@@ -16,6 +20,16 @@ logger = get_logger()
 
 DEFAULT_TIMEOUT = 60.0
 _REQUIRE_EXISTING_PARTITION_KWARG = "require_existing_partition"
+
+# Retention for the durable ``jobs`` table (issue #660). Terminal jobs are swept
+# opportunistically from the dispatch path rather than by a background task: a
+# sweep is only ever needed *because* jobs are being created, and piggybacking on
+# dispatch keeps this out of the app lifecycle (no extra task to own, cancel and
+# reason about across API replicas). The interval throttle means a burst of a
+# thousand uploads still costs one DELETE.
+JOB_RETENTION_SECONDS = 7 * 24 * 3600
+JOB_RETENTION_MAX_ROWS = 10_000
+JOB_PURGE_INTERVAL_SECONDS = 300.0
 
 
 class WorkerDispatcher(IndexingDispatcher):
@@ -48,6 +62,7 @@ class WorkerDispatcher(IndexingDispatcher):
         workspace_repo: Any,
         collection: str,
         timeout: float = DEFAULT_TIMEOUT,
+        job_repo: Any = None,
     ) -> None:
         self._pool = pool
         self._tsm = task_state_manager
@@ -56,6 +71,12 @@ class WorkerDispatcher(IndexingDispatcher):
         self._workspace_repo = workspace_repo
         self._collection = collection
         self._timeout = timeout
+        # Optional so the dispatcher still runs against a catalog store without a
+        # job repository (and so tests can build one without Postgres). When it
+        # is absent, job state degrades to the in-memory actor — the pre-#660
+        # behaviour.
+        self._job_repo = job_repo
+        self._last_job_purge_at: float | None = None
 
     async def _call(self, future: Any, task_description: str) -> Any:
         from services.workers.ray_utils import call_ray_actor_with_timeout
@@ -136,6 +157,7 @@ class WorkerDispatcher(IndexingDispatcher):
         embedder_name: str | None = None,
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
+        quota_reserved: bool = False,
     ) -> str:
         task_id = uuid.uuid4().hex
 
@@ -153,6 +175,33 @@ class WorkerDispatcher(IndexingDispatcher):
                 f"in partition {partition!r} is being deleted"
             )
 
+        # The durable row is written *before* the task is submitted, so a crash
+        # between submit and the worker's first state write still leaves the job
+        # visible (as QUEUED) rather than silently in-flight and unobservable.
+        #
+        # It is written *after* the admission gate above, not before, because
+        # #671 made admission refusable: ``_set_queued_details`` returns False
+        # when a delete fence covers this file, and forces the in-memory state to
+        # CANCELLED. A job that was never admitted has no work to record, so
+        # writing QUEUED here would leave a durable row that no worker will ever
+        # settle -- non-terminal forever, since retention sweeps terminal rows
+        # only, and counted active in ``/queue/info`` for good.
+        await self._record_job(
+            "create",
+            task_id,
+            lambda: self._job_repo.create_job(
+                IndexationJob(
+                    id=task_id,
+                    status=DocumentStatus.QUEUED,
+                    partition=partition,
+                    file_id=metadata.get("file_id"),
+                    user_id=user.get("id") if user else None,
+                    job_metadata=user_metadata,
+                )
+            ),
+        )
+        await self._maybe_purge_jobs()
+
         task: Any | None = None
         try:
             submit_kwargs: dict[str, Any] = {
@@ -165,6 +214,9 @@ class WorkerDispatcher(IndexingDispatcher):
                 "replace": replace,
                 "indexation_config": indexation_config,
                 "embedder_name": embedder_name,
+                # #664: tells the worker it owns the reserved file slot and must
+                # release it if the file never reaches the catalog.
+                "quota_reserved": quota_reserved,
             }
             if require_existing_partition:
                 submit_kwargs[_REQUIRE_EXISTING_PARTITION_KWARG] = True
@@ -174,6 +226,20 @@ class WorkerDispatcher(IndexingDispatcher):
                 allow_legacy_retry=allow_legacy_require_existing_partition_retry,
             )
 
+            # #671 made this call fail closed: it returns False when a delete
+            # fence covers the file, and the handler below then cancels the
+            # worker we just started and sweeps its vectors.
+            #
+            # This is where 4ec0a634 ("don't report a dispatch failure once the
+            # worker has started") used to swallow the failure, on the grounds
+            # that the worker owns the reserved slot from submit onwards and
+            # would run to completion regardless. #671 invalidated that premise:
+            # the worker no longer runs to completion, it is rolled back, so the
+            # error is truthful and must propagate. The residual cost is a
+            # double release (the cancelled worker's finally and the request
+            # teardown both give the slot back), which under-counts rather than
+            # leaks -- the direction this branch already chose deliberately, and
+            # which #700 closes.
             registered = await self._call(
                 self._tsm.set_object_ref.remote(task_id, {"ref": task}),
                 task_description=f"set_object_ref({task_id})",
@@ -238,6 +304,16 @@ class WorkerDispatcher(IndexingDispatcher):
         # (wrapped so Ray doesn't auto-dereference and block on the worker task).
         # Awaiting the submit call yields that list; element 0 is the worker ref
         # that ``cancel_task``/``ray.cancel`` must target.
+        #
+        # A timeout here is ambiguous about ownership of the reserved slot: the
+        # submit may have started the worker (which then owns it) or not (in
+        # which case the request's teardown must release it), and the caller
+        # cannot tell which. The wrapper cancels the future and raises, so the
+        # router skips ``commit_quota_reservation`` and teardown releases --
+        # correct for the overwhelmingly common case that submit never ran, and
+        # off by one the other way. Both directions undercount rather than
+        # leak, which is the side this branch errs on, and both self-heal under
+        # the #676 recount.
         submitted = await self._call(
             self._pool.submit.remote(**submit_kwargs),
             task_description=f"submit({task_id})",
@@ -245,16 +321,53 @@ class WorkerDispatcher(IndexingDispatcher):
         return submitted[0]
 
     async def _mark_submit_failed(self, task_id: str, tb: str) -> None:
-        set_failed = getattr(self._tsm, "set_failed_if_not_cancelled", None)
-        if set_failed is not None:
-            await self._call(
-                set_failed.remote(task_id, tb),
-                task_description=f"set_failed_if_not_cancelled({task_id})",
+        """Settle a dispatch that failed, in both stores.
+
+        The durable half is #660's: ``dispatch_indexing`` has already written a
+        QUEUED row, and a failed submit means ``IndexerWorker`` -- the only
+        writer of SERIALIZING/COMPLETED/FAILED -- is never entered, so nothing
+        else would ever settle it. Left QUEUED the row is unsweepable
+        (``purge_terminal_jobs`` takes terminal rows only) and counted active in
+        ``/queue/info`` for good, and the actor entry is unevictable (eviction
+        reads ``terminal_at``, which only a terminal state enters) on an actor
+        that outlives the API restart.
+
+        Both writes inherit this method's caller-side gate: #671 only calls it
+        once ``_cancel_submitted_task`` has confirmed the task really was
+        cancelled, so a task that actually completed is never recorded FAILED in
+        either store.
+        """
+        # Guarded: this runs inside the except in dispatch_indexing, so
+        # an unreachable state actor here would replace the exception the caller
+        # actually needs ("the pool is down") with one about the bookkeeping
+        # ("the actor is gone"). The durable write below is guarded by
+        # _record_job for the same reason.
+        try:
+            set_failed = getattr(self._tsm, "set_failed_if_not_cancelled", None)
+            if set_failed is not None:
+                await self._call(
+                    set_failed.remote(task_id, tb),
+                    task_description=f"set_failed_if_not_cancelled({task_id})",
+                )
+            else:
+                await self._call(
+                    self._tsm.set_state.remote(task_id, "FAILED"),
+                    task_description=f"set_state({task_id}, FAILED)",
+                )
+        except Exception as exc:  # noqa: BLE001 - settling must not mask the dispatch failure
+            logger.warning(
+                "Could not settle a failed dispatch in the state actor; the task may stay QUEUED",
+                task_id=task_id,
+                error=str(exc),
             )
-            return
-        await self._call(
-            self._tsm.set_state.remote(task_id, "FAILED"),
-            task_description=f"set_state({task_id}, FAILED)",
+        await self._record_job(
+            "settle_failed_dispatch",
+            task_id,
+            lambda: self._job_repo.mark_failed_if_not_cancelled(
+                task_id,
+                error=tb,
+                completed_at=datetime.now(UTC),
+            ),
         )
 
     async def _cancel_submitted_task(self, task_id: str, task: Any) -> bool:
@@ -297,6 +410,52 @@ class WorkerDispatcher(IndexingDispatcher):
             task_id=task_id,
         )
         return False
+
+    async def _record_job(self, action: str, task_id: str, call: Any) -> Any:
+        """Run a durable job write, degrading to a warning on failure.
+
+        Postgres is the source of truth for job state, but it is not on the
+        critical path of *indexing*: failing an upload because the audit row
+        could not be written would turn a monitoring outage into a data-ingest
+        outage. The in-memory actor still has the state, so we log loudly and
+        continue.
+        """
+        if self._job_repo is None:
+            return None
+        try:
+            return await call()
+        except Exception as exc:  # noqa: BLE001 - durable bookkeeping must not fail indexing
+            logger.warning(
+                "Durable job state write failed; job history for this task may be incomplete",
+                action=action,
+                task_id=task_id,
+                error=str(exc),
+            )
+            return None
+
+    async def _maybe_purge_jobs(self) -> None:
+        """Sweep terminal jobs at most once per ``JOB_PURGE_INTERVAL_SECONDS``."""
+        if self._job_repo is None:
+            return
+        now = time.monotonic()
+        if self._last_job_purge_at is not None and now - self._last_job_purge_at < JOB_PURGE_INTERVAL_SECONDS:
+            return
+        # Stamped before the call so a slow or failing purge cannot be retried on
+        # every single dispatch.
+        self._last_job_purge_at = now
+        purged = await self._record_job(
+            "purge",
+            "-",
+            lambda: self._job_repo.purge_terminal_jobs(
+                older_than_seconds=JOB_RETENTION_SECONDS,
+                keep_last=JOB_RETENTION_MAX_ROWS,
+            ),
+        )
+        if purged:
+            logger.info("Purged terminal indexation jobs past retention", purged=purged)
+
+    async def _get_job(self, task_id: str) -> Any:
+        return await self._record_job("get", task_id, lambda: self._job_repo.get_job(task_id))
 
     async def delete_file(self, file_id: str, partition: str) -> None:
         await self._begin_file_delete_fence(file_id=file_id, partition=partition)
@@ -382,14 +541,15 @@ class WorkerDispatcher(IndexingDispatcher):
         metadata: dict,
         partition: str,
         user: dict | None,
-    ) -> None:
+    ) -> bool:
+        """Copy the file's chunks + catalog row; return whether a row was created."""
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
             output_fields=["*", "vector"],
         )
         if not rows:
-            return
+            return False
 
         public_metadata = strip_internal_metadata(metadata)
         entities = []
@@ -405,13 +565,15 @@ class WorkerDispatcher(IndexingDispatcher):
         target_partition = metadata.get("partition", partition)
         file_metadata = self._file_metadata_from_chunk(rows[0])
         file_metadata.update(public_metadata)
-        await self._document_repo.add_file_to_partition(
-            file_id=target_file_id,
-            partition=target_partition,
-            file_metadata=file_metadata,
-            user_id=user.get("id") if user else None,
-            relationship_id=file_metadata.get("relationship_id"),
-            parent_id=file_metadata.get("parent_id"),
+        return bool(
+            await self._document_repo.add_file_to_partition(
+                file_id=target_file_id,
+                partition=target_partition,
+                file_metadata=file_metadata,
+                user_id=user.get("id") if user else None,
+                relationship_id=file_metadata.get("relationship_id"),
+                parent_id=file_metadata.get("parent_id"),
+            )
         )
 
     async def _upsert_entities(self, entities: list[dict[str, Any]]) -> None:
@@ -434,16 +596,30 @@ class WorkerDispatcher(IndexingDispatcher):
         }
 
     async def get_task_state(self, task_id: str) -> str | None:
-        return await self._call(
+        """Read a task's state, hot cache first, Postgres second.
+
+        A miss is not "unknown task": the actor evicts settled tasks and loses
+        everything on restart, so the durable row is what makes a task's outcome
+        observable afterwards.
+        """
+        state = await self._call(
             self._tsm.get_state.remote(task_id),
             task_description=f"get_state({task_id})",
         )
+        if state is not None:
+            return state
+        job = await self._get_job(task_id)
+        return job.status.value if job else None
 
     async def get_task_error(self, task_id: str) -> str | None:
-        return await self._call(
+        error = await self._call(
             self._tsm.get_error.remote(task_id),
             task_description=f"get_error({task_id})",
         )
+        if error is not None:
+            return error
+        job = await self._get_job(task_id)
+        return job.error if job else None
 
     async def cancel_task(self, task_id: str) -> bool:
         import ray
@@ -465,9 +641,57 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=f"set_cancelled_if_active({task_id})",
         )
         if not cancelled:
+            # Already terminal (or evicted): the task reached its own outcome
+            # first. Returning before the durable write is what keeps a job that
+            # actually COMPLETED from being recorded as CANCELLED in `jobs`.
             return False
 
-        ray.cancel(obj_ref["ref"], recursive=True)
+        # The durable write is part of the claim, so it happens *before*
+        # ``ray.cancel`` -- not after. ``ray.cancel`` kills the only other
+        # writer of this row, and everything between here and there runs
+        # without a successor that could heal a half-applied cancel:
+        # ``_record_job`` catches ``Exception``, but a client disconnect or a
+        # graceful shutdown raises ``asyncio.CancelledError``, a
+        # ``BaseException`` that sails straight through it. Writing after the
+        # kill would leave the actor CANCELLED and the row stuck on its last
+        # active status forever -- non-terminal, so ``purge_terminal_jobs``
+        # never sweeps it, ``count_by_status`` counts it active forever, and
+        # the actor-first and durable-first read paths answer differently for
+        # the same task id.
+        #
+        # Ordering it first cannot mis-record a job that escapes the cancel:
+        # the actor claim above already succeeded, and ``update_job`` keeps
+        # CANCELLED sticky, so a worker that somehow finishes anyway is
+        # declined by the same guard in both stores.
+        try:
+            # ``shield`` so a client disconnect cannot abort the UPDATE in
+            # flight: the write runs to completion even though the
+            # ``CancelledError`` propagates to us immediately.
+            await asyncio.shield(
+                self._record_job(
+                    "cancel",
+                    task_id,
+                    lambda: self._job_repo.update_job(
+                        task_id,
+                        status=DocumentStatus.CANCELLED,
+                        completed_at=datetime.now(UTC),
+                    ),
+                )
+            )
+        finally:
+            # In a ``finally`` so the worker still dies if the durable write
+            # raises: the actor has already claimed the cancellation, and
+            # leaving the worker running would contradict both records.
+            ray.cancel(obj_ref["ref"], recursive=True)
+        # The reserved quota slot (#664) is deliberately not released here.
+        # A task cancelled mid-flight gives its slot back in
+        # ``IndexerWorker.process_file``'s ``finally``; releasing here too
+        # would double-release. But a task that ``ray.cancel`` retires
+        # *before* that body runs never executes the ``finally``, so its slot
+        # leaks -- and the CANCELLED row written just above is terminal, hence
+        # indistinguishable from a clean cancel. Recovering it needs the #676
+        # reconciliation to *recount* ``file_count`` (completed files + active
+        # job rows), not merely sweep orphaned active rows.
         return True
 
 
@@ -479,6 +703,7 @@ def from_ray_namespace(
     document_repo: Any,
     workspace_repo: Any,
     collection: str,
+    job_repo: Any = None,
 ) -> WorkerDispatcher:
     import ray
     from services.workers.indexer_pool import build_indexer_pool
@@ -491,6 +716,7 @@ def from_ray_namespace(
         workspace_repo=workspace_repo,
         collection=collection,
         timeout=timeout,
+        job_repo=job_repo,
     )
 
 

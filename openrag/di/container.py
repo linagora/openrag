@@ -583,6 +583,7 @@ class ServiceContainer:
                     document_repo=self.document_repo,
                     workspace_repo=self.workspace_repo,
                     collection=settings.vectordb.collection_name,
+                    job_repo=self.job_repo,
                 ),
                 config=settings,
                 partition_service=self.partition_service,
@@ -593,15 +594,18 @@ class ServiceContainer:
     def job_service(self) -> JobService:
         """JobService — lazily built, cached for the container's lifetime.
 
-        Wraps the ``TaskStateManager`` Ray actor directly (8H excepts
-        JobService); resolved lazily so the actor only needs to exist at
-        first request.
+        Reads the durable ``jobs`` table, with the ``TaskStateManager`` Ray
+        actor as the fallback (8H excepts JobService for wrapping the actor);
+        resolved lazily so the actor only needs to exist at first request.
         """
         if self._job_service is None:
             from services.orchestrators.job_service import JobService
             from services.workers.bootstrap import get_task_state_manager
 
-            self._job_service = JobService(task_state_manager=get_task_state_manager())
+            self._job_service = JobService(
+                task_state_manager=get_task_state_manager(),
+                job_repo=self.job_repo,
+            )
         return self._job_service
 
     @property
@@ -645,8 +649,10 @@ class ServiceContainer:
                 indexing_service=self.indexing_service,
                 job_service=self.job_service,
                 conversion_service=self.conversion_service,
+                auth_service=self.auth_service,
                 vector_store=self.vector_store,
                 collection=settings.vectordb.collection_name,
+                default_file_quota=settings.rdb.default_file_quota,
                 default_top_k=mcp_cfg.default_top_k,
                 max_top_k=mcp_cfg.max_top_k,
                 similarity_threshold=mcp_cfg.similarity_threshold,

@@ -1011,6 +1011,9 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     class Store:
         document_repo = object()
         topic_tag_repo = object()
+        # #664: the worker needs a user_repo to release reserved quota slots.
+        user_repo = object()
+        job_repo = object()
 
     class Worker:
         def __init__(self, **kwargs):
@@ -1067,9 +1070,11 @@ class _RecordingWorker:
     def __init__(self, *, error: Exception | None = None) -> None:
         self._error = error
         self.calls = 0
+        self.last_kwargs: dict = {}
 
-    async def process_file(self, **_kwargs) -> dict:
+    async def process_file(self, **kwargs) -> dict:
         self.calls += 1
+        self.last_kwargs = kwargs
         if self._error is not None:
             raise self._error
         return {"stored_count": 1, "stage": "stored"}
@@ -1088,7 +1093,8 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     actor._ensure_catalog = _noop
     actor._ensure_registry_fresh = _noop
     actor._worker = worker
-    actor._catalog_store = SimpleNamespace(workspace_repo=SimpleNamespace())
+    actor._catalog_store = SimpleNamespace(workspace_repo=SimpleNamespace(), job_repo=None)
+    actor._task_state_manager = _FakeStateManager()
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
     return actor
@@ -1170,3 +1176,211 @@ async def test_actor_keeps_upload_on_pre_worker_failure_when_saving(tmp_path) ->
         await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
 
     assert path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Setup-failure quota release (#664)
+# ---------------------------------------------------------------------------
+
+
+class _FakeUserRepo:
+    def __init__(self) -> None:
+        self.released: list[int] = []
+
+    async def release_file_slot(self, user_id: int) -> None:
+        self.released.append(user_id)
+
+
+class _FakeRemote:
+    """Stands in for a Ray ``.remote`` handle method."""
+
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.calls: list[tuple] = []
+        self._error = error
+
+    async def remote(self, *args):
+        self.calls.append(args)
+        if self._error is not None:
+            raise self._error
+        return True
+
+
+class _FakeStateManager:
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.set_failed_if_not_cancelled = _FakeRemote(error)
+
+
+class _FakeJobRepo:
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.failed: list[str] = []
+        self._error = error
+
+    async def mark_failed_if_not_cancelled(self, job_id, *, error, completed_at):
+        if self._error is not None:
+            raise self._error
+        self.failed.append(job_id)
+        return True
+
+
+class _FakeCatalogStore:
+    def __init__(self, user_repo, job_repo=None) -> None:
+        self.user_repo = user_repo
+        self.job_repo = job_repo
+
+
+def _pool_with_broken_setup(user_repo, *, error: BaseException, tsm=None, job_repo=None):
+    """A pool whose ``_ensure_catalog`` fails before the worker can take over."""
+    from services.workers.indexer_pool import IndexerWorkerActor
+
+    cls = IndexerWorkerActor.__ray_metadata__.modified_class
+    pool = cls.__new__(cls)
+    pool._catalog_store = _FakeCatalogStore(user_repo, job_repo)
+    pool._task_state_manager = tsm if tsm is not None else _FakeStateManager()
+
+    async def _boom() -> None:
+        raise error
+
+    async def _fresh(_names) -> None:
+        return None
+
+    pool._ensure_catalog = _boom
+    pool._ensure_registry_fresh = _fresh
+    pool._worker = None  # must never be reached
+    # Keep the upload on disk so the cleanup finally is a no-op here; the raw-file
+    # purge has its own coverage and is not what these tests are pinning.
+    pool._save_uploaded_files = True
+    pool._logger = None
+    return pool
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("catalog init failed"), asyncio.CancelledError()],
+    ids=["exception", "cancellation"],
+)
+async def test_setup_failure_releases_the_reserved_slot(error):
+    """Setup blew up before the worker owned the slot, so the pool must release it.
+
+    The worker's own ``finally`` never runs when ``_ensure_catalog`` /
+    ``_ensure_registry_fresh`` raise, so without this release the upload
+    permanently narrows the user's quota. ``BaseException`` is deliberate:
+    a cancellation during setup must release too, and ``CancelledError`` is not
+    an ``Exception``.
+    """
+    user_repo = _FakeUserRepo()
+    pool = _pool_with_broken_setup(user_repo, error=error)
+
+    with pytest.raises(type(error)):
+        await pool.process_file(
+            task_id="t1",
+            path="/tmp/doc.txt",
+            metadata={"file_id": "f1"},
+            partition="p1",
+            user={"id": 42},
+            quota_reserved=True,
+        )
+
+    assert user_repo.released == [42], "a setup failure leaked the reserved quota slot"
+
+
+async def test_setup_failure_releases_nothing_when_no_slot_was_reserved():
+    """The other half: no reservation, no release (``put_file`` never reserves)."""
+    user_repo = _FakeUserRepo()
+    pool = _pool_with_broken_setup(user_repo, error=RuntimeError("catalog init failed"))
+
+    with pytest.raises(RuntimeError):
+        await pool.process_file(
+            task_id="t1",
+            path="/tmp/doc.txt",
+            metadata={"file_id": "f1"},
+            partition="p1",
+            user={"id": 42},
+            quota_reserved=False,
+        )
+
+    assert user_repo.released == []
+
+
+@pytest.mark.asyncio
+async def test_setup_failure_settles_the_task_terminally_in_both_stores():
+    """A setup failure must not leave the task QUEUED forever.
+
+    ``IndexerWorker`` -- the only writer of SERIALIZING/COMPLETED/FAILED -- is
+    never entered, so nothing else settles this task. Left QUEUED it is
+    unevictable in the detached actor (eviction reads ``terminal_at``, which
+    only a terminal state enters) and unsweepable by retention (terminal rows
+    only), so it is counted active in ``/queue/info`` for good -- while the
+    client polls a ``task_status_url`` that answers QUEUED forever.
+    """
+    tsm = _FakeStateManager()
+    job_repo = _FakeJobRepo()
+    pool = _pool_with_broken_setup(
+        _FakeUserRepo(), error=RuntimeError("catalog init failed"), tsm=tsm, job_repo=job_repo
+    )
+
+    with pytest.raises(RuntimeError):
+        await pool.process_file(
+            task_id="t1",
+            path="/tmp/doc.txt",
+            metadata={"file_id": "f1"},
+            partition="p1",
+            user={"id": 42},
+            quota_reserved=True,
+        )
+
+    assert [c[0] for c in tsm.set_failed_if_not_cancelled.calls] == ["t1"]
+    assert job_repo.failed == ["t1"]
+
+
+@pytest.mark.asyncio
+async def test_settling_a_setup_failure_never_masks_the_setup_error():
+    """The caller must see why setup failed, not why the bookkeeping did.
+
+    Both settling writes go through stores that may be exactly what just
+    broke, so both have to be able to fail without changing the exception
+    the pool re-raises.
+    """
+    tsm = _FakeStateManager(error=RuntimeError("state actor is gone"))
+    job_repo = _FakeJobRepo(error=RuntimeError("postgres is down"))
+    pool = _pool_with_broken_setup(
+        _FakeUserRepo(), error=RuntimeError("catalog init failed"), tsm=tsm, job_repo=job_repo
+    )
+
+    with pytest.raises(RuntimeError, match="catalog init failed"):
+        await pool.process_file(
+            task_id="t1",
+            path="/tmp/doc.txt",
+            metadata={"file_id": "f1"},
+            partition="p1",
+            user={"id": 42},
+            quota_reserved=True,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reserved", [True, False])
+async def test_the_actor_forwards_the_quota_reservation_to_the_worker(reserved):
+    """The pool must tell the worker whether it owns a reserved slot.
+
+    ``quota_reserved`` is what arms the release in
+    ``IndexerWorker.process_file``'s ``finally`` (#664). The router end of
+    this wire is pinned by
+    ``test_dispatch_tells_the_worker_the_slot_is_already_reserved``, but the
+    pool hop was not: the setup-failure tests stub the worker out entirely
+    (``pool._worker = None  # must never be reached``) and the worker tests
+    call ``process_file`` directly. Drop the keyword here and ``release_slot``
+    is always False, so every failed upload leaks a slot in silence.
+    """
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+
+    await actor.process_file(
+        task_id="t1",
+        path="/tmp/doc.txt",
+        metadata={"file_id": "f1"},
+        partition="p1",
+        user={"id": 42},
+        quota_reserved=reserved,
+    )
+
+    assert worker.last_kwargs["quota_reserved"] is reserved

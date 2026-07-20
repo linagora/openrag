@@ -279,7 +279,9 @@ class PgDocumentRepository(DocumentRepository):
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
         Creates the partition row on first use (legacy behaviour). Returns
-        ``False`` if a row with the same (file_id, partition) already exists.
+        ``False`` if a row with the same (file_id, partition) already exists —
+        callers holding a quota reservation must release it on ``False``,
+        since no file was created for it (#664).
 
         ``indexed_at`` pins the indexation timestamp so it matches the Milvus
         chunks; when ``None`` the ``files.indexed_at`` server default applies.
@@ -356,11 +358,13 @@ class PgDocumentRepository(DocumentRepository):
                     f"INSERT INTO files ({', '.join(columns)}) VALUES ({placeholders})",
                     *values,
                 )
-                if user_id is not None:
-                    await conn.execute(
-                        "UPDATE users SET file_count = file_count + 1 WHERE id = $1",
-                        user_id,
-                    )
+                # No ``file_count`` increment here. Since #664 the uploader's
+                # slot is charged atomically at *admission*
+                # (``UserRepository.try_reserve_file_slot``) and this insert
+                # merely consumes that reservation — incrementing again would
+                # double-count. The paths that never reach this insert release
+                # the reservation instead; see ``check_user_file_quota`` and
+                # ``IndexerWorker.process_file``.
                 return True
 
     async def remove_file_from_partition(self, file_id: str, partition: str) -> bool:

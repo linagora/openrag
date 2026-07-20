@@ -14,6 +14,15 @@ from core.utils.logging import get_logger
 
 DEFAULT_FALLBACK_ENCODING = "utf-8"
 
+# Upper bound for a stored error/traceback string (issue #660). Tracebacks are
+# unbounded input: they were kept in full both in the detached TaskStateManager
+# actor (which never evicted) and, now, in a retained ``jobs`` row. The tail is
+# what is kept — the exception type/message and the innermost frames are the
+# diagnostic payload; the outermost frames are the same dispatcher stack on
+# every task.
+MAX_ERROR_TEXT_CHARS = 4000
+
+
 logger = get_logger()
 
 
@@ -42,6 +51,33 @@ def get_num_tokens():
             encoding = tiktoken.get_encoding("cl100k_base")
             _cached_length_function = lambda text: len(encoding.encode(text))  # noqa: E731
     return _cached_length_function
+
+
+def truncate_error_text(text: str | None, max_chars: int = MAX_ERROR_TEXT_CHARS) -> str | None:
+    """Bound an error/traceback string, keeping its most diagnostic tail.
+
+    Returns ``text`` unchanged when it already fits (the overwhelmingly common
+    case), so this is free on the happy path. Oversized text is replaced by a
+    marker line naming the number of dropped characters followed by the last
+    ``max_chars`` characters, which makes the truncation auditable rather than
+    silent.
+
+    ``max_chars`` bounds the retained *original* text, not the returned string:
+    the audit marker is overhead on top, so the result runs ~35 characters
+    longer. The point is to stop unbounded growth, and the caller's column is
+    unbounded ``VARCHAR`` — a hard ceiling on the return value would have to
+    either eat into the tail (the exception message lives at the very end, and
+    is the whole reason the tail is what we keep) or iterate to a fixed point
+    against the marker's own digit count. Neither is worth it here.
+    """
+    if text is None:
+        return None
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
+    if len(text) <= max_chars:
+        return text
+    dropped = len(text) - max_chars
+    return f"[truncated {dropped} of {len(text)} chars]\n...{text[-max_chars:]}"
 
 
 def decode_bytes(raw: bytes, encoding: str | None = None) -> str:

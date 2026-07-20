@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
 import ray
 from core.models.catalog import TERMINAL_TASK_STATES, DocumentStatus
+from core.utils.text import MAX_ERROR_TEXT_CHARS, truncate_error_text
 
 ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"})
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
@@ -27,6 +30,32 @@ except (ImportError, AttributeError) as _cfg_err:
     _MAX_TASKS_PER_WORKER = 1
 
 
+# This actor is created with ``lifetime="detached"`` (see ``bootstrap.py``), so it
+# outlives the API process and used to be insert-only: every file ever dispatched
+# left a permanent ``TaskInfo`` (plus a full traceback on failure) until the actor
+# OOM-ed (issue #660). Postgres now holds the durable record, which frees this
+# actor to be what its callers actually need — a hot cache of recent tasks.
+#
+# Only *terminal* tasks are evictable: an in-flight task still owns the
+# ``object_ref`` that ``cancel_task`` needs, and that ref is not serializable, so
+# it cannot live anywhere but here. In-flight tasks are self-limiting (the pool
+# has bounded capacity and every task eventually settles), terminal ones are not.
+#
+# Both bounds apply, and both are enforced lazily: the sweep runs only when a
+# task settles, never on a timer (this is a Ray actor; a background loop would be
+# another thing to own). The cap is therefore the real memory guarantee — it is
+# checked exactly when growth happens. The TTL only retires stale entries once
+# *some* task settles, so a fully idle deployment keeps its last few terminal
+# tasks cached indefinitely. That is harmless: a terminal state is immutable, so
+# a stale read is not a wrong read, and the cap still bounds the memory.
+# Reads that miss fall back to Postgres (``WorkerDispatcher.get_task_state`` /
+# ``JobService``), which is the durable record either way.
+_TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+_MAX_TERMINAL_TASKS = 2000
+_TERMINAL_TTL_SECONDS = 3600.0
+_MAX_ERROR_CHARS = MAX_ERROR_TEXT_CHARS
+
+
 @dataclass
 class TaskInfo:
     state: str | None = None
@@ -41,9 +70,42 @@ class TaskStateManager:
         self.tasks: dict[str, TaskInfo] = {}
         self.user_index: dict[int | None, set[str]] = {}
         self.file_delete_fences: dict[tuple[str, str], int] = {}
+        # task_id -> monotonic timestamp of the terminal transition, in
+        # insertion order so eviction is FIFO (oldest settled task first).
+        self.terminal_at: OrderedDict[str, float] = OrderedDict()
         self.lock = asyncio.Lock()
 
     async def _ensure_task(self, task_id: str) -> TaskInfo:
+        """Create the entry for a task we are hearing about for the first time.
+
+        The call that legitimately means "new" is the dispatcher's opening
+        ``QUEUED`` write, the first write for a task id (before
+        ``set_details``/``set_object_ref``).
+
+        ``set_state`` is *not* dispatcher-only, though: the worker also writes
+        ``SERIALIZING`` and ``COMPLETED`` through it. That is safe today only
+        because of ordering -- the worker's first write happens long before the
+        task can be terminal, and eviction only ever removes *terminal* entries,
+        so there is nothing evicted for it to resurrect. Anything that breaks
+        that ordering (a ``set_state`` after a terminal transition) reopens the
+        leak this guard exists to close: a resurrected entry with a
+        *non-terminal* state never re-enters ``terminal_at`` and is never
+        evictable again.
+
+        Making creation opt-in (``create=True``, dispatcher only) is the durable
+        fix, but it changes the signature of a **detached** actor method --
+        ``get_or_create_actor(..., lifetime="detached")`` keeps the previous
+        instance alive across an API deploy, so a new dispatcher would call an
+        old actor and every dispatch would fail on the unexpected keyword. It
+        therefore has to be sequenced with a deliberate actor restart rather
+        than shipped as a plain code change (tracked in #676).
+
+        Every *other* writer must go through :meth:`_live_task`. Creating an
+        entry from a late write would resurrect an evicted task with
+        ``state=None``, which never re-enters ``terminal_at`` and is therefore
+        never evictable again — an unbounded leak on a detached actor, i.e. the
+        exact failure #660 exists to fix.
+        """
         if task_id not in self.tasks:
             self.tasks[task_id] = TaskInfo()
         return self.tasks[task_id]
@@ -87,6 +149,55 @@ class TaskStateManager:
             else:
                 self.file_delete_fences.pop(key, None)
 
+    def _live_task(self, task_id: str) -> TaskInfo | None:
+        """The entry for ``task_id``, or ``None`` if it is unknown or evicted.
+
+        A write for a task that is no longer cached is dropped: the durable
+        ``jobs`` row is the record of what happened, and this actor is only a
+        hot cache of recent tasks. See :meth:`_ensure_task` for why recreating
+        it here would be a leak.
+        """
+        return self.tasks.get(task_id)
+
+    def _mark_terminal(self, task_id: str, state: str | None) -> None:
+        """Record (or clear) a task's terminal transition, then evict.
+
+        Called with ``self.lock`` held, from every state write.
+        """
+        if state in _TERMINAL_STATES:
+            self.terminal_at[task_id] = time.monotonic()
+            self.terminal_at.move_to_end(task_id)
+            self._evict_terminal()
+        else:
+            # A task that leaves a terminal state (a re-dispatch reusing the id)
+            # must stop being a candidate for eviction.
+            self.terminal_at.pop(task_id, None)
+
+    def _evict_terminal(self) -> None:
+        """Drop terminal tasks that are over the cap or past the TTL."""
+        now = time.monotonic()
+        while self.terminal_at:
+            task_id, settled_at = next(iter(self.terminal_at.items()))
+            over_cap = len(self.terminal_at) > _MAX_TERMINAL_TASKS
+            expired = now - settled_at > _TERMINAL_TTL_SECONDS
+            if not (over_cap or expired):
+                # FIFO: the head is the oldest, so nothing behind it can qualify.
+                break
+            self.terminal_at.popitem(last=False)
+            self._forget(task_id)
+
+    def _forget(self, task_id: str) -> None:
+        info = self.tasks.pop(task_id, None)
+        if info is None:
+            return
+        user_id = info.details.get("user_id")
+        task_ids = self.user_index.get(user_id)
+        if task_ids is None:
+            return
+        task_ids.discard(task_id)
+        if not task_ids:
+            del self.user_index[user_id]
+
     @ray.method(concurrency_group="set")
     async def set_state(self, task_id: str, state: str) -> None:
         async with self.lock:
@@ -94,12 +205,15 @@ class TaskStateManager:
             if info.state == DocumentStatus.CANCELLED and state != DocumentStatus.CANCELLED:
                 return
             info.state = state
+            self._mark_terminal(task_id, state)
 
     @ray.method(concurrency_group="set")
     async def set_error(self, task_id: str, tb_str: str) -> None:
         async with self.lock:
-            info = await self._ensure_task(task_id)
-            info.error = tb_str
+            info = self._live_task(task_id)
+            if info is None:
+                return
+            info.error = truncate_error_text(tb_str, _MAX_ERROR_CHARS)
 
     @ray.method(concurrency_group="set")
     async def set_failed_if_not_cancelled(self, task_id: str, tb_str: str) -> bool:
@@ -109,7 +223,8 @@ class TaskStateManager:
             if info is None or info.state == "CANCELLED":
                 return False
             info.state = "FAILED"
-            info.error = tb_str
+            info.error = truncate_error_text(tb_str, _MAX_ERROR_CHARS)
+            self._mark_terminal(task_id, "FAILED")
             return True
 
     @ray.method(concurrency_group="set")
@@ -119,6 +234,14 @@ class TaskStateManager:
             if info is None or info.state in TERMINAL_TASK_STATES:
                 return False
             info.state = "CANCELLED"
+            # CANCELLED is terminal, so it must register like every other
+            # terminal write does. Skipping this leaves the entry retained
+            # forever: eviction is driven entirely off ``terminal_at``, and
+            # nothing writes this task's state again -- ray.cancel raises
+            # CancelledError, a BaseException that ``process_file``'s
+            # ``except Exception`` never catches. That is precisely the
+            # unbounded growth #660 exists to fix.
+            self._mark_terminal(task_id, "CANCELLED")
             return True
 
     @ray.method(concurrency_group="set")
@@ -132,7 +255,11 @@ class TaskStateManager:
         user_id: int | None,
     ) -> None:
         async with self.lock:
-            info = await self._ensure_task(task_id)
+            info = self._live_task(task_id)
+            if info is None:
+                # Dropping the details also keeps ``user_index`` from growing an
+                # entry that ``_forget`` will never be able to clean up.
+                return
             self._record_details(
                 task_id,
                 info,
@@ -173,7 +300,9 @@ class TaskStateManager:
     @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
         async with self.lock:
-            info = await self._ensure_task(task_id)
+            info = self._live_task(task_id)
+            if info is None:
+                return
             info.object_ref = object_ref
             details = info.details or {}
             if self._file_delete_fenced(partition=details.get("partition"), file_id=details.get("file_id")):
