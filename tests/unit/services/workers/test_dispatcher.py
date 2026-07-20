@@ -94,6 +94,12 @@ def _task_state_manager() -> MagicMock:
     return tsm
 
 
+def _completion_tracker() -> MagicMock:
+    tracker = MagicMock()
+    tracker.track.remote.return_value = object()
+    return tracker
+
+
 def test_from_ray_namespace_does_not_require_legacy_indexer_actor() -> None:
     from services.workers.dispatcher import WorkerDispatcher, from_ray_namespace
 
@@ -104,6 +110,8 @@ def test_from_ray_namespace_does_not_require_legacy_indexer_actor() -> None:
         assert namespace == "openrag"
         if name == "TaskStateManager":
             return tsm
+        if name == "TaskCompletionTracker":
+            return _completion_tracker()
         raise AssertionError(f"unexpected eager actor lookup: {name}")
 
     with (
@@ -130,17 +138,27 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=_vector_store(),
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
     )
 
-    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.dispatcher._utc_now_iso", return_value="2026-07-20T08:00:00+00:00"),
+    ):
         mock_uuid.uuid4.return_value.hex = "task-1"
         task_id = await dispatcher.dispatch_indexing(
             path="/data/report.txt",
-            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            metadata={
+                "file_id": "file-1",
+                "source": "/data/report.txt",
+                "filename": "report.txt",
+                "_openrag_job_created_at": "forged-created",
+                "_openrag_job_finished_at": "forged-finished",
+            },
             partition="tenant-a",
             user={"id": 42},
             workspace_ids=["ws-1"],
@@ -155,7 +173,10 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         "task-1",
         file_id="file-1",
         partition="tenant-a",
-        metadata={"filename": "report.txt"},
+        metadata={
+            "filename": "report.txt",
+            "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
+        },
         user_id=42,
     )
     tsm.set_state.remote.assert_not_called()
@@ -163,7 +184,13 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
     pool.submit.remote.assert_called_once_with(
         task_id="task-1",
         path="/data/report.txt",
-        metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+        metadata={
+            "file_id": "file-1",
+            "source": "/data/report.txt",
+            "filename": "report.txt",
+            "_openrag_job_created_at": "forged-created",
+            "_openrag_job_finished_at": "forged-finished",
+        },
         partition="tenant-a",
         user={"id": 42},
         workspace_ids=["ws-1"],
@@ -176,6 +203,40 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
 
 
 @pytest.mark.asyncio
+async def test_dispatch_indexing_registers_completion_with_detached_tracker() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = asyncio.get_running_loop().create_future()
+    tsm = _task_state_manager()
+    tracker = _completion_tracker()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(ref),
+        task_state_manager=tsm,
+        completion_tracker=tracker,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.dispatcher._utc_now_iso", return_value="2026-07-20T08:00:00+00:00"),
+    ):
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+    tracker.track.remote.assert_called_once_with("task-1", {"ref": ref})
+    tsm.set_details.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
@@ -185,13 +246,17 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=_vector_store(),
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
     )
 
-    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.dispatcher._utc_now_iso", return_value="2026-07-20T08:00:00+00:00"),
+    ):
         mock_uuid.uuid4.return_value.hex = "task-1"
         with pytest.raises(RuntimeError, match="is being deleted"):
             await dispatcher.dispatch_indexing(
@@ -220,13 +285,17 @@ async def test_dispatch_indexing_uses_split_queue_registration_for_legacy_task_s
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=_vector_store(),
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
     )
 
-    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.dispatcher._utc_now_iso", return_value="2026-07-20T08:00:00+00:00"),
+    ):
         mock_uuid.uuid4.return_value.hex = "task-1"
         task_id = await dispatcher.dispatch_indexing(
             path="/data/report.txt",
@@ -244,7 +313,10 @@ async def test_dispatch_indexing_uses_split_queue_registration_for_legacy_task_s
         "task-1",
         file_id="file-1",
         partition="tenant-a",
-        metadata={"filename": "report.txt"},
+        metadata={
+            "filename": "report.txt",
+            "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
+        },
         user_id=42,
     )
     tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})
@@ -260,13 +332,20 @@ async def test_dispatch_indexing_omits_false_require_existing_partition_for_lega
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=_vector_store(),
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
     )
 
-    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch(
+            "services.workers.dispatcher._utc_now_iso",
+            side_effect=["2026-07-20T08:00:00+00:00", "2026-07-20T08:00:02+00:00"],
+        ),
+    ):
         mock_uuid.uuid4.return_value.hex = "task-1"
         task_id = await dispatcher.dispatch_indexing(
             path="/data/report.txt",
@@ -297,6 +376,7 @@ async def test_dispatch_indexing_retries_without_require_existing_partition_for_
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=_vector_store(),
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -337,6 +417,7 @@ async def test_dispatch_indexing_does_not_drop_required_partition_guard_for_lega
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=_vector_store(),
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -373,13 +454,20 @@ async def test_dispatch_indexing_marks_task_failed_when_submit_fails() -> None:
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=_vector_store(),
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
     )
 
-    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch(
+            "services.workers.dispatcher._utc_now_iso",
+            side_effect=["2026-07-20T08:00:00+00:00", "2026-07-20T08:00:02+00:00"],
+        ),
+    ):
         mock_uuid.uuid4.return_value.hex = "task-1"
         with pytest.raises(RuntimeError, match="submit failed"):
             await dispatcher.dispatch_indexing(
@@ -393,7 +481,16 @@ async def test_dispatch_indexing_marks_task_failed_when_submit_fails() -> None:
 
     tsm.set_queued_details.remote.assert_called_once()
     tsm.set_state.remote.assert_not_called()
-    tsm.set_details.remote.assert_not_called()
+    tsm.set_details.remote.assert_awaited_once_with(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={
+            "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
+            "_openrag_job_finished_at": "2026-07-20T08:00:02+00:00",
+        },
+        user_id=42,
+    )
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
     assert tsm.set_failed_if_not_cancelled.remote.call_args.args[0] == "task-1"
     assert "submit failed" in tsm.set_failed_if_not_cancelled.remote.call_args.args[1]
@@ -412,6 +509,7 @@ async def test_dispatch_indexing_cancels_worker_when_ref_registration_fails() ->
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -455,6 +553,7 @@ async def test_dispatch_indexing_does_not_mark_failed_when_submitted_worker_alre
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -490,6 +589,7 @@ async def test_dispatch_indexing_does_not_mark_failed_when_submitted_worker_canc
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -527,6 +627,7 @@ async def test_dispatch_indexing_does_not_mark_failed_when_submitted_worker_canc
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -561,6 +662,7 @@ async def test_dispatch_indexing_keeps_fast_finished_task_when_ref_registration_
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=_vector_store(),
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -595,6 +697,7 @@ async def test_dispatch_indexing_cancels_worker_when_ref_registration_is_rejecte
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -635,6 +738,7 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
@@ -686,6 +790,7 @@ async def test_cancel_task_uses_stored_pool_object_ref() -> None:
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=_vector_store(),
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -711,6 +816,7 @@ async def test_cancel_task_does_not_cancel_terminal_task() -> None:
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=_vector_store(),
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -736,6 +842,7 @@ async def test_delete_file_cleans_vector_store_before_database() -> None:
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
@@ -779,6 +886,7 @@ async def test_delete_file_holds_file_delete_fence_around_cleanup() -> None:
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
@@ -804,6 +912,7 @@ async def test_delete_file_releases_file_delete_fence_when_cleanup_fails() -> No
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
@@ -830,6 +939,7 @@ async def test_delete_file_fails_closed_when_file_delete_fence_is_missing() -> N
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
@@ -854,6 +964,7 @@ async def test_delete_file_cancels_active_matching_indexing_task_before_cleanup(
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=_vector_store(),
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -884,6 +995,7 @@ async def test_delete_file_waits_for_matching_task_ref_before_cleanup() -> None:
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -915,6 +1027,7 @@ async def test_delete_file_rechecks_ref_less_task_before_marking_stale() -> None
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -947,6 +1060,7 @@ async def test_delete_file_rechecks_pending_task_details_before_cleanup() -> Non
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -975,6 +1089,7 @@ async def test_delete_file_fails_closed_when_pending_task_details_do_not_settle(
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
@@ -1003,6 +1118,7 @@ async def test_delete_file_final_ref_recheck_stays_within_delete_timeout() -> No
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -1039,6 +1155,7 @@ async def test_delete_file_waits_for_cancelled_task_to_settle_before_cleanup() -
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -1069,6 +1186,7 @@ async def test_delete_file_fails_closed_when_active_task_lookup_missing() -> Non
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
@@ -1111,6 +1229,7 @@ async def test_delete_file_uses_legacy_task_state_lookup_when_matching_api_missi
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -1147,6 +1266,7 @@ async def test_delete_file_ignores_unsafe_legacy_matching_api_when_v2_missing() 
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -1184,6 +1304,7 @@ async def test_delete_file_legacy_lookup_blocks_detail_less_active_task() -> Non
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
@@ -1215,6 +1336,7 @@ async def test_delete_file_does_not_cleanup_when_cancelled_task_does_not_settle(
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
@@ -1244,6 +1366,7 @@ async def test_delete_file_marks_stale_ref_less_task_failed_before_cleanup() -> 
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
@@ -1275,6 +1398,7 @@ async def test_delete_file_does_not_cleanup_when_matching_task_cancel_fails() ->
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
@@ -1301,6 +1425,7 @@ async def test_delete_file_does_not_remove_database_row_if_vector_store_delete_f
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
@@ -1327,6 +1452,7 @@ async def test_delete_file_reports_failure_when_post_delete_cleanup_fails() -> N
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
