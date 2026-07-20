@@ -223,10 +223,7 @@ def _resolve_llm_endpoint_name(config: "Settings", partitions: list[str] | None)
 def _effective_max_output_tokens(config: "Settings", partitions: list[str] | None = None) -> int:
     """Default output-token budget: the resolved LLM endpoint's admin-configured
     value when set, else the global ``llm_context`` fallback."""
-    models = getattr(config, "models", None)
-    configured = (
-        models.llm_output_tokens(_resolve_llm_endpoint_name(config, partitions)) if models is not None else None
-    )
+    configured = config.models.llm_output_tokens(_resolve_llm_endpoint_name(config, partitions))
     return configured or int(config.llm_context.max_output_tokens)
 
 
@@ -247,9 +244,7 @@ def get_max_model_tokens(partitions: list[str] | None = None, settings: "Setting
     if configured is not None:
         return configured
     probed = _max_model_tokens_by_name.get(name)
-    if probed is not None:
-        return probed
-    return int(config.llm_context.max_llm_context_size)
+    return probed or int(config.llm_context.max_llm_context_size)
 
 
 def validate_tokens_limit(
