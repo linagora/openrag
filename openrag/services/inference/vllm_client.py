@@ -276,9 +276,15 @@ class VLLMEmbedder(Embedder):
             )
         except BaseException as exc:
             done = sum(1 for task in tasks if task.done() and not task.cancelled() and task.exception() is None)
-            logger.bind(batches_done=done, n_batches=len(batches), error=repr(exc)).warning(
-                "Embedding failed after {d}/{b} batches", d=done, b=len(batches)
-            )
+            # `.extra` (set on OpenRAGError subclasses like EmbeddingAPIError) carries
+            # the embedder's actual response body — repr(exc) alone only has the
+            # generic "Embedder API error (400)" message, not why it was rejected.
+            logger.bind(
+                batches_done=done,
+                n_batches=len(batches),
+                error=repr(exc),
+                error_detail=getattr(exc, "extra", None),
+            ).warning("Embedding failed after {d}/{b} batches", d=done, b=len(batches))
             for task in tasks:
                 if not task.done():
                     task.cancel()
