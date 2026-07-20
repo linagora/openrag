@@ -162,6 +162,13 @@ class TestLifecycle:
         assert patched.status is DocumentStatus.CANCELLED
         assert patched.error == "late diagnostic"
 
+    async def test_an_explicit_zero_limit_returns_no_rows(self, repo):
+        """``limit=0`` means none, not one — the floor is 0, mirroring ``offset``."""
+        await repo.create_job(_job())
+
+        assert await repo.list_jobs(limit=0) == []
+        assert len(await repo.list_jobs(limit=1)) == 1
+
     async def test_marking_an_unknown_job_failed_reports_no_write(self, repo):
         assert await repo.mark_failed_if_not_cancelled("ghost", error="boom", completed_at=datetime.now(UTC)) is False
 

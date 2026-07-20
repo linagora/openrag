@@ -247,7 +247,7 @@ class PgJobRepository(JobRepository):
             where.append(f"user_id = ${len(params)}")
 
         clause = f" WHERE {' AND '.join(where)}" if where else ""
-        params.append(max(1, limit))
+        params.append(max(0, limit))
         limit_param = len(params)
         params.append(max(0, offset))
 
