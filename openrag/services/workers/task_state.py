@@ -62,6 +62,12 @@ class TaskInfo:
     error: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     object_ref: ray.ObjectRef | None = None
+    # #664. ``quota_reserved`` records that admission charged one
+    # ``users.file_count`` slot for this task; ``quota_release_claimed`` is the
+    # one-shot token that decides *who* gives it back. Kept on the record rather
+    # than in ``details`` because ``details`` is surfaced in API responses.
+    quota_reserved: bool = False
+    quota_release_claimed: bool = False
 
 
 @ray.remote(concurrency_groups={"set": 1000, "get": 1000, "queue_info": 1000})
@@ -253,6 +259,7 @@ class TaskStateManager:
         partition: str,
         metadata: dict[str, Any],
         user_id: int | None,
+        quota_reserved: bool = False,
     ) -> None:
         async with self.lock:
             info = self._live_task(task_id)
@@ -268,6 +275,7 @@ class TaskStateManager:
                 metadata=metadata,
                 user_id=user_id,
             )
+            info.quota_reserved = quota_reserved
 
     @ray.method(concurrency_group="set")
     async def set_queued_details(
@@ -278,6 +286,7 @@ class TaskStateManager:
         partition: str,
         metadata: dict[str, Any],
         user_id: int | None,
+        quota_reserved: bool = False,
     ) -> bool:
         async with self.lock:
             info = await self._ensure_task(task_id)
@@ -291,10 +300,39 @@ class TaskStateManager:
                 metadata=metadata,
                 user_id=user_id,
             )
+            info.quota_reserved = quota_reserved
             if self._file_delete_fenced(partition=partition, file_id=file_id):
                 info.state = "CANCELLED"
                 return False
             info.state = "QUEUED"
+            return True
+
+    @ray.method(concurrency_group="set")
+    async def claim_quota_release(self, task_id: str) -> bool:
+        """Hand the task's reserved file slot to exactly one releaser (#664).
+
+        Two parties can end up believing they owe the uploader a slot back:
+        ``IndexerWorker.process_file``'s ``finally``, and
+        ``WorkerDispatcher.cancel_task`` when ``ray.cancel`` retires the task
+        before that body ever runs. Letting both release double-counts; letting
+        neither leaks. This actor is single-threaded, so a compare-and-set here
+        settles it: the first caller wins, every later one is told to stand
+        down.
+
+        Returns ``True`` for a task the actor no longer knows. A slot was
+        reserved for *some* task and nothing else will give it back, and this
+        branch prefers an undercount (recoverable, and self-heals on the next
+        reconciliation) over a leak (permanent, and silently narrows the user's
+        quota). In practice it is unreachable: eviction is FIFO by settle time,
+        so a task that just settled is the last candidate to be dropped.
+        """
+        async with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None:
+                return True
+            if not info.quota_reserved or info.quota_release_claimed:
+                return False
+            info.quota_release_claimed = True
             return True
 
     @ray.method(concurrency_group="set")

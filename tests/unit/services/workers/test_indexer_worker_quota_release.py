@@ -58,19 +58,23 @@ class _Pipeline:
         return {**row, "stored_count": 3, "stage": "stored", "indexed_at": None}
 
 
-def _tsm() -> MagicMock:
+def _tsm(*, claim: bool = True) -> MagicMock:
     tsm = MagicMock()
     tsm.set_state = MagicMock()
     tsm.set_state.remote = AsyncMock(return_value=None)
     tsm.set_failed_if_not_cancelled = MagicMock()
     tsm.set_failed_if_not_cancelled.remote = AsyncMock(return_value=True)
+    # The slot is released by whoever wins this claim; ``cancel_task`` can be
+    # the other contender (#664).
+    tsm.claim_quota_release = MagicMock()
+    tsm.claim_quota_release.remote = AsyncMock(return_value=claim)
     return tsm
 
 
-def _worker(pipeline, doc_repo, user_repo) -> IndexerWorker:
+def _worker(pipeline, doc_repo, user_repo, *, tsm=None) -> IndexerWorker:
     return IndexerWorker(
         pipeline=pipeline,
-        task_state_manager=_tsm(),
+        task_state_manager=tsm or _tsm(),
         document_repo=doc_repo,
         topic_tag_repo=None,
         user_repo=user_repo,
@@ -103,6 +107,47 @@ async def test_success_consumes_the_slot(tmp_path):
     assert result["stored_count"] == 3
     assert len(doc_repo.add_calls) == 1
     assert user_repo.released == []
+
+
+@pytest.mark.asyncio
+async def test_a_lost_claim_leaves_the_release_to_the_canceller(tmp_path):
+    """Only one party may hand the slot back.
+
+    A task cancelled mid-flight runs this ``finally`` *and* reaches
+    ``WorkerDispatcher.cancel_task``. Both would otherwise release, driving
+    ``file_count`` below reality and handing the user free quota.
+    """
+    user_repo = FakeUserRepo()
+    worker = _worker(
+        _Pipeline(error=RuntimeError("boom")),
+        FakeDocumentRepo(),
+        user_repo,
+        tsm=_tsm(claim=False),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _run(worker, tmp_path)
+
+    assert user_repo.released == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_state_actor_still_releases(tmp_path):
+    """Arbitration is an optimisation; not leaking is the requirement.
+
+    If the claim itself cannot be made, release anyway: an undercount is
+    recoverable and self-heals on reconciliation, whereas a leak permanently
+    narrows the uploader's quota.
+    """
+    user_repo = FakeUserRepo()
+    tsm = _tsm()
+    tsm.claim_quota_release.remote = AsyncMock(side_effect=RuntimeError("actor is gone"))
+    worker = _worker(_Pipeline(error=RuntimeError("boom")), FakeDocumentRepo(), user_repo, tsm=tsm)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _run(worker, tmp_path)
+
+    assert user_repo.released == [42]
 
 
 @pytest.mark.asyncio

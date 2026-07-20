@@ -91,6 +91,9 @@ def _task_state_manager() -> MagicMock:
     tsm.set_queued_details = _remote_mock(True)
     tsm.begin_file_delete = _remote_mock()
     tsm.end_file_delete = _remote_mock()
+    # #700: the cancel path asks who owns the reserved slot, then claims it.
+    tsm.get_details = _remote_mock({"user_id": 42})
+    tsm.claim_quota_release = _remote_mock(True)
     return tsm
 
 
@@ -157,6 +160,7 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         partition="tenant-a",
         metadata={"filename": "report.txt"},
         user_id=42,
+        quota_reserved=False,
     )
     tsm.set_state.remote.assert_not_called()
     tsm.set_details.remote.assert_not_called()
@@ -247,6 +251,7 @@ async def test_dispatch_indexing_uses_split_queue_registration_for_legacy_task_s
         partition="tenant-a",
         metadata={"filename": "report.txt"},
         user_id=42,
+        quota_reserved=False,
     )
     tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})
 
@@ -1733,3 +1738,89 @@ async def test_an_empty_source_copies_nothing_and_reports_no_row():
 
     assert created is False
     dispatcher._document_repo.add_file_to_partition.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_releases_a_slot_the_worker_will_never_release() -> None:
+    """The cancel-before-start leak (#664).
+
+    After dispatch the worker owns the reserved slot and hands it back in
+    ``process_file``'s ``finally``. If ``ray.cancel`` retires the task before
+    that body ever runs, the ``finally`` never executes and the slot used to
+    leak outright — permanently narrowing the uploader's quota, and
+    indistinguishable from a clean cancel because the CANCELLED row is terminal
+    either way. The state actor now arbitrates, so the cancel releases it.
+    """
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.get_object_ref.remote = AsyncMock(return_value={"ref": object()})
+    user_repo = MagicMock()
+    user_repo.release_file_slot = AsyncMock()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        user_repo=user_repo,
+    )
+
+    with patch("ray.cancel"):
+        assert await dispatcher.cancel_task("task-1") is True
+
+    tsm.claim_quota_release.remote.assert_called_once_with("task-1")
+    user_repo.release_file_slot.assert_awaited_once_with(42)
+
+
+@pytest.mark.asyncio
+async def test_cancel_does_not_release_a_slot_the_worker_already_owns() -> None:
+    """A task cancelled *mid-flight* still runs its ``finally``.
+
+    Both paths then believe they owe the slot back; the claim is what stops the
+    second one, and a double release would drive ``file_count`` below reality
+    and hand out free quota.
+    """
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.claim_quota_release.remote = AsyncMock(return_value=False)
+    user_repo = MagicMock()
+    user_repo.release_file_slot = AsyncMock()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        user_repo=user_repo,
+    )
+
+    with patch("ray.cancel"):
+        assert await dispatcher.cancel_task("task-1") is True
+
+    user_repo.release_file_slot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_slot_release_does_not_fail_the_cancellation() -> None:
+    """The user asked to cancel and the cancel landed; bookkeeping is secondary."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    user_repo = MagicMock()
+    user_repo.release_file_slot = AsyncMock(side_effect=RuntimeError("postgres is down"))
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        user_repo=user_repo,
+    )
+
+    with patch("ray.cancel"):
+        assert await dispatcher.cancel_task("task-1") is True
