@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import traceback
 import uuid
 from datetime import UTC, datetime
@@ -46,6 +45,7 @@ class WorkerDispatcher(IndexingDispatcher):
         *,
         pool: Any,
         task_state_manager: Any,
+        completion_tracker: Any,
         vector_store: Any,
         document_repo: Any,
         workspace_repo: Any,
@@ -54,12 +54,12 @@ class WorkerDispatcher(IndexingDispatcher):
     ) -> None:
         self._pool = pool
         self._tsm = task_state_manager
+        self._completion_tracker = completion_tracker
         self._vector_store = vector_store
         self._document_repo = document_repo
         self._workspace_repo = workspace_repo
         self._collection = collection
         self._timeout = timeout
-        self._completion_tasks: set[asyncio.Task[None]] = set()
 
     async def _call(self, future: Any, task_description: str) -> Any:
         from services.workers.ray_utils import call_ray_actor_with_timeout
@@ -188,7 +188,7 @@ class WorkerDispatcher(IndexingDispatcher):
             )
             if registered is False:
                 raise RuntimeError(f"Task {task_id} was cancelled before worker ref registration")
-            self._track_completion(task_id, task, task_details)
+            self._track_completion(task_id, task)
         except Exception:
             mark_submit_failed = True
             if task is not None:
@@ -201,18 +201,8 @@ class WorkerDispatcher(IndexingDispatcher):
             raise
         return task_id
 
-    def _track_completion(self, task_id: str, task: Any, task_details: dict[str, Any]) -> None:
-        if not hasattr(task, "__await__"):
-            return
-        tracker = asyncio.create_task(self._record_completion(task_id, task, task_details))
-        self._completion_tasks.add(tracker)
-        tracker.add_done_callback(self._completion_tasks.discard)
-
-    async def _record_completion(self, task_id: str, task: Any, task_details: dict[str, Any]) -> None:
-        try:
-            await asyncio.gather(task, return_exceptions=True)
-        finally:
-            await self._record_finished_at(task_id, task_details)
+    def _track_completion(self, task_id: str, task: Any) -> None:
+        self._completion_tracker.track.remote(task_id, {"ref": task})
 
     async def _record_finished_at(self, task_id: str, task_details: dict[str, Any]) -> None:
         metadata = dict(task_details["metadata"])
@@ -515,11 +505,13 @@ def from_ray_namespace(
     collection: str,
 ) -> WorkerDispatcher:
     import ray
+    from services.workers.bootstrap import get_task_completion_tracker
     from services.workers.indexer_pool import build_indexer_pool
 
     return WorkerDispatcher(
         pool=build_indexer_pool(namespace=namespace),
         task_state_manager=ray.get_actor("TaskStateManager", namespace=namespace),
+        completion_tracker=get_task_completion_tracker(namespace=namespace),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,

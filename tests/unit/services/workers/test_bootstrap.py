@@ -10,6 +10,7 @@ without creating the actors, or the endpoint 404s for every parser pool.
 from __future__ import annotations
 
 import importlib
+from unittest.mock import Mock
 
 import pytest
 import services.workers.bootstrap as bootstrap
@@ -43,12 +44,42 @@ def test_initialize_worker_bootstrap_registers_parser_pool_factories(monkeypatch
 
     monkeypatch.setattr(bootstrap, "actor_creation_map", {})
     monkeypatch.setattr(bootstrap, "_settings", None)
-    for creator in ("init_llm_semaphore", "init_vlm_semaphore", "init_audio_semaphore", "get_task_state_manager"):
+    for creator in (
+        "init_llm_semaphore",
+        "init_vlm_semaphore",
+        "init_audio_semaphore",
+        "get_task_state_manager",
+        "get_task_completion_tracker",
+    ):
         monkeypatch.setattr(bootstrap, creator, lambda: None)
 
     bootstrap.initialize_worker_bootstrap(Settings())
 
     assert set(PARSER_POOL_ACTORS) <= set(bootstrap.actor_creation_map)
+
+
+def test_task_completion_tracker_is_detached_and_starts_recovery(monkeypatch):
+    calls = []
+    tracker = Mock()
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+
+    def fake_get_or_create_actor(name, cls, **options):
+        calls.append((name, cls, options))
+        return tracker
+
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", fake_get_or_create_actor)
+
+    assert bootstrap.get_task_completion_tracker() is tracker
+
+    ((name, _cls, options),) = calls
+    assert name == "TaskCompletionTracker"
+    assert options == {
+        "namespace": "openrag",
+        "remote_args": ("openrag",),
+        "lifetime": "detached",
+    }
+    tracker.recover.remote.assert_called_once_with()
+    assert bootstrap.actor_creation_map["TaskCompletionTracker"]() is tracker
 
 
 @pytest.mark.parametrize(
