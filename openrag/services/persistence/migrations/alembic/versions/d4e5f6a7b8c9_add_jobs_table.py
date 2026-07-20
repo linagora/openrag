@@ -23,7 +23,9 @@ depends_on: str | Sequence[str] | None = None
 _INDEXES = (
     ("ix_jobs_status_created_at", ["status", "created_at"]),
     ("ix_jobs_user_status", ["user_id", "status"]),
-    ("ix_jobs_completed_at", ["completed_at"]),
+    # Expression index: the retention sweep filters and orders on
+    # ``COALESCE(completed_at, created_at)``, not on ``completed_at`` alone.
+    ("ix_jobs_settled_at", [sa.text("COALESCE(completed_at, created_at)")]),
 )
 
 

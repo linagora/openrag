@@ -225,8 +225,13 @@ jobs = Table(
     Index("ix_jobs_status_created_at", "status", "created_at"),
     # Per-user task listing and the pending-task count.
     Index("ix_jobs_user_status", "user_id", "status"),
-    # Retention sweeps scan terminal rows by completion time.
-    Index("ix_jobs_completed_at", "completed_at"),
+    # Retention sweeps terminal rows by *settle* time, which is
+    # ``COALESCE(completed_at, created_at)`` — a row whose terminal write raced a
+    # failure has no ``completed_at`` and is aged out on ``created_at`` instead.
+    # The index has to match that expression: a plain b-tree on bare
+    # ``completed_at`` can serve neither the filter nor the ordering the sweep
+    # uses, so it would be maintained on every insert and read by nothing.
+    Index("ix_jobs_settled_at", text("COALESCE(completed_at, created_at)")),
 )
 
 
