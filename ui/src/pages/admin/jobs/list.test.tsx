@@ -204,6 +204,31 @@ describe("JobListPage filters", () => {
     expect(screen.getByText("1m 5s")).not.toBeNull();
   });
 
+  it("sorts jobs by file and creation time", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("zeta-task", "COMPLETED", "zeta.pdf", "docs", {
+          created_at: "2026-07-20T08:00:00+00:00",
+          duration_ms: 2000,
+        }),
+        task("alpha-task", "COMPLETED", "alpha.pdf", "docs", {
+          created_at: "2026-07-20T09:00:00+00:00",
+          duration_ms: 1000,
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByText("zeta.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "File" }));
+    expect(screen.getAllByRole("row")[1].textContent).toContain("alpha.pdf");
+
+    await userEvent.click(screen.getByRole("button", { name: "Created" }));
+    expect(screen.getAllByRole("row")[1].textContent).toContain("zeta.pdf");
+  });
+
   it("shows queue and worker pressure from the backend", async () => {
     getQueueInfoMock.mockResolvedValue({
       workers: { total_slots: 2, pool_size: 1, max_per_actor: 2 },

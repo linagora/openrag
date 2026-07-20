@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { usePermissions } from "@/lib/permissions";
 
 import { PageHeader } from "@/components/shared/page-header";
-import { DataTable } from "@/components/shared/data-table";
+import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -110,7 +110,9 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
   },
   {
     id: "file",
-    header: "File",
+    accessorFn: (task) =>
+      (str(task.details?.metadata?.filename) || str(task.details?.file_id)).toLowerCase(),
+    header: ({ column }) => <SortableHeader column={column} title="File" />,
     cell: ({ row }) => (
       <TruncatedValue
         value={str(row.original.details?.metadata?.filename) || str(row.original.details?.file_id)}
@@ -127,7 +129,7 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
   },
   {
     accessorKey: "created_at",
-    header: "Created",
+    header: ({ column }) => <SortableHeader column={column} title="Created" />,
     cell: ({ row }) => (
       <span className="whitespace-nowrap" title={row.original.created_at ?? undefined}>
         {formatDate(row.original.created_at)}
