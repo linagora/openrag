@@ -15,7 +15,6 @@ home: https://github.com/linagora/openrag
 sources:
   - https://github.com/linagora/openrag
 
-
 dependencies:
   - name: kuberay-operator
     version: "1.4.0"
