@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any
 
 from openrag.core.models.catalog import IndexationJob
@@ -40,6 +41,20 @@ class JobRepository(ABC):
 
     @abstractmethod
     async def update_job(self, job_id: str, **fields: Any) -> IndexationJob | None: ...
+
+    @abstractmethod
+    async def mark_failed_if_not_cancelled(self, job_id: str, *, error: str, completed_at: datetime) -> bool:
+        """Record a FAILED outcome unless the row is already CANCELLED.
+
+        Arbitration lives here rather than in the in-memory task actor because
+        the durable row is the only participant guaranteed to still exist. An
+        actor that restarted or evicted the entry cannot say whether the user
+        cancelled, and treating "I don't know" as "cancelled" leaves the job in a
+        non-terminal state that retention never sweeps — a permanent phantom in
+        the queue views, which is the failure #660 exists to remove.
+
+        Returns ``True`` if the row moved to FAILED.
+        """
 
     @abstractmethod
     async def count_by_status(self) -> dict[str, int]:

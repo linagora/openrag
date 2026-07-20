@@ -26,6 +26,8 @@ from core.ports.job_repo import ACTIVE_JOB_STATES, TERMINAL_JOB_STATES, JobRepos
 from core.utils.text import truncate_error_text
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     import asyncpg
 
 
@@ -136,6 +138,31 @@ class PgJobRepository(JobRepository):
             *updates.values(),
         )
         return _row_to_job(row)
+
+    async def mark_failed_if_not_cancelled(self, job_id: str, *, error: str, completed_at: datetime) -> bool:
+        """Move the row to FAILED unless a cancellation already claimed it.
+
+        The guard is part of the UPDATE, so a concurrent cancel either lands
+        before this statement (and the WHERE drops it) or after (and it
+        overwrites a FAILED row the user never saw). No row returned means the
+        job was already CANCELLED, or is gone.
+        """
+        row = await self.pool.fetchrow(
+            """
+            UPDATE jobs
+            SET status = 'FAILED',
+                error = $2,
+                completed_at = $3,
+                updated_at = now()
+            WHERE id = $1
+              AND status <> 'CANCELLED'
+            RETURNING id
+            """,
+            job_id,
+            truncate_error_text(error),
+            completed_at,
+        )
+        return row is not None
 
     async def purge_terminal_jobs(self, *, older_than_seconds: int, keep_last: int) -> int:
         if older_than_seconds < 0 or keep_last < 0:

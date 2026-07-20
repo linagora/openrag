@@ -75,6 +75,38 @@ class TestLifecycle:
         assert len(job.error) < 10_000
         assert "truncated" in job.error
 
+    async def test_a_late_failure_cannot_overwrite_a_cancellation(self, repo):
+        await repo.create_job(_job())
+        await repo.update_job("task-1", status=DocumentStatus.CANCELLED, completed_at=datetime.now(UTC))
+
+        wrote = await repo.mark_failed_if_not_cancelled("task-1", error="boom", completed_at=datetime.now(UTC))
+
+        assert wrote is False
+        assert (await repo.get_job("task-1")).status is DocumentStatus.CANCELLED
+
+    async def test_a_failure_lands_when_the_job_was_not_cancelled(self, repo):
+        """The write must not depend on the in-memory actor still knowing the task.
+
+        Gating it on the actor's verdict stranded the row in SERIALIZING whenever
+        the actor had restarted or evicted the entry, and retention only sweeps
+        terminal rows — so the job stayed in the queue views forever (#660).
+        """
+        await repo.create_job(_job())
+        await repo.update_job("task-1", status=DocumentStatus.SERIALIZING, started_at=datetime.now(UTC))
+
+        wrote = await repo.mark_failed_if_not_cancelled(
+            "task-1", error="boom\n" + "x" * 200_000, completed_at=datetime.now(UTC)
+        )
+
+        assert wrote is True
+        job = await repo.get_job("task-1")
+        assert job.status is DocumentStatus.FAILED
+        assert job.completed_at is not None
+        assert len(job.error) < 10_000  # truncation holds on this path too
+
+    async def test_marking_an_unknown_job_failed_reports_no_write(self, repo):
+        assert await repo.mark_failed_if_not_cancelled("ghost", error="boom", completed_at=datetime.now(UTC)) is False
+
     async def test_create_is_idempotent_for_a_redispatched_task(self, repo):
         await repo.create_job(_job())
         await repo.create_job(_job(status=DocumentStatus.CANCELLED))

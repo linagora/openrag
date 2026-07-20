@@ -136,6 +136,44 @@ async def test_update_job_truncates_error_text():
     assert "truncated" in stored
 
 
+async def test_mark_failed_if_not_cancelled_guards_on_status_in_sql():
+    """The CANCELLED check must be part of the UPDATE, not a read-then-write.
+
+    Arbitrating in the statement is what lets a worker whose state actor has
+    forgotten the task still reach a terminal row (#660): the actor can no
+    longer veto the write, and a concurrent cancel is still respected.
+    """
+    pool = _FakePool(row={"id": "task-1"})
+    assert await _repo(pool).mark_failed_if_not_cancelled(
+        "task-1", error="boom", completed_at=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+
+    query, params = pool.executed[0]
+    assert "UPDATE jobs" in query
+    assert "status <> 'CANCELLED'" in query
+    assert "task-1" in params
+
+
+async def test_mark_failed_if_not_cancelled_reports_a_cancelled_row():
+    pool = _FakePool(row=None)  # WHERE matched nothing: already CANCELLED, or gone
+
+    assert not await _repo(pool).mark_failed_if_not_cancelled(
+        "task-1", error="boom", completed_at=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+
+
+async def test_mark_failed_if_not_cancelled_truncates_error_text():
+    pool = _FakePool(row={"id": "task-1"})
+    await _repo(pool).mark_failed_if_not_cancelled(
+        "task-1", error="y" * 50_000, completed_at=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+
+    _, params = pool.executed[0]
+    stored = next(p for p in params if isinstance(p, str) and p.startswith("["))
+    assert len(stored) < 10_000
+    assert "truncated" in stored
+
+
 async def test_update_job_with_no_known_fields_is_a_noop_read():
     pool = _FakePool(row=_db_row())
     job = await _repo(pool).update_job("task-1", bogus="x")

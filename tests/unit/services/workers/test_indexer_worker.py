@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from core.models.catalog import DocumentStatus
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from services.workers.indexer_actor import IndexerWorker, _load_document
@@ -825,12 +826,23 @@ class FakeJobRepo:
     def __init__(self) -> None:
         self.updates: list[tuple[str, dict[str, Any]]] = []
         self.raise_on_update = False
+        # Job ids the durable store already holds as CANCELLED. Standing in for
+        # the ``status <> 'CANCELLED'`` guard that lives in SQL.
+        self.cancelled: set[str] = set()
 
     async def update_job(self, job_id: str, **fields: Any):
         if self.raise_on_update:
             raise RuntimeError("postgres down")
         self.updates.append((job_id, fields))
         return None
+
+    async def mark_failed_if_not_cancelled(self, job_id: str, *, error: str, completed_at: Any) -> bool:
+        if self.raise_on_update:
+            raise RuntimeError("postgres down")
+        if job_id in self.cancelled:
+            return False
+        self.updates.append((job_id, {"status": DocumentStatus.FAILED, "error": error, "completed_at": completed_at}))
+        return True
 
 
 def _statuses(job_repo: FakeJobRepo) -> list[str]:
@@ -894,12 +906,38 @@ async def test_process_file_records_the_failure_and_its_traceback(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_process_file_does_not_overwrite_a_cancelled_job(tmp_path: Path) -> None:
+    """A cancellation the user already saw survives a late failure write."""
     path = tmp_path / "doc.txt"
     path.write_bytes(b"hello")
     job_repo = FakeJobRepo()
+    job_repo.cancelled.add("t1")  # the user cancelled while the pipeline ran
+
+    class BoomPipeline:
+        async def run(self, row):
+            raise RuntimeError("boom")
+
+    worker = IndexerWorker(pipeline=BoomPipeline(), task_state_manager=_fake_tsm(), job_repo=job_repo)
+
+    with pytest.raises(RuntimeError):
+        await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert _statuses(job_repo) == ["SERIALIZING"]
+
+
+@pytest.mark.asyncio
+async def test_failure_is_recorded_even_when_the_state_actor_lost_the_task(tmp_path: Path) -> None:
+    """A forgetful state actor must not strand the durable row in SERIALIZING.
+
+    ``set_failed_if_not_cancelled`` answers False both for a real cancellation
+    and for a task the actor no longer has (restart, TTL eviction). Gating the
+    durable write on it left the row non-terminal forever, since retention only
+    sweeps terminal rows. Postgres now arbitrates, so this still reaches FAILED.
+    """
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"hello")
+    job_repo = FakeJobRepo()  # nothing cancelled: the row is live
     tsm = _fake_tsm()
-    # the user cancelled while the pipeline was running
-    tsm.set_failed_if_not_cancelled.remote = AsyncMock(return_value=False)
+    tsm.set_failed_if_not_cancelled.remote = AsyncMock(return_value=False)  # entry evicted
 
     class BoomPipeline:
         async def run(self, row):
@@ -910,7 +948,8 @@ async def test_process_file_does_not_overwrite_a_cancelled_job(tmp_path: Path) -
     with pytest.raises(RuntimeError):
         await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
 
-    assert _statuses(job_repo) == ["SERIALIZING"]
+    assert _statuses(job_repo) == ["SERIALIZING", "FAILED"]
+    assert "boom" in job_repo.updates[-1][1]["error"]
 
 
 @pytest.mark.asyncio

@@ -196,18 +196,20 @@ class IndexerWorker:
                     task_id=task_id,
                 )
             tb = traceback.format_exc()
-            # The actor arbitrates FAILED-vs-CANCELLED atomically under its lock;
-            # honouring its verdict here keeps the durable row from overwriting a
-            # cancellation the user already asked for (and already saw).
-            failed = await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
-            if failed:
-                await _update_job(
-                    self._job_repo,
-                    task_id,
-                    status=DocumentStatus.FAILED,
-                    error=tb,
-                    completed_at=datetime.now(UTC),
-                )
+            # Keep the hot cache in step, but do not let its verdict decide the
+            # durable write. ``set_failed_if_not_cancelled`` returns False both
+            # for a real cancellation *and* for an entry the actor no longer has
+            # (restart, TTL eviction, lost node), and skipping the write in the
+            # second case strands the row in SERIALIZING forever — retention
+            # sweeps terminal rows only. Postgres arbitrates instead: it is the
+            # one participant guaranteed to still know what the user asked for.
+            await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
+            await _mark_job_failed(
+                self._job_repo,
+                task_id,
+                error=tb,
+                completed_at=datetime.now(UTC),
+            )
             raise
         finally:
             if release_slot:
@@ -235,6 +237,26 @@ async def _update_job(job_repo: Any, task_id: str, **fields: Any) -> None:
             "Durable job state write failed; job history for this task may be incomplete",
             task_id=task_id,
             status=fields.get("status"),
+            error=str(exc),
+        )
+
+
+async def _mark_job_failed(job_repo: Any, task_id: str, *, error: str, completed_at: datetime) -> None:
+    """Mirror a FAILED outcome to the durable row, with the cancel check in SQL.
+
+    Same best-effort contract as :func:`_update_job` — a Postgres blip must not
+    mask the exception this runs inside. The CANCELLED guard is part of the
+    UPDATE, so a state actor that lost the task cannot leave the row non-terminal.
+    """
+    if job_repo is None:
+        return
+    try:
+        await job_repo.mark_failed_if_not_cancelled(task_id, error=error, completed_at=completed_at)
+    except Exception as exc:  # noqa: BLE001 - durable bookkeeping must not fail indexing
+        logger.warning(
+            "Durable job state write failed; job history for this task may be incomplete",
+            task_id=task_id,
+            status="FAILED",
             error=str(exc),
         )
 
