@@ -15,6 +15,8 @@ global:
   image:
     registry: docker.io
 
+# Chart-level toggle for umbrella charts that include openrag-stack as a
+# dependency with `condition: openrag-stack.enabled` — has no effect standalone.
 enabled: true
 
 # === Network isolation ===
@@ -41,13 +43,36 @@ persistence:
     logs: { size: 1Gi }
     venv: { size: 10Gi }
 
-# === KubeRay operator (sub-chart) ===
+# === Shared security defaults ===
+# Pod Security Standards "restricted" baseline, merged into each workload's
+# own podSecurityContext below via the openrag-stack.mergeSecurityContext
+# helper — components only set the runAsUser/runAsGroup/fsGroup specific to
+# their own Dockerfile (see e.g. openrag's OpenShift arbitrary-UID comment)
+# and inherit runAsNonRoot/seccompProfile from here. automountServiceAccountToken
+# and containerSecurityContext are identical for every workload today, so
+# templates read them directly from here with no per-component override.
+security:
+  automountServiceAccountToken: false
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+    readOnlyRootFilesystem: false  # workloads write to runtime paths (openrag /tmp, ray .venv, reranker model cache, ...)
+
+# === Ray (KubeRay operator + RayCluster) ===
 kuberay:
   enabled: false
 
 ray:
   enabled: false
-  dashboardHost: "0.0.0.0"
+  # 0.0.0.0 would expose the unauthenticated Ray dashboard on every pod
+  # interface (ShadowRay / CVE-2023-48022); loopback-only is safe because the
+  # dashboard is still reachable through ray.ingress / openrag.rayDashboard.ingress.
+  dashboardHost: "127.0.0.1"
   rayVersion: "2.47.1"
   enableInTreeAutoscaling: false
   annotations:
@@ -58,8 +83,17 @@ ray:
     minReplicas: 1
     maxReplicas: 1
   serviceAccountName: ""
-  podSecurityContext: {}
-  containerSecurityContext: {}
+  # infra/docker/ray.Dockerfile creates a plain uid/gid 10001 "app" user (no
+  # arbitrary-GID pattern like openrag's image) and chowns /app to it. Merged
+  # with the shared security.podSecurityContext defaults above.
+  podSecurityContext:
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+  # Uncomment to override the shared security.automountServiceAccountToken /
+  # security.containerSecurityContext defaults for this workload specifically.
+  # automountServiceAccountToken: false
+  # containerSecurityContext: {}
   nodeSelector: {}
   image:
     registry: ghcr.io
@@ -104,8 +138,9 @@ postgresql:
   fullnameOverride: "openrag-postgresql"
   auth:
     username: &pgUser root
-    # Override at install, e.g. --set postgresql.auth.password=$(openssl rand -hex 16)
-    password: &pgPass "CHANGE_ME_STRONG_PASSWORD"
+    # Must be supplied at install time, e.g. --set postgresql.auth.password=$(openssl rand -hex 16)
+    # — templates fail closed (secrets-env.yaml's requiredSecrets check) if left empty.
+    password: ""
   primary:
     persistence:
       enabled: true
@@ -114,6 +149,7 @@ postgresql:
   service:
     port: &pgPort 5432
 
+# === PostgreSQL provisioning & migrations ===
 postgresProvisioning:
   # Keep the bundled PostgreSQL chart self-contained by default. Managed
   # Postgres deployments should set this to false and point POSTGRES_* values
@@ -322,17 +358,15 @@ reranker:
     limits:
       cpu: "4"
       memory: "16Gi"
+  serviceAccountName: ""
+  # Merged with the shared security.podSecurityContext defaults above.
   podSecurityContext:
-    runAsNonRoot: true
     runAsUser: 1000
     fsGroup: 1000
-  serviceAccountName: ""
-  automountServiceAccountToken: false
-  containerSecurityContext:
-    allowPrivilegeEscalation: false
-    capabilities:
-      drop: ["ALL"]
-    readOnlyRootFilesystem: false  # model cache writes to /app/.cache
+  # Uncomment to override the shared security.automountServiceAccountToken /
+  # security.containerSecurityContext defaults for this workload specifically.
+  # automountServiceAccountToken: false
+  # containerSecurityContext: {}
 
 # === Admin UI (replaces indexer-ui) ===
 # React SPA served by an nginx bundled inside the image. VITE_BASE_PATH=/app/
@@ -343,20 +377,16 @@ reranker:
 # build-args; this chart cannot do it via runtime env.
 adminUi:
   enabled: true
-
   image:
     registry: ""
     repository: "linagoraai/openrag-admin-ui"
     tag: v2.0.0-rc.1
     pullPolicy: IfNotPresent
-
   replicaCount: 1
-
   service:
     type: ClusterIP
     port: 8080
     targetPort: 8080
-
   # Routing note: this chart exposes admin-ui and openrag/ray-serve as two
   # separate optional Ingress resources (this block and openrag.ingress),
   # rather than a single combined Ingress — mirrors the docker-compose
@@ -370,30 +400,27 @@ adminUi:
   # e.g. OpenShift HAProxy Routes or a Gateway API implementation).
   # There is no automatic "/" -> "/app/" redirect in this mode (unlike the
   # compose front-door) — users must browse to /app/ directly.
+  # Off by default. This flag only adds the /app/ path to openrag.ingress's
+  # single Ingress resource (see templates/openrag.yaml) — it has no effect
+  # unless openrag.ingress.enabled=true too.
   ingress:
-    enabled: true
-
+    enabled: false
   resources: {}
-
+  serviceAccountName: ""
+  # Uncomment to override the shared security.automountServiceAccountToken /
+  # security.containerSecurityContext defaults for this workload specifically.
+  # automountServiceAccountToken: false
+  # containerSecurityContext: {}
   # Base image is nginxinc/nginx-unprivileged:1.27-alpine, listening on 8080 so
   # it never needs root/NET_BIND_SERVICE. infra/docker/ui.Dockerfile explicitly
   # chowns /var/cache/nginx, /etc/nginx/conf.d and /var/run to 10001:10001 and
   # makes them group-writable, matching runAsUser/runAsGroup below exactly —
   # fsGroup would not help here instead (it only affects mounted volumes, not
   # paths baked into the image, and this container has no volumeMounts at all).
+  # Merged with the shared security.podSecurityContext defaults above.
   podSecurityContext:
-    runAsNonRoot: true
     runAsUser: 10001
     runAsGroup: 10001
-  serviceAccountName: ""
-  automountServiceAccountToken: false
-
-  containerSecurityContext:
-    allowPrivilegeEscalation: false
-    capabilities:
-      drop: ["ALL"]
-    readOnlyRootFilesystem: false
-  
   probes:
     startup: {}
     readiness:
@@ -420,8 +447,11 @@ openrag:
     type: ClusterIP
     port: 8080
     targetPort: 8080
+  # Off by default: enabling requires an explicit openrag.ingress.host (see
+  # templates/openrag.yaml's `required` guard) so the chart never exposes an
+  # unauthenticated wildcard-host Ingress by accident.
   ingress:
-    enabled: true
+    enabled: false
     className: ""
     host: ""
     annotations: {}
@@ -467,6 +497,11 @@ openrag:
   # bundles into one file on a shared emptyDir before the main container
   # starts (see values-openrag.yaml's kc-ca-bundle example).
   extraInitContainers: []
+  serviceAccountName: ""
+  # Uncomment to override the shared security.automountServiceAccountToken /
+  # security.containerSecurityContext defaults for this workload specifically.
+  # automountServiceAccountToken: false
+  # containerSecurityContext: {}
   # infra/docker/api.Dockerfile bakes an "openrag" user as uid 10001, primary
   # gid 0 (`useradd --uid 10001 --gid 0`), and grants group-write on the paths
   # it writes at runtime (venv, egg-info, HOME, data/db/logs, HF cache, uv
@@ -476,18 +511,11 @@ openrag:
   # ("Cannot update time stamp of directory 'openrag.egg-info'"). fsGroup can
   # stay 10001: it's only applied (and added as a supplementary group) to the
   # mounted PVCs (data/logs/model_weights/venv), not to the image's own paths.
+  # Merged with the shared security.podSecurityContext defaults above.
   podSecurityContext:
-    runAsNonRoot: true
     runAsUser: 10001
     runAsGroup: 0
     fsGroup: 10001
-  serviceAccountName: ""
-  automountServiceAccountToken: false
-  containerSecurityContext:
-    allowPrivilegeEscalation: false
-    capabilities:
-      drop: ["ALL"]
-    readOnlyRootFilesystem: false  # app writes to /tmp and other runtime paths
   # Probe configuration. Override with exec probes when ENABLE_RAY_SERVE=true,
   # since the Ray Serve HTTP proxy runs on the Ray head (not on this pod).
   probes:
@@ -656,7 +684,10 @@ env:
     VLM_API_KEY: "" # VLM API KEY
     EMBEDDER_API_KEY: ""
     TRANSCRIBER_API_KEY: ""
-    POSTGRES_PASSWORD: *pgPass
+    # Read live from postgresql.auth.password (not the *pgPass anchor, which
+    # only resolves within values.yaml and goes stale once overridden via
+    # --set/-f) so the secret always matches the actual DB credential.
+    POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
     AUTH_TOKEN: "" # API KEY for OpenRAG
     HF_TOKEN: "" # HuggingFace token
     RERANKER_API_KEY: "EMPTY"  # Set when using an external reranker that requires authentication

@@ -87,3 +87,14 @@ When env.existingSecret is set, that name is returned directly.
 {{- printf "%s-env-secrets" (include "openrag-stack.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}
+
+{{/*
+Merge a component's security context override (e.g. just runAsUser/runAsGroup/
+fsGroup, tuned to that component's own Dockerfile) on top of a shared default
+from values.yaml's top-level `security` block — component keys win on
+conflicts, everything else is inherited from the default.
+Usage: {{ include "openrag-stack.mergeSecurityContext" (dict "component" .Values.ray.podSecurityContext "default" .Values.security.podSecurityContext) }}
+*/}}
+{{- define "openrag-stack.mergeSecurityContext" -}}
+{{- merge (deepCopy .component) .default | toYaml }}
+{{- end }}

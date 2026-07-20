@@ -36,14 +36,14 @@ spec:
         app.kubernetes.io/component: postgres-migration
     spec:
       restartPolicy: Never
-      automountServiceAccountToken: {{ .Values.openrag.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ .Values.openrag.automountServiceAccountToken | default .Values.security.automountServiceAccountToken }}
       securityContext:
-        {{- toYaml .Values.openrag.podSecurityContext | nindent 8 }}
+        {{- include "openrag-stack.mergeSecurityContext" (dict "component" .Values.openrag.podSecurityContext "default" .Values.security.podSecurityContext) | nindent 8 }}
       containers:
         - name: migrate
           image: "{{ .Values.openrag.image.registry | default .Values.global.image.registry }}/{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
           securityContext:
-            {{- toYaml .Values.openrag.containerSecurityContext | nindent 12 }}
+            {{- include "openrag-stack.mergeSecurityContext" (dict "component" (.Values.openrag.containerSecurityContext | default dict) "default" .Values.security.containerSecurityContext) | nindent 12 }}
           workingDir: /app/openrag
           command:
             - sh

@@ -7,13 +7,18 @@ MIGRATION_JOB_TEMPLATE = ROOT / "infra" / "charts" / "openrag-stack" / "template
 
 
 def test_postgres_migration_job_uses_secret_ref_instead_of_literal_secret_values() -> None:
+    """This chart names its ConfigMap/Secret via the openrag-stack.fullname /
+    secretName helpers (release-scoped, e.g. for ArgoCD) rather than the fixed
+    "rag-env"/"rag-env-secrets" names — assert it references those same
+    helpers instead of inlining literal secret values.
+    """
     template = MIGRATION_JOB_TEMPLATE.read_text(encoding="utf-8")
 
     assert "envFrom:" in template
     assert "configMapRef:" in template
-    assert "name: rag-env" in template
+    assert 'name: {{ include "openrag-stack.fullname" . }}-env' in template
     assert "secretRef:" in template
-    assert "name: rag-env-secrets" in template
+    assert 'name: {{ include "openrag-stack.secretName" . }}' in template
     assert ".Values.env.secrets" not in template
     assert 'value: "{{ $value }}"' not in template
 

@@ -15,22 +15,18 @@ spec:
       labels:
         {{- include "openrag-stack.componentSelectorLabels" (dict "component" "admin-ui" "context" $) | nindent 8 }}
     spec:
-      {{- with .Values.adminUi.podSecurityContext }}
       securityContext:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- include "openrag-stack.mergeSecurityContext" (dict "component" .Values.adminUi.podSecurityContext "default" .Values.security.podSecurityContext) | nindent 8 }}
       {{- with .Values.adminUi.serviceAccountName }}
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
-      automountServiceAccountToken: {{ .Values.adminUi.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ .Values.adminUi.automountServiceAccountToken | default .Values.security.automountServiceAccountToken }}
       containers:
         - name: admin-ui
           image: "{{ .Values.adminUi.image.registry | default .Values.global.image.registry }}/{{ .Values.adminUi.image.repository }}:{{ .Values.adminUi.image.tag }}"
           imagePullPolicy: {{ .Values.adminUi.image.pullPolicy }}
-          {{- with .Values.adminUi.containerSecurityContext }}
           securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- include "openrag-stack.mergeSecurityContext" (dict "component" (.Values.adminUi.containerSecurityContext | default dict) "default" .Values.security.containerSecurityContext) | nindent 12 }}
           ports:
             - containerPort: {{ .Values.adminUi.service.targetPort }}
               name: admin-ui

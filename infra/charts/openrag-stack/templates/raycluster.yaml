@@ -22,18 +22,14 @@ spec:
         {{- with .Values.ray.serviceAccountName }}
         serviceAccountName: {{ tpl . $ }}
         {{- end }}
-        automountServiceAccountToken: {{ .Values.ray.automountServiceAccountToken }}
-        {{- with .Values.ray.podSecurityContext }}
+        automountServiceAccountToken: {{ .Values.ray.automountServiceAccountToken | default .Values.security.automountServiceAccountToken }}
         securityContext:
-          {{- toYaml . | nindent 10 }}
-        {{- end }}
+          {{- include "openrag-stack.mergeSecurityContext" (dict "component" .Values.ray.podSecurityContext "default" .Values.security.podSecurityContext) | nindent 10 }}
         initContainers:
           - name: init-venv-sync
             image: "{{ .Values.ray.image.registry | default .Values.global.image.registry }}/{{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}"
-            {{- with .Values.ray.containerSecurityContext }}
             securityContext:
-              {{- toYaml . | nindent 14 }}
-            {{- end }}
+              {{- include "openrag-stack.mergeSecurityContext" (dict "component" (.Values.ray.containerSecurityContext | default dict) "default" .Values.security.containerSecurityContext) | nindent 14 }}
             command:
               - sh
               - -c
@@ -52,10 +48,8 @@ spec:
         containers:
           - name: ray-head
             image: "{{ .Values.ray.image.registry | default .Values.global.image.registry }}/{{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}"
-            {{- with .Values.ray.containerSecurityContext }}
             securityContext:
-              {{- toYaml . | nindent 14 }}
-            {{- end }}
+              {{- include "openrag-stack.mergeSecurityContext" (dict "component" (.Values.ray.containerSecurityContext | default dict) "default" .Values.security.containerSecurityContext) | nindent 14 }}
             command: ["uv"]
             args:
               - "run"
@@ -126,20 +120,14 @@ spec:
           {{- with $.Values.ray.serviceAccountName }}
           serviceAccountName: {{ tpl . $ }}
           {{- end }}
-          {{- with $.Values.ray.automountServiceAccountToken }}
-          automountServiceAccountToken: {{ . }}
-          {{- end }}
-          {{- with $.Values.ray.podSecurityContext }}
+          automountServiceAccountToken: {{ $.Values.ray.automountServiceAccountToken | default $.Values.security.automountServiceAccountToken }}
           securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- include "openrag-stack.mergeSecurityContext" (dict "component" $.Values.ray.podSecurityContext "default" $.Values.security.podSecurityContext) | nindent 12 }}
           containers:
             - name: ray-worker
               image: "{{ $.Values.ray.image.registry | default $.Values.global.image.registry }}/{{ $.Values.ray.image.repository }}:{{ $.Values.ray.image.tag }}"
-              {{- with $.Values.ray.containerSecurityContext }}
               securityContext:
-                {{- toYaml . | nindent 16 }}
-              {{- end }}
+                {{- include "openrag-stack.mergeSecurityContext" (dict "component" ($.Values.ray.containerSecurityContext | default dict) "default" $.Values.security.containerSecurityContext) | nindent 16 }}
               command: ["/bin/bash", "-lc", "--"]
               args:
                 - uv run $KUBERAY_GEN_RAY_START_CMD
@@ -199,9 +187,7 @@ spec:
                 name: {{ include "openrag-stack.fullname" . }}-raycluster-head-svc
                 port:
                   name: ray-dashboard
-      {{- with .Values.ray.ingress.host }}
-      host: {{ . | quote }}
-      {{- end }}
+      host: {{ required "ray.ingress.host must be set when ray.ingress.enabled=true" .Values.ray.ingress.host | quote }}
   {{- with .Values.ray.ingress.tls }}
   tls:
     {{- toYaml . | nindent 4 }}

@@ -15,14 +15,12 @@ spec:
       labels:
         {{- include "openrag-stack.componentSelectorLabels" (dict "component" "reranker" "context" $) | nindent 8 }}
     spec:
-      {{- with .Values.reranker.podSecurityContext }}
       securityContext:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- include "openrag-stack.mergeSecurityContext" (dict "component" .Values.reranker.podSecurityContext "default" .Values.security.podSecurityContext) | nindent 8 }}
       {{- with .Values.reranker.serviceAccountName }}
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
-      automountServiceAccountToken: {{ .Values.reranker.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ .Values.reranker.automountServiceAccountToken | default .Values.security.automountServiceAccountToken }}
       {{- if .Values.reranker.runtimeClassName }}
       runtimeClassName: {{ .Values.reranker.runtimeClassName }}
       {{- end }}
@@ -33,7 +31,7 @@ spec:
         - name: reranker
           image: "{{ .Values.reranker.image.registry | default .Values.global.image.registry }}/{{ .Values.reranker.image.repository }}:{{ .Values.reranker.image.tag }}"
           securityContext:
-            {{- toYaml .Values.reranker.containerSecurityContext | nindent 12 }}
+            {{- include "openrag-stack.mergeSecurityContext" (dict "component" (.Values.reranker.containerSecurityContext | default dict) "default" .Values.security.containerSecurityContext) | nindent 12 }}
           args:
             - "v2"
             - "--model-id"

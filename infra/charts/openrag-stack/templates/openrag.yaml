@@ -16,14 +16,12 @@ spec:
       labels:
         {{- include "openrag-stack.componentSelectorLabels" (dict "component" "openrag" "context" $) | nindent 8 }}
     spec:
-      {{- with .Values.openrag.podSecurityContext }}
       securityContext:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- include "openrag-stack.mergeSecurityContext" (dict "component" .Values.openrag.podSecurityContext "default" .Values.security.podSecurityContext) | nindent 8 }}
       {{- with .Values.openrag.serviceAccountName }}
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
-      automountServiceAccountToken: {{ .Values.openrag.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ .Values.openrag.automountServiceAccountToken | default .Values.security.automountServiceAccountToken }}
       {{- if or .Values.openrag.extraInitContainers .Values.ray.enabled }}
       initContainers:
         {{- with .Values.openrag.extraInitContainers }}
@@ -32,10 +30,8 @@ spec:
         {{- if .Values.ray.enabled }}
         - name: init-venv
           image: "{{ .Values.openrag.image.registry | default .Values.global.image.registry }}/{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
-          {{- with .Values.openrag.containerSecurityContext }}
           securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- include "openrag-stack.mergeSecurityContext" (dict "component" (.Values.openrag.containerSecurityContext | default dict) "default" .Values.security.containerSecurityContext) | nindent 12 }}
           command:
             - sh
             - -c
@@ -54,10 +50,8 @@ spec:
         - name: openrag
           image: "{{ .Values.openrag.image.registry | default .Values.global.image.registry }}/{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
           imagePullPolicy: {{ .Values.openrag.image.pullPolicy }}
-          {{- with .Values.openrag.containerSecurityContext }}
           securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- include "openrag-stack.mergeSecurityContext" (dict "component" (.Values.openrag.containerSecurityContext | default dict) "default" .Values.security.containerSecurityContext) | nindent 12 }}
           ports:
             - containerPort: {{ .Values.openrag.service.targetPort }}
               name: openrag
@@ -187,9 +181,7 @@ spec:
                 port:
                   name: openrag
                 {{- end }}
-      {{- with .Values.openrag.ingress.host }}
-      host: {{ . | quote }}
-      {{- end }}
+      host: {{ required "openrag.ingress.host must be set when openrag.ingress.enabled=true" .Values.openrag.ingress.host | quote }}
   {{- with .Values.openrag.ingress.tls }}
   tls:
     {{- toYaml . | nindent 4 }}
@@ -219,9 +211,7 @@ spec:
                 name: {{ include "openrag-stack.fullname" . }}-openrag
                 port:
                   name: ray-dashboard
-      {{- with .Values.openrag.rayDashboard.ingress.host }}
-      host: {{ . | quote }}
-      {{- end }}
+      host: {{ required "openrag.rayDashboard.ingress.host must be set when openrag.rayDashboard.ingress.enabled=true" .Values.openrag.rayDashboard.ingress.host | quote }}
   {{- with .Values.openrag.rayDashboard.ingress.tls }}
   tls:
     {{- toYaml . | nindent 4 }}
