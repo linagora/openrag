@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 from collections.abc import AsyncIterator
 
 import httpx
@@ -41,6 +42,26 @@ def _parse_response(resp: httpx.Response) -> dict:
         return resp.json()
     except ValueError as e:
         raise InferenceError(f"Invalid JSON from inference server ({resp.url}): {e}", status_code=502) from e
+
+
+# A literal backslash followed by "u" and anything other than 4 hex digits.
+# json.dumps always escapes a literal backslash to `\\`, so this pattern can
+# only appear in a text's *decoded* content, never in a properly-serialized
+# JSON body — but some downstream JSON parsers (observed: a Go-based embedder
+# gateway) still choke on it with "invalid character ... in \u hexadecimal
+# character escape". Flagging it here pinpoints which input text to inspect.
+_SUSPECT_UNICODE_ESCAPE = re.compile(r"\\u(?![0-9a-fA-F]{4})")
+
+
+def _find_suspect_escapes(texts: list[str]) -> list[dict]:
+    findings = []
+    for i, text in enumerate(texts):
+        match = _SUSPECT_UNICODE_ESCAPE.search(text)
+        if match:
+            start = max(0, match.start() - 15)
+            end = min(len(text), match.end() + 15)
+            findings.append({"index": i, "snippet": text[start:end]})
+    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -314,12 +335,16 @@ class VLLMEmbedder(Embedder):
                 error=str(exc),
             ) from exc
         except httpx.HTTPStatusError as exc:
-            raise EmbeddingAPIError(
-                f"Embedder API error ({exc.response.status_code})",
-                model_name=self._model,
-                base_url=self._endpoint,
-                error=exc.response.text,
-            ) from exc
+            extra: dict = {
+                "model_name": self._model,
+                "base_url": self._endpoint,
+                "error": exc.response.text,
+            }
+            if exc.response.status_code == 400:
+                suspect_texts = _find_suspect_escapes(texts)
+                if suspect_texts:
+                    extra["suspect_texts"] = suspect_texts
+            raise EmbeddingAPIError(f"Embedder API error ({exc.response.status_code})", **extra) from exc
 
         try:
             data = resp.json()["data"]
