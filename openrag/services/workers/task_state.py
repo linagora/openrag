@@ -78,9 +78,27 @@ class TaskStateManager:
     async def _ensure_task(self, task_id: str) -> TaskInfo:
         """Create the entry for a task we are hearing about for the first time.
 
-        Only ``set_state`` may do this: it is the dispatcher's first write for a
-        task id (``QUEUED``, before ``set_details``/``set_object_ref``), so it is
-        the one caller for which "not present" legitimately means "new".
+        The call that legitimately means "new" is the dispatcher's opening
+        ``QUEUED`` write, the first write for a task id (before
+        ``set_details``/``set_object_ref``).
+
+        ``set_state`` is *not* dispatcher-only, though: the worker also writes
+        ``SERIALIZING`` and ``COMPLETED`` through it. That is safe today only
+        because of ordering -- the worker's first write happens long before the
+        task can be terminal, and eviction only ever removes *terminal* entries,
+        so there is nothing evicted for it to resurrect. Anything that breaks
+        that ordering (a ``set_state`` after a terminal transition) reopens the
+        leak this guard exists to close: a resurrected entry with a
+        *non-terminal* state never re-enters ``terminal_at`` and is never
+        evictable again.
+
+        Making creation opt-in (``create=True``, dispatcher only) is the durable
+        fix, but it changes the signature of a **detached** actor method --
+        ``get_or_create_actor(..., lifetime="detached")`` keeps the previous
+        instance alive across an API deploy, so a new dispatcher would call an
+        old actor and every dispatch would fail on the unexpected keyword. It
+        therefore has to be sequenced with a deliberate actor restart rather
+        than shipped as a plain code change (tracked in #676).
 
         Every *other* writer must go through :meth:`_live_task`. Creating an
         entry from a late write would resurrect an evicted task with
