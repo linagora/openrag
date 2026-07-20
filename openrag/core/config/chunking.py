@@ -19,3 +19,13 @@ class ChunkerConfig(ConfigMixin):
     # raise at construction ("larger chunk overlap than chunk size"), so a bad
     # CHUNK_OVERLAP_RATE must fail at config load, not per-file at index time.
     chunk_overlap_rate: float = Field(default=0.2, ge=0.0, lt=1.0)
+
+    # ``structured_section`` knobs (ignored by ``recursive_splitter``). Sizing
+    # defaults derive from ``chunk_size`` when left None (target=chunk_size,
+    # max≈1.5×, min≈¼×). ``heading_keywords`` / ``leaf_patterns`` make boundary
+    # detection generalize beyond French legal codes; None uses the built-ins.
+    min_tokens: int | None = None
+    max_tokens: int | None = None
+    prepend_heading_path: bool = True
+    heading_keywords: list[str] | None = None
+    leaf_patterns: list[str] | None = None
