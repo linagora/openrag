@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 import traceback
 import uuid
@@ -608,16 +609,43 @@ class WorkerDispatcher(IndexingDispatcher):
             # actually COMPLETED from being recorded as CANCELLED in `jobs`.
             return False
 
-        ray.cancel(obj_ref["ref"], recursive=True)
-        await self._record_job(
-            "cancel",
-            task_id,
-            lambda: self._job_repo.update_job(
-                task_id,
-                status=DocumentStatus.CANCELLED,
-                completed_at=datetime.now(UTC),
-            ),
-        )
+        # The durable write is part of the claim, so it happens *before*
+        # ``ray.cancel`` -- not after. ``ray.cancel`` kills the only other
+        # writer of this row, and everything between here and there runs
+        # without a successor that could heal a half-applied cancel:
+        # ``_record_job`` catches ``Exception``, but a client disconnect or a
+        # graceful shutdown raises ``asyncio.CancelledError``, a
+        # ``BaseException`` that sails straight through it. Writing after the
+        # kill would leave the actor CANCELLED and the row stuck on its last
+        # active status forever -- non-terminal, so ``purge_terminal_jobs``
+        # never sweeps it, ``count_by_status`` counts it active forever, and
+        # the actor-first and durable-first read paths answer differently for
+        # the same task id.
+        #
+        # Ordering it first cannot mis-record a job that escapes the cancel:
+        # the actor claim above already succeeded, and ``update_job`` keeps
+        # CANCELLED sticky, so a worker that somehow finishes anyway is
+        # declined by the same guard in both stores.
+        try:
+            # ``shield`` so a client disconnect cannot abort the UPDATE in
+            # flight: the write runs to completion even though the
+            # ``CancelledError`` propagates to us immediately.
+            await asyncio.shield(
+                self._record_job(
+                    "cancel",
+                    task_id,
+                    lambda: self._job_repo.update_job(
+                        task_id,
+                        status=DocumentStatus.CANCELLED,
+                        completed_at=datetime.now(UTC),
+                    ),
+                )
+            )
+        finally:
+            # In a ``finally`` so the worker still dies if the durable write
+            # raises: the actor has already claimed the cancellation, and
+            # leaving the worker running would contradict both records.
+            ray.cancel(obj_ref["ref"], recursive=True)
         # The reserved quota slot (#664) is deliberately not released here.
         # A task cancelled mid-flight gives its slot back in
         # ``IndexerWorker.process_file``'s ``finally``; releasing here too

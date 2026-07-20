@@ -1612,3 +1612,45 @@ async def test_purge_failure_never_fails_a_dispatch() -> None:
         workspace_ids=None,
         replace=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_writes_the_durable_row_before_killing_the_worker() -> None:
+    """The durable CANCELLED must be written before ``ray.cancel``, not after.
+
+    ``ray.cancel`` kills the only other writer of the row, and the write that
+    follows it has no successor that could heal it: ``_record_job`` catches
+    ``Exception``, but a client disconnect raises ``asyncio.CancelledError`` —
+    a ``BaseException`` — straight through. Writing after the kill therefore
+    left the actor CANCELLED and the row stuck on its last active status
+    forever: non-terminal, so retention never sweeps it and it is counted
+    active for good, while the actor-first and durable-first read paths answer
+    differently for the same task id.
+    """
+    order: list[str] = []
+    job_repo = _job_repo()
+    job_repo.update_job = AsyncMock(side_effect=lambda *a, **k: order.append("durable"))
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    with patch("ray.cancel", side_effect=lambda *a, **k: order.append("ray.cancel")):
+        assert await dispatcher.cancel_task("task-1") is True
+
+    assert order == ["durable", "ray.cancel"], order
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_during_the_durable_write_still_kills_the_worker() -> None:
+    """A ``BaseException`` out of the durable write must not skip ``ray.cancel``.
+
+    The user asked for a cancellation and the actor already claimed it; leaving
+    the worker running would contradict both records.
+    """
+    job_repo = _job_repo()
+    job_repo.update_job = AsyncMock(side_effect=asyncio.CancelledError())
+    dispatcher = _dispatcher_with_job_repo(job_repo)
+
+    with patch("ray.cancel") as cancel:
+        with pytest.raises(asyncio.CancelledError):
+            await dispatcher.cancel_task("task-1")
+
+    cancel.assert_called_once()
