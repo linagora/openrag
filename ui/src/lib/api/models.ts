@@ -231,6 +231,53 @@ export function mergeModelEndpointLlmContext(
   return result;
 }
 
+// Which client class an endpoint is built with — a control key inside `extra`
+// (see di/factories.py:make_component_factory), surfaced here as a per-type
+// "Vendor" dropdown instead of free-text JSON. Options mirror the registries
+// in openrag/services/inference/*.py; defaults mirror openrag/di/container.py.
+export const IMPLEMENTATION_KEY = "implementation";
+
+export const VENDOR_OPTIONS_BY_TYPE: Record<ModelType, string[]> = {
+  embedder: ["vllm", "ollama"],
+  reranker: ["infinity", "openai", "tei"],
+  llm: ["vllm", "ollama"],
+  vlm: ["vllm"],
+};
+
+export const DEFAULT_VENDOR_BY_TYPE: Record<ModelType, string> = {
+  embedder: "vllm",
+  reranker: "infinity",
+  llm: "vllm",
+  vlm: "vllm",
+};
+
+/** Pull the vendor/`implementation` control key out of `extra` into a form field. */
+export function splitModelEndpointImplementation(extra: Record<string, unknown>): {
+  implementation: string;
+  extra: Record<string, unknown>;
+} {
+  const { [IMPLEMENTATION_KEY]: implementation, ...rest } = extra;
+  return {
+    implementation: typeof implementation === "string" ? implementation : "",
+    extra: rest,
+  };
+}
+
+/** Merge the vendor field back into `extra`. Blank omits the key entirely
+ *  (server falls back to its own `default_impl` per model type). */
+export function mergeModelEndpointImplementation(
+  extra: Record<string, unknown>,
+  implementation: string,
+): Record<string, unknown> {
+  const result = { ...extra };
+  if (implementation.trim()) {
+    result[IMPLEMENTATION_KEY] = implementation.trim();
+  } else {
+    delete result[IMPLEMENTATION_KEY];
+  }
+  return result;
+}
+
 /** List endpoints (bare array). Optionally filter by model type. */
 export function listModelEndpoints(modelType?: ModelType) {
   const qs = modelType ? `?model_type=${enc(modelType)}` : "";

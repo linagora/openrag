@@ -19,15 +19,19 @@ import {
   createModelEndpoint,
   updateModelEndpoint,
   deleteModelEndpoint,
+  DEFAULT_VENDOR_BY_TYPE,
   mergeModelEndpointApiKeyExtra,
+  mergeModelEndpointImplementation,
   mergeModelEndpointLlmContext,
   prepareModelEndpointExtraForSubmit,
   revealModelEndpointApiKey,
   REDACTED_SECRET,
   setDefaultModelEndpoint,
   splitModelEndpointApiKeyExtra,
+  splitModelEndpointImplementation,
   splitModelEndpointLlmContext,
   validateModelEndpoint,
+  VENDOR_OPTIONS_BY_TYPE,
 } from "@/lib/api/models";
 import type {
   ModelEndpointResponse,
@@ -50,7 +54,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { VendorIcon } from "@/components/ui/vendor-icon";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -306,10 +312,13 @@ function EndpointDialog({
   const [apiKey, setApiKey] = useState("");
   const [maxContextSize, setMaxContextSize] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
+  const [vendor, setVendor] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
 
+  const modelType = (editing ? editing.model_type : activeTab) as ModelType;
   // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
-  const isLlm = (editing ? editing.model_type : activeTab) === "llm";
+  const isLlm = modelType === "llm";
+  const vendorOptions = VENDOR_OPTIONS_BY_TYPE[modelType];
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
   const [validationMsg, setValidationMsg] = useState<string | null>(null);
@@ -332,7 +341,8 @@ function EndpointDialog({
       setRevealingApiKey(false);
       if (editing) {
         const { apiKey: displayApiKey, extra: apiExtra } = splitModelEndpointApiKeyExtra(editing.extra);
-        const { llmContext, extra: displayExtra } = splitModelEndpointLlmContext(apiExtra);
+        const { implementation, extra: implExtra } = splitModelEndpointImplementation(apiExtra);
+        const { llmContext, extra: displayExtra } = splitModelEndpointLlmContext(implExtra);
         setName(editing.name);
         setEndpoint(editing.endpoint);
         setModelName(editing.model_name || "");
@@ -341,6 +351,7 @@ function EndpointDialog({
         setApiKey(displayApiKey);
         setMaxContextSize(llmContext.maxContextSize);
         setMaxOutputTokens(llmContext.maxOutputTokens);
+        setVendor(implementation || DEFAULT_VENDOR_BY_TYPE[editing.model_type]);
         setExtraJson(JSON.stringify(displayExtra, null, 2));
         setValidated(true);
         setValidationMsg(
@@ -357,6 +368,7 @@ function EndpointDialog({
         setApiKey("");
         setMaxContextSize("");
         setMaxOutputTokens("");
+        setVendor(DEFAULT_VENDOR_BY_TYPE[activeTab as ModelType]);
         setExtraJson("{}");
         setValidated(null);
         setValidationMsg(null);
@@ -369,7 +381,8 @@ function EndpointDialog({
   // raw extra is compared with them stripped out (as the textarea shows them).
   useEffect(() => {
     const editingExtra = editing ? splitModelEndpointApiKeyExtra(editing.extra) : null;
-    const editingRawExtra = editingExtra ? splitModelEndpointLlmContext(editingExtra.extra).extra : null;
+    const editingImplExtra = editingExtra ? splitModelEndpointImplementation(editingExtra.extra).extra : null;
+    const editingRawExtra = editingImplExtra ? splitModelEndpointLlmContext(editingImplExtra).extra : null;
     if (
       editing &&
       endpoint === editing.endpoint &&
@@ -556,6 +569,7 @@ function EndpointDialog({
     if (isLlm) {
       extra = mergeModelEndpointLlmContext(extra, { maxContextSize, maxOutputTokens });
     }
+    extra = mergeModelEndpointImplementation(extra, vendor);
 
     if (editing) {
       const updateData: UpdateModelEndpointRequest = {
@@ -705,6 +719,27 @@ function EndpointDialog({
               {editing?.has_api_key
                 ? "Leave unchanged to keep the stored key, or type a new key to rotate it."
                 : "Stored in the endpoint extra payload when provided."}
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label>Vendor</Label>
+            <Select value={vendor} onValueChange={setVendor}>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {vendorOptions.map((option) => (
+                  <SelectItem key={option} value={option} className="py-2">
+                    <span className="flex items-center gap-2.5 text-base">
+                      <VendorIcon vendor={option} className="h-5 w-5" />
+                      {option}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Client implementation used to talk to this endpoint.
             </p>
           </div>
           <div className="space-y-2">
