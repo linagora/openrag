@@ -264,6 +264,31 @@ async def test_cancelled_tasks_are_evictable(monkeypatch):
     assert mgr.tasks == {}
 
 
+async def test_a_claimed_cancellation_is_evictable(monkeypatch):
+    """The *real* cancel entry point must register the terminal transition.
+
+    ``test_cancelled_tasks_are_evictable`` above goes through ``set_state``,
+    which no cancellation actually uses: ``WorkerDispatcher.cancel_task`` claims
+    the cancellation with ``set_cancelled_if_active``, and nothing writes that
+    task's state again -- ``ray.cancel`` raises ``CancelledError``, a
+    ``BaseException`` that ``process_file``'s ``except Exception`` sails past.
+    If this path skips ``_mark_terminal`` the entry never enters
+    ``terminal_at``, so neither the cap nor the TTL can reclaim it, and every
+    user-initiated cancel leaks one ``TaskInfo`` -- with its details, its
+    ``user_index`` entry, and its pinned ``object_ref`` -- for the lifetime of
+    the detached actor.
+    """
+    monkeypatch.setattr(task_state_module, "_MAX_TERMINAL_TASKS", 0)
+    mgr = _manager()
+
+    await _dispatch(mgr, "t0")
+    assert await mgr.set_cancelled_if_active("t0") is True
+
+    assert mgr.tasks == {}
+    assert mgr.terminal_at == {}
+    assert mgr.user_index == {}
+
+
 async def test_set_error_truncates_long_tracebacks():
     mgr = _manager()
     await _dispatch(mgr, "t0")

@@ -216,6 +216,14 @@ class TaskStateManager:
             if info is None or info.state in TERMINAL_TASK_STATES:
                 return False
             info.state = "CANCELLED"
+            # CANCELLED is terminal, so it must register like every other
+            # terminal write does. Skipping this leaves the entry retained
+            # forever: eviction is driven entirely off ``terminal_at``, and
+            # nothing writes this task's state again -- ray.cancel raises
+            # CancelledError, a BaseException that ``process_file``'s
+            # ``except Exception`` never catches. That is precisely the
+            # unbounded growth #660 exists to fix.
+            self._mark_terminal(task_id, "CANCELLED")
             return True
 
     @ray.method(concurrency_group="set")
