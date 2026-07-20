@@ -31,6 +31,10 @@ if TYPE_CHECKING:
     import asyncpg
 
 
+# The exact set ``ck_jobs_status`` allows. Kept as one expression over the
+# shared tuples so the constraint, the migration and this guard cannot drift.
+_ALLOWED_STATUSES: frozenset[str] = frozenset(ACTIVE_JOB_STATES) | frozenset(TERMINAL_JOB_STATES)
+
 _COLUMNS = (
     "id",
     "status",
@@ -141,6 +145,13 @@ class PgJobRepository(JobRepository):
         # terminal rows only, so it never ages out.
         # ``mark_failed_if_not_cancelled`` already arbitrates this in SQL; this
         # extends the same rule to the writes that lacked it.
+        # ``None`` covers the status-less patch (a late error or timestamp),
+        # which deliberately keeps the guard *off*: the rule is about status
+        # transitions, not about freezing the row — see
+        # ``test_a_non_status_patch_still_lands_on_a_cancelled_job``. Since
+        # ``_status_value`` now rejects any value outside the CHECK, an explicit
+        # ``status=None`` can no longer reach this line, so the two cases the
+        # ``get`` conflates are down to the one that is intended.
         guard_cancelled = updates.get("status") not in (None, "CANCELLED")
         where = "id = $1" + (" AND status <> 'CANCELLED'" if guard_cancelled else "")
 
@@ -279,9 +290,22 @@ def _status_value(status: Any) -> str:
     violation would be swallowed and the job would silently freeze at its
     previous status — permanently, if the dropped write was the terminal one.
     Enum members already carry the right value; plain strings may not.
+
+    Membership is checked for the same reason, one step earlier. Casing is not
+    the only way to build a status the CHECK rejects: ``update_job`` is untyped
+    and takes whatever the hot path knows, so ``None`` (``str(None).upper()`` is
+    ``"NONE"``) or a stray :class:`JobStatus` member — the enum this field used
+    before #660, still exported from ``catalog`` — reaches SQL and violates the
+    constraint just the same, with the same silent freeze. Raising here turns an
+    unwritable value into a loud, local failure instead of a lost write.
     """
     value = status.value if hasattr(status, "value") else str(status)
-    return value.upper()
+    value = value.upper()
+    if value not in _ALLOWED_STATUSES:
+        raise ValueError(
+            f"unknown job status {status!r}: the ck_jobs_status CHECK allows only {sorted(_ALLOWED_STATUSES)}"
+        )
+    return value
 
 
 def _row_to_job(row: asyncpg.Record | None) -> IndexationJob | None:

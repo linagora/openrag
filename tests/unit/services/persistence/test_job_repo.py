@@ -233,3 +233,28 @@ async def test_purge_terminal_jobs_deletes_aged_and_overflow_rows():
 async def test_purge_terminal_jobs_rejects_negative_bounds():
     with pytest.raises(ValueError):
         await _repo(_FakePool()).purge_terminal_jobs(older_than_seconds=-1, keep_last=10)
+
+
+async def test_an_unwritable_status_is_rejected_before_it_reaches_sql():
+    """A status outside the CHECK must fail loudly here, not silently in SQL.
+
+    Every durable write is best-effort, so a ``CheckViolationError`` from
+    ``ck_jobs_status`` is swallowed by the caller and the job freezes at its
+    previous status — permanently, if the dropped write was the terminal one.
+    Casing is not the only way to build such a value: ``update_job`` is untyped,
+    and ``str(None).upper()`` is ``"NONE"``.
+    """
+    pool = _FakePool(row=_db_row())
+    for bad in (None, "bogus", "RUNNING"):
+        with pytest.raises(ValueError, match="unknown job status"):
+            await _repo(pool).update_job("task-1", status=bad)
+
+    assert pool.executed == [], "a rejected status must not reach the database"
+
+
+async def test_every_allowed_status_survives_the_guard():
+    """The other half: the seven states the CHECK allows must all pass."""
+    for state in DocumentStatus:
+        pool = _FakePool(row=_db_row(status=state.value))
+        assert await _repo(pool).update_job("task-1", status=state) is not None
+        assert await _repo(pool).update_job("task-1", status=state.value.lower()) is not None
