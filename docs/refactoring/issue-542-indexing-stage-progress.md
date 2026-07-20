@@ -50,7 +50,10 @@ a conflicting duplicate is rejected or logged as a state-write bug.
 Running a stage again is different from retrying an event write. A real stage
 retry creates a new attempt id and increments the attempt number, preserving the
 previous attempt as history. A worker restart follows the same rule unless it is
-only resending a transition that was already accepted.
+only resending a transition that was already accepted. Before a restarted worker
+begins a new attempt, recovery must close any previous `pending` or `running`
+attempt with a terminal `failed` event and a worker-interruption reason. A retry
+must never leave the previous attempt looking active beside the new one.
 
 Valid transition sequences within one attempt are intentionally narrow:
 
