@@ -584,6 +584,7 @@ class ServiceContainer:
                     workspace_repo=self.workspace_repo,
                     collection=settings.vectordb.collection_name,
                     job_repo=self.job_repo,
+                    user_repo=self.user_repo,
                 ),
                 config=settings,
                 partition_service=self.partition_service,

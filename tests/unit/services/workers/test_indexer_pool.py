@@ -1094,7 +1094,7 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     actor._ensure_registry_fresh = _noop
     actor._worker = worker
     actor._catalog_store = SimpleNamespace(workspace_repo=SimpleNamespace(), job_repo=None)
-    actor._task_state_manager = _FakeStateManager()
+    actor._tsm = _FakeStateManager()
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
     return actor
@@ -1235,7 +1235,7 @@ def _pool_with_broken_setup(user_repo, *, error: BaseException, tsm=None, job_re
     cls = IndexerWorkerActor.__ray_metadata__.modified_class
     pool = cls.__new__(cls)
     pool._catalog_store = _FakeCatalogStore(user_repo, job_repo)
-    pool._task_state_manager = tsm if tsm is not None else _FakeStateManager()
+    pool._tsm = tsm if tsm is not None else _FakeStateManager()
 
     async def _boom() -> None:
         raise error

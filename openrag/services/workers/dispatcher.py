@@ -63,6 +63,7 @@ class WorkerDispatcher(IndexingDispatcher):
         collection: str,
         timeout: float = DEFAULT_TIMEOUT,
         job_repo: Any = None,
+        user_repo: Any = None,
     ) -> None:
         self._pool = pool
         self._tsm = task_state_manager
@@ -76,6 +77,10 @@ class WorkerDispatcher(IndexingDispatcher):
         # is absent, job state degrades to the in-memory actor — the pre-#660
         # behaviour.
         self._job_repo = job_repo
+        # Optional for the same reason as ``job_repo``. Without it a cancel that
+        # beats the worker to the task cannot return the reserved slot, which is
+        # the pre-#664 behaviour rather than a new failure.
+        self._user_repo = user_repo
         self._last_job_purge_at: float | None = None
 
     async def _call(self, future: Any, task_description: str) -> Any:
@@ -95,6 +100,7 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         metadata: dict[str, Any],
         user_id: int | None,
+        quota_reserved: bool = False,
     ) -> bool:
         remote = _remote_actor_method(self._tsm, "set_queued_details")
         if remote is not None:
@@ -105,6 +111,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     partition=partition,
                     metadata=metadata,
                     user_id=user_id,
+                    quota_reserved=quota_reserved,
                 ),
                 task_description=f"set_queued_details({task_id})",
             )
@@ -121,6 +128,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 partition=partition,
                 metadata=metadata,
                 user_id=user_id,
+                quota_reserved=quota_reserved,
             ),
             task_description=f"set_details({task_id})",
         )
@@ -168,6 +176,9 @@ class WorkerDispatcher(IndexingDispatcher):
             partition=partition,
             metadata=user_metadata,
             user_id=user.get("id") if user else None,
+            # Tells the actor a slot is outstanding for this task, so
+            # ``claim_quota_release`` can arbitrate who gives it back.
+            quota_reserved=quota_reserved,
         )
         if not accepted:
             raise RuntimeError(
@@ -683,16 +694,52 @@ class WorkerDispatcher(IndexingDispatcher):
             # raises: the actor has already claimed the cancellation, and
             # leaving the worker running would contradict both records.
             ray.cancel(obj_ref["ref"], recursive=True)
-        # The reserved quota slot (#664) is deliberately not released here.
-        # A task cancelled mid-flight gives its slot back in
-        # ``IndexerWorker.process_file``'s ``finally``; releasing here too
-        # would double-release. But a task that ``ray.cancel`` retires
-        # *before* that body runs never executes the ``finally``, so its slot
-        # leaks -- and the CANCELLED row written just above is terminal, hence
-        # indistinguishable from a clean cancel. Recovering it needs the #676
-        # reconciliation to *recount* ``file_count`` (completed files + active
-        # job rows), not merely sweep orphaned active rows.
+        # Return the reserved quota slot (#664) if -- and only if -- this
+        # cancel is the reason nobody else will. A task cancelled mid-flight
+        # releases in ``IndexerWorker.process_file``'s ``finally``; a task that
+        # ``ray.cancel`` retires before that body runs never executes it, and
+        # used to leak the slot outright. ``claim_quota_release`` is a one-shot
+        # token in the state actor, so exactly one of the two wins and the
+        # outcome no longer depends on how far the worker got.
+        #
+        # After the release, not inside the ``finally`` above: the claim is
+        # only meaningful once ``ray.cancel`` has actually retired the task,
+        # and a failure here must not stop the worker from being killed.
+        await self._release_cancelled_slot(task_id)
         return True
+
+    async def _release_cancelled_slot(self, task_id: str) -> None:
+        """Give a cancelled task's reserved file slot back, if we own it.
+
+        Best-effort throughout: a cancellation the user already asked for and
+        already saw must not fail because quota bookkeeping did. A lost release
+        leaves ``file_count`` one too high, which the #676 reconciliation
+        recount is there to repair.
+        """
+        if self._user_repo is None:
+            return
+        try:
+            details = await self._call(
+                self._tsm.get_details.remote(task_id),
+                task_description=f"get_details({task_id})",
+            )
+            user_id = (details or {}).get("user_id")
+            if user_id is None:
+                return
+            claimed = await self._call(
+                self._tsm.claim_quota_release.remote(task_id),
+                task_description=f"claim_quota_release({task_id})",
+            )
+            if not claimed:
+                return
+            await self._user_repo.release_file_slot(user_id)
+        except Exception as exc:  # noqa: BLE001 - the cancellation itself already succeeded
+            logger.warning(
+                "Could not release the reserved file slot for a cancelled task; "
+                "the user file_count may be one too high until reconciliation.",
+                task_id=task_id,
+                error=str(exc),
+            )
 
 
 def from_ray_namespace(
@@ -704,6 +751,7 @@ def from_ray_namespace(
     workspace_repo: Any,
     collection: str,
     job_repo: Any = None,
+    user_repo: Any = None,
 ) -> WorkerDispatcher:
     import ray
     from services.workers.indexer_pool import build_indexer_pool
@@ -717,6 +765,7 @@ def from_ray_namespace(
         collection=collection,
         timeout=timeout,
         job_repo=job_repo,
+        user_repo=user_repo,
     )
 
 

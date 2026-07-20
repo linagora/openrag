@@ -193,9 +193,16 @@ def _manager():
     return _ACTOR()
 
 
-async def _dispatch(mgr, task_id: str, user_id: int = 1) -> None:
+async def _dispatch(mgr, task_id: str, user_id: int = 1, *, quota_reserved: bool = False) -> None:
     await mgr.set_state(task_id, "QUEUED")
-    await mgr.set_details(task_id, file_id=f"f-{task_id}", partition="p", metadata={}, user_id=user_id)
+    await mgr.set_details(
+        task_id,
+        file_id=f"f-{task_id}",
+        partition="p",
+        metadata={},
+        user_id=user_id,
+        quota_reserved=quota_reserved,
+    )
 
 
 async def test_terminal_tasks_are_evicted_beyond_the_cap(monkeypatch):
@@ -288,6 +295,42 @@ async def test_a_claimed_cancellation_is_evictable(monkeypatch):
     assert mgr.tasks == {}
     assert mgr.terminal_at == {}
     assert mgr.user_index == {}
+
+
+async def test_the_quota_release_is_claimable_exactly_once():
+    """One reserved slot, one releaser (#664).
+
+    ``process_file``'s ``finally`` and ``cancel_task`` can both conclude they
+    owe the slot back. The actor is single-threaded, so this compare-and-set is
+    what makes the outcome independent of how far the worker got.
+    """
+    mgr = _manager()
+    await _dispatch(mgr, "t0", quota_reserved=True)
+
+    assert await mgr.claim_quota_release("t0") is True
+    assert await mgr.claim_quota_release("t0") is False
+    assert await mgr.claim_quota_release("t0") is False
+
+
+async def test_a_task_that_reserved_nothing_has_no_slot_to_claim():
+    """`put_file` (replace re-index) reuses an existing row and never reserves."""
+    mgr = _manager()
+    await _dispatch(mgr, "t0")
+
+    assert await mgr.claim_quota_release("t0") is False
+
+
+async def test_an_unknown_task_claims_rather_than_leaks():
+    """Prefer the recoverable failure.
+
+    A slot was reserved for *some* task and the caller is the last code that
+    knows it. Releasing risks an undercount, which reconciliation repairs;
+    staying silent risks a leak, which is permanent and silently narrows the
+    user's quota.
+    """
+    mgr = _manager()
+
+    assert await mgr.claim_quota_release("never-seen") is True
 
 
 async def test_set_error_truncates_long_tracebacks():

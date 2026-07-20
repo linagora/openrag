@@ -9,6 +9,7 @@ from typing import Any
 import ray
 from services.workers.indexer_actor import (
     IndexerWorker,
+    claim_quota_release,
     delete_uploaded_file,
     mark_dispatch_orphan_failed,
     release_quota_slot,
@@ -69,8 +70,8 @@ class IndexerWorkerActor:
         task_state_manager = ray.get_actor("TaskStateManager", namespace="openrag")
         # Kept on the actor as well as handed to the worker: setup can fail
         # before the worker is ever entered, and that path has to settle the
-        # task itself (see ``process_file``).
-        self._task_state_manager = task_state_manager
+        # task itself and arbitrate the quota release (see ``process_file``).
+        self._tsm = task_state_manager
         pipeline = build_indexing_pipeline(
             parser=parser,
             chunker=chunker,
@@ -244,7 +245,11 @@ class IndexerWorkerActor:
                 # release too, and ``release_quota_slot`` swallows it, leaking the
                 # slot. Nothing local can fix that (the DB *is* the counter);
                 # recovering it needs the reconciliation sweep tracked in #676.
-                if quota_reserved:
+                #
+                # Routed through the same one-shot claim as every other release
+                # path: a cancellation *during* setup lands here and in
+                # ``cancel_task``, and without arbitration both would release.
+                if quota_reserved and await claim_quota_release(self._tsm, task_id):
                     await release_quota_slot(self._catalog_store.user_repo, (user or {}).get("id"))
                 # The task is QUEUED in both stores and ``IndexerWorker`` --
                 # the only writer of SERIALIZING/COMPLETED/FAILED -- is never
@@ -262,7 +267,7 @@ class IndexerWorkerActor:
                 # unreachable Postgres still leaves an evictable, terminal
                 # ``TaskInfo`` rather than a pinned one.
                 await mark_dispatch_orphan_failed(
-                    self._task_state_manager,
+                    self._tsm,
                     self._catalog_store.job_repo,
                     task_id,
                 )

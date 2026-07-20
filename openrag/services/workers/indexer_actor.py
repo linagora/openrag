@@ -223,7 +223,7 @@ class IndexerWorker:
             )
             raise
         finally:
-            if release_slot:
+            if release_slot and await claim_quota_release(self._tsm, task_id):
                 await release_quota_slot(self._user_repo, user_id)
         # The raw upload is purged (when configured) by the enclosing actor, not
         # here: cleanup must also cover failures that happen *before* this method
@@ -479,6 +479,28 @@ def _display_filename(path: str, metadata: dict[str, Any]) -> str:
     if filename:
         return str(filename)
     return Path(path).name
+
+
+async def claim_quota_release(tsm: Any, task_id: str) -> bool:
+    """Ask the state actor whether *we* are the ones who owe the slot back.
+
+    ``WorkerDispatcher.cancel_task`` can reach the same conclusion for the same
+    task, so the actor arbitrates with a one-shot token (#664). Only the winner
+    releases.
+
+    An unreachable actor answers ``True``: a slot was reserved and this is the
+    last code that knows it, so releasing risks an undercount while staying
+    silent risks a permanent leak. This branch prefers the recoverable failure,
+    which is also exactly the pre-arbitration behaviour.
+    """
+    try:
+        return bool(await tsm.claim_quota_release.remote(task_id))
+    except Exception:  # noqa: BLE001 - cleanup must never mask the indexing error
+        logger.warning(
+            "Could not arbitrate the reserved file slot release; releasing it anyway.",
+            task_id=task_id,
+        )
+        return True
 
 
 async def release_quota_slot(user_repo: Any, user_id: int | None) -> None:

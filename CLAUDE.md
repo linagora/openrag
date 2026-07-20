@@ -272,6 +272,16 @@ Consequences to respect when touching this code:
   so do the MCP tools that create rows (`MCPService.index_url`, `MCPService.copy_file`),
   which have no dependency chain and therefore reserve inline;
   `put_file` (replace re-index) does not, since it reuses an existing row.
+- **After dispatch, ownership is arbitrated, not assumed.** A task that
+  `ray.cancel` retires before `process_file`'s body runs never executes that
+  `finally`, so `WorkerDispatcher.cancel_task` releases instead. Both call
+  `TaskStateManager.claim_quota_release`, a one-shot compare-and-set in the
+  (single-threaded) state actor: the first caller wins and the other stands
+  down. Any new release path must go through the same claim — releasing
+  directly reintroduces the double-release, and skipping the release when the
+  claim is *lost* is correct, but skipping it when the claim cannot be *made*
+  is not. When the arbiter is unreachable, release: an undercount is
+  recoverable, a leak is permanent.
 - Any new early return between admission and dispatch is automatically covered by the
   teardown — but any new code path that *creates a file row without reserving*, or
   *reserves without either committing or releasing*, leaks the counter. A leak is
