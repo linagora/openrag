@@ -127,16 +127,38 @@ class PgJobRepository(JobRepository):
 
         assignments = [f"{column} = ${i}" for i, column in enumerate(updates, start=2)]
         assignments.append("updated_at = now()")
+
+        # A cancellation is sticky here for the same reason it is sticky in the
+        # hot cache (``TaskStateManager.set_state``): once the user has asked
+        # for a cancel and been told it landed, no later write may walk it back.
+        # Without this guard a *winning* cancel — one that claims a task still
+        # SERIALIZING — is clobbered by the worker's own in-flight lifecycle
+        # write, because both are blind UPDATEs and Postgres is free to order
+        # them either way. The COMPLETED case leaves the actor and the table
+        # disagreeing forever; the SERIALIZING case is worse, stranding the row
+        # non-terminal after ``ray.cancel`` has already killed the only writer
+        # that could have finished it — and ``purge_terminal_jobs`` sweeps
+        # terminal rows only, so it never ages out.
+        # ``mark_failed_if_not_cancelled`` already arbitrates this in SQL; this
+        # extends the same rule to the writes that lacked it.
+        guard_cancelled = updates.get("status") not in (None, "CANCELLED")
+        where = "id = $1" + (" AND status <> 'CANCELLED'" if guard_cancelled else "")
+
         row = await self.pool.fetchrow(
             f"""
             UPDATE jobs
             SET {", ".join(assignments)}
-            WHERE id = $1
+            WHERE {where}
             RETURNING {", ".join(_COLUMNS)}
             """,
             job_id,
             *updates.values(),
         )
+        if row is None and guard_cancelled:
+            # The guard declined the write, or the job is gone. Re-read so the
+            # caller still gets the truth: returning ``None`` here would report
+            # a cancelled job as a missing one.
+            return await self.get_job(job_id)
         return _row_to_job(row)
 
     async def mark_failed_if_not_cancelled(self, job_id: str, *, error: str, completed_at: datetime) -> bool:

@@ -104,6 +104,64 @@ class TestLifecycle:
         assert job.completed_at is not None
         assert len(job.error) < 10_000  # truncation holds on this path too
 
+    async def test_a_late_lifecycle_write_cannot_resurrect_a_cancellation(self, repo):
+        """A cancel that *wins* must not be walked back by the worker's own write.
+
+        `mark_failed_if_not_cancelled` arbitrated the FAILED path in SQL, but the
+        worker's SERIALIZING/COMPLETED writes were blind UPDATEs racing the
+        cancel's blind UPDATE, so Postgres was free to order them either way.
+        SERIALIZING landing last is the damaging one: `ray.cancel` has already
+        killed the only writer that could have finished the row, and
+        `purge_terminal_jobs` sweeps terminal rows only — so the job would sit
+        in the queue views, active, forever.
+        """
+        await repo.create_job(_job())
+        await repo.update_job("task-1", status=DocumentStatus.CANCELLED, completed_at=datetime.now(UTC))
+
+        declined = await repo.update_job("task-1", status=DocumentStatus.SERIALIZING, started_at=datetime.now(UTC))
+
+        # The declined write still reports the row, not ``None`` — a cancelled
+        # job must not read back as a missing one.
+        assert declined is not None
+        assert declined.status is DocumentStatus.CANCELLED
+        assert (await repo.get_job("task-1")).status is DocumentStatus.CANCELLED
+
+    async def test_a_late_completion_cannot_overwrite_a_cancellation(self, repo):
+        """Otherwise the actor (sticky CANCELLED) and the table disagree forever.
+
+        The two read paths would then answer differently for the same task:
+        `JobService` reads Postgres first, `WorkerDispatcher.get_task_state`
+        reads the actor first.
+        """
+        await repo.create_job(_job())
+        await repo.update_job("task-1", status=DocumentStatus.CANCELLED, completed_at=datetime.now(UTC))
+
+        await repo.update_job("task-1", status=DocumentStatus.COMPLETED, completed_at=datetime.now(UTC))
+
+        assert (await repo.get_job("task-1")).status is DocumentStatus.CANCELLED
+
+    async def test_a_cancellation_is_still_rewritable_as_cancelled(self, repo):
+        """The guard must not block the cancel path itself (retry, double-click)."""
+        await repo.create_job(_job())
+        first = datetime.now(UTC)
+        await repo.update_job("task-1", status=DocumentStatus.CANCELLED, completed_at=first)
+
+        later = first + timedelta(seconds=30)
+        again = await repo.update_job("task-1", status=DocumentStatus.CANCELLED, completed_at=later)
+
+        assert again.status is DocumentStatus.CANCELLED
+        assert again.completed_at == later
+
+    async def test_a_non_status_patch_still_lands_on_a_cancelled_job(self, repo):
+        """The guard is about status transitions, not about freezing the row."""
+        await repo.create_job(_job())
+        await repo.update_job("task-1", status=DocumentStatus.CANCELLED, completed_at=datetime.now(UTC))
+
+        patched = await repo.update_job("task-1", error="late diagnostic")
+
+        assert patched.status is DocumentStatus.CANCELLED
+        assert patched.error == "late diagnostic"
+
     async def test_marking_an_unknown_job_failed_reports_no_write(self, repo):
         assert await repo.mark_failed_if_not_cancelled("ghost", error="boom", completed_at=datetime.now(UTC)) is False
 
