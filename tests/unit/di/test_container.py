@@ -585,6 +585,20 @@ class TestPhase14NamedComponentFactories:
         assert embedder.kwargs["max_model_len"] == 4096
         assert embedder.kwargs["embed_concurrency"] == 9
 
+    def test_embedder_extra_batch_size_wins_over_top_level(self):
+        """An explicit extra['batch_size'] must override the top-level value.
+
+        The top-level field is backfilled only when extra omits it, so moving
+        batch_size into extra_kwargs_fn (#712) does not invert the precedence the
+        base kwargs applied — extra still wins.
+        """
+        settings = _settings_with_named_models()
+        settings.models.embedder["embed-a"].batch_size = 16
+        settings.models.embedder["embed-a"].extra["batch_size"] = 128
+        c = ServiceContainer(settings)
+
+        assert c.embedder_factory("embed-a").kwargs["batch_size"] == 128
+
     def test_named_factories_cache_by_endpoint_name(self):
         """Repeated factory calls for the same endpoint return one client."""
         c = ServiceContainer(_settings_with_named_models())
