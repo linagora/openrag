@@ -143,7 +143,11 @@ class WorkerDispatcher(IndexingDispatcher):
     ) -> str:
         task_id = uuid.uuid4().hex
 
-        user_metadata = {key: value for key, value in metadata.items() if key not in {"file_id", "source"}}
+        user_metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key not in {"file_id", "source", TASK_CREATED_AT_METADATA_KEY, TASK_FINISHED_AT_METADATA_KEY}
+        }
         user_metadata[TASK_CREATED_AT_METADATA_KEY] = _utc_now_iso()
         task_details = {
             "file_id": metadata.get("file_id"),
@@ -505,13 +509,12 @@ def from_ray_namespace(
     collection: str,
 ) -> WorkerDispatcher:
     import ray
-    from services.workers.bootstrap import get_task_completion_tracker
     from services.workers.indexer_pool import build_indexer_pool
 
     return WorkerDispatcher(
         pool=build_indexer_pool(namespace=namespace),
         task_state_manager=ray.get_actor("TaskStateManager", namespace=namespace),
-        completion_tracker=get_task_completion_tracker(namespace=namespace),
+        completion_tracker=ray.get_actor("TaskCompletionTracker", namespace=namespace),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,

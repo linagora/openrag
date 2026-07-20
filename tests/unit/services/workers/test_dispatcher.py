@@ -110,12 +110,13 @@ def test_from_ray_namespace_does_not_require_legacy_indexer_actor() -> None:
         assert namespace == "openrag"
         if name == "TaskStateManager":
             return tsm
+        if name == "TaskCompletionTracker":
+            return _completion_tracker()
         raise AssertionError(f"unexpected eager actor lookup: {name}")
 
     with (
         patch("ray.get_actor", side_effect=fake_get_actor),
         patch("services.workers.indexer_pool.build_indexer_pool", return_value=pool),
-        patch("services.workers.bootstrap.get_task_completion_tracker", return_value=_completion_tracker()),
     ):
         dispatcher = from_ray_namespace(
             vector_store=_vector_store(),
@@ -151,7 +152,13 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         mock_uuid.uuid4.return_value.hex = "task-1"
         task_id = await dispatcher.dispatch_indexing(
             path="/data/report.txt",
-            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            metadata={
+                "file_id": "file-1",
+                "source": "/data/report.txt",
+                "filename": "report.txt",
+                "_openrag_job_created_at": "forged-created",
+                "_openrag_job_finished_at": "forged-finished",
+            },
             partition="tenant-a",
             user={"id": 42},
             workspace_ids=["ws-1"],
@@ -177,7 +184,13 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
     pool.submit.remote.assert_called_once_with(
         task_id="task-1",
         path="/data/report.txt",
-        metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+        metadata={
+            "file_id": "file-1",
+            "source": "/data/report.txt",
+            "filename": "report.txt",
+            "_openrag_job_created_at": "forged-created",
+            "_openrag_job_finished_at": "forged-finished",
+        },
         partition="tenant-a",
         user={"id": 42},
         workspace_ids=["ws-1"],
