@@ -963,3 +963,59 @@ async def test_durable_write_failure_never_fails_indexing(tmp_path: Path) -> Non
     result = await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
 
     assert result["stored_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_state_actor_still_writes_the_durable_failure(tmp_path: Path) -> None:
+    """The hot-cache write must not be able to take ``_mark_job_failed`` with it.
+
+    The failure handler talks to the detached ``TaskStateManager`` first. Left
+    unguarded, an actor that is gone (restart, lost node) raises straight out of
+    the ``except`` block and the durable write never runs — leaving the row
+    non-terminal, which ``purge_terminal_jobs`` never sweeps. Every file
+    dispatched during an actor outage would strand one row forever: the
+    unbounded growth #660 exists to fix, on the durable side.
+    """
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+
+    tsm = _fake_tsm()
+    tsm.set_failed_if_not_cancelled.remote = AsyncMock(side_effect=RuntimeError("actor gone"))
+
+    class BrokenRepo:
+        async def add_file_to_partition(self, **kwargs: Any) -> bool:
+            raise RuntimeError("pg down")
+
+    class RecordingJobRepo:
+        def __init__(self) -> None:
+            self.failed: list[dict[str, Any]] = []
+
+        async def update_job(self, job_id: str, **fields: Any) -> None:
+            return None
+
+        async def mark_failed_if_not_cancelled(self, job_id: str, **kwargs: Any) -> bool:
+            self.failed.append({"job_id": job_id, **kwargs})
+            return True
+
+    job_repo = RecordingJobRepo()
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=tsm,
+        document_repo=BrokenRepo(),
+        job_repo=job_repo,
+    )
+
+    # The original pipeline error must survive, not the actor's.
+    with pytest.raises(RuntimeError, match="pg down"):
+        await worker.process_file(
+            task_id="t-actor-gone",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+        )
+
+    assert [row["job_id"] for row in job_repo.failed] == ["t-actor-gone"], (
+        "the durable FAILED write was lost when the state actor was unreachable"
+    )

@@ -203,7 +203,18 @@ class IndexerWorker:
             # second case strands the row in SERIALIZING forever — retention
             # sweeps terminal rows only. Postgres arbitrates instead: it is the
             # one participant guaranteed to still know what the user asked for.
-            await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
+            # Which is why this one is guarded: unguarded, an actor that is gone
+            # (restart, lost node) raises straight out of this handler and takes
+            # ``_mark_job_failed`` with it, stranding the row exactly as above —
+            # so the hot cache would decide the durable outcome after all.
+            try:
+                await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
+            except Exception as exc:  # noqa: BLE001 - hot-cache write must not block the durable one
+                logger.warning(
+                    "Hot-cache FAILED write lost; the durable job row arbitrates.",
+                    task_id=task_id,
+                    error=str(exc),
+                )
             await _mark_job_failed(
                 self._job_repo,
                 task_id,
