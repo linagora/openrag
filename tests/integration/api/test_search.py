@@ -489,12 +489,12 @@ class TestSearchFiltering:
 It contains information about machine learning and artificial intelligence.
 The document is used to verify that search filtering works correctly.
 Key topics include: neural networks, deep learning, and natural language processing.
-This content is intentionally repeated across multiple files to test filtering.
+Each fixture adds a unique document marker while keeping this shared searchable text.
 """
 
     @pytest.fixture
     def filter_test_files(self, tmp_path):
-        """Create 6 files with the same content but different metadata."""
+        """Create 6 distinct files with shared searchable content and different metadata."""
         files_config = [
             {
                 "file_id": "filter-file-1",
@@ -538,7 +538,7 @@ This content is intentionally repeated across multiple files to test filtering.
         for config in files_config:
             file_id = config.pop("file_id")
             file_path = tmp_path / f"{file_id}.txt"
-            file_path.write_text(self.COMMON_CONTENT)
+            file_path.write_text(f"{self.COMMON_CONTENT}\nFixture document: {file_id}\n")
             config["path"] = file_path
             file_paths[file_id] = config
 

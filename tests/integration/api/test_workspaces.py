@@ -76,8 +76,9 @@ class TestWorkspaceCRUD:
 
 class TestWorkspaceFiles:
     @staticmethod
-    def _upload_file(api_client, partition: str, file_id: str, content: str = "Test content"):
-        file_obj = io.BytesIO(content.encode())
+    def _upload_file(api_client, partition: str, file_id: str, content: str | None = None):
+        file_content = content if content is not None else f"Test content for {file_id}"
+        file_obj = io.BytesIO(file_content.encode())
         response = api_client.post(
             f"/indexer/partition/{partition}/file/{file_id}",
             files={"file": (f"{file_id}.txt", file_obj, "text/plain")},
@@ -189,8 +190,9 @@ class TestPartitionDeletionCascade:
 class TestFileWorkspaceMembership:
     """Test that file workspace memberships survive file replace operations."""
 
-    def _upload_file(self, api_client, partition: str, file_id: str, content: str = "Test content"):
-        file_obj = io.BytesIO(content.encode())
+    def _upload_file(self, api_client, partition: str, file_id: str, content: str | None = None):
+        file_content = content if content is not None else f"Test content for {file_id}"
+        file_obj = io.BytesIO(file_content.encode())
         return api_client.post(
             f"/indexer/partition/{partition}/file/{file_id}",
             files={"file": (f"{file_id}.txt", file_obj, "text/plain")},
