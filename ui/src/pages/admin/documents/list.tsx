@@ -223,7 +223,11 @@ export default function DocumentListPage() {
       accessorFn: (f) => fileLabel(f).toLowerCase(),
       header: ({ column }) => <SortableHeader column={column} title="Filename" />,
       cell: ({ row }) => (
-        <Link to={fileHref(selected, row.original.file_id)} className="text-primary hover:underline font-medium">
+        <Link
+          to={fileHref(selected, row.original.file_id)}
+          className="block max-w-[280px] truncate font-medium text-primary hover:underline sm:max-w-[360px] lg:max-w-[480px]"
+          title={fileLabel(row.original)}
+        >
           {fileLabel(row.original)}
         </Link>
       ),

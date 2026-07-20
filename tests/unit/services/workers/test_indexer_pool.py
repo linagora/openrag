@@ -480,9 +480,10 @@ def test_required_llm_names_mirrors_pipeline_selection() -> None:
     from services.workers.indexer_pool import _required_llm_names
 
     assert _required_llm_names(None) == []
-    # Topic tagging defaults on, contextualization defaults off.
-    assert _required_llm_names({}) == ["default"]
+    # Both topic tagging and contextualization default off.
+    assert _required_llm_names({}) == []
     assert _required_llm_names({"enable_topic_tagging": False}) == []
+    assert _required_llm_names({"enable_topic_tagging": True}) == ["default"]
     assert _required_llm_names(
         {
             "enable_contextualization": True,

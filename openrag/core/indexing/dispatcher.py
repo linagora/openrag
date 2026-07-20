@@ -83,8 +83,7 @@ class IndexingDispatcher(ABC):
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a running/queued task.
 
-        Returns ``False`` when no object ref is stored for ``task_id``
-        (the caller maps that to a 404), ``True`` once the cancel signal
-        has been sent.
+        Returns ``False`` when the task cannot be cancelled, ``True`` once
+        the cancel signal has been sent.
         """
         ...
