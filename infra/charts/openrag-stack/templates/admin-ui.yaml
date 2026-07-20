@@ -20,7 +20,7 @@ spec:
       {{- with .Values.adminUi.serviceAccountName }}
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
-      automountServiceAccountToken: {{ .Values.adminUi.automountServiceAccountToken | default .Values.security.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.adminUi "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
       containers:
         - name: admin-ui
           image: "{{ .Values.adminUi.image.registry | default .Values.global.image.registry }}/{{ .Values.adminUi.image.repository }}:{{ .Values.adminUi.image.tag }}"

@@ -20,7 +20,7 @@ spec:
       {{- with .Values.reranker.serviceAccountName }}
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
-      automountServiceAccountToken: {{ .Values.reranker.automountServiceAccountToken | default .Values.security.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.reranker "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
       {{- if .Values.reranker.runtimeClassName }}
       runtimeClassName: {{ .Values.reranker.runtimeClassName }}
       {{- end }}

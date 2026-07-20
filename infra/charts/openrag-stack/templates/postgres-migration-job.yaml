@@ -36,7 +36,7 @@ spec:
         app.kubernetes.io/component: postgres-migration
     spec:
       restartPolicy: Never
-      automountServiceAccountToken: {{ .Values.openrag.automountServiceAccountToken | default .Values.security.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.openrag "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
       securityContext:
         {{- include "openrag-stack.mergeSecurityContext" (dict "component" .Values.openrag.podSecurityContext "default" .Values.security.podSecurityContext) | nindent 8 }}
       containers:

@@ -93,8 +93,35 @@ Merge a component's security context override (e.g. just runAsUser/runAsGroup/
 fsGroup, tuned to that component's own Dockerfile) on top of a shared default
 from values.yaml's top-level `security` block — component keys win on
 conflicts, everything else is inherited from the default.
+Deliberately NOT Sprig's `merge` (mergo): mergo treats a zero value (false, 0,
+"") as "unset" and overwrites it with the default, so an explicit
+`allowPrivilegeEscalation: false` override would be silently discarded the
+day the shared default becomes `true`. This does a presence-based (hasKey)
+shallow merge instead, so an explicitly-set false/0/"" always wins.
 Usage: {{ include "openrag-stack.mergeSecurityContext" (dict "component" .Values.ray.podSecurityContext "default" .Values.security.podSecurityContext) }}
 */}}
 {{- define "openrag-stack.mergeSecurityContext" -}}
-{{- merge (deepCopy .component) .default | toYaml }}
+{{- $result := deepCopy .component -}}
+{{- range $key, $value := .default -}}
+{{- if not (hasKey $result $key) -}}
+{{- $_ := set $result $key $value -}}
+{{- end -}}
+{{- end -}}
+{{- $result | toYaml -}}
+{{- end }}
+
+{{/*
+Component override for a single boolean/scalar security field (e.g.
+automountServiceAccountToken): uses the component's own value only if the key
+is explicitly present, otherwise falls back to the shared default. A plain
+`| default` would treat an explicit `false` override as empty and silently
+fall back anyway — this checks presence (hasKey) instead of truthiness.
+Usage: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.ray "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
+*/}}
+{{- define "openrag-stack.securityFieldOverride" -}}
+{{- if hasKey .component .key -}}
+{{- get .component .key -}}
+{{- else -}}
+{{- .default -}}
+{{- end -}}
 {{- end }}

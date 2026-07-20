@@ -21,7 +21,7 @@ spec:
       {{- with .Values.openrag.serviceAccountName }}
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
-      automountServiceAccountToken: {{ .Values.openrag.automountServiceAccountToken | default .Values.security.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.openrag "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
       {{- if or .Values.openrag.extraInitContainers .Values.ray.enabled }}
       initContainers:
         {{- with .Values.openrag.extraInitContainers }}

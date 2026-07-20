@@ -22,7 +22,7 @@ spec:
         {{- with .Values.ray.serviceAccountName }}
         serviceAccountName: {{ tpl . $ }}
         {{- end }}
-        automountServiceAccountToken: {{ .Values.ray.automountServiceAccountToken | default .Values.security.automountServiceAccountToken }}
+        automountServiceAccountToken: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.ray "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
         securityContext:
           {{- include "openrag-stack.mergeSecurityContext" (dict "component" .Values.ray.podSecurityContext "default" .Values.security.podSecurityContext) | nindent 10 }}
         initContainers:
@@ -120,7 +120,7 @@ spec:
           {{- with $.Values.ray.serviceAccountName }}
           serviceAccountName: {{ tpl . $ }}
           {{- end }}
-          automountServiceAccountToken: {{ $.Values.ray.automountServiceAccountToken | default $.Values.security.automountServiceAccountToken }}
+          automountServiceAccountToken: {{ include "openrag-stack.securityFieldOverride" (dict "component" $.Values.ray "key" "automountServiceAccountToken" "default" $.Values.security.automountServiceAccountToken) }}
           securityContext:
             {{- include "openrag-stack.mergeSecurityContext" (dict "component" $.Values.ray.podSecurityContext "default" $.Values.security.podSecurityContext) | nindent 12 }}
           containers:
