@@ -9,6 +9,7 @@ from core.models.catalog import TERMINAL_TASK_STATES, DocumentStatus
 
 ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"})
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
+PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
 
 try:
     from core.config import load_config as _load_config
@@ -38,13 +39,31 @@ class TaskInfo:
 class TaskStateManager:
     def __init__(self) -> None:
         self.tasks: dict[str, TaskInfo] = {}
-        self.user_index: dict[int, set[str]] = {}
+        self.user_index: dict[int | None, set[str]] = {}
         self.lock = asyncio.Lock()
 
     async def _ensure_task(self, task_id: str) -> TaskInfo:
         if task_id not in self.tasks:
             self.tasks[task_id] = TaskInfo()
         return self.tasks[task_id]
+
+    def _record_details(
+        self,
+        task_id: str,
+        info: TaskInfo,
+        *,
+        file_id: str | None,
+        partition: str,
+        metadata: dict[str, Any],
+        user_id: int | None,
+    ) -> None:
+        info.details = {
+            "file_id": file_id,
+            "partition": partition,
+            "metadata": metadata,
+            "user_id": user_id,
+        }
+        self.user_index.setdefault(user_id, set()).add(task_id)
 
     @ray.method(concurrency_group="set")
     async def set_state(self, task_id: str, state: str) -> None:
@@ -85,20 +104,45 @@ class TaskStateManager:
         self,
         task_id: str,
         *,
-        file_id: str,
-        partition: int,
-        metadata: dict,
-        user_id: int,
+        file_id: str | None,
+        partition: str,
+        metadata: dict[str, Any],
+        user_id: int | None,
     ) -> None:
         async with self.lock:
             info = await self._ensure_task(task_id)
-            info.details = {
-                "file_id": file_id,
-                "partition": partition,
-                "metadata": metadata,
-                "user_id": user_id,
-            }
-            self.user_index.setdefault(user_id, set()).add(task_id)
+            self._record_details(
+                task_id,
+                info,
+                file_id=file_id,
+                partition=partition,
+                metadata=metadata,
+                user_id=user_id,
+            )
+
+    @ray.method(concurrency_group="set")
+    async def set_queued_details(
+        self,
+        task_id: str,
+        *,
+        file_id: str | None,
+        partition: str,
+        metadata: dict[str, Any],
+        user_id: int | None,
+    ) -> None:
+        async with self.lock:
+            info = await self._ensure_task(task_id)
+            if info.state == DocumentStatus.CANCELLED:
+                return
+            info.state = "QUEUED"
+            self._record_details(
+                task_id,
+                info,
+                file_id=file_id,
+                partition=partition,
+                metadata=metadata,
+                user_id=user_id,
+            )
 
     @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
@@ -137,22 +181,40 @@ class TaskStateManager:
         *,
         partition: str,
         file_id: str | None = None,
-    ) -> dict[str, ray.ObjectRef | None]:
+    ) -> dict[str, ray.ObjectRef | None | str]:
         async with self.lock:
-            matches = {}
-            for task_id, info in self.tasks.items():
-                if info.state not in ACTIVE_INDEXING_STATES:
-                    continue
-                details = info.details or {}
-                if not details:
-                    matches[task_id] = info.object_ref
-                    continue
-                if details.get("partition") != partition:
-                    continue
-                if file_id is not None and details.get("file_id") != file_id:
-                    continue
-                matches[task_id] = info.object_ref
-            return matches
+            return self._matching_active_task_refs_locked(partition=partition, file_id=file_id)
+
+    @ray.method(concurrency_group="get")
+    async def get_matching_active_task_refs_v2(
+        self,
+        *,
+        partition: str,
+        file_id: str | None = None,
+    ) -> dict[str, ray.ObjectRef | None | str]:
+        async with self.lock:
+            return self._matching_active_task_refs_locked(partition=partition, file_id=file_id)
+
+    def _matching_active_task_refs_locked(
+        self,
+        *,
+        partition: str,
+        file_id: str | None = None,
+    ) -> dict[str, ray.ObjectRef | None | str]:
+        matches = {}
+        for task_id, info in self.tasks.items():
+            if info.state not in ACTIVE_INDEXING_STATES:
+                continue
+            details = info.details or {}
+            if not details:
+                matches[task_id] = PENDING_TASK_DETAILS
+                continue
+            if details.get("partition") != partition:
+                continue
+            if file_id is not None and details.get("file_id") != file_id:
+                continue
+            matches[task_id] = info.object_ref
+        return matches
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_states(self) -> dict[str, str | None]:
@@ -200,4 +262,10 @@ class TaskStateManager:
             return sum(1 for tid in task_ids if (info := self.tasks.get(tid)) and info.state in ACTIVE_INDEXING_STATES)
 
 
-__all__ = ["ACTIVE_INDEXING_STATES", "TERMINAL_INDEXING_STATES", "TaskInfo", "TaskStateManager"]
+__all__ = [
+    "ACTIVE_INDEXING_STATES",
+    "PENDING_TASK_DETAILS",
+    "TERMINAL_INDEXING_STATES",
+    "TaskInfo",
+    "TaskStateManager",
+]

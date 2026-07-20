@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from ray.exceptions import TaskCancelledError
+from services.workers.task_state import PENDING_TASK_DETAILS
 
 
 def _remote_mock(return_value: Any = None) -> MagicMock:
@@ -84,8 +85,10 @@ def _task_state_manager() -> MagicMock:
     tsm.get_state = _remote_mock("SERIALIZING")
     tsm.get_error = _remote_mock("traceback")
     tsm.get_object_ref = _remote_mock({"ref": object()})
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({})
     tsm.get_matching_active_task_refs = _remote_mock({})
     tsm.get_all_info = None
+    tsm.set_queued_details = _remote_mock()
     return tsm
 
 
@@ -146,14 +149,15 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         )
 
     assert task_id == "task-1"
-    tsm.set_state.remote.assert_called_once_with("task-1", "QUEUED")
-    tsm.set_details.remote.assert_called_once_with(
+    tsm.set_queued_details.remote.assert_called_once_with(
         "task-1",
         file_id="file-1",
         partition="tenant-a",
         metadata={"filename": "report.txt"},
         user_id=42,
     )
+    tsm.set_state.remote.assert_not_called()
+    tsm.set_details.remote.assert_not_called()
     pool.submit.remote.assert_called_once_with(
         task_id="task-1",
         path="/data/report.txt",
@@ -165,6 +169,48 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         indexation_config={"parsing_strategy": "pymupdf"},
         embedder_name="embed-fast",
         require_existing_partition=True,
+    )
+    tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_uses_split_queue_registration_for_legacy_task_state_actor() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = object()
+    pool = _pool_with_ref(ref)
+    tsm = _task_state_manager()
+    tsm._ray_actor_method_names = {"set_state", "set_details", "set_object_ref"}
+    del tsm.set_queued_details
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        task_id = await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=["ws-1"],
+            replace=True,
+            require_existing_partition=True,
+        )
+
+    assert task_id == "task-1"
+    tsm.set_state.remote.assert_called_once_with("task-1", "QUEUED")
+    tsm.set_details.remote.assert_called_once_with(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"filename": "report.txt"},
+        user_id=42,
     )
     tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})
 
@@ -232,6 +278,7 @@ async def test_dispatch_indexing_retries_without_require_existing_partition_for_
             workspace_ids=None,
             replace=False,
             require_existing_partition=True,
+            allow_legacy_require_existing_partition_retry=True,
         )
 
     assert task_id == "task-1"
@@ -240,6 +287,44 @@ async def test_dispatch_indexing_retries_without_require_existing_partition_for_
     assert "require_existing_partition" not in second_call.kwargs
     tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_does_not_drop_required_partition_guard_for_legacy_actor() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    legacy_error = RuntimeError("submit(task-1) failed")
+    legacy_error.__cause__ = TypeError("process_file() got an unexpected keyword argument 'require_existing_partition'")
+    pool = MagicMock()
+    pool.submit = MagicMock()
+    pool.submit.remote = AsyncMock(side_effect=legacy_error)
+    tsm = _task_state_manager()
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        with pytest.raises(RuntimeError, match="submit"):
+            await dispatcher.dispatch_indexing(
+                path="/data/report.txt",
+                metadata={"file_id": "file-1", "source": "/data/report.txt"},
+                partition="tenant-a",
+                user={"id": 42},
+                workspace_ids=None,
+                replace=False,
+                require_existing_partition=True,
+            )
+
+    pool.submit.remote.assert_called_once()
+    assert pool.submit.remote.call_args.kwargs["require_existing_partition"] is True
+    tsm.set_object_ref.remote.assert_not_called()
+    tsm.set_failed_if_not_cancelled.remote.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -271,7 +356,9 @@ async def test_dispatch_indexing_marks_task_failed_when_submit_fails() -> None:
                 replace=False,
             )
 
-    tsm.set_details.remote.assert_called_once()
+    tsm.set_queued_details.remote.assert_called_once()
+    tsm.set_state.remote.assert_not_called()
+    tsm.set_details.remote.assert_not_called()
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
     assert tsm.set_failed_if_not_cancelled.remote.call_args.args[0] == "task-1"
     assert "submit failed" in tsm.set_failed_if_not_cancelled.remote.call_args.args[1]
@@ -286,10 +373,11 @@ async def test_dispatch_indexing_cancels_worker_when_ref_registration_fails() ->
     pool = _pool_with_ref(ref)
     tsm = _task_state_manager()
     tsm.set_object_ref.remote = AsyncMock(side_effect=RuntimeError("ref registration failed"))
+    vector_store = _vector_store()
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
-        vector_store=_vector_store(),
+        vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
@@ -311,6 +399,13 @@ async def test_dispatch_indexing_cancels_worker_when_ref_registration_fails() ->
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
     assert tsm.set_failed_if_not_cancelled.remote.call_args.args[0] == "task-1"
     assert "ref registration failed" in tsm.set_failed_if_not_cancelled.remote.call_args.args[1]
+    vector_store.delete_by_filter.assert_awaited_once_with(
+        {
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "_openrag_indexing_task_id": "task-1",
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -321,10 +416,11 @@ async def test_dispatch_indexing_does_not_mark_failed_when_submitted_worker_alre
     pool = _pool_with_ref(ref)
     tsm = _task_state_manager()
     tsm.set_object_ref.remote = AsyncMock(side_effect=RuntimeError("ref registration failed"))
+    vector_store = _vector_store()
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
-        vector_store=_vector_store(),
+        vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
@@ -344,6 +440,7 @@ async def test_dispatch_indexing_does_not_mark_failed_when_submitted_worker_alre
 
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+    vector_store.delete_by_filter.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -354,10 +451,11 @@ async def test_dispatch_indexing_does_not_mark_failed_when_submitted_worker_canc
     pool = _pool_with_ref(ref)
     tsm = _task_state_manager()
     tsm.set_object_ref.remote = AsyncMock(return_value=False)
+    vector_store = _vector_store()
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
-        vector_store=_vector_store(),
+        vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
@@ -379,6 +477,7 @@ async def test_dispatch_indexing_does_not_mark_failed_when_submitted_worker_canc
             )
 
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+    vector_store.delete_by_filter.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -389,10 +488,11 @@ async def test_dispatch_indexing_does_not_mark_failed_when_submitted_worker_canc
     pool = _pool_with_ref(ref)
     tsm = _task_state_manager()
     tsm.set_object_ref.remote = AsyncMock(return_value=False)
+    vector_store = _vector_store()
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
-        vector_store=_vector_store(),
+        vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
@@ -412,6 +512,7 @@ async def test_dispatch_indexing_does_not_mark_failed_when_submitted_worker_canc
             )
 
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+    vector_store.delete_by_filter.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -455,10 +556,11 @@ async def test_dispatch_indexing_cancels_worker_when_ref_registration_is_rejecte
     pool = _pool_with_ref(ref)
     tsm = _task_state_manager()
     tsm.set_object_ref.remote = AsyncMock(return_value=False)
+    vector_store = _vector_store()
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
-        vector_store=_vector_store(),
+        vector_store=vector_store,
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
@@ -478,6 +580,13 @@ async def test_dispatch_indexing_cancels_worker_when_ref_registration_is_rejecte
 
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
+    vector_store.delete_by_filter.assert_awaited_once_with(
+        {
+            "partition": "tenant-a",
+            "file_id": "file-1",
+            "_openrag_indexing_task_id": "task-1",
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -616,7 +725,7 @@ async def test_delete_file_cancels_active_matching_indexing_task_before_cleanup(
 
     ref = _settled_ref()
     tsm = _task_state_manager()
-    tsm.get_matching_active_task_refs = _remote_mock({"task-1": {"ref": ref}})
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": ref}})
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
@@ -629,7 +738,7 @@ async def test_delete_file_cancels_active_matching_indexing_task_before_cleanup(
     with patch("ray.cancel") as cancel:
         await dispatcher.delete_file("file-1", "tenant-a")
 
-    tsm.get_matching_active_task_refs.remote.assert_called_once_with(partition="tenant-a", file_id="file-1")
+    tsm.get_matching_active_task_refs_v2.remote.assert_called_once_with(partition="tenant-a", file_id="file-1")
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
 
@@ -640,7 +749,7 @@ async def test_delete_file_waits_for_matching_task_ref_before_cleanup() -> None:
 
     ref = _settled_ref()
     tsm = _task_state_manager()
-    tsm.get_matching_active_task_refs.remote = AsyncMock(
+    tsm.get_matching_active_task_refs_v2.remote = AsyncMock(
         side_effect=[
             {"task-1": {"ref": None}},
             {"task-1": {"ref": ref}},
@@ -659,7 +768,7 @@ async def test_delete_file_waits_for_matching_task_ref_before_cleanup() -> None:
     with patch("services.workers.task_cancellation._REF_WAIT_INTERVAL", 0), patch("ray.cancel") as cancel:
         await dispatcher.delete_file("file-1", "tenant-a")
 
-    assert tsm.get_matching_active_task_refs.remote.call_count == 2
+    assert tsm.get_matching_active_task_refs_v2.remote.call_count == 2
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
     assert vector_store.delete_by_filter.await_count == 2
@@ -671,7 +780,7 @@ async def test_delete_file_rechecks_ref_less_task_before_marking_stale() -> None
 
     ref = _settled_ref()
     tsm = _task_state_manager()
-    tsm.get_matching_active_task_refs.remote = AsyncMock(
+    tsm.get_matching_active_task_refs_v2.remote = AsyncMock(
         side_effect=[
             {"task-1": {"ref": None}},
             {"task-1": {"ref": ref}},
@@ -691,7 +800,7 @@ async def test_delete_file_rechecks_ref_less_task_before_marking_stale() -> None
     with patch("ray.cancel") as cancel:
         await dispatcher.delete_file("file-1", "tenant-a")
 
-    assert tsm.get_matching_active_task_refs.remote.call_count == 2
+    assert tsm.get_matching_active_task_refs_v2.remote.call_count == 2
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
     tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
@@ -699,11 +808,72 @@ async def test_delete_file_rechecks_ref_less_task_before_marking_stale() -> None
 
 
 @pytest.mark.asyncio
+async def test_delete_file_rechecks_pending_task_details_before_cleanup() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2.remote = AsyncMock(
+        side_effect=[
+            {"task-1": PENDING_TASK_DETAILS},
+            {},
+        ]
+    )
+    vector_store = _vector_store()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=vector_store,
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.task_cancellation._REF_WAIT_INTERVAL", 0), patch("ray.cancel") as cancel:
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    assert tsm.get_matching_active_task_refs_v2.remote.call_count == 2
+    cancel.assert_not_called()
+    tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+    tsm.set_state.remote.assert_not_called()
+    assert vector_store.delete_by_filter.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_file_fails_closed_when_pending_task_details_do_not_settle() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2.remote = AsyncMock(return_value={"task-1": PENDING_TASK_DETAILS})
+    vector_store = _vector_store()
+    document_repo = _document_repo()
+    workspace_repo = _workspace_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=workspace_repo,
+        collection="default",
+        timeout=0.01,
+    )
+
+    with pytest.raises(TimeoutError, match="routing details"), patch("ray.cancel") as cancel:
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    cancel.assert_not_called()
+    tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+    tsm.set_state.remote.assert_not_called()
+    vector_store.delete_by_filter.assert_not_called()
+    workspace_repo.remove_file_from_all_workspaces.assert_not_called()
+    document_repo.remove_file_from_partition.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_delete_file_final_ref_recheck_stays_within_delete_timeout() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     tsm = _task_state_manager()
-    tsm.get_matching_active_task_refs.remote = AsyncMock(return_value={"task-1": {"ref": None}})
+    tsm.get_matching_active_task_refs_v2.remote = AsyncMock(return_value={"task-1": {"ref": None}})
     vector_store = _vector_store()
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
@@ -739,7 +909,7 @@ async def test_delete_file_waits_for_cancelled_task_to_settle_before_cleanup() -
     settled = asyncio.Event()
     ref = asyncio.create_task(settled.wait())
     tsm = _task_state_manager()
-    tsm.get_matching_active_task_refs = _remote_mock({"task-1": {"ref": ref}})
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": ref}})
     vector_store = _vector_store()
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
@@ -767,7 +937,7 @@ async def test_delete_file_fails_closed_when_active_task_lookup_missing() -> Non
     from services.workers.dispatcher import WorkerDispatcher
 
     tsm = _task_state_manager()
-    del tsm.get_matching_active_task_refs
+    del tsm.get_matching_active_task_refs_v2
     vector_store = _vector_store()
     document_repo = _document_repo()
     workspace_repo = _workspace_repo()
@@ -794,7 +964,7 @@ async def test_delete_file_uses_legacy_task_state_lookup_when_matching_api_missi
 
     ref = _settled_ref()
     tsm = _task_state_manager()
-    del tsm.get_matching_active_task_refs
+    del tsm.get_matching_active_task_refs_v2
     tsm.get_all_info = _remote_mock(
         {
             "task-1": {
@@ -833,25 +1003,19 @@ async def test_delete_file_uses_legacy_task_state_lookup_when_matching_api_missi
 
 
 @pytest.mark.asyncio
-async def test_delete_file_legacy_lookup_blocks_detail_less_active_task() -> None:
+async def test_delete_file_ignores_unsafe_legacy_matching_api_when_v2_missing() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     ref = _settled_ref()
     tsm = _task_state_manager()
-    del tsm.get_matching_active_task_refs
-    tsm.get_all_info = _remote_mock(
-        {
-            "task-1": {
-                "state": "QUEUED",
-                "details": {},
-            },
-            "other-partition": {
-                "state": "SERIALIZING",
-                "details": {"partition": "tenant-b", "file_id": "file-1"},
-            },
-        }
-    )
-    tsm.get_object_ref = _remote_mock({"ref": ref})
+    tsm._ray_actor_method_names = {
+        "get_matching_active_task_refs",
+        "get_all_info",
+        "get_object_ref",
+        "set_state",
+    }
+    tsm.get_matching_active_task_refs = _remote_mock({"unsafe-task": {"ref": ref}})
+    tsm.get_all_info = _remote_mock({})
     vector_store = _vector_store()
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
@@ -865,10 +1029,50 @@ async def test_delete_file_legacy_lookup_blocks_detail_less_active_task() -> Non
     with patch("ray.cancel") as cancel:
         await dispatcher.delete_file("file-1", "tenant-a")
 
-    tsm.get_object_ref.remote.assert_called_once_with("task-1")
-    cancel.assert_called_once_with(ref, recursive=True)
-    tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.get_matching_active_task_refs.remote.assert_not_called()
+    tsm.get_all_info.remote.assert_called_once_with()
+    cancel.assert_not_called()
     assert vector_store.delete_by_filter.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_file_legacy_lookup_blocks_detail_less_active_task() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    del tsm.get_matching_active_task_refs_v2
+    tsm.get_all_info = _remote_mock(
+        {
+            "task-1": {
+                "state": "QUEUED",
+                "details": {},
+            },
+            "other-partition": {
+                "state": "SERIALIZING",
+                "details": {"partition": "tenant-b", "file_id": "file-1"},
+            },
+        }
+    )
+    vector_store = _vector_store()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=vector_store,
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=0.01,
+    )
+
+    with pytest.raises(TimeoutError, match="routing details"), patch("ray.cancel") as cancel:
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    assert tsm.get_all_info.remote.call_count == 2
+    tsm.get_object_ref.remote.assert_not_called()
+    cancel.assert_not_called()
+    tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+    tsm.set_state.remote.assert_not_called()
+    vector_store.delete_by_filter.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -877,7 +1081,7 @@ async def test_delete_file_does_not_cleanup_when_cancelled_task_does_not_settle(
 
     ref = asyncio.get_running_loop().create_future()
     tsm = _task_state_manager()
-    tsm.get_matching_active_task_refs = _remote_mock({"task-1": {"ref": ref}})
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": ref}})
     vector_store = _vector_store()
     document_repo = _document_repo()
     workspace_repo = _workspace_repo()
@@ -906,7 +1110,7 @@ async def test_delete_file_marks_stale_ref_less_task_failed_before_cleanup() -> 
     from services.workers.dispatcher import WorkerDispatcher
 
     tsm = _task_state_manager()
-    tsm.get_matching_active_task_refs.remote = AsyncMock(return_value={"task-1": {"ref": None}})
+    tsm.get_matching_active_task_refs_v2.remote = AsyncMock(return_value={"task-1": {"ref": None}})
     vector_store = _vector_store()
     document_repo = _document_repo()
     workspace_repo = _workspace_repo()
@@ -937,7 +1141,7 @@ async def test_delete_file_does_not_cleanup_when_matching_task_cancel_fails() ->
 
     ref = _settled_ref()
     tsm = _task_state_manager()
-    tsm.get_matching_active_task_refs.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
+    tsm.get_matching_active_task_refs_v2.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
     vector_store = _vector_store()
     document_repo = _document_repo()
     workspace_repo = _workspace_repo()

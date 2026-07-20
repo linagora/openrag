@@ -8,6 +8,7 @@ import ray
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
 from services.workers.ray_utils import call_ray_actor_with_timeout
+from services.workers.task_state import PENDING_TASK_DETAILS
 
 logger = get_logger()
 
@@ -35,7 +36,7 @@ async def cancel_active_indexing_tasks(
             partition=partition,
             file_id=file_id,
         )
-        cancelled_now, pending_without_ref = await _cancel_refs(
+        cancelled_now, pending_without_ref, pending_details = await _cancel_refs(
             task_state_manager,
             matches,
             deadline=deadline,
@@ -43,13 +44,14 @@ async def cancel_active_indexing_tasks(
             file_id=file_id,
         )
         cancelled += cancelled_now
-        if not pending_without_ref:
+        if not pending_without_ref and not pending_details:
             return cancelled
         logger.info(
-            "Waiting for active indexing tasks to expose object refs before delete cleanup",
+            "Waiting for active indexing tasks to finish registration before delete cleanup",
             partition=partition,
             file_id=file_id,
-            task_ids=pending_without_ref,
+            pending_without_ref=pending_without_ref,
+            pending_details=pending_details,
         )
         remaining = deadline - monotonic()
         if remaining <= _REF_WAIT_INTERVAL:
@@ -60,7 +62,7 @@ async def cancel_active_indexing_tasks(
                 file_id=file_id,
                 final=True,
             )
-            cancelled_now, pending_without_ref = await _cancel_refs(
+            cancelled_now, pending_without_ref, pending_details = await _cancel_refs(
                 task_state_manager,
                 final_matches,
                 deadline=deadline,
@@ -68,6 +70,8 @@ async def cancel_active_indexing_tasks(
                 file_id=file_id,
             )
             cancelled += cancelled_now
+            if pending_details:
+                _raise_pending_details_timeout(pending_details, partition=partition, file_id=file_id)
             if not pending_without_ref:
                 return cancelled
             await _mark_ref_less_tasks_failed(
@@ -89,14 +93,13 @@ async def _get_matching_active_task_refs(
     file_id: str | None,
     final: bool = False,
 ) -> dict[str, Any]:
-    get_matching = getattr(task_state_manager, "get_matching_active_task_refs", None)
-    remote = getattr(get_matching, "remote", None)
+    remote = _remote_actor_method(task_state_manager, "get_matching_active_task_refs_v2")
     suffix = " final" if final else ""
     if remote is not None:
         return await call_ray_actor_with_timeout(
             future=remote(partition=partition, file_id=file_id),
             timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
-            task_description=f"get_matching_active_task_refs({partition}, {file_id}){suffix}",
+            task_description=f"get_matching_active_task_refs_v2({partition}, {file_id}){suffix}",
         )
     return await _get_matching_active_task_refs_legacy(
         task_state_manager,
@@ -115,8 +118,7 @@ async def _get_matching_active_task_refs_legacy(
     file_id: str | None,
     final: bool,
 ) -> dict[str, Any]:
-    get_all_info = getattr(task_state_manager, "get_all_info", None)
-    get_all_info_remote = getattr(get_all_info, "remote", None)
+    get_all_info_remote = _remote_actor_method(task_state_manager, "get_all_info")
     if get_all_info_remote is None:
         logger.warning(
             "TaskStateManager does not expose active-task lookup; refusing delete cleanup",
@@ -134,8 +136,7 @@ async def _get_matching_active_task_refs_legacy(
     if not isinstance(all_info, dict):
         raise RuntimeError("TaskStateManager returned invalid task info for delete cleanup")
 
-    get_object_ref = getattr(task_state_manager, "get_object_ref", None)
-    get_object_ref_remote = getattr(get_object_ref, "remote", None)
+    get_object_ref_remote = _remote_actor_method(task_state_manager, "get_object_ref")
     matches: dict[str, Any] = {}
     for task_id, info in all_info.items():
         if not isinstance(info, dict):
@@ -146,14 +147,7 @@ async def _get_matching_active_task_refs_legacy(
         if not isinstance(details, dict):
             continue
         if not details:
-            object_ref = None
-            if get_object_ref_remote is not None:
-                object_ref = await call_ray_actor_with_timeout(
-                    future=get_object_ref_remote(task_id),
-                    timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
-                    task_description=f"get_object_ref({task_id}) for delete cleanup",
-                )
-            matches[task_id] = object_ref
+            matches[task_id] = PENDING_TASK_DETAILS
             continue
         if details.get("partition") != partition:
             continue
@@ -177,10 +171,14 @@ async def _cancel_refs(
     deadline: float,
     partition: str,
     file_id: str | None,
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[str], list[str]]:
     cancelled = 0
     pending_without_ref: list[str] = []
+    pending_details: list[str] = []
     for task_id, object_ref in matches.items():
+        if _task_details_pending(object_ref):
+            pending_details.append(task_id)
+            continue
         ref = _task_ref(object_ref)
         if ref is None:
             pending_without_ref.append(task_id)
@@ -210,11 +208,23 @@ async def _cancel_refs(
             task_description=f"set_state({task_id}, CANCELLED)",
         )
         cancelled += 1
-    return cancelled, pending_without_ref
+    return cancelled, pending_without_ref, pending_details
+
+
+def _task_details_pending(object_ref: Any) -> bool:
+    return object_ref == PENDING_TASK_DETAILS
 
 
 def _task_ref(object_ref: Any) -> Any | None:
     return object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+
+
+def _remote_actor_method(actor: Any, name: str) -> Any | None:
+    method_names = getattr(actor, "_ray_actor_method_names", None)
+    if isinstance(method_names, (frozenset, list, set, tuple)) and name not in method_names:
+        return None
+    method = getattr(actor, name, None)
+    return getattr(method, "remote", None)
 
 
 async def _wait_for_task_to_settle(
@@ -294,3 +304,10 @@ def _remaining_timeout(deadline: float, *, partition: str, file_id: str | None) 
             f"before deleting partition={partition!r}, file_id={file_id!r}"
         )
     return remaining
+
+
+def _raise_pending_details_timeout(task_ids: list[str], *, partition: str, file_id: str | None) -> None:
+    raise TimeoutError(
+        "Timed out waiting for active indexing tasks to record routing details "
+        f"before deleting partition={partition!r}, file_id={file_id!r}, task_ids={task_ids!r}"
+    )

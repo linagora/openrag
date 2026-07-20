@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 from core.utils.exceptions import NotFoundError, PartitionNotFoundError, UserNotFoundError, ValidationError
@@ -37,6 +39,89 @@ class FakePartitionRepo:
         self.deleted.append(name)
         self._existing.discard(name)
         return True
+
+
+class LockingPartitionRepo(FakePartitionRepo):
+    def __init__(self, existing: set[str] | None = None, *, events: list[tuple[str, str]]):
+        super().__init__(existing)
+        self.events = events
+        self.locked = False
+
+    @asynccontextmanager
+    async def partition_operation_lock(self, name: str):
+        self.events.append(("lock_enter", name))
+        self.locked = True
+        try:
+            yield
+        finally:
+            self.locked = False
+            self.events.append(("lock_exit", name))
+
+    async def delete_partition(self, name: str) -> bool:
+        assert self.locked is True
+        self.events.append(("repo_delete", name))
+        return await super().delete_partition(name)
+
+
+class _GuardedPartitionOperation:
+    def __init__(self, repo: GuardedPartitionRepo, name: str) -> None:
+        self._repo = repo
+        self._name = name
+
+    async def partition_exists(self, name: str) -> bool:
+        assert name == self._name
+        self._repo.events.append(("guard_exists", name))
+        return name in self._repo._existing
+
+    async def create_partition(self, name: str, user_id: int | None = None, *, max_owned: int | None = None) -> dict:
+        assert name == self._name
+        self._repo.events.append(("guard_create", name))
+        return await FakePartitionRepo.create_partition(self._repo, name, user_id=user_id, max_owned=max_owned)
+
+    async def delete_partition(self, name: str) -> bool:
+        assert name == self._name
+        self._repo.events.append(("guard_delete", name))
+        return await FakePartitionRepo.delete_partition(self._repo, name)
+
+    async def update_partition(self, name: str, **fields: object) -> dict:
+        assert name == self._name
+        self._repo.events.append(("guard_update", name))
+        self._repo.updated.append((name, fields))
+        return {"partition": name, **fields}
+
+    async def list_partition_rows(self) -> list[dict]:
+        self._repo.events.append(("guard_list", self._name))
+        return [{"partition": name} for name in sorted(self._repo._existing)]
+
+
+class GuardedPartitionRepo(FakePartitionRepo):
+    def __init__(self, existing: set[str] | None = None, *, events: list[tuple[str, str]]):
+        super().__init__(existing)
+        self.events = events
+        self.updated: list[tuple[str, dict[str, object]]] = []
+
+    @asynccontextmanager
+    async def partition_operation_lock(self, name: str):
+        self.events.append(("lock_enter", name))
+        try:
+            yield _GuardedPartitionOperation(self, name)
+        finally:
+            self.events.append(("lock_exit", name))
+
+    async def partition_exists(self, name: str) -> bool:
+        raise AssertionError("locked operations must use the operation guard")
+
+    async def create_partition(self, name: str, user_id: int | None = None, *, max_owned: int | None = None) -> dict:
+        raise AssertionError("locked operations must create through the operation guard")
+
+    async def delete_partition(self, name: str) -> bool:
+        raise AssertionError("locked operations must delete through the operation guard")
+
+    async def update_partition(self, name: str, **fields: object) -> dict | None:
+        raise AssertionError("locked operations must update through the operation guard")
+
+    async def list_partition_rows(self) -> list[dict]:
+        raise AssertionError("locked operations must list through the operation guard")
 
 
 class FakeMembershipRepo:
@@ -144,6 +229,7 @@ def _svc(
     collection="vdb",
     tsm=None,
     task_cancel_timeout=60.0,
+    config=None,
 ) -> PartitionService:
     return PartitionService(
         partition_repo=prepo or FakePartitionRepo(),
@@ -154,6 +240,7 @@ def _svc(
         collection=collection,
         task_state_manager=tsm,
         task_cancel_timeout=task_cancel_timeout,
+        config=config,
     )
 
 
@@ -272,6 +359,146 @@ async def test_delete_partition_deletes_vectors_before_rows():
 
 
 @pytest.mark.asyncio
+async def test_indexing_admission_reports_existing_partition_under_operation_lock():
+    events: list[tuple[str, str]] = []
+    prepo = LockingPartitionRepo(existing={"p1"}, events=events)
+    svc = _svc(prepo=prepo)
+
+    async with svc.indexing_admission("p1") as existed:
+        assert existed is True
+        assert prepo.locked is True
+
+    assert prepo.locked is False
+    assert events == [("lock_enter", "p1"), ("lock_exit", "p1")]
+
+
+@pytest.mark.asyncio
+async def test_indexing_admission_uses_operation_guard_for_existence_check():
+    events: list[tuple[str, str]] = []
+    prepo = GuardedPartitionRepo(existing={"p1"}, events=events)
+    svc = _svc(prepo=prepo)
+
+    async with svc.indexing_admission("p1") as existed:
+        assert existed is True
+
+    assert events == [("lock_enter", "p1"), ("guard_exists", "p1"), ("lock_exit", "p1")]
+
+
+@pytest.mark.asyncio
+async def test_partition_exists_inside_indexing_admission_uses_operation_guard():
+    events: list[tuple[str, str]] = []
+    prepo = GuardedPartitionRepo(existing={"p1"}, events=events)
+    svc = _svc(prepo=prepo)
+
+    async with svc.indexing_admission("p1"):
+        assert await svc.partition_exists("p1") is True
+
+    assert events == [
+        ("lock_enter", "p1"),
+        ("guard_exists", "p1"),
+        ("guard_exists", "p1"),
+        ("lock_exit", "p1"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_partition_inside_indexing_admission_uses_operation_guard():
+    events: list[tuple[str, str]] = []
+    prepo = GuardedPartitionRepo(existing=set(), events=events)
+    svc = _svc(prepo=prepo)
+
+    async with svc.indexing_admission("p1") as existed:
+        assert existed is False
+        await svc.create_partition("p1", user_id=7)
+
+    assert prepo.created == [("p1", 7)]
+    assert events == [
+        ("lock_enter", "p1"),
+        ("guard_exists", "p1"),
+        ("guard_exists", "p1"),
+        ("guard_create", "p1"),
+        ("lock_exit", "p1"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_partition_with_config_inside_indexing_admission_keeps_db_work_on_operation_guard():
+    events: list[tuple[str, str]] = []
+    prepo = GuardedPartitionRepo(existing=set(), events=events)
+    config = SimpleNamespace(partitions={})
+    svc = _svc(prepo=prepo, config=config)
+    svc._validate_preset_refs = lambda row: None
+    svc.resolve_partition_row = lambda row: f"resolved-{row['partition']}"
+
+    async with svc.indexing_admission("p1") as existed:
+        assert existed is False
+        await svc.create_partition("p1", user_id=7)
+
+    assert prepo.created == [("p1", 7)]
+    assert prepo.updated == [
+        (
+            "p1",
+            {
+                "description": "",
+                "embedder": "default",
+                "indexation_preset": "default",
+                "retrieval_preset": "default",
+                "chat_history_depth": 0,
+                "chat_llm": None,
+            },
+        )
+    ]
+    assert config.partitions == {"p1": "resolved-p1"}
+    assert events == [
+        ("lock_enter", "p1"),
+        ("guard_exists", "p1"),
+        ("guard_exists", "p1"),
+        ("guard_create", "p1"),
+        ("guard_update", "p1"),
+        ("guard_list", "p1"),
+        ("lock_exit", "p1"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_holds_operation_lock_through_vector_and_row_cleanup():
+    events: list[tuple[str, str]] = []
+    prepo = LockingPartitionRepo(existing={"p1"}, events=events)
+
+    class LockAssertingVectorStore(FakeVectorStore):
+        async def delete_by_filter(self, filters) -> int:
+            assert prepo.locked is True
+            events.append(("vector_delete", filters["partition"]))
+            return await super().delete_by_filter(filters)
+
+    await _svc(prepo=prepo, vstore=LockAssertingVectorStore()).delete_partition("p1")
+
+    assert events == [
+        ("lock_enter", "p1"),
+        ("vector_delete", "p1"),
+        ("repo_delete", "p1"),
+        ("vector_delete", "p1"),
+        ("lock_exit", "p1"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_uses_operation_guard_for_existence_and_row_delete():
+    events: list[tuple[str, str]] = []
+    prepo = GuardedPartitionRepo(existing={"p1"}, events=events)
+
+    await _svc(prepo=prepo).delete_partition("p1")
+
+    assert prepo.deleted == ["p1"]
+    assert events == [
+        ("lock_enter", "p1"),
+        ("guard_exists", "p1"),
+        ("guard_delete", "p1"),
+        ("lock_exit", "p1"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_delete_partition_no_vectors_still_deletes_rows():
     prepo = FakePartitionRepo(existing={"p1"})
     vstore = FakeVectorStore(ids=[])
@@ -339,15 +566,15 @@ async def test_delete_partition_cancels_active_indexing_tasks_before_cleanup():
     ref = asyncio.get_running_loop().create_future()
     ref.set_result(None)
     tsm = MagicMock()
-    tsm.get_matching_active_task_refs = MagicMock()
-    tsm.get_matching_active_task_refs.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
+    tsm.get_matching_active_task_refs_v2 = MagicMock()
+    tsm.get_matching_active_task_refs_v2.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
     tsm.set_state = MagicMock()
     tsm.set_state.remote = AsyncMock(return_value=None)
 
     with patch("ray.cancel") as cancel:
         await _svc(prepo=prepo, tsm=tsm).delete_partition("p1")
 
-    tsm.get_matching_active_task_refs.remote.assert_called_once_with(partition="p1", file_id=None)
+    tsm.get_matching_active_task_refs_v2.remote.assert_called_once_with(partition="p1", file_id=None)
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
 
@@ -361,7 +588,7 @@ async def test_delete_partition_uses_legacy_task_state_lookup_when_matching_api_
     ref = asyncio.get_running_loop().create_future()
     ref.set_result(None)
     tsm = MagicMock()
-    del tsm.get_matching_active_task_refs
+    del tsm.get_matching_active_task_refs_v2
     tsm.get_all_info = MagicMock()
     tsm.get_all_info.remote = AsyncMock(
         return_value={
@@ -399,8 +626,8 @@ async def test_delete_partition_does_not_cleanup_when_cancelled_task_does_not_se
     vstore = FakeVectorStore()
     ref = asyncio.get_running_loop().create_future()
     tsm = MagicMock()
-    tsm.get_matching_active_task_refs = MagicMock()
-    tsm.get_matching_active_task_refs.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
+    tsm.get_matching_active_task_refs_v2 = MagicMock()
+    tsm.get_matching_active_task_refs_v2.remote = AsyncMock(return_value={"task-1": {"ref": ref}})
     tsm.set_state = MagicMock()
     tsm.set_state.remote = AsyncMock(return_value=None)
 
@@ -420,8 +647,8 @@ async def test_delete_partition_marks_stale_ref_less_task_failed_before_cleanup(
     prepo = FakePartitionRepo(existing={"p1"})
     vstore = FakeVectorStore()
     tsm = MagicMock()
-    tsm.get_matching_active_task_refs = MagicMock()
-    tsm.get_matching_active_task_refs.remote = AsyncMock(return_value={"task-1": {"ref": None}})
+    tsm.get_matching_active_task_refs_v2 = MagicMock()
+    tsm.get_matching_active_task_refs_v2.remote = AsyncMock(return_value={"task-1": {"ref": None}})
     tsm.set_failed_if_not_cancelled = MagicMock()
     tsm.set_failed_if_not_cancelled.remote = AsyncMock(return_value=True)
     tsm.set_state = MagicMock()

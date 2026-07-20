@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from services.workers.task_state import TaskStateManager
+from services.workers.task_state import PENDING_TASK_DETAILS, TaskStateManager
 
 
 def _task_state_manager() -> Any:
@@ -41,7 +41,29 @@ async def test_set_object_ref_accepts_terminal_states_without_reopening_task() -
 
 
 @pytest.mark.asyncio
-async def test_matching_active_task_refs_include_detail_less_queued_tasks() -> None:
+async def test_set_queued_details_records_active_state_and_routing_together() -> None:
+    manager = _task_state_manager()
+
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"filename": "report.txt"},
+        user_id=42,
+    )
+
+    assert await manager.get_state("task-1") == "QUEUED"
+    assert await manager.get_details("task-1") == {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {"filename": "report.txt"},
+        "user_id": 42,
+    }
+    assert "task-1" in await manager.get_all_user_info(42)
+
+
+@pytest.mark.asyncio
+async def test_matching_active_task_refs_treat_detail_less_queued_tasks_as_pending_registration() -> None:
     manager = _task_state_manager()
     ref = object()
 
@@ -57,6 +79,7 @@ async def test_matching_active_task_refs_include_detail_less_queued_tasks() -> N
         user_id=1,
     )
 
-    assert await manager.get_matching_active_task_refs(partition="tenant-a", file_id="file-1") == {
-        "queued-without-details": {"ref": ref}
-    }
+    expected = {"queued-without-details": PENDING_TASK_DETAILS}
+
+    assert await manager.get_matching_active_task_refs(partition="tenant-a", file_id="file-1") == expected
+    assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == expected

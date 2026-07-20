@@ -9,6 +9,7 @@ from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
 from services.workers.ray_utils import call_ray_actor_with_timeout
+from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 
 logger = get_logger()
@@ -65,6 +66,44 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=task_description,
         )
 
+    async def _set_queued_details(
+        self,
+        task_id: str,
+        *,
+        file_id: str | None,
+        partition: str,
+        metadata: dict[str, Any],
+        user_id: int | None,
+    ) -> None:
+        remote = _remote_actor_method(self._tsm, "set_queued_details")
+        if remote is not None:
+            await self._call(
+                remote(
+                    task_id,
+                    file_id=file_id,
+                    partition=partition,
+                    metadata=metadata,
+                    user_id=user_id,
+                ),
+                task_description=f"set_queued_details({task_id})",
+            )
+            return
+
+        await self._call(
+            self._tsm.set_state.remote(task_id, "QUEUED"),
+            task_description=f"set_state({task_id})",
+        )
+        await self._call(
+            self._tsm.set_details.remote(
+                task_id,
+                file_id=file_id,
+                partition=partition,
+                metadata=metadata,
+                user_id=user_id,
+            ),
+            task_description=f"set_details({task_id})",
+        )
+
     async def dispatch_indexing(
         self,
         *,
@@ -77,24 +116,17 @@ class WorkerDispatcher(IndexingDispatcher):
         indexation_config: dict | None = None,
         embedder_name: str | None = None,
         require_existing_partition: bool = False,
+        allow_legacy_require_existing_partition_retry: bool = False,
     ) -> str:
         task_id = uuid.uuid4().hex
 
-        await self._call(
-            self._tsm.set_state.remote(task_id, "QUEUED"),
-            task_description=f"set_state({task_id})",
-        )
-
         user_metadata = {key: value for key, value in metadata.items() if key not in {"file_id", "source"}}
-        await self._call(
-            self._tsm.set_details.remote(
-                task_id,
-                file_id=metadata.get("file_id"),
-                partition=partition,
-                metadata=user_metadata,
-                user_id=user.get("id") if user else None,
-            ),
-            task_description=f"set_details({task_id})",
+        await self._set_queued_details(
+            task_id,
+            file_id=metadata.get("file_id"),
+            partition=partition,
+            metadata=user_metadata,
+            user_id=user.get("id") if user else None,
         )
 
         task: Any | None = None
@@ -115,7 +147,7 @@ class WorkerDispatcher(IndexingDispatcher):
             task = await self._submit_indexing_task(
                 task_id,
                 submit_kwargs,
-                allow_legacy_retry=require_existing_partition,
+                allow_legacy_retry=allow_legacy_require_existing_partition_retry,
             )
 
             registered = await self._call(
@@ -128,10 +160,34 @@ class WorkerDispatcher(IndexingDispatcher):
             mark_submit_failed = True
             if task is not None:
                 mark_submit_failed = await self._cancel_submitted_task(task_id, task)
+                if mark_submit_failed:
+                    await self._cleanup_submitted_vectors(task_id, metadata=metadata, partition=partition)
             if mark_submit_failed:
                 await self._mark_submit_failed(task_id, traceback.format_exc())
             raise
         return task_id
+
+    async def _cleanup_submitted_vectors(self, task_id: str, *, metadata: dict, partition: str) -> None:
+        file_id = metadata.get("file_id")
+        if not file_id:
+            return
+        try:
+            if await self._vector_store.collection_exists(self._collection):
+                await self._vector_store.delete_by_filter(
+                    {
+                        "partition": partition,
+                        "file_id": file_id,
+                        INDEXING_TASK_ID_METADATA_KEY: str(task_id),
+                    }
+                )
+        except Exception as exc:
+            logger.warning(
+                "Failed to clean task-marked vectors after indexing dispatch failure",
+                task_id=task_id,
+                file_id=file_id,
+                partition=partition,
+                error=str(exc),
+            )
 
     async def _submit_indexing_task(
         self,
@@ -408,6 +464,14 @@ def _exception_chain(exc: BaseException):
         seen.add(id(current))
         yield current
         current = current.__cause__ or current.__context__
+
+
+def _remote_actor_method(actor: Any, name: str) -> Any | None:
+    method_names = getattr(actor, "_ray_actor_method_names", None)
+    if isinstance(method_names, (frozenset, list, set, tuple)) and name not in method_names:
+        return None
+    method = getattr(actor, name, None)
+    return getattr(method, "remote", None)
 
 
 __all__ = ["WorkerDispatcher", "from_ray_namespace"]
