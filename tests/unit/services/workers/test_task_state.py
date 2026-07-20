@@ -44,7 +44,7 @@ async def test_set_object_ref_accepts_terminal_states_without_reopening_task() -
 async def test_set_queued_details_records_active_state_and_routing_together() -> None:
     manager = _task_state_manager()
 
-    await manager.set_queued_details(
+    accepted = await manager.set_queued_details(
         "task-1",
         file_id="file-1",
         partition="tenant-a",
@@ -52,6 +52,7 @@ async def test_set_queued_details_records_active_state_and_routing_together() ->
         user_id=42,
     )
 
+    assert accepted is True
     assert await manager.get_state("task-1") == "QUEUED"
     assert await manager.get_details("task-1") == {
         "file_id": "file-1",
@@ -83,3 +84,101 @@ async def test_matching_active_task_refs_treat_detail_less_queued_tasks_as_pendi
 
     assert await manager.get_matching_active_task_refs(partition="tenant-a", file_id="file-1") == expected
     assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == expected
+
+
+@pytest.mark.asyncio
+async def test_file_delete_fence_rejects_matching_queued_details() -> None:
+    manager = _task_state_manager()
+
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1")
+    accepted = await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"filename": "report.txt"},
+        user_id=42,
+    )
+
+    assert accepted is False
+    assert await manager.get_state("task-1") == "CANCELLED"
+    assert await manager.get_details("task-1") == {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {"filename": "report.txt"},
+        "user_id": 42,
+    }
+
+
+@pytest.mark.asyncio
+async def test_file_delete_fence_rejects_late_object_ref_registration() -> None:
+    manager = _task_state_manager()
+
+    assert await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=None,
+    )
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1")
+
+    assert await manager.set_object_ref("task-1", {"ref": object()}) is False
+    assert await manager.get_state("task-1") == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_file_delete_fence_only_blocks_same_partition_and_file() -> None:
+    manager = _task_state_manager()
+
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1")
+
+    assert await manager.set_queued_details(
+        "other-file",
+        file_id="file-2",
+        partition="tenant-a",
+        metadata={},
+        user_id=None,
+    )
+    assert await manager.set_queued_details(
+        "other-partition",
+        file_id="file-1",
+        partition="tenant-b",
+        metadata={},
+        user_id=None,
+    )
+
+    assert await manager.get_state("other-file") == "QUEUED"
+    assert await manager.get_state("other-partition") == "QUEUED"
+
+
+@pytest.mark.asyncio
+async def test_file_delete_fence_is_counted_for_overlapping_deletes() -> None:
+    manager = _task_state_manager()
+
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1")
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1")
+    await manager.end_file_delete(partition="tenant-a", file_id="file-1")
+
+    assert (
+        await manager.set_queued_details(
+            "task-1",
+            file_id="file-1",
+            partition="tenant-a",
+            metadata={},
+            user_id=None,
+        )
+        is False
+    )
+
+    await manager.end_file_delete(partition="tenant-a", file_id="file-1")
+
+    assert (
+        await manager.set_queued_details(
+            "task-2",
+            file_id="file-1",
+            partition="tenant-a",
+            metadata={},
+            user_id=None,
+        )
+        is True
+    )

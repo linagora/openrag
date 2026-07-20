@@ -88,7 +88,9 @@ def _task_state_manager() -> MagicMock:
     tsm.get_matching_active_task_refs_v2 = _remote_mock({})
     tsm.get_matching_active_task_refs = _remote_mock({})
     tsm.get_all_info = None
-    tsm.set_queued_details = _remote_mock()
+    tsm.set_queued_details = _remote_mock(True)
+    tsm.begin_file_delete = _remote_mock()
+    tsm.end_file_delete = _remote_mock()
     return tsm
 
 
@@ -171,6 +173,39 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         require_existing_partition=True,
     )
     tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = _pool_with_ref(object())
+    tsm = _task_state_manager()
+    tsm.set_queued_details.remote = AsyncMock(return_value=False)
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        with pytest.raises(RuntimeError, match="is being deleted"):
+            await dispatcher.dispatch_indexing(
+                path="/data/report.txt",
+                metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+                partition="tenant-a",
+                user={"id": 42},
+                workspace_ids=["ws-1"],
+                replace=True,
+            )
+
+    pool.submit.remote.assert_not_called()
+    tsm.set_object_ref.remote.assert_not_called()
+    tsm.set_failed_if_not_cancelled.remote.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -720,6 +755,96 @@ async def test_delete_file_cleans_vector_store_before_database() -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_file_holds_file_delete_fence_around_cleanup() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    call_order = []
+    tsm = _task_state_manager()
+    tsm.begin_file_delete.remote = AsyncMock(side_effect=lambda **kwargs: call_order.append("begin"))
+    tsm.get_matching_active_task_refs_v2.remote = AsyncMock(
+        side_effect=lambda **kwargs: call_order.append("lookup") or {}
+    )
+    tsm.end_file_delete.remote = AsyncMock(side_effect=lambda **kwargs: call_order.append("end"))
+    vector_store = _vector_store()
+    vector_store.collection_exists = AsyncMock(side_effect=lambda collection: call_order.append("exists") or True)
+    vector_store.delete_by_filter = AsyncMock(side_effect=lambda *args, **kwargs: call_order.append("delete") or 2)
+    workspace_repo = _workspace_repo()
+    workspace_repo.remove_file_from_all_workspaces = AsyncMock(
+        side_effect=lambda *args, **kwargs: call_order.append("workspace")
+    )
+    document_repo = _document_repo()
+    document_repo.remove_file_from_partition = AsyncMock(
+        side_effect=lambda *args, **kwargs: call_order.append("document")
+    )
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=workspace_repo,
+        collection="default",
+    )
+
+    await dispatcher.delete_file("file-1", "tenant-a")
+
+    assert call_order == ["begin", "lookup", "exists", "delete", "workspace", "document", "delete", "end"]
+    tsm.begin_file_delete.remote.assert_awaited_once_with(partition="tenant-a", file_id="file-1")
+    tsm.end_file_delete.remote.assert_awaited_once_with(partition="tenant-a", file_id="file-1")
+
+
+@pytest.mark.asyncio
+async def test_delete_file_releases_file_delete_fence_when_cleanup_fails() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    vector_store = _vector_store()
+    vector_store.delete_by_filter = AsyncMock(side_effect=Exception("Milvus connection failed"))
+    workspace_repo = _workspace_repo()
+    document_repo = _document_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=workspace_repo,
+        collection="default",
+    )
+
+    with pytest.raises(Exception, match="Milvus connection failed"):
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    tsm.end_file_delete.remote.assert_awaited_once_with(partition="tenant-a", file_id="file-1")
+    workspace_repo.remove_file_from_all_workspaces.assert_not_called()
+    document_repo.remove_file_from_partition.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_file_fails_closed_when_file_delete_fence_is_missing() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    del tsm.begin_file_delete
+    vector_store = _vector_store()
+    workspace_repo = _workspace_repo()
+    document_repo = _document_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=workspace_repo,
+        collection="default",
+    )
+
+    with pytest.raises(RuntimeError, match="file delete fencing"):
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    vector_store.delete_by_filter.assert_not_called()
+    workspace_repo.remove_file_from_all_workspaces.assert_not_called()
+    document_repo.remove_file_from_partition.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_delete_file_cancels_active_matching_indexing_task_before_cleanup() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
@@ -1009,6 +1134,8 @@ async def test_delete_file_ignores_unsafe_legacy_matching_api_when_v2_missing() 
     ref = _settled_ref()
     tsm = _task_state_manager()
     tsm._ray_actor_method_names = {
+        "begin_file_delete",
+        "end_file_delete",
         "get_matching_active_task_refs",
         "get_all_info",
         "get_object_ref",

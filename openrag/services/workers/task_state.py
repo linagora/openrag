@@ -40,6 +40,7 @@ class TaskStateManager:
     def __init__(self) -> None:
         self.tasks: dict[str, TaskInfo] = {}
         self.user_index: dict[int | None, set[str]] = {}
+        self.file_delete_fences: dict[tuple[str, str], int] = {}
         self.lock = asyncio.Lock()
 
     async def _ensure_task(self, task_id: str) -> TaskInfo:
@@ -64,6 +65,27 @@ class TaskStateManager:
             "user_id": user_id,
         }
         self.user_index.setdefault(user_id, set()).add(task_id)
+
+    def _file_delete_fenced(self, *, partition: str | None, file_id: str | None) -> bool:
+        if partition is None or file_id is None:
+            return False
+        return self.file_delete_fences.get((partition, file_id), 0) > 0
+
+    @ray.method(concurrency_group="set")
+    async def begin_file_delete(self, *, partition: str, file_id: str) -> None:
+        async with self.lock:
+            key = (partition, file_id)
+            self.file_delete_fences[key] = self.file_delete_fences.get(key, 0) + 1
+
+    @ray.method(concurrency_group="set")
+    async def end_file_delete(self, *, partition: str, file_id: str) -> None:
+        async with self.lock:
+            key = (partition, file_id)
+            remaining = self.file_delete_fences.get(key, 0) - 1
+            if remaining > 0:
+                self.file_delete_fences[key] = remaining
+            else:
+                self.file_delete_fences.pop(key, None)
 
     @ray.method(concurrency_group="set")
     async def set_state(self, task_id: str, state: str) -> None:
@@ -129,12 +151,11 @@ class TaskStateManager:
         partition: str,
         metadata: dict[str, Any],
         user_id: int | None,
-    ) -> None:
+    ) -> bool:
         async with self.lock:
             info = await self._ensure_task(task_id)
             if info.state == DocumentStatus.CANCELLED:
-                return
-            info.state = "QUEUED"
+                return False
             self._record_details(
                 task_id,
                 info,
@@ -143,12 +164,21 @@ class TaskStateManager:
                 metadata=metadata,
                 user_id=user_id,
             )
+            if self._file_delete_fenced(partition=partition, file_id=file_id):
+                info.state = "CANCELLED"
+                return False
+            info.state = "QUEUED"
+            return True
 
     @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
         async with self.lock:
             info = await self._ensure_task(task_id)
             info.object_ref = object_ref
+            details = info.details or {}
+            if self._file_delete_fenced(partition=details.get("partition"), file_id=details.get("file_id")):
+                info.state = "CANCELLED"
+                return False
             return info.state in ACTIVE_INDEXING_STATES or info.state in TERMINAL_INDEXING_STATES
 
     @ray.method(concurrency_group="get")

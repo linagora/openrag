@@ -74,10 +74,10 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         metadata: dict[str, Any],
         user_id: int | None,
-    ) -> None:
+    ) -> bool:
         remote = _remote_actor_method(self._tsm, "set_queued_details")
         if remote is not None:
-            await self._call(
+            accepted = await self._call(
                 remote(
                     task_id,
                     file_id=file_id,
@@ -87,7 +87,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 ),
                 task_description=f"set_queued_details({task_id})",
             )
-            return
+            return accepted is not False
 
         await self._call(
             self._tsm.set_state.remote(task_id, "QUEUED"),
@@ -102,6 +102,25 @@ class WorkerDispatcher(IndexingDispatcher):
                 user_id=user_id,
             ),
             task_description=f"set_details({task_id})",
+        )
+        return True
+
+    async def _begin_file_delete_fence(self, *, file_id: str, partition: str) -> None:
+        remote = _remote_actor_method(self._tsm, "begin_file_delete")
+        if remote is None:
+            raise RuntimeError("TaskStateManager does not expose file delete fencing for delete cleanup")
+        await self._call(
+            remote(partition=partition, file_id=file_id),
+            task_description=f"begin_file_delete({partition}, {file_id})",
+        )
+
+    async def _end_file_delete_fence(self, *, file_id: str, partition: str) -> None:
+        remote = _remote_actor_method(self._tsm, "end_file_delete")
+        if remote is None:
+            raise RuntimeError("TaskStateManager does not expose file delete fencing for delete cleanup")
+        await self._call(
+            remote(partition=partition, file_id=file_id),
+            task_description=f"end_file_delete({partition}, {file_id})",
         )
 
     async def dispatch_indexing(
@@ -121,13 +140,18 @@ class WorkerDispatcher(IndexingDispatcher):
         task_id = uuid.uuid4().hex
 
         user_metadata = {key: value for key, value in metadata.items() if key not in {"file_id", "source"}}
-        await self._set_queued_details(
+        accepted = await self._set_queued_details(
             task_id,
             file_id=metadata.get("file_id"),
             partition=partition,
             metadata=user_metadata,
             user_id=user.get("id") if user else None,
         )
+        if not accepted:
+            raise RuntimeError(
+                f"Task {task_id} was rejected because file {metadata.get('file_id')!r} "
+                f"in partition {partition!r} is being deleted"
+            )
 
         task: Any | None = None
         try:
@@ -275,6 +299,27 @@ class WorkerDispatcher(IndexingDispatcher):
         return False
 
     async def delete_file(self, file_id: str, partition: str) -> None:
+        await self._begin_file_delete_fence(file_id=file_id, partition=partition)
+        delete_failed = False
+        try:
+            await self._delete_file_with_fence(file_id=file_id, partition=partition)
+        except Exception:
+            delete_failed = True
+            raise
+        finally:
+            try:
+                await self._end_file_delete_fence(file_id=file_id, partition=partition)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to release file delete fence",
+                    file_id=file_id,
+                    partition=partition,
+                    error=str(exc),
+                )
+                if not delete_failed:
+                    raise
+
+    async def _delete_file_with_fence(self, *, file_id: str, partition: str) -> None:
         cancelled = await cancel_active_indexing_tasks(
             self._tsm,
             partition=partition,
