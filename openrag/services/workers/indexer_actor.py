@@ -7,7 +7,16 @@ from pathlib import Path
 from typing import Any
 
 from core.models.document import Document
-from services.workers.pipeline_builder import IndexingPipeline
+from core.utils.logging import get_logger
+from services.workers.pipeline_builder import (
+    REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY,
+    REPLACE_OLD_CHUNK_IDS_ROW_KEY,
+    IndexingPipeline,
+)
+from services.workers.stages._common import run_with_optional_timeout
+from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
+
+logger = get_logger()
 
 
 class IndexerWorker:
@@ -34,11 +43,15 @@ class IndexerWorker:
         task_state_manager: Any,
         document_repo: Any = None,
         topic_tag_repo: Any = None,
+        vector_store: Any = None,
+        collection: str = "default",
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
         self._document_repo = document_repo
         self._topic_tag_repo = topic_tag_repo
+        self._vector_store = vector_store
+        self._collection = collection
 
     async def process_file(
         self,
@@ -52,6 +65,7 @@ class IndexerWorker:
         replace: bool = False,
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
+        require_existing_partition: bool = False,
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
@@ -60,6 +74,8 @@ class IndexerWorker:
         is re-raised so the Ray task is marked as errored.
         """
         await self._tsm.set_state.remote(task_id, "SERIALIZING")
+        row: dict[str, Any] | None = None
+        catalog_written = False
         try:
             document = await _load_document(path, metadata, partition)
             # One indexation timestamp for this file, shared by the Milvus chunks
@@ -80,7 +96,7 @@ class IndexerWorker:
             indexed_at = row.get("indexed_at")
 
             if self._document_repo is not None:
-                await _write_catalog_record(
+                wrote_catalog = await _write_catalog_record(
                     doc_repo=self._document_repo,
                     metadata=metadata,
                     partition=partition,
@@ -88,6 +104,15 @@ class IndexerWorker:
                     replace=replace,
                     indexation_config=indexation_config,
                     indexed_at=indexed_at,
+                    require_existing_partition=require_existing_partition,
+                )
+                if not wrote_catalog:
+                    raise RuntimeError("Catalog row was not written after vector indexing")
+                catalog_written = True
+                await _delete_replaced_chunks_after_catalog(
+                    vector_store=self._vector_store or getattr(self._pipeline, "vector_store", None),
+                    row=row,
+                    timeout=getattr(getattr(self._pipeline, "timeouts", None), "store", None),
                 )
             if self._topic_tag_repo is not None:
                 await _replace_topic_tags_if_needed(
@@ -100,6 +125,17 @@ class IndexerWorker:
             await self._tsm.set_state.remote(task_id, "COMPLETED")
             return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
         except Exception:
+            should_cleanup_vectors = row is not None and (
+                row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"
+            )
+            if not catalog_written and should_cleanup_vectors:
+                await _cleanup_indexed_vectors(
+                    vector_store=self._vector_store or getattr(self._pipeline, "vector_store", None),
+                    collection=self._collection,
+                    metadata=metadata,
+                    partition=partition,
+                    task_id=task_id,
+                )
             tb = traceback.format_exc()
             await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
             raise
@@ -118,12 +154,13 @@ async def _write_catalog_record(
     replace: bool,
     indexation_config: dict[str, Any] | None,
     indexed_at: datetime | None = None,
-) -> None:
+    require_existing_partition: bool = False,
+) -> bool:
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
     config_kwargs = {"indexation_config": indexation_config} if indexation_config is not None else {}
     if replace:
-        await doc_repo.update_file_in_partition(
+        return await doc_repo.update_file_in_partition(
             file_id=file_id,
             partition=partition,
             file_metadata=file_metadata,
@@ -132,9 +169,8 @@ async def _write_catalog_record(
             indexed_at=indexed_at,
             **config_kwargs,
         )
-        return
 
-    await doc_repo.add_file_to_partition(
+    return await doc_repo.add_file_to_partition(
         file_id=file_id,
         partition=partition,
         file_metadata=file_metadata,
@@ -142,8 +178,55 @@ async def _write_catalog_record(
         relationship_id=metadata.get("relationship_id"),
         parent_id=metadata.get("parent_id"),
         indexed_at=indexed_at,
+        require_existing_partition=require_existing_partition,
         **config_kwargs,
     )
+
+
+async def _cleanup_indexed_vectors(
+    *,
+    vector_store: Any,
+    collection: str,
+    metadata: dict[str, Any],
+    partition: str,
+    task_id: str,
+) -> None:
+    file_id = metadata.get("file_id")
+    if vector_store is None or not file_id or not task_id:
+        return
+    try:
+        if await vector_store.collection_exists(collection):
+            await vector_store.delete_by_filter(
+                {
+                    "partition": partition,
+                    "file_id": file_id,
+                    INDEXING_TASK_ID_METADATA_KEY: str(task_id),
+                }
+            )
+    except Exception:
+        # Preserve the original indexing failure. A later file delete still runs
+        # the broader partition/file cleanup path if this best-effort sweep fails.
+        return
+
+
+async def _delete_replaced_chunks_after_catalog(
+    *,
+    vector_store: Any,
+    row: dict[str, Any],
+    timeout: float | None,
+) -> None:
+    ids = row.get(REPLACE_OLD_CHUNK_IDS_ROW_KEY)
+    if vector_store is None or not isinstance(ids, list) or not ids:
+        return
+    collection = row.get(REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY) or "default"
+    try:
+        deleted = await run_with_optional_timeout(lambda: vector_store.delete(ids, collection), timeout)
+        logger.bind(task_id=row.get("task_id")).debug(f"re-index: removed {deleted} stale chunk(s) after replace")
+    except Exception as exc:  # noqa: BLE001 - cleanup is best-effort after catalog commit
+        logger.bind(task_id=row.get("task_id")).error(
+            f"re-index: catalog was updated but failed to delete {len(ids)} stale chunk(s); "
+            f"duplicates remain until reconciliation: {exc}"
+        )
 
 
 async def _replace_topic_tags_if_needed(

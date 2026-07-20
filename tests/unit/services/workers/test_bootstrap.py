@@ -51,6 +51,19 @@ def test_initialize_worker_bootstrap_registers_parser_pool_factories(monkeypatch
     assert set(PARSER_POOL_ACTORS) <= set(bootstrap.actor_creation_map)
 
 
+def test_task_state_manager_uses_versioned_actor_name(monkeypatch):
+    from services.workers.task_state import TaskStateManager
+
+    calls = _capture_actor_creations(monkeypatch)
+
+    assert bootstrap.get_task_state_manager() == "actor-handle"
+
+    ((name, cls, options),) = calls
+    assert name == "TaskStateManagerV2"
+    assert cls is TaskStateManager
+    assert options == {"lifetime": "detached"}
+
+
 @pytest.mark.parametrize(
     ("actor_name", "module_name"),
     [

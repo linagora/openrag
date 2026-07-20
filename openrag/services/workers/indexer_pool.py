@@ -8,6 +8,7 @@ from typing import Any
 
 import ray
 from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
+from services.workers.task_state import TASK_STATE_ACTOR_GENERATION, TASK_STATE_MANAGER_ACTOR_NAME
 
 from openrag.core.config.root import Settings
 
@@ -15,7 +16,8 @@ from openrag.core.config.root import Settings
 # this window (and on a miss), bounding both staleness and DB load regardless
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
-_INDEXER_POOL_DISPATCHER_ACTOR_NAME = "IndexerPoolDispatcher"
+_INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcherV{TASK_STATE_ACTOR_GENERATION}"
+_INDEXER_WORKER_ACTOR_NAME_PREFIX = f"IndexerWorkerV{TASK_STATE_ACTOR_GENERATION}"
 
 
 @ray.remote
@@ -61,7 +63,7 @@ class IndexerWorkerActor:
             embed_concurrency=embed_cfg.embed_concurrency,
         )
         self._vector_store = MilvusVectorStore(cfg.vectordb)
-        task_state_manager = ray.get_actor("TaskStateManager", namespace="openrag")
+        task_state_manager = ray.get_actor(TASK_STATE_MANAGER_ACTOR_NAME, namespace="openrag")
         pipeline = build_indexing_pipeline(
             parser=parser,
             chunker=chunker,
@@ -75,6 +77,7 @@ class IndexerWorkerActor:
             vlm_factory=vlm_factory,
             contextualizer_factory=contextualizer_factory,
             topic_tagger_factory=topic_tagger_factory,
+            defer_replace_cleanup=True,
         )
         rdb_cfg = cfg.rdb.model_copy(update={"database": f"partitions_for_collection_{cfg.vectordb.collection_name}"})
         self._catalog_store = PostgresStore(rdb_cfg, run_migrations=False)
@@ -112,6 +115,8 @@ class IndexerWorkerActor:
             task_state_manager=task_state_manager,
             document_repo=self._catalog_store.document_repo,
             topic_tag_repo=self._catalog_store.topic_tag_repo,
+            vector_store=self._vector_store,
+            collection=cfg.vectordb.collection_name,
         )
         # When False (e.g. Twake, which keeps its own copy), the raw upload is
         # purged from ``paths.data_dir`` once indexing settles. Enforced at this
@@ -208,6 +213,7 @@ class IndexerWorkerActor:
         replace: bool = False,
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
+        require_existing_partition: bool = False,
     ) -> dict[str, Any]:
         try:
             await self._ensure_catalog()
@@ -222,6 +228,7 @@ class IndexerWorkerActor:
                 replace=replace,
                 indexation_config=indexation_config,
                 embedder_name=embedder_name,
+                require_existing_partition=require_existing_partition,
             )
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:
@@ -276,7 +283,7 @@ class IndexerPool:
         # are shared singletons too; only this dispatcher creates them.
         self._workers = [
             IndexerWorkerActor.options(  # type: ignore[attr-defined]
-                name=f"IndexerWorker-{i}",
+                name=f"{_INDEXER_WORKER_ACTOR_NAME_PREFIX}-{i}",
                 namespace=namespace,
                 get_if_exists=True,
                 lifetime="detached",

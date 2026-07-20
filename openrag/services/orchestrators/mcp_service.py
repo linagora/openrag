@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from core.utils.conts import is_internal_metadata_key
 from core.utils.exceptions import ValidationError
 from core.utils.log_tail import collect_task_logs
 from core.utils.logging import get_logger
@@ -251,7 +252,7 @@ class MCPService:
         return {
             "chunk_id": meta.get("_id") or chunk.id,
             "content": chunk.text,
-            "metadata": meta,
+            "metadata": _public_chunk_metadata(meta, exclude=("_id",)),
         }
 
     # ------------------------------------------------------------------
@@ -296,7 +297,7 @@ class MCPService:
             {"partition": partition, "file_id": file_id},
             output_fields=["*"],
         )
-        metadata = {k: v for k, v in rows[0].items() if k not in ("_id", "text", "vector")} if rows else {}
+        metadata = _public_chunk_metadata(rows[0], exclude=("_id", "text", "vector")) if rows else {}
         return {
             "partition": partition,
             "file_id": file_id,
@@ -344,7 +345,7 @@ class MCPService:
                 {
                     "chunk_id": row.get("_id"),
                     "content": row.get("text"),
-                    "metadata": {k: v for k, v in row.items() if k not in ("text", "_id", "vector")},
+                    "metadata": _public_chunk_metadata(row, exclude=("text", "_id", "vector")),
                 }
                 for row in page
             ],
@@ -694,3 +695,7 @@ class MCPService:
 
 
 __all__ = ["MCPService"]
+
+
+def _public_chunk_metadata(row: dict[str, Any], *, exclude: tuple[str, ...]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if key not in exclude and not is_internal_metadata_key(key)}

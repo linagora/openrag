@@ -71,6 +71,11 @@ class _FakePartitionRepo:
         return dict(self._counts)
 
 
+class _FakeVectorStore:
+    async def collection_exists(self, name: str) -> bool:
+        return False
+
+
 def _settings(idx=None, ret=None):
     from core.config.root import Settings
 
@@ -89,7 +94,7 @@ def _make_service(repo=None, rows=None, settings=None):
         partition_repo=repo or _FakePartitionRepo(rows),
         membership_repo=object(),
         document_repo=object(),
-        vector_store=object(),
+        vector_store=_FakeVectorStore(),
         user_repo=object(),
         collection="vdb",
         config=settings if settings is not None else _settings(),
@@ -234,6 +239,19 @@ async def test_create_partition_persists_config_and_reloads():
     assert any(c[0] == "update_partition" for c in repo.calls)
     assert "p1" in settings.partitions
     assert settings.partitions["p1"].description == "docs"
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_removes_deleted_partition_from_cache():
+    settings = _settings()
+    repo = _FakePartitionRepo(rows=[_full_row("p1"), _full_row("keep")])
+    svc = _make_service(repo, settings=settings)
+    await svc.load_partitions()
+
+    await svc.delete_partition("p1")
+
+    assert "p1" not in settings.partitions
+    assert "keep" in settings.partitions
 
 
 # ------------------------------------------------------------------

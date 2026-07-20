@@ -274,6 +274,7 @@ class PgDocumentRepository(DocumentRepository):
         parent_id: str | None = None,
         indexation_config: dict | None = None,
         indexed_at: datetime | None = None,
+        require_existing_partition: bool = False,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
@@ -293,17 +294,26 @@ class PgDocumentRepository(DocumentRepository):
                 if existing:
                     return False
 
-                # Auto-create partition + first-owner membership when missing —
-                # legacy side-effect documented in the phase-7 spec.
-                created = await conn.fetchval(
-                    """
-                    INSERT INTO partitions (partition, created_at)
-                    VALUES ($1, NOW())
-                    ON CONFLICT (partition) DO NOTHING
-                    RETURNING 1
-                    """,
-                    partition,
-                )
+                created = None
+                if require_existing_partition:
+                    partition_exists = await conn.fetchval(
+                        "SELECT 1 FROM partitions WHERE partition = $1",
+                        partition,
+                    )
+                    if not partition_exists:
+                        return False
+                else:
+                    # Auto-create partition + first-owner membership when missing —
+                    # legacy side-effect documented in the phase-7 spec.
+                    created = await conn.fetchval(
+                        """
+                        INSERT INTO partitions (partition, created_at)
+                        VALUES ($1, NOW())
+                        ON CONFLICT (partition) DO NOTHING
+                        RETURNING 1
+                        """,
+                        partition,
+                    )
                 if created and user_id is None:
                     raise ValueError("Cannot auto-create a partition without a user_id")
                 if created and user_id is not None:
