@@ -133,6 +133,28 @@ async def test_release_content_hash_claim_is_scoped_to_its_owner() -> None:
     assert params == ("tenant-a", "abc123", "new-file")
 
 
+@pytest.mark.asyncio
+async def test_renew_content_hash_claim_extends_only_its_owner() -> None:
+    from services.persistence.document_repo import PgDocumentRepository
+
+    pool = _ClaimPool([])
+    repo = PgDocumentRepository(pool_getter=lambda: pool)
+
+    assert (
+        await repo.renew_content_sha256_claim(
+            file_id="new-file",
+            partition="tenant-a",
+            content_sha256="abc123",
+        )
+        is True
+    )
+
+    query, params = pool.executed[0]
+    assert "SET expires_at" in query
+    assert "file_id = $3" in query
+    assert params == ("tenant-a", "abc123", "new-file")
+
+
 def test_persistence_schema_enforces_partition_scoped_content_uniqueness() -> None:
     from services.persistence.schema import file_content_claims, files
 

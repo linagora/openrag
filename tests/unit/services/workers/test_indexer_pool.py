@@ -976,6 +976,39 @@ async def test_pool_rolls_back_inflight_when_submission_raises() -> None:
     assert pool._inflight == [0]
 
 
+@pytest.mark.asyncio
+async def test_pool_renews_content_claim_while_task_is_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    renewed = asyncio.Event()
+
+    async def renew(**_kwargs):
+        renewed.set()
+        return True
+
+    repo = SimpleNamespace(renew_content_sha256_claim=AsyncMock(side_effect=renew))
+    pool._claim_store = SimpleNamespace(document_repo=repo)
+    pool._claim_store_lock = asyncio.Lock()
+    monkeypatch.setattr(module, "_CONTENT_CLAIM_RENEW_INTERVAL_SECONDS", 0.001)
+
+    await pool.submit(
+        task_id="task-1",
+        partition="tenant-a",
+        metadata={"file_id": "file-1", "content_sha256": "abc123"},
+    )
+    await asyncio.wait_for(renewed.wait(), timeout=1)
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+
+    repo.renew_content_sha256_claim.assert_awaited()
+    assert repo.renew_content_sha256_claim.await_args.kwargs == {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "content_sha256": "abc123",
+    }
+
+
 def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPatch) -> None:
     import core.config
     import core.embeddings

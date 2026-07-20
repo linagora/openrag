@@ -7,6 +7,7 @@ fuzzy ranking, task assembly and URL-indexation guards in isolation.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -87,7 +88,7 @@ class RaceLostPartitions(FakePartitions):
 
 
 class FakeIndexing:
-    def __init__(self, *, state="COMPLETED", error="boom", add_error: Exception | None = None):
+    def __init__(self, *, state="COMPLETED", error="boom", add_error: BaseException | None = None):
         self._state = state
         self._error = error
         self._add_error = add_error
@@ -724,6 +725,33 @@ async def test_index_url_removes_download_when_content_is_duplicate(monkeypatch)
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
     with pytest.raises(ConflictError):
+        await svc.index_url(
+            url="https://example.com/report.pdf",
+            partition="p1",
+            file_id="f2",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+
+    assert downloaded_path is not None
+    assert not downloaded_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_index_url_removes_download_when_dispatch_is_cancelled(monkeypatch):
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    indexing = FakeIndexing(add_error=asyncio.CancelledError())
+    svc = _service(partitions=parts, indexing=indexing)
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(b"partial")
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    with pytest.raises(asyncio.CancelledError):
         await svc.index_url(
             url="https://example.com/report.pdf",
             partition="p1",

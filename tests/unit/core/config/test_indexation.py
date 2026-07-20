@@ -40,6 +40,6 @@ def test_content_deduplication_is_enabled_by_default():
 def test_content_deduplication_can_be_disabled_by_env(monkeypatch, tmp_path):
     monkeypatch.setenv("CONTENT_DEDUPLICATION_ENABLED", "false")
 
-    settings = load_config(conf_dir=tmp_path)
+    settings = load_config(config_path=tmp_path)
 
     assert settings.loader.content_deduplication_enabled is False

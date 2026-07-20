@@ -32,7 +32,7 @@ from api.dependencies.files import (
 )
 from api.routers.admin.task_logs import collect_task_logs
 from core.models.catalog import TERMINAL_TASK_STATES
-from core.utils.exceptions import ConflictError, OpenRAGError
+from core.utils.exceptions import OpenRAGError
 from core.utils.filename import sanitize_filename
 from core.utils.log_tail import app_log_file
 from core.utils.logging import get_logger

@@ -31,12 +31,20 @@ class _FakeIndexingService:
             existing_file_id="existing-file",
         )
 
+    async def get_workspace(self, _workspace_id: str):
+        return None
+
+
+class _DispatchFailureService(_FakeIndexingService):
+    async def add_file(self, **_kwargs):
+        raise RuntimeError("dispatcher unavailable")
+
 
 def _empty_metadata() -> dict:
     return {}
 
 
-def _build_app(tmp_path, monkeypatch, content: bytes) -> FastAPI:
+def _build_app(tmp_path, monkeypatch, content: bytes, *, service=None) -> FastAPI:
     # Cap at ~8 bytes so a small upload trips the limit.
     monkeypatch.setattr("api.dependencies.files._max_upload_size_bytes", lambda: 8)
 
@@ -52,7 +60,7 @@ def _build_app(tmp_path, monkeypatch, content: bytes) -> FastAPI:
     app.dependency_overrides[require_partition_editor] = lambda: {"id": 1, "is_admin": True}
     app.dependency_overrides[check_user_file_quota] = lambda: None
     app.dependency_overrides[get_config] = lambda: cfg
-    app.dependency_overrides[get_indexing_service] = lambda: _FakeIndexingService()
+    app.dependency_overrides[get_indexing_service] = lambda: service or _FakeIndexingService()
     return app
 
 
@@ -76,4 +84,36 @@ async def test_add_file_duplicate_content_returns_409_and_removes_upload(tmp_pat
 
     assert resp.status_code == 409
     assert resp.json()["extra"]["existing_file_id"] == "existing-file"
+    assert list((tmp_path / "data").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_add_file_invalid_workspace_is_rejected_before_upload_is_saved(tmp_path, monkeypatch):
+    app = _build_app(tmp_path, monkeypatch, content=b"same")
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post(
+            "/indexer/partition/p1/file/f1",
+            data={"workspace_ids": '["missing"]'},
+        )
+
+    assert resp.status_code == 404
+    assert not (tmp_path / "data").exists()
+
+
+@pytest.mark.asyncio
+async def test_add_file_dispatch_failure_removes_upload(tmp_path, monkeypatch):
+    app = _build_app(
+        tmp_path,
+        monkeypatch,
+        content=b"same",
+        service=_DispatchFailureService(),
+    )
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 500
     assert list((tmp_path / "data").iterdir()) == []

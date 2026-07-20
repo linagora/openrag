@@ -1,5 +1,7 @@
+import asyncio
 import io
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from api.dependencies import files as files_dep
@@ -55,6 +57,17 @@ async def test_save_file_to_disk_rejects_oversize_upload(tmp_path: Path, monkeyp
     assert exc.value.status_code == 413
     # The partially written file must have been cleaned up.
     assert not (dest_dir / "big.bin").exists()
+
+
+@pytest.mark.asyncio
+async def test_save_file_to_disk_removes_partial_file_when_upload_is_cancelled(tmp_path: Path):
+    upload = UploadFile(file=io.BytesIO(), filename="cancelled.bin")
+    upload.read = AsyncMock(side_effect=[b"partial", asyncio.CancelledError()])
+
+    with pytest.raises(asyncio.CancelledError):
+        await save_file_to_disk(file=upload, dest_dir=tmp_path, chunk_size=4)
+
+    assert not (tmp_path / "cancelled.bin").exists()
 
 
 def test_max_upload_size_reads_env_at_call_time(monkeypatch):
