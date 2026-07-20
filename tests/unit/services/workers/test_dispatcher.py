@@ -1654,3 +1654,59 @@ async def test_a_cancellation_during_the_durable_write_still_kills_the_worker() 
             await dispatcher.cancel_task("task-1")
 
     cancel.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_submit_settles_the_task_terminally_in_both_stores() -> None:
+    """A dispatch that never reaches a worker must not leave a QUEUED orphan.
+
+    Nothing else can reclaim it: actor eviction is driven entirely off
+    ``terminal_at`` (which only a terminal state enters) and the detached actor
+    survives API restarts, while ``purge_terminal_jobs`` sweeps terminal rows
+    only. One permanent leak in each store per failed dispatch — verbatim the
+    unbounded growth #660 exists to fix.
+    """
+    tsm = _task_state_manager()
+    tsm.set_failed_if_not_cancelled = _remote_mock(True)
+    job_repo = _job_repo()
+    job_repo.mark_failed_if_not_cancelled = AsyncMock(return_value=True)
+    dispatcher = _dispatcher_with_job_repo(job_repo, tsm=tsm)
+    dispatcher._pool.submit = _remote_mock()
+    dispatcher._pool.submit.remote = AsyncMock(side_effect=RuntimeError("pool is down"))
+
+    with pytest.raises(RuntimeError, match="pool is down"):
+        await dispatcher.dispatch_indexing(
+            path="/tmp/f.txt",
+            metadata={"file_id": "f1"},
+            partition="default",
+            user={"id": 7},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    tsm.set_failed_if_not_cancelled.remote.assert_awaited_once()
+    job_repo.mark_failed_if_not_cancelled.assert_awaited_once()
+    assert job_repo.mark_failed_if_not_cancelled.await_args.kwargs["completed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_settling_a_failed_dispatch_never_masks_the_dispatch_error() -> None:
+    """The caller must see why the dispatch failed, not why the cleanup did."""
+    tsm = _task_state_manager()
+    tsm.set_failed_if_not_cancelled = _remote_mock()
+    tsm.set_failed_if_not_cancelled.remote = AsyncMock(side_effect=RuntimeError("actor is gone"))
+    job_repo = _job_repo()
+    job_repo.mark_failed_if_not_cancelled = AsyncMock(side_effect=RuntimeError("postgres is down"))
+    dispatcher = _dispatcher_with_job_repo(job_repo, tsm=tsm)
+    dispatcher._pool.submit = _remote_mock()
+    dispatcher._pool.submit.remote = AsyncMock(side_effect=RuntimeError("pool is down"))
+
+    with pytest.raises(RuntimeError, match="pool is down"):
+        await dispatcher.dispatch_indexing(
+            path="/tmp/f.txt",
+            metadata={"file_id": "f1"},
+            partition="default",
+            user={"id": 7},
+            workspace_ids=None,
+            replace=False,
+        )

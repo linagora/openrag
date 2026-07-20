@@ -272,6 +272,34 @@ async def _mark_job_failed(job_repo: Any, task_id: str, *, error: str, completed
         )
 
 
+async def mark_dispatch_orphan_failed(task_state_manager: Any, job_repo: Any, task_id: str) -> None:
+    """Drive a task that never reached :class:`IndexerWorker` to a terminal FAILED.
+
+    Used by the pool actor when setup (catalog / model-endpoint registry) blows
+    up before ``process_file`` is entered. Both stores hold the task as QUEUED
+    at that point and nothing else will ever write it, so both need settling —
+    otherwise the entry is unevictable in the detached actor (eviction is driven
+    off ``terminal_at``, which only a terminal state enters) and the row is
+    unsweepable by retention, which takes terminal rows only.
+
+    Both writes swallow ``Exception`` so a bookkeeping failure does not mask
+    the setup exception the caller must actually see; neither swallows
+    ``BaseException``, so a cancellation arriving here still propagates.
+    Both carry the CANCELLED guard, so a user who cancelled during setup
+    keeps their outcome.
+    """
+    error = "Indexing setup failed before the file reached a worker."
+    try:
+        await task_state_manager.set_failed_if_not_cancelled.remote(task_id, error)
+    except Exception as exc:  # noqa: BLE001 - settling an orphan must not mask the real failure
+        logger.warning(
+            "Hot-cache FAILED write lost while settling a dispatch orphan; the task may stay QUEUED",
+            task_id=task_id,
+            error=str(exc),
+        )
+    await _mark_job_failed(job_repo, task_id, error=error, completed_at=datetime.now(UTC))
+
+
 async def _write_catalog_record(
     *,
     doc_repo: Any,

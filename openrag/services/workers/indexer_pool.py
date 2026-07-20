@@ -7,7 +7,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import ray
-from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file, release_quota_slot
+from services.workers.indexer_actor import (
+    IndexerWorker,
+    delete_uploaded_file,
+    mark_dispatch_orphan_failed,
+    release_quota_slot,
+)
 
 from openrag.core.config.root import Settings
 
@@ -62,6 +67,10 @@ class IndexerWorkerActor:
         )
         self._vector_store = MilvusVectorStore(cfg.vectordb)
         task_state_manager = ray.get_actor("TaskStateManager", namespace="openrag")
+        # Kept on the actor as well as handed to the worker: setup can fail
+        # before the worker is ever entered, and that path has to settle the
+        # task itself (see ``process_file``).
+        self._task_state_manager = task_state_manager
         pipeline = build_indexing_pipeline(
             parser=parser,
             chunker=chunker,
@@ -237,6 +246,26 @@ class IndexerWorkerActor:
                 # recovering it needs the reconciliation sweep tracked in #676.
                 if quota_reserved:
                     await release_quota_slot(self._catalog_store.user_repo, (user or {}).get("id"))
+                # The task is QUEUED in both stores and ``IndexerWorker`` --
+                # the only writer of SERIALIZING/COMPLETED/FAILED -- is never
+                # entered, so without this it stays non-terminal forever:
+                # unevictable in the detached actor (eviction reads
+                # ``terminal_at``, which only a terminal state enters) and
+                # unsweepable in Postgres (retention takes terminal rows only),
+                # counted active in ``/queue/info`` for good. The client has
+                # already been handed a 201 and a ``task_status_url`` that would
+                # answer QUEUED forever.
+                #
+                # Best-effort and, like the release above, honestly so: the
+                # durable half writes through the very store whose init may have
+                # just failed. The hot-cache half is independent of it, so an
+                # unreachable Postgres still leaves an evictable, terminal
+                # ``TaskInfo`` rather than a pinned one.
+                await mark_dispatch_orphan_failed(
+                    self._task_state_manager,
+                    self._catalog_store.job_repo,
+                    task_id,
+                )
                 raise
             result = await self._worker.process_file(
                 task_id=task_id,

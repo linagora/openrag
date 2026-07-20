@@ -321,16 +321,53 @@ class WorkerDispatcher(IndexingDispatcher):
         return submitted[0]
 
     async def _mark_submit_failed(self, task_id: str, tb: str) -> None:
-        set_failed = getattr(self._tsm, "set_failed_if_not_cancelled", None)
-        if set_failed is not None:
-            await self._call(
-                set_failed.remote(task_id, tb),
-                task_description=f"set_failed_if_not_cancelled({task_id})",
+        """Settle a dispatch that failed, in both stores.
+
+        The durable half is #660's: ``dispatch_indexing`` has already written a
+        QUEUED row, and a failed submit means ``IndexerWorker`` -- the only
+        writer of SERIALIZING/COMPLETED/FAILED -- is never entered, so nothing
+        else would ever settle it. Left QUEUED the row is unsweepable
+        (``purge_terminal_jobs`` takes terminal rows only) and counted active in
+        ``/queue/info`` for good, and the actor entry is unevictable (eviction
+        reads ``terminal_at``, which only a terminal state enters) on an actor
+        that outlives the API restart.
+
+        Both writes inherit this method's caller-side gate: #671 only calls it
+        once ``_cancel_submitted_task`` has confirmed the task really was
+        cancelled, so a task that actually completed is never recorded FAILED in
+        either store.
+        """
+        # Guarded: this runs inside the except in dispatch_indexing, so
+        # an unreachable state actor here would replace the exception the caller
+        # actually needs ("the pool is down") with one about the bookkeeping
+        # ("the actor is gone"). The durable write below is guarded by
+        # _record_job for the same reason.
+        try:
+            set_failed = getattr(self._tsm, "set_failed_if_not_cancelled", None)
+            if set_failed is not None:
+                await self._call(
+                    set_failed.remote(task_id, tb),
+                    task_description=f"set_failed_if_not_cancelled({task_id})",
+                )
+            else:
+                await self._call(
+                    self._tsm.set_state.remote(task_id, "FAILED"),
+                    task_description=f"set_state({task_id}, FAILED)",
+                )
+        except Exception as exc:  # noqa: BLE001 - settling must not mask the dispatch failure
+            logger.warning(
+                "Could not settle a failed dispatch in the state actor; the task may stay QUEUED",
+                task_id=task_id,
+                error=str(exc),
             )
-            return
-        await self._call(
-            self._tsm.set_state.remote(task_id, "FAILED"),
-            task_description=f"set_state({task_id}, FAILED)",
+        await self._record_job(
+            "settle_failed_dispatch",
+            task_id,
+            lambda: self._job_repo.mark_failed_if_not_cancelled(
+                task_id,
+                error=tb,
+                completed_at=datetime.now(UTC),
+            ),
         )
 
     async def _cancel_submitted_task(self, task_id: str, task: Any) -> bool:
