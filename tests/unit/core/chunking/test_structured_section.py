@@ -152,6 +152,45 @@ def test_markdown_headings_also_detected():
     assert "Chapter A" not in l2.metadata["hierarchy_path"]
 
 
+def test_flat_markdown_hierarchy_keeps_all_ancestors():
+    # Marker emits an entire legal hierarchy at a single ``#`` level. Taking the
+    # flat markdown depth would let these same-level headings pop one another off
+    # the stack, collapsing the breadcrumb to just the innermost heading and
+    # dropping every ancestor — including the document title. Structural keywords
+    # must re-establish the nesting so the whole path survives.
+    md = (
+        "# Code de l'entrée et du séjour\n\n"
+        "# Partie législative\n\n"
+        "# Livre I : Dispositions générales\n\n"
+        "# Titre I : Champ d'application\n\n"
+        "Article L110-1\n"
+        "Le présent code régit l'entrée et le séjour des étrangers en France.\n"
+    )
+    chunk = _chunker(chunk_size=40).chunk(_doc(md))[0]
+    path = chunk.metadata["hierarchy_path"]
+    assert path == [
+        "Code de l'entrée et du séjour",
+        "Partie législative",
+        "Livre I : Dispositions générales",
+        "Titre I : Champ d'application",
+    ]
+
+
+def test_escaped_emphasis_marker_is_a_leaf_not_a_heading():
+    # Marker escapes emphasis inside a marker (``Article R\*352-1*`` for an
+    # italic ``R*352-1*``). The stray backslash must not push the marker off the
+    # leaf test and into the heading stack, or it pollutes the breadcrumb of
+    # every chunk beneath it.
+    md = (
+        "# Livre I : Dispositions\n\n"
+        r"Article R\*352-1*"
+        "\nL'autorité administrative statue sur la demande dans les conditions prévues.\n"
+    )
+    chunk = _chunker(chunk_size=40).chunk(_doc(md))[0]
+    assert chunk.metadata["hierarchy_path"] == ["Livre I : Dispositions"]
+    assert not any("352-1" in h for h in chunk.metadata["hierarchy_path"])
+
+
 def test_empty_document_returns_no_chunks():
     assert _chunker().chunk(ProcessedDocument(document_id="d1", text_blocks=[])) == []
     assert _chunker().chunk(_doc("   \n  \n")) == []

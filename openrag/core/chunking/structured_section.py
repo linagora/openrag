@@ -63,7 +63,12 @@ _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*?)\s*#*$")
 # (``**bold**``, ``_em_``, `` `code` ``) — stripped when testing a line for a
 # leaf pattern and when cleaning heading text for the breadcrumb.
 _HEADING_PREFIX_RE = re.compile(r"^\s*#{1,6}\s*")
-_EMPHASIS_RE = re.compile(r"[*_`]+")
+# Markdown emphasis/code markers plus the escape backslash. The backslash matters
+# for leaf detection: Marker escapes emphasis inside markers (``Article R\*352-1*``
+# for an italic ``R*352-1*``), and a stray ``\`` sitting where the leaf regex
+# expects a digit makes the marker miss the leaf test and get misfiled as a
+# heading — polluting the breadcrumb of every chunk beneath it.
+_EMPHASIS_RE = re.compile(r"[*_`\\]+")
 
 
 def _clean_heading(text: str) -> str:
@@ -75,6 +80,7 @@ def _clean_heading(text: str) -> str:
 # outermost → innermost; the index gives the nesting level so a heading stack
 # can pop correctly. Config can replace this list.
 _DEFAULT_HEADING_KEYWORDS: tuple[str, ...] = (
+    "partie",
     "livre",
     "titre",
     "chapitre",
@@ -300,11 +306,27 @@ class StructuredSectionChunker(BaseChunker):
             return None
         md = _MD_HEADING_RE.match(line)
         if md:
-            return _MD_LEVEL_BASE + len(md.group(1)), _clean_heading(md.group(2))
+            text = _clean_heading(md.group(2))
+            # A structural keyword (Partie/Livre/Titre/Chapitre/…) carries the
+            # real nesting depth in its rank, so prefer it over the parser's ``#``
+            # depth. Marker emits an entire legal hierarchy at a single ``#``
+            # (``# Livre I``, ``# Titre I``, ``# Chapitre …`` all level 1); taking
+            # the flat markdown level makes those same-level headings pop one
+            # another off the stack, collapsing the whole hierarchy to its
+            # innermost heading and dropping every ancestor — including the
+            # document title — from the breadcrumb.
+            kw_level = self._keyword_level_for(text)
+            level = kw_level if kw_level is not None else _MD_LEVEL_BASE + len(md.group(1))
+            return level, text
         kw = self._keyword_re.match(line)
         if kw:
             return self._keyword_level[kw.group(1).lower()], _clean_heading(line)
         return None
+
+    def _keyword_level_for(self, text: str) -> int | None:
+        """Nesting level if ``text`` opens with a structural keyword, else None."""
+        kw = self._keyword_re.match(text)
+        return self._keyword_level[kw.group(1).lower()] if kw else None
 
     def _is_leaf(self, line: str) -> bool:
         # Strip a markdown heading prefix + emphasis so "#### **Article L110-5**"
