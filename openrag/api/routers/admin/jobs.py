@@ -70,6 +70,8 @@ Returns list of tasks with:
 - `task_id`: Unique task identifier
 - `state`: Current task state
 - `details`: Task metadata (file_id, partition, etc.)
+- `created_at`: Date and time when the task was created
+- `duration_ms`: Total task duration in milliseconds
 - `url`: Link to detailed task status
 - `error_url`: Link to error details (if failed)
 
@@ -107,6 +109,8 @@ async def list_tasks(
             "task_id": task_id,
             "state": row["state"],
             "details": row["details"],
+            "created_at": row["created_at"],
+            "duration_ms": row["duration_ms"],
             **(
                 {"error_url": str(request.url_for("get_task_error", task_id=task_id))}
                 if row["state"] == "FAILED"
