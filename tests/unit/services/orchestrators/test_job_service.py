@@ -154,7 +154,7 @@ class FakeJobRepo:
     async def list_jobs(self, status=None, offset=0, limit=50, user_id=None):
         self._check()
         self.list_calls.append({"status": status, "offset": offset, "limit": limit, "user_id": user_id})
-        return list(self._jobs)
+        return list(self._jobs)[offset : offset + limit]
 
     async def get_job(self, job_id):
         self._check()
@@ -214,6 +214,59 @@ async def test_list_tasks_reads_durable_jobs_and_scopes_non_admins():
     ]
     assert repo.list_calls[0]["user_id"] == 7
     assert repo.list_calls[0]["status"] == "completed"
+
+
+class _WarningRecorder:
+    """Stands in for the module logger: loguru bypasses caplog and capsys."""
+
+    def __init__(self) -> None:
+        self.warnings: list[str] = []
+
+    def warning(self, message, **kwargs):
+        self.warnings.append(message)
+
+    def __getattr__(self, _name):
+        return lambda *args, **kwargs: None
+
+
+def _recording_logger(monkeypatch) -> _WarningRecorder:
+    from services.orchestrators import job_service as job_service_module
+
+    recorder = _WarningRecorder()
+    monkeypatch.setattr(job_service_module, "logger", recorder)
+    return recorder
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_caps_the_page_and_warns_when_it_truncates(monkeypatch):
+    """A capped page must not be handed back as if it were the whole queue."""
+    from services.orchestrators.job_service import _LIST_LIMIT
+
+    recorder = _recording_logger(monkeypatch)
+    repo = FakeJobRepo(jobs=[_job(id=f"t{i}") for i in range(_LIST_LIMIT + 50)])
+    svc = JobService(task_state_manager=FakeTSM(), job_repo=repo)
+
+    rows = await svc.list_tasks(is_admin=True, user_id=1)
+
+    assert len(rows) == _LIST_LIMIT
+    # asked for one more than it returns: that extra row is how truncation is seen
+    assert repo.list_calls[0]["limit"] == _LIST_LIMIT + 1
+    assert any("truncated" in w for w in recorder.warnings)
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_does_not_warn_on_an_exactly_full_page(monkeypatch):
+    """Exactly _LIST_LIMIT jobs is a complete answer, not a truncated one."""
+    from services.orchestrators.job_service import _LIST_LIMIT
+
+    recorder = _recording_logger(monkeypatch)
+    repo = FakeJobRepo(jobs=[_job(id=f"t{i}") for i in range(_LIST_LIMIT)])
+    svc = JobService(task_state_manager=FakeTSM(), job_repo=repo)
+
+    rows = await svc.list_tasks(is_admin=True, user_id=1)
+
+    assert len(rows) == _LIST_LIMIT
+    assert recorder.warnings == []
 
 
 @pytest.mark.asyncio

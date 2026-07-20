@@ -32,6 +32,11 @@ logger = get_logger()
 # route is unpaginated (it used to read an in-memory dict), so without this a
 # deployment with a full retention window would try to serialize every retained
 # job into one response.
+#
+# Retention keeps up to ``JOB_RETENTION_MAX_ROWS`` (10k) rows, so this cap is
+# reachable. ``list_tasks`` asks for one row more than it will return, which is
+# what lets it tell "exactly _LIST_LIMIT jobs" apart from "more than we will
+# show" and say so, rather than handing back a short answer that looks complete.
 _LIST_LIMIT = 1000
 
 
@@ -145,6 +150,9 @@ class JobService:
         - any other value → exact match (case-insensitive)
         - ``None`` → all tasks
 
+        Capped at ``_LIST_LIMIT`` rows; hitting the cap logs a warning, since the
+        route has no way to signal a partial answer in its response body.
+
         The router decorates each row with the status / error URLs.
         """
         if not is_admin and user_id is None:
@@ -158,11 +166,19 @@ class JobService:
             "list_jobs",
             lambda: self._job_repo.list_jobs(
                 status=task_status,
-                limit=_LIST_LIMIT,
+                limit=_LIST_LIMIT + 1,  # the extra row is the truncation probe
                 user_id=None if is_admin else user_id,
             ),
         )
         if jobs:
+            if len(jobs) > _LIST_LIMIT:
+                jobs = jobs[:_LIST_LIMIT]
+                logger.warning(
+                    "Task list truncated at the page cap; the response is not the whole queue",
+                    limit=_LIST_LIMIT,
+                    task_status=task_status,
+                    user_id=None if is_admin else user_id,
+                )
             # Filtering happened in SQL; the fallback below has to do it itself.
             return [{"task_id": j.id, "state": j.status.value, "details": self._job_details(j)} for j in jobs]
 
