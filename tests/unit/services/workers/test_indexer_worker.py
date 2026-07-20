@@ -1019,3 +1019,40 @@ async def test_an_unreachable_state_actor_still_writes_the_durable_failure(tmp_p
     assert [row["job_id"] for row in job_repo.failed] == ["t-actor-gone"], (
         "the durable FAILED write was lost when the state actor was unreachable"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_replace_reindex_updates_the_row_without_creating_one():
+    """A ``replace`` re-index reuses an existing row, and must say the write landed.
+
+    This pins the contract that the rebase onto #671 had to settle. Before it,
+    ``_write_catalog_record`` returned "a *new* row was created", so ``replace``
+    reported False and the caller read that as "the reservation was not
+    consumed". #671 added a fail-closed ``if not wrote_catalog: raise`` on the
+    same value, which would have turned every ``replace`` re-index into a hard
+    failure.
+
+    The two questions are now separate: this returns whether the catalog write
+    landed (True on either branch), and the quota verdict is derived from
+    ``replace`` at the call site. So the assertion here is that a replace
+    updates rather than inserts, and still reports success --
+    ``test_replace_reindex_never_releases`` covers the quota half.
+    """
+    from services.workers.indexer_actor import _write_catalog_record
+
+    doc_repo = MagicMock()
+    doc_repo.update_file_in_partition = AsyncMock(return_value=True)
+    doc_repo.add_file_to_partition = AsyncMock(return_value=True)
+
+    wrote_catalog = await _write_catalog_record(
+        doc_repo=doc_repo,
+        metadata={"file_id": "f1"},
+        partition="p1",
+        user={"id": 42},
+        replace=True,
+        indexation_config=None,
+    )
+
+    assert wrote_catalog is True, "a replace must report the write as landed, or #671 fails it closed"
+    doc_repo.update_file_in_partition.assert_awaited_once()
+    doc_repo.add_file_to_partition.assert_not_awaited()

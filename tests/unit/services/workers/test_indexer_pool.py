@@ -1070,9 +1070,11 @@ class _RecordingWorker:
     def __init__(self, *, error: Exception | None = None) -> None:
         self._error = error
         self.calls = 0
+        self.last_kwargs: dict = {}
 
-    async def process_file(self, **_kwargs) -> dict:
+    async def process_file(self, **kwargs) -> dict:
         self.calls += 1
+        self.last_kwargs = kwargs
         if self._error is not None:
             raise self._error
         return {"stored_count": 1, "stage": "stored"}
@@ -1353,3 +1355,32 @@ async def test_settling_a_setup_failure_never_masks_the_setup_error():
             user={"id": 42},
             quota_reserved=True,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reserved", [True, False])
+async def test_the_actor_forwards_the_quota_reservation_to_the_worker(reserved):
+    """The pool must tell the worker whether it owns a reserved slot.
+
+    ``quota_reserved`` is what arms the release in
+    ``IndexerWorker.process_file``'s ``finally`` (#664). The router end of
+    this wire is pinned by
+    ``test_dispatch_tells_the_worker_the_slot_is_already_reserved``, but the
+    pool hop was not: the setup-failure tests stub the worker out entirely
+    (``pool._worker = None  # must never be reached``) and the worker tests
+    call ``process_file`` directly. Drop the keyword here and ``release_slot``
+    is always False, so every failed upload leaks a slot in silence.
+    """
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+
+    await actor.process_file(
+        task_id="t1",
+        path="/tmp/doc.txt",
+        metadata={"file_id": "f1"},
+        partition="p1",
+        user={"id": 42},
+        quota_reserved=reserved,
+    )
+
+    assert worker.last_kwargs["quota_reserved"] is reserved

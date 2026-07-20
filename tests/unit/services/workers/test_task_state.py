@@ -415,3 +415,28 @@ async def test_an_idle_deployment_keeps_its_last_terminal_task_cached(monkeypatc
 
     assert await mgr.get_state("only") == "COMPLETED"
     assert "only" in mgr.tasks
+
+
+async def test_a_failure_is_evictable(monkeypatch):
+    """The *primary* failure path must register the terminal transition too.
+
+    ``test_a_claimed_cancellation_is_evictable`` pins this for the cancel
+    entry point, but the argument applies harder here:
+    ``IndexerWorker.process_file``'s ``except`` reaches for
+    ``set_failed_if_not_cancelled``, never ``set_state``, so this is the path
+    every failed indexing job actually takes. Skipping ``_mark_terminal``
+    keeps the entry out of ``terminal_at``, so neither the cap nor the TTL
+    can reclaim it and every failure leaks one ``TaskInfo`` -- with its
+    stored traceback, its ``user_index`` entry and its pinned
+    ``object_ref`` -- for the lifetime of the detached actor. That is
+    verbatim the unbounded growth #660 exists to fix.
+    """
+    monkeypatch.setattr(task_state_module, "_MAX_TERMINAL_TASKS", 0)
+    mgr = _manager()
+
+    await _dispatch(mgr, "t0")
+    assert await mgr.set_failed_if_not_cancelled("t0", "boom") is True
+
+    assert mgr.tasks == {}
+    assert mgr.terminal_at == {}
+    assert mgr.user_index == {}

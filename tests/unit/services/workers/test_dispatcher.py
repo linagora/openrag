@@ -1710,3 +1710,26 @@ async def test_settling_a_failed_dispatch_never_masks_the_dispatch_error() -> No
             workspace_ids=None,
             replace=False,
         )
+
+
+@pytest.mark.asyncio
+async def test_an_empty_source_copies_nothing_and_reports_no_row():
+    """A source with no chunks must report False so the slot goes back.
+
+    ``copy_file``'s return value is what the router commits the reservation
+    on (#664): a True here would commit a slot for a copy that never wrote a
+    catalog row, permanently narrowing the user's quota. The MCP copy path
+    has this pinned; the dispatcher's own empty-source probe did not.
+    """
+    dispatcher = _dispatcher_with_job_repo(_job_repo())
+    dispatcher._vector_store.query_chunks_by_filter = AsyncMock(return_value=[])
+
+    created = await dispatcher.copy_file(
+        file_id="src",
+        metadata={},
+        partition="p1",
+        user={"id": 42},
+    )
+
+    assert created is False
+    dispatcher._document_repo.add_file_to_partition.assert_not_awaited()
