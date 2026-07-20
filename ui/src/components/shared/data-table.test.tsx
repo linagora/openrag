@@ -13,14 +13,18 @@ const columns: ColumnDef<Row, unknown>[] = [
 
 const makeRows = (n: number): Row[] => Array.from({ length: n }, (_, i) => ({ id: i + 1 }));
 
-// The pager renders only a prev + next icon button (no text), so "next" is the
-// last button on screen.
 const clickNextPage = () => {
-  const buttons = screen.getAllByRole("button");
-  fireEvent.click(buttons[buttons.length - 1]);
+  fireEvent.click(screen.getByRole("button", { name: /next page/i }));
 };
 
 describe("DataTable pagination", () => {
+  it("labels pagination icon buttons", () => {
+    render(<DataTable columns={columns} data={makeRows(25)} />);
+
+    expect(screen.getByRole("button", { name: /previous page/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /next page/i })).toBeTruthy();
+  });
+
   it("keeps the user on the current page when a row is deleted underneath them", () => {
     const { rerender } = render(<DataTable columns={columns} data={makeRows(25)} />);
     expect(screen.getByText("Page 1 of 3")).toBeTruthy();
@@ -114,5 +118,19 @@ describe("DataTable selection", () => {
 
     fireEvent.click(screen.getAllByRole("checkbox")[0]);
     expect(screen.queryByText(/selected/)).toBeNull();
+  });
+
+  it("disables select-all when the visible rows cannot be selected", () => {
+    render(
+      <DataTable
+        columns={columns}
+        data={makeRows(2)}
+        enableSelection
+        canSelectRow={() => false}
+        getRowId={(r) => String(r.id)}
+      />,
+    );
+
+    expect(screen.getByRole("checkbox", { name: /select visible rows/i }).hasAttribute("disabled")).toBe(true);
   });
 });

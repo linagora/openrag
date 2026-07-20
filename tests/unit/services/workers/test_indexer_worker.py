@@ -558,6 +558,40 @@ async def test_process_file_deletes_topic_tags_when_tagging_is_disabled(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_process_file_deletes_topic_tags_when_tagging_key_absent(tmp_path: Path) -> None:
+    """An absent ``enable_topic_tagging`` key means disabled (mirrors the config
+    default), so a re-index under a preset that never enabled tagging — e.g.
+    ``legal``/``finance`` — still purges tags left behind by an earlier run.
+    Guards against reverting the absent-key semantics to explicit ``is False``."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class UntaggedPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    repo = FakeTopicTagRepo()
+    worker = IndexerWorker(
+        pipeline=UntaggedPipeline(),
+        task_state_manager=_fake_tsm(),
+        topic_tag_repo=repo,
+    )
+
+    await worker.process_file(
+        task_id="t-absent-tags",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="tenant-a",
+        indexation_config={"enable_image_captioning": True},
+    )
+
+    assert repo.deleted == [("f1", "tenant-a")]
+    assert repo.inserted == []
+
+
+@pytest.mark.asyncio
 async def test_process_file_rejects_malformed_topic_tags_before_delete(tmp_path: Path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")

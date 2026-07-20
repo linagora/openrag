@@ -31,6 +31,8 @@ interface BaseDataTableProps<TData, TValue> {
   initialSorting?: SortingState;
   /** Render a leading checkbox column. */
   enableSelection?: boolean;
+  /** Optional row-level selection guard for pages with state-dependent bulk actions. */
+  canSelectRow?: (row: TData) => boolean;
   /** Stable row id (e.g. file_id) so selection survives a data refetch. */
   getRowId?: (row: TData) => string;
 }
@@ -54,6 +56,7 @@ export function DataTable<TData, TValue>({
   pageSize = 10,
   initialSorting = [],
   enableSelection = false,
+  canSelectRow,
   getRowId,
   rowSelection: controlledRowSelection,
   onRowSelectionChange,
@@ -71,20 +74,25 @@ export function DataTable<TData, TValue>({
     const selectColumn: ColumnDef<TData, TValue> = {
       id: "__select",
       enableSorting: false,
-      header: ({ table }) => (
-        <Checkbox
-          checked={
-            table.getIsAllPageRowsSelected() ||
-            (table.getIsSomePageRowsSelected() && "indeterminate")
-          }
-          onCheckedChange={(value) => table.toggleAllPageRowsSelected(!!value)}
-          aria-label="Select visible rows"
-        />
-      ),
+      header: ({ table }) => {
+        const hasSelectablePageRows = table.getRowModel().rows.some((row) => row.getCanSelect());
+        return (
+          <Checkbox
+            checked={
+              table.getIsAllPageRowsSelected() ||
+              (table.getIsSomePageRowsSelected() && "indeterminate")
+            }
+            onCheckedChange={(value) => table.toggleAllPageRowsSelected(!!value)}
+            disabled={!hasSelectablePageRows}
+            aria-label="Select visible rows"
+          />
+        );
+      },
       cell: ({ row }) => (
         <Checkbox
           checked={row.getIsSelected()}
           onCheckedChange={(value) => row.toggleSelected(!!value)}
+          disabled={!row.getCanSelect()}
           aria-label="Select row"
         />
       ),
@@ -103,7 +111,9 @@ export function DataTable<TData, TValue>({
     onColumnFiltersChange: setColumnFilters,
     onPaginationChange: setPagination,
     onRowSelectionChange: setRowSelection,
-    enableRowSelection: enableSelection,
+    enableRowSelection: enableSelection
+      ? (row) => (canSelectRow ? canSelectRow(row.original) : true)
+      : false,
     getRowId,
     // Keep the user on their current page when the rows change underneath them
     // (e.g. deleting a row refetches the list). TanStack resets pageIndex to 0
@@ -186,6 +196,8 @@ export function DataTable<TData, TValue>({
               size="sm"
               onClick={() => table.previousPage()}
               disabled={!table.getCanPreviousPage()}
+              aria-label="Previous page"
+              title="Previous page"
             >
               <ChevronLeft className="h-4 w-4" />
             </Button>
@@ -194,6 +206,8 @@ export function DataTable<TData, TValue>({
               size="sm"
               onClick={() => table.nextPage()}
               disabled={!table.getCanNextPage()}
+              aria-label="Next page"
+              title="Next page"
             >
               <ChevronRight className="h-4 w-4" />
             </Button>

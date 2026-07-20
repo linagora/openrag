@@ -406,7 +406,7 @@ function IndexationPresetForm({
         />
         <FeatureToggle
           label="Topic tagging"
-          enabled={configGet(config, "enable_topic_tagging", true)}
+          enabled={configGet(config, "enable_topic_tagging", false)}
           onToggle={(on) => toggleFeature("enable_topic_tagging", "topic_tagging_llm", on)}
           // Postponed: tags are generated but not yet surfaced or used in
           // retrieval, so the control is disabled until the feature ships.

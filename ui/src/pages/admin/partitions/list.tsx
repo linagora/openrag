@@ -81,7 +81,11 @@ function RowActions({
     <div className="flex items-center gap-1">
       {showEdit && (
         <Button variant="ghost" size="sm" asChild>
-          <Link to={partitionDetailPath(partition.name)}>
+          <Link
+            to={partitionDetailPath(partition.name)}
+            aria-label={`Edit ${partition.name}`}
+            title={`Edit ${partition.name}`}
+          >
             <Pencil className="h-3 w-3" />
           </Link>
         </Button>
@@ -92,7 +96,13 @@ function RowActions({
           description={`Delete "${partition.name}"? This cannot be undone.`}
           onConfirm={() => deleteMutation.mutate()}
         >
-          <Button variant="ghost" size="sm" disabled={deleteMutation.isPending}>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={deleteMutation.isPending}
+            aria-label={`Delete ${partition.name}`}
+            title={`Delete ${partition.name}`}
+          >
             <Trash2 className="h-3 w-3 text-destructive" />
           </Button>
         </ConfirmDialog>
@@ -516,10 +526,11 @@ export default function PartitionListPage() {
                       </TableCell>
                     )}
                     <TableCell>
-                      <div className="flex items-center gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
                         <Link
                           to={partitionDetailPath(p.name)}
-                          className="font-medium text-primary hover:underline"
+                          className="block max-w-[220px] truncate font-medium text-primary hover:underline"
+                          title={p.name}
                         >
                           {p.name}
                         </Link>
@@ -544,11 +555,25 @@ export default function PartitionListPage() {
                     <TableCell>{p.document_count}</TableCell>
                     {canManagePartitions && (
                       <TableCell className="text-sm">
-                        {resolveEmbedderName(p.embedder, embedderEndpoints)}
+                        <span className="block max-w-[180px] truncate" title={resolveEmbedderName(p.embedder, embedderEndpoints)}>
+                          {resolveEmbedderName(p.embedder, embedderEndpoints)}
+                        </span>
                       </TableCell>
                     )}
-                    {canManagePartitions && <TableCell>{p.indexation_preset}</TableCell>}
-                    {canManagePartitions && <TableCell>{p.retrieval_preset}</TableCell>}
+                    {canManagePartitions && (
+                      <TableCell>
+                        <span className="block max-w-[180px] truncate" title={p.indexation_preset}>
+                          {p.indexation_preset}
+                        </span>
+                      </TableCell>
+                    )}
+                    {canManagePartitions && (
+                      <TableCell>
+                        <span className="block max-w-[180px] truncate" title={p.retrieval_preset}>
+                          {p.retrieval_preset}
+                        </span>
+                      </TableCell>
+                    )}
                     <TableCell className="text-sm text-muted-foreground">
                       {p.created_at
                         ? new Date(p.created_at).toLocaleDateString()
@@ -613,117 +638,119 @@ export default function PartitionListPage() {
       )}
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col overflow-hidden sm:max-w-lg">
+          <DialogHeader className="shrink-0">
             <DialogTitle>{createPartitionLabel}</DialogTitle>
             <DialogDescription>
               {createPartitionDescription}
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Label>Name *</Label>
-              <Input
-                placeholder="my-partition"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Description</Label>
-              <Textarea
-                placeholder="Optional description..."
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </div>
-            {canManagePartitions && (
-              <>
-                <div className="space-y-2">
-                  <Label>Embedder *</Label>
-                  <Select value={embedder} onValueChange={setEmbedder}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select embedder..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(embedderEndpoints ?? []).map((ep) => (
-                        <SelectItem key={ep.name} value={ep.name}>
-                          {ep.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
+          <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+            <div className="-mx-1 min-h-0 flex-1 space-y-4 overflow-y-auto px-1 pb-1">
+              <div className="space-y-2">
+                <Label>Name *</Label>
+                <Input
+                  placeholder="my-partition"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Description</Label>
+                <Textarea
+                  placeholder="Optional description..."
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                />
+              </div>
+              {canManagePartitions && (
+                <>
                   <div className="space-y-2">
-                    <Label>Indexation Preset</Label>
-                    <Select value={indexationPreset} onValueChange={setIndexationPreset}>
+                    <Label>Embedder *</Label>
+                    <Select value={embedder} onValueChange={setEmbedder}>
                       <SelectTrigger>
-                        <SelectValue placeholder="Select preset" />
+                        <SelectValue placeholder="Select embedder..." />
                       </SelectTrigger>
                       <SelectContent>
-                        {indexationPresets.map((p) => (
-                          <SelectItem key={p.name} value={p.name}>
-                            {p.name}
+                        {(embedderEndpoints ?? []).map((ep) => (
+                          <SelectItem key={ep.name} value={ep.name}>
+                            {ep.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>Indexation Preset</Label>
+                      <Select value={indexationPreset} onValueChange={setIndexationPreset}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select preset" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {indexationPresets.map((p) => (
+                            <SelectItem key={p.name} value={p.name}>
+                              {p.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Retrieval Preset</Label>
+                      <Select value={retrievalPreset} onValueChange={setRetrievalPreset}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select preset" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {retrievalPresets.map((p) => (
+                            <SelectItem key={p.name} value={p.name}>
+                              {p.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="flex items-center gap-1.5">
+                      Chat LLM
+                      {llmValidating && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+                      {!llmValidating && llmValidated === true && chatLlm !== "__default__" && (
+                        <CheckCircle className="h-3.5 w-3.5 text-green-500" />
+                      )}
+                      {!llmValidating && llmValidated === false && (
+                        <XCircle className="h-3.5 w-3.5 text-destructive" />
+                      )}
+                    </Label>
+                    <Select value={chatLlm} onValueChange={handleChatLlmChange}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select LLM" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__default__">Default (from retrieval config)</SelectItem>
+                        {llmEndpoints?.map((ep) => (
+                          <SelectItem key={ep.name} value={ep.name}>
+                            {ep.name}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <Label>Retrieval Preset</Label>
-                    <Select value={retrievalPreset} onValueChange={setRetrievalPreset}>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select preset" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {retrievalPresets.map((p) => (
-                          <SelectItem key={p.name} value={p.name}>
-                            {p.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <Label>Chat History Depth</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={chatHistoryDepth}
+                      onChange={(e) => setChatHistoryDepth(e.target.value)}
+                    />
                   </div>
-                </div>
-                <div className="space-y-2">
-                  <Label className="flex items-center gap-1.5">
-                    Chat LLM
-                    {llmValidating && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
-                    {!llmValidating && llmValidated === true && chatLlm !== "__default__" && (
-                      <CheckCircle className="h-3.5 w-3.5 text-green-500" />
-                    )}
-                    {!llmValidating && llmValidated === false && (
-                      <XCircle className="h-3.5 w-3.5 text-destructive" />
-                    )}
-                  </Label>
-                  <Select value={chatLlm} onValueChange={handleChatLlmChange}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select LLM" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__default__">Default (from retrieval config)</SelectItem>
-                      {llmEndpoints?.map((ep) => (
-                        <SelectItem key={ep.name} value={ep.name}>
-                          {ep.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label>Chat History Depth</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={chatHistoryDepth}
-                    onChange={(e) => setChatHistoryDepth(e.target.value)}
-                  />
-                </div>
-              </>
-            )}
-            <DialogFooter>
+                </>
+              )}
+            </div>
+            <DialogFooter className="shrink-0 pt-4">
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
                 Cancel
               </Button>

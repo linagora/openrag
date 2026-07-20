@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Copy, KeyRound, ShieldCheck } from "lucide-react";
-import { regenerateMyToken } from "@/lib/api/account";
+import { getCurrentAuthInfo, regenerateMyToken } from "@/lib/api/account";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,13 @@ import { copyToClipboard } from "@/lib/utils";
 
 export default function SettingsPage() {
   const [token, setToken] = useState<string | null>(null);
+  const { data: authInfo } = useQuery({
+    queryKey: ["current-auth-info"],
+    queryFn: getCurrentAuthInfo,
+    staleTime: 60_000,
+  });
+  const isOidc = authInfo?.auth_method === "oidc";
+  const isToken = authInfo?.auth_method === "token";
 
   const regenerateMut = useMutation({
     mutationFn: regenerateMyToken,
@@ -36,15 +43,18 @@ export default function SettingsPage() {
       <PageHeader title="Account Settings" description="Manage your API access and authentication." />
 
       <div className="mt-4 grid gap-4 max-w-2xl">
-        {/* Sign-in is handled by the IdP — nothing to manage here. */}
+        {/* Sign-in is handled by the configured auth mode — nothing to manage here. */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <ShieldCheck className="h-4 w-4 text-primary" /> Sign-in
             </CardTitle>
             <CardDescription>
-              Authentication is managed through your organization's SSO. OpenRAG does not manage
-              passwords.
+              {isOidc
+                ? "Authentication is managed through your organization's SSO. OpenRAG does not manage passwords."
+                : isToken
+                  ? "Authentication uses your OpenRAG bearer token. Regenerate it below if the current token needs to be rotated."
+                  : "Authentication is managed by the active OpenRAG deployment configuration."}
             </CardDescription>
           </CardHeader>
         </Card>
@@ -68,7 +78,7 @@ export default function SettingsPage() {
                 </p>
                 <div className="flex gap-2">
                   <Input value={token} readOnly className="font-mono text-xs" />
-                  <Button size="icon" variant="outline" onClick={copyToken}>
+                  <Button size="icon" variant="outline" onClick={copyToken} aria-label="Copy API token" title="Copy API token">
                     <Copy className="h-4 w-4" />
                   </Button>
                 </div>

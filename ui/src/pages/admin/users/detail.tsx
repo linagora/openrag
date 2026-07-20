@@ -543,7 +543,7 @@ function ApiTokenTab({ userId }: { userId: number }) {
             </p>
             <div className="flex gap-2">
               <Input value={token} readOnly className="font-mono text-xs" />
-              <Button size="icon" variant="outline" onClick={copyToken}>
+              <Button size="icon" variant="outline" onClick={copyToken} aria-label="Copy API token" title="Copy API token">
                 <Copy className="h-4 w-4" />
               </Button>
             </div>

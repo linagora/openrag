@@ -159,7 +159,10 @@ async def _replace_topic_tags_if_needed(
         return
 
     has_topic_tags = "topic_tags" in row
-    topic_tagging_disabled = indexation_config is not None and indexation_config.get("enable_topic_tagging") is False
+    # Mirrors IndexationPipelineConfig.enable_topic_tagging: an absent key means
+    # disabled, so a re-index under a preset that never enabled tagging still
+    # clears tags left behind by an earlier run.
+    topic_tagging_disabled = indexation_config is not None and not indexation_config.get("enable_topic_tagging", False)
     if not has_topic_tags and not topic_tagging_disabled:
         return
 

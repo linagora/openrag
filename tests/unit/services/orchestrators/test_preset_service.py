@@ -156,6 +156,17 @@ async def test_seed_defaults_inserts_six_presets_when_empty():
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_indexation_leaves_topic_tagging_off():
+    repo = _FakePresetRepo()
+    svc = _make_service(repo)
+    await svc.seed_defaults()
+
+    idx = [r for r in repo._store.values() if r["preset_type"] == "indexation"]
+    assert idx  # sanity: indexation presets were seeded
+    assert all(r["config"].get("enable_topic_tagging", False) is False for r in idx)
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_retrieval_inherits_reranker_enabled():
     from core.config.root import Settings
 
@@ -210,6 +221,34 @@ async def test_seed_defaults_default_indexation_inherits_contextual_retrieval_en
     assert default_idx["enable_contextualization"] is True
     # finance preset explicitly disables it and must stay off.
     assert repo._store[("finance", "indexation")]["config"]["enable_contextualization"] is False
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_default_indexation_inherits_image_captioning_disabled():
+    from core.config.root import Settings
+
+    settings = Settings(loader={"image_captioning": False})
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    default_idx = repo._store[("default", "indexation")]["config"]
+    assert default_idx["enable_image_captioning"] is False
+    # Named presets keep their explicit seed value regardless of the global flag.
+    assert repo._store[("legal", "indexation")]["config"]["enable_image_captioning"] is True
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_default_indexation_inherits_image_captioning_enabled():
+    from core.config.root import Settings
+
+    settings = Settings(loader={"image_captioning": True})
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    default_idx = repo._store[("default", "indexation")]["config"]
+    assert default_idx["enable_image_captioning"] is True
 
 
 @pytest.mark.asyncio

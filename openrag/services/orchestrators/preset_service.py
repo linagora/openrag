@@ -34,12 +34,14 @@ _VALID_PRESET_TYPES = frozenset({"indexation", "retrieval"})
 _RESERVED_PRESET_NAME = "default"
 
 _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
-    # ``enable_contextualization`` and ``parsing_strategy`` are intentionally
-    # omitted from the ``default`` indexation preset below. The former is injected
-    # at seed time from the global ``chunker.contextual_retrieval``
-    # (``CONTEXTUAL_RETRIEVAL``) toggle in _finalize_seed; the latter stays unset
-    # so the default preset inherits the global ``file_loaders.pdf`` (``PDFLOADER``)
-    # backend at parse time. Named presets (legal/finance) keep their explicit choice.
+    # ``enable_contextualization``, ``enable_image_captioning``, and
+    # ``parsing_strategy`` are intentionally omitted from the ``default``
+    # indexation preset below. The first two are injected at seed time from
+    # the global ``chunker.contextual_retrieval`` (``CONTEXTUAL_RETRIEVAL``)
+    # and ``loader.image_captioning`` (``IMAGE_CAPTIONING``) toggles in
+    # _finalize_seed; the last stays unset so the default preset inherits the
+    # global ``file_loaders.pdf`` (``PDFLOADER``) backend at parse time.
+    # Named presets (legal/finance) keep their explicit choice.
     "indexation": {
         "default": {
             "chunking": {"name": "recursive_splitter", "chunk_size": 512, "chunk_overlap_rate": 0.2},
@@ -49,9 +51,8 @@ _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
             # value here would override the operator's global choice and lazily
             # spin up that backend's Ray pool — e.g. forcing marker on a
             # pymupdf-configured deployment. Named presets below opt in explicitly.
-            "enable_image_captioning": True,
             "enable_entity_extraction": True,
-            "enable_topic_tagging": True,
+            "enable_topic_tagging": False,
         },
         "legal": {
             "chunking": {"name": "recursive_splitter", "chunk_size": 1024, "chunk_overlap_rate": 0.25},
@@ -127,21 +128,32 @@ class PresetService:
     def _finalize_seed(self, name: str, preset_type: str, config: dict[str, Any]) -> dict[str, Any]:
         """Overlay env-derived global toggles onto a static default seed.
 
-        Two top-level kill-switches are folded into the seeded presets so a
+        Top-level kill-switches are folded into the seeded presets so a
         fresh deployment honours the env flags without admin action:
 
         * every retrieval preset inherits ``reranker.enabled`` (``enable_reranker``)
           so a deployment without a reranker never builds one against a
           missing/unreachable endpoint;
         * the ``default`` indexation preset inherits ``chunker.contextual_retrieval``
-          (``CONTEXTUAL_RETRIEVAL``) as ``enable_contextualization`` so the global
-          toggle still drives contextualization. Named presets keep the explicit
-          value carried in the seed.
+          (``CONTEXTUAL_RETRIEVAL``) as ``enable_contextualization`` and
+          ``loader.image_captioning`` (``IMAGE_CAPTIONING``) as
+          ``enable_image_captioning``, so the global toggles still drive
+          these enrichments on a fresh deployment. Named presets keep the
+          explicit value carried in the seed.
+
+        This is a one-time seed-time default, not a live runtime gate: once a
+        preset row exists, it is the sole source of truth (an admin can flip
+        ``enable_image_captioning`` per partition regardless of the current
+        ``IMAGE_CAPTIONING`` env value) — see ``IndexingPipeline._should_caption``.
         """
         if preset_type == "retrieval":
             return {**config, "enable_reranker": self._config.reranker.enabled}
         if preset_type == "indexation" and name == "default":
-            return {**config, "enable_contextualization": self._config.chunker.contextual_retrieval}
+            return {
+                **config,
+                "enable_contextualization": self._config.chunker.contextual_retrieval,
+                "enable_image_captioning": self._config.loader.image_captioning,
+            }
         return config
 
     async def load_all(self) -> None:

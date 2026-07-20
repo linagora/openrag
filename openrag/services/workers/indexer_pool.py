@@ -68,7 +68,6 @@ class IndexerWorkerActor:
             embedder=embedder,
             vector_store=self._vector_store,
             vlm=vlm,
-            image_captioning=cfg.loader.image_captioning,
             timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
             parser_factory=parser_factory,
@@ -359,7 +358,7 @@ def _required_llm_names(indexation_config: dict[str, Any] | None) -> list[str]:
     names: list[str] = []
     if indexation_config.get("enable_contextualization"):
         names.append(indexation_config.get("contextualization_llm") or "default")
-    if indexation_config.get("enable_topic_tagging", True):
+    if indexation_config.get("enable_topic_tagging", False):
         names.append(indexation_config.get("topic_tagging_llm") or "default")
     return names
 

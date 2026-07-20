@@ -237,11 +237,19 @@ class WorkerDispatcher(IndexingDispatcher):
         if obj_ref is None:
             return False
 
-        ray.cancel(obj_ref["ref"], recursive=True)
-        await self._call(
-            self._tsm.set_state.remote(task_id, "CANCELLED"),
-            task_description=f"set_state({task_id})",
+        # Atomically claim the cancellation first: if ray.cancel() ran before
+        # this and the RPC then failed, a killed worker could never report
+        # back and the task would be stuck active forever (a zombie).
+        # TaskStateManager keeps CANCELLED sticky, so a worker that starts in
+        # this small window cannot report active/success after the cancel claim.
+        cancelled = await self._call(
+            self._tsm.set_cancelled_if_active.remote(task_id),
+            task_description=f"set_cancelled_if_active({task_id})",
         )
+        if not cancelled:
+            return False
+
+        ray.cancel(obj_ref["ref"], recursive=True)
         return True
 
 
