@@ -169,6 +169,79 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
 
 
 @pytest.mark.asyncio
+async def test_dispatch_indexing_omits_false_require_existing_partition_for_legacy_actors() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = object()
+    pool = _pool_with_ref(ref)
+    tsm = _task_state_manager()
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        task_id = await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+            require_existing_partition=False,
+        )
+
+    assert task_id == "task-1"
+    assert "require_existing_partition" not in pool.submit.remote.call_args.kwargs
+    tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_retries_without_require_existing_partition_for_legacy_actor() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = object()
+    legacy_error = RuntimeError("submit(task-1) failed")
+    legacy_error.__cause__ = TypeError("process_file() got an unexpected keyword argument 'require_existing_partition'")
+    pool = MagicMock()
+    pool.submit = MagicMock()
+    pool.submit.remote = AsyncMock(side_effect=[legacy_error, [ref]])
+    tsm = _task_state_manager()
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        task_id = await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+            require_existing_partition=True,
+        )
+
+    assert task_id == "task-1"
+    first_call, second_call = pool.submit.remote.call_args_list
+    assert first_call.kwargs["require_existing_partition"] is True
+    assert "require_existing_partition" not in second_call.kwargs
+    tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})
+    tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_indexing_marks_task_failed_when_submit_fails() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 

@@ -14,6 +14,7 @@ from services.workers.task_cancellation import cancel_active_indexing_tasks
 logger = get_logger()
 
 DEFAULT_TIMEOUT = 60.0
+_REQUIRE_EXISTING_PARTITION_KWARG = "require_existing_partition"
 
 
 class WorkerDispatcher(IndexingDispatcher):
@@ -98,26 +99,24 @@ class WorkerDispatcher(IndexingDispatcher):
 
         task: Any | None = None
         try:
-            # ``IndexerPool`` is a Ray actor; ``submit`` returns ``[worker_ref]``
-            # (wrapped so Ray doesn't auto-dereference and block on the worker task).
-            # Awaiting the submit call yields that list; element 0 is the worker ref
-            # that ``cancel_task``/``ray.cancel`` must target.
-            submitted = await self._call(
-                self._pool.submit.remote(
-                    task_id=task_id,
-                    path=path,
-                    metadata=metadata,
-                    partition=partition,
-                    user=user,
-                    workspace_ids=workspace_ids,
-                    replace=replace,
-                    indexation_config=indexation_config,
-                    embedder_name=embedder_name,
-                    require_existing_partition=require_existing_partition,
-                ),
-                task_description=f"submit({task_id})",
+            submit_kwargs: dict[str, Any] = {
+                "task_id": task_id,
+                "path": path,
+                "metadata": metadata,
+                "partition": partition,
+                "user": user,
+                "workspace_ids": workspace_ids,
+                "replace": replace,
+                "indexation_config": indexation_config,
+                "embedder_name": embedder_name,
+            }
+            if require_existing_partition:
+                submit_kwargs[_REQUIRE_EXISTING_PARTITION_KWARG] = True
+            task = await self._submit_indexing_task(
+                task_id,
+                submit_kwargs,
+                allow_legacy_retry=require_existing_partition,
             )
-            task = submitted[0]
 
             registered = await self._call(
                 self._tsm.set_object_ref.remote(task_id, {"ref": task}),
@@ -133,6 +132,37 @@ class WorkerDispatcher(IndexingDispatcher):
                 await self._mark_submit_failed(task_id, traceback.format_exc())
             raise
         return task_id
+
+    async def _submit_indexing_task(
+        self,
+        task_id: str,
+        submit_kwargs: dict[str, Any],
+        *,
+        allow_legacy_retry: bool,
+    ) -> Any:
+        try:
+            return await self._submit_indexing_task_once(task_id, submit_kwargs)
+        except Exception as exc:
+            if not allow_legacy_retry or not _is_legacy_require_existing_partition_rejection(exc):
+                raise
+            logger.warning(
+                "Indexer actor rejected require_existing_partition; retrying without it for rolling-deploy compatibility",
+                task_id=task_id,
+            )
+            legacy_kwargs = dict(submit_kwargs)
+            legacy_kwargs.pop(_REQUIRE_EXISTING_PARTITION_KWARG, None)
+            return await self._submit_indexing_task_once(task_id, legacy_kwargs)
+
+    async def _submit_indexing_task_once(self, task_id: str, submit_kwargs: dict[str, Any]) -> Any:
+        # ``IndexerPool`` is a Ray actor; ``submit`` returns ``[worker_ref]``
+        # (wrapped so Ray doesn't auto-dereference and block on the worker task).
+        # Awaiting the submit call yields that list; element 0 is the worker ref
+        # that ``cancel_task``/``ray.cancel`` must target.
+        submitted = await self._call(
+            self._pool.submit.remote(**submit_kwargs),
+            task_description=f"submit({task_id})",
+        )
+        return submitted[0]
 
     async def _mark_submit_failed(self, task_id: str, tb: str) -> None:
         set_failed = getattr(self._tsm, "set_failed_if_not_cancelled", None)
@@ -353,6 +383,23 @@ def from_ray_namespace(
         collection=collection,
         timeout=timeout,
     )
+
+
+def _is_legacy_require_existing_partition_rejection(exc: BaseException) -> bool:
+    for current in _exception_chain(exc):
+        message = f"{type(current).__name__}: {current}"
+        if _REQUIRE_EXISTING_PARTITION_KWARG in message and "unexpected keyword" in message:
+            return True
+    return False
+
+
+def _exception_chain(exc: BaseException):
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
 
 
 __all__ = ["WorkerDispatcher", "from_ray_namespace"]
