@@ -1,4 +1,15 @@
-from services.inference.distributed_semaphore import DistributedSemaphore, DistributedSemaphoreActor
+import asyncio
+import uuid
+
+import pytest
+import ray
+
+# Prevent Ray from scanning the working directory (which may contain
+# permission-restricted folders like db/) and from packaging the whole repo.
+if not ray.is_initialized():
+    ray.init(runtime_env={"working_dir": None}, ignore_reinit_error=True)
+
+from services.inference.distributed_semaphore import DistributedSemaphore, DistributedSemaphoreActor  # noqa: E402
 
 
 class TestDistributedSemaphore:
@@ -16,3 +27,40 @@ class TestDistributedSemaphore:
 
     def test_actor_class_exists(self):
         assert hasattr(DistributedSemaphoreActor, "remote")
+
+
+class TestDistributedSemaphoreCancellationSafety:
+    """Regression tests for issue #630: cancelling a caller mid-``acquire``
+    must not leak the permit forever, since ``acquire.remote()`` keeps
+    running on the actor after the local await is cancelled.
+    """
+
+    def _new_pool(self, max_concurrent_ops: int = 1) -> DistributedSemaphore:
+        # Unique namespace per test so actors from different tests never collide.
+        namespace = f"test-sem-{uuid.uuid4().hex}"
+        return DistributedSemaphore(name="sem", namespace=namespace, max_concurrent_ops=max_concurrent_ops)
+
+    async def test_cancelling_a_blocked_acquire_does_not_leak_the_permit(self):
+        holder = self._new_pool()
+        waiter = DistributedSemaphore(name=holder._name, namespace=holder._namespace, max_concurrent_ops=1)
+
+        await holder.__aenter__()  # take the only permit
+
+        blocked_acquire = asyncio.ensure_future(waiter.__aenter__())
+        await asyncio.sleep(0.2)  # let the acquire actually reach the actor and start waiting
+        blocked_acquire.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await blocked_acquire
+
+        await holder.__aexit__(None, None, None)  # release the original permit
+        await asyncio.sleep(0.5)  # give the shielded acquire + its release callback time to run
+
+        # If the permit leaked, this would hang until the wait_for timeout fires.
+        fresh = DistributedSemaphore(name=holder._name, namespace=holder._namespace, max_concurrent_ops=1)
+        await asyncio.wait_for(fresh.__aenter__(), timeout=2.0)
+        await fresh.__aexit__(None, None, None)
+
+    async def test_uncancelled_acquire_still_works(self):
+        sem = self._new_pool()
+        await sem.__aenter__()
+        await sem.__aexit__(None, None, None)

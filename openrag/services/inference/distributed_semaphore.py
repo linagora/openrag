@@ -8,8 +8,12 @@ async context manager.
 from __future__ import annotations
 
 import asyncio
+import functools
 
 import ray
+from core.utils.logging import get_logger
+
+logger = get_logger()
 
 
 @ray.remote(max_restarts=5)
@@ -53,9 +57,37 @@ class DistributedSemaphore:
 
     async def __aenter__(self):
         semaphore_actor = self._get_or_create_actor()
-        await semaphore_actor.acquire.remote()
+        # acquire.remote() is dispatched to the actor immediately and runs to
+        # completion there regardless of what happens locally - cancelling the
+        # local await does not cancel the remote task. Shield the wait so a
+        # cancellation here doesn't just abandon a permit that the actor may
+        # still grant a moment later: if that happens, __aenter__ never
+        # returns, __aexit__ never runs, and the permit would otherwise leak
+        # for the lifetime of the actor.
+        acquire_task = asyncio.ensure_future(semaphore_actor.acquire.remote())
+        try:
+            await asyncio.shield(acquire_task)
+        except asyncio.CancelledError:
+            acquire_task.add_done_callback(functools.partial(_release_if_granted, self._name, semaphore_actor))
+            raise
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         semaphore_actor = self._get_or_create_actor()
         await semaphore_actor.release.remote()
+
+
+def _release_if_granted(name: str, semaphore_actor, acquire_task: asyncio.Task) -> None:
+    """Release a permit granted to an acquire whose caller was already cancelled.
+
+    Runs as a done-callback on the (shielded, still-running) acquire task, so
+    it fires once the actor eventually grants or drops the request.
+    """
+    if acquire_task.cancelled() or acquire_task.exception() is not None:
+        return
+    logger.bind(semaphore=name).warning(
+        "Releasing permit for a cancelled acquire on semaphore '{name}' - "
+        "caller was cancelled while waiting, permit granted afterwards.",
+        name=name,
+    )
+    semaphore_actor.release.remote()

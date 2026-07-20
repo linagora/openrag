@@ -29,7 +29,7 @@ llm:
   api_key: ""
 
 # --- VLM (Vision Language Model) ---
-# Env: VLM_BASE_URL, VLM_MODEL, VLM_API_KEY, VLM_ENABLE_THINKING
+# Env: VLM_BASE_URL, VLM_MODEL, VLM_API_KEY, VLM_ENABLE_THINKING, VLM_TIMEOUT
 vlm:
   <<: *llm_params
   base_url: ""
