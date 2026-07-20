@@ -88,10 +88,15 @@ def make_component_factory(
             # constructor argument, so it is read out before splatting `extra`.
             impl_kwargs = {k: v for k, v in model_cfg.extra.items() if k != "implementation"}
             impl = model_cfg.extra.get("implementation", default_impl)
+            # NOTE: batch_size is deliberately NOT passed here. Only the embedder
+            # constructor consumes it; the LLM/VLM clients absorb unknown kwargs
+            # into ``self._defaults`` and splat them into the request body, so an
+            # unconditional batch_size leaked a bogus field onto every chat and
+            # caption call (#712). The embedder factory injects it via
+            # ``extra_kwargs_fn`` instead.
             kwargs: dict[str, Any] = {
                 "endpoint": model_cfg.endpoint,
                 "model_name": model_cfg.model_name,
-                "batch_size": model_cfg.batch_size,
                 "timeout": model_cfg.timeout,
                 **impl_kwargs,
             }
