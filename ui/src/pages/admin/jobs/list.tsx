@@ -1,18 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import type { ColumnDef } from "@tanstack/react-table";
-import { RefreshCw, Search } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { ColumnDef, RowSelectionState } from "@tanstack/react-table";
+import { Ban, RefreshCw, Search } from "lucide-react";
+import { toast } from "sonner";
 import { usePermissions } from "@/lib/permissions";
 
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
+import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { getQueueInfo, listTasks, type QueueInfo, type TaskListItem } from "@/lib/api/jobs";
+import { cancelTask, getQueueInfo, isActiveState, listTasks, type QueueInfo, type TaskListItem } from "@/lib/api/jobs";
 
 // OpenRag exposes per-file indexing tasks (TaskStateManager), not batch "jobs".
 const STATUS_TABS = ["ALL", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED"] as const;
@@ -62,12 +64,25 @@ function QueuePressureSummary({
   );
 }
 
+function TruncatedValue({ value, className = "max-w-[320px]" }: { value: string; className?: string }) {
+  if (!value) return "—";
+  return (
+    <span className={`block truncate ${className}`} title={value}>
+      {value}
+    </span>
+  );
+}
+
 const columns: ColumnDef<TaskListItem, unknown>[] = [
   {
     accessorKey: "task_id",
     header: "Task",
     cell: ({ row }) => (
-      <Link to={`/jobs/${row.original.task_id}`} className="text-primary hover:underline font-mono text-sm">
+      <Link
+        to={`/jobs/${row.original.task_id}`}
+        className="text-primary hover:underline font-mono text-sm"
+        title={row.original.task_id}
+      >
         {row.original.task_id.slice(0, 8)}
       </Link>
     ),
@@ -80,21 +95,31 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
   {
     id: "file",
     header: "File",
-    cell: ({ row }) => str(row.original.details?.metadata?.filename) || str(row.original.details?.file_id) || "—",
+    cell: ({ row }) => (
+      <TruncatedValue
+        value={str(row.original.details?.metadata?.filename) || str(row.original.details?.file_id)}
+        className="max-w-[280px] sm:max-w-[360px] lg:max-w-[440px]"
+      />
+    ),
   },
   {
     id: "partition",
     header: "Partition",
-    cell: ({ row }) => str(row.original.details?.partition) || "—",
+    cell: ({ row }) => (
+      <TruncatedValue value={str(row.original.details?.partition)} className="max-w-[180px] sm:max-w-[240px]" />
+    ),
   },
 ];
 
 export default function JobListPage() {
   const { isAdmin } = usePermissions();
+  const queryClient = useQueryClient();
   const [statusTab, setStatusTab] = useState<string>("ALL");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [manualRefreshing, setManualRefreshing] = useState(false);
+  const taskStatusFilter = statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab;
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedSearch(search), JOB_SEARCH_DEBOUNCE_MS);
@@ -103,7 +128,7 @@ export default function JobListPage() {
 
   const tasksQuery = useQuery({
     queryKey: ["tasks", statusTab],
-    queryFn: () => listTasks(statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab),
+    queryFn: () => listTasks(taskStatusFilter),
     refetchInterval: JOBS_REFETCH_INTERVAL_MS, // poll — OpenRag has no task SSE
   });
   const queueInfoQuery = useQuery({
@@ -126,11 +151,37 @@ export default function JobListPage() {
       );
     });
   }, [tasks, debouncedSearch]);
+  const selectedActiveTasks = useMemo(
+    () => filteredTasks.filter((task) => rowSelection[task.task_id] && isActiveState(task.state)),
+    [filteredTasks, rowSelection],
+  );
+
+  const bulkCancelMutation = useMutation({
+    mutationFn: async (taskIds: string[]) => {
+      const latestTasks = await listTasks(taskStatusFilter);
+      const selectedIds = new Set(taskIds);
+      const activeTaskIds = latestTasks.tasks
+        .filter((task) => selectedIds.has(task.task_id) && isActiveState(task.state))
+        .map((task) => task.task_id);
+      const results = await Promise.allSettled(activeTaskIds.map((taskId) => cancelTask(taskId)));
+      const ok = results.filter((result) => result.status === "fulfilled").length;
+      return { ok, failed: results.length - ok, skipped: taskIds.length - activeTaskIds.length };
+    },
+    onSuccess: ({ ok, failed, skipped }) => {
+      if (ok) toast.success(`${ok} task(s) cancelled`);
+      if (failed) toast.error(`${failed} task(s) failed to cancel`);
+      if (skipped) toast.error(`${skipped} task(s) were no longer active`);
+      setRowSelection({});
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    onError: (error: Error) => toast.error(`Bulk cancel failed: ${error.message}`),
+  });
 
   const handleStatusTabChange = (value: string) => {
     setStatusTab(value);
     setSearch("");
     setDebouncedSearch("");
+    setRowSelection({});
   };
 
   return (
@@ -138,13 +189,16 @@ export default function JobListPage() {
       <PageHeader title="Jobs" description={isAdmin ? "Monitor indexing tasks" : "Monitor your indexing tasks"} />
 
       <Tabs value={statusTab} onValueChange={handleStatusTabChange}>
-        <div className="mb-4 mt-0 flex items-center gap-2">
+        <div className="mb-4 mt-0 flex flex-wrap items-center gap-2">
           <div className="relative max-w-sm">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder="Search jobs..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setRowSelection({});
+              }}
               className="pl-9"
             />
           </div>
@@ -152,6 +206,23 @@ export default function JobListPage() {
             <p className="text-sm text-muted-foreground">
               {filteredTasks.length} job{filteredTasks.length === 1 ? "" : "s"}
             </p>
+            {selectedActiveTasks.length > 0 && (
+              <>
+                <ConfirmDialog
+                  title="Cancel selected tasks?"
+                  description={`Send a cancellation signal for ${selectedActiveTasks.length} active task(s)? Already-completed work is not rolled back.`}
+                  onConfirm={() => bulkCancelMutation.mutate(selectedActiveTasks.map((task) => task.task_id))}
+                >
+                  <Button variant="outline" size="sm" disabled={bulkCancelMutation.isPending}>
+                    <Ban className="h-4 w-4" />
+                    Cancel selected
+                  </Button>
+                </ConfirmDialog>
+                <p className="text-sm text-muted-foreground">
+                  {selectedActiveTasks.length} selected
+                </p>
+              </>
+            )}
             {isAdmin && (
               <QueuePressureSummary
                 queueInfo={queueInfoQuery.data}
@@ -195,7 +266,16 @@ export default function JobListPage() {
               </div>
             ) : (
               // Remounting resets pagination for a new tab/search context; sort state resets with it.
-              <DataTable key={`${statusTab}:${debouncedSearch}`} columns={columns} data={filteredTasks} />
+              <DataTable
+                key={`${statusTab}:${debouncedSearch}`}
+                columns={columns}
+                data={filteredTasks}
+                enableSelection
+                canSelectRow={(task) => isActiveState(task.state)}
+                getRowId={(task) => task.task_id}
+                rowSelection={rowSelection}
+                onRowSelectionChange={setRowSelection}
+              />
             )}
           </TabsContent>
         ))}

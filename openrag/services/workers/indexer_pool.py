@@ -88,6 +88,7 @@ class IndexerWorkerActor:
             vlm_factory=vlm_factory,
             contextualizer_factory=contextualizer_factory,
             topic_tagger_factory=topic_tagger_factory,
+            defer_replace_cleanup=True,
         )
         rdb_cfg = cfg.rdb.model_copy(update={"database": f"partitions_for_collection_{cfg.vectordb.collection_name}"})
         self._catalog_store = PostgresStore(rdb_cfg, run_migrations=False)
@@ -125,6 +126,8 @@ class IndexerWorkerActor:
             task_state_manager=task_state_manager,
             document_repo=self._catalog_store.document_repo,
             topic_tag_repo=self._catalog_store.topic_tag_repo,
+            vector_store=self._vector_store,
+            collection=cfg.vectordb.collection_name,
         )
         # When False (e.g. Twake, which keeps its own copy), the raw upload is
         # purged from ``paths.data_dir`` once indexing settles. Enforced at this
@@ -221,6 +224,7 @@ class IndexerWorkerActor:
         replace: bool = False,
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
+        require_existing_partition: bool = False,
     ) -> dict[str, Any]:
         try:
             await self._ensure_catalog()
@@ -235,6 +239,7 @@ class IndexerWorkerActor:
                 replace=replace,
                 indexation_config=indexation_config,
                 embedder_name=embedder_name,
+                require_existing_partition=require_existing_partition,
             )
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:

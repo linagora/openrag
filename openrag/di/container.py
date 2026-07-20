@@ -403,6 +403,7 @@ class ServiceContainer:
         """PartitionService — lazily built, cached for the container's lifetime."""
         if self._partition_service is None:
             from services.orchestrators.partition_service import PartitionService
+            from services.workers.bootstrap import get_task_state_manager
 
             settings = self._require_settings()
             self._partition_service = PartitionService(
@@ -413,6 +414,7 @@ class ServiceContainer:
                 user_repo=self.user_repo,
                 collection=settings.vectordb.collection_name,
                 config=settings,
+                task_state_manager_factory=get_task_state_manager,
             )
         return self._partition_service
 

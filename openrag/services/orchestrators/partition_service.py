@@ -6,10 +6,9 @@ Phase 7 repositories and the :class:`VectorStore` port directly; it does
 not depend on Ray or pymilvus.
 
 ``delete_partition`` is the one cross-cutting method — it must drop the
-partition's vectors from the store *and* the relational rows. It is
-performed through the clean :class:`VectorStore` port
-(``query_ids_by_filter`` + ``delete``) rather than a Milvus-specific
-filter delete, so PartitionService stays backend-agnostic.
+partition's vectors from the store *and* the relational rows. Vector cleanup
+runs first through :class:`VectorStore.delete_by_filter`, so a failed vector
+delete does not leave catalog rows removed while chunks remain queryable.
 
 Chunk reads return plain dicts (never LangChain ``Document`` objects —
 8H forbids LangChain in orchestrators); the thin router builds the
@@ -25,6 +24,10 @@ raised). The container supplies both from settings/the catalog store.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -32,6 +35,7 @@ from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
 from core.models.preset import PartitionConfig
+from core.utils.conts import is_internal_metadata_key
 from core.utils.exceptions import (
     ConfigError,
     NotFoundError,
@@ -40,6 +44,7 @@ from core.utils.exceptions import (
     ValidationError,
 )
 from core.utils.logging import get_logger
+from services.workers.task_cancellation import cancel_active_indexing_tasks
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -61,6 +66,10 @@ _RESERVED_PARTITION_NAMES = frozenset({"all"})
 # "reset to default"), not the omitted-field sentinel that the None-filter
 # in ``update_partition`` gives every other column.
 _NULLABLE_COLUMNS = frozenset({"chat_llm"})
+_ACTIVE_PARTITION_OPERATIONS: ContextVar[dict[str, Any] | None] = ContextVar(
+    "_ACTIVE_PARTITION_OPERATIONS",
+    default=None,
+)
 
 
 def _validate_limit(limit: int | None) -> None:
@@ -86,6 +95,9 @@ class PartitionService:
         user_repo: UserRepository,
         collection: str,
         config: Settings | None = None,
+        task_state_manager: Any = None,
+        task_state_manager_factory: Callable[[], Any] | None = None,
+        task_cancel_timeout: float = 60.0,
     ) -> None:
         self._partition_repo = partition_repo
         self._membership_repo = membership_repo
@@ -94,13 +106,18 @@ class PartitionService:
         self._user_repo = user_repo
         self._collection = collection
         self._config = config
+        self._task_state_manager = task_state_manager
+        self._task_state_manager_factory = task_state_manager_factory
+        self._task_cancel_timeout = task_cancel_timeout
+        self._partition_locks: dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # Existence guards (mirror the legacy _check_* helpers, core exceptions)
     # ------------------------------------------------------------------
 
     async def _ensure_partition(self, partition: str) -> None:
-        if not await self._partition_repo.partition_exists(name=partition):
+        operation = self._active_partition_operation(partition)
+        if not await self._partition_exists_for_operation(partition, operation=operation):
             logger.warning(f"Partition '{partition}' does not exist.")
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
 
@@ -134,10 +151,95 @@ class PartitionService:
 
     async def partition_exists(self, partition: str) -> bool:
         try:
-            return await self._partition_repo.partition_exists(name=partition)
+            operation = self._active_partition_operation(partition)
+            return await self._partition_exists_for_operation(partition, operation=operation)
         except Exception as e:  # pragma: no cover - defensive, matches legacy
             logger.exception("Partition existence check failed.", partition=partition, error=str(e))
             return False
+
+    @asynccontextmanager
+    async def indexing_admission(self, partition: str) -> AsyncIterator[bool]:
+        """Serialize upload admission with partition deletion.
+
+        Yields whether the partition row existed while the admission fence was
+        held. Uploads that observed an existing partition must not auto-create it
+        later if a concurrent delete removes the row before the worker writes the
+        catalog record.
+        """
+        async with self._partition_operation_lock(partition) as operation:
+            active_operations = dict(_ACTIVE_PARTITION_OPERATIONS.get() or {})
+            active_operations[partition] = operation
+            token = _ACTIVE_PARTITION_OPERATIONS.set(active_operations)
+            try:
+                yield await self._partition_exists_for_operation(partition, operation=operation)
+            finally:
+                _ACTIVE_PARTITION_OPERATIONS.reset(token)
+
+    @asynccontextmanager
+    async def _partition_operation_lock(self, partition: str) -> AsyncIterator[Any]:
+        lock_factory = getattr(self._partition_repo, "partition_operation_lock", None)
+        if lock_factory is not None:
+            async with lock_factory(partition) as operation:
+                yield operation
+            return
+
+        lock = self._partition_locks.setdefault(partition, asyncio.Lock())
+        async with lock:
+            yield None
+
+    async def _partition_exists_for_operation(self, partition: str, *, operation: Any = None) -> bool:
+        exists = getattr(operation, "partition_exists", None)
+        if exists is not None:
+            return bool(await exists(partition))
+        return await self._partition_repo.partition_exists(name=partition)
+
+    async def _create_partition_for_operation(
+        self,
+        partition: str,
+        *,
+        user_id: int | None,
+        max_owned: int | None,
+        operation: Any = None,
+    ) -> dict:
+        create_partition = getattr(operation, "create_partition", None)
+        if create_partition is not None:
+            return await create_partition(partition, user_id=user_id, max_owned=max_owned)
+        return await self._partition_repo.create_partition(name=partition, user_id=user_id, max_owned=max_owned)
+
+    async def _delete_partition_for_operation(self, partition: str, *, operation: Any = None) -> bool:
+        delete_partition = getattr(operation, "delete_partition", None)
+        if delete_partition is not None:
+            return bool(await delete_partition(partition))
+        return await self._partition_repo.delete_partition(name=partition)
+
+    async def _update_partition_for_operation(
+        self,
+        partition: str,
+        *,
+        operation: Any = None,
+        **fields: object,
+    ) -> dict | None:
+        update_partition = getattr(operation, "update_partition", None)
+        if update_partition is not None:
+            return await update_partition(partition, **fields)
+        return await self._partition_repo.update_partition(partition, **fields)
+
+    async def _list_partition_rows_for_operation(self, *, operation: Any = None) -> list[dict]:
+        list_partition_rows = getattr(operation, "list_partition_rows", None)
+        if list_partition_rows is not None:
+            return await list_partition_rows()
+        return await self._partition_repo.list_partition_rows()
+
+    def _active_partition_operation(self, partition: str | None = None) -> Any:
+        active_operations = _ACTIVE_PARTITION_OPERATIONS.get() or {}
+        if partition is not None:
+            return active_operations.get(partition)
+        return next((operation for operation in active_operations.values() if operation is not None), None)
+
+    async def _ensure_partition_for_operation(self, partition: str, *, operation: Any = None) -> None:
+        if not await self._partition_exists_for_operation(partition, operation=operation):
+            logger.warning(f"Partition '{partition}' does not exist.")
+            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
 
     async def list_partitions(self) -> list[dict]:
         return await self._partition_repo.list_partitions()
@@ -209,7 +311,8 @@ class PartitionService:
                 code="RESERVED_PARTITION_NAME",
             )
         validate_partition_name(partition)
-        if await self._partition_repo.partition_exists(name=partition):
+        operation = self._active_partition_operation(partition)
+        if await self._partition_exists_for_operation(partition, operation=operation):
             raise ValidationError(
                 f"Partition '{partition}' already exists.",
                 status_code=409,
@@ -231,47 +334,77 @@ class PartitionService:
             if chat_llm:
                 self._validate_chat_llm_ref(chat_llm)
 
-        await self._partition_repo.create_partition(name=partition, user_id=user_id, max_owned=max_owned)
+        await self._create_partition_for_operation(
+            partition,
+            user_id=user_id,
+            max_owned=max_owned,
+            operation=operation,
+        )
 
         # Persist the config columns (the insert only sets server defaults)
         # and re-resolve the in-memory cache. Only done in the Phase 14 flow
         # where a config was supplied.
         if self._config is not None:
-            await self._partition_repo.update_partition(partition, **config_fields)
+            await self._update_partition_for_operation(partition, operation=operation, **config_fields)
             await self.load_partitions()
 
         logger.info(f"Partition '{partition}' created by user_id {user_id}.")
 
     async def delete_partition(self, partition: str) -> None:
         """Drop a partition's vectors *and* relational rows (cross-cutting)."""
-        await self._ensure_partition(partition)
-        await self._partition_repo.delete_partition(name=partition)
+        async with self._partition_operation_lock(partition) as operation:
+            await self._delete_partition_locked(partition, operation=operation)
+
+    async def _delete_partition_locked(self, partition: str, *, operation: Any = None) -> None:
+        await self._ensure_partition_for_operation(partition, operation=operation)
+        task_state_manager = self._task_state_manager
+        if task_state_manager is None and self._task_state_manager_factory is not None:
+            task_state_manager = self._task_state_manager_factory()
+        if task_state_manager is not None:
+            cancelled = await cancel_active_indexing_tasks(
+                task_state_manager,
+                partition=partition,
+                timeout=self._task_cancel_timeout,
+            )
+            if cancelled:
+                logger.info("Cancelled active indexing tasks before deleting partition", partition=partition)
+
         # The shared Milvus collection is created lazily on the first insert
         # system-wide, so on a fresh stack (nothing ever indexed) it doesn't
-        # exist; querying it would raise (e.g. DescribeCollectionException) and
-        # fail the whole delete *after* the relational rows are already gone.
+        # exist; deleting by filter would raise (e.g. DescribeCollectionException)
+        # even though there are no chunks to clean up.
         # No collection means no chunks to clean up — skip the vector cleanup.
-        if not await self._vector_store.collection_exists(self._collection):
+        collection_exists = await self._vector_store.collection_exists(self._collection)
+        if collection_exists:
+            deleted = await self._vector_store.delete_by_filter({"partition": partition})
             logger.info(
-                "Partition deleted; no vector collection to clean up",
+                "Deleted points from partition",
+                partition=partition,
+                count=deleted,
+            )
+        else:
+            logger.info(
+                "No vector collection to clean up before deleting partition",
                 partition=partition,
             )
-            return
-        ids = await self._vector_store.query_ids_by_filter(
-            self._collection,
-            {"partition": partition},
-        )
-        if ids:
+        deleted = await self._delete_partition_for_operation(partition, operation=operation)
+        if deleted and self._config is not None:
+            self._config.partitions.pop(partition, None)
+        if collection_exists:
             try:
-                deleted = await self._vector_store.delete(ids, self._collection)
-                logger.info("Deleted points from partition", partition=partition, count=deleted)
-            except Exception as e:
-                logger.error(
-                    "Failed to delete chunks from vector store after removing partition from database; "
-                    "reconciliation task required",
+                deleted = await self._vector_store.delete_by_filter({"partition": partition})
+            except Exception as exc:
+                logger.warning(
+                    "Post-delete vector cleanup failed after partition row removal",
                     partition=partition,
-                    chunk_count=len(ids),
-                    error=str(e),
+                    error=str(exc),
+                )
+                raise
+            else:
+                logger.info(
+                    "Deleted race-leftover points from partition",
+                    partition=partition,
+                    count=deleted,
                 )
         logger.info("Partition successfully deleted.", partition=partition)
 
@@ -414,7 +547,7 @@ class PartitionService:
         ``config.partitions`` dict stays valid after the swap.
         """
         cfg = self._require_config()
-        rows = await self._partition_repo.list_partition_rows()
+        rows = await self._list_partition_rows_for_operation(operation=self._active_partition_operation())
         resolved = {row["partition"]: self.resolve_partition_row(row) for row in rows}
 
         cache = cfg.partitions
@@ -462,7 +595,7 @@ class PartitionService:
         )
         if len(rows) > limit:
             rows = rows[:limit]
-        return [{k: v for k, v in row.items() if k != "text"} for row in rows]
+        return [{k: v for k, v in row.items() if k != "text" and not is_internal_metadata_key(k)} for row in rows]
 
     async def list_all_chunks(
         self,
@@ -497,6 +630,8 @@ class PartitionService:
             meta: dict[str, Any] = {}
             for k, v in row.items():
                 if k in excluded:
+                    continue
+                if is_internal_metadata_key(k):
                     continue
                 if k == "vector":
                     # Legacy surfaced the embedding as a flat string.

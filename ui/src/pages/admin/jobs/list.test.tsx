@@ -2,9 +2,17 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
+import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getQueueInfo, listTasks } from "@/lib/api/jobs";
+import { cancelTask, getQueueInfo, listTasks, type TaskState } from "@/lib/api/jobs";
 import JobListPage from "./list";
+
+vi.mock("sonner", () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+  },
+}));
 
 const permissions = vi.hoisted(() => ({ isAdmin: true }));
 
@@ -14,20 +22,27 @@ vi.mock("@/lib/permissions", () => ({
   }),
 }));
 
-vi.mock("@/lib/api/jobs", () => ({
-  getQueueInfo: vi.fn(),
-  listTasks: vi.fn(),
-}));
+vi.mock("@/lib/api/jobs", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api/jobs")>("@/lib/api/jobs");
+  return {
+    ...actual,
+    cancelTask: vi.fn(),
+    getQueueInfo: vi.fn(),
+    listTasks: vi.fn(),
+  };
+});
 
+const cancelTaskMock = vi.mocked(cancelTask);
 const getQueueInfoMock = vi.mocked(getQueueInfo);
 const listTasksMock = vi.mocked(listTasks);
+const toastErrorMock = vi.mocked(toast.error);
 
-const task = (task_id: string, state: "COMPLETED" | "FAILED", filename: string) => ({
+const task = (task_id: string, state: TaskState, filename: string, partition = "docs") => ({
   task_id,
   state,
   details: {
     file_id: task_id,
-    partition: "docs",
+    partition,
     metadata: { filename },
     user_id: 1,
   },
@@ -54,6 +69,7 @@ describe("JobListPage filters", () => {
   beforeEach(() => {
     permissions.isAdmin = true;
     vi.clearAllMocks();
+    cancelTaskMock.mockResolvedValue({ message: "Cancellation signal sent" });
     getQueueInfoMock.mockResolvedValue({
       workers: { total_slots: 4, pool_size: 2, max_per_actor: 2 },
       tasks: {
@@ -88,6 +104,85 @@ describe("JobListPage filters", () => {
 
     await waitFor(() => expect(search.value).toBe(""));
     expect(await screen.findByText("failed.pdf")).not.toBeNull();
+  });
+
+  it("bulk-cancels only selected active jobs", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("queued-task", "QUEUED", "queued.pdf"),
+        task("completed-task", "COMPLETED", "completed.pdf"),
+      ],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByText("queued.pdf")).not.toBeNull();
+    expect(screen.getByText("completed.pdf")).not.toBeNull();
+
+    const rowCheckboxes = screen.getAllByRole("checkbox", { name: /select row/i });
+    expect(rowCheckboxes[0].hasAttribute("disabled")).toBe(false);
+    expect(rowCheckboxes[1].hasAttribute("disabled")).toBe(true);
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /select visible rows/i }));
+    expect(screen.getByText("1 selected")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /cancel selected/i }));
+    await userEvent.click(screen.getByRole("button", { name: /confirm/i }));
+
+    await waitFor(() => expect(cancelTaskMock).toHaveBeenCalledWith("queued-task"));
+    expect(cancelTaskMock).not.toHaveBeenCalledWith("completed-task");
+  });
+
+  it("rechecks selected jobs before bulk cancelling", async () => {
+    let tasks = [task("queued-task", "QUEUED", "queued.pdf")];
+    listTasksMock.mockImplementation(async () => ({ tasks }));
+
+    renderJobs();
+
+    expect(await screen.findByText("queued.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /select row/i }));
+    expect(screen.getByText("1 selected")).not.toBeNull();
+
+    tasks = [task("queued-task", "COMPLETED", "queued.pdf")];
+
+    await userEvent.click(screen.getByRole("button", { name: /cancel selected/i }));
+    await userEvent.click(screen.getByRole("button", { name: /confirm/i }));
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith("1 task(s) were no longer active"));
+    expect(cancelTaskMock).not.toHaveBeenCalled();
+  });
+
+  it("clears selected jobs when the search changes", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [task("queued-task", "QUEUED", "queued.pdf"), task("other-task", "QUEUED", "other.pdf")],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByText("queued.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getAllByRole("checkbox", { name: /select row/i })[0]);
+    expect(screen.getByText("1 selected")).not.toBeNull();
+
+    await userEvent.type(screen.getByPlaceholderText("Search jobs..."), "other");
+
+    await waitFor(() => expect(screen.queryByText("1 selected")).toBeNull());
+  });
+
+  it("keeps long job values constrained while exposing full names", async () => {
+    const longTaskId = "task-" + "1234567890".repeat(5);
+    const longFilename = "benchmark-run-with-a-very-long-document-name-that-should-not-stretch-the-table.pdf";
+    const longPartition = "benchmark-partition-with-a-very-long-name-for-regression-testing";
+    listTasksMock.mockResolvedValue({
+      tasks: [task(longTaskId, "COMPLETED", longFilename, longPartition)],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByTitle(longTaskId)).not.toBeNull();
+    expect(screen.getByTitle(longFilename).className).toContain("truncate");
+    expect(screen.getByTitle(longPartition).className).toContain("truncate");
   });
 
   it("shows queue and worker pressure from the backend", async () => {

@@ -67,9 +67,18 @@ def test_dict_to_chunk_uses_underscore_id_as_fallback():
 
 
 def test_dict_to_chunk_metadata_excludes_reserved_keys():
-    row = {"id": "x", "text": "t", "partition": "p", "file_id": "f", "score": 0.9, "extra_key": "val"}
+    row = {
+        "id": "x",
+        "text": "t",
+        "partition": "p",
+        "file_id": "f",
+        "score": 0.9,
+        "extra_key": "val",
+        "_openrag_indexing_task_id": "task-1",
+    }
     c = _dict_to_chunk(row)
     assert "score" not in c.metadata
+    assert "_openrag_indexing_task_id" not in c.metadata
     assert "extra_key" in c.metadata
 
 

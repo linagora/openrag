@@ -37,6 +37,8 @@ class IndexingDispatcher(ABC):
         replace: bool,
         indexation_config: dict | None = None,
         embedder_name: str | None = None,
+        require_existing_partition: bool = False,
+        allow_legacy_require_existing_partition_retry: bool = False,
     ) -> str:
         """Queue an (re)indexing job, register its task state, return its id."""
         ...
@@ -82,8 +84,7 @@ class IndexingDispatcher(ABC):
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a running/queued task.
 
-        Returns ``False`` when no object ref is stored for ``task_id``
-        (the caller maps that to a 404), ``True`` once the cancel signal
-        has been sent.
+        Returns ``False`` when the task cannot be cancelled, ``True`` once
+        the cancel signal has been sent.
         """
         ...

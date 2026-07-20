@@ -111,6 +111,19 @@ describe("PartitionListPage bulk actions", () => {
     expect(screen.getByRole("button", { name: /delete owned-a/i })).not.toBeNull();
   });
 
+  it("keeps long partition names constrained while exposing the full name", async () => {
+    const longName = "partition-with-a-very-long-benchmark-name-that-should-not-stretch-the-table";
+    listPartitionsMock.mockResolvedValue({
+      partitions: [makePartition(longName)],
+    });
+
+    renderPartitions();
+
+    const partitionLink = await screen.findByRole("link", { name: longName });
+    expect(partitionLink.getAttribute("title")).toBe(longName);
+    expect(partitionLink.className).toContain("truncate");
+  });
+
   it("selects all deletable partitions and deletes only those partitions", async () => {
     renderPartitions();
 

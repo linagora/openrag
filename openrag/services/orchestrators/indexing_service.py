@@ -13,6 +13,8 @@ returned via ``HTTPException``.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -117,6 +119,20 @@ class IndexingService:
             return {}
         return getattr(self._config, "partitions", {}) or {}
 
+    @asynccontextmanager
+    async def _partition_admission(self, partition: str) -> AsyncIterator[bool]:
+        if self._partition_service is None:
+            yield False
+            return
+
+        admission = getattr(self._partition_service, "indexing_admission", None)
+        if admission is not None:
+            async with admission(partition) as partition_existed:
+                yield bool(partition_existed)
+            return
+
+        yield await self._partition_service.partition_exists(partition)
+
     async def _ensure_editor_access_after_create_race(self, partition: str, user: dict | None) -> None:
         if user is None:
             return
@@ -196,18 +212,23 @@ class IndexingService:
             sanitized_filename=sanitized_filename,
             original_filename=original_filename,
         )
-        await self._ensure_partition_exists(partition, user)
-        indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
-        return await self._dispatcher.dispatch_indexing(
-            path=file_path,
-            metadata=full_metadata,
-            partition=partition,
-            user=user,
-            workspace_ids=workspace_ids,
-            replace=replace,
-            indexation_config=indexation_config,
-            embedder_name=embedder_name,
-        )
+        async with self._partition_admission(partition) as partition_existed_at_admission:
+            await self._ensure_partition_exists(partition, user)
+            require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
+            indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
+            legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
+            return await self._dispatcher.dispatch_indexing(
+                path=file_path,
+                metadata=full_metadata,
+                partition=partition,
+                user=user,
+                workspace_ids=workspace_ids,
+                replace=replace,
+                indexation_config=indexation_config,
+                embedder_name=embedder_name,
+                require_existing_partition=require_existing_partition,
+                allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
+            )
 
     async def delete_file(self, file_id: str, partition: str) -> None:
         await self._dispatcher.delete_file(file_id, partition)
