@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from core.utils.conts import is_internal_metadata_key
 from core.utils.logging import get_logger
 from core.utils.text import sanitize_extracted_text
 
@@ -87,8 +88,14 @@ class ConversionService:
         row = rows[0]
         return {
             "page_content": row["text"],
-            "metadata": {k: v for k, v in row.items() if k not in ("text", "vector")},
+            "metadata": _public_chunk_metadata(row),
         }
 
 
 __all__ = ["ConversionService"]
+
+
+def _public_chunk_metadata(row: dict) -> dict:
+    return {
+        key: value for key, value in row.items() if key not in ("text", "vector") and not is_internal_metadata_key(key)
+    }
