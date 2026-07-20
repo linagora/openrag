@@ -191,6 +191,57 @@ def test_escaped_emphasis_marker_is_a_leaf_not_a_heading():
     assert not any("352-1" in h for h in chunk.metadata["hierarchy_path"])
 
 
+def test_non_structural_headings_stay_out_of_breadcrumb():
+    # Parsers mark captions, TOC leaders, image credits, bare page numbers,
+    # amendment enumerations, and stray sentences as `#` headings. None should
+    # become a section label; the real heading must remain the breadcrumb, and
+    # the rejected line stays as body content.
+    body = " ".join(["lorem"] * 30)
+    md = (
+        "## Real Section\n\n"
+        "# Figure 2 - Examples of computing services\n\n"
+        "# SUMMARY INTRODUCTION .......... 17\n\n"
+        "# photo © oticki - stock.adobe.com\n\n"
+        "# 1\n\n"
+        "# 11° L'article L. 413-3 est ainsi rédigé :\n\n"
+        "# The strategy implemented since 2018 has produced measurable and lasting national results\n\n"
+        f"Article L1\n{body}\n"
+    )
+    chunks = _chunker(chunk_size=60).chunk(_doc(md))
+    l1 = next(c for c in chunks if "Article L1" in (c.content or ""))
+    assert l1.metadata["hierarchy_path"] == ["Real Section"]
+    # None of the rejected lines became a section label anywhere.
+    labels = {h for c in chunks for h in c.metadata["hierarchy_path"]}
+    assert labels == {"Real Section"}
+    # The rejected lines are preserved as body somewhere, not lost.
+    alltext = "\n".join(c.text for c in chunks)
+    assert "Figure 2" in alltext
+    assert "The strategy implemented since 2018" in alltext
+
+
+def test_keyword_sentence_is_not_taken_as_heading():
+    # A body sentence opening with a structural keyword (common in pymupdf output,
+    # which emits no `#` headings) must not be mistaken for a `Partie` heading.
+    md = "# Livre I : Dispositions\n\npartie de ce total doit être expliquée par la hausse observée cette année.\n"
+    chunk = _chunker(chunk_size=60).chunk(_doc(md))[0]
+    assert chunk.metadata["hierarchy_path"] == ["Livre I : Dispositions"]
+
+
+def test_annexe_heading_is_structural():
+    md = (
+        "# Annexe 1 - Suivi de la mise en œuvre des propositions pour 2024 et années suivantes\n\n"
+        "Article L1\nLe contenu de l'annexe figure ci-après pour information du lecteur.\n"
+    )
+    chunk = _chunker(chunk_size=60).chunk(_doc(md))[0]
+    assert any("Annexe 1" in h for h in chunk.metadata["hierarchy_path"])
+
+
+def test_span_anchor_stripped_from_heading():
+    md = '# <span id="page-46-0"></span>Dispositions générales\n\nArticle L1\nLe présent article régit les conditions applicables.\n'
+    chunk = _chunker(chunk_size=60).chunk(_doc(md))[0]
+    assert chunk.metadata["hierarchy_path"] == ["Dispositions générales"]
+
+
 def test_empty_document_returns_no_chunks():
     assert _chunker().chunk(ProcessedDocument(document_id="d1", text_blocks=[])) == []
     assert _chunker().chunk(_doc("   \n  \n")) == []

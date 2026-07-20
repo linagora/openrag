@@ -69,11 +69,65 @@ _HEADING_PREFIX_RE = re.compile(r"^\s*#{1,6}\s*")
 # expects a digit makes the marker miss the leaf test and get misfiled as a
 # heading — polluting the breadcrumb of every chunk beneath it.
 _EMPHASIS_RE = re.compile(r"[*_`\\]+")
+# Inline HTML the parsers leave in heading lines — chiefly Marker's page anchors
+# (``<span id="page-46-0"></span>Encadré 3 …``), which would otherwise ride into
+# the breadcrumb verbatim.
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+# Caption / credit / TOC-leader prefixes: lines a parser marks as a heading that
+# are really figure/table captions or a table-of-contents entry, not a section.
+_CAPTION_RE = re.compile(
+    r"^(?:figure|fig\.|table|tableau|source|photo|graph(?:e|ique)?|sch[eé]ma|cr[eé]dits?)\b",
+    re.IGNORECASE,
+)
 
 
 def _clean_heading(text: str) -> str:
-    """Strip markdown emphasis/heading noise from a heading's display text."""
+    """Strip HTML, markdown emphasis, and heading noise from a heading's text."""
+    text = _HTML_TAG_RE.sub("", text)
     return _EMPHASIS_RE.sub("", _HEADING_PREFIX_RE.sub("", text)).strip()
+
+
+def _looks_like_heading(text: str, *, keyword_led: bool) -> bool:
+    """True if ``text`` is plausibly a *structural* heading.
+
+    Both parsers routinely mark non-headings as headings — figure/table
+    captions, table-of-contents leaders, image credits, enumerated amendment
+    items (``11° L'article … est ainsi rédigé :``), bare page numbers (pymupdf's
+    ``## 1``), table cells, running-header fragments, and whole body sentences.
+    Taking any of those as a section pollutes the breadcrumb of every chunk
+    beneath it, so reject them here; the line then stays as body text (its
+    content is preserved, it just no longer names a section).
+
+    ``keyword_led`` marks a line opening with a structural keyword
+    (Partie/Livre/Titre/…). Those are trusted to be real headings even when long
+    (legal titles run long) — but must still clear the punctuation/caption gate,
+    since a body sentence can open with a keyword word (``Partie de … augmente,``)
+    and would otherwise be mistaken for a ``Partie`` heading.
+    """
+    t = text.strip()
+    if not t:
+        return False
+    # Prose / enumeration punctuation — headings don't end this way.
+    if t[-1] in ",;:" or t.endswith(("...", "…")):
+        return False
+    if t.endswith(".") and len(t.split()) > 3:
+        return False
+    # Captions, credits, references, TOC dot-leaders, numbered-amendment items.
+    if _CAPTION_RE.match(t) or "©" in t or "...." in t or "doi:" in t.lower():
+        return False
+    if re.match(r"^\d+°", t):
+        return False
+    # Bare numbers / symbol runs (page numbers, table cells like "4,51 4,79").
+    if sum(c.isalpha() for c in t) < 3:
+        return False
+    if keyword_led:
+        return True
+    words = t.split()
+    if len(words) > 10:  # an 11+-word "heading" is a sentence
+        return False
+    if t[:1].islower() and len(words) >= 3:  # opens mid-sentence
+        return False
+    return True
 
 
 # Keyword headings emitted as plain text by structure-unaware parsers. Ordered
@@ -81,6 +135,7 @@ def _clean_heading(text: str) -> str:
 # can pop correctly. Config can replace this list.
 _DEFAULT_HEADING_KEYWORDS: tuple[str, ...] = (
     "partie",
+    "annexe",
     "livre",
     "titre",
     "chapitre",
@@ -278,7 +333,11 @@ class StructuredSectionChunker(BaseChunker):
                     buf_path = list(stack_path(stack))
 
                 if raw_line.strip():
-                    buf_lines.append(raw_line)
+                    # A markdown-heading line still here is one ``_heading``
+                    # rejected as non-structural (caption, sentence, …); keep its
+                    # text as body but drop the ``#``/emphasis markup so the body
+                    # reads clean and isn't re-detected as a heading downstream.
+                    buf_lines.append(_clean_heading(raw_line) if _MD_HEADING_RE.match(raw_line) else raw_line)
                     buf_pages.add(page)
             flush()
 
@@ -316,11 +375,16 @@ class StructuredSectionChunker(BaseChunker):
             # innermost heading and dropping every ancestor — including the
             # document title — from the breadcrumb.
             kw_level = self._keyword_level_for(text)
+            if not _looks_like_heading(text, keyword_led=kw_level is not None):
+                return None
             level = kw_level if kw_level is not None else _MD_LEVEL_BASE + len(md.group(1))
             return level, text
         kw = self._keyword_re.match(line)
         if kw:
-            return self._keyword_level[kw.group(1).lower()], _clean_heading(line)
+            text = _clean_heading(line)
+            if not _looks_like_heading(text, keyword_led=True):
+                return None
+            return self._keyword_level[kw.group(1).lower()], text
         return None
 
     def _keyword_level_for(self, text: str) -> int | None:
