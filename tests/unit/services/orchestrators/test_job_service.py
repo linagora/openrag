@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
+from datetime import UTC, datetime
 
 import pytest
 from services.orchestrators.job_service import JobService
@@ -91,6 +92,60 @@ async def test_list_tasks_admin_sees_all():
 
 
 @pytest.mark.asyncio
+async def test_list_tasks_uses_legacy_actor_timing_metadata_without_exposing_it():
+    info = {
+        "t1": {
+            "state": "COMPLETED",
+            "details": {
+                "file_id": "file-1",
+                "metadata": {
+                    "filename": "report.pdf",
+                    "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
+                    "_openrag_job_finished_at": "2026-07-20T08:01:05+00:00",
+                },
+            },
+            "user": 1,
+        }
+    }
+
+    rows = await JobService(FakeTSM(info=info)).list_tasks(is_admin=True, user_id=1)
+
+    assert rows == [
+        {
+            "task_id": "t1",
+            "state": "COMPLETED",
+            "details": {
+                "file_id": "file-1",
+                "metadata": {"filename": "report.pdf"},
+            },
+            "created_at": "2026-07-20T08:00:00+00:00",
+            "duration_ms": 65_000,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_computes_running_duration_from_legacy_actor_metadata():
+    info = {
+        "t1": {
+            "state": "SERIALIZING",
+            "details": {
+                "metadata": {
+                    "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
+                }
+            },
+            "user": 1,
+        }
+    }
+    service = JobService(FakeTSM(info=info))
+    service._now = lambda: datetime(2026, 7, 20, 8, 0, 12, tzinfo=UTC)
+
+    rows = await service.list_tasks(is_admin=True, user_id=1)
+
+    assert rows[0]["duration_ms"] == 12_000
+
+
+@pytest.mark.asyncio
 async def test_list_tasks_user_scoped():
     info = {
         "t1": {"state": "QUEUED", "details": {}, "user": 1},
@@ -123,11 +178,34 @@ async def test_list_tasks_exact_status_case_insensitive():
 
 @pytest.mark.asyncio
 async def test_get_task_details_uses_task_state_manager():
-    info = {"t1": {"details": {"user_id": 7, "filename": "a.pdf"}}}
+    info = {
+        "t1": {
+            "details": {
+                "user_id": 7,
+                "filename": "a.pdf",
+                "metadata": {
+                    "language": "en",
+                    "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
+                    "_openrag_job_finished_at": "2026-07-20T08:01:05+00:00",
+                },
+            }
+        }
+    }
 
     details = await JobService(FakeTSM(info=info)).get_task_details("t1")
 
-    assert details == {"user_id": 7, "filename": "a.pdf"}
+    assert details == {"user_id": 7, "filename": "a.pdf", "metadata": {"language": "en"}}
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_tolerates_malformed_legacy_metadata():
+    info = {"t1": {"state": "COMPLETED", "details": {"metadata": "legacy"}, "user": 1}}
+
+    rows = await JobService(FakeTSM(info=info)).list_tasks(is_admin=True, user_id=1)
+
+    assert rows[0]["details"] == {"metadata": "legacy"}
+    assert rows[0]["created_at"] is None
+    assert rows[0]["duration_ms"] is None
 
 
 @pytest.mark.asyncio

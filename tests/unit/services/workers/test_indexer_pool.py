@@ -121,7 +121,7 @@ def test_build_indexer_pool_uses_new_detached_dispatcher_name(
     opts = options_calls[0]
     # The dispatcher has a different public interface from the old detached
     # IndexerPool actor, so it must not reuse that actor name during upgrades.
-    assert opts["name"] == "IndexerPoolDispatcherV2"
+    assert opts["name"] == "IndexerPoolDispatcher"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -156,7 +156,7 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
 
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
-    assert {c["name"] for c in calls} == {"IndexerWorkerV2-0", "IndexerWorkerV2-1", "IndexerWorkerV2-2"}
+    assert {c["name"] for c in calls} == {"IndexerWorker-0", "IndexerWorker-1", "IndexerWorker-2"}
     for c in calls:
         assert c["lifetime"] == "detached"
         assert c["max_concurrency"] == 4
@@ -1045,7 +1045,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     actor_class()
 
     assert actor_calls
-    assert actor_calls[0][0][0] == "TaskStateManagerV2"
+    assert actor_calls[0][0][0] == "TaskStateManager"
     assert actor_calls[0][1].get("namespace") == "openrag"
     assert captured["contextualizer_factory"] is contextualizer_factory
     assert captured["topic_tagger_factory"] is topic_tagger_factory

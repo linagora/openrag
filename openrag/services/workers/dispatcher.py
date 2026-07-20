@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import traceback
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
+from core.models.catalog import TASK_CREATED_AT_METADATA_KEY, TASK_FINISHED_AT_METADATA_KEY
 from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
@@ -56,6 +59,7 @@ class WorkerDispatcher(IndexingDispatcher):
         self._workspace_repo = workspace_repo
         self._collection = collection
         self._timeout = timeout
+        self._completion_tasks: set[asyncio.Task[None]] = set()
 
     async def _call(self, future: Any, task_description: str) -> Any:
         from services.workers.ray_utils import call_ray_actor_with_timeout
@@ -140,12 +144,16 @@ class WorkerDispatcher(IndexingDispatcher):
         task_id = uuid.uuid4().hex
 
         user_metadata = {key: value for key, value in metadata.items() if key not in {"file_id", "source"}}
+        user_metadata[TASK_CREATED_AT_METADATA_KEY] = _utc_now_iso()
+        task_details = {
+            "file_id": metadata.get("file_id"),
+            "partition": partition,
+            "metadata": user_metadata,
+            "user_id": user.get("id") if user else None,
+        }
         accepted = await self._set_queued_details(
             task_id,
-            file_id=metadata.get("file_id"),
-            partition=partition,
-            metadata=user_metadata,
-            user_id=user.get("id") if user else None,
+            **task_details,
         )
         if not accepted:
             raise RuntimeError(
@@ -180,16 +188,42 @@ class WorkerDispatcher(IndexingDispatcher):
             )
             if registered is False:
                 raise RuntimeError(f"Task {task_id} was cancelled before worker ref registration")
+            self._track_completion(task_id, task, task_details)
         except Exception:
             mark_submit_failed = True
             if task is not None:
                 mark_submit_failed = await self._cancel_submitted_task(task_id, task)
                 if mark_submit_failed:
                     await self._cleanup_submitted_vectors(task_id, metadata=metadata, partition=partition)
+            await self._record_finished_at(task_id, task_details)
             if mark_submit_failed:
                 await self._mark_submit_failed(task_id, traceback.format_exc())
             raise
         return task_id
+
+    def _track_completion(self, task_id: str, task: Any, task_details: dict[str, Any]) -> None:
+        if not hasattr(task, "__await__"):
+            return
+        tracker = asyncio.create_task(self._record_completion(task_id, task, task_details))
+        self._completion_tasks.add(tracker)
+        tracker.add_done_callback(self._completion_tasks.discard)
+
+    async def _record_completion(self, task_id: str, task: Any, task_details: dict[str, Any]) -> None:
+        try:
+            await asyncio.gather(task, return_exceptions=True)
+        finally:
+            await self._record_finished_at(task_id, task_details)
+
+    async def _record_finished_at(self, task_id: str, task_details: dict[str, Any]) -> None:
+        metadata = dict(task_details["metadata"])
+        metadata[TASK_FINISHED_AT_METADATA_KEY] = _utc_now_iso()
+        try:
+            await self._call(
+                self._tsm.set_details.remote(task_id, **{**task_details, "metadata": metadata}),
+                task_description=f"set_finished_at({task_id})",
+            )
+        except Exception as exc:
+            logger.warning("Failed to record indexing task completion time", task_id=task_id, error=str(exc))
 
     async def _cleanup_submitted_vectors(self, task_id: str, *, metadata: dict, partition: str) -> None:
         file_id = metadata.get("file_id")
@@ -482,11 +516,10 @@ def from_ray_namespace(
 ) -> WorkerDispatcher:
     import ray
     from services.workers.indexer_pool import build_indexer_pool
-    from services.workers.task_state import TASK_STATE_MANAGER_ACTOR_NAME
 
     return WorkerDispatcher(
         pool=build_indexer_pool(namespace=namespace),
-        task_state_manager=ray.get_actor(TASK_STATE_MANAGER_ACTOR_NAME, namespace=namespace),
+        task_state_manager=ray.get_actor("TaskStateManager", namespace=namespace),
         vector_store=vector_store,
         document_repo=document_repo,
         workspace_repo=workspace_repo,
@@ -518,6 +551,10 @@ def _remote_actor_method(actor: Any, name: str) -> Any | None:
         return None
     method = getattr(actor, name, None)
     return getattr(method, "remote", None)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 __all__ = ["WorkerDispatcher", "from_ray_namespace"]

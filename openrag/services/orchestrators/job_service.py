@@ -15,9 +15,17 @@ job repository (this service is the hook point for that P0 feature).
 from __future__ import annotations
 
 from collections import Counter
+from datetime import UTC, datetime
 from typing import Any
 
+from core.models.catalog import (
+    TASK_CREATED_AT_METADATA_KEY,
+    TASK_FINISHED_AT_METADATA_KEY,
+    TERMINAL_TASK_STATES,
+)
+
 _ACTIVE_STATES = ("QUEUED", "SERIALIZING", "CHUNKING", "INSERTING")
+_TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 
 
 class JobService:
@@ -97,16 +105,34 @@ class JobService:
         else:
             filtered = [(tid, i) for tid, i in all_info.items() if i["state"].lower() == task_status.lower()]
 
-        return [
-            {
-                "task_id": tid,
-                "state": i["state"],
-                "details": i["details"],
-                "created_at": i.get("created_at"),
-                "duration_ms": i.get("duration_ms"),
-            }
-            for tid, i in filtered
-        ]
+        now = self._now()
+        return [self._task_row(task_id, info, now=now) for task_id, info in filtered]
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(UTC)
+
+    @staticmethod
+    def _task_row(task_id: str, info: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+        details, fallback_created_at, fallback_finished_at = _task_details(info.get("details"))
+
+        created_at = info.get("created_at") or fallback_created_at
+        duration_ms = info.get("duration_ms")
+        if duration_ms is None:
+            duration_ms = _duration_ms(
+                created_at,
+                fallback_finished_at,
+                state=info.get("state"),
+                now=now,
+            )
+
+        return {
+            "task_id": task_id,
+            "state": info["state"],
+            "details": details,
+            "created_at": created_at,
+            "duration_ms": duration_ms,
+        }
 
     async def get_user_pending_task_count(self, user_id: int | None) -> int:
         """Pending (not-yet-completed) indexing tasks for one user.
@@ -121,10 +147,57 @@ class JobService:
 
     async def get_task_details(self, task_id: str) -> dict | None:
         """Return task details for ownership checks and status routes."""
-        return await self._call(
+        details = await self._call(
             self._tsm.get_details.remote(task_id),
             f"get_details({task_id})",
         )
+        if details is None:
+            return None
+        public_details, _, _ = _task_details(details)
+        return public_details
+
+
+def _duration_ms(
+    created_at: Any,
+    finished_at: Any,
+    *,
+    state: Any,
+    now: datetime,
+) -> int | None:
+    created = _parse_timestamp(created_at)
+    if created is None:
+        return None
+    finished = _parse_timestamp(finished_at)
+    if finished is None:
+        if state in _TERMINAL_STATES:
+            return None
+        finished = now
+    return max(0, int((finished - created).total_seconds() * 1000))
+
+
+def _task_details(details: Any) -> tuple[dict[str, Any], Any, Any]:
+    public_details = dict(details) if isinstance(details, dict) else {}
+    raw_metadata = public_details.get("metadata")
+    if not isinstance(raw_metadata, dict):
+        return public_details, None, None
+
+    metadata = dict(raw_metadata)
+    created_at = metadata.pop(TASK_CREATED_AT_METADATA_KEY, None)
+    finished_at = metadata.pop(TASK_FINISHED_AT_METADATA_KEY, None)
+    public_details["metadata"] = metadata
+    return public_details, created_at, finished_at
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 __all__ = ["JobService"]

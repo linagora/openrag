@@ -64,9 +64,9 @@ def get_or_create_actor(name, cls, namespace="openrag", remote_args=(), **option
 
 
 def get_task_state_manager():
-    from services.workers.task_state import TASK_STATE_MANAGER_ACTOR_NAME, TaskStateManager
+    from services.workers.task_state import TaskStateManager
 
-    return get_or_create_actor(TASK_STATE_MANAGER_ACTOR_NAME, TaskStateManager, lifetime="detached")
+    return get_or_create_actor("TaskStateManager", TaskStateManager, lifetime="detached")
 
 
 def register_parser_pool_restart_factories() -> None:

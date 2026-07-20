@@ -8,7 +8,6 @@ from typing import Any
 
 import ray
 from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
-from services.workers.task_state import TASK_STATE_ACTOR_GENERATION, TASK_STATE_MANAGER_ACTOR_NAME
 
 from openrag.core.config.root import Settings
 
@@ -16,8 +15,7 @@ from openrag.core.config.root import Settings
 # this window (and on a miss), bounding both staleness and DB load regardless
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
-_INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcherV{TASK_STATE_ACTOR_GENERATION}"
-_INDEXER_WORKER_ACTOR_NAME_PREFIX = f"IndexerWorkerV{TASK_STATE_ACTOR_GENERATION}"
+_INDEXER_POOL_DISPATCHER_ACTOR_NAME = "IndexerPoolDispatcher"
 
 
 @ray.remote
@@ -63,7 +61,7 @@ class IndexerWorkerActor:
             embed_concurrency=embed_cfg.embed_concurrency,
         )
         self._vector_store = MilvusVectorStore(cfg.vectordb)
-        task_state_manager = ray.get_actor(TASK_STATE_MANAGER_ACTOR_NAME, namespace="openrag")
+        task_state_manager = ray.get_actor("TaskStateManager", namespace="openrag")
         pipeline = build_indexing_pipeline(
             parser=parser,
             chunker=chunker,
@@ -283,7 +281,7 @@ class IndexerPool:
         # are shared singletons too; only this dispatcher creates them.
         self._workers = [
             IndexerWorkerActor.options(  # type: ignore[attr-defined]
-                name=f"{_INDEXER_WORKER_ACTOR_NAME_PREFIX}-{i}",
+                name=f"IndexerWorker-{i}",
                 namespace=namespace,
                 get_if_exists=True,
                 lifetime="detached",

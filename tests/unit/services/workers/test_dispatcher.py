@@ -102,7 +102,7 @@ def test_from_ray_namespace_does_not_require_legacy_indexer_actor() -> None:
 
     def fake_get_actor(name: str, namespace: str):
         assert namespace == "openrag"
-        if name == "TaskStateManagerV2":
+        if name == "TaskStateManager":
             return tsm
         raise AssertionError(f"unexpected eager actor lookup: {name}")
 
@@ -136,7 +136,10 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         collection="default",
     )
 
-    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.dispatcher._utc_now_iso", return_value="2026-07-20T08:00:00+00:00"),
+    ):
         mock_uuid.uuid4.return_value.hex = "task-1"
         task_id = await dispatcher.dispatch_indexing(
             path="/data/report.txt",
@@ -155,7 +158,10 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
         "task-1",
         file_id="file-1",
         partition="tenant-a",
-        metadata={"filename": "report.txt"},
+        metadata={
+            "filename": "report.txt",
+            "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
+        },
         user_id=42,
     )
     tsm.set_state.remote.assert_not_called()
@@ -176,6 +182,53 @@ async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> No
 
 
 @pytest.mark.asyncio
+async def test_dispatch_indexing_records_completion_through_legacy_actor_contract() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = asyncio.get_running_loop().create_future()
+    tsm = _task_state_manager()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(ref),
+        task_state_manager=tsm,
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch(
+            "services.workers.dispatcher._utc_now_iso",
+            side_effect=["2026-07-20T08:00:00+00:00", "2026-07-20T08:01:05+00:00"],
+        ),
+    ):
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "source": "/data/report.txt", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+        ref.set_result(None)
+        await asyncio.gather(*dispatcher._completion_tasks)
+
+    tsm.set_details.remote.assert_awaited_once_with(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={
+            "filename": "report.txt",
+            "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
+            "_openrag_job_finished_at": "2026-07-20T08:01:05+00:00",
+        },
+        user_id=42,
+    )
+
+
+@pytest.mark.asyncio
 async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
@@ -191,7 +244,10 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
         collection="default",
     )
 
-    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.dispatcher._utc_now_iso", return_value="2026-07-20T08:00:00+00:00"),
+    ):
         mock_uuid.uuid4.return_value.hex = "task-1"
         with pytest.raises(RuntimeError, match="is being deleted"):
             await dispatcher.dispatch_indexing(
@@ -226,7 +282,10 @@ async def test_dispatch_indexing_uses_split_queue_registration_for_legacy_task_s
         collection="default",
     )
 
-    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.dispatcher._utc_now_iso", return_value="2026-07-20T08:00:00+00:00"),
+    ):
         mock_uuid.uuid4.return_value.hex = "task-1"
         task_id = await dispatcher.dispatch_indexing(
             path="/data/report.txt",
@@ -244,7 +303,10 @@ async def test_dispatch_indexing_uses_split_queue_registration_for_legacy_task_s
         "task-1",
         file_id="file-1",
         partition="tenant-a",
-        metadata={"filename": "report.txt"},
+        metadata={
+            "filename": "report.txt",
+            "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
+        },
         user_id=42,
     )
     tsm.set_object_ref.remote.assert_called_once_with("task-1", {"ref": ref})
@@ -266,7 +328,13 @@ async def test_dispatch_indexing_omits_false_require_existing_partition_for_lega
         collection="default",
     )
 
-    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch(
+            "services.workers.dispatcher._utc_now_iso",
+            side_effect=["2026-07-20T08:00:00+00:00", "2026-07-20T08:00:02+00:00"],
+        ),
+    ):
         mock_uuid.uuid4.return_value.hex = "task-1"
         task_id = await dispatcher.dispatch_indexing(
             path="/data/report.txt",
@@ -379,7 +447,13 @@ async def test_dispatch_indexing_marks_task_failed_when_submit_fails() -> None:
         collection="default",
     )
 
-    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch(
+            "services.workers.dispatcher._utc_now_iso",
+            side_effect=["2026-07-20T08:00:00+00:00", "2026-07-20T08:00:02+00:00"],
+        ),
+    ):
         mock_uuid.uuid4.return_value.hex = "task-1"
         with pytest.raises(RuntimeError, match="submit failed"):
             await dispatcher.dispatch_indexing(
@@ -393,7 +467,16 @@ async def test_dispatch_indexing_marks_task_failed_when_submit_fails() -> None:
 
     tsm.set_queued_details.remote.assert_called_once()
     tsm.set_state.remote.assert_not_called()
-    tsm.set_details.remote.assert_not_called()
+    tsm.set_details.remote.assert_awaited_once_with(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={
+            "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
+            "_openrag_job_finished_at": "2026-07-20T08:00:02+00:00",
+        },
+        user_id=42,
+    )
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
     assert tsm.set_failed_if_not_cancelled.remote.call_args.args[0] == "task-1"
     assert "submit failed" in tsm.set_failed_if_not_cancelled.remote.call_args.args[1]

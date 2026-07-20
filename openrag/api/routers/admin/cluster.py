@@ -48,7 +48,7 @@ async def list_ray_actors():
 - Requires admin role
 
 **Available Actors:**
-- `TaskStateManagerV2`: Manages task states
+- `TaskStateManager`: Manages task states
 - `MarkerPool`: PDF processing actor pool
 - `SerializerQueue`: Document serialization queue
 - `llmSemaphore`: LLM request semaphore
