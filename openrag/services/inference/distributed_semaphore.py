@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import uuid
 
 import ray
 from core.utils.logging import get_logger
@@ -20,11 +21,19 @@ logger = get_logger()
 class DistributedSemaphoreActor:
     def __init__(self, max_concurrent_ops: int):
         self.semaphore = asyncio.Semaphore(max_concurrent_ops)
+        # Regenerated every time the actor (re)starts, so a release that was
+        # queued against a prior incarnation - e.g. one deferred past a
+        # cancellation - can be detected and dropped instead of incrementing
+        # a freshly-restarted semaphore above max_concurrent_ops.
+        self.incarnation = uuid.uuid4().hex
 
-    async def acquire(self):
+    async def acquire(self) -> str:
         await self.semaphore.acquire()
+        return self.incarnation
 
-    def release(self):
+    def release(self, incarnation: str) -> None:
+        if incarnation != self.incarnation:
+            return
         self.semaphore.release()
 
 
@@ -44,6 +53,7 @@ class DistributedSemaphore:
         self._name = name
         self._namespace = namespace
         self._max_concurrent_ops = max_concurrent_ops
+        self._incarnation: str | None = None
 
     def _get_or_create_actor(self):
         try:
@@ -66,7 +76,7 @@ class DistributedSemaphore:
         # for the lifetime of the actor.
         acquire_task = asyncio.ensure_future(semaphore_actor.acquire.remote())
         try:
-            await asyncio.shield(acquire_task)
+            self._incarnation = await asyncio.shield(acquire_task)
         except asyncio.CancelledError:
             acquire_task.add_done_callback(functools.partial(_release_if_granted, self._name, semaphore_actor))
             raise
@@ -74,20 +84,24 @@ class DistributedSemaphore:
 
     async def __aexit__(self, exc_type, exc, tb):
         semaphore_actor = self._get_or_create_actor()
-        await semaphore_actor.release.remote()
+        await semaphore_actor.release.remote(self._incarnation)
 
 
 def _release_if_granted(name: str, semaphore_actor, acquire_task: asyncio.Task) -> None:
     """Release a permit granted to an acquire whose caller was already cancelled.
 
     Runs as a done-callback on the (shielded, still-running) acquire task, so
-    it fires once the actor eventually grants or drops the request.
+    it fires once the actor eventually grants or drops the request. Passes
+    along the incarnation token from that same grant so a release delayed
+    past an actor restart is dropped by the actor instead of over-counting
+    the freshly-restarted semaphore.
     """
     if acquire_task.cancelled() or acquire_task.exception() is not None:
         return
+    incarnation = acquire_task.result()
     logger.bind(semaphore=name).warning(
         "Releasing permit for a cancelled acquire on semaphore '{name}' - "
         "caller was cancelled while waiting, permit granted afterwards.",
         name=name,
     )
-    semaphore_actor.release.remote()
+    semaphore_actor.release.remote(incarnation)

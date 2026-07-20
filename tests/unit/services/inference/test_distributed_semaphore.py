@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import uuid
 
 import pytest
@@ -64,3 +65,41 @@ class TestDistributedSemaphoreCancellationSafety:
         sem = self._new_pool()
         await sem.__aenter__()
         await sem.__aexit__(None, None, None)
+
+
+class TestDistributedSemaphoreActorRestartSafety:
+    """A release deferred past an actor restart (``max_restarts=5``) must not
+    over-count the freshly-restarted actor's semaphore above
+    ``max_concurrent_ops`` (codex review comment on PR #719).
+    """
+
+    async def test_stale_release_after_restart_is_dropped(self):
+        namespace = f"test-restart-{uuid.uuid4().hex}"
+        actor = DistributedSemaphoreActor.options(
+            name="sem",
+            namespace=namespace,
+            lifetime="detached",
+        ).remote(1)
+
+        # Take the only permit and remember the incarnation it was granted under.
+        stale_incarnation = await actor.acquire.remote()
+
+        ray.kill(actor, no_restart=False)
+        await asyncio.sleep(1.0)  # let Ray restart the actor (fresh __init__, fresh incarnation)
+
+        # A release carrying the pre-restart incarnation must be dropped, not
+        # applied to the freshly-restarted (and already full-capacity) actor.
+        await actor.release.remote(stale_incarnation)
+
+        # The restarted actor starts with exactly 1 free permit. If the stale
+        # release above had incorrectly landed, capacity would be 2 and both
+        # of these acquires would succeed immediately.
+        await asyncio.wait_for(actor.acquire.remote(), timeout=2.0)
+        second = asyncio.ensure_future(actor.acquire.remote())
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(second), timeout=0.5)
+        finally:
+            second.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await second
