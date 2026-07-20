@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 from api.dependencies import files as files_dep
-from api.dependencies.files import save_file_to_disk
+from api.dependencies.files import save_file_to_disk, save_file_to_disk_with_sha256
 from core.utils.exceptions import ValidationError
 from core.utils.filename import extract_temporal_fields, sanitize_filename
 from fastapi import UploadFile
@@ -29,6 +29,17 @@ async def test_save_file_to_disk_writes_content(tmp_path: Path):
         saved_content = f.read()
 
     assert saved_content == content
+
+
+@pytest.mark.asyncio
+async def test_save_file_to_disk_calculates_sha256_while_streaming(tmp_path: Path):
+    upload = UploadFile(file=io.BytesIO(b"hello world"), filename="test.bin")
+
+    saved = await save_file_to_disk_with_sha256(upload, tmp_path, chunk_size=4)
+
+    assert saved.path.read_bytes() == b"hello world"
+    assert saved.sha256 == "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    assert saved.size_bytes == 11
 
 
 @pytest.mark.asyncio

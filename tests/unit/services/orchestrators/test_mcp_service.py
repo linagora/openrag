@@ -87,9 +87,10 @@ class RaceLostPartitions(FakePartitions):
 
 
 class FakeIndexing:
-    def __init__(self, *, state="COMPLETED", error="boom"):
+    def __init__(self, *, state="COMPLETED", error="boom", add_error: Exception | None = None):
         self._state = state
         self._error = error
+        self._add_error = add_error
         self.deleted: list[tuple[str, str]] = []
         self.updated: list[tuple] = []
         self.copied: list[dict] = []
@@ -112,6 +113,8 @@ class FakeIndexing:
 
     async def add_file(self, **kwargs):
         self.added.append(kwargs)
+        if self._add_error is not None:
+            raise self._add_error
         return "task-123"
 
 
@@ -697,6 +700,40 @@ async def test_index_url_auto_creates_partition_and_indexes(monkeypatch):
     assert added["metadata"]["author"] == "me"
     assert "created_by" not in added["metadata"]  # protected key dropped
     assert out["task_id"] == "task-123"
+
+
+@pytest.mark.asyncio
+async def test_index_url_removes_download_when_content_is_duplicate(monkeypatch):
+    from core.utils.exceptions import ConflictError
+
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    indexing = FakeIndexing(
+        add_error=ConflictError(
+            "This document already exists in partition 'p1'.",
+            code="DOCUMENT_CONTENT_EXISTS",
+        )
+    )
+    svc = _service(partitions=parts, indexing=indexing)
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(b"duplicate")
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    with pytest.raises(ConflictError):
+        await svc.index_url(
+            url="https://example.com/report.pdf",
+            partition="p1",
+            file_id="f2",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+
+    assert downloaded_path is not None
+    assert not downloaded_path.exists()
 
 
 @pytest.mark.asyncio

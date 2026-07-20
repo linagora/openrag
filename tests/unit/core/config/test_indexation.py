@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from core.config import load_config
 from core.config.indexation import (
     _DEFAULT_DIRECT_UPLOAD_SUFFIXES,
+    LoaderConfig,
     TranscriberConfig,
 )
 
@@ -29,3 +31,15 @@ def test_transcriber_config_drops_empty_components():
 def test_transcriber_config_set_input_passes_through():
     cfg = TranscriberConfig(direct_upload_suffixes={".wav", ".m4a"})
     assert cfg.direct_upload_suffixes == {".wav", ".m4a"}
+
+
+def test_content_deduplication_is_enabled_by_default():
+    assert LoaderConfig().content_deduplication_enabled is True
+
+
+def test_content_deduplication_can_be_disabled_by_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONTENT_DEDUPLICATION_ENABLED", "false")
+
+    settings = load_config(conf_dir=tmp_path)
+
+    assert settings.loader.content_deduplication_enabled is False

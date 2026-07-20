@@ -8,6 +8,7 @@ from typing import Any
 from core.indexing.dispatcher import IndexingDispatcher
 from core.models.catalog import TASK_CREATED_AT_METADATA_KEY, TASK_FINISHED_AT_METADATA_KEY
 from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
+from core.utils.exceptions import ConflictError
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
 from services.workers.ray_utils import call_ray_actor_with_timeout
@@ -142,6 +143,24 @@ class WorkerDispatcher(IndexingDispatcher):
         allow_legacy_require_existing_partition_retry: bool = False,
     ) -> str:
         task_id = uuid.uuid4().hex
+        file_id = str(metadata.get("file_id") or "")
+        content_sha256 = metadata.get("content_sha256")
+        claimed_content = False
+
+        if content_sha256:
+            conflicting_file_id = await self._document_repo.claim_content_sha256(
+                file_id=file_id,
+                partition=partition,
+                content_sha256=content_sha256,
+                replace=replace,
+            )
+            if conflicting_file_id is not None:
+                raise ConflictError(
+                    f"This document already exists in partition '{partition}'.",
+                    code="DOCUMENT_CONTENT_EXISTS",
+                    existing_file_id=conflicting_file_id,
+                )
+            claimed_content = True
 
         user_metadata = {
             key: value
@@ -150,18 +169,30 @@ class WorkerDispatcher(IndexingDispatcher):
         }
         user_metadata[TASK_CREATED_AT_METADATA_KEY] = _utc_now_iso()
         task_details = {
-            "file_id": metadata.get("file_id"),
+            "file_id": file_id,
             "partition": partition,
             "metadata": user_metadata,
             "user_id": user.get("id") if user else None,
         }
-        accepted = await self._set_queued_details(
-            task_id,
-            **task_details,
-        )
+        try:
+            accepted = await self._set_queued_details(task_id, **task_details)
+        except BaseException:
+            if claimed_content:
+                await self._document_repo.release_content_sha256_claim(
+                    file_id=file_id,
+                    partition=partition,
+                    content_sha256=content_sha256,
+                )
+            raise
         if not accepted:
+            if claimed_content:
+                await self._document_repo.release_content_sha256_claim(
+                    file_id=file_id,
+                    partition=partition,
+                    content_sha256=content_sha256,
+                )
             raise RuntimeError(
-                f"Task {task_id} was rejected because file {metadata.get('file_id')!r} "
+                f"Task {task_id} was rejected because file {file_id!r} "
                 f"in partition {partition!r} is being deleted"
             )
 
@@ -193,15 +224,23 @@ class WorkerDispatcher(IndexingDispatcher):
             if registered is False:
                 raise RuntimeError(f"Task {task_id} was cancelled before worker ref registration")
             self._track_completion(task_id, task)
-        except Exception:
+        except BaseException:
             mark_submit_failed = True
-            if task is not None:
-                mark_submit_failed = await self._cancel_submitted_task(task_id, task)
+            try:
+                if task is not None:
+                    mark_submit_failed = await self._cancel_submitted_task(task_id, task)
+                    if mark_submit_failed:
+                        await self._cleanup_submitted_vectors(task_id, metadata=metadata, partition=partition)
+                await self._record_finished_at(task_id, task_details)
                 if mark_submit_failed:
-                    await self._cleanup_submitted_vectors(task_id, metadata=metadata, partition=partition)
-            await self._record_finished_at(task_id, task_details)
-            if mark_submit_failed:
-                await self._mark_submit_failed(task_id, traceback.format_exc())
+                    await self._mark_submit_failed(task_id, traceback.format_exc())
+            finally:
+                if claimed_content and (task is None or mark_submit_failed):
+                    await self._document_repo.release_content_sha256_claim(
+                        file_id=file_id,
+                        partition=partition,
+                        content_sha256=content_sha256,
+                    )
             raise
         return task_id
 
@@ -411,36 +450,61 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         user: dict | None,
     ) -> None:
-        rows = await self._vector_store.query_chunks_by_filter(
-            self._collection,
-            {"partition": partition, "file_id": file_id},
-            output_fields=["*", "vector"],
-        )
-        if not rows:
-            return
-
-        public_metadata = strip_internal_metadata(metadata)
-        entities = []
-        for row in rows:
-            entity = strip_internal_metadata(row)
-            entity.pop("_id", None)
-            entity.update(public_metadata)
-            entities.append(entity)
-
-        await self._insert_entities(entities)
-
         target_file_id = metadata.get("file_id", file_id)
         target_partition = metadata.get("partition", partition)
-        file_metadata = self._file_metadata_from_chunk(rows[0])
-        file_metadata.update(public_metadata)
-        await self._document_repo.add_file_to_partition(
-            file_id=target_file_id,
-            partition=target_partition,
-            file_metadata=file_metadata,
-            user_id=user.get("id") if user else None,
-            relationship_id=file_metadata.get("relationship_id"),
-            parent_id=file_metadata.get("parent_id"),
-        )
+        content_sha256 = metadata.get("content_sha256")
+        claimed_content = False
+        if content_sha256:
+            conflicting_file_id = await self._document_repo.claim_content_sha256(
+                file_id=target_file_id,
+                partition=target_partition,
+                content_sha256=content_sha256,
+            )
+            if conflicting_file_id is not None:
+                raise ConflictError(
+                    f"This document already exists in partition '{target_partition}'.",
+                    code="DOCUMENT_CONTENT_EXISTS",
+                    existing_file_id=conflicting_file_id,
+                )
+            claimed_content = True
+
+        try:
+            rows = await self._vector_store.query_chunks_by_filter(
+                self._collection,
+                {"partition": partition, "file_id": file_id},
+                output_fields=["*", "vector"],
+            )
+            if not rows:
+                return
+
+            public_metadata = strip_internal_metadata(metadata)
+            entities = []
+            for row in rows:
+                entity = strip_internal_metadata(row)
+                entity.pop("_id", None)
+                entity.update(public_metadata)
+                entities.append(entity)
+
+            await self._insert_entities(entities)
+
+            file_metadata = self._file_metadata_from_chunk(rows[0])
+            file_metadata.update(public_metadata)
+            await self._document_repo.add_file_to_partition(
+                file_id=target_file_id,
+                partition=target_partition,
+                file_metadata=file_metadata,
+                user_id=user.get("id") if user else None,
+                relationship_id=file_metadata.get("relationship_id"),
+                parent_id=file_metadata.get("parent_id"),
+                content_sha256=content_sha256,
+            )
+        finally:
+            if claimed_content:
+                await self._document_repo.release_content_sha256_claim(
+                    file_id=target_file_id,
+                    partition=target_partition,
+                    content_sha256=content_sha256,
+                )
 
     async def _upsert_entities(self, entities: list[dict[str, Any]]) -> None:
         upsert_entities = getattr(self._vector_store, "upsert_entities", None)
@@ -476,6 +540,10 @@ class WorkerDispatcher(IndexingDispatcher):
     async def cancel_task(self, task_id: str) -> bool:
         import ray
 
+        details = await self._call(
+            self._tsm.get_details.remote(task_id),
+            task_description=f"get_details({task_id})",
+        )
         obj_ref = await self._call(
             self._tsm.get_object_ref.remote(task_id),
             task_description=f"get_object_ref({task_id})",
@@ -496,6 +564,16 @@ class WorkerDispatcher(IndexingDispatcher):
             return False
 
         ray.cancel(obj_ref["ref"], recursive=True)
+        metadata = (details or {}).get("metadata") or {}
+        content_sha256 = metadata.get("content_sha256")
+        file_id = (details or {}).get("file_id")
+        partition = (details or {}).get("partition")
+        if content_sha256 and file_id and partition:
+            await self._document_repo.release_content_sha256_claim(
+                file_id=file_id,
+                partition=partition,
+                content_sha256=content_sha256,
+            )
         return True
 
 

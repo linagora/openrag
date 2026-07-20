@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
@@ -1158,7 +1159,10 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     actor._ensure_catalog = _noop
     actor._ensure_registry_fresh = _noop
     actor._worker = worker
-    actor._catalog_store = SimpleNamespace(workspace_repo=SimpleNamespace())
+    actor._catalog_store = SimpleNamespace(
+        workspace_repo=SimpleNamespace(),
+        document_repo=SimpleNamespace(release_content_sha256_claim=AsyncMock()),
+    )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
     return actor
@@ -1175,6 +1179,26 @@ async def test_actor_keeps_upload_by_default(tmp_path) -> None:
     # Default: the raw upload stays on disk so the source-download route can
     # serve it back for Chainlit source viewing.
     assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_actor_releases_content_claim_after_indexing(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f", "content_sha256": "abc123"},
+        partition="p",
+    )
+
+    actor._catalog_store.document_repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="f",
+        partition="p",
+        content_sha256="abc123",
+    )
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,6 @@
+import hashlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,13 @@ from di.providers import get_config
 from fastapi import Depends, Form, UploadFile
 
 FORBIDDEN_CHARS_IN_FILE_ID = set("/")
+
+
+@dataclass(frozen=True, slots=True)
+class SavedUpload:
+    path: Path
+    sha256: str
+    size_bytes: int
 
 
 def _max_upload_size_bytes() -> int:
@@ -59,6 +68,40 @@ async def save_file_to_disk(
     with_random_prefix: bool = False,
 ) -> Path:
     """Save an uploaded file to disk in chunks and return the saved path."""
+    saved = await _save_file_to_disk(
+        file=file,
+        dest_dir=dest_dir,
+        chunk_size=chunk_size,
+        with_random_prefix=with_random_prefix,
+        calculate_sha256=False,
+    )
+    return saved.path
+
+
+async def save_file_to_disk_with_sha256(
+    file: UploadFile,
+    dest_dir: Path,
+    chunk_size: int = consts.FILE_READ_CHUNK_SIZE,
+    with_random_prefix: bool = False,
+) -> SavedUpload:
+    """Save an upload and calculate its SHA-256 digest in the same pass."""
+    return await _save_file_to_disk(
+        file=file,
+        dest_dir=dest_dir,
+        chunk_size=chunk_size,
+        with_random_prefix=with_random_prefix,
+        calculate_sha256=True,
+    )
+
+
+async def _save_file_to_disk(
+    *,
+    file: UploadFile,
+    dest_dir: Path,
+    chunk_size: int,
+    with_random_prefix: bool,
+    calculate_sha256: bool,
+) -> SavedUpload:
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_dir = dest_dir.resolve()
 
@@ -76,6 +119,7 @@ async def save_file_to_disk(
 
     max_bytes = _max_upload_size_bytes()
     total = 0
+    hasher = hashlib.sha256() if calculate_sha256 else None
     try:
         async with aiofiles.open(file_path, "wb") as buffer:
             while True:
@@ -88,10 +132,16 @@ async def save_file_to_disk(
                         f"File exceeds the maximum allowed size of {max_bytes // (1024 * 1024)} MB.",
                         status_code=413,
                     )
+                if hasher is not None:
+                    hasher.update(chunk)
                 await buffer.write(chunk)
-    except ValidationError:
+    except BaseException:
         # Remove the partially written file before propagating.
         file_path.unlink(missing_ok=True)
         raise
 
-    return file_path
+    return SavedUpload(
+        path=file_path,
+        sha256=hasher.hexdigest() if hasher is not None else "",
+        size_bytes=total,
+    )

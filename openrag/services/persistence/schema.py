@@ -137,6 +137,7 @@ files = Table(
     ),
     Column("relationship_id", String, nullable=True, index=True),
     Column("parent_id", String, nullable=True, index=True),
+    Column("content_sha256", String(64), nullable=True),
     Column(
         "indexed_at",
         DateTime(timezone=True),
@@ -147,6 +148,33 @@ files = Table(
     Index("ix_partition_file", "partition_name", "file_id"),
     Index("ix_relationship_partition", "relationship_id", "partition_name"),
     Index("ix_parent_partition", "parent_id", "partition_name"),
+    Index(
+        "uix_files_partition_content_sha256",
+        "partition_name",
+        "content_sha256",
+        unique=True,
+        postgresql_where=text("content_sha256 IS NOT NULL"),
+    ),
+)
+
+
+file_content_claims = Table(
+    "file_content_claims",
+    metadata,
+    Column(
+        "partition_name",
+        String,
+        ForeignKey("partitions.partition", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("content_sha256", String(64), primary_key=True),
+    Column("file_id", String, nullable=False),
+    Column(
+        "expires_at",
+        DateTime(timezone=True),
+        server_default=text("now() + interval '24 hours'"),
+        nullable=False,
+    ),
 )
 
 
