@@ -167,7 +167,7 @@ def test_pymupdf_backend_builds_in_markdown_mode_without_images() -> None:
     raw = doc.tobytes()
     doc.close()
 
-    pages, images = _extract_markdown(raw)
+    pages, images = _extract_markdown(raw, "doc.pdf")
     assert images == []  # pymupdf must not extract/inline images
     assert not any("data:image" in p for p in pages)
 
