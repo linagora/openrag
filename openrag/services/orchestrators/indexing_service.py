@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from core.utils.conts import strip_protected_metadata
 from core.utils.exceptions import AuthError, PartitionNotFoundError, ValidationError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
@@ -240,7 +241,18 @@ class IndexingService:
         partition: str,
         user: dict | None,
     ) -> None:
-        metadata = dict(metadata or {})
+        # Drop server-managed keys before they reach the store (#713). Without
+        # this a partition editor could repoint ``source`` at another tenant's
+        # upload under the shared data dir and read it back through
+        # ``GET /static/{extract_id}`` — that route authorizes on the chunk's
+        # partition, which is unchanged by the write. The upload path
+        # (``dispatcher.dispatch_indexing``) and the MCP tools already filtered
+        # these; only this REST path did not.
+        metadata, dropped = strip_protected_metadata(metadata)
+        if dropped:
+            logger.bind(file_id=file_id, partition=partition).warning(
+                f"Dropped protected metadata keys from file metadata update: {dropped}"
+            )
         metadata["file_id"] = file_id
         await self._dispatcher.update_file_metadata(file_id, metadata, partition, user)
 
@@ -254,7 +266,13 @@ class IndexingService:
         metadata: dict,
         user: dict | None,
     ) -> None:
-        metadata = dict(metadata or {})
+        # Same guard as update_metadata (#713): the copy carries caller-supplied
+        # metadata onto the new rows, so a spoofed ``source`` would land there too.
+        metadata, dropped = strip_protected_metadata(metadata)
+        if dropped:
+            logger.bind(file_id=target_file_id, partition=target_partition).warning(
+                f"Dropped protected metadata keys from file copy: {dropped}"
+            )
         metadata["file_id"] = target_file_id
         metadata["partition"] = target_partition
         await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user)
