@@ -56,6 +56,7 @@ class IndexingPipeline:
     embedder: Embedder
     vector_store: VectorStore
     vlm: VLM | None = None
+    caption_prompt: str | None = None
     contextualizer: ChunkContextualizer | None = None
     topic_tagger: TopicTagger | None = None
     timeouts: PipelineTimeouts = PipelineTimeouts()
@@ -117,6 +118,19 @@ class IndexingPipeline:
                 embedder=str(row.get("embedder_name") or "default"),
             ).debug("model endpoints resolved for indexing (None = stage disabled)")
             if vlm is not None:
+                # Inject the configured captioning template (image_describer)
+                # unless the row already carries an explicit override, so the VLM
+                # gets the real prompt instead of its bare built-in fallback.
+                #
+                # FORWARD-COMPAT: this ``row["caption_prompt"]`` seam is the
+                # intended hook for the planned DB-backed prompt management — a
+                # future ``PromptService.resolve(partition, "image_captioning")``
+                # would populate it per-partition here (partition override →
+                # global default → disk seed), superseding the process-wide
+                # ``self.caption_prompt`` default. ``setdefault`` already lets a
+                # per-row value win, so that migration is a one-line change.
+                if self.caption_prompt is not None:
+                    row.setdefault("caption_prompt", self.caption_prompt)
                 await _timed(
                     "caption",
                     caption_stage(
@@ -370,6 +384,7 @@ def build_indexing_pipeline(
     embedder: Embedder,
     vector_store: VectorStore,
     vlm: VLM | None = None,
+    caption_prompt: str | None = None,
     contextualizer: ChunkContextualizer | None = None,
     topic_tagger: TopicTagger | None = None,
     timeouts: PipelineTimeouts | None = None,
@@ -390,6 +405,7 @@ def build_indexing_pipeline(
         embedder=embedder,
         vector_store=vector_store,
         vlm=vlm,
+        caption_prompt=caption_prompt,
         contextualizer=contextualizer,
         topic_tagger=topic_tagger,
         timeouts=timeouts or PipelineTimeouts(),

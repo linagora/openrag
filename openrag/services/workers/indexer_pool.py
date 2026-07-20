@@ -35,7 +35,11 @@ class IndexerWorkerActor:
         from core.utils.logging import get_logger
         from services.storage.milvus_store import MilvusVectorStore
         from services.storage.postgres_store import PostgresStore
-        from services.workers.parsers.parser_dispatcher import build_caption_vlm, build_parser_dispatcher
+        from services.workers.parsers.parser_dispatcher import (
+            build_caption_vlm,
+            build_parser_dispatcher,
+            load_caption_prompt,
+        )
         from services.workers.pipeline_builder import build_indexing_pipeline
 
         cfg = load_config()
@@ -43,6 +47,14 @@ class IndexerWorkerActor:
         parser = build_parser_dispatcher(cfg)
         parser_factory = _build_parser_factory(parser)
         vlm = build_caption_vlm(cfg)
+        # Loaded unconditionally: a preset can caption through a *named* VLM
+        # endpoint (resolved per-row via vlm_factory, see
+        # IndexingPipeline._select_vlm) even when no global default is
+        # configured, so gating this on `vlm is not None` would silently skip
+        # the prompt for that deployment shape. load_caption_prompt already
+        # degrades to None on any load failure, so there's no safety
+        # trade-off in always calling it.
+        caption_prompt = load_caption_prompt(cfg)
         chunker = _build_chunker(cfg)
         embedder_factory = _build_embedder_factory(cfg)
         vlm_factory = _build_vlm_factory(cfg)
@@ -68,6 +80,7 @@ class IndexerWorkerActor:
             embedder=embedder,
             vector_store=self._vector_store,
             vlm=vlm,
+            caption_prompt=caption_prompt,
             timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
             parser_factory=parser_factory,
