@@ -34,7 +34,7 @@ class HtmlParser(DocumentParser):
 
     async def parse(self, document: Document) -> ProcessedDocument:
         markdown = (await asyncio.to_thread(self._html_to_markdown, document)).strip()
-        markdown, images = normalize_data_uri_images(markdown, page_number=1)
+        markdown, images = normalize_data_uri_images(markdown, page_number=1, reference_scope=document.id)
         text_blocks = [TextBlock(text=markdown, page_number=1)] if markdown else []
         return ProcessedDocument(
             document_id=document.id,

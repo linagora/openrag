@@ -38,6 +38,19 @@ async def test_markdown_parser_preserves_http_image_behavior():
 
 
 @pytest.mark.asyncio
+async def test_markdown_parser_sanitizes_data_uri_links():
+    encoded = base64.b64encode(b"image-bytes").decode()
+    source = f"See [the logo](data:image/png;base64,{encoded}) here"
+
+    processed = await MarkdownParser().parse(
+        Document(filename="report.md", content_type=DocumentType.MARKDOWN, text=source)
+    )
+
+    assert processed.text_blocks[0].text == "See the logo here"
+    assert processed.images == []
+
+
+@pytest.mark.asyncio
 async def test_captioning_does_not_replace_a_preexisting_similar_reference():
     class FakeVLM:
         async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:

@@ -37,7 +37,7 @@ class MarkdownParser(DocumentParser):
 
     async def parse(self, document: Document) -> ProcessedDocument:
         text = self._extract_text(document).strip()
-        text, images = normalize_data_uri_images(text, page_number=1)
+        text, images = normalize_data_uri_images(text, page_number=1, reference_scope=document.id)
         images.extend(self._extract_http_image_blocks(text))
 
         text_blocks = [TextBlock(text=text, page_number=1)] if text else []

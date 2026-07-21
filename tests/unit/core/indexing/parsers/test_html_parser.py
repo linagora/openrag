@@ -66,3 +66,26 @@ async def test_html_parser_handles_parameterized_data_uri():
     assert "data:image" not in processed.text_blocks[0].text
     assert len(processed.images) == 1
     assert processed.images[0].mime_type == "image/svg+xml"
+
+
+@pytest.mark.asyncio
+async def test_html_parser_handles_an_embedded_image_with_a_title():
+    encoded = base64.b64encode(b"logo-image").decode()
+    html = f'<img alt="logo" title="Company logo" src="data:image/png;base64,{encoded}">'
+
+    processed = await HtmlParser().parse(Document(filename="logo.html", content_type=DocumentType.HTML, text=html))
+
+    assert "data:image" not in processed.text_blocks[0].text
+    assert len(processed.images) == 1
+    assert processed.images[0].image_bytes == b"logo-image"
+
+
+@pytest.mark.asyncio
+async def test_html_parser_sanitizes_data_uri_links():
+    encoded = base64.b64encode(b"logo-image").decode()
+    html = f'<a href="data:image/png;base64,{encoded}">logo</a>'
+
+    processed = await HtmlParser().parse(Document(filename="link.html", content_type=DocumentType.HTML, text=html))
+
+    assert processed.text_blocks[0].text == "logo"
+    assert processed.images == []

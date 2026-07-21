@@ -100,6 +100,16 @@ class TestExtractDataUriImageBlocks:
         text = "![](data:image/png;base64,!!!not-base64)"
         assert extract_data_uri_image_blocks(text) == []
 
+    def test_markdown_title_is_not_part_of_payload(self):
+        uri = self._data_uri(b"image")
+        text = f'![logo]({uri} "Company logo")'
+
+        blocks = extract_data_uri_image_blocks(text)
+
+        assert len(blocks) == 1
+        assert blocks[0].image_bytes == b"image"
+        assert blocks[0].metadata["markdown_ref"] == text
+
 
 class TestNormalizeDataUriImages:
     def _data_uri(self, payload: bytes = b"x", mime: str = "image/png") -> str:
@@ -138,12 +148,49 @@ class TestNormalizeDataUriImages:
         assert len(blocks) == 1
         assert blocks[0].image_bytes == payload
 
-    def test_malformed_parameter_sequence_is_not_matched(self):
+    def test_markdown_title_is_excluded_from_the_data_uri(self):
+        uri = self._data_uri(b"image")
+
+        text, blocks = normalize_data_uri_images(f'before ![logo]({uri} "Company logo") after')
+
+        assert "data:image" not in text
+        assert len(blocks) == 1
+        assert blocks[0].image_bytes == b"image"
+
+    def test_data_uri_link_is_reduced_to_its_label(self):
+        uri = self._data_uri(b"image")
+
+        text, blocks = normalize_data_uri_images(f"before [logo]({uri}) after")
+
+        assert text == "before logo after"
+        assert blocks == []
+
+    def test_padded_payloads_are_accepted_at_exact_size_limits(self):
+        uri = self._data_uri(b"x")
+
+        text, blocks = normalize_data_uri_images(
+            f"![one]({uri}) ![two]({uri})",
+            max_image_bytes=1,
+            max_total_bytes=2,
+        )
+
+        assert "data:image" not in text
+        assert len(blocks) == 2
+
+    def test_reference_scope_prevents_cross_document_collisions(self):
+        uri = self._data_uri(b"same-image")
+
+        _, first = normalize_data_uri_images(f"![logo]({uri})", reference_scope="body")
+        _, second = normalize_data_uri_images(f"![logo]({uri})", reference_scope="attachment")
+
+        assert first[0].metadata["markdown_ref"] != second[0].metadata["markdown_ref"]
+
+    def test_malformed_parameter_sequence_is_sanitized(self):
         text = f"before ![bad](data:image/png;{'a=' * 10_000} nob64) after"
 
         sanitized, blocks = normalize_data_uri_images(text)
 
-        assert sanitized == text
+        assert sanitized == "before bad after"
         assert blocks == []
 
     def test_generated_reference_does_not_collide_with_existing_markdown(self):

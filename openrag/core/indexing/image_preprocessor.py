@@ -30,7 +30,15 @@ logger = get_logger()
 
 HTTP_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((https?://[^)]+)\)")
 DATA_URI_IMAGE_PATTERN = re.compile(
-    r"!\[(.*?)\]\((data:image/[^;,\s)]+(?:;[^;,=\s)]+=[^;,=\s)]*)*;base64,[^)]+)\)",
+    r"!\[(.*?)\]\((data:image/[^)]*)\)",
+    re.IGNORECASE,
+)
+DATA_URI_LINK_PATTERN = re.compile(r"(?<!!)\[([^]]*)\]\(data:image/[^)]*\)", re.IGNORECASE)
+_VALID_DATA_URI_TARGET_PATTERN = re.compile(
+    r"^(data:image/[^;,\s)]+(?:;[^;,=\s)]+=[^;,=\s)]*)*;base64,"
+    r"[A-Za-z0-9+/=]+(?:[ \t\r\n\f\v]+[A-Za-z0-9+/=]+)*)"
+    r"(?:[ \t\r\n\f\v]+(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|\([^\)\r\n]*\)))?"
+    r"[ \t\r\n\f\v]*$",
     re.IGNORECASE,
 )
 
@@ -98,6 +106,18 @@ def mime_from_data_uri(data_uri: str) -> str:
         return "image/png"
 
 
+def _data_uri_from_markdown_target(target: str) -> str | None:
+    """Return a validated data URI without an optional Markdown title."""
+    match = _VALID_DATA_URI_TARGET_PATTERN.fullmatch(target)
+    return match.group(1) if match else None
+
+
+def _estimated_base64_size(encoded: str) -> int:
+    """Estimate decoded bytes exactly for valid padded Base64."""
+    padding = min(len(encoded) - len(encoded.rstrip("=")), 2)
+    return max(0, (len(encoded) * 3) // 4 - padding)
+
+
 def extract_data_uri_image_blocks(text: str, *, page_number: int = 1) -> list[Any]:
     """Build ``ImageBlock``s for every ``![alt](data:image/...;base64,...)`` ref.
 
@@ -115,7 +135,11 @@ def extract_data_uri_image_blocks(text: str, *, page_number: int = 1) -> list[An
     from core.models.document import ImageBlock
 
     blocks: list[Any] = []
-    for alt, data_uri in DATA_URI_IMAGE_PATTERN.findall(text):
+    for match in DATA_URI_IMAGE_PATTERN.finditer(text):
+        alt, target = match.groups()
+        data_uri = _data_uri_from_markdown_target(target)
+        if data_uri is None:
+            continue
         payload = decode_data_uri(data_uri)
         if payload is None:
             continue
@@ -124,7 +148,7 @@ def extract_data_uri_image_blocks(text: str, *, page_number: int = 1) -> list[An
                 image_bytes=payload,
                 page_number=page_number,
                 mime_type=mime_from_data_uri(data_uri),
-                metadata={"markdown_ref": f"![{alt}]({data_uri})", "alt": alt},
+                metadata={"markdown_ref": match.group(0), "alt": alt},
             )
         )
     return blocks
@@ -137,13 +161,15 @@ def normalize_data_uri_images(
     max_images: int = MAX_EMBEDDED_IMAGES,
     max_image_bytes: int = MAX_EMBEDDED_IMAGE_BYTES,
     max_total_bytes: int = MAX_EMBEDDED_TOTAL_BYTES,
+    reference_scope: str | None = None,
 ) -> tuple[str, list[Any]]:
-    """Extract embedded images and remove their base64 payloads from Markdown.
+    """Extract embedded images and remove image data URIs from Markdown.
 
     Accepted images receive a compact deterministic placeholder that remains
     compatible with the parser-to-caption replacement contract. Rejected or
-    malformed images are reduced to their alt text (or a small generic label),
-    so raw payloads never continue into chunking.
+    malformed images and data-URI links are reduced to their display text, so
+    raw payloads never continue into chunking. ``reference_scope`` keeps
+    placeholders unique when independently parsed documents are combined.
     """
     if not text:
         return text, []
@@ -160,15 +186,20 @@ def normalize_data_uri_images(
     def replace(match: re.Match[str]) -> str:
         nonlocal matched, skipped, total_bytes
         matched += 1
-        alt, data_uri = match.groups()
+        alt, target = match.groups()
         fallback = alt.strip() or "[Image]"
 
         if matched > max_images:
             skipped += 1
             return fallback
 
+        data_uri = _data_uri_from_markdown_target(target)
+        if data_uri is None:
+            skipped += 1
+            return fallback
+
         encoded = "".join(data_uri.split(",", 1)[1].split()) if "," in data_uri else ""
-        estimated_bytes = (len(encoded) * 3) // 4
+        estimated_bytes = _estimated_base64_size(encoded)
         if estimated_bytes > max_image_bytes or total_bytes + estimated_bytes > max_total_bytes:
             skipped += 1
             return fallback
@@ -178,7 +209,8 @@ def normalize_data_uri_images(
             skipped += 1
             return fallback
 
-        digest_builder = hashlib.sha256(f"{matched}:{alt}".encode())
+        digest_seed = f"{matched}:{alt}" if reference_scope is None else f"{reference_scope}:{matched}:{alt}"
+        digest_builder = hashlib.sha256(digest_seed.encode())
         digest_builder.update(payload)
         digest = digest_builder.hexdigest()[:16]
         suffix = 0
@@ -202,6 +234,7 @@ def normalize_data_uri_images(
         return placeholder
 
     sanitized = DATA_URI_IMAGE_PATTERN.sub(replace, text)
+    sanitized = DATA_URI_LINK_PATTERN.sub(lambda match: match.group(1).strip() or "[Link]", sanitized)
     if skipped:
         logger.bind(skipped=skipped, matched=matched).warning(
             "Skipped embedded image(s) while sanitizing document text"

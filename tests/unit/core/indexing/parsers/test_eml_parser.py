@@ -7,6 +7,7 @@ import email.message
 
 import pytest
 from core.indexing.parsers.eml_parser import _MAX_EML_ATTACHMENTS, EmlParser
+from core.indexing.parsers.html_parser import HtmlParser
 from core.models.document import Document, DocumentType
 
 
@@ -95,6 +96,30 @@ async def test_plain_text_alternative_remains_preferred_over_html_body():
 
     assert processed.images == []
     assert processed.text_blocks[0].text == "Plain report"
+
+
+@pytest.mark.asyncio
+async def test_body_and_attachment_images_have_distinct_markdown_refs():
+    encoded = base64.b64encode(b"shared-logo").decode()
+    image_html = f'<img alt="logo" src="data:image/png;base64,{encoded}">'
+    msg = email.message.EmailMessage()
+    msg["Subject"] = "Logos"
+    msg.set_content(image_html, subtype="html")
+    msg.add_attachment(
+        image_html.encode(),
+        maintype="text",
+        subtype="html",
+        filename="inner.html",
+    )
+
+    processed = await EmlParser(attachment_parsers={"html": HtmlParser()}).parse(
+        Document(filename="logos.eml", content_type=DocumentType.EML, raw_bytes=msg.as_bytes())
+    )
+
+    refs = [image.metadata["markdown_ref"] for image in processed.images]
+    assert len(refs) == 2
+    assert len(set(refs)) == 2
+    assert all(processed.text_blocks[0].text.count(ref) == 1 for ref in refs)
 
 
 def test_eml_caps_attachment_candidates_before_decoding(monkeypatch):
