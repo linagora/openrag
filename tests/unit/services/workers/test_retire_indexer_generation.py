@@ -85,6 +85,29 @@ def test_protocol_generation_drains_before_removal(monkeypatch: pytest.MonkeyPat
     ]
 
 
+def test_missing_dispatcher_still_removes_discovered_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.retire_indexer_generation as module
+
+    actors = [
+        {"name": "IndexerWorker-v2-0", "state": "ALIVE"},
+        {"name": "IndexerWorker-v2-1", "state": "ALIVE"},
+    ]
+    killed: list[str] = []
+
+    monkeypatch.setattr("ray.util.state.list_actors", lambda **_kwargs: actors)
+    monkeypatch.setattr(module, "_get_actor", lambda *_args: None)
+    monkeypatch.setattr(module, "_kill_actor", lambda name, _namespace: not killed.append(name))
+
+    assert module.retire_generation(
+        "v2",
+        namespace="openrag",
+        timeout=1,
+        poll_interval=0,
+        confirm_legacy_idle=False,
+    ) == ["IndexerWorker-v2-0", "IndexerWorker-v2-1"]
+    assert killed == ["IndexerWorker-v2-0", "IndexerWorker-v2-1"]
+
+
 def test_begin_drain_rpc_timeout_keeps_generation_alive(monkeypatch: pytest.MonkeyPatch) -> None:
     import services.workers.retire_indexer_generation as module
 
