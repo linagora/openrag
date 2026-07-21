@@ -30,7 +30,8 @@ logger = get_logger()
 
 HTTP_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((https?://[^)]+)\)")
 DATA_URI_IMAGE_PATTERN = re.compile(
-    r"""!\[([^]]*)\]\((<?data:image/(?:[^()"']+|"[^"\r\n]*"|'[^'\r\n]*'|\([^\)\r\n]*\))*)\)""",
+    r"""!\[((?:\\[^\r\n]|(?!\]\()[^\\\r\n])*)\]\("""
+    r"""(<?data:image/(?:[^()"']+|"[^"\r\n]*"|'[^'\r\n]*'|\([^\)\r\n]*\))*)\)""",
     re.IGNORECASE,
 )
 DATA_URI_LINK_PATTERN = re.compile(r"(?<!!)\[([^]]*)\]\(<?data:image/[^)]*\)", re.IGNORECASE)

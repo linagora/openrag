@@ -137,6 +137,17 @@ class TestNormalizeDataUriImages:
         assert len(blocks) == 1
         assert blocks[0].image_bytes == b"embedded"
 
+    def test_image_alt_text_accepts_escaped_and_nested_brackets(self):
+        uri = self._data_uri(b"embedded")
+
+        for alt in (r"status \] chart", "status [draft] chart"):
+            text, blocks = normalize_data_uri_images(f"before ![{alt}]({uri}) after")
+
+            assert "data:image" not in text
+            assert len(blocks) == 1
+            assert blocks[0].metadata["alt"] == alt
+            assert blocks[0].image_bytes == b"embedded"
+
     def test_parameterized_data_uri_is_extracted_and_sanitized(self):
         payload = base64.b64encode(b"svg-image").decode()
         uri = f"data:image/svg+xml;charset=utf-8;profile=compact;base64,{payload}"
