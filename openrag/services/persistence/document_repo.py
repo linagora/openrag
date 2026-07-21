@@ -275,6 +275,7 @@ class PgDocumentRepository(DocumentRepository):
         file_id: str,
         partition: str,
         content_sha256: str,
+        claim_token: str,
         replace: bool = False,
     ) -> str | None:
         """Atomically reserve content while it is being indexed."""
@@ -307,14 +308,15 @@ class PgDocumentRepository(DocumentRepository):
                 )
                 claimed = await conn.fetchval(
                     """
-                    INSERT INTO file_content_claims (partition_name, content_sha256, file_id)
-                    VALUES ($1, $2, $3)
+                    INSERT INTO file_content_claims (partition_name, content_sha256, file_id, claim_token)
+                    VALUES ($1, $2, $3, $4)
                     ON CONFLICT (partition_name, content_sha256) DO NOTHING
                     RETURNING file_id
                     """,
                     partition,
                     content_sha256,
                     file_id,
+                    claim_token,
                 )
                 if claimed is not None:
                     return None
@@ -333,16 +335,19 @@ class PgDocumentRepository(DocumentRepository):
         file_id: str,
         partition: str,
         content_sha256: str,
+        claim_token: str,
     ) -> bool:
         result = await self.pool.execute(
             """
             UPDATE file_content_claims
             SET expires_at = NOW() + interval '24 hours'
-            WHERE partition_name = $1 AND content_sha256 = $2 AND file_id = $3
+            WHERE partition_name = $1 AND content_sha256 = $2
+              AND file_id = $3 AND claim_token = $4
             """,
             partition,
             content_sha256,
             file_id,
+            claim_token,
         )
         return result.endswith(" 1")
 
@@ -352,6 +357,7 @@ class PgDocumentRepository(DocumentRepository):
         file_id: str,
         partition: str,
         content_sha256: str,
+        claim_token: str,
     ) -> None:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -363,11 +369,13 @@ class PgDocumentRepository(DocumentRepository):
                 await conn.execute(
                     """
                     DELETE FROM file_content_claims
-                    WHERE partition_name = $1 AND content_sha256 = $2 AND file_id = $3
+                    WHERE partition_name = $1 AND content_sha256 = $2
+                      AND file_id = $3 AND claim_token = $4
                     """,
                     partition,
                     content_sha256,
                     file_id,
+                    claim_token,
                 )
 
     # ── Legacy method names used by the Phase 7C shim ────────────────
