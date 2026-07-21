@@ -101,22 +101,55 @@ class ModelEndpointService:
         from their ``extra`` first (see ``_backfill_sampling_params``), since
         endpoints created before #720's fix never had them written and would
         otherwise keep silently running at the provider default forever.
+
+        When ``models.sync_on_boot`` is set (env ``MODEL_ENDPOINT_SYNC_ON_BOOT``),
+        the endpoint whose name matches the current env-derived slug is instead
+        kept in sync with Settings/env on every boot (``endpoint``/``model_name``/
+        ``batch_size``/``timeout`` only — never ``extra``, so a manually-set API
+        key survives) — lets operators manage that one endpoint purely via env
+        vars and a pod rollout. Any other endpoint (e.g. hand-created via the
+        admin API under a different name) is never touched.
         """
         seeds = self._build_default_seeds()
         now = datetime.now(UTC)
+        sync_on_boot = self._config.models.sync_on_boot
         for model_type, data in seeds.items():
             existing = await self._repo.list_all(model_type=model_type)
-            if existing:
-                if model_type in _SAMPLING_TYPES:
-                    await self._backfill_sampling_params(existing, getattr(self._config, model_type))
-                continue
+            if existing and model_type in _SAMPLING_TYPES:
+                # #720: rows created before the fix never had the sampling params
+                # written, so backfill them before anything else — independent of
+                # whether the env still points anywhere or sync_on_boot is set.
+                await self._backfill_sampling_params(existing, getattr(self._config, model_type))
+
             endpoint: str = data["endpoint"]
             model_name: str = data["model_name"]
             if not endpoint:
                 logger.info(f"No {model_type} endpoint configured — skipping seed.")
                 continue
+
+            name = _slug(model_name or "")
+            existing_row = await self._repo.get(name, model_type)
+            if existing_row is not None:
+                if sync_on_boot:
+                    await self._repo.update(
+                        name,
+                        model_type,
+                        endpoint=endpoint,
+                        model_name=model_name or None,
+                        batch_size=data.get("batch_size", 32),
+                        timeout=data.get("timeout", 30.0),
+                    )
+                    logger.info(f"Synced {model_type} endpoint '{name}' from env (MODEL_ENDPOINT_SYNC_ON_BOOT=true).")
+                continue
+
+            if existing:
+                # Some other endpoint of this type already exists (hand-created
+                # via the admin API) — don't create a competing default. Reuses
+                # the list fetched above (nothing added/removed a row since).
+                continue
+
             row = ModelEndpointRow(
-                name=_slug(model_name or ""),
+                name=name,
                 model_type=model_type,
                 endpoint=endpoint,
                 model_name=model_name or None,
