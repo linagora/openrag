@@ -42,6 +42,7 @@ class _DispatchFailureService(_FakeIndexingService):
 
 class _ExistingFileService(_FakeIndexingService):
     def __init__(self) -> None:
+        super().__init__()
         self.dispatched = False
 
     async def file_exists(self, file_id: str, partition: str) -> bool:
@@ -67,6 +68,7 @@ def _build_app(tmp_path, monkeypatch, content: bytes, *, service=None, deduplica
     cfg = SimpleNamespace(
         paths=SimpleNamespace(data_dir=str(tmp_path / "data")),
         loader=SimpleNamespace(content_deduplication_enabled=deduplication_enabled),
+        server=SimpleNamespace(preferred_url_scheme="http"),
     )
 
     app.dependency_overrides[validate_file_id] = lambda: "f1"
