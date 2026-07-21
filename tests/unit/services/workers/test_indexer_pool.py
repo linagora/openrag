@@ -90,7 +90,7 @@ async def test_catalog_initialization_is_single_flight() -> None:
     assert pool._catalog_initialized is True
 
 
-def test_build_indexer_pool_uses_new_detached_dispatcher_name(
+def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import core.config
@@ -121,9 +121,9 @@ def test_build_indexer_pool_uses_new_detached_dispatcher_name(
     assert pool == "dispatcher-actor"
     assert len(options_calls) == 1
     opts = options_calls[0]
-    # The dispatcher has a different public interface from the old detached
-    # IndexerPool actor, so it must not reuse that actor name during upgrades.
-    assert opts["name"] == "IndexerPoolDispatcher"
+    # A protocol-specific name prevents a rolling deployment from attaching to
+    # a detached actor that still runs the previous claim implementation.
+    assert opts["name"] == "IndexerPoolDispatcher-v2"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -158,7 +158,11 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
 
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
-    assert {c["name"] for c in calls} == {"IndexerWorker-0", "IndexerWorker-1", "IndexerWorker-2"}
+    assert {c["name"] for c in calls} == {
+        "IndexerWorker-v2-0",
+        "IndexerWorker-v2-1",
+        "IndexerWorker-v2-2",
+    }
     for c in calls:
         assert c["lifetime"] == "detached"
         assert c["max_concurrency"] == 4
@@ -950,6 +954,7 @@ def _bare_pool(workers: list) -> object:
     pool = actor_class.__new__(actor_class)
     pool._workers = list(workers)
     pool._inflight = [0] * len(workers)
+    pool._accepting_tasks = True
     pool._release_tasks = set()
     pool._claim_store = None
     pool._claim_store_lock = asyncio.Lock()
@@ -1019,6 +1024,37 @@ async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
         workers[1].futures[0],
         workers[0].futures[1],
     )
+
+
+@pytest.mark.asyncio
+async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+
+    await pool.submit(task_id="accepted-before-drain")
+
+    assert await pool.begin_drain() == {
+        "protocol_version": "v2",
+        "accepting_tasks": False,
+        "inflight_jobs": 1,
+    }
+    with pytest.raises(RuntimeError, match="draining"):
+        await pool.submit(task_id="rejected-after-drain")
+    assert len(worker.calls) == 1
+
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+    assert await pool.status() == {
+        "protocol_version": "v2",
+        "accepting_tasks": False,
+        "inflight_jobs": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pool_reports_current_protocol_version() -> None:
+    pool = _bare_pool([_FakeWorker()])
+
+    assert await pool.protocol_version() == "v2"
 
 
 @pytest.mark.asyncio

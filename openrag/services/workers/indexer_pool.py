@@ -17,7 +17,16 @@ from openrag.core.config.root import Settings
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
 _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
-_INDEXER_POOL_DISPATCHER_ACTOR_NAME = "IndexerPoolDispatcher"
+# Named detached actors survive API rolling deployments. Keep the dispatcher
+# and workers on the same protocol generation whenever their remote contract or
+# cross-process indexing semantics change, so new replicas cannot attach to a
+# partially compatible actor fleet left by the previous release.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v2"
+_INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
+
+
+def _indexer_worker_actor_name(index: int) -> str:
+    return f"IndexerWorker-{_INDEXER_ACTOR_PROTOCOL_VERSION}-{index}"
 
 
 def _catalog_rdb_config(settings: Settings) -> Any:
@@ -290,13 +299,14 @@ class IndexerWorkerActor:
 class IndexerPool:
     """Single detached dispatcher actor over a fleet of ``IndexerWorkerActor``.
 
-    Exactly **one** instance exists cluster-wide — it is created named, detached
-    and with ``get_if_exists=True`` (see :func:`build_indexer_pool`). Every API
-    process and every Ray Serve replica therefore shares the *same* dispatcher,
-    so the least-loaded view is global. A per-replica client object would keep
-    its own ``_inflight`` counters, and since Ray Serve runs each replica as a
-    separate actor/process, those views would diverge and unbalance dispatch
-    across the shared workers under bursts.
+    Exactly **one** instance per protocol generation exists cluster-wide — it is
+    created named, detached and with ``get_if_exists=True`` (see
+    :func:`build_indexer_pool`). Every API process and every Ray Serve replica
+    on the current generation therefore shares the *same* dispatcher, so the
+    least-loaded view is global. A per-replica client object would keep its own
+    ``_inflight`` counters, and since Ray Serve runs each replica as a separate
+    actor/process, those views would diverge and unbalance dispatch across the
+    shared workers under bursts.
 
     It holds ``ray.indexer.pool_size`` worker actors and dispatches each file to
     the least-loaded one (fewest in-flight files). ``submit`` returns the
@@ -318,7 +328,7 @@ class IndexerPool:
         # are shared singletons too; only this dispatcher creates them.
         self._workers = [
             IndexerWorkerActor.options(  # type: ignore[attr-defined]
-                name=f"IndexerWorker-{i}",
+                name=_indexer_worker_actor_name(i),
                 namespace=namespace,
                 get_if_exists=True,
                 lifetime="detached",
@@ -327,12 +337,30 @@ class IndexerPool:
             for i in range(pool_size)
         ]
         self._inflight = [0] * len(self._workers)
+        self._accepting_tasks = True
         self._release_tasks: set[asyncio.Task[Any]] = set()
         self._claim_store: Any = None
         self._claim_store_lock = asyncio.Lock()
 
     async def size(self) -> int:
         return len(self._workers)
+
+    async def protocol_version(self) -> str:
+        """Return the remote contract generation implemented by this actor."""
+        return _INDEXER_ACTOR_PROTOCOL_VERSION
+
+    async def begin_drain(self) -> dict[str, Any]:
+        """Reject new submissions while allowing accepted work to settle."""
+        self._accepting_tasks = False
+        return await self.status()
+
+    async def status(self) -> dict[str, Any]:
+        """Expose the state a deployment controller needs before actor cleanup."""
+        return {
+            "protocol_version": _INDEXER_ACTOR_PROTOCOL_VERSION,
+            "accepting_tasks": self._accepting_tasks,
+            "inflight_jobs": sum(self._inflight),
+        }
 
     async def submit(self, **kwargs: Any) -> list[Any]:
         """Dispatch ``process_file`` to the least-loaded worker.
@@ -341,6 +369,8 @@ class IndexerPool:
         one-element list — see the class docstring); in-flight bookkeeping is
         released when the task settles (success, failure, or cancellation).
         """
+        if not self._accepting_tasks:
+            raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
         idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
         self._inflight[idx] += 1
         try:
@@ -448,8 +478,10 @@ def build_indexer_pool(namespace: str = "openrag") -> Any:
     # the whole fleet's capacity. The constructor args are honoured only on the
     # first creation; later get_if_exists calls reuse the existing dispatcher
     # and ignore them — which is correct, since every replica loads the same cfg.
-    # Do not reuse the old "IndexerPool" name: that detached actor exposed
-    # process_file(), while this dispatcher exposes submit().
+    # The protocol-generation suffix prevents a rolling deployment from
+    # reusing an older detached dispatcher or its workers. This matters even
+    # when the public submit() signature is unchanged: claim ownership and
+    # catalog routing are implemented inside those long-lived actor processes.
     return IndexerPool.options(  # type: ignore[attr-defined]
         name=_INDEXER_POOL_DISPATCHER_ACTOR_NAME,
         namespace=namespace,
