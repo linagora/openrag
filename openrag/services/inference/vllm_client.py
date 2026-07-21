@@ -299,16 +299,23 @@ class VLLMEmbedder(Embedder):
         # actually fires (#704) — the translation happens inside the retried
         # body, so the decorator never sees the underlying httpx exception and
         # judges retryability purely on the status code we choose here.
-        except httpx.ConnectError as exc:
-            raise EmbeddingConnectionError(
-                f"Cannot reach embedder at {self._endpoint}",
+        #
+        # TimeoutException is caught first: it is a subclass of TransportError,
+        # so the broader clause below would otherwise swallow it as a 503. The
+        # TransportError net (not just ConnectError) covers a connection reset
+        # mid-request, which httpx raises as ReadError, plus WriteError/protocol
+        # errors — all transient and safe to retry since the embed POST is
+        # idempotent. HTTPStatusError is not a TransportError, so it is unaffected.
+        except httpx.TimeoutException as exc:
+            raise EmbeddingTimeoutError(
+                f"Embedder request timed out at {self._endpoint}",
                 model_name=self._model,
                 base_url=self._endpoint,
                 error=str(exc),
             ) from exc
-        except httpx.TimeoutException as exc:
-            raise EmbeddingTimeoutError(
-                f"Embedder request timed out at {self._endpoint}",
+        except httpx.TransportError as exc:
+            raise EmbeddingConnectionError(
+                f"Cannot reach embedder at {self._endpoint}",
                 model_name=self._model,
                 base_url=self._endpoint,
                 error=str(exc),

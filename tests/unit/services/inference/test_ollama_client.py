@@ -285,6 +285,30 @@ class TestOllamaEmbedder:
             await embedder.embed(["text"])
 
     @pytest.mark.asyncio
+    async def test_embed_retries_on_connection_reset(self):
+        """A mid-request reset is httpx.ReadError (NetworkError), not
+        ConnectError. It must be retried, not escape raw. Regression for #718."""
+        import tenacity
+
+        retrying = OllamaEmbedder.embed.retry
+        original_wait = retrying.wait
+        retrying.wait = tenacity.wait_none()
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise httpx.ReadError("connection reset by peer")
+            return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.7]}]})
+
+        try:
+            embedder = self._make_embedder(handler)
+            assert await embedder.embed(["text"]) == [[0.7]]
+            assert calls["n"] == 2, "a ReadError mid-request must be retried"
+        finally:
+            retrying.wait = original_wait
+
+    @pytest.mark.asyncio
     async def test_embed_timeout(self):
         async def fail(*a, **kw):
             raise httpx.TimeoutException("timeout")

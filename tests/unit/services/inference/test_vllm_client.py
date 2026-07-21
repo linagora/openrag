@@ -673,6 +673,38 @@ class TestEmbedderRetryFires:
         assert calls["n"] == 2
 
     @pytest.mark.asyncio
+    async def test_retries_on_connection_reset_mid_request(self):
+        """A connection reset after the request starts is httpx.ReadError, not
+        ConnectError (a NetworkError under TransportError). The first fix only
+        caught ConnectError/TimeoutException, so a reset escaped raw and was not
+        retried. Regression for the #718 review."""
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise httpx.ReadError("connection reset by peer")
+            return _embed_response([[0.5]])
+
+        embedder = self._embedder(handler)
+        assert await embedder._embed_batch(["x"]) == [[0.5]]
+        assert calls["n"] == 2, "a ReadError mid-request must be retried"
+
+    @pytest.mark.asyncio
+    async def test_retries_on_connect_error(self):
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise httpx.ConnectError("cannot connect")
+            return _embed_response([[0.6]])
+
+        embedder = self._embedder(handler)
+        assert await embedder._embed_batch(["x"]) == [[0.6]]
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
     async def test_does_not_retry_client_error(self):
         """A 400 is not transient — it must fail fast, not burn three attempts."""
         calls = {"n": 0}
