@@ -85,7 +85,30 @@ def test_protocol_generation_drains_before_removal(monkeypatch: pytest.MonkeyPat
     ]
 
 
-def test_missing_dispatcher_still_removes_discovered_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_dispatcher_requires_idle_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.retire_indexer_generation as module
+
+    actors = [
+        {"name": "IndexerWorker-v2-0", "state": "ALIVE"},
+        {"name": "IndexerWorker-v2-1", "state": "ALIVE"},
+    ]
+    monkeypatch.setattr("ray.util.state.list_actors", lambda **_kwargs: actors)
+    monkeypatch.setattr(module, "_get_actor", lambda *_args: None)
+    kill = Mock()
+    monkeypatch.setattr(module, "_kill_actor", kill)
+
+    with pytest.raises(RuntimeError, match="confirm-workers-idle"):
+        module.retire_generation(
+            "v2",
+            namespace="openrag",
+            timeout=1,
+            poll_interval=0,
+            confirm_legacy_idle=False,
+        )
+    kill.assert_not_called()
+
+
+def test_missing_dispatcher_removes_confirmed_idle_workers(monkeypatch: pytest.MonkeyPatch) -> None:
     import services.workers.retire_indexer_generation as module
 
     actors = [
@@ -104,6 +127,7 @@ def test_missing_dispatcher_still_removes_discovered_workers(monkeypatch: pytest
         timeout=1,
         poll_interval=0,
         confirm_legacy_idle=False,
+        confirm_workers_idle=True,
     ) == ["IndexerWorker-v2-0", "IndexerWorker-v2-1"]
     assert killed == ["IndexerWorker-v2-0", "IndexerWorker-v2-1"]
 
