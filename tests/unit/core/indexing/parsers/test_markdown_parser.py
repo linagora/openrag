@@ -65,6 +65,21 @@ async def test_markdown_parser_sanitizes_angle_bracketed_data_uri_images():
 
 
 @pytest.mark.asyncio
+async def test_markdown_parser_sanitizes_reference_style_data_uri_images():
+    encoded = base64.b64encode(b"image-bytes").decode()
+    source = f"Before ![logo][asset] after\n\n[asset]: data:image/png;base64,{encoded}"
+
+    processed = await MarkdownParser().parse(
+        Document(filename="report.md", content_type=DocumentType.MARKDOWN, text=source)
+    )
+
+    assert "data:image" not in processed.text_blocks[0].text
+    assert "[asset]:" not in processed.text_blocks[0].text
+    assert len(processed.images) == 1
+    assert processed.images[0].image_bytes == b"image-bytes"
+
+
+@pytest.mark.asyncio
 async def test_captioning_does_not_replace_a_preexisting_similar_reference():
     class FakeVLM:
         async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:

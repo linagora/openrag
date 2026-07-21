@@ -34,6 +34,11 @@ DATA_URI_IMAGE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 DATA_URI_LINK_PATTERN = re.compile(r"(?<!!)\[([^]]*)\]\(<?data:image/[^)]*\)", re.IGNORECASE)
+DATA_URI_REFERENCE_IMAGE_PATTERN = re.compile(r"!\[([^]]+)\](?:\[([^]]*)\]|(?!\())")
+DATA_URI_REFERENCE_DEFINITION_PATTERN = re.compile(
+    r"^[ \t]{0,3}\[([^]\r\n]+)\]:[ \t]*(<?data:image/[^\r\n]*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
 _VALID_DATA_URI_TARGET_PATTERN = re.compile(
     r"^(data:image/[^;,\s)]+(?:;[^;,=\s)]+=[^;,=\s)]*)*;base64,"
     r"[A-Za-z0-9+/=]+(?:[ \t\r\n\f\v]+[A-Za-z0-9+/=]+)*)"
@@ -123,6 +128,11 @@ def _estimated_base64_size(encoded: str) -> int:
     return max(0, (len(encoded) * 3) // 4 - padding)
 
 
+def _normalize_reference_label(label: str) -> str:
+    """Normalize a Markdown reference label for case-insensitive matching."""
+    return " ".join(label.split()).casefold()
+
+
 def extract_data_uri_image_blocks(text: str, *, page_number: int = 1) -> list[Any]:
     """Build ``ImageBlock``s for every ``![alt](data:image/...;base64,...)`` ref.
 
@@ -172,7 +182,8 @@ def normalize_data_uri_images(
 
     Accepted images receive a compact deterministic placeholder that remains
     compatible with the parser-to-caption replacement contract. Rejected or
-    malformed images and data-URI links are reduced to their display text, so
+    malformed images and data-URI links are reduced to their display text.
+    Inline and reference-style images share the same validation and limits, so
     raw payloads never continue into chunking. ``reference_scope`` keeps
     placeholders unique when independently parsed documents are combined.
     """
@@ -188,10 +199,9 @@ def normalize_data_uri_images(
     existing_targets = set(re.findall(r"\(openrag-embedded-image-[^)]+\)", text))
     generated_targets: set[str] = set()
 
-    def replace(match: re.Match[str]) -> str:
+    def replace_target(alt: str, target: str) -> str:
         nonlocal matched, skipped, total_bytes
         matched += 1
-        alt, target = match.groups()
         fallback = alt.strip() or "[Image]"
 
         if matched > max_images:
@@ -238,7 +248,19 @@ def normalize_data_uri_images(
         total_bytes += len(payload)
         return placeholder
 
-    sanitized = DATA_URI_IMAGE_PATTERN.sub(replace, text)
+    reference_targets: dict[str, str] = {}
+    for match in DATA_URI_REFERENCE_DEFINITION_PATTERN.finditer(text):
+        label, target = match.groups()
+        reference_targets.setdefault(_normalize_reference_label(label), target.strip())
+
+    def replace_reference(match: re.Match[str]) -> str:
+        alt, label = match.groups()
+        target = reference_targets.get(_normalize_reference_label(label or alt))
+        return match.group(0) if target is None else replace_target(alt, target)
+
+    sanitized = DATA_URI_IMAGE_PATTERN.sub(lambda match: replace_target(*match.groups()), text)
+    sanitized = DATA_URI_REFERENCE_IMAGE_PATTERN.sub(replace_reference, sanitized)
+    sanitized = DATA_URI_REFERENCE_DEFINITION_PATTERN.sub("", sanitized)
     sanitized = DATA_URI_LINK_PATTERN.sub(lambda match: match.group(1).strip() or "[Link]", sanitized)
     if skipped:
         logger.bind(skipped=skipped, matched=matched).warning(

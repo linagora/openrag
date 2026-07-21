@@ -174,6 +174,29 @@ class TestNormalizeDataUriImages:
         assert text == "before logo after"
         assert blocks == []
 
+    def test_reference_style_image_is_extracted_and_sanitized(self):
+        uri = self._data_uri(b"image")
+        for reference in ("![logo][asset]", "![asset][]", "![asset]"):
+            source = f"before {reference} after\n\n[asset]: {uri}"
+
+            text, blocks = normalize_data_uri_images(source)
+
+            assert "data:image" not in text
+            assert "[asset]:" not in text
+            assert len(blocks) == 1
+            assert blocks[0].image_bytes == b"image"
+            assert blocks[0].metadata["markdown_ref"] in text
+
+    def test_reference_style_image_uses_existing_size_limits(self):
+        uri = self._data_uri(b"too-large")
+        source = f"before ![logo][asset] after\n\n[asset]: {uri}"
+
+        text, blocks = normalize_data_uri_images(source, max_image_bytes=1)
+
+        assert "data:image" not in text
+        assert "logo" in text
+        assert blocks == []
+
     def test_padded_payloads_are_accepted_at_exact_size_limits(self):
         uri = self._data_uri(b"x")
 
