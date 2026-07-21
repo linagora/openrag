@@ -167,6 +167,17 @@ class TestNormalizeDataUriImages:
         assert len(blocks) == 1
         assert blocks[0].image_bytes == b"image"
 
+    def test_parenthesized_title_does_not_end_the_image(self):
+        uri = self._data_uri(b"image")
+
+        text, blocks = normalize_data_uri_images(f"before ![chart]({uri} (sales draft)) after")
+
+        assert "data:image" not in text
+        assert text.startswith("before ![chart](openrag-embedded-image-")
+        assert text.endswith(" after")
+        assert len(blocks) == 1
+        assert blocks[0].image_bytes == b"image"
+
     def test_angle_bracketed_destination_is_extracted_and_sanitized(self):
         uri = self._data_uri(b"image")
 
