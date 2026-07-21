@@ -149,8 +149,20 @@ class PresetService:
         if preset_type == "retrieval":
             return {**config, "enable_reranker": self._config.reranker.enabled}
         if preset_type == "indexation" and name == "default":
+            chunker = self._config.chunker
             return {
                 **config,
+                # The default preset follows the deployment's global chunking
+                # knobs (CHUNKER / CHUNK_SIZE / CHUNK_OVERLAP_RATE). Without this
+                # the seeded 512/0.2 was hardcoded and the operator's global
+                # values were silently ignored for every document (#709). Named
+                # presets keep their explicit, deliberate chunk sizes.
+                "chunking": {
+                    **config.get("chunking", {}),
+                    "name": chunker.name,
+                    "chunk_size": chunker.chunk_size,
+                    "chunk_overlap_rate": chunker.chunk_overlap_rate,
+                },
                 "enable_contextualization": self._config.chunker.contextual_retrieval,
                 "enable_image_captioning": self._config.loader.image_captioning,
             }

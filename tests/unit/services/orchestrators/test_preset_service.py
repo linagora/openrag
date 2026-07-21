@@ -544,3 +544,52 @@ async def test_delete_preset_removes_row():
     await svc.delete_preset("legal", "indexation")
 
     assert ("legal", "indexation") not in repo._store
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_default_indexation_inherits_global_chunk_size():
+    """The default preset must follow the global CHUNK_SIZE / CHUNK_OVERLAP_RATE
+    / CHUNKER, not the hardcoded 512/0.2 seed (#709)."""
+    from core.config.root import Settings
+
+    settings = Settings(chunker={"chunk_size": 1024, "chunk_overlap_rate": 0.3, "name": "recursive_splitter"})
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    default_chunking = repo._store[("default", "indexation")]["config"]["chunking"]
+    assert default_chunking["chunk_size"] == 1024
+    assert default_chunking["chunk_overlap_rate"] == 0.3
+    assert default_chunking["name"] == "recursive_splitter"
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_named_presets_keep_explicit_chunk_size():
+    """Named presets carry deliberate per-domain chunk sizes and must NOT be
+    overridden by the global chunker knob."""
+    from core.config.root import Settings
+
+    settings = Settings(chunker={"chunk_size": 1024})
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    # finance seeds 768 explicitly; global is 1024 — finance must stay 768.
+    finance_chunking = repo._store[("finance", "indexation")]["config"]["chunking"]
+    assert finance_chunking["chunk_size"] == 768
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_default_chunk_size_falls_back_to_seed_when_global_unset():
+    """With the global chunker at its own default (512/0.2), the default preset
+    reflects that — no behavioural change for a deployment that didn't tune it."""
+    from core.config.root import Settings
+
+    settings = Settings()
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    default_chunking = repo._store[("default", "indexation")]["config"]["chunking"]
+    assert default_chunking["chunk_size"] == 512
+    assert default_chunking["chunk_overlap_rate"] == 0.2
