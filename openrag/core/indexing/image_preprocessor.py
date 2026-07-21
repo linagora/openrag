@@ -30,15 +30,21 @@ logger = get_logger()
 
 HTTP_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((https?://[^)]+)\)")
 DATA_URI_IMAGE_PATTERN = re.compile(
-    r"!\[(.*?)\]\((data:image/[^)]*)\)",
+    r"!\[(.*?)\]\((<?data:image/[^)]*)\)",
     re.IGNORECASE,
 )
-DATA_URI_LINK_PATTERN = re.compile(r"(?<!!)\[([^]]*)\]\(data:image/[^)]*\)", re.IGNORECASE)
+DATA_URI_LINK_PATTERN = re.compile(r"(?<!!)\[([^]]*)\]\(<?data:image/[^)]*\)", re.IGNORECASE)
+_DATA_URI_PATTERN = (
+    r"data:image/[^;,\s)]+(?:;[^;,=\s)]+=[^;,=\s)]*)*;base64,"
+    r"[A-Za-z0-9+/=]+(?:[ \t\r\n\f\v]+[A-Za-z0-9+/=]+)*"
+)
+_MARKDOWN_TITLE_PATTERN = r"(?:[ \t\r\n\f\v]+(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|\([^\)\r\n]*\)))?"
 _VALID_DATA_URI_TARGET_PATTERN = re.compile(
-    r"^(data:image/[^;,\s)]+(?:;[^;,=\s)]+=[^;,=\s)]*)*;base64,"
-    r"[A-Za-z0-9+/=]+(?:[ \t\r\n\f\v]+[A-Za-z0-9+/=]+)*)"
-    r"(?:[ \t\r\n\f\v]+(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|\([^\)\r\n]*\)))?"
-    r"[ \t\r\n\f\v]*$",
+    rf"^({_DATA_URI_PATTERN}){_MARKDOWN_TITLE_PATTERN}[ \t\r\n\f\v]*$",
+    re.IGNORECASE,
+)
+_VALID_ANGLED_DATA_URI_TARGET_PATTERN = re.compile(
+    rf"^<({_DATA_URI_PATTERN})>{_MARKDOWN_TITLE_PATTERN}[ \t\r\n\f\v]*$",
     re.IGNORECASE,
 )
 
@@ -108,8 +114,10 @@ def mime_from_data_uri(data_uri: str) -> str:
 
 def _data_uri_from_markdown_target(target: str) -> str | None:
     """Return a validated data URI without an optional Markdown title."""
-    match = _VALID_DATA_URI_TARGET_PATTERN.fullmatch(target)
-    return match.group(1) if match else None
+    for pattern in (_VALID_DATA_URI_TARGET_PATTERN, _VALID_ANGLED_DATA_URI_TARGET_PATTERN):
+        if match := pattern.fullmatch(target):
+            return match.group(1)
+    return None
 
 
 def _estimated_base64_size(encoded: str) -> int:

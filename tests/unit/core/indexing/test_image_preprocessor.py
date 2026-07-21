@@ -157,6 +157,15 @@ class TestNormalizeDataUriImages:
         assert len(blocks) == 1
         assert blocks[0].image_bytes == b"image"
 
+    def test_angle_bracketed_destination_is_extracted_and_sanitized(self):
+        uri = self._data_uri(b"image")
+
+        text, blocks = normalize_data_uri_images(f'before ![logo](<{uri}> "Company logo") after')
+
+        assert "data:image" not in text
+        assert len(blocks) == 1
+        assert blocks[0].image_bytes == b"image"
+
     def test_data_uri_link_is_reduced_to_its_label(self):
         uri = self._data_uri(b"image")
 
