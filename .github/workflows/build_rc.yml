@@ -1,16 +1,13 @@
 # Build and publish release-candidate images.
 #
-# Git flow: release candidates are cut from a `release/X.Y.Z` branch. Tagging
-# that branch with `vX.Y.Z-rc.N` publishes the api, ray, and admin-ui images
-# under the `vX.Y.Z-rc.N` tag — mirroring the GA pipeline (`build.yml`) but
-# guarded to `release/*` instead of `main`, and NEVER tagging `latest`.
+# Triggered by any tag matching v*-rc.* (e.g. v2.0.0-rc.5), pushed from any
+# branch — mirrors the GA pipeline (build.yml) but never tags `latest` and
+# publishes to ghcr only (this fork has no Docker Hub credentials configured).
 #
-# api + admin-ui -> ghcr + Docker Hub; ray -> ghcr only (same split as build.yml).
-#
-# The GA pipeline (`build.yml`) also triggers on `v*` tags, but its jobs are
-# guarded to `base_ref == refs/heads/main`, so an rc tag on a release branch is
-# a no-op there. This workflow is the mirror image: it only runs for rc tags
-# whose base branch is `release/*`.
+# `vars` just lowercases the repository path once: ghcr (like any OCI
+# registry) requires a lowercase repository name, but `github.repository`
+# preserves owner/repo casing verbatim (e.g. a fork under a mixed-case
+# username), so the raw value can't be used directly as an image name.
 name: Build RC
 
 on:
@@ -19,12 +16,20 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push-image:
+  vars:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && startsWith(github.event.base_ref, 'refs/heads/release/')
+    outputs:
+      image_name: ${{ steps.vars.outputs.image_name }}
+    steps:
+      - name: Compute lowercase image name
+        id: vars
+        run: echo "image_name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+  build-and-push-image:
+    needs: vars
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -47,19 +52,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-            linagoraai/openrag
+          images: ${{ env.REGISTRY }}/${{ needs.vars.outputs.image_name }}
           tags: |
             type=ref,event=tag
 
@@ -76,8 +73,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-and-push-image-ray:
+    needs: vars
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && startsWith(github.event.base_ref, 'refs/heads/release/')
     permissions:
       contents: read
       packages: write
@@ -104,7 +101,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ray
+          images: ${{ env.REGISTRY }}/${{ needs.vars.outputs.image_name }}-ray
           tags: |
             type=ref,event=tag
 
@@ -121,8 +118,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-and-push-image-admin-ui:
+    needs: vars
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && startsWith(github.event.base_ref, 'refs/heads/release/')
     permissions:
       contents: read
       packages: write
@@ -145,19 +142,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-admin-ui
-            linagoraai/openrag-admin-ui
+          images: ${{ env.REGISTRY }}/${{ needs.vars.outputs.image_name }}-admin-ui
           tags: |
             type=ref,event=tag
 
