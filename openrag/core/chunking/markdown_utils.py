@@ -17,9 +17,14 @@ from typing import Literal
 
 from core.utils.text import clean_markdown_table_spacing
 
-# Header + delimiter + at least one row.
+# Header + delimiter + at least one row. The delimiter row is one or more cells
+# of ``:?-+:?`` with optional surrounding whitespace — this matches canonical GFM
+# spacing (``| --- | --- |``), alignment colons (``| :--- | ---: |``, ``| :---: |``)
+# and the tight form (``|---|---|``) alike. A previous ``\s*[:-]+(?:\s*\|[:-]+)*``
+# allowed whitespace only *before* each pipe, so a space *after* a pipe (the
+# canonical form) failed to match and the table fell through to plain text (#710).
 TABLE_RE = re.compile(
-    r"((?:^|\n)\|.*?\|\r?\n\|\s*[:-]+(?:\s*\|[:-]+)*\|\r?\n(?:\|.*?\|\r?\n)+)",
+    r"((?:^|\n)\|.*?\|\r?\n\|(?:\s*:?-+:?\s*\|)+\r?\n(?:\|.*?\|\r?\n)+)",
     re.DOTALL | re.MULTILINE,
 )
 
