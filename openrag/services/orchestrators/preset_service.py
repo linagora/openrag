@@ -122,7 +122,16 @@ class PresetService:
             if existing:
                 continue
             for name, config in presets.items():
-                await self._repo.upsert(name, preset_type, self._finalize_seed(name, preset_type, config))
+                finalized = self._finalize_seed(name, preset_type, config)
+                # Validate the finalized seed the same way the CRUD path does, so
+                # a structurally-invalid global override folded in here is rejected
+                # at seeding rather than persisted and exploded later. (An
+                # out-of-range CHUNK_OVERLAP_RATE is already rejected earlier at
+                # config load via ChunkerConfig's bounds; a bad CHUNKER *name* is
+                # an unvalidated string here but fails fast at chunker build — this
+                # call is defense-in-depth over both.)
+                self._validate_config(preset_type, finalized)
+                await self._repo.upsert(name, preset_type, finalized)
                 logger.info(f"Seeded default {preset_type} preset '{name}'.")
 
     def _finalize_seed(self, name: str, preset_type: str, config: dict[str, Any]) -> dict[str, Any]:

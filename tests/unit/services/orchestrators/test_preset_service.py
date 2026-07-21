@@ -593,3 +593,44 @@ async def test_seed_defaults_default_chunk_size_falls_back_to_seed_when_global_u
     default_chunking = repo._store[("default", "indexation")]["config"]["chunking"]
     assert default_chunking["chunk_size"] == 512
     assert default_chunking["chunk_overlap_rate"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_does_not_update_existing_default_chunk_size():
+    """KNOWN LIMITATION (documented, not a bug): the global chunk-size overlay
+    is a *seed-time* default. Once a `default` indexation row exists, a changed
+    CHUNK_SIZE does NOT rewrite it — `seed_defaults` skips a type that already
+    has rows. Existing deployments change chunking by editing the preset. This
+    test pins that behaviour so it isn't 'fixed' accidentally without a
+    reconciliation design (see the #709 follow-up)."""
+    from core.config.root import Settings
+
+    current = _make_row(
+        "default",
+        "indexation",
+        {**_VALID_IDX_CONFIG, "chunking": {"name": "recursive_splitter", "chunk_size": 512, "chunk_overlap_rate": 0.2}},
+    )
+    repo = _FakePresetRepo(rows=[current])
+    settings = Settings(chunker={"chunk_size": 1024})  # operator raised it after first seed
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    # Unchanged: the stored 512 is the source of truth once the row exists.
+    assert repo._store[("default", "indexation")]["config"]["chunking"]["chunk_size"] == 512
+    upserts = [c for c in repo.calls if c[0] == "upsert"]
+    assert all(args[1] != "indexation" for _, args in upserts)
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_rejects_invalid_overlap_in_default_chunking():
+    """A structurally-invalid finalized seed is rejected at seeding, not
+    persisted (defense-in-depth on the seed path). Overlap out of [0,1) can't
+    even be built into Settings, so validate the seed-path guard directly."""
+    from core.utils.exceptions import ValidationError as OpenRAGValidationError
+
+    repo = _FakePresetRepo()
+    svc = _make_service(repo)
+    bad = {"chunking": {"name": "recursive_splitter", "chunk_size": 512, "chunk_overlap_rate": 1.5}}
+    with pytest.raises(OpenRAGValidationError):
+        svc._validate_config("indexation", bad)
