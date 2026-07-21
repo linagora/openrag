@@ -321,8 +321,7 @@ class QueryService:
 
         web_results: list = []
         if partition is not None and use_websearch:
-            doc_lists, web_lists = await self._gather_rag_and_web(queries.query_list, partition, top_k, filter_params)
-            chunks = self._retrieval.fuse(doc_lists, top_k=top_k)
+            chunks, web_lists = await self._gather_rag_and_web(queries, partition, top_k, filter_params)
             web_results = _dedupe_web(web_lists)
         elif partition is not None:
             chunks = await self._retrieval.retrieve_multi(
@@ -380,13 +379,18 @@ class QueryService:
         payload["messages"] = new_messages
         return payload, docs, web_results
 
-    async def _gather_rag_and_web(self, query_list, partition, top_k, filter_params):
-        rag = self._retrieval.retrieve_per_query(
-            partitions=partition, queries=query_list, top_k=top_k, filter_params=filter_params
+    async def _gather_rag_and_web(self, queries, partition, top_k, filter_params):
+        # Fuse the doc branch through retrieve_multi so a partition's rrf_k drives
+        # its sub-query fusion here too (#707). Previously this used
+        # retrieve_per_query + fuse() at the hardcoded 60, so enabling websearch
+        # silently ignored rrf_k and the same preset fused differently depending
+        # on the websearch toggle.
+        rag = self._retrieval.retrieve_multi(
+            partitions=partition, search_queries=queries, top_k=top_k, filter_params=filter_params
         )
-        web = asyncio.gather(*[self._web.search(q.query) for q in query_list])
-        doc_lists, web_lists = await asyncio.gather(rag, web)
-        return doc_lists, web_lists
+        web = asyncio.gather(*[self._web.search(q.query) for q in queries.query_list])
+        chunks, web_lists = await asyncio.gather(rag, web)
+        return chunks, web_lists
 
     async def _prepare_completions(self, partition: list[str], payload: dict, llm: LLM | None = None):
         prompt = payload["prompt"]
