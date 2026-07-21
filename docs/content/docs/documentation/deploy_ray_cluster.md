@@ -136,6 +136,30 @@ Once running, **OpenRAG will auto-connect** to the Ray cluster using `RAY_ADDRES
 When `RAY_ADDRESS` is set, the app **attaches** to the external cluster and does **not** start its own embedded Ray dashboard — the head node owns it. Keep the dashboard bound to `127.0.0.1` by default because the dashboard API is unauthenticated ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)). If operators need remote dashboard access, expose it only through a private network, SSH tunnel, or authenticated proxy.
 :::
 
+### Retire an old indexer actor generation
+
+Detached indexer actors survive an API-only rollout when OpenRAG uses an external Ray cluster. When an upgrade changes the indexer actor protocol, stop traffic to API replicas using the old generation, then retire that generation from a checkout of the new release.
+
+The first transition is from the original unversioned actors to `v2`. Those actors cannot report whether they are idle, so verify that the old API replicas and indexing jobs have stopped before confirming their removal:
+
+```bash
+uv run python -m openrag.services.workers.retire_indexer_generation \
+  --ray-address "${RAY_ADDRESS}" \
+  --generation legacy \
+  --confirm-legacy-idle
+```
+
+Protocol-aware generations drain automatically. For example, a future `v2` retirement rejects new submissions, waits for all accepted jobs to settle, and only then removes the dispatcher and workers:
+
+```bash
+uv run python -m openrag.services.workers.retire_indexer_generation \
+  --ray-address "${RAY_ADDRESS}" \
+  --generation v2 \
+  --timeout 3600
+```
+
+If the timeout expires, the command leaves the actors running. Do not use the legacy confirmation while old API replicas can still submit indexing work. A complete Ray cluster restart also removes all detached generations.
+
 ---
 
 With this setup, your app is now fully distributed and ready to handle concurrent tasks across your Ray cluster.

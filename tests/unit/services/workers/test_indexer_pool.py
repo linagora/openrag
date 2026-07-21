@@ -953,6 +953,7 @@ def _bare_pool(workers: list) -> object:
     actor_class = IndexerPool.__ray_metadata__.modified_class
     pool = actor_class.__new__(actor_class)
     pool._workers = list(workers)
+    pool._worker_names = [f"test-worker-{index}" for index in range(len(workers))]
     pool._inflight = [0] * len(workers)
     pool._accepting_tasks = True
     pool._release_tasks = set()
@@ -1037,6 +1038,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
         "protocol_version": "v2",
         "accepting_tasks": False,
         "inflight_jobs": 1,
+        "worker_names": ["test-worker-0"],
     }
     with pytest.raises(RuntimeError, match="draining"):
         await pool.submit(task_id="rejected-after-drain")
@@ -1047,6 +1049,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
         "protocol_version": "v2",
         "accepting_tasks": False,
         "inflight_jobs": 0,
+        "worker_names": ["test-worker-0"],
     }
 
 
