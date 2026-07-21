@@ -25,3 +25,13 @@ def test_llm_and_vlm_enable_thinking_can_be_overridden_from_env(monkeypatch, tmp
     assert settings.llm.enable_thinking is False
     assert settings.vlm.enable_thinking is True
     assert settings.loader.openai.enable_thinking is False
+
+
+def test_vlm_timeout_can_be_overridden_independently_of_llm_timeout(monkeypatch, tmp_path):
+    (tmp_path / "config.yaml").write_text("retriever:\n  type: single\n", encoding="utf-8")
+    monkeypatch.setenv("VLM_TIMEOUT", "180")
+
+    settings = load_config(config_path=tmp_path)
+
+    assert settings.vlm.timeout == 180.0
+    assert settings.llm.timeout == 60

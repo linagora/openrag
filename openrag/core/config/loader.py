@@ -33,6 +33,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("VLM_MODEL", "vlm.model", str),
     ("VLM_API_KEY", "vlm.api_key", str),
     ("VLM_ENABLE_THINKING", "vlm.enable_thinking", bool),
+    ("VLM_TIMEOUT", "vlm.timeout", float),
     # Semaphore
     ("LLM_SEMAPHORE", "semaphore.llm_semaphore", int),
     ("VLM_SEMAPHORE", "semaphore.vlm_semaphore", int),
