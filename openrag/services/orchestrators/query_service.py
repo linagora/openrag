@@ -138,9 +138,16 @@ class QueryService:
         """Effective chat-history depth for this request.
 
         Honors a partition's configured ``chat_history_depth`` (set via the
-        admin API) over the global default. A partition value of ``0`` means
-        "inherit the global default" — it never reaches the ``messages[-depth:]``
-        slice, where ``0`` would otherwise select the *entire* history.
+        admin API) over the global default. The admin API now requires an
+        explicit ``chat_history_depth >= 1`` on create/update (``ge=1`` in
+        ``CreatePartitionRequest``/``UpdatePartitionRequest``), and
+        ``PartitionService.resolve_partition_row`` normalizes any pre-existing
+        row still holding the legacy ``0`` sentinel to the global default
+        value before it reaches ``Settings.partitions``. So in practice
+        ``cfg.chat_history_depth`` is always >= 1 here; the ``> 0`` filter
+        below is kept only as a defensive backstop — it must never reach the
+        ``messages[-depth:]`` slice, where ``0`` would select the *entire*
+        history rather than none.
 
         The ``"all"`` sentinel (``openrag-all``) reaches this layer un-expanded
         (retrieval resolves it to concrete partitions downstream) and is a

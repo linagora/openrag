@@ -270,7 +270,11 @@ class PartitionService:
                 "indexation_preset": r.get("indexation_preset") or "default",
                 "retrieval_preset": r.get("retrieval_preset") or "default",
                 "dimension": r.get("dimension"),
-                "chat_history_depth": r.get("chat_history_depth") or 0,
+                # `or 4`, not `or 0`: normalizes pre-existing rows stored under the old
+                # "0 = inherit global default" scheme to the concrete value they already
+                # resolve to at chat time (see QueryService._resolve_chat_history_depth).
+                # New writes can no longer produce 0 (schema now requires >=1).
+                "chat_history_depth": r.get("chat_history_depth") or 4,
                 "chat_llm": r.get("chat_llm"),
                 "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
                 "document_count": counts.get(name, 0),
@@ -287,7 +291,7 @@ class PartitionService:
         embedder: str = "default",
         indexation_preset: str = "default",
         retrieval_preset: str = "default",
-        chat_history_depth: int = 0,
+        chat_history_depth: int = 4,
         chat_llm: str | None = None,
     ) -> None:
         """Create a partition owned by ``user_id`` with preset references.
@@ -501,7 +505,8 @@ class PartitionService:
             "retrieval_pipeline": cfg.retrieval.model_dump(mode="json"),
             "dimension": row.get("dimension"),
             "created_at": row.get("created_at"),
-            "chat_history_depth": row.get("chat_history_depth") or 0,
+            # See list_partition_summaries() above for why this normalizes to 4, not 0.
+            "chat_history_depth": row.get("chat_history_depth") or 4,
             "chat_llm": row.get("chat_llm"),
         }
 
@@ -536,7 +541,10 @@ class PartitionService:
             indexation=IndexationPipelineConfig(**idx_preset),
             retrieval=RetrievalPipelineConfig(**ret_preset),
             collection_name=row.get("collection_name"),
-            chat_history_depth=row.get("chat_history_depth") or 0,
+            # See list_partition_summaries() above for why this normalizes to 4, not 0.
+            # This value feeds Settings.partitions, so it's what
+            # QueryService._resolve_chat_history_depth actually reads at chat time.
+            chat_history_depth=row.get("chat_history_depth") or 4,
             chat_llm=row.get("chat_llm"),
         )
 

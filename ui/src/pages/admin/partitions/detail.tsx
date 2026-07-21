@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Save, UserPlus, Trash2, CheckCircle, XCircle, Loader2 } from "lucide-react";
+import { ArrowLeft, Save, UserPlus, Trash2, CheckCircle, XCircle, Loader2, Info } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -162,6 +163,10 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
       toast.error("Presets are required");
       return;
     }
+    if (intOr(chatHistoryDepth, 0) < 1) {
+      toast.error("Chat history depth must be at least 1");
+      return;
+    }
     mutation.mutate();
   };
 
@@ -266,17 +271,37 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
             </div>
           </div>
           <div className="space-y-2">
-            <Label>Chat History Depth</Label>
+            <Label className="flex items-center gap-1.5">
+              Chat History Depth *
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Info className="h-3.5 w-3.5 text-muted-foreground" />
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xs">
+                    Number of previous chat messages (including the current question) kept as context
+                    for follow-up questions in this partition. Low values (e.g. 1) mean the assistant
+                    won&apos;t see earlier turns in the conversation. Default: 4.
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </Label>
             <Input
               type="number"
-              min={0}
+              min={1}
+              required
               value={chatHistoryDepth}
               onChange={(e) => setChatHistoryDepth(e.target.value)}
               disabled={!canEdit}
             />
           </div>
           {canEdit && (
-            <Button type="submit" disabled={mutation.isPending || llmValidating || llmValidated === false}>
+            <Button
+              type="submit"
+              disabled={
+                mutation.isPending || llmValidating || llmValidated === false || intOr(chatHistoryDepth, 0) < 1
+              }
+            >
               <Save className="h-4 w-4" />
               {mutation.isPending ? "Saving..." : "Save Changes"}
             </Button>

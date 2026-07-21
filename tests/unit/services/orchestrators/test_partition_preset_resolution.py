@@ -121,6 +121,23 @@ def test_resolve_partition_row_builds_config():
     assert cfg.retrieval.top_k == 50
 
 
+def test_resolve_partition_row_normalizes_legacy_zero_chat_history_depth():
+    """Rows written under the old '0 = inherit global default' scheme resolve to
+    the concrete default (4) instead of the no-longer-valid 0 (schema now
+    requires chat_history_depth >= 1 on new writes)."""
+    svc = _make_service()
+    cfg = svc.resolve_partition_row(_full_row("p1", chat_history_depth=0))
+
+    assert cfg.chat_history_depth == 4
+
+
+def test_resolve_partition_row_keeps_explicit_chat_history_depth():
+    svc = _make_service()
+    cfg = svc.resolve_partition_row(_full_row("p1", chat_history_depth=10))
+
+    assert cfg.chat_history_depth == 10
+
+
 def test_resolve_partition_row_missing_indexation_preset_raises():
     from core.utils.exceptions import ConfigError
 
