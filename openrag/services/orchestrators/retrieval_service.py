@@ -284,6 +284,34 @@ class RetrievalService:
     # Pipeline retrieval (powers QueryService — 8C.2)
     # ------------------------------------------------------------------
 
+    async def _gather_partition_groups(self, coros: list) -> list:
+        """Await one coroutine per partition group, bounding concurrency.
+
+        Small fan-outs (the common case: a handful of partitions) run fully
+        parallel via a plain gather — no added overhead, byte-identical to the
+        prior behaviour. Only a fan-out larger than ``max_partition_concurrency``
+        (e.g. a SUPER_ADMIN_MODE ``openrag-all`` expanded to every partition) is
+        throttled through a per-call semaphore, so one request cannot launch a
+        partition-count-proportional flood of embed+Milvus calls (#708).
+
+        The semaphore is per-call, not shared: it caps this request's own fan-out
+        without coupling concurrent requests, and the caps compose safely across
+        the ``retrieve_per_query`` → ``retrieve`` nesting (each inner call bounds
+        its own leaves; the coroutines being awaited hold no permit while
+        waiting for one, so there is no cross-level deadlock).
+        """
+        limit = getattr(self._config.retriever, "max_partition_concurrency", 16) or 16
+        if len(coros) <= limit:
+            return await asyncio.gather(*coros)
+
+        semaphore = asyncio.Semaphore(limit)
+
+        async def _bounded(coro):
+            async with semaphore:
+                return await coro
+
+        return await asyncio.gather(*(_bounded(c) for c in coros))
+
     async def retrieve(
         self,
         *,
@@ -293,8 +321,8 @@ class RetrievalService:
         filter_params: dict | None = None,
     ) -> list[Chunk]:
         """Single ``Query`` through retrieve → expand → rerank."""
-        ranked_lists = await asyncio.gather(
-            *[
+        ranked_lists = await self._gather_partition_groups(
+            [
                 pipeline.retrieve_docs(
                     partition=partition_group,
                     query=query,
@@ -315,8 +343,8 @@ class RetrievalService:
         filter_params: dict | None = None,
     ) -> list[Chunk]:
         """Every sub-query in parallel, fused with RRF."""
-        ranked_lists = await asyncio.gather(
-            *[
+        ranked_lists = await self._gather_partition_groups(
+            [
                 pipeline.get_relevant_docs(
                     partition=partition_group,
                     search_queries=search_queries,

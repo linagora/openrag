@@ -9,6 +9,7 @@ without inference services.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -376,3 +377,70 @@ async def test_retrieve_all_falls_back_to_legacy_when_no_partitions_exist():
 
     assert [c.id for c in out] == ["x"]
     assert default_searcher.search_calls[0]["partition"] == ["all"]
+
+
+# --- #708: the "all" fan-out must be concurrency-bounded (production safety) ---
+
+
+def _tracking_factory(state: dict):
+    """searcher_factory whose searchers share a live-concurrency tracker."""
+
+    def factory(_name: str) -> FakeSearcher:
+        s = FakeSearcher()
+
+        async def tracked_search(**kwargs):
+            state["live"] += 1
+            state["max"] = max(state["max"], state["live"])
+            for _ in range(5):  # yield so queued searches get a chance to start
+                await asyncio.sleep(0)
+            state["live"] -= 1
+            return [_chunk("hit")]
+
+        s.search = tracked_search
+        return s
+
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_retrieve_all_bounds_partition_fanout():
+    """A large `all` fan-out must not launch one search per partition at once.
+    With the cap at 2 over 6 partitions, no more than 2 run concurrently."""
+    state = {"live": 0, "max": 0}
+    cfg = _config()
+    cfg.retriever.max_partition_concurrency = 2
+    cfg.partitions = {f"p{i}": _partition(name=f"p{i}", embedder=f"e{i}") for i in range(6)}
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=_tracking_factory(state),
+    )
+
+    await svc.retrieve(partitions=["all"], query=Query(query="hi"))
+
+    assert state["max"] <= 2, f"fan-out exceeded the cap: {state['max']}"
+    assert state["max"] == 2, "the cap should still allow parallelism up to the limit"
+    assert state["live"] == 0
+
+
+@pytest.mark.asyncio
+async def test_retrieve_small_fanout_stays_fully_parallel():
+    """The fast path: a fan-out within the cap runs fully parallel — regular
+    multi-partition users are not throttled and keep the prior behaviour."""
+    state = {"live": 0, "max": 0}
+    cfg = _config()
+    cfg.retriever.max_partition_concurrency = 16
+    cfg.partitions = {f"p{i}": _partition(name=f"p{i}", embedder=f"e{i}") for i in range(3)}
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=_tracking_factory(state),
+    )
+
+    await svc.retrieve(partitions=["all"], query=Query(query="hi"))
+
+    assert state["max"] == 3, "all 3 partitions should run concurrently under the cap"
