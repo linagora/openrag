@@ -65,8 +65,17 @@ class VLLMClient(LLM):
         api_key: str = "",
         timeout: float = 240.0,
         enable_thinking: bool | None = None,
+        max_retries: int = 2,
         **kwargs,
     ) -> None:
+        # max_retries is accepted (not forwarded into self._defaults) purely to
+        # stop it from leaking into the request body: LLMParamsConfig carries it
+        # as a config field, but retry attempts are fixed by the @with_retry
+        # decorator on each method, not by a per-instance value. Without this
+        # param it would fall into **kwargs like an unknown sampling field and
+        # get sent to the backend on every call — the same class of bug fixed
+        # for batch_size in di/factories.py (#712).
+        del max_retries
         self._endpoint = endpoint.rstrip("/")
         self._model = model_name
         self._api_key = api_key
