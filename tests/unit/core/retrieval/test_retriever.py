@@ -7,6 +7,7 @@ the new core/ retriever has clean dependencies.
 from __future__ import annotations
 
 import pytest
+from core.llm.llm import chat_content
 from core.models.chunk import Chunk
 from core.retrieval.retriever import (
     HyDeRetriever,
@@ -48,16 +49,29 @@ class FakeSearcher(RetrievalSearcher):
 
 
 class FakeLLM:
+    """Test double for the ``LLM`` port.
+
+    Returns the OpenAI-shaped ``dict`` the real port declares (``LLM.chat ->
+    dict``), NOT a bare ``str``. A previous ``-> str`` fake was more permissive
+    than production and hid #703: ``multiQuery``/``hyde`` called ``.split()`` /
+    ``.strip()`` straight on the response and raised ``AttributeError`` on every
+    real query while these tests stayed green.
+    """
+
     def __init__(self, response: str) -> None:
         self.response = response
         self.chat_calls: list[list[dict]] = []
 
-    async def generate(self, prompt: str, **kwargs) -> str:
-        return self.response
+    @staticmethod
+    def _envelope(content: str) -> dict:
+        return {"choices": [{"message": {"role": "assistant", "content": content}}]}
 
-    async def chat(self, messages: list[dict], **kwargs) -> str:
+    async def generate(self, prompt: str, **kwargs) -> dict:
+        return self._envelope(self.response)
+
+    async def chat(self, messages: list[dict], **kwargs) -> dict:
         self.chat_calls.append(messages)
-        return self.response
+        return self._envelope(self.response)
 
 
 def _chunk(idv: str, text: str = "x", document_id: str = "", partition: str = "p1") -> Chunk:
@@ -272,3 +286,70 @@ async def test_expansion_dedupes_ancestor_fetches_per_file():
     ]
     await r.expand_search_results(initial)
     assert s.ancestor_call_count == 1
+
+
+# --- #703 regression: LLM.chat returns a dict, not a str -------------------
+
+
+def test_chat_content_extracts_assistant_message():
+    assert chat_content({"choices": [{"message": {"content": "hello"}}]}) == "hello"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"choices": []},
+        {"choices": [{}]},
+        {"choices": [{"message": {}}]},
+        {"choices": [{"message": {"content": None}}]},
+        None,
+        "already a string",
+    ],
+)
+def test_chat_content_degrades_to_empty_on_malformed_payload(payload):
+    """A non-compliant provider must not crash retrieval — callers fall back
+    to the original query when expansion yields nothing."""
+    assert chat_content(payload) == ""
+
+
+@pytest.mark.asyncio
+async def test_multi_query_handles_dict_response_from_llm_port():
+    """Regression for #703: the real ``LLM.chat`` returns a dict. Calling
+    ``.split()`` on it raised AttributeError on every multiQuery search."""
+    s = FakeSearcher()
+    llm = FakeLLM("alpha[SEP]beta")
+    r = MultiQueryRetriever(
+        searcher=s,
+        llm=llm,
+        multi_query_template="generate {k_queries} variants of: {query}",
+        k_queries=2,
+    )
+    await r.retrieve(partition=["p1"], query="seed")
+    assert s.multi_calls[0]["queries"] == ["alpha", "beta"]
+
+
+@pytest.mark.asyncio
+async def test_hyde_handles_dict_response_from_llm_port():
+    """Regression for #703: ``.strip()`` on the dict raised AttributeError on
+    every hyde search."""
+    s = FakeSearcher()
+    llm = FakeLLM("  hypothetical answer  ")
+    r = HyDeRetriever(searcher=s, llm=llm, hyde_template="Answer: {question}")
+    await r.retrieve(partition=["p1"], query="seed")
+    assert s.multi_calls[0]["queries"] == ["hypothetical answer"]
+
+
+@pytest.mark.asyncio
+async def test_hyde_falls_back_to_seed_when_llm_returns_malformed_payload():
+    s = FakeSearcher()
+    llm = FakeLLM("")
+
+    async def _malformed(messages, **kwargs):
+        llm.chat_calls.append(messages)
+        return {"unexpected": "shape"}
+
+    llm.chat = _malformed
+    r = HyDeRetriever(searcher=s, llm=llm, hyde_template="Answer: {question}")
+    await r.retrieve(partition=["p1"], query="seed")
+    assert s.multi_calls[0]["queries"] == ["seed"]

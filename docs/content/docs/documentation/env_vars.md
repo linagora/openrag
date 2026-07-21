@@ -481,7 +481,7 @@ Web search allows the LLM to augment RAG document context with live web results.
 | `WEBSEARCH_FETCH_MAX_RESULTS` | `int` | `3` | Number of top URLs to fetch content from (the remaining results use their search snippet). |
 | `WEBSEARCH_FETCH_TIMEOUT` | `float` | `1.0` | Per-URL timeout in seconds for content fetching. URLs that don't respond within this time fall back to their snippet. |
 | `WEBSEARCH_FETCH_MAX_TOKENS` | `int` | `500` | Maximum approximate tokens of content to extract per page. Content is truncated at word boundaries. |
-| `WEBSEARCH_FETCH_VERIFY_SSL` | `bool` | `false` | Whether to verify SSL certificates when fetching page content. |
+| `WEBSEARCH_FETCH_VERIFY_SSL` | `bool` | `true` | Whether to verify SSL certificates when fetching page content. Set to `false` only for internal CAs — fetched pages are injected into the LLM context as cited sources. |
 
 :::tip[How to Enable Web Search?]
 When chatting, you can enable web search through the OpenAI-compatible API by setting `"websearch": true` in the `metadata` field of the request body. See the [API documentation](/openrag/documentation/api/#extra-arguments) for examples.

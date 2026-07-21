@@ -1,5 +1,6 @@
 import asyncio
 import socket
+from pathlib import Path
 
 import httpx
 import pytest
@@ -305,6 +306,24 @@ def test_fetch_verify_ssl_default_is_true():
 
     cfg = StaanWebSearchConfig()
     assert cfg.fetch_verify_ssl is True
+
+
+def test_fetch_verify_ssl_is_true_in_the_shipped_yaml():
+    """The *effective* value must be True, not just the Pydantic default.
+
+    Regression for #714. The test above constructs the model directly, so it
+    passes on the declared default and never sees ``conf/config.yaml``. Since
+    the loader merges YAML over that default, `conf/config.yaml` shipping
+    ``fetch_verify_ssl: false`` silently disabled TLS verification at runtime
+    while this file stayed green — the #404 fix never took effect.
+
+    Assert the shipped YAML directly so a config-level override cannot
+    re-disable it without turning a test red.
+    """
+    import yaml
+
+    conf = yaml.safe_load((Path(__file__).parents[4] / "conf" / "config.yaml").read_text())
+    assert conf["websearch"]["fetch_verify_ssl"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -285,3 +285,211 @@ async def test_check_user_file_quota_default_zero_enforces_zero():
     assert exc.value.status_code == 403
     assert exc.value.detail == "File quota exceeded"
     assert denied_job_service.pending_checks == [8]
+
+
+# ---------------------------------------------------------------------------
+# #725 — the role literal each wrapper passes must itself be asserted.
+#
+# `ensure_partition_role` is well covered, but every existing test of the thin
+# wrappers replaces them via `dependency_overrides`, so the wrapper body — and
+# the role string it hardcodes — never executes. Mutation testing showed five of
+# six wrappers could be made allow-all with zero failures, and a one-word slip
+# ("owner" -> "viewer") across three byte-identical wrappers would ship green.
+#
+# These call each wrapper DIRECTLY and spy on the role it forwards.
+# ---------------------------------------------------------------------------
+
+
+class RoleSpy:
+    """Records the required_role each wrapper forwards to ensure_partition_role."""
+
+    def __init__(self) -> None:
+        self.roles: list[str] = []
+        self.partitions: list[str] = []
+
+    async def __call__(self, partition, user, user_partitions, required_role, **kwargs):
+        self.partitions.append(partition)
+        self.roles.append(required_role)
+        return True
+
+
+@pytest.fixture
+def role_spy(monkeypatch):
+    spy = RoleSpy()
+    monkeypatch.setattr("api.dependencies.auth.ensure_partition_role", spy)
+    return spy
+
+
+@pytest.mark.parametrize(
+    ("wrapper_name", "expected_role"),
+    [
+        ("require_partition_viewer", "viewer"),
+        ("require_partition_editor", "editor"),
+        ("require_partition_owner", "owner"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_partition_wrappers_forward_their_own_role(role_spy, wrapper_name, expected_role):
+    import api.dependencies.auth as auth_deps
+
+    wrapper = getattr(auth_deps, wrapper_name)
+    user = {"id": 1, "is_admin": False}
+
+    returned = await wrapper(
+        partition="p1",
+        user=user,
+        user_partitions=[],
+        auth_service=FakeAuthService,
+        partition_service=FakePartitionService(existing={"p1"}),
+    )
+
+    assert role_spy.roles == [expected_role], f"{wrapper_name} must require '{expected_role}'"
+    assert role_spy.partitions == ["p1"]
+    assert returned is user
+
+
+@pytest.mark.asyncio
+async def test_require_partitions_viewer_forwards_viewer_for_each_partition(role_spy):
+    user = {"id": 1, "is_admin": False}
+
+    await require_partitions_viewer(
+        partitions=["a", "b"],
+        user=user,
+        user_partitions=[{"partition": "a"}, {"partition": "b"}],
+        auth_service=FakeAuthService,
+        partition_service=FakePartitionService(existing={"a", "b"}),
+    )
+
+    assert role_spy.roles == ["viewer", "viewer"]
+    assert role_spy.partitions == ["a", "b"]
+
+
+# --- require_admin / require_admin_or_self: previously 0 direct references ---
+
+
+def test_require_admin_rejects_non_admin():
+    from api.dependencies.auth import require_admin
+
+    with pytest.raises(HTTPException) as exc:
+        require_admin(user={"id": 2, "is_admin": False})
+    assert exc.value.status_code == 403
+
+
+def test_require_admin_rejects_missing_user():
+    from api.dependencies.auth import require_admin
+
+    with pytest.raises(HTTPException) as exc:
+        require_admin(user=None)
+    assert exc.value.status_code == 403
+
+
+def test_require_admin_allows_admin():
+    from api.dependencies.auth import require_admin
+
+    user = {"id": 1, "is_admin": True}
+    assert require_admin(user=user) is user
+
+
+@pytest.mark.parametrize(
+    ("user", "target_user_id", "allowed"),
+    [
+        ({"id": 5, "is_admin": True}, 9, True),  # admin acting on someone else
+        ({"id": 5, "is_admin": False}, 5, True),  # self
+        ({"id": 5, "is_admin": False}, 9, False),  # another user's account
+        ({"id": 5, "is_admin": False}, None, False),  # no target resolved
+    ],
+)
+def test_require_admin_or_self_matrix(user, target_user_id, allowed):
+    """Guards token regeneration; had zero test references before #725."""
+    from api.dependencies.auth import require_admin_or_self
+
+    if allowed:
+        assert require_admin_or_self(target_user_id=target_user_id, user=user) is user
+    else:
+        with pytest.raises(HTTPException) as exc:
+            require_admin_or_self(target_user_id=target_user_id, user=user)
+        assert exc.value.status_code == 403
+
+
+def test_require_admin_or_self_rejects_missing_user():
+    from api.dependencies.auth import require_admin_or_self
+
+    with pytest.raises(HTTPException) as exc:
+        require_admin_or_self(target_user_id=1, user=None)
+    assert exc.value.status_code == 403
+
+
+# --- SUPER_ADMIN_MODE: the deny side had no test at all ---
+
+
+@pytest.mark.asyncio
+async def test_admin_does_not_bypass_partition_check_when_super_admin_mode_off(monkeypatch):
+    """With SUPER_ADMIN_MODE off, is_admin must NOT grant cross-partition access.
+
+    Dropping the `SUPER_ADMIN_MODE and ...` conjunct (making it permanently on)
+    previously failed no test.
+    """
+    monkeypatch.setattr("api.dependencies.auth.SUPER_ADMIN_MODE", False)
+
+    with pytest.raises(HTTPException) as exc:
+        await ensure_partition_role(
+            "other-tenant",
+            {"id": 1, "is_admin": True},
+            [],  # no membership
+            "viewer",
+            auth_service=FakeAuthService,
+            partition_service=FakePartitionService(existing={"other-tenant"}),
+        )
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_admin_bypasses_partition_check_when_super_admin_mode_on(monkeypatch):
+    monkeypatch.setattr("api.dependencies.auth.SUPER_ADMIN_MODE", True)
+
+    assert await ensure_partition_role(
+        "other-tenant",
+        {"id": 1, "is_admin": True},
+        [],
+        "viewer",
+        auth_service=FakeAuthService,
+        partition_service=FakePartitionService(existing={"other-tenant"}),
+    )
+
+
+# --- quota: the in-flight half (the #664 race) was unverified ---
+
+
+@pytest.mark.asyncio
+async def test_quota_denies_on_pending_tasks_alone():
+    """Pending tasks alone must be able to exhaust the quota.
+
+    Uses the real AuthService, not a fake: forcing `pending_task_count=0` in the
+    dependency previously failed no test, because every enforcing case already
+    passed pending_count=0. This is the in-flight half that #664 is about.
+    """
+    job_service = FakeJobService(pending_count=5)
+
+    with pytest.raises(HTTPException) as exc:
+        await check_user_file_quota(
+            user={"id": 7, "is_admin": False, "file_count": 0, "file_quota": 5},
+            auth_service=AuthService,
+            job_service=job_service,
+            config=_config(default_file_quota=10),
+        )
+
+    assert exc.value.status_code == 403
+    assert job_service.pending_checks == [7]
+
+
+@pytest.mark.asyncio
+async def test_quota_allows_when_indexed_plus_pending_is_under_limit():
+    job_service = FakeJobService(pending_count=1)
+
+    user = await check_user_file_quota(
+        user={"id": 7, "is_admin": False, "file_count": 1, "file_quota": 5},
+        auth_service=AuthService,
+        job_service=job_service,
+        config=_config(default_file_quota=10),
+    )
+    assert user["id"] == 7
