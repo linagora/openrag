@@ -103,3 +103,59 @@ class TestDistributedSemaphoreActorRestartSafety:
             second.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await second
+
+
+class TestDistributedSemaphoreSharedInstanceConcurrencySafety:
+    """A single ``DistributedSemaphore`` instance is routinely entered by many
+    concurrent callers at once (e.g. the cluster-wide ``llmSemaphore`` shared
+    across a batch of chunk-contextualization calls). The incarnation token
+    must be tracked per calling task, not on ``self`` - otherwise a
+    concurrent caller's acquire (after an actor restart) can overwrite
+    another's release token, causing a stale release to be misattributed to
+    the new incarnation and over-releasing the freshly-restarted semaphore
+    (self-review comment on PR #719).
+    """
+
+    async def test_concurrent_holder_release_is_not_clobbered_by_a_sibling_acquire_after_restart(self):
+        namespace = f"test-shared-{uuid.uuid4().hex}"
+        sem = DistributedSemaphore(name="sem", namespace=namespace, max_concurrent_ops=1)
+
+        entered = asyncio.Event()
+        release_now = asyncio.Event()
+
+        async def hold_across_restart():
+            async with sem:
+                entered.set()
+                await release_now.wait()
+
+        # Task A takes the only permit under the pre-restart incarnation and
+        # blocks inside the critical section.
+        task_a = asyncio.ensure_future(hold_across_restart())
+        await asyncio.wait_for(entered.wait(), timeout=2.0)
+
+        actor = sem._get_or_create_actor()
+        ray.kill(actor, no_restart=False)
+        await asyncio.sleep(1.0)  # let Ray restart the actor: fresh semaphore, fresh incarnation
+
+        # Task B reuses the SAME shared `sem` instance and acquires after the
+        # restart - capacity is free again post-restart, so this succeeds
+        # immediately. Pre-fix, this would overwrite `sem._incarnation`.
+        await asyncio.wait_for(sem.__aenter__(), timeout=2.0)
+
+        # Let task A's (pre-restart) hold release. If its incarnation token
+        # was clobbered by task B's acquire, the actor would wrongly accept
+        # the release and the freshly-restarted semaphore would end up
+        # over-capacity.
+        release_now.set()
+        await asyncio.wait_for(task_a, timeout=2.0)
+
+        # Capacity is 1 and task B is still holding it: a third acquire must
+        # block, proving task A's release did not land on task B's incarnation.
+        third = asyncio.ensure_future(sem.__aenter__())
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(third), timeout=0.5)
+        finally:
+            third.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await third

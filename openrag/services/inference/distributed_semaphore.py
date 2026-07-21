@@ -41,7 +41,14 @@ class DistributedSemaphore:
     """Async context manager backed by a detached Ray actor.
 
     The actor is created on first use (get-or-create) and survives across
-    callers within the same Ray cluster.
+    callers within the same Ray cluster. Instances are routinely shared and
+    entered concurrently by many callers at once (e.g. one cluster-wide
+    ``llmSemaphore`` used by every call in a batch of chunk-contextualization
+    tasks), so the incarnation token from each acquire is tracked per calling
+    task rather than on ``self``: storing it on ``self`` would let one
+    caller's concurrent ``__aenter__`` overwrite another's before its
+    ``__aexit__`` reads it back, misattributing a release to the wrong
+    incarnation after an actor restart.
     """
 
     def __init__(
@@ -53,7 +60,7 @@ class DistributedSemaphore:
         self._name = name
         self._namespace = namespace
         self._max_concurrent_ops = max_concurrent_ops
-        self._incarnation: str | None = None
+        self._incarnations: dict[asyncio.Task, list[str | None]] = {}
 
     def _get_or_create_actor(self):
         try:
@@ -76,15 +83,21 @@ class DistributedSemaphore:
         # for the lifetime of the actor.
         acquire_task = asyncio.ensure_future(semaphore_actor.acquire.remote())
         try:
-            self._incarnation = await asyncio.shield(acquire_task)
+            incarnation = await asyncio.shield(acquire_task)
         except asyncio.CancelledError:
             acquire_task.add_done_callback(functools.partial(_release_if_granted, self._name, semaphore_actor))
             raise
+        self._incarnations.setdefault(asyncio.current_task(), []).append(incarnation)
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         semaphore_actor = self._get_or_create_actor()
-        await semaphore_actor.release.remote(self._incarnation)
+        task = asyncio.current_task()
+        stack = self._incarnations.get(task)
+        incarnation = stack.pop() if stack else None
+        if stack is not None and not stack:
+            del self._incarnations[task]
+        await semaphore_actor.release.remote(incarnation)
 
 
 def _release_if_granted(name: str, semaphore_actor, acquire_task: asyncio.Task) -> None:
