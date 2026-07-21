@@ -9,11 +9,14 @@ retiring it requires an explicit operator confirmation.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import re
 import time
 from typing import Any
 
 import ray
+
+from .ray_utils import call_ray_actor_with_timeout
 
 _LEGACY_GENERATION = "legacy"
 _LEGACY_DISPATCHER_NAME = "IndexerPoolDispatcher"
@@ -69,6 +72,48 @@ def _kill_actor(name: str, namespace: str) -> bool:
     return True
 
 
+def _drain_timeout(generation: str, timeout: float) -> TimeoutError:
+    return TimeoutError(
+        f"Indexer generation {generation!r} did not drain within {timeout:g} seconds; actors were kept."
+    )
+
+
+async def _drain_protocol_generation(
+    dispatcher: Any,
+    generation: str,
+    *,
+    timeout: float,
+    poll_interval: float,
+) -> dict[str, Any]:
+    """Drain one protocol-aware generation within one end-to-end deadline."""
+    deadline = time.monotonic() + timeout
+
+    async def call_with_remaining_timeout(method: Any, description: str) -> dict[str, Any]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _drain_timeout(generation, timeout)
+        future = method.remote()
+        try:
+            return await call_ray_actor_with_timeout(future, remaining, description)
+        except TimeoutError as exc:
+            raise _drain_timeout(generation, timeout) from exc
+
+    status = await call_with_remaining_timeout(
+        dispatcher.begin_drain,
+        f"Begin draining indexer generation {generation}",
+    )
+    while int(status.get("inflight_jobs", 0)) > 0:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _drain_timeout(generation, timeout)
+        await asyncio.sleep(min(max(poll_interval, 0.0), remaining))
+        status = await call_with_remaining_timeout(
+            dispatcher.status,
+            f"Check indexer generation {generation} drain status",
+        )
+    return status
+
+
 def retire_generation(
     generation: str,
     *,
@@ -98,15 +143,14 @@ def retire_generation(
                 "then rerun with --confirm-legacy-idle."
             )
     else:
-        status = ray.get(dispatcher.begin_drain.remote())
-        deadline = time.monotonic() + timeout
-        while int(status.get("inflight_jobs", 0)) > 0:
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"Indexer generation {generation!r} did not drain within {timeout:g} seconds; actors were kept."
-                )
-            time.sleep(poll_interval)
-            status = ray.get(dispatcher.status.remote())
+        status = asyncio.run(
+            _drain_protocol_generation(
+                dispatcher,
+                generation,
+                timeout=timeout,
+                poll_interval=poll_interval,
+            )
+        )
         worker_names = list(status.get("worker_names") or worker_names)
 
     removed: list[str] = []
