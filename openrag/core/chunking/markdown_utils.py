@@ -24,10 +24,12 @@ from core.utils.text import clean_markdown_table_spacing
 # allowed whitespace only *before* each pipe, so a space *after* a pipe (the
 # canonical form) failed to match and the table fell through to plain text (#710).
 # In-cell whitespace is ``[ \t]`` (not ``\s``) so a delimiter can't span line
-# breaks and swallow following rows as one multi-line "delimiter".
+# breaks and swallow following rows as one multi-line "delimiter". No re.DOTALL,
+# so a row's ``.*?`` stays on its line (a pipe-looking text line can't be pulled
+# into a later table); the final row may end at a newline OR EOF.
 TABLE_RE = re.compile(
-    r"((?:^|\n)\|.*?\|\r?\n\|(?:[ \t]*:?-+:?[ \t]*\|)+\r?\n(?:\|.*?\|\r?\n)+)",
-    re.DOTALL | re.MULTILINE,
+    r"((?:^|\n)\|.*?\|\r?\n\|(?:[ \t]*:?-+:?[ \t]*\|)+\r?\n(?:\|.*?\|(?:\r?\n|$))+)",
+    re.MULTILINE,
 )
 
 # `<image_description>...</image_description>` block injected by the VLM step.

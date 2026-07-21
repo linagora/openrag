@@ -69,6 +69,22 @@ class TestSplitMdElements:
         elems = split_md_elements(md)
         assert any(e.type == "table" for e in elems)
 
+    def test_table_at_eof_without_trailing_newline(self):
+        """A table whose last row ends at EOF (no trailing newline) is detected."""
+        md = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        elems = split_md_elements(md)
+        assert any(e.type == "table" for e in elems)
+
+    def test_pipe_text_line_before_blank_not_swallowed_into_later_table(self):
+        """A pipe-looking text line before a blank line must not be pulled into a
+        later table by ``.*?`` crossing line breaks (hedhoud review on #710)."""
+        md = "| just some | inline pipes |\n\nintro\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+        elems = split_md_elements(md)
+        tables = [e for e in elems if e.type == "table"]
+        assert len(tables) == 1
+        assert "just some" not in tables[0].content
+        assert "A" in tables[0].content
+
     def test_delimiter_cannot_span_line_breaks(self):
         """In-cell whitespace is spaces/tabs only — a "delimiter" broken across
         physical lines is not a valid GFM delimiter and must not match (hedhoud
