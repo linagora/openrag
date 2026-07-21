@@ -761,7 +761,7 @@ export default function PartitionListPage() {
                       Chat History Depth *
                       <TooltipProvider>
                         <Tooltip>
-                          <TooltipTrigger asChild>
+                          <TooltipTrigger type="button" className="cursor-help">
                             <Info className="h-3.5 w-3.5 text-muted-foreground" />
                           </TooltipTrigger>
                           <TooltipContent className="max-w-xs">

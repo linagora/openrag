@@ -569,6 +569,9 @@ class PartitionService:
             raise ConfigError("PartitionService was constructed without a config; preset resolution unavailable.")
         return self._config
 
+    #: Depth used when neither a partition row nor the global config yields a usable value.
+    _CHAT_HISTORY_DEPTH_DEFAULT = 4
+
     def _legacy_chat_history_depth_fallback(self) -> int:
         """Value substituted for a partition row still holding the pre-guard ``0``.
 
@@ -579,8 +582,17 @@ class PartitionService:
         from the live config, not a hardcoded constant, so a legacy row keeps resolving
         to the *current* global default exactly as it did before, even if an operator
         changes ``rag.chat_history_depth`` later.
+
+        ``RAGConfig.chat_history_depth`` itself carries no lower bound, so a deployment
+        may configure it to ``0`` (or negative). Since this value feeds
+        ``PartitionConfig(chat_history_depth: ge=1)``, returning ``< 1`` here would make
+        ``load_partitions()`` raise ``ValidationError`` at startup. Clamp such values to
+        the hardcoded default so a legacy row can never crash partition loading.
         """
-        return self._config.rag.chat_history_depth if self._config is not None else 4
+        if self._config is None:
+            return self._CHAT_HISTORY_DEPTH_DEFAULT
+        configured = self._config.rag.chat_history_depth
+        return configured if configured >= 1 else self._CHAT_HISTORY_DEPTH_DEFAULT
 
     # ------------------------------------------------------------------
     # File / chunk reads

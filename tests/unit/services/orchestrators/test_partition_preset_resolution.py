@@ -151,6 +151,22 @@ def test_resolve_partition_row_legacy_zero_tracks_current_global_default():
     assert cfg.chat_history_depth == 9
 
 
+@pytest.mark.parametrize("global_depth", [0, -1])
+def test_resolve_partition_row_legacy_zero_clamps_invalid_global_default(global_depth):
+    """RAGConfig.chat_history_depth carries no lower bound, so a deployment may set it
+    to 0 (or negative). A legacy-0 row would then inherit that value and hit
+    PartitionConfig's ge=1 guard, crashing load_partitions() at startup. The fallback
+    must clamp such values to the hardcoded default instead of propagating them."""
+    from core.config.retrieval import RAGConfig
+
+    settings = _settings().model_copy(update={"rag": RAGConfig(chat_history_depth=global_depth)})
+    svc = _make_service(settings=settings)
+
+    cfg = svc.resolve_partition_row(_full_row("p1", chat_history_depth=0))
+
+    assert cfg.chat_history_depth == 4
+
+
 def test_resolve_partition_row_missing_indexation_preset_raises():
     from core.utils.exceptions import ConfigError
 
