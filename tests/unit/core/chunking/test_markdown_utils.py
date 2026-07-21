@@ -69,6 +69,14 @@ class TestSplitMdElements:
         elems = split_md_elements(md)
         assert any(e.type == "table" for e in elems)
 
+    def test_delimiter_cannot_span_line_breaks(self):
+        """In-cell whitespace is spaces/tabs only — a "delimiter" broken across
+        physical lines is not a valid GFM delimiter and must not match (hedhoud
+        review on #710)."""
+        md = "| A | B |\n| ---\n | --- |\n| 1 | 2 |\n"
+        elems = split_md_elements(md)
+        assert all(e.type != "table" for e in elems)
+
     def test_single_image(self):
         md = (
             "\nText before image.\n\n<image_description>\nA beautiful sunset over the ocean.\n"

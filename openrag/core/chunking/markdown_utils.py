@@ -18,13 +18,15 @@ from typing import Literal
 from core.utils.text import clean_markdown_table_spacing
 
 # Header + delimiter + at least one row. The delimiter row is one or more cells
-# of ``:?-+:?`` with optional surrounding whitespace — this matches canonical GFM
+# of ``:?-+:?`` with optional surrounding spaces/tabs — this matches canonical GFM
 # spacing (``| --- | --- |``), alignment colons (``| :--- | ---: |``, ``| :---: |``)
 # and the tight form (``|---|---|``) alike. A previous ``\s*[:-]+(?:\s*\|[:-]+)*``
 # allowed whitespace only *before* each pipe, so a space *after* a pipe (the
 # canonical form) failed to match and the table fell through to plain text (#710).
+# In-cell whitespace is ``[ \t]`` (not ``\s``) so a delimiter can't span line
+# breaks and swallow following rows as one multi-line "delimiter".
 TABLE_RE = re.compile(
-    r"((?:^|\n)\|.*?\|\r?\n\|(?:\s*:?-+:?\s*\|)+\r?\n(?:\|.*?\|\r?\n)+)",
+    r"((?:^|\n)\|.*?\|\r?\n\|(?:[ \t]*:?-+:?[ \t]*\|)+\r?\n(?:\|.*?\|\r?\n)+)",
     re.DOTALL | re.MULTILINE,
 )
 
