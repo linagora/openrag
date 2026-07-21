@@ -13,15 +13,19 @@ import argparse
 import asyncio
 import re
 import time
+import uuid
 from typing import Any
 
 import ray
+from core.utils.logging import get_logger
 
 from .ray_utils import call_ray_actor_with_timeout
 
 _LEGACY_GENERATION = "legacy"
 _LEGACY_DISPATCHER_NAME = "IndexerPoolDispatcher"
 _LEGACY_WORKER_PATTERN = re.compile(r"^IndexerWorker-\d+$")
+_RECOVERY_TIMEOUT_SECONDS = 30.0
+logger = get_logger()
 
 
 def _actor_name(actor: Any) -> str:
@@ -88,31 +92,53 @@ async def _drain_protocol_generation(
 ) -> dict[str, Any]:
     """Drain one protocol-aware generation within one end-to-end deadline."""
     deadline = time.monotonic() + timeout
+    operation_id = uuid.uuid4().hex
+    drain_started = False
 
-    async def call_with_remaining_timeout(method: Any, description: str) -> dict[str, Any]:
+    async def call_with_remaining_timeout(method: Any, description: str, *args: Any) -> dict[str, Any]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise _drain_timeout(generation, timeout)
-        future = method.remote()
+        future = method.remote(*args)
         try:
             return await call_ray_actor_with_timeout(future, remaining, description)
         except TimeoutError as exc:
             raise _drain_timeout(generation, timeout) from exc
 
-    status = await call_with_remaining_timeout(
-        dispatcher.begin_drain,
-        f"Begin draining indexer generation {generation}",
-    )
-    while int(status.get("inflight_jobs", 0)) > 0:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _drain_timeout(generation, timeout)
-        await asyncio.sleep(min(max(poll_interval, 0.0), remaining))
+    try:
         status = await call_with_remaining_timeout(
-            dispatcher.status,
-            f"Check indexer generation {generation} drain status",
+            dispatcher.begin_drain,
+            f"Begin draining indexer generation {generation}",
+            operation_id,
         )
-    return status
+        drain_started = True
+        while int(status.get("inflight_jobs", 0)) > 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _drain_timeout(generation, timeout)
+            await asyncio.sleep(min(max(poll_interval, 0.0), remaining))
+            status = await call_with_remaining_timeout(
+                dispatcher.status,
+                f"Check indexer generation {generation} drain status",
+            )
+        return status
+    except BaseException as exc:
+        if not drain_started:
+            raise
+        try:
+            await call_ray_actor_with_timeout(
+                dispatcher.abort_drain.remote(operation_id),
+                _RECOVERY_TIMEOUT_SECONDS,
+                f"Restore indexer generation {generation} after failed retirement",
+            )
+        except BaseException as recovery_exc:
+            logger.error(
+                "Failed to restore an indexer generation after retirement was abandoned; it may remain drained.",
+                generation=generation,
+                error=str(recovery_exc),
+                original_error=str(exc),
+            )
+        raise
 
 
 def retire_generation(

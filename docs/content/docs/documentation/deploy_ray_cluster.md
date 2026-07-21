@@ -158,7 +158,7 @@ PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
   --timeout 3600
 ```
 
-If the timeout expires, the command leaves the actors running. Do not use the legacy confirmation while old API replicas can still submit indexing work. A complete Ray cluster restart also removes all detached generations.
+If `begin_drain` succeeds but a later timeout or drain check fails, the command leaves the actors running and restores submissions automatically. If that restoration also fails, the command logs that the pool may remain drained; stop API traffic and restart the Ray cluster to recreate the current generation. Do not use the legacy confirmation while old API replicas can still submit indexing work.
 
 ---
 

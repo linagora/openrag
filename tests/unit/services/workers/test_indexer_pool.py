@@ -894,6 +894,7 @@ def _bare_pool(workers: list) -> object:
     pool._worker_names = [f"test-worker-{index}" for index in range(len(workers))]
     pool._inflight = [0] * len(workers)
     pool._accepting_tasks = True
+    pool._drain_operation_id = None
     pool._release_tasks = set()
     pool._claim_store = None
     pool._claim_store_lock = asyncio.Lock()
@@ -972,7 +973,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
 
     await pool.submit(task_id="accepted-before-drain")
 
-    assert await pool.begin_drain() == {
+    assert await pool.begin_drain("retirement-a") == {
         "protocol_version": "v2",
         "accepting_tasks": False,
         "inflight_jobs": 1,
@@ -989,6 +990,37 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
     }
+
+
+@pytest.mark.asyncio
+async def test_pool_abort_drain_restores_submissions() -> None:
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+
+    await pool.begin_drain("retirement-a")
+    with pytest.raises(RuntimeError, match="draining"):
+        await pool.submit(task_id="rejected-while-draining")
+
+    assert await pool.abort_drain("retirement-a") == {
+        "protocol_version": "v2",
+        "accepting_tasks": True,
+        "inflight_jobs": 0,
+        "worker_names": ["test-worker-0"],
+    }
+    await pool.submit(task_id="accepted-after-abort")
+    assert [call["task_id"] for call in worker.calls] == ["accepted-after-abort"]
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+
+
+@pytest.mark.asyncio
+async def test_pool_drain_operations_are_owned_and_abort_is_idempotent() -> None:
+    pool = _bare_pool([_FakeWorker()])
+
+    await pool.begin_drain("retirement-a")
+    with pytest.raises(RuntimeError, match="another retirement"):
+        await pool.begin_drain("retirement-b")
+    await pool.abort_drain("retirement-a")
+    assert (await pool.abort_drain("retirement-a"))["accepting_tasks"] is True
 
 
 @pytest.mark.asyncio

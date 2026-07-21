@@ -339,6 +339,7 @@ class IndexerPool:
         self._worker_names = [_indexer_worker_actor_name(i) for i in range(pool_size)]
         self._inflight = [0] * len(self._workers)
         self._accepting_tasks = True
+        self._drain_operation_id: str | None = None
         self._release_tasks: set[asyncio.Task[Any]] = set()
         self._claim_store: Any = None
         self._claim_store_lock = asyncio.Lock()
@@ -350,9 +351,22 @@ class IndexerPool:
         """Return the remote contract generation implemented by this actor."""
         return _INDEXER_ACTOR_PROTOCOL_VERSION
 
-    async def begin_drain(self) -> dict[str, Any]:
+    async def begin_drain(self, operation_id: str) -> dict[str, Any]:
         """Reject new submissions while allowing accepted work to settle."""
+        if not self._accepting_tasks and self._drain_operation_id != operation_id:
+            raise RuntimeError("IndexerPool is already draining for another retirement operation")
         self._accepting_tasks = False
+        self._drain_operation_id = operation_id
+        return await self.status()
+
+    async def abort_drain(self, operation_id: str) -> dict[str, Any]:
+        """Resume submissions after this retirement operation is abandoned."""
+        if self._accepting_tasks and self._drain_operation_id is None:
+            return await self.status()
+        if self._drain_operation_id != operation_id:
+            raise RuntimeError("IndexerPool drain belongs to another retirement operation")
+        self._accepting_tasks = True
+        self._drain_operation_id = None
         return await self.status()
 
     async def status(self) -> dict[str, Any]:
