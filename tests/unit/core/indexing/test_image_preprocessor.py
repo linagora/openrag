@@ -127,6 +127,16 @@ class TestNormalizeDataUriImages:
         assert all(block.metadata["markdown_ref"] in text for block in blocks)
         assert blocks[0].metadata["markdown_ref"] != blocks[1].metadata["markdown_ref"]
 
+    def test_embedded_image_does_not_consume_an_earlier_markdown_image(self):
+        uri = self._data_uri(b"embedded")
+        remote = "![remote](https://example.test/image.png)"
+
+        text, blocks = normalize_data_uri_images(f"{remote} middle ![embedded]({uri})")
+
+        assert text.startswith(f"{remote} middle ")
+        assert len(blocks) == 1
+        assert blocks[0].image_bytes == b"embedded"
+
     def test_parameterized_data_uri_is_extracted_and_sanitized(self):
         payload = base64.b64encode(b"svg-image").decode()
         uri = f"data:image/svg+xml;charset=utf-8;profile=compact;base64,{payload}"
