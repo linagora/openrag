@@ -41,6 +41,14 @@ class ModelsConfig(ConfigMixin):
     llm: dict[str, ModelEndpointConfig] = Field(default_factory=dict)
     vlm: dict[str, ModelEndpointConfig] = Field(default_factory=dict)
 
+    # When True, the env-derived endpoint for each type (the one whose name
+    # matches _slug(model_name)) is kept in sync with Settings/env on every
+    # boot instead of only on first seed — lets operators manage it purely
+    # via env vars + a pod rollout. Endpoints created by hand (any other
+    # name) are never touched. Default False preserves the "DB is the
+    # editable source of truth after first boot" behavior.
+    sync_on_boot: bool = False
+
 
 class ModelEndpointRow(BaseModel):
     """DB representation of a model endpoint (returned by the repository)."""

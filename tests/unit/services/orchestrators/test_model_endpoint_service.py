@@ -65,6 +65,7 @@ class _FakeEndpointRepo:
         return rows
 
     async def update(self, name: str, model_type: str, **fields):
+        self.calls.append(("update", (name, model_type)))
         row = self._store.get((name, model_type))
         if row is None:
             return None
@@ -270,6 +271,91 @@ async def test_seed_defaults_skips_reranker_when_unconfigured(monkeypatch):
 
     creates = [c for c in repo.calls if c[0] == "create"]
     assert not any(name_type[1] == "reranker" for _, name_type in creates)
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_leaves_existing_env_named_row_untouched_by_default(monkeypatch):
+    """sync_on_boot defaults to False: an already-seeded row (name matches the
+    env-derived slug) must survive an env-var change across restarts — the DB
+    stays the source of truth until an admin (or an opt-in sync) changes it.
+    """
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="embed-model", model_type="embedder", model_name="embed-model", batch_size=512, is_default=True
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(embedder={"base_url": "http://embedder:8000/v1", "model_name": "embed-model", "batch_size": 64})
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    assert not any(c[0] == "update" for c in repo.calls)
+    assert repo._store[("embed-model", "embedder")].batch_size == 512
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_syncs_env_named_row_when_sync_on_boot_enabled(monkeypatch):
+    """sync_on_boot=True: the endpoint whose name matches the current
+    env-derived slug is refreshed from Settings/env on every boot, so a Helm
+    values change + pod rollout is enough — no admin API call needed.
+    """
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="embed-model",
+        model_type="embedder",
+        model_name="embed-model",
+        endpoint="http://old-embedder:8000/v1",
+        batch_size=512,
+        extra={"api_key": "hand-set-secret"},
+        is_default=True,
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "embed-model", "batch_size": 64},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    updated = repo._store[("embed-model", "embedder")]
+    assert updated.batch_size == 64
+    assert updated.endpoint == "http://embedder:8000/v1"
+    # extra (e.g. a hand-set API key) is deliberately never touched by sync.
+    assert updated.extra == {"api_key": "hand-set-secret"}
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_never_touches_differently_named_endpoints(monkeypatch):
+    """sync_on_boot=True must not clobber a hand-created endpoint that doesn't
+    share the env-derived name, and must not create a competing default either.
+    """
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(name="custom", model_type="embedder", batch_size=999, is_default=True)
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "embed-model", "batch_size": 64},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    embedder_calls = [c for c in repo.calls if c[0] in ("update", "create") and c[1][1] == "embedder"]
+    assert not embedder_calls
+    assert repo._store[("custom", "embedder")].batch_size == 999
 
 
 # ------------------------------------------------------------------
