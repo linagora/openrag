@@ -67,11 +67,17 @@ class RetrieverPipeline:
         reranker: Reranker | None = None,
         reranker_top_k: int = 5,
         allow_filterless_fallback: bool = True,
+        rrf_k: int = 60,
     ) -> None:
         self.retriever = retriever
         self.reranker = reranker
         self.reranker_top_k = reranker_top_k
         self.allow_filterless_fallback = allow_filterless_fallback
+        # RRF dampening for fusing this partition's multiQuery sub-query rankings
+        # (see get_relevant_docs). 60 is canonical; a preset can tune it via
+        # RetrievalPipelineConfig.rrf_k. Cross-partition fusion happens a layer
+        # up in RetrievalService.fuse, which is not partition-scoped.
+        self.rrf_k = rrf_k
 
     @property
     def reranker_enabled(self) -> bool:
@@ -146,7 +152,7 @@ class RetrieverPipeline:
             for q in search_queries.query_list
         ]
         ranked_lists = await asyncio.gather(*tasks)
-        fused = rrf_reranking(ranked_lists, key_fn=_chunk_key)
+        fused = rrf_reranking(ranked_lists, key_fn=_chunk_key, k=self.rrf_k)
         if top_k is not None:
             fused = fused[:top_k]
         return fused
