@@ -133,16 +133,22 @@ def retire_generation(
     )
     dispatcher_name, worker_names = _generation_actor_names(actors, generation)
     dispatcher = _get_actor(dispatcher_name, namespace)
-    if dispatcher is None:
-        return []
 
     if generation == _LEGACY_GENERATION:
-        if not confirm_legacy_idle:
+        if (dispatcher is not None or worker_names) and not confirm_legacy_idle:
             raise RuntimeError(
                 "The legacy indexer cannot report active work. Stop old API traffic, verify its jobs are idle, "
                 "then rerun with --confirm-legacy-idle."
             )
-    else:
+
+    removed: list[str] = []
+    if dispatcher is None:
+        for worker_name in worker_names:
+            if _kill_actor(worker_name, namespace):
+                removed.append(worker_name)
+        return removed
+
+    if generation != _LEGACY_GENERATION:
         status = asyncio.run(
             _drain_protocol_generation(
                 dispatcher,
@@ -153,7 +159,6 @@ def retire_generation(
         )
         worker_names = list(status.get("worker_names") or worker_names)
 
-    removed: list[str] = []
     if _kill_actor(dispatcher_name, namespace):
         removed.append(dispatcher_name)
     for worker_name in worker_names:
