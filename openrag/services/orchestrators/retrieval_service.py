@@ -263,6 +263,7 @@ class RetrievalService:
                 include_ancestors=include_ancestors,
                 related_limit=related_limit,
                 max_ancestor_depth=max_ancestor_depth,
+                filter_params=filter_params,
             )
         return chunks
 

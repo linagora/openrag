@@ -164,10 +164,14 @@ async def search_multiple_partitions(
 
     filter_params = None
     if workspace:
-        ws = await workspaces.get_workspace(workspace)
-        if not ws or ws["partition_name"] not in partitions:
+        scope = await workspaces.resolve_scope(workspace, partitions)
+        if scope is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
-        filter_params = {"workspace_id": workspace}
+        # A workspace belongs to exactly one partition — narrow the search to
+        # it, otherwise file_id-only filtering could match a same-named file
+        # in another partition the caller also has access to (#706).
+        partitions = [scope.partition]
+        filter_params = {"file_id": scope.file_ids}
 
     results = await service.search(
         text=search_params.text,
@@ -249,10 +253,10 @@ async def search_one_partition(
     )
     filter_params = None
     if workspace:
-        ws = await workspaces.get_workspace(workspace)
-        if not ws or ws["partition_name"] != partition:
+        scope = await workspaces.resolve_scope(workspace, [partition])
+        if scope is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
-        filter_params = {"workspace_id": workspace}
+        filter_params = {"file_id": scope.file_ids}
 
     results = await service.search(
         text=search_params.text,
@@ -322,19 +326,18 @@ async def search_file(
         partition=partition, file_id=file_id, query_len=len(search_params.text), top_k=search_params.top_k
     )
 
-    # Parenthesise the caller filter so it stays a single AND-operand and can't
-    # break out of the file scope (e.g. ``page > 5 OR 1==1`` must not widen the
-    # ``file_id ==`` constraint). It is already validated by CommonSearchParams.
-    filter = "file_id == {_file_id}" + (f" AND ({search_params.filter})" if search_params.filter else "")
-    params = {"_file_id": file_id}
-
+    # The file_id restriction goes through filter_params (parameterized), not
+    # string-templated into `filter` — the store ANDs every filter_params key
+    # with the raw `filter` expr and parenthesises each operand, so a caller
+    # filter like ``page > 5 OR 1==1`` cannot widen the file_id scope. It is
+    # already validated by CommonSearchParams.
     results = await service.search(
         text=search_params.text,
         partitions=partition,
         top_k=search_params.top_k,
         similarity_threshold=search_params.similarity_threshold,
-        filter=filter,
-        filter_params=params,
+        filter=search_params.filter,
+        filter_params={"file_id": file_id},
     )
     log.info("Semantic search on specific file completed.", result_count=len(results))
 
