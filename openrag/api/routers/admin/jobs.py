@@ -31,7 +31,7 @@ Returns system status including:
 
 **Tasks:**
 - `active`: Total active tasks
-- `active_statuses`: Breakdown by status (QUEUED, SERIALIZING, CHUNKING, INSERTING)
+- `active_statuses`: Breakdown by status (QUEUED, SERIALIZING)
 - `total_completed`: Count of completed tasks
 - `total_cancelled`: Count of cancelled tasks
 - `total_failed`: Count of failed tasks
@@ -54,7 +54,7 @@ async def get_queue_info(
 
 **Query Parameters:**
 - `task_status`: Filter by status (optional)
-  - `active`: Show QUEUED, SERIALIZING, CHUNKING, or INSERTING tasks
+  - `active`: Show QUEUED or SERIALIZING tasks
   - `completed`: Show completed tasks
   - `failed`: Show failed tasks
   - `cancelled`: Show cancelled tasks
@@ -77,9 +77,7 @@ Returns list of tasks with:
 
 **Task States:**
 - `QUEUED`: Waiting to start
-- `SERIALIZING`: Converting document format
-- `CHUNKING`: Splitting into chunks
-- `INSERTING`: Adding to vector database
+- `SERIALIZING`: Parsing, chunking, embedding, and storing the document
 - `COMPLETED`: Successfully finished
 - `CANCELLED`: Cancelled by user/admin
 - `FAILED`: Error occurred
@@ -92,7 +90,7 @@ async def list_tasks(
     service=Depends(get_job_service),
 ):
     """
-    - ?task_status=active  → QUEUED | SERIALIZING | CHUNKING | INSERTING
+    - ?task_status=active  → QUEUED | SERIALIZING
     - ?task_status=<exact> → exact match (case-insensitive)
     - (none)               → all tasks
     """

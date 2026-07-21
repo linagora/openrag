@@ -205,7 +205,7 @@ class TestTaskStatus:
         """Test that file processing goes through expected states."""
         file_id = "state-test-001"
         observed_states = set()
-        valid_states = {"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING", "COMPLETED", "FAILED"}
+        valid_states = {"QUEUED", "SERIALIZING", "COMPLETED", "FAILED"}
 
         with open(pdf_file_path, "rb") as f:
             response = api_client.post(
