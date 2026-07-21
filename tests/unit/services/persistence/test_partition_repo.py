@@ -41,6 +41,8 @@ class _FakeConn:
 
     async def fetchval(self, query: str, *params):
         self.operations.append((query, params))
+        if "SELECT EXISTS (SELECT 1 FROM partitions" in query:
+            return self.existing_partition
         if "COUNT(*)::int FROM partition_memberships" in query:
             return self.owned_count
         return None
@@ -53,8 +55,10 @@ class _FakeConn:
 class _FakePool:
     def __init__(self, conn: _FakeConn):
         self.conn = conn
+        self.acquire_count = 0
 
     def acquire(self):
+        self.acquire_count += 1
         return _AsyncContext(self.conn)
 
 
@@ -105,6 +109,48 @@ async def test_create_partition_existing_row_raises_conflict():
     assert exc.value.status_code == 409
     assert exc.value.code == "PARTITION_EXISTS"
     assert conn.inserted_partition is False
+
+
+@pytest.mark.asyncio
+async def test_partition_operation_lock_uses_session_advisory_lock_and_unlocks_on_error():
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _FakeConn()
+    pool = _FakePool(conn)
+    repo = PgPartitionRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(RuntimeError, match="inside fence"):
+        async with repo.partition_operation_lock("tenant-a"):
+            raise RuntimeError("inside fence")
+
+    operations = [(query, params) for query, params in conn.operations if "pg_advisory_" in query]
+    assert [query for query, _ in operations] == [
+        "SELECT pg_advisory_lock($1::integer, hashtext($2)::integer)",
+        "SELECT pg_advisory_unlock($1::integer, hashtext($2)::integer)",
+    ]
+    assert operations[0][1] == operations[1][1]
+    assert operations[0][1][1] == "tenant-a"
+    assert pool.acquire_count == 1
+
+
+@pytest.mark.asyncio
+async def test_partition_operation_guard_checks_existence_on_lock_connection():
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _FakeConn(existing_partition=True)
+    pool = _FakePool(conn)
+    repo = PgPartitionRepository(pool_getter=lambda: pool)
+
+    async with repo.partition_operation_lock("tenant-a") as operation:
+        assert await operation.partition_exists("tenant-a") is True
+
+    operations = [query for query, _params in conn.operations]
+    assert operations == [
+        "SELECT pg_advisory_lock($1::integer, hashtext($2)::integer)",
+        "SELECT EXISTS (SELECT 1 FROM partitions WHERE partition = $1)",
+        "SELECT pg_advisory_unlock($1::integer, hashtext($2)::integer)",
+    ]
+    assert pool.acquire_count == 1
 
 
 # ── update_partition preset-assignment race guard ────────────────────

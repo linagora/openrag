@@ -1,7 +1,7 @@
 import { useMemo, useState, useCallback, useEffect } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Pencil, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle, XCircle, Loader2, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle, XCircle, Loader2, RefreshCw, ChevronLeft, ChevronRight, FilePlus } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -57,10 +57,12 @@ const PARTITIONS_REFETCH_INTERVAL_MS = 5000;
 
 function RowActions({
   partition,
+  showUpload,
   showEdit,
   showDelete,
 }: {
   partition: PartitionResponse;
+  showUpload: boolean;
   showEdit: boolean;
   showDelete: boolean;
 }) {
@@ -79,14 +81,25 @@ function RowActions({
 
   return (
     <div className="flex items-center gap-1">
+      {showUpload && (
+        <Button variant="ghost" size="icon-xs" asChild>
+          <Link
+            to={`/documents?partition=${encodeURIComponent(partition.name)}&upload=1`}
+            aria-label={`Upload documents to ${partition.name}`}
+            title={`Upload documents to ${partition.name}`}
+          >
+            <FilePlus className="h-3.5 w-3.5" />
+          </Link>
+        </Button>
+      )}
       {showEdit && (
-        <Button variant="ghost" size="sm" asChild>
+        <Button variant="ghost" size="icon-xs" asChild>
           <Link
             to={partitionDetailPath(partition.name)}
             aria-label={`Edit ${partition.name}`}
             title={`Edit ${partition.name}`}
           >
-            <Pencil className="h-3 w-3" />
+            <Pencil className="h-3.5 w-3.5" />
           </Link>
         </Button>
       )}
@@ -98,12 +111,12 @@ function RowActions({
         >
           <Button
             variant="ghost"
-            size="sm"
+            size="icon-xs"
             disabled={deleteMutation.isPending}
             aria-label={`Delete ${partition.name}`}
             title={`Delete ${partition.name}`}
           >
-            <Trash2 className="h-3 w-3 text-destructive" />
+            <Trash2 className="h-3.5 w-3.5 text-destructive" />
           </Button>
         </ConfirmDialog>
       )}
@@ -128,7 +141,7 @@ function SortButton({ label, active, direction, onClick }: { label: string; acti
 
 export default function PartitionListPage() {
   const queryClient = useQueryClient();
-  const { canManagePartitions, canConfigurePartition } = usePermissions();
+  const { canManagePartitions, canConfigurePartition, canWrite } = usePermissions();
   const [dialogOpen, setDialogOpen] = useState(false);
 
   // Open the create dialog directly when arriving from the Overview quick action
@@ -262,12 +275,11 @@ export default function PartitionListPage() {
     return items;
   }, [partitionsQuery.data, search, sortDir, sortColumn]);
 
-  // Show a delete affordance for anyone the backend (`require_partition_owner`)
-  // would allow: admins (satisfied via SUPER_ADMIN_MODE) and partition owners.
-  // `canConfigurePartition(role)` is `superAdmin || role === "owner"`, so a
-  // non-admin owner can delete their own partition — not just admins.
+  // Show the actions column whenever the row has at least one available row
+  // action: upload for writable partitions, or edit/delete for admins/owners.
   const showActions =
-    canManagePartitions || filteredAndSorted.some((p) => canConfigurePartition(p.role));
+    canManagePartitions ||
+    filteredAndSorted.some((p) => canWrite(p.role) || canConfigurePartition(p.role));
 
   const pageCount = Math.ceil(filteredAndSorted.length / PARTITIONS_PAGE_SIZE);
   useEffect(() => {
@@ -583,6 +595,7 @@ export default function PartitionListPage() {
                       <TableCell>
                         <RowActions
                           partition={p}
+                          showUpload={canWrite(p.role)}
                           showEdit={canManagePartitions}
                           showDelete={canConfigurePartition(p.role)}
                         />

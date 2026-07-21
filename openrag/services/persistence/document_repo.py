@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING, Any
 
 from core.models.catalog import DocumentRecord, DocumentStatus
 from core.ports.document_repo import DocumentRepository
+from core.utils.logging import get_logger
+from services.persistence.file_count import decrement_file_counts
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -37,6 +39,8 @@ if TYPE_CHECKING:
 # on every connection, so reading a JSON column yields a Python dict and
 # binding a dict to a JSON parameter is encoded transparently. The repo
 # therefore never calls ``json.dumps`` itself.
+
+logger = get_logger()
 
 
 class PgDocumentRepository(DocumentRepository):
@@ -71,8 +75,9 @@ class PgDocumentRepository(DocumentRepository):
         await self.pool.execute(
             """
             INSERT INTO files (file_id, partition_name, file_metadata,
-                               indexation_config, created_by, relationship_id, parent_id)
-            VALUES ($1, $2, $3::json, $4::jsonb, $5, $6, $7)
+                               indexation_config, created_by, relationship_id, parent_id,
+                               content_sha256)
+            VALUES ($1, $2, $3::json, $4::jsonb, $5, $6, $7, $8)
             """,
             file_id,
             doc.partition,
@@ -81,6 +86,7 @@ class PgDocumentRepository(DocumentRepository):
             doc.created_by,
             doc.relationship_id,
             doc.parent_id,
+            doc.content_sha256,
         )
         return doc.model_copy(update={"file_id": file_id, "metadata": metadata})
 
@@ -190,47 +196,45 @@ class PgDocumentRepository(DocumentRepository):
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
-                    "SELECT id, created_by FROM files WHERE file_id = $1 LIMIT 1",
+                    """
+                    WITH target AS (
+                        SELECT id
+                        FROM files
+                        WHERE file_id = $1
+                        ORDER BY id
+                        LIMIT 1
+                    )
+                    DELETE FROM files AS file
+                    USING target
+                    WHERE file.id = target.id
+                    RETURNING file.created_by
+                    """,
                     document_id,
                 )
-                if row is None:
-                    return False
-                await conn.execute("DELETE FROM files WHERE id = $1", row["id"])
-                if row["created_by"] is not None:
-                    await conn.execute(
-                        "UPDATE users SET file_count = GREATEST(file_count - 1, 0) WHERE id = $1",
-                        row["created_by"],
-                    )
-                return True
+                deleted_rows = [row] if row is not None else []
+                counters_adjusted = await decrement_file_counts(conn, deleted_rows)
+                logger.bind(
+                    operation="delete_document",
+                    deleted_rows=len(deleted_rows),
+                    counters_adjusted=counters_adjusted,
+                ).debug("Catalog file deletion accounted")
+                return row is not None
 
     async def delete_documents_by_partition(self, partition: str) -> int:
         """Bulk-delete every file in a partition and decrement uploader counts."""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                uploader_rows = await conn.fetch(
-                    """
-                    SELECT created_by, COUNT(*)::int AS n
-                    FROM files
-                    WHERE partition_name = $1 AND created_by IS NOT NULL
-                    GROUP BY created_by
-                    """,
+                deleted_rows = await conn.fetch(
+                    "DELETE FROM files WHERE partition_name = $1 RETURNING created_by",
                     partition,
                 )
-                result = await conn.execute(
-                    "DELETE FROM files WHERE partition_name = $1",
-                    partition,
-                )
-                for r in uploader_rows:
-                    await conn.execute(
-                        "UPDATE users SET file_count = GREATEST(file_count - $1, 0) WHERE id = $2",
-                        r["n"],
-                        r["created_by"],
-                    )
-        # asyncpg returns 'DELETE <n>' as the command tag.
-        try:
-            return int(result.split()[-1])
-        except (ValueError, IndexError):
-            return 0
+                counters_adjusted = await decrement_file_counts(conn, deleted_rows)
+                logger.bind(
+                    operation="delete_documents_by_partition",
+                    deleted_rows=len(deleted_rows),
+                    counters_adjusted=counters_adjusted,
+                ).debug("Catalog file deletion accounted")
+                return len(deleted_rows)
 
     async def count_documents(
         self,
@@ -258,6 +262,114 @@ class PgDocumentRepository(DocumentRepository):
             partition,
         )
 
+    async def get_content_sha256(self, file_id: str, partition: str) -> str | None:
+        return await self.pool.fetchval(
+            "SELECT content_sha256 FROM files WHERE file_id = $1 AND partition_name = $2",
+            file_id,
+            partition,
+        )
+
+    async def claim_content_sha256(
+        self,
+        *,
+        file_id: str,
+        partition: str,
+        content_sha256: str,
+        replace: bool = False,
+    ) -> str | None:
+        """Atomically reserve content while it is being indexed."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+                    partition,
+                    content_sha256,
+                )
+                existing_file_id = await conn.fetchval(
+                    """
+                    SELECT file_id FROM files
+                    WHERE partition_name = $1 AND content_sha256 = $2
+                    LIMIT 1
+                    """,
+                    partition,
+                    content_sha256,
+                )
+                if existing_file_id is not None and not (replace and existing_file_id == file_id):
+                    return existing_file_id
+
+                await conn.execute(
+                    """
+                    DELETE FROM file_content_claims
+                    WHERE partition_name = $1 AND content_sha256 = $2 AND expires_at <= NOW()
+                    """,
+                    partition,
+                    content_sha256,
+                )
+                claimed = await conn.fetchval(
+                    """
+                    INSERT INTO file_content_claims (partition_name, content_sha256, file_id)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (partition_name, content_sha256) DO NOTHING
+                    RETURNING file_id
+                    """,
+                    partition,
+                    content_sha256,
+                    file_id,
+                )
+                if claimed is not None:
+                    return None
+                return await conn.fetchval(
+                    """
+                    SELECT file_id FROM file_content_claims
+                    WHERE partition_name = $1 AND content_sha256 = $2
+                    """,
+                    partition,
+                    content_sha256,
+                )
+
+    async def renew_content_sha256_claim(
+        self,
+        *,
+        file_id: str,
+        partition: str,
+        content_sha256: str,
+    ) -> bool:
+        result = await self.pool.execute(
+            """
+            UPDATE file_content_claims
+            SET expires_at = NOW() + interval '24 hours'
+            WHERE partition_name = $1 AND content_sha256 = $2 AND file_id = $3
+            """,
+            partition,
+            content_sha256,
+            file_id,
+        )
+        return result.endswith(" 1")
+
+    async def release_content_sha256_claim(
+        self,
+        *,
+        file_id: str,
+        partition: str,
+        content_sha256: str,
+    ) -> None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+                    partition,
+                    content_sha256,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM file_content_claims
+                    WHERE partition_name = $1 AND content_sha256 = $2 AND file_id = $3
+                    """,
+                    partition,
+                    content_sha256,
+                    file_id,
+                )
+
     # ── Legacy method names used by the Phase 7C shim ────────────────
     # These are NOT on the ABC. Phase 8 orchestrators must not depend on
     # them — they exist solely so the shim can keep every legacy caller
@@ -274,6 +386,8 @@ class PgDocumentRepository(DocumentRepository):
         parent_id: str | None = None,
         indexation_config: dict | None = None,
         indexed_at: datetime | None = None,
+        require_existing_partition: bool = False,
+        content_sha256: str | None = None,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
@@ -293,17 +407,26 @@ class PgDocumentRepository(DocumentRepository):
                 if existing:
                     return False
 
-                # Auto-create partition + first-owner membership when missing —
-                # legacy side-effect documented in the phase-7 spec.
-                created = await conn.fetchval(
-                    """
-                    INSERT INTO partitions (partition, created_at)
-                    VALUES ($1, NOW())
-                    ON CONFLICT (partition) DO NOTHING
-                    RETURNING 1
-                    """,
-                    partition,
-                )
+                created = None
+                if require_existing_partition:
+                    partition_exists = await conn.fetchval(
+                        "SELECT 1 FROM partitions WHERE partition = $1",
+                        partition,
+                    )
+                    if not partition_exists:
+                        return False
+                else:
+                    # Auto-create partition + first-owner membership when missing —
+                    # legacy side-effect documented in the phase-7 spec.
+                    created = await conn.fetchval(
+                        """
+                        INSERT INTO partitions (partition, created_at)
+                        VALUES ($1, NOW())
+                        ON CONFLICT (partition) DO NOTHING
+                        RETURNING 1
+                        """,
+                        partition,
+                    )
                 if created and user_id is None:
                     raise ValueError("Cannot auto-create a partition without a user_id")
                 if created and user_id is not None:
@@ -325,6 +448,7 @@ class PgDocumentRepository(DocumentRepository):
                     "created_by",
                     "relationship_id",
                     "parent_id",
+                    "content_sha256",
                 ]
                 values: list[Any] = [
                     file_id,
@@ -334,6 +458,7 @@ class PgDocumentRepository(DocumentRepository):
                     user_id,
                     relationship_id,
                     parent_id,
+                    content_sha256,
                 ]
                 # Omit indexed_at to let the server default fire (legacy path).
                 if indexed_at is not None:
@@ -358,19 +483,22 @@ class PgDocumentRepository(DocumentRepository):
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
-                    "SELECT id, created_by FROM files WHERE file_id = $1 AND partition_name = $2",
+                    """
+                    DELETE FROM files
+                    WHERE file_id = $1 AND partition_name = $2
+                    RETURNING created_by
+                    """,
                     file_id,
                     partition,
                 )
-                if row is None:
-                    return False
-                await conn.execute("DELETE FROM files WHERE id = $1", row["id"])
-                if row["created_by"] is not None:
-                    await conn.execute(
-                        "UPDATE users SET file_count = GREATEST(file_count - 1, 0) WHERE id = $1",
-                        row["created_by"],
-                    )
-                return True
+                deleted_rows = [row] if row is not None else []
+                counters_adjusted = await decrement_file_counts(conn, deleted_rows)
+                logger.bind(
+                    operation="remove_file_from_partition",
+                    deleted_rows=len(deleted_rows),
+                    counters_adjusted=counters_adjusted,
+                ).debug("Catalog file deletion accounted")
+                return row is not None
 
     async def update_file_metadata_in_db(
         self,
@@ -415,6 +543,7 @@ class PgDocumentRepository(DocumentRepository):
         parent_id: object = _UNSET,
         indexation_config: object = _UNSET,
         indexed_at: datetime | None = None,
+        content_sha256: object = _UNSET,
     ) -> bool:
         """TODO(phase-9): remove. PUT-style in-place update.
 
@@ -442,6 +571,9 @@ class PgDocumentRepository(DocumentRepository):
         if indexed_at is not None:
             params.append(indexed_at)
             sets.append(f"indexed_at = ${len(params)}")
+        if content_sha256 is not self._UNSET:
+            params.append(content_sha256)
+            sets.append(f"content_sha256 = ${len(params)}")
         if not sets:
             # Match legacy: report whether the row exists at all.
             return await self.file_exists_in_partition(file_id, partition)
@@ -585,6 +717,7 @@ class PgDocumentRepository(DocumentRepository):
             "relationship_id": row["relationship_id"],
             "parent_id": row["parent_id"],
             **metadata,
+            "content_sha256": row.get("content_sha256"),
             # Authoritative system insert time, materialized on the row. Placed
             # after the spread so the column wins over any ``indexed_at`` the
             # copy/restore path copies into file_metadata from chunk metadata
@@ -614,6 +747,7 @@ class PgDocumentRepository(DocumentRepository):
             created_by=row["created_by"],
             relationship_id=row["relationship_id"],
             parent_id=row["parent_id"],
+            content_sha256=row.get("content_sha256"),
             indexation_config=row["indexation_config"],
         )
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
@@ -887,6 +888,8 @@ def _bare_pool(workers: list) -> object:
     pool._workers = list(workers)
     pool._inflight = [0] * len(workers)
     pool._release_tasks = set()
+    pool._claim_store = None
+    pool._claim_store_lock = asyncio.Lock()
     return pool
 
 
@@ -975,6 +978,74 @@ async def test_pool_rolls_back_inflight_when_submission_raises() -> None:
     assert pool._inflight == [0]
 
 
+@pytest.mark.asyncio
+async def test_pool_renews_content_claim_while_task_is_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    renewed = asyncio.Event()
+
+    async def renew(**_kwargs):
+        renewed.set()
+        return True
+
+    repo = SimpleNamespace(
+        renew_content_sha256_claim=AsyncMock(side_effect=renew),
+        release_content_sha256_claim=AsyncMock(),
+    )
+    pool._claim_store = SimpleNamespace(document_repo=repo)
+    pool._claim_store_lock = asyncio.Lock()
+    monkeypatch.setattr(module, "_CONTENT_CLAIM_RENEW_INTERVAL_SECONDS", 0.001)
+
+    await pool.submit(
+        task_id="task-1",
+        partition="tenant-a",
+        metadata={"file_id": "file-1", "content_sha256": "abc123"},
+    )
+    await asyncio.wait_for(renewed.wait(), timeout=1)
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+
+    repo.renew_content_sha256_claim.assert_awaited()
+    assert repo.renew_content_sha256_claim.await_args.kwargs == {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "content_sha256": "abc123",
+    }
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+    )
+
+
+@pytest.mark.asyncio
+async def test_pool_keeps_content_claim_until_cancelled_task_settles() -> None:
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    repo = SimpleNamespace(
+        renew_content_sha256_claim=AsyncMock(return_value=True),
+        release_content_sha256_claim=AsyncMock(),
+    )
+    pool._claim_store = SimpleNamespace(document_repo=repo)
+
+    await pool.submit(
+        task_id="task-1",
+        partition="tenant-a",
+        metadata={"file_id": "file-1", "content_sha256": "abc123"},
+    )
+
+    worker.futures[0].cancel()
+    assert repo.release_content_sha256_claim.await_count == 0
+    await _settle_pool_release_tasks(pool)
+
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+    )
+
+
 def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPatch) -> None:
     import core.config
     import core.embeddings
@@ -1052,6 +1123,76 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     assert captured["vlm_factory"] is vlm_factory
 
 
+def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A preset can caption through a *named* VLM endpoint (resolved per-row via
+    # vlm_factory) even when no global default VLM is configured. The caption
+    # prompt must still be loaded in that case, or that preset silently falls
+    # back to the VLM client's bare default (#692 regression for named VLMs).
+    import core.config
+    import core.embeddings
+    import services.storage.milvus_store as milvus_store
+    import services.storage.postgres_store as postgres_store
+    import services.workers.indexer_pool as module
+    import services.workers.parsers.parser_dispatcher as parser_dispatcher
+    import services.workers.pipeline_builder as pipeline_builder
+
+    captured = {}
+
+    class RDBConfig:
+        def model_copy(self, *, update):
+            return SimpleNamespace(**update)
+
+    cfg = SimpleNamespace(
+        embedder=SimpleNamespace(
+            base_url="http://embedder/v1",
+            model_name="embed-model",
+            api_key="embed-key",
+            max_model_len=2048,
+            timeout=30,
+            batch_size=32,
+            embed_concurrency=2,
+        ),
+        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        vectordb=SimpleNamespace(collection_name="vdb_test"),
+        rdb=RDBConfig(),
+    )
+
+    class Store:
+        document_repo = object()
+        topic_tag_repo = object()
+
+    class Worker:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    def fake_build_pipeline(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(core.config, "load_config", lambda: cfg)
+    monkeypatch.setattr(module, "_build_chunker", lambda _cfg: object())
+    monkeypatch.setattr(module, "_build_embedder_factory", lambda _cfg: object())
+    monkeypatch.setattr(module, "_build_vlm_factory", lambda _cfg: object())
+    monkeypatch.setattr(module, "_build_contextualizer_factory", lambda _cfg: object())
+    monkeypatch.setattr(module, "_build_topic_tagger_factory", lambda _cfg: object())
+    monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
+    monkeypatch.setattr(milvus_store, "MilvusVectorStore", lambda _cfg: object())
+    monkeypatch.setattr(postgres_store, "PostgresStore", lambda *args, **kwargs: Store())
+    monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg: object())
+    # No global default VLM endpoint configured.
+    monkeypatch.setattr(parser_dispatcher, "build_caption_vlm", lambda _cfg: None)
+    monkeypatch.setattr(parser_dispatcher, "load_caption_prompt", lambda _cfg: "TEMPLATE TEXT")
+    monkeypatch.setattr(pipeline_builder, "build_indexing_pipeline", fake_build_pipeline)
+    monkeypatch.setattr(module.ray, "get_actor", lambda *args, **kwargs: object())
+    monkeypatch.setattr(module, "IndexerWorker", Worker)
+
+    actor_class = module.IndexerWorkerActor.__ray_metadata__.modified_class
+    actor_class()
+
+    assert captured["vlm"] is None
+    assert captured["caption_prompt"] == "TEMPLATE TEXT"
+
+
 # ---------------------------------------------------------------------------
 # Tests — IndexerWorkerActor.process_file upload cleanup (SAVE_UPLOADED_FILES)
 #
@@ -1088,7 +1229,10 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     actor._ensure_catalog = _noop
     actor._ensure_registry_fresh = _noop
     actor._worker = worker
-    actor._catalog_store = SimpleNamespace(workspace_repo=SimpleNamespace())
+    actor._catalog_store = SimpleNamespace(
+        workspace_repo=SimpleNamespace(),
+        document_repo=SimpleNamespace(release_content_sha256_claim=AsyncMock()),
+    )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
     return actor
@@ -1105,6 +1249,26 @@ async def test_actor_keeps_upload_by_default(tmp_path) -> None:
     # Default: the raw upload stays on disk so the source-download route can
     # serve it back for Chainlit source viewing.
     assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_actor_releases_content_claim_after_indexing(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f", "content_sha256": "abc123"},
+        partition="p",
+    )
+
+    actor._catalog_store.document_repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="f",
+        partition="p",
+        content_sha256="abc123",
+    )
 
 
 @pytest.mark.asyncio

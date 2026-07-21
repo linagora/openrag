@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 from itertools import chain as ichain
 from typing import Any
 
-from core.llm.llm import LLM
+from core.llm.llm import LLM, chat_content
 from core.models.chunk import Chunk
 from core.prompts.query_rewriter import (
     build_hyde_prompt,
@@ -135,7 +135,7 @@ class MultiQueryRetriever(BaseRetriever):
         response = await self.llm.chat([{"role": "user", "content": prompt}])
         # Cap to k_queries — a non-compliant LLM response can otherwise fan
         # out far more searches than configured.
-        queries = split_multi_query_response(response)[: self.k_queries]
+        queries = split_multi_query_response(chat_content(response))[: self.k_queries]
         return queries or [query]
 
     async def retrieve(
@@ -181,7 +181,8 @@ class HyDeRetriever(BaseRetriever):
 
     async def get_hyde(self, query: str) -> str:
         prompt = build_hyde_prompt(self.hyde_template, query)
-        return await self.llm.chat([{"role": "user", "content": prompt}])
+        response = await self.llm.chat([{"role": "user", "content": prompt}])
+        return chat_content(response)
 
     async def retrieve(
         self,

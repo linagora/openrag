@@ -25,11 +25,16 @@ class ParserFileSerializer(FileSerializer):
 
     def __init__(self) -> None:
         from core.config import load_config
-        from services.workers.parsers.parser_dispatcher import build_caption_vlm, build_parser_dispatcher
+        from services.workers.parsers.parser_dispatcher import (
+            build_caption_vlm,
+            build_parser_dispatcher,
+            load_caption_prompt,
+        )
 
         config = load_config()
         self._dispatcher = build_parser_dispatcher(config)
         self._vlm = build_caption_vlm(config)
+        self._caption_prompt = load_caption_prompt(config) if self._vlm is not None else None
         # Global gate for captioning images embedded in other documents.
         # Standalone image files are always captioned (see ``serialize``).
         self._image_captioning = bool(config.loader.image_captioning)
@@ -57,7 +62,7 @@ class ParserFileSerializer(FileSerializer):
             and (document.content_type is DocumentType.IMAGE or self._image_captioning)
         )
         if should_caption:
-            processed = await _caption_document(processed, self._vlm, None)
+            processed = await _caption_document(processed, self._vlm, self._caption_prompt)
 
         return "\n\n".join(block.text for block in processed.text_blocks if block.text)
 

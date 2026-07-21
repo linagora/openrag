@@ -26,6 +26,9 @@ from services.workers.stages.topic_tag import topic_tag_stage
 
 logger = get_logger()
 
+REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY = "_replace_old_chunk_collection"
+REPLACE_OLD_CHUNK_IDS_ROW_KEY = "_replace_old_chunk_ids"
+
 
 @dataclass(slots=True, frozen=True)
 class PipelineTimeouts:
@@ -53,6 +56,7 @@ class IndexingPipeline:
     embedder: Embedder
     vector_store: VectorStore
     vlm: VLM | None = None
+    caption_prompt: str | None = None
     contextualizer: ChunkContextualizer | None = None
     topic_tagger: TopicTagger | None = None
     timeouts: PipelineTimeouts = PipelineTimeouts()
@@ -63,6 +67,7 @@ class IndexingPipeline:
     vlm_factory: Callable[[str], VLM] | None = None
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None
+    defer_replace_cleanup: bool = False
 
     async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store.
@@ -113,6 +118,19 @@ class IndexingPipeline:
                 embedder=str(row.get("embedder_name") or "default"),
             ).debug("model endpoints resolved for indexing (None = stage disabled)")
             if vlm is not None:
+                # Inject the configured captioning template (image_describer)
+                # unless the row already carries an explicit override, so the VLM
+                # gets the real prompt instead of its bare built-in fallback.
+                #
+                # FORWARD-COMPAT: this ``row["caption_prompt"]`` seam is the
+                # intended hook for the planned DB-backed prompt management — a
+                # future ``PromptService.resolve(partition, "image_captioning")``
+                # would populate it per-partition here (partition override →
+                # global default → disk seed), superseding the process-wide
+                # ``self.caption_prompt`` default. ``setdefault`` already lets a
+                # per-row value win, so that migration is a one-line change.
+                if self.caption_prompt is not None:
+                    row.setdefault("caption_prompt", self.caption_prompt)
                 await _timed(
                     "caption",
                     caption_stage(
@@ -155,7 +173,9 @@ class IndexingPipeline:
             )
             # Re-index (``replace=True``) is insert-before-delete: snapshot the
             # file's existing chunk ids *before* the store stage inserts the new
-            # set, then delete exactly that old set *after* a successful insert.
+            # set, then delete exactly that old set after a successful insert.
+            # Worker pipelines defer that delete until after the catalog row is
+            # successfully written; direct pipeline callers clean it up here.
             # The Milvus collection is ``auto_id``, so a plain insert can never
             # overwrite the previous chunks — without this cleanup every re-index
             # duplicates the whole file (#657). Insert-before-delete also means a
@@ -168,10 +188,11 @@ class IndexingPipeline:
             #     *same* file snapshot the same old ids and both keep their new
             #     set, leaving duplicates. Serializing replace per (partition,
             #     file_id) belongs with the durable job/lifecycle work (#658/#660).
-            #   * A crash between store and delete orphans the old chunks with no
-            #     reconciler yet (the delete below logs for reconciliation, same
-            #     best-effort contract as WorkerDispatcher.delete_file) — the
-            #     reconciliation job is tracked in #658/#660.
+            #   * A crash after store but before cleanup can orphan the old
+            #     chunks with no reconciler yet — the reconciliation job is
+            #     tracked in #658/#660.
+            row.pop(REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY, None)
+            row.pop(REPLACE_OLD_CHUNK_IDS_ROW_KEY, None)
             replace = bool(row.get("replace"))
             old_chunk_ids = await self._existing_chunk_ids(row) if replace else []
             await _timed(
@@ -195,7 +216,11 @@ class IndexingPipeline:
             # Gating on ``stored_count`` ensures cleanup only runs once we know
             # the new set actually replaced the old one.
             if replace and old_chunk_ids and row.get("stored_count"):
-                await self._delete_replaced_chunks(row, old_chunk_ids)
+                if self.defer_replace_cleanup:
+                    row[REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY] = "default"
+                    row[REPLACE_OLD_CHUNK_IDS_ROW_KEY] = old_chunk_ids
+                else:
+                    await self._delete_replaced_chunks(row, old_chunk_ids)
             return row
         finally:
             logger.bind(
@@ -234,15 +259,8 @@ class IndexingPipeline:
             return []
 
     async def _delete_replaced_chunks(self, row: MutableMapping[str, Any], ids: list[str]) -> None:
-        """Delete the pre-re-index chunk set after the new chunks are stored.
-
-        Best-effort: the new chunks are already safely inserted, so a delete
-        failure only leaves recoverable duplicates behind (logged for
-        reconciliation), mirroring ``WorkerDispatcher.delete_file``.
-        """
+        """Delete the pre-re-index chunk set after the new chunks are stored."""
         try:
-            # Bound by the store budget: the new chunks are already stored, so a
-            # stalled delete must not hang the task — it degrades to duplicates.
             deleted = await run_with_optional_timeout(
                 lambda: self.vector_store.delete(ids, "default"), self.timeouts.store
             )
@@ -366,6 +384,7 @@ def build_indexing_pipeline(
     embedder: Embedder,
     vector_store: VectorStore,
     vlm: VLM | None = None,
+    caption_prompt: str | None = None,
     contextualizer: ChunkContextualizer | None = None,
     topic_tagger: TopicTagger | None = None,
     timeouts: PipelineTimeouts | None = None,
@@ -376,6 +395,7 @@ def build_indexing_pipeline(
     vlm_factory: Callable[[str], VLM] | None = None,
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None,
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None,
+    defer_replace_cleanup: bool = False,
 ) -> IndexingPipeline:
     """Build the default sequential indexing pipeline."""
 
@@ -385,6 +405,7 @@ def build_indexing_pipeline(
         embedder=embedder,
         vector_store=vector_store,
         vlm=vlm,
+        caption_prompt=caption_prompt,
         contextualizer=contextualizer,
         topic_tagger=topic_tagger,
         timeouts=timeouts or PipelineTimeouts(),
@@ -395,6 +416,7 @@ def build_indexing_pipeline(
         vlm_factory=vlm_factory,
         contextualizer_factory=contextualizer_factory,
         topic_tagger_factory=topic_tagger_factory,
+        defer_replace_cleanup=defer_replace_cleanup,
     )
 
 
