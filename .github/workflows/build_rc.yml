@@ -57,6 +57,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ needs.vars.outputs.image_name }}
+          flavor: latest=false
           tags: |
             type=ref,event=tag
 
@@ -102,6 +103,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ needs.vars.outputs.image_name }}-ray
+          flavor: latest=false
           tags: |
             type=ref,event=tag
 
@@ -147,6 +149,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ needs.vars.outputs.image_name }}-admin-ui
+          flavor: latest=false
           tags: |
             type=ref,event=tag
 
