@@ -15,6 +15,7 @@ from openrag.core.config.root import Settings
 # this window (and on a miss), bounding both staleness and DB load regardless
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
+_CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = "IndexerPoolDispatcher"
 
 
@@ -254,6 +255,18 @@ class IndexerWorkerActor:
                     pass
             return result
         finally:
+            content_sha256 = metadata.get("content_sha256")
+            file_id = metadata.get("file_id")
+            if content_sha256 and file_id:
+                try:
+                    await self._ensure_catalog()
+                    await self._catalog_store.document_repo.release_content_sha256_claim(
+                        file_id=file_id,
+                        partition=partition,
+                        content_sha256=content_sha256,
+                    )
+                except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
+                    self._logger.warning(f"Failed to release content deduplication claim for {file_id}: {exc}")
             # Purge the raw upload (when configured) after indexing settles —
             # success or failure. Enforced here rather than in the worker so it
             # also covers pre-processing failures (catalog/registry init, or the
@@ -304,6 +317,8 @@ class IndexerPool:
         ]
         self._inflight = [0] * len(self._workers)
         self._release_tasks: set[asyncio.Task[Any]] = set()
+        self._claim_store: Any = None
+        self._claim_store_lock = asyncio.Lock()
 
     async def size(self) -> int:
         return len(self._workers)
@@ -324,18 +339,89 @@ class IndexerPool:
             # a dead actor); roll back so load balancing stays accurate.
             self._inflight[idx] -= 1
             raise
-        task = asyncio.get_running_loop().create_task(self._release(idx, ref))
+        metadata = kwargs.get("metadata") or {}
+        content_sha256 = metadata.get("content_sha256")
+        file_id = metadata.get("file_id")
+        claim = None
+        if content_sha256 and file_id:
+            claim = {
+                "file_id": str(file_id),
+                "partition": str(kwargs.get("partition") or ""),
+                "content_sha256": str(content_sha256),
+            }
+        task = asyncio.get_running_loop().create_task(self._release(idx, ref, claim=claim))
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
         self._release_tasks.add(task)
         task.add_done_callback(self._release_tasks.discard)
         return [ref]
 
-    async def _release(self, idx: int, ref: Any) -> None:
+    async def _release(self, idx: int, ref: Any, *, claim: dict[str, str] | None = None) -> None:
+        renewal_task = None
+        if claim is not None:
+            renewal_task = asyncio.create_task(self._keep_content_claim_alive(**claim))
         try:
             # return_exceptions=True so a failed/cancelled task still decrements.
             await asyncio.gather(ref, return_exceptions=True)
         finally:
+            if renewal_task is not None:
+                renewal_task.cancel()
+                await asyncio.gather(renewal_task, return_exceptions=True)
+            if claim is not None:
+                try:
+                    repo = await self._claim_document_repo()
+                    await repo.release_content_sha256_claim(**claim)
+                except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
+                    from core.utils.logging import get_logger
+
+                    get_logger().bind(file_id=claim["file_id"], partition=claim["partition"]).warning(
+                        "Failed to release settled content deduplication claim.",
+                        error=str(exc),
+                    )
             self._inflight[idx] -= 1
+
+    async def _claim_document_repo(self) -> Any:
+        if self._claim_store is None:
+            async with self._claim_store_lock:
+                if self._claim_store is None:
+                    from core.config import load_config
+                    from services.storage.postgres_store import PostgresStore
+
+                    cfg = load_config()
+                    rdb_cfg = cfg.rdb.model_copy(
+                        update={"database": f"partitions_for_collection_{cfg.vectordb.collection_name}"}
+                    )
+                    store = PostgresStore(rdb_cfg, run_migrations=False)
+                    await store.initialize()
+                    self._claim_store = store
+        return self._claim_store.document_repo
+
+    async def _keep_content_claim_alive(
+        self,
+        *,
+        file_id: str,
+        partition: str,
+        content_sha256: str,
+    ) -> None:
+        while True:
+            await asyncio.sleep(_CONTENT_CLAIM_RENEW_INTERVAL_SECONDS)
+            try:
+                repo = await self._claim_document_repo()
+                renewed = await repo.renew_content_sha256_claim(
+                    file_id=file_id,
+                    partition=partition,
+                    content_sha256=content_sha256,
+                )
+                if not renewed:
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - lease renewal retries until the task settles
+                from core.utils.logging import get_logger
+
+                get_logger().bind(file_id=file_id, partition=partition).warning(
+                    "Failed to renew content deduplication claim; retrying.",
+                    error=str(exc),
+                )
 
 
 def build_indexer_pool(namespace: str = "openrag") -> Any:

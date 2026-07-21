@@ -63,6 +63,8 @@ def _vector_store() -> MagicMock:
 
 def _document_repo() -> MagicMock:
     repo = MagicMock()
+    repo.claim_content_sha256 = AsyncMock(return_value=None)
+    repo.release_content_sha256_claim = AsyncMock()
     repo.remove_file_from_partition = AsyncMock()
     repo.update_file_metadata_in_db = AsyncMock(return_value=True)
     repo.add_file_to_partition = AsyncMock(return_value=True)
@@ -84,6 +86,7 @@ def _task_state_manager() -> MagicMock:
     tsm.set_object_ref = _remote_mock()
     tsm.get_state = _remote_mock("SERIALIZING")
     tsm.get_error = _remote_mock("traceback")
+    tsm.get_details = _remote_mock(None)
     tsm.get_object_ref = _remote_mock({"ref": object()})
     tsm.get_matching_active_task_refs_v2 = _remote_mock({})
     tsm.get_matching_active_task_refs = _remote_mock({})
@@ -234,6 +237,73 @@ async def test_dispatch_indexing_registers_completion_with_detached_tracker() ->
         )
     tracker.track.remote.assert_called_once_with("task-1", {"ref": ref})
     tsm.set_details.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_rejects_content_already_claimed() -> None:
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    repo.claim_content_sha256.return_value = "existing-file"
+    pool = _pool_with_ref(object())
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ConflictError) as exc:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "new-file", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert exc.value.code == "DOCUMENT_CONTENT_EXISTS"
+    assert exc.value.extra["existing_file_id"] == "existing-file"
+    pool.submit.remote.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_releases_claim_when_queueing_fails() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    tsm = _task_state_manager()
+    tsm.set_queued_details.remote.side_effect = RuntimeError("queue unavailable")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "new-file", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="new-file",
+        partition="tenant-a",
+        content_sha256="abc123",
+    )
 
 
 @pytest.mark.asyncio
@@ -773,6 +843,7 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
         user_id=None,
         relationship_id=None,
         parent_id=None,
+        content_sha256=None,
     )
     vector_store.upsert_entities.assert_awaited_once()
     vector_store.insert_entities.assert_awaited_once()
@@ -803,6 +874,29 @@ async def test_cancel_task_uses_stored_pool_object_ref() -> None:
     assert result is True
     tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
     cancel.assert_called_once_with(ref, recursive=True)
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_leaves_content_claim_for_task_settlement() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    repo = _document_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("ray.cancel"):
+        assert await dispatcher.cancel_task("task-1") is True
+
+    repo.release_content_sha256_claim.assert_not_awaited()
+    tsm.get_details.remote.assert_not_awaited()
 
 
 @pytest.mark.asyncio
