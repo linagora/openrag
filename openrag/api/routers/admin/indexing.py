@@ -298,17 +298,26 @@ async def put_file(
     # duplicates behind (recoverable; #658/#660 reconciliation covers that).
     original_filename = file.filename
     file.filename = sanitize_filename(file.filename)
-    if getattr(getattr(config, "loader", None), "content_deduplication_enabled", True):
-        saved_upload = await save_file_to_disk_with_sha256(
-            file,
-            Path(config.paths.data_dir),
-            with_random_prefix=True,
+    try:
+        if getattr(getattr(config, "loader", None), "content_deduplication_enabled", True):
+            saved_upload = await save_file_to_disk_with_sha256(
+                file,
+                Path(config.paths.data_dir),
+                with_random_prefix=True,
+            )
+            file_path = saved_upload.path
+            content_sha256 = saved_upload.sha256
+        else:
+            file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+            content_sha256 = None
+    except OpenRAGError:
+        raise
+    except Exception as e:
+        logger.exception("Failed to save file to disk.", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save uploaded file.",
         )
-        file_path = saved_upload.path
-        content_sha256 = saved_upload.sha256
-    else:
-        file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
-        content_sha256 = None
 
     try:
         task_id = await service.add_file(
