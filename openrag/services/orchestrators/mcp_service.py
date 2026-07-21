@@ -52,7 +52,7 @@ logger = get_logger()
 
 _ROLE_HIERARCHY: dict[str, int] = {"viewer": 1, "editor": 2, "owner": 3}
 _FORBIDDEN_FILE_ID_CHARS: frozenset[str] = frozenset("/")
-_ACTIVE_STATES = {"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"}
+_ACTIVE_STATES = {"QUEUED", "SERIALIZING"}
 _MAX_REDIRECTS = 10
 _MAX_CHUNKS_PER_CALL = 200
 _MAX_FUZZY_CANDIDATES = 5000

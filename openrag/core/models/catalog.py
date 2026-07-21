@@ -13,8 +13,6 @@ from pydantic import BaseModel, Field
 class DocumentStatus(str, Enum):
     QUEUED = "QUEUED"
     SERIALIZING = "SERIALIZING"
-    CHUNKING = "CHUNKING"
-    INSERTING = "INSERTING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"

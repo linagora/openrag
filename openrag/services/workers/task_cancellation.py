@@ -12,7 +12,7 @@ from services.workers.task_state import PENDING_TASK_DETAILS
 
 logger = get_logger()
 
-_ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"})
+_ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 _REF_WAIT_INTERVAL = 0.05
 _STALE_REFLESS_TASK_ERROR = (
     "Indexing task never exposed a cancellable worker ref before delete cleanup; marking it failed as stale."

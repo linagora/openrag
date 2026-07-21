@@ -7,7 +7,7 @@ from typing import Any
 import ray
 from core.models.catalog import TERMINAL_TASK_STATES, DocumentStatus
 
-ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"})
+ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
 PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
 
