@@ -58,8 +58,13 @@ class OllamaClient(LLM):
         model_name: str,
         *,
         timeout: float = 240.0,
+        max_retries: int = 2,
         **kwargs,
     ) -> None:
+        # See VLLMClient.__init__: accepted here purely so it doesn't fall into
+        # **kwargs and leak into the request body — retry attempts are fixed by
+        # the @with_retry decorator on each method, not by a per-instance value.
+        del max_retries
         self._endpoint = endpoint.rstrip("/")
         if not self._endpoint.endswith("/v1"):
             self._endpoint = f"{self._endpoint}/v1"

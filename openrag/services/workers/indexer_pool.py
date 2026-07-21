@@ -846,7 +846,7 @@ def _global_llm_endpoint_config(cfg: Any) -> Any | None:
         "api_key": getattr(llm_cfg, "api_key", ""),
         "temperature": getattr(llm_cfg, "temperature", 0.1),
         "max_retries": getattr(llm_cfg, "max_retries", 2),
-        "logprobs": getattr(llm_cfg, "logprobs", True),
+        "logprobs": getattr(llm_cfg, "logprobs", False),
     }
     enable_thinking = getattr(llm_cfg, "enable_thinking", None)
     if enable_thinking is not None:
@@ -892,6 +892,9 @@ def _global_vlm_endpoint_config(cfg: Any) -> Any | None:
     extra = {
         "implementation": "vllm",
         "api_key": getattr(vlm_cfg, "api_key", ""),
+        "temperature": getattr(vlm_cfg, "temperature", 0.1),
+        "max_retries": getattr(vlm_cfg, "max_retries", 2),
+        "logprobs": getattr(vlm_cfg, "logprobs", False),
     }
     enable_thinking = getattr(vlm_cfg, "enable_thinking", None)
     if enable_thinking is not None:
