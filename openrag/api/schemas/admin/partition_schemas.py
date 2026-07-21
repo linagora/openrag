@@ -111,7 +111,7 @@ class PartitionDetailResponse(BaseModel):
     dimension: int
     created_at: datetime
     document_count: int = 0
-    chat_history_depth: int = 0
+    chat_history_depth: int = 4
     chat_llm: str | None = None
 
 

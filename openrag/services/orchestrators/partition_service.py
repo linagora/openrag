@@ -270,11 +270,7 @@ class PartitionService:
                 "indexation_preset": r.get("indexation_preset") or "default",
                 "retrieval_preset": r.get("retrieval_preset") or "default",
                 "dimension": r.get("dimension"),
-                # `or 4`, not `or 0`: normalizes pre-existing rows stored under the old
-                # "0 = inherit global default" scheme to the concrete value they already
-                # resolve to at chat time (see QueryService._resolve_chat_history_depth).
-                # New writes can no longer produce 0 (schema now requires >=1).
-                "chat_history_depth": r.get("chat_history_depth") or 4,
+                "chat_history_depth": r.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
                 "chat_llm": r.get("chat_llm"),
                 "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
                 "document_count": counts.get(name, 0),
@@ -505,8 +501,7 @@ class PartitionService:
             "retrieval_pipeline": cfg.retrieval.model_dump(mode="json"),
             "dimension": row.get("dimension"),
             "created_at": row.get("created_at"),
-            # See list_partition_summaries() above for why this normalizes to 4, not 0.
-            "chat_history_depth": row.get("chat_history_depth") or 4,
+            "chat_history_depth": row.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
             "chat_llm": row.get("chat_llm"),
         }
 
@@ -541,10 +536,9 @@ class PartitionService:
             indexation=IndexationPipelineConfig(**idx_preset),
             retrieval=RetrievalPipelineConfig(**ret_preset),
             collection_name=row.get("collection_name"),
-            # See list_partition_summaries() above for why this normalizes to 4, not 0.
             # This value feeds Settings.partitions, so it's what
             # QueryService._resolve_chat_history_depth actually reads at chat time.
-            chat_history_depth=row.get("chat_history_depth") or 4,
+            chat_history_depth=row.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
             chat_llm=row.get("chat_llm"),
         )
 
@@ -574,6 +568,19 @@ class PartitionService:
         if self._config is None:
             raise ConfigError("PartitionService was constructed without a config; preset resolution unavailable.")
         return self._config
+
+    def _legacy_chat_history_depth_fallback(self) -> int:
+        """Value substituted for a partition row still holding the pre-guard ``0``.
+
+        ``0`` used to mean "inherit the global default" (``config.rag.chat_history_depth``,
+        see ``QueryService._resolve_chat_history_depth``). New writes can no longer
+        produce ``0`` (``ge=1`` on ``CreatePartitionRequest``/``UpdatePartitionRequest``),
+        but a row written before that guard existed may still have it stored — read it
+        from the live config, not a hardcoded constant, so a legacy row keeps resolving
+        to the *current* global default exactly as it did before, even if an operator
+        changes ``rag.chat_history_depth`` later.
+        """
+        return self._config.rag.chat_history_depth if self._config is not None else 4
 
     # ------------------------------------------------------------------
     # File / chunk reads

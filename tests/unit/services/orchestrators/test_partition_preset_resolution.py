@@ -138,6 +138,19 @@ def test_resolve_partition_row_keeps_explicit_chat_history_depth():
     assert cfg.chat_history_depth == 10
 
 
+def test_resolve_partition_row_legacy_zero_tracks_current_global_default():
+    """The legacy-0 fallback reads the live config, not a hardcoded constant —
+    changing rag.chat_history_depth must change what a legacy-0 row resolves to."""
+    from core.config.retrieval import RAGConfig
+
+    settings = _settings().model_copy(update={"rag": RAGConfig(chat_history_depth=9)})
+    svc = _make_service(settings=settings)
+
+    cfg = svc.resolve_partition_row(_full_row("p1", chat_history_depth=0))
+
+    assert cfg.chat_history_depth == 9
+
+
 def test_resolve_partition_row_missing_indexation_preset_raises():
     from core.utils.exceptions import ConfigError
 
