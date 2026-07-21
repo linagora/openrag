@@ -1054,6 +1054,27 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pool_abort_drain_restores_acceptance() -> None:
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+
+    await pool.begin_drain()
+    with pytest.raises(RuntimeError, match="draining"):
+        await pool.submit(task_id="rejected-while-draining")
+
+    assert await pool.abort_drain() == {
+        "protocol_version": "v2",
+        "accepting_tasks": True,
+        "inflight_jobs": 0,
+        "worker_names": ["test-worker-0"],
+    }
+
+    await pool.submit(task_id="accepted-after-abort")
+    assert len(worker.calls) == 1
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+
+
+@pytest.mark.asyncio
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 

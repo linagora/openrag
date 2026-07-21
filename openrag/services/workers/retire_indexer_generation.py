@@ -2,7 +2,9 @@
 
 Run this only after traffic has stopped reaching API replicas that use the
 generation being retired. Protocol-aware generations are drained before they
-are removed. The original unversioned generation cannot report its state, so
+are removed. If a drain times out, the actors are kept and the pool is asked to
+resume accepting work, so a retained generation is not left rejecting every
+submission. The original unversioned generation cannot report its state, so
 retiring it requires an explicit operator confirmation. The same confirmation
 is required when a dispatcher is unavailable but its workers are still alive.
 """
@@ -22,6 +24,9 @@ from .ray_utils import call_ray_actor_with_timeout
 _LEGACY_GENERATION = "legacy"
 _LEGACY_DISPATCHER_NAME = "IndexerPoolDispatcher"
 _LEGACY_WORKER_PATTERN = re.compile(r"^IndexerWorker-\d+$")
+# Dedicated budget for the recovery call after a drain has already exhausted
+# its own deadline, so restoring acceptance never blocks indefinitely.
+_ABORT_DRAIN_TIMEOUT = 30.0
 
 
 def _actor_name(actor: Any) -> str:
@@ -79,6 +84,30 @@ def _drain_timeout(generation: str, timeout: float) -> TimeoutError:
     )
 
 
+async def _abort_drain_best_effort(dispatcher: Any, generation: str) -> None:
+    """Restore submission acceptance after a drain that did not finish.
+
+    ``begin_drain`` has already stopped the still-alive pool from accepting
+    work. Since the timeout leaves the generation's actors intact, resume
+    acceptance so it keeps serving API submissions instead of rejecting every
+    one until an operator recreates the pool. Failures are swallowed — the drain
+    timeout is the error worth surfacing.
+    """
+    try:
+        future = dispatcher.abort_drain.remote()
+        await call_ray_actor_with_timeout(
+            future,
+            _ABORT_DRAIN_TIMEOUT,
+            f"Restore submissions for indexer generation {generation}",
+        )
+    except Exception as exc:  # noqa: BLE001 - best effort; the drain timeout is the real error
+        from core.utils.logging import get_logger
+
+        get_logger().warning(
+            f"Could not restore submissions for indexer generation {generation!r} after a drain timeout: {exc}"
+        )
+
+
 async def _drain_protocol_generation(
     dispatcher: Any,
     generation: str,
@@ -99,20 +128,26 @@ async def _drain_protocol_generation(
         except TimeoutError as exc:
             raise _drain_timeout(generation, timeout) from exc
 
-    status = await call_with_remaining_timeout(
-        dispatcher.begin_drain,
-        f"Begin draining indexer generation {generation}",
-    )
-    while int(status.get("inflight_jobs", 0)) > 0:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _drain_timeout(generation, timeout)
-        await asyncio.sleep(min(max(poll_interval, 0.0), remaining))
+    try:
         status = await call_with_remaining_timeout(
-            dispatcher.status,
-            f"Check indexer generation {generation} drain status",
+            dispatcher.begin_drain,
+            f"Begin draining indexer generation {generation}",
         )
-    return status
+        while int(status.get("inflight_jobs", 0)) > 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _drain_timeout(generation, timeout)
+            await asyncio.sleep(min(max(poll_interval, 0.0), remaining))
+            status = await call_with_remaining_timeout(
+                dispatcher.status,
+                f"Check indexer generation {generation} drain status",
+            )
+        return status
+    except TimeoutError:
+        # begin_drain has already stopped this retained pool from accepting
+        # work; restore acceptance so it keeps serving after we give up.
+        await _abort_drain_best_effort(dispatcher, generation)
+        raise
 
 
 def retire_generation(

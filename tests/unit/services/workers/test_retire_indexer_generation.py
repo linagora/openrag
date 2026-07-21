@@ -135,11 +135,20 @@ def test_missing_dispatcher_removes_confirmed_idle_workers(monkeypatch: pytest.M
 def test_begin_drain_rpc_timeout_keeps_generation_alive(monkeypatch: pytest.MonkeyPatch) -> None:
     import services.workers.retire_indexer_generation as module
 
-    dispatcher = SimpleNamespace(begin_drain=SimpleNamespace(remote=Mock()))
+    abort = Mock()
+    dispatcher = SimpleNamespace(
+        begin_drain=SimpleNamespace(remote=Mock()),
+        abort_drain=SimpleNamespace(remote=abort),
+    )
     monkeypatch.setattr("ray.util.state.list_actors", lambda **_kwargs: [])
     monkeypatch.setattr(module, "_get_actor", lambda *_args: dispatcher)
-    rpc = AsyncMock(side_effect=TimeoutError)
-    monkeypatch.setattr(module, "call_ray_actor_with_timeout", rpc)
+
+    def rpc(_future, _timeout, description):
+        if description.startswith("Restore submissions"):
+            return {"accepting_tasks": True}
+        raise TimeoutError
+
+    monkeypatch.setattr(module, "call_ray_actor_with_timeout", AsyncMock(side_effect=rpc))
     kill = Mock()
     monkeypatch.setattr(module, "_kill_actor", kill)
 
@@ -152,19 +161,30 @@ def test_begin_drain_rpc_timeout_keeps_generation_alive(monkeypatch: pytest.Monk
             confirm_legacy_idle=False,
         )
     kill.assert_not_called()
+    # The retained pool is asked to resume accepting submissions.
+    abort.assert_called_once_with()
 
 
 def test_status_rpc_timeout_keeps_generation_alive(monkeypatch: pytest.MonkeyPatch) -> None:
     import services.workers.retire_indexer_generation as module
 
+    abort = Mock()
     dispatcher = SimpleNamespace(
         begin_drain=SimpleNamespace(remote=Mock()),
         status=SimpleNamespace(remote=Mock()),
+        abort_drain=SimpleNamespace(remote=abort),
     )
     monkeypatch.setattr("ray.util.state.list_actors", lambda **_kwargs: [])
     monkeypatch.setattr(module, "_get_actor", lambda *_args: dispatcher)
-    rpc = AsyncMock(side_effect=[{"inflight_jobs": 1}, TimeoutError()])
-    monkeypatch.setattr(module, "call_ray_actor_with_timeout", rpc)
+
+    def rpc(_future, _timeout, description):
+        if description.startswith("Begin draining"):
+            return {"inflight_jobs": 1}
+        if description.startswith("Restore submissions"):
+            return {"accepting_tasks": True}
+        raise TimeoutError
+
+    monkeypatch.setattr(module, "call_ray_actor_with_timeout", AsyncMock(side_effect=rpc))
     monkeypatch.setattr(module.asyncio, "sleep", AsyncMock())
     kill = Mock()
     monkeypatch.setattr(module, "_kill_actor", kill)
@@ -178,4 +198,31 @@ def test_status_rpc_timeout_keeps_generation_alive(monkeypatch: pytest.MonkeyPat
             confirm_legacy_idle=False,
         )
     kill.assert_not_called()
-    assert rpc.await_count == 2
+    abort.assert_called_once_with()
+
+
+def test_drain_timeout_survives_failed_acceptance_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A best-effort abort that itself fails must not mask the drain timeout."""
+    import services.workers.retire_indexer_generation as module
+
+    abort = Mock()
+    dispatcher = SimpleNamespace(
+        begin_drain=SimpleNamespace(remote=Mock()),
+        abort_drain=SimpleNamespace(remote=abort),
+    )
+    monkeypatch.setattr("ray.util.state.list_actors", lambda **_kwargs: [])
+    monkeypatch.setattr(module, "_get_actor", lambda *_args: dispatcher)
+    monkeypatch.setattr(module, "call_ray_actor_with_timeout", AsyncMock(side_effect=TimeoutError))
+    kill = Mock()
+    monkeypatch.setattr(module, "_kill_actor", kill)
+
+    with pytest.raises(TimeoutError, match="actors were kept"):
+        module.retire_generation(
+            "v2",
+            namespace="openrag",
+            timeout=1,
+            poll_interval=0,
+            confirm_legacy_idle=False,
+        )
+    kill.assert_not_called()
+    abort.assert_called_once_with()

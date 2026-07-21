@@ -355,6 +355,17 @@ class IndexerPool:
         self._accepting_tasks = False
         return await self.status()
 
+    async def abort_drain(self) -> dict[str, Any]:
+        """Resume accepting submissions after an abandoned drain.
+
+        When a retirement gives up (e.g. it times out waiting for accepted work
+        to settle), the actors are kept alive but ``begin_drain`` has already
+        stopped this pool from accepting work. Restore acceptance so the
+        retained generation keeps serving instead of rejecting every submission.
+        """
+        self._accepting_tasks = True
+        return await self.status()
+
     async def status(self) -> dict[str, Any]:
         """Expose the state a deployment controller needs before actor cleanup."""
         return {
