@@ -1,16 +1,19 @@
 """HTML ``DocumentParser`` implementation.
 
 Converts HTML to Markdown via the project's ``html_to_markdown`` dep
-(already used by the websearch and pptx pipelines), then emits a single
-text block. No file I/O, no JavaScript execution, no image fetching —
-purely structural conversion.
+(already used by the websearch and pptx pipelines), then emits a text
+block plus image blocks for embedded data-URI images. The base64 payloads
+are replaced with compact caption-compatible references before chunking.
+No file I/O, JavaScript execution, or image fetching is performed.
 """
 
 from __future__ import annotations
 
 import asyncio
 
-from ...models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from core.indexing.image_preprocessor import normalize_data_uri_images
+from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+
 from ..text_preprocessor import decode_bytes
 from .document_parser import DocumentParser
 from .registry import parser_registry
@@ -31,10 +34,12 @@ class HtmlParser(DocumentParser):
 
     async def parse(self, document: Document) -> ProcessedDocument:
         markdown = (await asyncio.to_thread(self._html_to_markdown, document)).strip()
+        markdown, images = normalize_data_uri_images(markdown, page_number=1, reference_scope=document.id)
         text_blocks = [TextBlock(text=markdown, page_number=1)] if markdown else []
         return ProcessedDocument(
             document_id=document.id,
             text_blocks=text_blocks,
+            images=images,
             metadata=dict(document.metadata),
             page_count=1 if markdown else 0,
         )
