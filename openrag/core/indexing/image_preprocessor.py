@@ -30,7 +30,7 @@ logger = get_logger()
 
 HTTP_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((https?://[^)]+)\)")
 DATA_URI_IMAGE_PATTERN = re.compile(
-    r"!\[(.*?)\]\((data:image/[^;,\s)]+(?:;[^;,\s)]+=[^;,\s)]*)*;base64,[^)]+)\)",
+    r"!\[(.*?)\]\((data:image/[^;,\s)]+(?:;[^;,=\s)]+=[^;,=\s)]*)*;base64,[^)]+)\)",
     re.IGNORECASE,
 )
 
@@ -81,7 +81,7 @@ def decode_data_uri(data_uri: str) -> bytes | None:
     """Decode a ``data:image/...;base64,...`` URI into raw bytes. ``None`` on failure."""
     try:
         _, b64 = data_uri.split(",", 1)
-        return base64.b64decode(b64, validate=True)
+        return base64.b64decode("".join(b64.split()), validate=True)
     except Exception as exc:
         logger.bind(error=str(exc)).warning("Failed to decode data URI")
         return None
@@ -167,7 +167,7 @@ def normalize_data_uri_images(
             skipped += 1
             return fallback
 
-        encoded = data_uri.split(",", 1)[1] if "," in data_uri else ""
+        encoded = "".join(data_uri.split(",", 1)[1].split()) if "," in data_uri else ""
         estimated_bytes = (len(encoded) * 3) // 4
         if estimated_bytes > max_image_bytes or total_bytes + estimated_bytes > max_total_bytes:
             skipped += 1

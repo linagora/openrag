@@ -59,6 +59,12 @@ class TestDecodeDataUri:
         assert decode_data_uri("not-a-data-uri") is None
         assert decode_data_uri("data:image/png;base64,!!!not-base64") is None
 
+    def test_line_wrapped_payload(self):
+        payload = b"hello world " * 8
+        wrapped = base64.encodebytes(payload).decode()
+
+        assert decode_data_uri(f"data:image/png;base64,{wrapped}") == payload
+
 
 class TestMimeFromDataUri:
     def test_jpeg(self):
@@ -113,7 +119,7 @@ class TestNormalizeDataUriImages:
 
     def test_parameterized_data_uri_is_extracted_and_sanitized(self):
         payload = base64.b64encode(b"svg-image").decode()
-        uri = f"data:image/svg+xml;charset=utf-8;base64,{payload}"
+        uri = f"data:image/svg+xml;charset=utf-8;profile=compact;base64,{payload}"
 
         text, blocks = normalize_data_uri_images(f"before ![diagram]({uri}) after")
 
@@ -121,6 +127,24 @@ class TestNormalizeDataUriImages:
         assert len(blocks) == 1
         assert blocks[0].image_bytes == b"svg-image"
         assert blocks[0].mime_type == "image/svg+xml"
+
+    def test_line_wrapped_data_uri_is_extracted_and_sanitized(self):
+        payload = b"hello world " * 8
+        wrapped = base64.encodebytes(payload).decode()
+
+        text, blocks = normalize_data_uri_images(f"before ![chart](data:image/png;base64,{wrapped}) after")
+
+        assert "data:image" not in text
+        assert len(blocks) == 1
+        assert blocks[0].image_bytes == payload
+
+    def test_malformed_parameter_sequence_is_not_matched(self):
+        text = f"before ![bad](data:image/png;{'a=' * 10_000} nob64) after"
+
+        sanitized, blocks = normalize_data_uri_images(text)
+
+        assert sanitized == text
+        assert blocks == []
 
     def test_generated_reference_does_not_collide_with_existing_markdown(self):
         uri = self._data_uri(b"chart")
