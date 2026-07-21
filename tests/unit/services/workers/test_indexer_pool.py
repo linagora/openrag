@@ -767,6 +767,68 @@ def test_contextualizer_factory_rebuilds_on_api_key_rotation(tmp_path) -> None:
         llm_registry._registry.pop("key-probe-llm", None)
 
 
+def test_global_llm_endpoint_config_carries_sampling_params() -> None:
+    """The fallback LLM endpoint config must carry temperature/max_retries/
+    logprobs so it behaves the same as a named endpoint (#720) — and
+    ``logprobs`` must default to False (LLMParamsConfig's real default), not
+    True.
+    """
+    from services.workers.indexer_pool import _global_llm_endpoint_config
+
+    cfg = SimpleNamespace(
+        llm=SimpleNamespace(
+            base_url="http://llm.example/v1",
+            model="mistral",
+            api_key="llm-key",
+            temperature=0.42,
+            max_retries=9,
+            logprobs=True,
+            timeout=60,
+        )
+    )
+
+    endpoint_cfg = _global_llm_endpoint_config(cfg)
+
+    assert endpoint_cfg.extra["temperature"] == 0.42
+    assert endpoint_cfg.extra["max_retries"] == 9
+    assert endpoint_cfg.extra["logprobs"] is True
+
+
+def test_global_llm_endpoint_config_logprobs_defaults_false() -> None:
+    from services.workers.indexer_pool import _global_llm_endpoint_config
+
+    cfg = SimpleNamespace(llm=SimpleNamespace(base_url="http://llm.example/v1", model="mistral"))
+
+    endpoint_cfg = _global_llm_endpoint_config(cfg)
+
+    assert endpoint_cfg.extra["logprobs"] is False
+
+
+def test_global_vlm_endpoint_config_carries_sampling_params() -> None:
+    """Mirrors the LLM fallback: the VLM fallback must also carry sampling
+    params instead of dropping temperature/max_retries/logprobs entirely.
+    """
+    from services.workers.indexer_pool import _global_vlm_endpoint_config
+
+    cfg = SimpleNamespace(
+        vlm=SimpleNamespace(
+            base_url="http://vlm.example/v1",
+            model="pixtral",
+            api_key="vlm-key",
+            temperature=0.55,
+            max_retries=4,
+            logprobs=True,
+            timeout=60,
+        )
+    )
+
+    endpoint_cfg = _global_vlm_endpoint_config(cfg)
+
+    assert endpoint_cfg.extra["temperature"] == 0.55
+    assert endpoint_cfg.extra["max_retries"] == 4
+    assert endpoint_cfg.extra["logprobs"] is True
+
+
 def test_build_contextualizer_factory_uses_global_llm_fallback(tmp_path) -> None:
     from services.workers.indexer_pool import _build_contextualizer_factory
 

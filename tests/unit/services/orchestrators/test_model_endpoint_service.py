@@ -258,6 +258,47 @@ async def test_seed_defaults_preserves_llm_and_vlm_enable_thinking(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_carries_llm_and_vlm_sampling_params(monkeypatch):
+    """temperature/max_retries/logprobs must reach the seeded ``extra`` so a
+    named LLM/VLM endpoint (built by di/factories.py splatting ``extra``) does
+    not silently fall back to the provider's default sampling params (#720).
+    """
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    settings = Settings(
+        llm={
+            "base_url": "http://llm:8000/v1",
+            "model": "qwen",
+            "temperature": 0.3,
+            "max_retries": 5,
+            "logprobs": True,
+        },
+        vlm={
+            "base_url": "http://vlm:8000/v1",
+            "model": "qwen-vl",
+            "temperature": 0.7,
+            "max_retries": 1,
+            "logprobs": False,
+        },
+    )
+    repo = _FakeEndpointRepo()
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    rows = {row.model_type: row for row in repo._store.values()}
+    assert rows["llm"].extra["temperature"] == 0.3
+    assert rows["llm"].extra["max_retries"] == 5
+    assert rows["llm"].extra["logprobs"] is True
+    assert rows["vlm"].extra["temperature"] == 0.7
+    assert rows["vlm"].extra["max_retries"] == 1
+    assert rows["vlm"].extra["logprobs"] is False
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_skips_reranker_when_unconfigured(monkeypatch):
     from core.config.root import Settings
 

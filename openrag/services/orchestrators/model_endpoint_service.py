@@ -46,6 +46,24 @@ def _with_enable_thinking(extra: dict[str, Any], enable_thinking: bool | None) -
     return {**extra, "enable_thinking": enable_thinking}
 
 
+def _with_sampling_params(extra: dict[str, Any], llm_cfg: Any) -> dict[str, Any]:
+    """Add the shared LLM/VLM sampling params (``LLMParamsConfig``) to endpoint extras.
+
+    Without this, a named LLM/VLM endpoint built via the DB-backed registry
+    (di/factories.py's ``make_component_factory``, which splats ``extra``
+    straight into the client constructor) never receives ``temperature`` /
+    ``max_retries`` / ``logprobs`` and silently runs at the provider default.
+    Mirrors the fallback config built in
+    ``indexer_pool._global_llm_endpoint_config``.
+    """
+    return {
+        **extra,
+        "temperature": llm_cfg.temperature,
+        "max_retries": llm_cfg.max_retries,
+        "logprobs": llm_cfg.logprobs,
+    }
+
+
 class ModelEndpointService:
     """CRUD and lifecycle management for named model endpoints."""
 
@@ -124,7 +142,7 @@ class ModelEndpointService:
                 "model_name": os.getenv("LLM_MODEL", s.llm.model),
                 "timeout": s.llm.timeout,
                 "extra": _with_enable_thinking(
-                    _with_api_key({"implementation": "vllm"}, s.llm.api_key),
+                    _with_sampling_params(_with_api_key({"implementation": "vllm"}, s.llm.api_key), s.llm),
                     s.llm.enable_thinking,
                 ),
             },
@@ -133,7 +151,7 @@ class ModelEndpointService:
                 "model_name": os.getenv("VLM_MODEL", s.vlm.model),
                 "timeout": s.vlm.timeout,
                 "extra": _with_enable_thinking(
-                    _with_api_key({"implementation": "vllm"}, s.vlm.api_key),
+                    _with_sampling_params(_with_api_key({"implementation": "vllm"}, s.vlm.api_key), s.vlm),
                     s.vlm.enable_thinking,
                 ),
             },
