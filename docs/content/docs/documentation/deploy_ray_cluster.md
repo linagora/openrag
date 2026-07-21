@@ -143,7 +143,7 @@ Detached indexer actors survive an API-only rollout when OpenRAG uses an externa
 The first transition is from the original unversioned actors to `v2`. Those actors cannot report whether they are idle, so verify that the old API replicas and indexing jobs have stopped before confirming their removal:
 
 ```bash
-uv run python -m openrag.services.workers.retire_indexer_generation \
+PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
   --ray-address "${RAY_ADDRESS}" \
   --generation legacy \
   --confirm-legacy-idle
@@ -152,7 +152,7 @@ uv run python -m openrag.services.workers.retire_indexer_generation \
 Protocol-aware generations drain automatically. For example, a future `v2` retirement rejects new submissions, waits for all accepted jobs to settle, and only then removes the dispatcher and workers:
 
 ```bash
-uv run python -m openrag.services.workers.retire_indexer_generation \
+PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
   --ray-address "${RAY_ADDRESS}" \
   --generation v2 \
   --timeout 3600
