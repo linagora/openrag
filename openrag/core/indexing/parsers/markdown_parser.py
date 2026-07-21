@@ -3,8 +3,9 @@
 Decodes a Markdown document into a single :class:`TextBlock` and emits
 one :class:`ImageBlock` per image reference in the source:
 
-- Data-URI refs (``![alt](data:image/...;base64,...)``) are decoded and
-  the bytes stored on the block.
+- Data-URI refs (``![alt](data:image/...;base64,...)``) are decoded, the
+  bytes stored on the block, and the raw payload replaced by a compact
+  caption-compatible reference before chunking.
 - HTTP/HTTPS refs (``![alt](https://...)``) yield an :class:`ImageBlock`
   with empty ``image_bytes`` and ``source_url`` set; a downstream fetch
   stage can populate the bytes later. The :attr:`ImageBlock.image_url`
@@ -17,7 +18,7 @@ parser→caption contract.
 from __future__ import annotations
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
-from ..image_preprocessor import HTTP_IMAGE_PATTERN, extract_data_uri_image_blocks
+from ..image_preprocessor import HTTP_IMAGE_PATTERN, normalize_data_uri_images
 from ..text_preprocessor import decode_bytes
 from .document_parser import DocumentParser
 from .registry import parser_registry
@@ -35,7 +36,8 @@ class MarkdownParser(DocumentParser):
 
     async def parse(self, document: Document) -> ProcessedDocument:
         text = self._extract_text(document).strip()
-        images = self._extract_image_blocks(text)
+        text, images = normalize_data_uri_images(text, page_number=1)
+        images.extend(self._extract_http_image_blocks(text))
 
         text_blocks = [TextBlock(text=text, page_number=1)] if text else []
         return ProcessedDocument(
@@ -54,10 +56,10 @@ class MarkdownParser(DocumentParser):
         return ""
 
     @staticmethod
-    def _extract_image_blocks(text: str) -> list[ImageBlock]:
+    def _extract_http_image_blocks(text: str) -> list[ImageBlock]:
         if not text:
             return []
-        blocks: list[ImageBlock] = list(extract_data_uri_image_blocks(text, page_number=1))
+        blocks: list[ImageBlock] = []
         for alt, url in HTTP_IMAGE_PATTERN.findall(text):
             blocks.append(
                 ImageBlock(

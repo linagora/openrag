@@ -35,6 +35,9 @@ DATA_URI_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((data:image/[^;]+;base64,[^)]+
 
 # Qwen2.5-VL ``min_pixels`` threshold; images below this break the model.
 MIN_IMAGE_PIXELS = 784
+MAX_EMBEDDED_IMAGES = 50
+MAX_EMBEDDED_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_EMBEDDED_TOTAL_BYTES = 100 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +76,7 @@ def decode_data_uri(data_uri: str) -> bytes | None:
     """Decode a ``data:image/...;base64,...`` URI into raw bytes. ``None`` on failure."""
     try:
         _, b64 = data_uri.split(",", 1)
-        return base64.b64decode(b64)
+        return base64.b64decode(b64, validate=True)
     except Exception as exc:
         logger.warning("Failed to decode data URI: %s", exc)
         return None
@@ -120,3 +123,71 @@ def extract_data_uri_image_blocks(text: str, *, page_number: int = 1) -> list[An
             )
         )
     return blocks
+
+
+def normalize_data_uri_images(
+    text: str,
+    *,
+    page_number: int = 1,
+    max_images: int = MAX_EMBEDDED_IMAGES,
+    max_image_bytes: int = MAX_EMBEDDED_IMAGE_BYTES,
+    max_total_bytes: int = MAX_EMBEDDED_TOTAL_BYTES,
+) -> tuple[str, list[Any]]:
+    """Extract embedded images and remove their base64 payloads from Markdown.
+
+    Accepted images receive a compact deterministic placeholder that remains
+    compatible with the parser-to-caption replacement contract. Rejected or
+    malformed images are reduced to their alt text (or a small generic label),
+    so raw payloads never continue into chunking.
+    """
+    if not text:
+        return text, []
+
+    from ..models.document import ImageBlock
+
+    blocks: list[Any] = []
+    matched = 0
+    skipped = 0
+    total_bytes = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal matched, skipped, total_bytes
+        matched += 1
+        alt, data_uri = match.groups()
+        fallback = alt.strip() or "[Image]"
+
+        if matched > max_images:
+            skipped += 1
+            return fallback
+
+        encoded = data_uri.split(",", 1)[1] if "," in data_uri else ""
+        estimated_bytes = (len(encoded) * 3) // 4
+        if estimated_bytes > max_image_bytes or total_bytes + estimated_bytes > max_total_bytes:
+            skipped += 1
+            return fallback
+
+        payload = decode_data_uri(data_uri)
+        if payload is None or len(payload) > max_image_bytes or total_bytes + len(payload) > max_total_bytes:
+            skipped += 1
+            return fallback
+
+        placeholder = f"![{alt}](openrag-embedded-image-{matched})"
+        blocks.append(
+            ImageBlock(
+                image_bytes=payload,
+                page_number=page_number,
+                mime_type=mime_from_data_uri(data_uri),
+                metadata={"markdown_ref": placeholder, "alt": alt},
+            )
+        )
+        total_bytes += len(payload)
+        return placeholder
+
+    sanitized = DATA_URI_IMAGE_PATTERN.sub(replace, text)
+    if skipped:
+        logger.warning(
+            "Skipped %d of %d embedded image(s) while sanitizing document text",
+            skipped,
+            matched,
+        )
+    return sanitized, blocks

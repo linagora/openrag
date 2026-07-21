@@ -10,6 +10,7 @@ from core.indexing.image_preprocessor import (
     ensure_png_compatible_mode,
     extract_data_uri_image_blocks,
     mime_from_data_uri,
+    normalize_data_uri_images,
     pil_to_png_bytes,
 )
 from PIL import Image
@@ -91,6 +92,46 @@ class TestExtractDataUriImageBlocks:
     def test_skips_undecodable(self):
         text = "![](data:image/png;base64,!!!not-base64)"
         assert extract_data_uri_image_blocks(text) == []
+
+
+class TestNormalizeDataUriImages:
+    def _data_uri(self, payload: bytes = b"x", mime: str = "image/png") -> str:
+        return f"data:{mime};base64,{base64.b64encode(payload).decode()}"
+
+    def test_extracts_images_and_replaces_payloads_with_safe_refs(self):
+        first = self._data_uri(b"first")
+        second = self._data_uri(b"second", "image/jpeg")
+
+        text, blocks = normalize_data_uri_images(f"before ![one]({first}) middle ![two]({second}) after")
+
+        assert "data:image" not in text
+        assert "openrag-embedded-image-1" in text
+        assert "openrag-embedded-image-2" in text
+        assert [block.image_bytes for block in blocks] == [b"first", b"second"]
+        assert all(block.metadata["markdown_ref"] in text for block in blocks)
+
+    def test_malformed_payload_is_removed_even_without_an_image_block(self):
+        text, blocks = normalize_data_uri_images("before ![diagram](data:image/png;base64,!!!) after")
+
+        assert text == "before diagram after"
+        assert blocks == []
+
+    def test_rejected_payloads_are_still_sanitized(self):
+        uri = self._data_uri(b"too-large")
+
+        text, blocks = normalize_data_uri_images(f"before ![large]({uri}) after", max_image_bytes=1)
+
+        assert text == "before large after"
+        assert blocks == []
+
+    def test_image_count_limit_does_not_leave_payloads_behind(self):
+        uri = self._data_uri()
+
+        text, blocks = normalize_data_uri_images(f"![one]({uri}) ![two]({uri})", max_images=1)
+
+        assert "data:image" not in text
+        assert len(blocks) == 1
+        assert text.endswith("two")
 
 
 def test_min_image_pixels_constant():
