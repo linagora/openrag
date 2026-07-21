@@ -17,8 +17,9 @@ parser→caption contract.
 
 from __future__ import annotations
 
+from core.indexing.image_preprocessor import HTTP_IMAGE_PATTERN, normalize_data_uri_images
+
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
-from ..image_preprocessor import HTTP_IMAGE_PATTERN, normalize_data_uri_images
 from ..text_preprocessor import decode_bytes
 from .document_parser import DocumentParser
 from .registry import parser_registry

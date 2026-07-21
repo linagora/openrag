@@ -54,3 +54,15 @@ async def test_html_without_images_is_unchanged():
 
     assert processed.images == []
     assert processed.text_blocks[0].text == "Hello **world**"
+
+
+@pytest.mark.asyncio
+async def test_html_parser_handles_parameterized_data_uri():
+    encoded = base64.b64encode(b"svg-image").decode()
+    html = f'<img alt="diagram" src="data:image/svg+xml;charset=utf-8;base64,{encoded}">'
+
+    processed = await HtmlParser().parse(Document(filename="diagram.html", content_type=DocumentType.HTML, text=html))
+
+    assert "data:image" not in processed.text_blocks[0].text
+    assert len(processed.images) == 1
+    assert processed.images[0].mime_type == "image/svg+xml"

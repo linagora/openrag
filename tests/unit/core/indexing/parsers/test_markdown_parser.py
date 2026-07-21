@@ -5,6 +5,7 @@ import base64
 import pytest
 from core.indexing.parsers.markdown_parser import MarkdownParser
 from core.models.document import Document, DocumentType
+from services.workers.stages.caption import caption_stage
 
 
 @pytest.mark.asyncio
@@ -34,3 +35,24 @@ async def test_markdown_parser_preserves_http_image_behavior():
     assert processed.text_blocks[0].text == "Before ![chart](https://example.test/chart.png) after"
     assert len(processed.images) == 1
     assert processed.images[0].source_url == "https://example.test/chart.png"
+
+
+@pytest.mark.asyncio
+async def test_captioning_does_not_replace_a_preexisting_similar_reference():
+    class FakeVLM:
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            return "Generated caption"
+
+    encoded = base64.b64encode(b"image-bytes").decode()
+    existing = "![chart](openrag-embedded-image-1)"
+    source = f"{existing}\n\n![chart](data:image/png;base64,{encoded})"
+    processed = await MarkdownParser().parse(
+        Document(filename="report.md", content_type=DocumentType.MARKDOWN, text=source)
+    )
+    row = {"processed_document": processed}
+
+    await caption_stage(row, FakeVLM())
+
+    text = row["processed_document"].text_blocks[0].text
+    assert existing in text
+    assert "Generated caption" in text

@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 
-from ...models.document import Document, DocumentType, ProcessedDocument, TextBlock
-from ..image_preprocessor import normalize_data_uri_images
+from core.indexing.image_preprocessor import normalize_data_uri_images
+from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+
 from ..text_preprocessor import decode_bytes
 from .document_parser import DocumentParser
 from .registry import parser_registry

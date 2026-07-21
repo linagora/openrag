@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 
 from core.indexing.image_preprocessor import (
     MIN_IMAGE_PIXELS,
@@ -105,10 +106,35 @@ class TestNormalizeDataUriImages:
         text, blocks = normalize_data_uri_images(f"before ![one]({first}) middle ![two]({second}) after")
 
         assert "data:image" not in text
-        assert "openrag-embedded-image-1" in text
-        assert "openrag-embedded-image-2" in text
+        assert text.count("openrag-embedded-image-") == 2
         assert [block.image_bytes for block in blocks] == [b"first", b"second"]
         assert all(block.metadata["markdown_ref"] in text for block in blocks)
+        assert blocks[0].metadata["markdown_ref"] != blocks[1].metadata["markdown_ref"]
+
+    def test_parameterized_data_uri_is_extracted_and_sanitized(self):
+        payload = base64.b64encode(b"svg-image").decode()
+        uri = f"data:image/svg+xml;charset=utf-8;base64,{payload}"
+
+        text, blocks = normalize_data_uri_images(f"before ![diagram]({uri}) after")
+
+        assert "data:image" not in text
+        assert len(blocks) == 1
+        assert blocks[0].image_bytes == b"svg-image"
+        assert blocks[0].mime_type == "image/svg+xml"
+
+    def test_generated_reference_does_not_collide_with_existing_markdown(self):
+        uri = self._data_uri(b"chart")
+        digest_builder = hashlib.sha256(b"1:chart")
+        digest_builder.update(b"chart")
+        target = f"openrag-embedded-image-{digest_builder.hexdigest()[:16]}"
+        existing = f"![chart]({target})"
+
+        text, blocks = normalize_data_uri_images(f"{existing} ![chart]({uri})")
+
+        assert existing in text
+        assert len(blocks) == 1
+        assert blocks[0].metadata["markdown_ref"] != existing
+        assert blocks[0].metadata["markdown_ref"] in text
 
     def test_malformed_payload_is_removed_even_without_an_image_block(self):
         text, blocks = normalize_data_uri_images("before ![diagram](data:image/png;base64,!!!) after")

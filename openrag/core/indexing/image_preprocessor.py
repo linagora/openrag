@@ -15,19 +15,24 @@ migrated.
 from __future__ import annotations
 
 import base64
-import logging
+import hashlib
 import re
 from io import BytesIO
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from core.utils.logging import get_logger
+
+logger = get_logger()
 
 # ---------------------------------------------------------------------------
 # Markdown image-reference patterns (compile once; shared regex objects)
 # ---------------------------------------------------------------------------
 
 HTTP_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((https?://[^)]+)\)")
-DATA_URI_IMAGE_PATTERN = re.compile(r"!\[(.*?)\]\((data:image/[^;]+;base64,[^)]+)\)")
+DATA_URI_IMAGE_PATTERN = re.compile(
+    r"!\[(.*?)\]\((data:image/[^;,\s)]+(?:;[^;,\s)]+=[^;,\s)]*)*;base64,[^)]+)\)",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -78,7 +83,7 @@ def decode_data_uri(data_uri: str) -> bytes | None:
         _, b64 = data_uri.split(",", 1)
         return base64.b64decode(b64, validate=True)
     except Exception as exc:
-        logger.warning("Failed to decode data URI: %s", exc)
+        logger.bind(error=str(exc)).warning("Failed to decode data URI")
         return None
 
 
@@ -107,7 +112,7 @@ def extract_data_uri_image_blocks(text: str, *, page_number: int = 1) -> list[An
     if not text:
         return []
     # Local import to avoid a top-level cycle with ``core.models``.
-    from ..models.document import ImageBlock
+    from core.models.document import ImageBlock
 
     blocks: list[Any] = []
     for alt, data_uri in DATA_URI_IMAGE_PATTERN.findall(text):
@@ -143,12 +148,14 @@ def normalize_data_uri_images(
     if not text:
         return text, []
 
-    from ..models.document import ImageBlock
+    from core.models.document import ImageBlock
 
     blocks: list[Any] = []
     matched = 0
     skipped = 0
     total_bytes = 0
+    existing_targets = set(re.findall(r"\(openrag-embedded-image-[^)]+\)", text))
+    generated_targets: set[str] = set()
 
     def replace(match: re.Match[str]) -> str:
         nonlocal matched, skipped, total_bytes
@@ -171,7 +178,18 @@ def normalize_data_uri_images(
             skipped += 1
             return fallback
 
-        placeholder = f"![{alt}](openrag-embedded-image-{matched})"
+        digest_builder = hashlib.sha256(f"{matched}:{alt}".encode())
+        digest_builder.update(payload)
+        digest = digest_builder.hexdigest()[:16]
+        suffix = 0
+        while True:
+            disambiguator = f"-{suffix}" if suffix else ""
+            target = f"(openrag-embedded-image-{digest}{disambiguator})"
+            if target not in existing_targets and target not in generated_targets:
+                break
+            suffix += 1
+        generated_targets.add(target)
+        placeholder = f"![{alt}]{target}"
         blocks.append(
             ImageBlock(
                 image_bytes=payload,
@@ -185,9 +203,7 @@ def normalize_data_uri_images(
 
     sanitized = DATA_URI_IMAGE_PATTERN.sub(replace, text)
     if skipped:
-        logger.warning(
-            "Skipped %d of %d embedded image(s) while sanitizing document text",
-            skipped,
-            matched,
+        logger.bind(skipped=skipped, matched=matched).warning(
+            "Skipped embedded image(s) while sanitizing document text"
         )
     return sanitized, blocks
