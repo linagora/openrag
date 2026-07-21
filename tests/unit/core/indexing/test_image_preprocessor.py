@@ -176,6 +176,24 @@ class TestNormalizeDataUriImages:
         assert len(blocks) == 1
         assert blocks[0].image_bytes == b"image"
 
+    def test_title_containing_a_closing_paren_does_not_truncate_the_target(self):
+        uri = self._data_uri(b"image")
+
+        text, blocks = normalize_data_uri_images(f'before ![chart]({uri} "sales (draft)") after')
+
+        assert "data:image" not in text
+        assert len(blocks) == 1
+        assert blocks[0].image_bytes == b"image"
+
+    def test_single_quoted_title_containing_a_closing_paren_does_not_truncate_the_target(self):
+        uri = self._data_uri(b"image")
+
+        text, blocks = normalize_data_uri_images(f"before ![chart]({uri} 'sales (draft)') after")
+
+        assert "data:image" not in text
+        assert len(blocks) == 1
+        assert blocks[0].image_bytes == b"image"
+
     def test_data_uri_link_is_reduced_to_its_label(self):
         uri = self._data_uri(b"image")
 
