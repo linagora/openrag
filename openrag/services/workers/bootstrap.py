@@ -4,6 +4,7 @@ Imported at startup (explicitly by ``main.py``) to create the long-lived
 detached actors the request path looks up by name:
 
 * TaskStateManager  — shared task-state actor
+* TaskCompletionTracker — durable indexing completion observer
 * llmSemaphore / vlmSemaphore / audioSemaphore — cluster-wide rate limiters
 
 The GPU parser pools (MarkerPool / DoclingPool / WhisperPool / WhisperActor)
@@ -67,6 +68,21 @@ def get_task_state_manager():
     from services.workers.task_state import TaskStateManager
 
     return get_or_create_actor("TaskStateManager", TaskStateManager, lifetime="detached")
+
+
+def get_task_completion_tracker(namespace: str = "openrag"):
+    from services.workers.task_completion import TaskCompletionTrackerActor
+
+    tracker = get_or_create_actor(
+        "TaskCompletionTracker",
+        TaskCompletionTrackerActor,
+        namespace=namespace,
+        remote_args=(namespace,),
+        lifetime="detached",
+    )
+    tracker.recover.remote()
+    actor_creation_map["TaskCompletionTracker"] = lambda: get_task_completion_tracker(namespace=namespace)
+    return tracker
 
 
 def register_parser_pool_restart_factories() -> None:
@@ -161,4 +177,5 @@ def initialize_worker_bootstrap(settings: "Settings") -> None:
     init_vlm_semaphore()
     init_audio_semaphore()
     get_task_state_manager()
+    get_task_completion_tracker()
     register_parser_pool_restart_factories()
