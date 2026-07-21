@@ -176,7 +176,7 @@ class TestNormalizeDataUriImages:
 
     def test_reference_style_image_is_extracted_and_sanitized(self):
         uri = self._data_uri(b"image")
-        for reference in ("![logo][asset]", "![asset][]", "![asset]"):
+        for reference in ("![logo][asset]", "![][asset]", "![asset][]", "![asset]"):
             source = f"before {reference} after\n\n[asset]: {uri}"
 
             text, blocks = normalize_data_uri_images(source)
@@ -285,6 +285,14 @@ class TestNormalizeDataUriImages:
             assert "data:image" not in text.lower()
             assert text == "before [Image] after"
             assert blocks == []
+
+    def test_undelimited_data_uri_does_not_consume_the_next_line(self):
+        source = "before data:image/png;base64,QUJD\nafter-newline-text here"
+
+        text, blocks = normalize_data_uri_images(source)
+
+        assert text == "before [Image]\nafter-newline-text here"
+        assert blocks == []
 
     def test_padded_payloads_are_accepted_at_exact_size_limits(self):
         uri = self._data_uri(b"x")

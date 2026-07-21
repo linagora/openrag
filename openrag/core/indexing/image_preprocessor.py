@@ -34,7 +34,7 @@ DATA_URI_IMAGE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 DATA_URI_LINK_PATTERN = re.compile(r"(?<!!)\[([^]]*)\]\(<?data:image/[^)]*\)", re.IGNORECASE)
-DATA_URI_REFERENCE_IMAGE_PATTERN = re.compile(r"!\[([^]]+)\](?:\[([^]]*)\]|(?!\())")
+DATA_URI_REFERENCE_IMAGE_PATTERN = re.compile(r"!\[([^]]*)\](?:\[([^]]*)\]|(?!\())")
 DATA_URI_REFERENCE_DEFINITION_PATTERN = re.compile(
     r"^[ \t]{0,3}\[([^]\r\n]+)\]:[ \t]*"
     r"(<?data:image/[^\r\n]*(?:(?<!=)\r?\n[ \t]*[A-Za-z0-9+/]+={0,2})*)$",
@@ -161,7 +161,7 @@ def _residual_data_uri_end(text: str, start: int, prefix_end: int) -> int:
         return _contextual_data_uri_end(text, prefix_end, closing_delimiter)
 
     end = prefix_end
-    while end < len(text) and text[end] != " " and text[end] not in _URI_DELIMITERS:
+    while end < len(text) and not text[end].isspace() and text[end] not in _URI_DELIMITERS:
         end += 1
     return end
 
