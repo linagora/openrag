@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import ray
+from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
 
 from openrag.core.config.root import Settings
@@ -17,6 +18,14 @@ from openrag.core.config.root import Settings
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
 _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = "IndexerPoolDispatcher"
+
+
+def _catalog_rdb_config(settings: Settings) -> Any:
+    if settings.rdb.database is not None:
+        return settings.rdb
+    return settings.rdb.model_copy(
+        update={"database": f"partitions_for_collection_{settings.vectordb.collection_name}"}
+    )
 
 
 @ray.remote
@@ -91,8 +100,7 @@ class IndexerWorkerActor:
             topic_tagger_factory=topic_tagger_factory,
             defer_replace_cleanup=True,
         )
-        rdb_cfg = cfg.rdb.model_copy(update={"database": f"partitions_for_collection_{cfg.vectordb.collection_name}"})
-        self._catalog_store = PostgresStore(rdb_cfg, run_migrations=False)
+        self._catalog_store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
         self._catalog_initialized = False
         self._catalog_init_lock = asyncio.Lock()
         # Model-endpoint registry hydration. Unlike the API process, the indexer
@@ -227,13 +235,15 @@ class IndexerWorkerActor:
         embedder_name: str | None = None,
         require_existing_partition: bool = False,
     ) -> dict[str, Any]:
+        content_claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
+        worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
         try:
             await self._ensure_catalog()
             await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
             result = await self._worker.process_file(
                 task_id=task_id,
                 path=path,
-                metadata=metadata,
+                metadata=worker_metadata,
                 partition=partition,
                 user=user,
                 workspace_ids=workspace_ids,
@@ -257,13 +267,14 @@ class IndexerWorkerActor:
         finally:
             content_sha256 = metadata.get("content_sha256")
             file_id = metadata.get("file_id")
-            if content_sha256 and file_id:
+            if content_sha256 and file_id and content_claim_token:
                 try:
                     await self._ensure_catalog()
                     await self._catalog_store.document_repo.release_content_sha256_claim(
                         file_id=file_id,
                         partition=partition,
                         content_sha256=content_sha256,
+                        claim_token=content_claim_token,
                     )
                 except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
                     self._logger.warning(f"Failed to release content deduplication claim for {file_id}: {exc}")
@@ -342,12 +353,14 @@ class IndexerPool:
         metadata = kwargs.get("metadata") or {}
         content_sha256 = metadata.get("content_sha256")
         file_id = metadata.get("file_id")
+        claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
         claim = None
-        if content_sha256 and file_id:
+        if content_sha256 and file_id and claim_token:
             claim = {
                 "file_id": str(file_id),
                 "partition": str(kwargs.get("partition") or ""),
                 "content_sha256": str(content_sha256),
+                "claim_token": str(claim_token),
             }
         task = asyncio.get_running_loop().create_task(self._release(idx, ref, claim=claim))
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
@@ -387,10 +400,7 @@ class IndexerPool:
                     from services.storage.postgres_store import PostgresStore
 
                     cfg = load_config()
-                    rdb_cfg = cfg.rdb.model_copy(
-                        update={"database": f"partitions_for_collection_{cfg.vectordb.collection_name}"}
-                    )
-                    store = PostgresStore(rdb_cfg, run_migrations=False)
+                    store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
                     await store.initialize()
                     self._claim_store = store
         return self._claim_store.document_repo
@@ -401,6 +411,7 @@ class IndexerPool:
         file_id: str,
         partition: str,
         content_sha256: str,
+        claim_token: str,
     ) -> None:
         while True:
             await asyncio.sleep(_CONTENT_CLAIM_RENEW_INTERVAL_SECONDS)
@@ -410,6 +421,7 @@ class IndexerPool:
                     file_id=file_id,
                     partition=partition,
                     content_sha256=content_sha256,
+                    claim_token=claim_token,
                 )
                 if not renewed:
                     return

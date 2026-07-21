@@ -30,6 +30,7 @@ TERMINAL_TASK_STATES = frozenset({DocumentStatus.COMPLETED, DocumentStatus.FAILE
 # without replacing an already-running detached TaskStateManager actor.
 TASK_CREATED_AT_METADATA_KEY = "_openrag_job_created_at"
 TASK_FINISHED_AT_METADATA_KEY = "_openrag_job_finished_at"
+CONTENT_CLAIM_TOKEN_METADATA_KEY = "_openrag_content_claim_token"
 
 
 class JobStatus(str, Enum):
