@@ -78,7 +78,7 @@ class TestFileIndexing:
         assert response.status_code in [200, 201, 202]
 
     def test_upload_duplicate_file_replaces(self, api_client, created_partition, sample_text_file):
-        """Test uploading duplicate file ID - API may allow replacement or reject."""
+        """Uploading the same content under the same file ID remains a valid replacement."""
         file_id = "duplicate-file"
 
         with open(sample_text_file, "rb") as f:
@@ -89,19 +89,46 @@ class TestFileIndexing:
             )
 
         assert first_response.status_code in [200, 201, 202]
-
-        # Wait briefly for first upload to register
-        time.sleep(2)
+        wait_for_task(api_client, get_task_id(first_response.json()))
 
         with open(sample_text_file, "rb") as f:
-            response = api_client.post(
+            response = api_client.put(
                 f"/indexer/partition/{created_partition}/file/{file_id}",
                 files={"file": ("test.txt", f, "text/plain")},
                 data={"metadata": "{}"},
             )
 
-        # API may allow replacement (201) or reject duplicate (400/409)
-        assert response.status_code in [200, 201, 202, 400, 409]
+        assert response.status_code in [200, 201, 202]
+
+    def test_duplicate_content_with_different_file_id_returns_conflict(
+        self,
+        api_client,
+        created_partition,
+        sample_text_file,
+    ):
+        """Identical content must not be indexed twice in one partition."""
+        first_file_id = "content-dedup-source"
+        duplicate_file_id = "content-dedup-copy"
+
+        with open(sample_text_file, "rb") as file_handle:
+            first_response = api_client.post(
+                f"/indexer/partition/{created_partition}/file/{first_file_id}",
+                files={"file": ("source.txt", file_handle, "text/plain")},
+                data={"metadata": "{}"},
+            )
+
+        assert first_response.status_code in [200, 201, 202]
+        wait_for_task(api_client, get_task_id(first_response.json()))
+
+        with open(sample_text_file, "rb") as file_handle:
+            duplicate_response = api_client.post(
+                f"/indexer/partition/{created_partition}/file/{duplicate_file_id}",
+                files={"file": ("copy.txt", file_handle, "text/plain")},
+                data={"metadata": "{}"},
+            )
+
+        assert duplicate_response.status_code == 409
+        assert duplicate_response.json()["extra"]["existing_file_id"] == first_file_id
 
 
 class TestIndexedDocuments:

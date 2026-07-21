@@ -97,6 +97,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("IMAGE_CAPTIONING_URL", "loader.image_captioning_url", bool),
     ("SAVE_MARKDOWN", "loader.save_markdown", bool),
     ("SAVE_UPLOADED_FILES", "loader.save_uploaded_files", bool),
+    ("CONTENT_DEDUPLICATION_ENABLED", "loader.content_deduplication_enabled", bool),
     ("PDFLOADER", "loader.file_loaders.pdf", str),
     ("AUDIOLOADER", "loader.file_loaders.wav", str),
     ("MARKER_MAX_TASKS_PER_CHILD", "loader.marker_max_tasks_per_child", int),

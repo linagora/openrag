@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
@@ -887,6 +888,8 @@ def _bare_pool(workers: list) -> object:
     pool._workers = list(workers)
     pool._inflight = [0] * len(workers)
     pool._release_tasks = set()
+    pool._claim_store = None
+    pool._claim_store_lock = asyncio.Lock()
     return pool
 
 
@@ -973,6 +976,74 @@ async def test_pool_rolls_back_inflight_when_submission_raises() -> None:
     assert pool._inflight == [0]
 
     assert pool._inflight == [0]
+
+
+@pytest.mark.asyncio
+async def test_pool_renews_content_claim_while_task_is_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    renewed = asyncio.Event()
+
+    async def renew(**_kwargs):
+        renewed.set()
+        return True
+
+    repo = SimpleNamespace(
+        renew_content_sha256_claim=AsyncMock(side_effect=renew),
+        release_content_sha256_claim=AsyncMock(),
+    )
+    pool._claim_store = SimpleNamespace(document_repo=repo)
+    pool._claim_store_lock = asyncio.Lock()
+    monkeypatch.setattr(module, "_CONTENT_CLAIM_RENEW_INTERVAL_SECONDS", 0.001)
+
+    await pool.submit(
+        task_id="task-1",
+        partition="tenant-a",
+        metadata={"file_id": "file-1", "content_sha256": "abc123"},
+    )
+    await asyncio.wait_for(renewed.wait(), timeout=1)
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+
+    repo.renew_content_sha256_claim.assert_awaited()
+    assert repo.renew_content_sha256_claim.await_args.kwargs == {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "content_sha256": "abc123",
+    }
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+    )
+
+
+@pytest.mark.asyncio
+async def test_pool_keeps_content_claim_until_cancelled_task_settles() -> None:
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    repo = SimpleNamespace(
+        renew_content_sha256_claim=AsyncMock(return_value=True),
+        release_content_sha256_claim=AsyncMock(),
+    )
+    pool._claim_store = SimpleNamespace(document_repo=repo)
+
+    await pool.submit(
+        task_id="task-1",
+        partition="tenant-a",
+        metadata={"file_id": "file-1", "content_sha256": "abc123"},
+    )
+
+    worker.futures[0].cancel()
+    assert repo.release_content_sha256_claim.await_count == 0
+    await _settle_pool_release_tasks(pool)
+
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+    )
 
 
 def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1158,7 +1229,10 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     actor._ensure_catalog = _noop
     actor._ensure_registry_fresh = _noop
     actor._worker = worker
-    actor._catalog_store = SimpleNamespace(workspace_repo=SimpleNamespace())
+    actor._catalog_store = SimpleNamespace(
+        workspace_repo=SimpleNamespace(),
+        document_repo=SimpleNamespace(release_content_sha256_claim=AsyncMock()),
+    )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
     return actor
@@ -1175,6 +1249,26 @@ async def test_actor_keeps_upload_by_default(tmp_path) -> None:
     # Default: the raw upload stays on disk so the source-download route can
     # serve it back for Chainlit source viewing.
     assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_actor_releases_content_claim_after_indexing(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f", "content_sha256": "abc123"},
+        partition="p",
+    )
+
+    actor._catalog_store.document_repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="f",
+        partition="p",
+        content_sha256="abc123",
+    )
 
 
 @pytest.mark.asyncio
