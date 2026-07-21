@@ -17,13 +17,11 @@ const TASK = "/indexer/task";
 export type TaskState =
   | "QUEUED"
   | "SERIALIZING"
-  | "CHUNKING"
-  | "INSERTING"
   | "COMPLETED"
   | "FAILED"
   | "CANCELLED";
 
-const ACTIVE_STATES: readonly TaskState[] = ["QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"];
+const ACTIVE_STATES: readonly TaskState[] = ["QUEUED", "SERIALIZING"];
 const TERMINAL_STATES: readonly TaskState[] = ["COMPLETED", "FAILED", "CANCELLED"];
 
 export const isActiveState = (s: string): boolean => (ACTIVE_STATES as readonly string[]).includes(s);
