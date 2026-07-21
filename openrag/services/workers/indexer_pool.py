@@ -336,6 +336,7 @@ class IndexerPool:
             ).remote()
             for i in range(pool_size)
         ]
+        self._worker_names = [_indexer_worker_actor_name(i) for i in range(pool_size)]
         self._inflight = [0] * len(self._workers)
         self._accepting_tasks = True
         self._release_tasks: set[asyncio.Task[Any]] = set()
@@ -360,6 +361,7 @@ class IndexerPool:
             "protocol_version": _INDEXER_ACTOR_PROTOCOL_VERSION,
             "accepting_tasks": self._accepting_tasks,
             "inflight_jobs": sum(self._inflight),
+            "worker_names": list(self._worker_names),
         }
 
     async def submit(self, **kwargs: Any) -> list[Any]:
