@@ -24,8 +24,12 @@ class DocumentStatus(str, Enum):
 # re-declaring the set.
 TERMINAL_TASK_STATES = frozenset({DocumentStatus.COMPLETED, DocumentStatus.FAILED, DocumentStatus.CANCELLED})
 
-# Kept inside TaskInfo.details.metadata so deployments can add lifecycle timing
-# without replacing an already-running detached TaskStateManager actor.
+# Kept inside TaskInfo.details.metadata (a free-form dict) rather than as
+# first-class TaskInfo fields, so lifecycle timing stays readable even against a
+# TaskStateManager still running the old schema. This only matters in cluster
+# mode (external RayCluster), where a detached actor can outlive an API redeploy;
+# embedded Ray always recreates it on restart. A deploy is expected to cycle all
+# actors, which makes this moot — it is only a defensive fallback if it doesn't.
 TASK_CREATED_AT_METADATA_KEY = "_openrag_job_created_at"
 TASK_FINISHED_AT_METADATA_KEY = "_openrag_job_finished_at"
 
