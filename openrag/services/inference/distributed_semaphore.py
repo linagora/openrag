@@ -31,8 +31,12 @@ class DistributedSemaphoreActor:
         await self.semaphore.acquire()
         return self.incarnation
 
-    def release(self, incarnation: str) -> None:
-        if incarnation != self.incarnation:
+    def release(self, incarnation: str | None = None) -> None:
+        # `incarnation` defaults to None so a driver still running the
+        # pre-incarnation-token code (rolling deploy against this same
+        # detached, `get_if_exists=True` actor) can call `release()` with no
+        # arguments without raising - it never checked incarnations either.
+        if incarnation is not None and incarnation != self.incarnation:
             return
         self.semaphore.release()
 
@@ -97,6 +101,22 @@ class DistributedSemaphore:
         incarnation = stack.pop() if stack else None
         if stack is not None and not stack:
             del self._incarnations[task]
+        await _release(semaphore_actor, incarnation)
+
+
+async def _release(semaphore_actor, incarnation: str | None) -> None:
+    """Call ``release`` with the right arity for whichever actor is live.
+
+    ``incarnation`` is ``None`` when talking to a pre-incarnation-token actor
+    left running from before this deploy (detached actors are looked up with
+    ``get_if_exists=True``, so a rolling deploy can attach to one instead of
+    recreating it) - its ``acquire()`` never returned a token, and its
+    ``release()`` takes no arguments, so passing one would raise ``TypeError``
+    and leak the permit.
+    """
+    if incarnation is None:
+        await semaphore_actor.release.remote()
+    else:
         await semaphore_actor.release.remote(incarnation)
 
 
@@ -117,4 +137,4 @@ def _release_if_granted(name: str, semaphore_actor, acquire_task: asyncio.Task) 
         "caller was cancelled while waiting, permit granted afterwards.",
         name=name,
     )
-    semaphore_actor.release.remote(incarnation)
+    asyncio.ensure_future(_release(semaphore_actor, incarnation))

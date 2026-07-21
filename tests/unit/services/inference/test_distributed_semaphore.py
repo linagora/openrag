@@ -159,3 +159,50 @@ class TestDistributedSemaphoreSharedInstanceConcurrencySafety:
             third.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await third
+
+
+@ray.remote(max_restarts=5)
+class _LegacyDistributedSemaphoreActor:
+    """Mirrors the pre-incarnation-token ``DistributedSemaphoreActor``:
+    ``acquire()`` returns nothing and ``release()`` takes zero arguments.
+
+    Detached actors are looked up with ``get_if_exists=True`` at bootstrap, so
+    a rolling deploy attaches to whatever actor is already running under that
+    name instead of recreating it - this simulates one left over from before
+    the incarnation-token fix.
+    """
+
+    def __init__(self, max_concurrent_ops: int):
+        self.semaphore = asyncio.Semaphore(max_concurrent_ops)
+
+    async def acquire(self):
+        await self.semaphore.acquire()
+
+    def release(self):
+        self.semaphore.release()
+
+
+class TestDistributedSemaphoreRollingDeployCompatibility:
+    """New driver code must not crash against a pre-existing legacy actor
+    during a rolling deploy (hedhoud + CodeRabbit review comments on PR #719).
+    """
+
+    async def test_new_driver_survives_a_pre_existing_legacy_actor(self):
+        namespace = f"test-legacy-{uuid.uuid4().hex}"
+        _LegacyDistributedSemaphoreActor.options(
+            name="sem",
+            namespace=namespace,
+            lifetime="detached",
+        ).remote(1)
+
+        sem = DistributedSemaphore(name="sem", namespace=namespace, max_concurrent_ops=1)
+
+        # Must not raise TypeError: the legacy actor's release() takes no
+        # arguments, so a bare `release.remote(incarnation)` would fail.
+        async with sem:
+            pass
+
+        # The permit must actually have been released - a second acquire
+        # right after must succeed rather than hang.
+        await asyncio.wait_for(sem.__aenter__(), timeout=2.0)
+        await sem.__aexit__(None, None, None)
