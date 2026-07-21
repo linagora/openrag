@@ -280,3 +280,99 @@ async def test_retrieve_rejects_unknown_partition_when_partition_configs_exist()
 
     with pytest.raises(PartitionNotFoundError, match="tenant-b"):
         await svc.retrieve(partitions=["tenant-b"], query=Query(query="hello"))
+
+
+# --- #708: "all" must expand to per-partition pipelines (right embedder + top_n) ---
+
+
+@pytest.mark.asyncio
+async def test_retrieve_all_expands_to_per_partition_embedders():
+    """Super-admin `openrag-all` reaches this layer as the literal ["all"].
+
+    It previously collapsed to the default-embedder legacy pipeline and searched
+    partition=["all"], so a partition indexed with a named embedder was queried
+    with the wrong model. It must instead fan out to one pipeline per partition,
+    each using that partition's embedder — the path named-partition search
+    already uses.
+    """
+    per_embedder: dict[str, FakeSearcher] = {}
+
+    def factory(name: str) -> FakeSearcher:
+        s = per_embedder.setdefault(name, FakeSearcher())
+        s.search_result = [_chunk(f"{name}-hit")]
+        return s
+
+    default_searcher = FakeSearcher()
+    cfg = _config()
+    cfg.partitions = {
+        "p1": _partition(name="p1", embedder="embed-1"),
+        "p2": _partition(name="p2", embedder="embed-2"),
+    }
+    svc = RetrievalService(
+        searcher=default_searcher,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=factory,
+    )
+
+    out = await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+    # Each partition searched with its OWN embedder, scoped to itself — never the
+    # default searcher, never partition=["all"].
+    assert set(per_embedder) == {"embed-1", "embed-2"}
+    assert default_searcher.search_calls == []
+    assert per_embedder["embed-1"].search_calls[0]["partition"] == ["p1"]
+    assert per_embedder["embed-2"].search_calls[0]["partition"] == ["p2"]
+    assert {c.id for c in out} == {"embed-1-hit", "embed-2-hit"}
+
+
+@pytest.mark.asyncio
+async def test_retrieve_all_applies_partition_top_n():
+    """The reranker top_n was dropped on the `all` path (default_top_k was None).
+    With expansion, each partition's top_n truncates its results."""
+    s = FakeSearcher()
+    s.search_result = [_chunk("a"), _chunk("b"), _chunk("c")]
+    reranker = FakeReranker()
+    cfg = _config()
+    cfg.partitions = {
+        "solo": _partition(
+            name="solo",
+            retrieval=RetrievalPipelineConfig(top_k=3, top_n=2, enable_reranker=True, reranker="r"),
+        )
+    }
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda name: s,
+        reranker_factory=lambda name: reranker,
+    )
+
+    out = await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+    assert [c.id for c in out] == ["a", "b"]  # truncated to top_n=2, not the full 3
+    assert s.search_calls[0]["partition"] == ["solo"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_all_falls_back_to_legacy_when_no_partitions_exist():
+    """On a fresh system with zero hydrated partitions there is nothing to
+    expand — keep the single legacy pipeline searching ["all"]."""
+    default_searcher = FakeSearcher()
+    default_searcher.search_result = [_chunk("x")]
+    cfg = _config()
+    cfg.partitions = {}
+    svc = RetrievalService(
+        searcher=default_searcher,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda name: (_ for _ in ()).throw(AssertionError("factory must not be used")),
+    )
+
+    out = await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+    assert [c.id for c in out] == ["x"]
+    assert default_searcher.search_calls[0]["partition"] == ["all"]

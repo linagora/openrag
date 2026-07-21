@@ -213,7 +213,21 @@ class RetrievalService:
     def _pipeline_groups_for_partitions(
         self, partitions: list[str]
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
-        if not partitions or "all" in partitions or not self._partition_configs():
+        configs = self._partition_configs()
+        # Expand the "all" sentinel to concrete partitions so each is retrieved
+        # with its own embedder and top_n, via the same per-partition fan-out the
+        # named-partition path already uses (#708). Collapsing to self._pipeline
+        # embedded the query with the deployment-default embedder — near-random
+        # recall for any partition indexed with a different one — and dropped the
+        # reranker top_n (its default_top_k was None). "all" only reaches this
+        # layer post-authorization (a SUPER_ADMIN_MODE admin; regular users are
+        # already expanded to their memberships upstream), so every hydrated
+        # partition is in scope.
+        if "all" in partitions and configs:
+            partitions = list(configs.keys())
+        elif not partitions or not configs:
+            # Nothing to expand (no partitions exist yet) — keep the single
+            # legacy pipeline; there is no per-partition config to honour.
             return [(["all"] if "all" in partitions else partitions, self._pipeline, None)]
         return [
             ([partition], pipeline, default_top_k)
