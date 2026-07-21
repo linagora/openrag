@@ -36,9 +36,11 @@ DATA_URI_IMAGE_PATTERN = re.compile(
 DATA_URI_LINK_PATTERN = re.compile(r"(?<!!)\[([^]]*)\]\(<?data:image/[^)]*\)", re.IGNORECASE)
 DATA_URI_REFERENCE_IMAGE_PATTERN = re.compile(r"!\[([^]]+)\](?:\[([^]]*)\]|(?!\())")
 DATA_URI_REFERENCE_DEFINITION_PATTERN = re.compile(
-    r"^[ \t]{0,3}\[([^]\r\n]+)\]:[ \t]*(<?data:image/[^\r\n]*)$",
+    r"^[ \t]{0,3}\[([^]\r\n]+)\]:[ \t]*"
+    r"(<?data:image/[^\r\n]*(?:(?<!=)\r?\n[ \t]*[A-Za-z0-9+/]+={0,2})*)$",
     re.IGNORECASE | re.MULTILINE,
 )
+_RESIDUAL_DATA_URI_PREFIX_PATTERN = re.compile(r"data:image/", re.IGNORECASE)
 _VALID_DATA_URI_TARGET_PATTERN = re.compile(
     r"^(data:image/[^;,\s)]+(?:;[^;,=\s)]+=[^;,=\s)]*)*;base64,"
     r"[A-Za-z0-9+/=]+(?:[ \t\r\n\f\v]+[A-Za-z0-9+/=]+)*)"
@@ -56,6 +58,7 @@ MIN_IMAGE_PIXELS = 784
 MAX_EMBEDDED_IMAGES = 50
 MAX_EMBEDDED_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_EMBEDDED_TOTAL_BYTES = 100 * 1024 * 1024
+_URI_DELIMITERS = frozenset("\"'<>()[]{}")
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +136,86 @@ def _normalize_reference_label(label: str) -> str:
     return " ".join(label.split()).casefold()
 
 
+def _contextual_data_uri_end(text: str, start: int, closing_delimiter: str) -> int:
+    """Scan to a closing delimiter or blank-line paragraph boundary."""
+    cursor = start
+    while cursor < len(text):
+        if text[cursor] == closing_delimiter:
+            return cursor
+        if text[cursor] in "\r\n":
+            next_line = cursor + 1
+            if text[cursor] == "\r" and next_line < len(text) and text[next_line] == "\n":
+                next_line += 1
+            while next_line < len(text) and text[next_line] in " \t":
+                next_line += 1
+            if next_line < len(text) and text[next_line] in "\r\n":
+                return cursor
+        cursor += 1
+    return len(text)
+
+
+def _residual_data_uri_end(text: str, start: int, prefix_end: int) -> int:
+    """Find the end of an unhandled data URI without backtracking."""
+    if start > 0 and text[start - 1] in {'"', "'", "<", "("}:
+        closing_delimiter = {'"': '"', "'": "'", "<": ">", "(": ")"}[text[start - 1]]
+        return _contextual_data_uri_end(text, prefix_end, closing_delimiter)
+
+    end = prefix_end
+    while end < len(text) and text[end] != " " and text[end] not in _URI_DELIMITERS:
+        end += 1
+    return end
+
+
+def _scrub_unterminated_parenthesized_data_uris(text: str) -> tuple[str, int]:
+    """Remove unterminated parenthesized data URIs before Markdown regexes run."""
+    parts: list[str] = []
+    cursor = 0
+    search_from = 0
+    scrubbed = 0
+
+    while match := _RESIDUAL_DATA_URI_PREFIX_PATTERN.search(text, search_from):
+        opening_delimiter = match.start() - 1
+        if opening_delimiter >= 0 and text[opening_delimiter] == "<":
+            opening_delimiter -= 1
+        if opening_delimiter < 0 or text[opening_delimiter] != "(":
+            search_from = match.end()
+            continue
+
+        end = _contextual_data_uri_end(text, match.end(), ")")
+        if end < len(text) and text[end] == ")":
+            search_from = end + 1
+            continue
+
+        parts.append(text[cursor : match.start()])
+        parts.append("[Image]")
+        cursor = end
+        search_from = end
+        scrubbed += 1
+
+    if not scrubbed:
+        return text, 0
+    parts.append(text[cursor:])
+    return "".join(parts), scrubbed
+
+
+def _scrub_residual_data_uris(text: str) -> tuple[str, int]:
+    """Replace data URIs left by syntax-aware extraction using a linear scan."""
+    parts: list[str] = []
+    cursor = 0
+    scrubbed = 0
+
+    while match := _RESIDUAL_DATA_URI_PREFIX_PATTERN.search(text, cursor):
+        parts.append(text[cursor : match.start()])
+        parts.append("[Image]")
+        cursor = _residual_data_uri_end(text, match.start(), match.end())
+        scrubbed += 1
+
+    if not scrubbed:
+        return text, 0
+    parts.append(text[cursor:])
+    return "".join(parts), scrubbed
+
+
 def extract_data_uri_image_blocks(text: str, *, page_number: int = 1) -> list[Any]:
     """Build ``ImageBlock``s for every ``![alt](data:image/...;base64,...)`` ref.
 
@@ -192,6 +275,7 @@ def normalize_data_uri_images(
 
     from core.models.document import ImageBlock
 
+    text, unterminated_scrubbed = _scrub_unterminated_parenthesized_data_uris(text)
     blocks: list[Any] = []
     matched = 0
     skipped = 0
@@ -262,8 +346,11 @@ def normalize_data_uri_images(
     sanitized = DATA_URI_REFERENCE_IMAGE_PATTERN.sub(replace_reference, sanitized)
     sanitized = DATA_URI_REFERENCE_DEFINITION_PATTERN.sub("", sanitized)
     sanitized = DATA_URI_LINK_PATTERN.sub(lambda match: match.group(1).strip() or "[Link]", sanitized)
+    sanitized, residual_scrubbed = _scrub_residual_data_uris(sanitized)
     if skipped:
         logger.bind(skipped=skipped, matched=matched).warning(
             "Skipped embedded image(s) while sanitizing document text"
         )
+    if scrubbed := unterminated_scrubbed + residual_scrubbed:
+        logger.bind(scrubbed=scrubbed).warning("Scrubbed residual embedded image data URI(s)")
     return sanitized, blocks

@@ -80,6 +80,34 @@ async def test_markdown_parser_sanitizes_reference_style_data_uri_images():
 
 
 @pytest.mark.asyncio
+async def test_markdown_parser_sanitizes_raw_html_data_uri_images():
+    encoded = base64.b64encode(b"image-bytes").decode()
+    source = f'Before <img alt="chart" src="data:image/png;base64,{encoded}"> after'
+
+    processed = await MarkdownParser().parse(
+        Document(filename="report.md", content_type=DocumentType.MARKDOWN, text=source)
+    )
+
+    assert "data:image" not in processed.text_blocks[0].text.lower()
+    assert encoded not in processed.text_blocks[0].text
+    assert processed.images == []
+
+
+@pytest.mark.asyncio
+async def test_markdown_parser_sanitizes_unterminated_data_uri_images():
+    encoded = base64.b64encode(b"image-bytes").decode()
+    source = f"Before ![chart](data:image/png;base64,{encoded}"
+
+    processed = await MarkdownParser().parse(
+        Document(filename="report.md", content_type=DocumentType.MARKDOWN, text=source)
+    )
+
+    assert "data:image" not in processed.text_blocks[0].text.lower()
+    assert encoded not in processed.text_blocks[0].text
+    assert processed.images == []
+
+
+@pytest.mark.asyncio
 async def test_captioning_does_not_replace_a_preexisting_similar_reference():
     class FakeVLM:
         async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:

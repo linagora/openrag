@@ -197,6 +197,95 @@ class TestNormalizeDataUriImages:
         assert "logo" in text
         assert blocks == []
 
+    def test_line_wrapped_reference_definition_is_fully_sanitized(self):
+        payload = b"image payload" * 20
+        wrapped = base64.encodebytes(payload).decode().strip()
+        source = f"before ![logo][asset] after\n\n[asset]: data:image/png;base64,{wrapped}"
+
+        text, blocks = normalize_data_uri_images(source)
+
+        assert "data:image" not in text.lower()
+        assert "aW1hZ2" not in text
+        assert len(blocks) == 1
+        assert blocks[0].image_bytes == payload
+
+    def test_reference_definition_does_not_consume_following_text(self):
+        uri = self._data_uri(b"image")
+        source = f"before ![logo][asset] after\n\n[asset]: {uri}\nNext"
+
+        text, blocks = normalize_data_uri_images(source)
+
+        assert text.endswith("Next")
+        assert len(blocks) == 1
+        assert blocks[0].image_bytes == b"image"
+
+    def test_residual_data_uris_are_scrubbed_in_unsupported_contexts(self):
+        uri = self._data_uri(b"image")
+        encoded = uri.split(",", 1)[1]
+        sources = (
+            f'before <img src="{uri}" alt="logo"> after',
+            f"before <img src='{uri}' alt='logo'> after",
+            f"before <img src={uri}> after",
+            f'before <span style="background-image:url({uri})">logo</span> after',
+            f"before {uri} after",
+        )
+
+        for source in sources:
+            text, blocks = normalize_data_uri_images(source)
+
+            assert "data:image" not in text.lower()
+            assert encoded not in text
+            assert "before" in text
+            assert "after" in text
+            assert blocks == []
+
+    def test_unterminated_data_uri_is_scrubbed_to_the_paragraph_boundary(self):
+        uri = self._data_uri(b"image")
+        source = f"before ![diagram]({uri} trailing payload\ncontinues here\n\nnext paragraph"
+
+        text, blocks = normalize_data_uri_images(source)
+
+        assert "data:image" not in text.lower()
+        assert uri.split(",", 1)[1] not in text
+        assert "trailing payload" not in text
+        assert text.endswith("next paragraph")
+        assert blocks == []
+
+    def test_repeated_unterminated_data_uris_are_sanitized_in_one_pass(self):
+        source = " ".join("![diagram](data:image/png;base64,AAAA" for _ in range(1_000))
+
+        text, blocks = normalize_data_uri_images(source)
+
+        assert "data:image" not in text.lower()
+        assert text == "![diagram]([Image]"
+        assert blocks == []
+
+    def test_residual_scrubber_handles_case_and_line_wrapping(self):
+        wrapped = base64.encodebytes(b"image payload" * 8).decode()
+        source = f'before <img src="DATA:IMAGE/PNG;BASE64,{wrapped}"> after'
+
+        text, blocks = normalize_data_uri_images(source)
+
+        assert "data:image" not in text.lower()
+        assert "aW1hZ2" not in text
+        assert text.startswith("before")
+        assert text.endswith("after")
+        assert blocks == []
+
+    def test_residual_scrubber_removes_malformed_data_uri_tokens(self):
+        sources = (
+            "before data:image/png;base64AAAA after",
+            "before data:image/png;base64,!!!!AAAA after",
+            "before data:image/svg+xml,%3Csvg%3E after",
+        )
+
+        for source in sources:
+            text, blocks = normalize_data_uri_images(source)
+
+            assert "data:image" not in text.lower()
+            assert text == "before [Image] after"
+            assert blocks == []
+
     def test_padded_payloads_are_accepted_at_exact_size_limits(self):
         uri = self._data_uri(b"x")
 
