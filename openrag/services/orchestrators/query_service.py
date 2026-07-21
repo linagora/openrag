@@ -99,6 +99,10 @@ class RAGMODE(Enum):
 class QueryService:
     """End-to-end RAG: query-gen → retrieve (+web) → map-reduce → answer."""
 
+    #: Used when the global ``rag.chat_history_depth`` config is < 1 — see
+    #: PartitionService._CHAT_HISTORY_DEPTH_DEFAULT for the matching partition-side clamp.
+    _CHAT_HISTORY_DEPTH_DEFAULT = 4
+
     def __init__(
         self,
         *,
@@ -120,7 +124,14 @@ class QueryService:
         # read at request time, not snapshotted once at startup.
         self._config = config
         self._rag_mode = config.rag.mode
-        self._default_chat_history_depth = config.rag.chat_history_depth
+        # RAGConfig.chat_history_depth carries no lower bound, so a deployment may
+        # configure it to 0 (or negative). Left unclamped, messages[-0:] would keep
+        # the *entire* history instead of none — the opposite of what this depth
+        # is meant to limit. Clamp here rather than reject at config-load time so a
+        # misconfigured global default degrades safely instead of crashing startup.
+        self._default_chat_history_depth = (
+            config.rag.chat_history_depth if config.rag.chat_history_depth >= 1 else self._CHAT_HISTORY_DEPTH_DEFAULT
+        )
         self._max_contextualized_query_len = config.rag.max_contextualized_query_len
         self._max_context_tokens = config.reranker.top_k * config.chunker.chunk_size
 
