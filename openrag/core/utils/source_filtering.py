@@ -84,45 +84,29 @@ async def stream_with_source_filtering(
     model_name: str,
     buffer_size: int | None = None,
 ):
-    """Process an LLM SSE stream, stripping line-terminal source tags."""
+    """Process an LLM SSE stream, stripping line-terminal source tags.
+
+    The terminal flush (tail content + ``extra.sources``) runs exactly once
+    after the loop, regardless of whether it exits via ``data: [DONE]`` or
+    the upstream simply closing the connection without it — otherwise a
+    dropped upstream stream silently loses the answer's tail and all
+    sources with no error surfaced to the caller.
+    """
     if buffer_size is None:
         buffer_size = max(_MIN_STREAM_LOOKAHEAD, _min_sources_tag_buffer_size(len(sources)))
     pending = ""
     emitted_len = 0
     chunk_template = None
     last_finish_reason = None
+    saw_done = False
 
     async for line in llm_stream:
         if not line.startswith("data:"):
             continue
 
         if line.strip() == "data: [DONE]":
-            final_clean, citations = extract_and_strip_sources_block(pending)
-            final_clean = final_clean.rstrip()
-
-            filtered = filter_sources_by_citations(sources, citations)
-            filtered_json = json.dumps({"sources": filtered})
-
-            if chunk_template and len(final_clean) > emitted_len:
-                tail_chunk = copy.deepcopy(chunk_template)
-                tail_chunk["choices"][0]["delta"] = {"content": final_clean[emitted_len:]}
-                # Content chunk must not carry finish_reason (template may be the
-                # finish chunk); clients treat such a chunk as terminal and drop its
-                # delta. The separate finish chunk below emits it with an empty delta.
-                tail_chunk["choices"][0]["finish_reason"] = None
-                tail_chunk["extra"] = filtered_json
-                yield f"data: {json.dumps(tail_chunk)}\n\n"
-
-            if chunk_template:
-                await asyncio.sleep(0.05)
-                finish_chunk = copy.deepcopy(chunk_template)
-                finish_chunk["choices"][0]["delta"] = {}
-                finish_chunk["choices"][0]["finish_reason"] = last_finish_reason or "stop"
-                finish_chunk["extra"] = filtered_json
-                yield f"data: {json.dumps(finish_chunk)}\n\n"
-
-            yield "data: [DONE]\n\n"
-            continue
+            saw_done = True
+            break
 
         data = json.loads(line[len("data: ") :])
         data["model"] = model_name
@@ -170,3 +154,38 @@ async def stream_with_source_filtering(
         else:
             data["extra"] = "{}"
             yield f"data: {json.dumps(data)}\n\n"
+
+    if not saw_done:
+        logger.warning(
+            "Upstream stream closed without [DONE]; flushing buffered tail",
+            pending_len=len(pending) - emitted_len,
+        )
+
+    final_clean, citations = extract_and_strip_sources_block(pending)
+    final_clean = final_clean.rstrip()
+
+    filtered = filter_sources_by_citations(sources, citations)
+    extra_payload = {"sources": filtered}
+    if not saw_done:
+        extra_payload["truncated"] = True
+    filtered_json = json.dumps(extra_payload)
+
+    if chunk_template and len(final_clean) > emitted_len:
+        tail_chunk = copy.deepcopy(chunk_template)
+        tail_chunk["choices"][0]["delta"] = {"content": final_clean[emitted_len:]}
+        # Content chunk must not carry finish_reason (template may be the
+        # finish chunk); clients treat such a chunk as terminal and drop its
+        # delta. The separate finish chunk below emits it with an empty delta.
+        tail_chunk["choices"][0]["finish_reason"] = None
+        tail_chunk["extra"] = filtered_json
+        yield f"data: {json.dumps(tail_chunk)}\n\n"
+
+    if chunk_template:
+        await asyncio.sleep(0.05)
+        finish_chunk = copy.deepcopy(chunk_template)
+        finish_chunk["choices"][0]["delta"] = {}
+        finish_chunk["choices"][0]["finish_reason"] = last_finish_reason or "stop"
+        finish_chunk["extra"] = filtered_json
+        yield f"data: {json.dumps(finish_chunk)}\n\n"
+
+    yield "data: [DONE]\n\n"

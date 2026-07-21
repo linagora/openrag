@@ -363,6 +363,65 @@ def test_min_sources_tag_buffer_size_fits_many_sources():
     assert _min_sources_tag_buffer_size(0) >= 1
 
 
+class TestStreamClosedWithoutDone:
+    """Regression for #715 — upstream closing without `data: [DONE]` must not
+    silently drop the answer tail or `extra.sources`."""
+
+    SOURCES = [{"file": "a.pdf"}, {"file": "b.pdf"}, {"file": "c.pdf"}]
+
+    @pytest.mark.asyncio
+    async def test_tail_and_sources_still_flushed_without_done(self):
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_chunk("\n[Sources: 1, 3]"),
+            _make_finish(),
+            # No DONE_LINE: upstream connection drops here.
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert _collect_content(result) == "Here is the answer."
+        assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
+        # A [DONE] marker is still emitted downstream so clients don't hang.
+        assert result[-1].strip() == "data: [DONE]"
+
+    @pytest.mark.asyncio
+    async def test_finish_chunk_flagged_truncated_without_done(self):
+        lines = [
+            _make_chunk("Partial answer only."),
+            _make_finish(),
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        finish_extra = None
+        for line in reversed(result):
+            if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                data = json.loads(line[len("data: ") :])
+                extra = data.get("extra")
+                if extra and extra != "{}":
+                    finish_extra = json.loads(extra)
+                    break
+        assert finish_extra is not None
+        assert finish_extra.get("truncated") is True
+
+    @pytest.mark.asyncio
+    async def test_clean_done_stream_has_no_truncated_flag(self):
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert "truncated" not in _parse_finish_extra(result)
+
+
+def _parse_finish_extra(sse_lines: list[str]) -> dict:
+    for line in reversed(sse_lines):
+        if line.startswith("data: ") and line.strip() != "data: [DONE]":
+            data = json.loads(line[len("data: ") :])
+            extra = data.get("extra")
+            if extra and extra != "{}":
+                return json.loads(extra)
+    return {}
+
+
 class TestStreamWithManySources:
     @pytest.mark.asyncio
     async def test_60_source_citation_survives_buffer_eviction(self):
