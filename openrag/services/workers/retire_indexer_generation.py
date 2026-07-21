@@ -3,7 +3,8 @@
 Run this only after traffic has stopped reaching API replicas that use the
 generation being retired. Protocol-aware generations are drained before they
 are removed. The original unversioned generation cannot report its state, so
-retiring it requires an explicit operator confirmation.
+retiring it requires an explicit operator confirmation. The same confirmation
+is required when a dispatcher is unavailable but its workers are still alive.
 """
 
 from __future__ import annotations
@@ -121,6 +122,7 @@ def retire_generation(
     timeout: float,
     poll_interval: float,
     confirm_legacy_idle: bool,
+    confirm_workers_idle: bool = False,
 ) -> list[str]:
     """Drain and remove one actor generation, returning removed actor names."""
     from ray.util.state import list_actors
@@ -143,6 +145,11 @@ def retire_generation(
 
     removed: list[str] = []
     if dispatcher is None:
+        if worker_names and not (confirm_legacy_idle or confirm_workers_idle):
+            raise RuntimeError(
+                "The indexer dispatcher is unavailable, so active worker jobs cannot be checked. "
+                "Verify the workers are idle, then rerun with --confirm-workers-idle."
+            )
         for worker_name in worker_names:
             if _kill_actor(worker_name, namespace):
                 removed.append(worker_name)
@@ -179,6 +186,11 @@ def main() -> int:
         action="store_true",
         help="Confirm old API traffic is stopped and the unversioned generation has no active work",
     )
+    parser.add_argument(
+        "--confirm-workers-idle",
+        action="store_true",
+        help="Confirm workers are idle when their dispatcher is unavailable",
+    )
     args = parser.parse_args()
 
     ray.init(address=args.ray_address, ignore_reinit_error=True)
@@ -188,6 +200,7 @@ def main() -> int:
         timeout=args.timeout,
         poll_interval=args.poll_interval,
         confirm_legacy_idle=args.confirm_legacy_idle,
+        confirm_workers_idle=args.confirm_workers_idle,
     )
     if removed:
         print("Removed indexer actors: " + ", ".join(removed))
