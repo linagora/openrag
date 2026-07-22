@@ -84,89 +84,171 @@ async def stream_with_source_filtering(
     model_name: str,
     buffer_size: int | None = None,
 ):
-    """Process an LLM SSE stream, stripping line-terminal source tags."""
+    """Process an LLM SSE stream, stripping line-terminal source tags.
+
+    The terminal flush (tail content + ``extra.sources``) runs exactly once
+    after the loop on *every* termination path — a clean ``data: [DONE]``, the
+    upstream closing the connection without one, or the upstream generator
+    raising mid-stream (e.g. a read timeout surfaced as ``InferenceTimeoutError``).
+    Otherwise a dropped upstream stream silently loses the answer's tail and all
+    sources with no error surfaced to the caller. A non-clean exit is flagged
+    with ``extra.truncated = true`` so the client can tell a cut-off answer from
+    a clean completion; if nothing was ever streamed there is no tail to salvage,
+    so a mid-stream error is re-raised to surface the real failure instead of a
+    silent empty ``[DONE]``.
+    """
     if buffer_size is None:
         buffer_size = max(_MIN_STREAM_LOOKAHEAD, _min_sources_tag_buffer_size(len(sources)))
     pending = ""
     emitted_len = 0
     chunk_template = None
+    # Fallback template for the truncated-finish chunk when the stream dies
+    # before any content/finish chunk (e.g. only a role-preamble arrived): any
+    # chunk with a usable `choices[0]` lets us still emit the `truncated` flag.
+    last_chunk = None
     last_finish_reason = None
+    saw_done = False
+    stream_error = None
 
-    async for line in llm_stream:
-        if not line.startswith("data:"):
-            continue
-
-        if line.strip() == "data: [DONE]":
-            final_clean, citations = extract_and_strip_sources_block(pending)
-            final_clean = final_clean.rstrip()
-
-            filtered = filter_sources_by_citations(sources, citations)
-            filtered_json = json.dumps({"sources": filtered})
-
-            if chunk_template and len(final_clean) > emitted_len:
-                tail_chunk = copy.deepcopy(chunk_template)
-                tail_chunk["choices"][0]["delta"] = {"content": final_clean[emitted_len:]}
-                # Content chunk must not carry finish_reason (template may be the
-                # finish chunk); clients treat such a chunk as terminal and drop its
-                # delta. The separate finish chunk below emits it with an empty delta.
-                tail_chunk["choices"][0]["finish_reason"] = None
-                tail_chunk["extra"] = filtered_json
-                yield f"data: {json.dumps(tail_chunk)}\n\n"
-
-            if chunk_template:
-                await asyncio.sleep(0.05)
-                finish_chunk = copy.deepcopy(chunk_template)
-                finish_chunk["choices"][0]["delta"] = {}
-                finish_chunk["choices"][0]["finish_reason"] = last_finish_reason or "stop"
-                finish_chunk["extra"] = filtered_json
-                yield f"data: {json.dumps(finish_chunk)}\n\n"
-
-            yield "data: [DONE]\n\n"
-            continue
-
-        data = json.loads(line[len("data: ") :])
-        data["model"] = model_name
-
-        # `choices` can be present but empty — e.g. the OpenAI/litellm final
-        # usage-report chunk sent when the caller requests
-        # `stream_options: {"include_usage": true}` has `"choices": []` and a
-        # top-level `"usage"` field. `.get("choices", [{}])` only falls back to
-        # the default when the key is *missing*, not when it's an empty list,
-        # so indexing straight into it raises IndexError on that chunk.
-        choices = data.get("choices") or [{}]
-        choice = choices[0]
-        delta = choice.get("delta", {})
-        content = delta.get("content", "") or ""
-        finish_reason = choice.get("finish_reason")
-
-        if finish_reason:
-            last_finish_reason = finish_reason
-            chunk_template = data
-        elif content:
-            chunk_template = data
-            pending += content
-
-            if len(pending) <= buffer_size:
+    try:
+        async for line in llm_stream:
+            if not line.startswith("data:"):
                 continue
 
-            cleaned, _, _ = _strip_sources_tags(pending)
-            safe_end = max(0, len(cleaned) - buffer_size)
-            if safe_end > emitted_len:
-                out = {
-                    **data,
-                    "choices": [
-                        {
-                            **choice,
-                            "delta": {
-                                **choice.get("delta", {}),
-                                "content": cleaned[emitted_len:safe_end],
-                            },
-                        }
-                    ],
-                    "extra": "{}",
-                }
-                yield f"data: {json.dumps(out)}\n\n"
-                emitted_len = safe_end
-        else:
-            data["extra"] = "{}"
-            yield f"data: {json.dumps(data)}\n\n"
+            if line.strip() == "data: [DONE]":
+                saw_done = True
+                break
+
+            data = json.loads(line[len("data: ") :])
+            data["model"] = model_name
+
+            # `choices` can be present but empty — e.g. the OpenAI/litellm final
+            # usage-report chunk sent when the caller requests
+            # `stream_options: {"include_usage": true}` has `"choices": []` and a
+            # top-level `"usage"` field. `.get("choices", [{}])` only falls back to
+            # the default when the key is *missing*, not when it's an empty list,
+            # so indexing straight into it raises IndexError on that chunk.
+            choices = data.get("choices") or [{}]
+            choice = choices[0]
+            delta = choice.get("delta", {})
+            content = delta.get("content", "") or ""
+            finish_reason = choice.get("finish_reason")
+
+            # Only chunks with a real `choices[0]` can template the finish chunk;
+            # skip usage-report chunks (`"choices": []`) whose deepcopy would
+            # IndexError in the flush below.
+            if data.get("choices"):
+                last_chunk = data
+
+            # `content` and `finish_reason` are handled independently: some
+            # OpenAI-compatible providers pack the last token and the terminal
+            # `finish_reason` into the *same* chunk, so gating content on
+            # `elif finish_reason` would silently drop that final token.
+            if finish_reason:
+                last_finish_reason = finish_reason
+                chunk_template = data
+
+            if content:
+                chunk_template = data
+                pending += content
+
+                if len(pending) <= buffer_size:
+                    continue
+
+                cleaned, _, _ = _strip_sources_tags(pending)
+                safe_end = max(0, len(cleaned) - buffer_size)
+                if safe_end > emitted_len:
+                    out = {
+                        **data,
+                        "choices": [
+                            {
+                                **choice,
+                                "delta": {
+                                    **choice.get("delta", {}),
+                                    "content": cleaned[emitted_len:safe_end],
+                                },
+                                # `choice` may carry finish_reason (a provider can pack
+                                # the last token + finish_reason into one chunk). Clear
+                                # it: a mid-stream chunk marked terminal makes spec
+                                # clients drop the delta and ignore the tail/finish
+                                # chunks. Same guard as the terminal tail chunk below.
+                                "finish_reason": None,
+                            }
+                        ],
+                        "extra": "{}",
+                    }
+                    yield f"data: {json.dumps(out)}\n\n"
+                    emitted_len = safe_end
+            elif not finish_reason:
+                # Neither content nor finish_reason (role preamble, usage-only or
+                # keep-alive chunk): pass it through untouched. A finish-only chunk
+                # is intentionally *not* re-emitted here — the terminal flush emits
+                # the finish chunk so it can carry `extra.sources`.
+                data["extra"] = "{}"
+                yield f"data: {json.dumps(data)}\n\n"
+    except Exception as exc:
+        # Upstream raised mid-stream (timeout, connection drop, worker restart):
+        # capture it and fall through to the flush so the buffered tail + sources
+        # are still delivered instead of unwinding past it. CancelledError and
+        # GeneratorExit are BaseException, not Exception, so a downstream client
+        # disconnect propagates untouched and correctly skips the flush.
+        stream_error = exc
+    finally:
+        # Release the upstream HTTP connection promptly. Breaking on `[DONE]`
+        # leaves the client's stream generator suspended inside its
+        # `async with response` (an `async for` does *not* close its iterator on
+        # break), so the pooled connection stays checked out until GC — which
+        # exhausts the httpx pool under concurrent traffic. Closing it here runs
+        # that cleanup now. Awaiting in a finally is safe (only *yielding* during
+        # teardown is forbidden); the guard tolerates iterables without `aclose`.
+        aclose = getattr(llm_stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+    # The finish chunk needs *a* template; prefer the content/finish chunk, but
+    # fall back to any earlier chunk so a preamble-only stream still gets flagged.
+    template = chunk_template or last_chunk
+
+    # Nothing was ever streamed to the client, so there is no partial answer to
+    # salvage. Surface the real error instead of a silent, clean-looking empty
+    # `[DONE]` the caller can't distinguish from success.
+    if stream_error is not None and template is None:
+        logger.warning("Upstream stream raised before any content; surfacing error", error=str(stream_error))
+        raise stream_error
+
+    final_clean, citations = extract_and_strip_sources_block(pending)
+    final_clean = final_clean.rstrip()
+
+    filtered = filter_sources_by_citations(sources, citations)
+    extra_payload = {"sources": filtered}
+    if not saw_done:
+        extra_payload["truncated"] = True
+        logger.warning(
+            "Answer truncated: upstream stream ended without [DONE] "
+            "(reason={reason}, model={model}, delivered_chars={chars}, sources={sources})",
+            reason=f"upstream error: {stream_error}" if stream_error is not None else "connection closed",
+            model=model_name,
+            chars=len(final_clean),
+            sources=len(filtered),
+        )
+    filtered_json = json.dumps(extra_payload)
+
+    if template and len(final_clean) > emitted_len:
+        tail_chunk = copy.deepcopy(template)
+        tail_chunk["choices"][0]["delta"] = {"content": final_clean[emitted_len:]}
+        # Content chunk must not carry finish_reason (template may be the
+        # finish chunk); clients treat such a chunk as terminal and drop its
+        # delta. The separate finish chunk below emits it with an empty delta.
+        tail_chunk["choices"][0]["finish_reason"] = None
+        tail_chunk["extra"] = filtered_json
+        yield f"data: {json.dumps(tail_chunk)}\n\n"
+
+    if template:
+        await asyncio.sleep(0.05)
+        finish_chunk = copy.deepcopy(template)
+        finish_chunk["choices"][0]["delta"] = {}
+        finish_chunk["choices"][0]["finish_reason"] = last_finish_reason or "stop"
+        finish_chunk["extra"] = filtered_json
+        yield f"data: {json.dumps(finish_chunk)}\n\n"
+
+    yield "data: [DONE]\n\n"

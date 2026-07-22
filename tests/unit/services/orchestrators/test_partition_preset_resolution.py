@@ -71,6 +71,11 @@ class _FakePartitionRepo:
         return dict(self._counts)
 
 
+class _FakeVectorStore:
+    async def collection_exists(self, name: str) -> bool:
+        return False
+
+
 def _settings(idx=None, ret=None):
     from core.config.root import Settings
 
@@ -89,7 +94,7 @@ def _make_service(repo=None, rows=None, settings=None):
         partition_repo=repo or _FakePartitionRepo(rows),
         membership_repo=object(),
         document_repo=object(),
-        vector_store=object(),
+        vector_store=_FakeVectorStore(),
         user_repo=object(),
         collection="vdb",
         config=settings if settings is not None else _settings(),
@@ -114,6 +119,52 @@ def test_resolve_partition_row_builds_config():
     assert isinstance(cfg.indexation, IndexationPipelineConfig)
     assert isinstance(cfg.retrieval, RetrievalPipelineConfig)
     assert cfg.retrieval.top_k == 50
+
+
+def test_resolve_partition_row_normalizes_legacy_zero_chat_history_depth():
+    """Rows written under the old '0 = inherit global default' scheme resolve to
+    the concrete default (4) instead of the no-longer-valid 0 (schema now
+    requires chat_history_depth >= 1 on new writes)."""
+    svc = _make_service()
+    cfg = svc.resolve_partition_row(_full_row("p1", chat_history_depth=0))
+
+    assert cfg.chat_history_depth == 4
+
+
+def test_resolve_partition_row_keeps_explicit_chat_history_depth():
+    svc = _make_service()
+    cfg = svc.resolve_partition_row(_full_row("p1", chat_history_depth=10))
+
+    assert cfg.chat_history_depth == 10
+
+
+def test_resolve_partition_row_legacy_zero_tracks_current_global_default():
+    """The legacy-0 fallback reads the live config, not a hardcoded constant —
+    changing rag.chat_history_depth must change what a legacy-0 row resolves to."""
+    from core.config.retrieval import RAGConfig
+
+    settings = _settings().model_copy(update={"rag": RAGConfig(chat_history_depth=9)})
+    svc = _make_service(settings=settings)
+
+    cfg = svc.resolve_partition_row(_full_row("p1", chat_history_depth=0))
+
+    assert cfg.chat_history_depth == 9
+
+
+@pytest.mark.parametrize("global_depth", [0, -1])
+def test_resolve_partition_row_legacy_zero_clamps_invalid_global_default(global_depth):
+    """RAGConfig.chat_history_depth carries no lower bound, so a deployment may set it
+    to 0 (or negative). A legacy-0 row would then inherit that value and hit
+    PartitionConfig's ge=1 guard, crashing load_partitions() at startup. The fallback
+    must clamp such values to the hardcoded default instead of propagating them."""
+    from core.config.retrieval import RAGConfig
+
+    settings = _settings().model_copy(update={"rag": RAGConfig(chat_history_depth=global_depth)})
+    svc = _make_service(settings=settings)
+
+    cfg = svc.resolve_partition_row(_full_row("p1", chat_history_depth=0))
+
+    assert cfg.chat_history_depth == 4
 
 
 def test_resolve_partition_row_missing_indexation_preset_raises():
@@ -234,6 +285,19 @@ async def test_create_partition_persists_config_and_reloads():
     assert any(c[0] == "update_partition" for c in repo.calls)
     assert "p1" in settings.partitions
     assert settings.partitions["p1"].description == "docs"
+
+
+@pytest.mark.asyncio
+async def test_delete_partition_removes_deleted_partition_from_cache():
+    settings = _settings()
+    repo = _FakePartitionRepo(rows=[_full_row("p1"), _full_row("keep")])
+    svc = _make_service(repo, settings=settings)
+    await svc.load_partitions()
+
+    await svc.delete_partition("p1")
+
+    assert "p1" not in settings.partitions
+    assert "keep" in settings.partitions
 
 
 # ------------------------------------------------------------------

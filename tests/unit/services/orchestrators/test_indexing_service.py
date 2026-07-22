@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
 import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
@@ -11,14 +14,18 @@ from services.orchestrators.indexing_service import IndexingService
 
 
 class FakeDocumentRepo:
-    def __init__(self, *, exists: bool = False, raise_on_check: bool = False):
+    def __init__(self, *, exists: bool = False, raise_on_check: bool = False, content_sha256: str | None = None):
         self._exists = exists
         self._raise = raise_on_check
+        self._content_sha256 = content_sha256
 
     async def file_exists_in_partition(self, file_id: str, partition: str) -> bool:
         if self._raise:
             raise RuntimeError("boom")
         return self._exists
+
+    async def get_content_sha256(self, file_id: str, partition: str) -> str | None:
+        return self._content_sha256
 
 
 class FakeWorkspaceRepo:
@@ -49,6 +56,8 @@ class FakeDispatcher:
         replace,
         indexation_config=None,
         embedder_name=None,
+        require_existing_partition=False,
+        allow_legacy_require_existing_partition_retry=False,
     ):
         self.dispatched.append(
             {
@@ -60,6 +69,8 @@ class FakeDispatcher:
                 "replace": replace,
                 "indexation_config": indexation_config,
                 "embedder_name": embedder_name,
+                "require_existing_partition": require_existing_partition,
+                "allow_legacy_require_existing_partition_retry": allow_legacy_require_existing_partition_retry,
             }
         )
         return "task-abc"
@@ -116,6 +127,8 @@ class FakePartitionService:
         self.created: list[tuple[str, int]] = []
         self.create_kwargs: list[dict] = []
         self.loaded = 0
+        self.admissions: list[str] = []
+        self.admission_depth = 0
 
     def _cfg(self, partition: str) -> PartitionConfig:
         return PartitionConfig(
@@ -127,6 +140,15 @@ class FakePartitionService:
 
     async def partition_exists(self, partition: str) -> bool:
         return partition in self._db
+
+    @asynccontextmanager
+    async def indexing_admission(self, partition: str):
+        self.admissions.append(partition)
+        self.admission_depth += 1
+        try:
+            yield await self.partition_exists(partition)
+        finally:
+            self.admission_depth -= 1
 
     async def create_partition(self, partition: str, *, user_id: int, **_) -> None:
         self.created.append((partition, user_id))
@@ -218,6 +240,7 @@ async def test_add_file_builds_metadata_and_dispatches(tmp_path):
     assert sent["partition"] == "p1"
     assert sent["workspace_ids"] == ["w1"]
     assert sent["replace"] is False
+    assert sent["require_existing_partition"] is False
     md = sent["metadata"]
     assert md["author"] == "alice"
     assert md["source"] == str(f)
@@ -225,6 +248,130 @@ async def test_add_file_builds_metadata_and_dispatches(tmp_path):
     assert md["original_filename"] == "Doc Original.txt"
     assert md["file_id"] == "f1"
     assert md["file_size"] == "11.00 B"
+    assert md["content_sha256"] is None
+
+
+@pytest.mark.asyncio
+async def test_add_file_uses_precomputed_content_hash_when_deduplication_is_enabled(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("hello world")
+    disp = FakeDispatcher()
+    config = SimpleNamespace(loader=SimpleNamespace(content_deduplication_enabled=True), partitions={})
+    svc = _service(disp=disp, config=config)
+
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="p1",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user={"id": 7},
+        content_sha256="abc123",
+    )
+
+    assert disp.dispatched[0]["metadata"]["content_sha256"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_add_file_hashes_non_http_input_when_digest_is_not_precomputed(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("hello world")
+    disp = FakeDispatcher()
+    config = SimpleNamespace(loader=SimpleNamespace(content_deduplication_enabled=True), partitions={})
+    svc = _service(disp=disp, config=config)
+
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="p1",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user={"id": 7},
+    )
+
+    assert (
+        disp.dispatched[0]["metadata"]["content_sha256"]
+        == "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    )
+
+
+@pytest.mark.asyncio
+async def test_add_file_holds_partition_admission_fence_until_dispatch(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    config = type("Config", (), {"partitions": {}})()
+    psvc = FakePartitionService(config, db_partitions={"tenant-a"})
+
+    class CheckingDispatcher(FakeDispatcher):
+        async def dispatch_indexing(self, **kwargs):
+            assert psvc.admission_depth == 1
+            return await super().dispatch_indexing(**kwargs)
+
+    disp = CheckingDispatcher()
+    svc = _service(disp=disp, config=config, partition_service=psvc)
+
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="tenant-a",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user={"id": 7},
+    )
+
+    assert psvc.admissions == ["tenant-a"]
+    assert psvc.admission_depth == 0
+
+
+@pytest.mark.asyncio
+async def test_add_file_requires_existing_partition_when_configless_partition_existed_at_admission(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    disp = FakeDispatcher()
+    config = type("Config", (), {"partitions": {}})()
+    psvc = FakePartitionService(config, db_partitions={"tenant-a"})
+    svc = _service(disp=disp, config=config, partition_service=psvc)
+
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="tenant-a",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user={"id": 7},
+    )
+
+    assert psvc.created == []
+    assert disp.dispatched[0]["require_existing_partition"] is True
+    assert disp.dispatched[0]["allow_legacy_require_existing_partition_retry"] is False
+
+
+@pytest.mark.asyncio
+async def test_add_file_keeps_legacy_auto_create_for_new_configless_partition(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    disp = FakeDispatcher()
+    config = type("Config", (), {"partitions": {}})()
+    psvc = FakePartitionService(config)
+    svc = _service(disp=disp, config=config, partition_service=psvc)
+
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="tenant-new",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user={"id": 7},
+    )
+
+    assert psvc.created == []
+    assert disp.dispatched[0]["require_existing_partition"] is False
+    assert disp.dispatched[0]["allow_legacy_require_existing_partition_retry"] is False
 
 
 @pytest.mark.asyncio
@@ -269,6 +416,8 @@ async def test_add_file_dispatches_partition_indexation_config_and_embedder(tmp_
     assert sent["indexation_config"]["enable_image_captioning"] is False
     assert sent["indexation_config"]["enable_contextualization"] is True
     assert sent["indexation_config"]["contextualization_llm"] == "llm-context"
+    assert sent["require_existing_partition"] is True
+    assert sent["allow_legacy_require_existing_partition_retry"] is True
 
 
 @pytest.mark.asyncio
@@ -455,6 +604,21 @@ async def test_update_metadata_injects_file_id():
 
 
 @pytest.mark.asyncio
+async def test_update_metadata_cannot_override_content_hash():
+    disp = FakeDispatcher()
+    svc = _service(disp=disp)
+
+    await svc.update_metadata(
+        "f1",
+        {"content_sha256": "client-controlled", "author": "bob"},
+        "p1",
+        {"id": 1},
+    )
+
+    assert disp.updated[0][1] == {"author": "bob", "file_id": "f1"}
+
+
+@pytest.mark.asyncio
 async def test_copy_file_sets_target_fields():
     disp = FakeDispatcher()
     svc = _service(disp=disp)
@@ -469,8 +633,26 @@ async def test_copy_file_sets_target_fields():
     file_id, md, partition, user = disp.copied[0]
     assert file_id == "src"
     assert partition == "p-src"
-    assert md == {"k": "v", "file_id": "dst", "partition": "p-dst"}
+    assert md == {"k": "v", "file_id": "dst", "partition": "p-dst", "content_sha256": None}
     assert user == {"id": 2}
+
+
+@pytest.mark.asyncio
+async def test_copy_file_preserves_content_hash_when_deduplication_is_enabled():
+    disp = FakeDispatcher()
+    config = SimpleNamespace(loader=SimpleNamespace(content_deduplication_enabled=True), partitions={})
+    svc = _service(doc=FakeDocumentRepo(content_sha256="abc123"), disp=disp, config=config)
+
+    await svc.copy_file(
+        source_file_id="src",
+        source_partition="p-src",
+        target_file_id="dst",
+        target_partition="p-dst",
+        metadata={},
+        user={"id": 2},
+    )
+
+    assert disp.copied[0][1]["content_sha256"] == "abc123"
 
 
 @pytest.mark.asyncio

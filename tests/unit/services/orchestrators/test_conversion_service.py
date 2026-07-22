@@ -55,7 +55,17 @@ async def test_serialize_file_merges_metadata_and_sanitizes():
 
 @pytest.mark.asyncio
 async def test_get_chunk_returns_page_content_and_metadata():
-    store = FakeVectorStore(rows=[{"text": "chunk body", "vector": [0.1], "partition": "p1", "file_id": "f1"}])
+    store = FakeVectorStore(
+        rows=[
+            {
+                "text": "chunk body",
+                "vector": [0.1],
+                "partition": "p1",
+                "file_id": "f1",
+                "_openrag_indexing_task_id": "t1",
+            }
+        ]
+    )
     svc = _service(store=store)
 
     chunk = await svc.get_chunk("42")

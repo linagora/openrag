@@ -17,6 +17,7 @@ class FakeRetriever(Retriever):
         self.results_queue: list[list[Chunk]] = []
         self.expand_input: list[Chunk] | None = None
         self.expand_result: list[Chunk] | None = None
+        self.expand_filter_params: dict | None = None
         self.expansion_enabled = expansion_enabled
 
     async def retrieve(self, partition, query, filter=None, filter_params=None):
@@ -25,8 +26,9 @@ class FakeRetriever(Retriever):
             return self.results_queue.pop(0)
         return []
 
-    async def expand_search_results(self, results):
+    async def expand_search_results(self, results, filter_params=None):
         self.expand_input = list(results)
+        self.expand_filter_params = filter_params
         return list(self.expand_result) if self.expand_result is not None else list(results)
 
 
@@ -203,3 +205,30 @@ async def test_retrieve_docs_top_k_zero_returns_empty():
     p = RetrieverPipeline(retriever=r)
     out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"), top_k=0)
     assert out == []
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_docs_passes_configured_rrf_k(monkeypatch):
+    """The per-partition rrf_k must reach rrf_reranking, not the hardcoded 60 (#707)."""
+    import core.retrieval.pipeline as pipeline_mod
+
+    captured = {}
+    real = pipeline_mod.rrf_reranking
+
+    def spy(ranked_lists, key_fn=None, k=60):
+        captured["k"] = k
+        return real(ranked_lists, key_fn=key_fn, k=k)
+
+    monkeypatch.setattr(pipeline_mod, "rrf_reranking", spy)
+
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b"), _chunks("b", "c")]
+    p = RetrieverPipeline(retriever=r, rrf_k=17)
+    sq = SearchQueries(query_list=[Query(query="q1"), Query(query="q2")])
+    await p.get_relevant_docs(partition=["p1"], search_queries=sq)
+
+    assert captured["k"] == 17
+
+
+def test_rrf_k_defaults_to_canonical_60():
+    assert RetrieverPipeline(retriever=FakeRetriever()).rrf_k == 60

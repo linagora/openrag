@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import difflib
 import ipaddress
-import json
 import mimetypes
 import socket
 import tempfile
@@ -33,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from core.utils.conts import is_internal_metadata_key
 from core.utils.exceptions import ValidationError
 from core.utils.log_tail import collect_task_logs
 from core.utils.logging import get_logger
@@ -51,7 +51,7 @@ logger = get_logger()
 
 _ROLE_HIERARCHY: dict[str, int] = {"viewer": 1, "editor": 2, "owner": 3}
 _FORBIDDEN_FILE_ID_CHARS: frozenset[str] = frozenset("/")
-_ACTIVE_STATES = {"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"}
+_ACTIVE_STATES = {"QUEUED", "SERIALIZING"}
 _MAX_REDIRECTS = 10
 _MAX_CHUNKS_PER_CALL = 200
 _MAX_FUZZY_CANDIDATES = 5000
@@ -221,19 +221,14 @@ class MCPService:
             raise ValueError("top_k must be greater than 0")
         effective_top_k = min(effective_top_k, self.max_top_k)
 
-        # Inline the file_id as a literal Milvus expression rather than using
-        # the templated ``filter_params`` form: the shared VectorStoreSearcher
-        # forwards the raw ``filter`` string to Milvus but drops
-        # ``filter_params``, so a ``{var}`` placeholder would never be bound.
-        # ``json.dumps`` yields a correctly quoted/escaped string literal.
-        search_filter = f"file_id == {json.dumps(file_id)}" if file_id is not None else None
+        filter_params = {"file_id": file_id} if file_id is not None else None
 
         chunks = await self._retrieval.search(
             text=normalized_query,
             partitions=scoped,
             top_k=effective_top_k,
             similarity_threshold=self.similarity_threshold,
-            filter=search_filter,
+            filter_params=filter_params,
         )
         documents = [self._shape_chunk(c) for c in chunks]
         return {
@@ -251,7 +246,7 @@ class MCPService:
         return {
             "chunk_id": meta.get("_id") or chunk.id,
             "content": chunk.text,
-            "metadata": meta,
+            "metadata": _public_chunk_metadata(meta, exclude=("_id",)),
         }
 
     # ------------------------------------------------------------------
@@ -296,7 +291,7 @@ class MCPService:
             {"partition": partition, "file_id": file_id},
             output_fields=["*"],
         )
-        metadata = {k: v for k, v in rows[0].items() if k not in ("_id", "text", "vector")} if rows else {}
+        metadata = _public_chunk_metadata(rows[0], exclude=("_id", "text", "vector")) if rows else {}
         return {
             "partition": partition,
             "file_id": file_id,
@@ -344,7 +339,7 @@ class MCPService:
                 {
                     "chunk_id": row.get("_id"),
                     "content": row.get("text"),
-                    "metadata": {k: v for k, v in row.items() if k not in ("text", "_id", "vector")},
+                    "metadata": _public_chunk_metadata(row, exclude=("text", "_id", "vector")),
                 }
                 for row in page
             ],
@@ -608,11 +603,15 @@ class MCPService:
         suffix = Path(filename).suffix or ""
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = Path(tmp.name)
+        download_complete = False
         try:
             await self._safe_download(url, tmp_path)
+            download_complete = True
         except Exception as exc:
-            tmp_path.unlink(missing_ok=True)
             raise RuntimeError(f"Failed to download '{url}': {exc}") from exc
+        finally:
+            if not download_complete:
+                tmp_path.unlink(missing_ok=True)
 
         metadata = _strip_protected_metadata(extra_metadata)
         metadata["source_url"] = url
@@ -620,15 +619,19 @@ class MCPService:
         if guessed_mime and "mimetype" not in metadata:
             metadata["mimetype"] = guessed_mime
 
-        task_id = await self._indexing.add_file(
-            file_path=str(tmp_path),
-            file_id=file_id,
-            partition=partition,
-            metadata=metadata,
-            sanitized_filename=filename,
-            original_filename=filename,
-            user={"id": user_id, "is_admin": is_admin} if user_id is not None else None,
-        )
+        try:
+            task_id = await self._indexing.add_file(
+                file_path=str(tmp_path),
+                file_id=file_id,
+                partition=partition,
+                metadata=metadata,
+                sanitized_filename=filename,
+                original_filename=filename,
+                user={"id": user_id, "is_admin": is_admin} if user_id is not None else None,
+            )
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
         return {
             "partition": partition,
             "file_id": file_id,
@@ -694,3 +697,7 @@ class MCPService:
 
 
 __all__ = ["MCPService"]
+
+
+def _public_chunk_metadata(row: dict[str, Any], *, exclude: tuple[str, ...]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if key not in exclude and not is_internal_metadata_key(key)}

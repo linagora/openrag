@@ -13,6 +13,10 @@ returned via ``HTTPException``.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +51,14 @@ def _human_readable_size(size_bytes: int) -> str:
             return f"{size:.2f} {unit}"
         size /= 1024
     return f"{size:.2f} PB"
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class IndexingService:
@@ -96,6 +108,7 @@ class IndexingService:
         file_id: str,
         sanitized_filename: str,
         original_filename: str | None,
+        content_sha256: str | None,
     ) -> dict:
         """Assemble the indexing metadata exactly as the legacy router did."""
         metadata = dict(metadata or {})
@@ -109,6 +122,7 @@ class IndexingService:
         file_stat = Path(file_path).stat()
         metadata["file_size"] = _human_readable_size(file_stat.st_size)
         metadata["file_id"] = file_id
+        metadata["content_sha256"] = content_sha256
         metadata.update(extract_temporal_fields(metadata, temporal_fields=TEMPORAL_FIELDS))
         return metadata
 
@@ -116,6 +130,26 @@ class IndexingService:
         if self._config is None:
             return {}
         return getattr(self._config, "partitions", {}) or {}
+
+    def _deduplication_enabled(self) -> bool:
+        return bool(
+            self._config is not None
+            and getattr(getattr(self._config, "loader", None), "content_deduplication_enabled", False)
+        )
+
+    @asynccontextmanager
+    async def _partition_admission(self, partition: str) -> AsyncIterator[bool]:
+        if self._partition_service is None:
+            yield False
+            return
+
+        admission = getattr(self._partition_service, "indexing_admission", None)
+        if admission is not None:
+            async with admission(partition) as partition_existed:
+                yield bool(partition_existed)
+            return
+
+        yield await self._partition_service.partition_exists(partition)
 
     async def _ensure_editor_access_after_create_race(self, partition: str, user: dict | None) -> None:
         if user is None:
@@ -183,31 +217,43 @@ class IndexingService:
         user: dict | None,
         workspace_ids: list[str] | None = None,
         replace: bool = False,
+        content_sha256: str | None = None,
     ) -> str:
         """Assemble metadata and queue an (re)indexing job; return its task id.
 
         Workspace association happens inside the worker's ``add_file``
         after a successful index — the router only pre-validates the ids.
         """
+        if self._deduplication_enabled() and content_sha256 is None:
+            content_sha256 = await asyncio.to_thread(_sha256_file, file_path)
+        if not self._deduplication_enabled():
+            content_sha256 = None
+
         full_metadata = self._build_metadata(
             metadata=metadata,
             file_path=file_path,
             file_id=file_id,
             sanitized_filename=sanitized_filename,
             original_filename=original_filename,
+            content_sha256=content_sha256,
         )
-        await self._ensure_partition_exists(partition, user)
-        indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
-        return await self._dispatcher.dispatch_indexing(
-            path=file_path,
-            metadata=full_metadata,
-            partition=partition,
-            user=user,
-            workspace_ids=workspace_ids,
-            replace=replace,
-            indexation_config=indexation_config,
-            embedder_name=embedder_name,
-        )
+        async with self._partition_admission(partition) as partition_existed_at_admission:
+            await self._ensure_partition_exists(partition, user)
+            require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
+            indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
+            legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
+            return await self._dispatcher.dispatch_indexing(
+                path=file_path,
+                metadata=full_metadata,
+                partition=partition,
+                user=user,
+                workspace_ids=workspace_ids,
+                replace=replace,
+                indexation_config=indexation_config,
+                embedder_name=embedder_name,
+                require_existing_partition=require_existing_partition,
+                allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
+            )
 
     async def delete_file(self, file_id: str, partition: str) -> None:
         await self._dispatcher.delete_file(file_id, partition)
@@ -220,6 +266,7 @@ class IndexingService:
         user: dict | None,
     ) -> None:
         metadata = dict(metadata or {})
+        metadata.pop("content_sha256", None)
         metadata["file_id"] = file_id
         await self._dispatcher.update_file_metadata(file_id, metadata, partition, user)
 
@@ -234,8 +281,12 @@ class IndexingService:
         user: dict | None,
     ) -> None:
         metadata = dict(metadata or {})
+        content_sha256 = None
+        if self._deduplication_enabled():
+            content_sha256 = await self._document_repo.get_content_sha256(source_file_id, source_partition)
         metadata["file_id"] = target_file_id
         metadata["partition"] = target_partition
+        metadata["content_sha256"] = content_sha256
         await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user)
 
     # ------------------------------------------------------------------

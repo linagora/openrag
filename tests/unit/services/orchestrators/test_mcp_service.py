@@ -7,6 +7,7 @@ fuzzy ranking, task assembly and URL-indexation guards in isolation.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -87,9 +88,10 @@ class RaceLostPartitions(FakePartitions):
 
 
 class FakeIndexing:
-    def __init__(self, *, state="COMPLETED", error="boom"):
+    def __init__(self, *, state="COMPLETED", error="boom", add_error: BaseException | None = None):
         self._state = state
         self._error = error
+        self._add_error = add_error
         self.deleted: list[tuple[str, str]] = []
         self.updated: list[tuple] = []
         self.copied: list[dict] = []
@@ -112,6 +114,8 @@ class FakeIndexing:
 
     async def add_file(self, **kwargs):
         self.added.append(kwargs)
+        if self._add_error is not None:
+            raise self._add_error
         return "task-123"
 
 
@@ -250,9 +254,9 @@ async def test_search_file_id_builds_filter():
     svc = _service(retrieval=retrieval)
     await svc.search_documents(query="hi", partitions=["a"], top_k=3, allowed_partitions=["a"], file_id="f1")
     call = retrieval.calls[0]
-    # Inlined as a literal expr (the shared searcher drops filter_params).
-    assert call["filter"] == 'file_id == "f1"'
-    assert "filter_params" not in call
+    # Bound through filter_params (parameterized), not a hand-built literal expr.
+    assert call["filter_params"] == {"file_id": "f1"}
+    assert call.get("filter") is None
 
 
 @pytest.mark.asyncio
@@ -265,7 +269,7 @@ async def test_search_rejects_file_id_with_slash():
 
 @pytest.mark.asyncio
 async def test_search_shapes_chunks():
-    chunks = [FakeChunk(_id=11, text="body", metadata={"file_id": "f1"})]
+    chunks = [FakeChunk(_id=11, text="body", metadata={"file_id": "f1", "_openrag_indexing_task_id": "t1"})]
     out = await _service(retrieval=FakeRetrieval(chunks=chunks)).search_documents(
         query="hi", partitions=["a"], top_k=3, allowed_partitions=["a"]
     )
@@ -274,6 +278,7 @@ async def test_search_shapes_chunks():
     assert doc["chunk_id"] == 11
     assert doc["content"] == "body"
     assert doc["metadata"]["file_id"] == "f1"
+    assert "_openrag_indexing_task_id" not in doc["metadata"]
 
 
 # ---------------------------------------------------------------------------
@@ -311,11 +316,20 @@ async def test_get_file_info_not_found():
 
 @pytest.mark.asyncio
 async def test_get_file_info_strips_id_text_vector_from_metadata():
-    rows = [{"_id": 1, "file_id": "f1", "page": 2, "text": "body", "vector": [0.1, 0.2]}]
+    rows = [
+        {
+            "_id": 1,
+            "file_id": "f1",
+            "page": 2,
+            "text": "body",
+            "vector": [0.1, 0.2],
+            "_openrag_indexing_task_id": "t1",
+        }
+    ]
     svc = _service(partitions=FakePartitions(exists=True), vector_store=FakeVectorStore(rows=rows))
     out = await svc.get_file_info(partition="a", file_id="f1", allowed_partitions=["a"])
     assert out["chunk_count"] == 1
-    assert {"_id", "text", "vector"}.isdisjoint(out["metadata"])
+    assert {"_id", "text", "vector", "_openrag_indexing_task_id"}.isdisjoint(out["metadata"])
     assert out["metadata"]["file_id"] == "f1"
 
 
@@ -330,7 +344,10 @@ async def test_get_file_info_count_not_capped():
 
 @pytest.mark.asyncio
 async def test_get_file_chunks_paginates_with_content():
-    rows = [{"_id": i, "text": f"c{i}", "file_id": "f1", "partition": "a"} for i in range(5)]
+    rows = [
+        {"_id": i, "text": f"c{i}", "file_id": "f1", "partition": "a", "_openrag_indexing_task_id": "t1"}
+        for i in range(5)
+    ]
     svc = _service(vector_store=FakeVectorStore(rows=rows))
     out = await svc.get_file_chunks(partition="a", file_id="f1", allowed_partitions=["a"], offset=1, limit=2)
     assert out["total_chunks"] == 5
@@ -338,6 +355,7 @@ async def test_get_file_chunks_paginates_with_content():
     assert [c["chunk_id"] for c in out["chunks"]] == [1, 2]
     assert out["chunks"][0]["content"] == "c1"
     assert "text" not in out["chunks"][0]["metadata"]
+    assert "_openrag_indexing_task_id" not in out["chunks"][0]["metadata"]
 
 
 @pytest.mark.asyncio
@@ -683,6 +701,67 @@ async def test_index_url_auto_creates_partition_and_indexes(monkeypatch):
     assert added["metadata"]["author"] == "me"
     assert "created_by" not in added["metadata"]  # protected key dropped
     assert out["task_id"] == "task-123"
+
+
+@pytest.mark.asyncio
+async def test_index_url_removes_download_when_content_is_duplicate(monkeypatch):
+    from core.utils.exceptions import ConflictError
+
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    indexing = FakeIndexing(
+        add_error=ConflictError(
+            "This document already exists in partition 'p1'.",
+            code="DOCUMENT_CONTENT_EXISTS",
+        )
+    )
+    svc = _service(partitions=parts, indexing=indexing)
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(b"duplicate")
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    with pytest.raises(ConflictError):
+        await svc.index_url(
+            url="https://example.com/report.pdf",
+            partition="p1",
+            file_id="f2",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+
+    assert downloaded_path is not None
+    assert not downloaded_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_index_url_removes_download_when_dispatch_is_cancelled(monkeypatch):
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    indexing = FakeIndexing(add_error=asyncio.CancelledError())
+    svc = _service(partitions=parts, indexing=indexing)
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(b"partial")
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    with pytest.raises(asyncio.CancelledError):
+        await svc.index_url(
+            url="https://example.com/report.pdf",
+            partition="p1",
+            file_id="f2",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+
+    assert downloaded_path is not None
+    assert not downloaded_path.exists()
 
 
 @pytest.mark.asyncio

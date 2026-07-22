@@ -9,7 +9,11 @@ import pytest
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from services.workers.indexer_actor import IndexerWorker, _load_document
-from services.workers.pipeline_builder import build_indexing_pipeline
+from services.workers.pipeline_builder import (
+    REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY,
+    REPLACE_OLD_CHUNK_IDS_ROW_KEY,
+    build_indexing_pipeline,
+)
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -50,6 +54,8 @@ class FakeVectorStore:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
         self.ensure_calls: list[tuple[str, int]] = []
+        self.deleted_filters: list[dict[str, Any]] = []
+        self.deleted_ids: list[tuple[list[str], str]] = []
 
     async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
         self.calls.append((chunks, collection, indexed_at))
@@ -57,6 +63,17 @@ class FakeVectorStore:
 
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
         self.ensure_calls.append((name, dimension))
+
+    async def collection_exists(self, name: str) -> bool:
+        return True
+
+    async def delete_by_filter(self, filters: dict[str, Any]) -> int:
+        self.deleted_filters.append(dict(filters))
+        return 1
+
+    async def delete(self, ids: list[str], collection: str = "default") -> int:
+        self.deleted_ids.append((list(ids), collection))
+        return len(ids)
 
 
 def _fake_tsm() -> MagicMock:
@@ -346,6 +363,8 @@ async def test_process_file_creates_catalog_record_after_successful_pipeline(tmp
         "user_id": 42,
         "relationship_id": "rel",
         "parent_id": "parent",
+        "require_existing_partition": False,
+        "content_sha256": None,
     }
     assert repo.update_calls == []
 
@@ -396,9 +415,38 @@ async def test_process_file_stores_indexation_config_snapshot_on_new_file(tmp_pa
         partition="p",
         user={"id": 42},
         indexation_config=indexation_config,
+        require_existing_partition=True,
     )
 
     assert repo.add_calls[0]["indexation_config"] == indexation_config
+    assert repo.add_calls[0]["require_existing_partition"] is True
+
+
+@pytest.mark.asyncio
+async def test_process_file_does_not_use_indexation_config_as_partition_policy(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    repo = FakeDocumentRepo()
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=_fake_tsm(),
+        document_repo=repo,
+    )
+    indexation_config = {"parsing_strategy": "pymupdf"}
+
+    await worker.process_file(
+        task_id="t-new",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+        user={"id": 42},
+        indexation_config=indexation_config,
+    )
+
+    assert repo.add_calls[0]["indexation_config"] == indexation_config
+    assert repo.add_calls[0]["require_existing_partition"] is False
 
 
 @pytest.mark.asyncio
@@ -431,8 +479,84 @@ async def test_process_file_updates_catalog_record_on_replace(tmp_path: Path) ->
         "file_metadata": {"file_id": "f1"},
         "relationship_id": None,
         "parent_id": None,
+        "content_sha256": None,
     }
     assert repo.add_calls == []
+
+
+@pytest.mark.asyncio
+async def test_process_file_deletes_replaced_chunks_after_catalog_update(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class ReplacePipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            row[REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY] = "default"
+            row[REPLACE_OLD_CHUNK_IDS_ROW_KEY] = ["old-1", "old-2"]
+            return row
+
+    repo = FakeDocumentRepo()
+    vector_store = FakeVectorStore()
+    worker = IndexerWorker(
+        pipeline=ReplacePipeline(),
+        task_state_manager=_fake_tsm(),
+        document_repo=repo,
+        vector_store=vector_store,
+    )
+
+    await worker.process_file(
+        task_id="t-replace",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+        replace=True,
+    )
+
+    assert len(repo.update_calls) == 1
+    assert vector_store.deleted_ids == [(["old-1", "old-2"], "default")]
+    assert vector_store.deleted_filters == []
+
+
+@pytest.mark.asyncio
+async def test_process_file_keeps_old_replace_chunks_when_catalog_update_fails(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class ReplacePipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            row[REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY] = "default"
+            row[REPLACE_OLD_CHUNK_IDS_ROW_KEY] = ["old-1"]
+            return row
+
+    class MissingCatalogRepo:
+        async def update_file_in_partition(self, **kwargs: Any) -> bool:
+            return False
+
+    vector_store = FakeVectorStore()
+    worker = IndexerWorker(
+        pipeline=ReplacePipeline(),
+        task_state_manager=_fake_tsm(),
+        document_repo=MissingCatalogRepo(),
+        vector_store=vector_store,
+    )
+
+    with pytest.raises(RuntimeError, match="Catalog row was not written"):
+        await worker.process_file(
+            task_id="t-replace",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+            replace=True,
+        )
+
+    assert vector_store.deleted_ids == []
+    assert vector_store.deleted_filters == [
+        {"partition": "p", "file_id": "f1", "_openrag_indexing_task_id": "t-replace"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -490,6 +614,70 @@ async def test_process_file_catalog_failure_sets_failed_state(tmp_path: Path) ->
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
     completed_calls = [call for call in tsm.set_state.remote.call_args_list if call.args == ("t-fail", "COMPLETED")]
     assert completed_calls == []
+
+
+@pytest.mark.asyncio
+async def test_process_file_cleans_vectors_when_catalog_write_loses_delete_race(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class StoredPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            return row
+
+    class MissingCatalogRepo:
+        async def add_file_to_partition(self, **kwargs: Any) -> bool:
+            return False
+
+    vector_store = FakeVectorStore()
+    worker = IndexerWorker(
+        pipeline=StoredPipeline(),
+        task_state_manager=_fake_tsm(),
+        document_repo=MissingCatalogRepo(),
+        vector_store=vector_store,
+        collection="vdb",
+    )
+
+    with pytest.raises(RuntimeError, match="Catalog row was not written"):
+        await worker.process_file(
+            task_id="t-race",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+        )
+
+    assert vector_store.deleted_filters == [{"partition": "p", "file_id": "f1", "_openrag_indexing_task_id": "t-race"}]
+
+
+@pytest.mark.asyncio
+async def test_process_file_cleans_task_marked_vectors_when_store_stage_fails(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class BrokenStorePipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stage"] = "store_failed"
+            raise RuntimeError("milvus write timed out")
+
+    vector_store = FakeVectorStore()
+    worker = IndexerWorker(
+        pipeline=BrokenStorePipeline(),
+        task_state_manager=_fake_tsm(),
+        vector_store=vector_store,
+        collection="vdb",
+    )
+
+    with pytest.raises(RuntimeError, match="milvus write timed out"):
+        await worker.process_file(
+            task_id="t-store",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+        )
+
+    assert vector_store.deleted_filters == [{"partition": "p", "file_id": "f1", "_openrag_indexing_task_id": "t-store"}]
 
 
 @pytest.mark.asyncio
@@ -605,10 +793,14 @@ async def test_process_file_rejects_malformed_topic_tags_before_delete(tmp_path:
             return row
 
     repo = FakeTopicTagRepo()
+    document_repo = FakeDocumentRepo()
+    vector_store = FakeVectorStore()
     worker = IndexerWorker(
         pipeline=BrokenTaggingPipeline(),
         task_state_manager=tsm,
+        document_repo=document_repo,
         topic_tag_repo=repo,
+        vector_store=vector_store,
     )
 
     with pytest.raises(TypeError, match="topic_tags"):
@@ -621,4 +813,6 @@ async def test_process_file_rejects_malformed_topic_tags_before_delete(tmp_path:
 
     assert repo.deleted == []
     assert repo.inserted == []
+    assert len(document_repo.add_calls) == 1
+    assert vector_store.deleted_filters == []
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()

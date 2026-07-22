@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { usePermissions } from "@/lib/permissions";
 
 import { PageHeader } from "@/components/shared/page-header";
-import { DataTable } from "@/components/shared/data-table";
+import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -23,6 +23,7 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cancelTask, getQueueInfo, isActiveState, listTasks, type QueueInfo, type TaskListItem } from "@/lib/api/jobs";
 import { downloadCsv } from "@/lib/csv";
+import { formatDate } from "@/lib/utils";
 
 // OpenRag exposes per-file indexing tasks (TaskStateManager), not batch "jobs".
 const STATUS_TABS = ["ALL", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED"] as const;
@@ -31,6 +32,21 @@ const JOB_SEARCH_DEBOUNCE_MS = 250;
 const ALL_PARTITIONS_FILTER = "__openrag/all_partitions__";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
+
+function formatDuration(durationMs: number | null | undefined): string {
+  if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 0) return "—";
+
+  const totalSeconds = Math.floor(durationMs / 1000);
+  if (totalSeconds < 1) return "< 1s";
+
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) return `${hours}h${minutes > 0 ? ` ${minutes}m` : ""}`;
+  if (minutes > 0) return `${minutes}m${seconds > 0 ? ` ${seconds}s` : ""}`;
+  return `${seconds}s`;
+}
 
 function QueuePressureSummary({
   queueInfo,
@@ -103,7 +119,9 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
   },
   {
     id: "file",
-    header: "File",
+    accessorFn: (task) =>
+      (str(task.details?.metadata?.filename) || str(task.details?.file_id)).toLowerCase(),
+    header: ({ column }) => <SortableHeader column={column} title="File" />,
     cell: ({ row }) => (
       <TruncatedValue
         value={str(row.original.details?.metadata?.filename) || str(row.original.details?.file_id)}
@@ -117,6 +135,20 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
     cell: ({ row }) => (
       <TruncatedValue value={str(row.original.details?.partition)} className="max-w-[180px] sm:max-w-[240px]" />
     ),
+  },
+  {
+    accessorKey: "created_at",
+    header: ({ column }) => <SortableHeader column={column} title="Created" />,
+    cell: ({ row }) => (
+      <span className="whitespace-nowrap" title={row.original.created_at ?? undefined}>
+        {formatDate(row.original.created_at)}
+      </span>
+    ),
+  },
+  {
+    accessorKey: "duration_ms",
+    header: "Duration",
+    cell: ({ row }) => <span className="whitespace-nowrap tabular-nums">{formatDuration(row.original.duration_ms)}</span>,
   },
 ];
 

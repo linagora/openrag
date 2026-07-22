@@ -80,7 +80,9 @@ class DoclingWorker:
             return await asyncio.to_thread(self.converter.convert, str(file_path))
 
 
-@ray.remote
+# max_restarts mirrors MarkerPool: the detached pool supervisor must survive its
+# own crashes rather than staying permanently dead (#722). Ray's default is 0.
+@ray.remote(max_restarts=5)
 class DoclingPool:
     def __init__(self):
         self.logger = get_logger()
@@ -88,8 +90,12 @@ class DoclingPool:
         self.pool_size = self.config.loader.docling_pool_size
         self.max_tasks_per_worker = self.config.loader.docling_max_tasks_per_worker
 
+        # max_restarts mirrors MarkerWorker: a worker that OOMs/CUDA-faults is
+        # restarted in place (same actor id), so the handle already queued keeps
+        # working instead of every retry drawing the same dead handle (#722).
         self.actors = [
-            DoclingWorker.options(num_gpus=_docling_num_gpus(self.config)).remote() for _ in range(self.pool_size)
+            DoclingWorker.options(num_gpus=_docling_num_gpus(self.config), max_restarts=5).remote()
+            for _ in range(self.pool_size)
         ]
         self._queue: asyncio.Queue[ray.actor.ActorHandle] = asyncio.Queue()
 

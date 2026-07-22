@@ -67,9 +67,18 @@ def test_dict_to_chunk_uses_underscore_id_as_fallback():
 
 
 def test_dict_to_chunk_metadata_excludes_reserved_keys():
-    row = {"id": "x", "text": "t", "partition": "p", "file_id": "f", "score": 0.9, "extra_key": "val"}
+    row = {
+        "id": "x",
+        "text": "t",
+        "partition": "p",
+        "file_id": "f",
+        "score": 0.9,
+        "extra_key": "val",
+        "_openrag_indexing_task_id": "task-1",
+    }
     c = _dict_to_chunk(row)
     assert "score" not in c.metadata
+    assert "_openrag_indexing_task_id" not in c.metadata
     assert "extra_key" in c.metadata
 
 
@@ -106,6 +115,94 @@ async def test_search_passes_filter_expr():
     )
     call_kwargs = store.search.call_args.kwargs
     assert call_kwargs["filters"]["expr"] == "file_id == 'x'"
+
+
+@pytest.mark.asyncio
+async def test_search_merges_filter_params_into_store_filters():
+    """#706: filter_params must actually reach the store, not be dropped."""
+    searcher, store, *_ = _make_searcher(search_results=[])
+    await searcher.search(
+        query="q",
+        partition=["p1"],
+        top_k=3,
+        filter_params={"file_id": ["a", "b"]},
+        with_surrounding_chunks=False,
+    )
+    call_kwargs = store.search.call_args.kwargs
+    assert call_kwargs["filters"]["file_id"] == ["a", "b"]
+    assert call_kwargs["filters"]["partition"] == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_search_forwards_empty_file_id_allowlist():
+    """An empty workspace's file_id restriction must reach the store as `[]`,
+    never be treated as falsy/absent — that's the fail-closed path."""
+    searcher, store, *_ = _make_searcher(search_results=[])
+    await searcher.search(
+        query="q",
+        partition=["p1"],
+        top_k=3,
+        filter_params={"file_id": []},
+        with_surrounding_chunks=False,
+    )
+    call_kwargs = store.search.call_args.kwargs
+    assert call_kwargs["filters"]["file_id"] == []
+
+
+@pytest.mark.asyncio
+async def test_search_combines_filter_and_filter_params():
+    searcher, store, *_ = _make_searcher(search_results=[])
+    await searcher.search(
+        query="q",
+        partition=["p1"],
+        top_k=3,
+        filter="page > 1",
+        filter_params={"file_id": ["a"]},
+        with_surrounding_chunks=False,
+    )
+    call_kwargs = store.search.call_args.kwargs
+    assert call_kwargs["filters"]["expr"] == "page > 1"
+    assert call_kwargs["filters"]["file_id"] == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_multi_query_search_merges_filter_params():
+    embedder = MagicMock()
+    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
+    store = MagicMock()
+    store.search = AsyncMock(return_value=[])
+    store.query_chunks_by_filter = AsyncMock(return_value=[])
+    searcher = VectorStoreSearcher(vector_store=store, embedder=embedder, document_repo=MagicMock(), collection="col")
+    await searcher.multi_query_search(
+        queries=["q1", "q2"],
+        partition=["p1"],
+        top_k_per_query=3,
+        filter_params={"file_id": ["a"]},
+        with_surrounding_chunks=False,
+    )
+    for call in store.search.call_args_list:
+        assert call.kwargs["filters"]["file_id"] == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_search_scopes_surrounding_chunks_to_allowed_file_ids():
+    """#706: surrounding-chunk hydration must not leak a neighbouring file
+    outside the workspace/file-id restriction the main search was scoped by."""
+    main_row = _make_row("1", file_id="in-scope", prev_section_id="s0")
+    surrounding_rows = [
+        {**_make_row("0"), "file_id": "in-scope"},
+        {**_make_row("2"), "file_id": "outside-scope"},
+    ]
+    searcher, store, _, _ = _make_searcher(search_results=[main_row], filter_results=surrounding_rows)
+    chunks = await searcher.search(
+        query="q",
+        partition=["p1"],
+        top_k=5,
+        filter_params={"file_id": ["in-scope"]},
+        with_surrounding_chunks=True,
+    )
+    ids = {c.id for c in chunks}
+    assert ids == {"1", "0"}  # "2" (outside-scope) must be dropped
 
 
 @pytest.mark.asyncio
@@ -219,6 +316,29 @@ async def test_get_related_chunks_queries_store_with_file_ids():
     assert call_args.args[1]["file_id"] == ["f1", "f2"]
 
 
+@pytest.mark.asyncio
+async def test_get_related_chunks_intersects_allowed_file_ids():
+    """#706: related-file expansion must not escape a workspace's file allowlist."""
+    rows = [_make_row("1")]
+    searcher, store, _, doc_repo = _make_searcher(
+        file_ids_by_rel=["f1", "f2", "f3"],
+        filter_results=rows,
+    )
+    await searcher.get_related_chunks(partition="p1", relationship_id="r1", limit=10, allowed_file_ids=["f1", "f3"])
+    call_args = store.query_chunks_by_filter.call_args
+    assert call_args.args[1]["file_id"] == ["f1", "f3"]  # "f2" excluded
+
+
+@pytest.mark.asyncio
+async def test_get_related_chunks_empty_intersection_skips_query():
+    searcher, store, _, doc_repo = _make_searcher(file_ids_by_rel=["f1", "f2"])
+    result = await searcher.get_related_chunks(
+        partition="p1", relationship_id="r1", limit=10, allowed_file_ids=["unrelated"]
+    )
+    assert result == []
+    store.query_chunks_by_filter.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # get_ancestor_chunks()
 # ---------------------------------------------------------------------------
@@ -251,6 +371,24 @@ async def test_get_ancestor_chunks_passes_max_depth():
 
 
 @pytest.mark.asyncio
+async def test_get_ancestor_chunks_intersects_allowed_file_ids():
+    """#706: ancestor-file expansion must not escape a workspace's file allowlist."""
+    rows = [_make_row("1")]
+    searcher, store, _, doc_repo = _make_searcher(ancestor_ids=["a1", "a2"], filter_results=rows)
+    await searcher.get_ancestor_chunks(partition="p1", file_id="f1", limit=10, allowed_file_ids=["a2"])
+    call_args = store.query_chunks_by_filter.call_args
+    assert call_args.args[1]["file_id"] == ["a2"]
+
+
+@pytest.mark.asyncio
+async def test_get_ancestor_chunks_empty_intersection_skips_query():
+    searcher, store, _, _ = _make_searcher(ancestor_ids=["a1", "a2"])
+    result = await searcher.get_ancestor_chunks(partition="p1", file_id="f1", limit=10, allowed_file_ids=["unrelated"])
+    assert result == []
+    store.query_chunks_by_filter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_fetch_surrounding_scopes_section_lookup_to_partition():
     """N6: section_id is only unique within a partition, so neighbour lookups
     must be scoped to each source chunk's partition (no cross-tenant leak)."""
@@ -274,3 +412,26 @@ async def test_fetch_surrounding_drops_refs_without_partition():
     c.partition = ""  # source chunk with no partition → dropped, not queried unscoped
     assert await searcher._fetch_surrounding([c]) == []
     store.query_chunks_by_filter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fetch_surrounding_filters_out_disallowed_file_ids():
+    """#706: neighbouring-section hydration must respect the allowed_file_ids
+    restriction even though the lookup itself is only scoped by partition."""
+    rows = [
+        {**_make_row("0"), "file_id": "allowed"},
+        {**_make_row("9"), "file_id": "not-allowed"},
+    ]
+    searcher, store, _, _ = _make_searcher(filter_results=rows)
+    c = _dict_to_chunk(_make_row("1", partition="p1", prev_section_id="s0"))
+    out = await searcher._fetch_surrounding([c], allowed_file_ids=["allowed"])
+    assert [o.id for o in out] == ["0"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_surrounding_no_restriction_when_allowed_file_ids_none():
+    rows = [{**_make_row("0"), "file_id": "anything"}]
+    searcher, store, _, _ = _make_searcher(filter_results=rows)
+    c = _dict_to_chunk(_make_row("1", partition="p1", prev_section_id="s0"))
+    out = await searcher._fetch_surrounding([c], allowed_file_ids=None)
+    assert [o.id for o in out] == ["0"]
