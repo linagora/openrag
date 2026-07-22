@@ -187,6 +187,17 @@ async def stream_with_source_filtering(
         # GeneratorExit are BaseException, not Exception, so a downstream client
         # disconnect propagates untouched and correctly skips the flush.
         stream_error = exc
+    finally:
+        # Release the upstream HTTP connection promptly. Breaking on `[DONE]`
+        # leaves the client's stream generator suspended inside its
+        # `async with response` (an `async for` does *not* close its iterator on
+        # break), so the pooled connection stays checked out until GC — which
+        # exhausts the httpx pool under concurrent traffic. Closing it here runs
+        # that cleanup now. Awaiting in a finally is safe (only *yielding* during
+        # teardown is forbidden); the guard tolerates iterables without `aclose`.
+        aclose = getattr(llm_stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
     # The finish chunk needs *a* template; prefer the content/finish chunk, but
     # fall back to any earlier chunk so a preamble-only stream still gets flagged.

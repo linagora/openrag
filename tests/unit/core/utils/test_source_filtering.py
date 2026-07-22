@@ -288,6 +288,29 @@ class TestStreamWithSourceFiltering:
         assert _collect_content(result) == "Hello world"
 
     @pytest.mark.asyncio
+    async def test_upstream_iterator_closed_after_done(self):
+        """Breaking on [DONE] must close the upstream generator so the client's
+        pooled HTTP connection is released now, not left suspended until GC (an
+        `async for` does not close its iterator on break)."""
+        closed = {"value": False}
+
+        async def _tracking_stream():
+            try:
+                yield _make_chunk("Answer.")
+                yield _make_finish()
+                yield DONE_LINE
+                yield _make_chunk("after-done-never-consumed")
+            finally:
+                closed["value"] = True
+
+        # Hold a reference so a passing assertion can only mean an explicit
+        # aclose() ran — not that GC happened to reclaim the generator.
+        stream = _tracking_stream()
+        result = await _collect(stream_with_source_filtering(stream, self.SOURCES, "test-model"))
+        assert result[-1].strip() == "data: [DONE]"
+        assert closed["value"] is True, "upstream generator was not closed after [DONE]"
+
+    @pytest.mark.asyncio
     async def test_content_tail_chunk_has_null_finish_reason(self):
         """The content-bearing tail chunk must not carry finish_reason — the
         upstream finish chunk becomes the template, and a spec-compliant client
