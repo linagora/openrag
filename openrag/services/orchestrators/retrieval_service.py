@@ -165,7 +165,10 @@ class RetrievalService:
         return getattr(self._config.retriever, name, default)
 
     def _pipeline_for_partition(self, partition: str) -> tuple[RetrieverPipeline, int | None]:
-        if partition == "all" or not self._partition_configs():
+        # Callers only ever pass a concrete partition name — the "all" sentinel is
+        # expanded to concrete keys by _pipeline_groups_for_partitions before this
+        # runs. With no per-partition configs at all, fall back to the legacy pipeline.
+        if not self._partition_configs():
             return self._pipeline, None
 
         partition_cfg = self._require_partition_config(partition)
@@ -214,7 +217,21 @@ class RetrievalService:
     def _pipeline_groups_for_partitions(
         self, partitions: list[str]
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
-        if not partitions or "all" in partitions or not self._partition_configs():
+        configs = self._partition_configs()
+        # Expand the "all" sentinel to concrete partitions so each is retrieved
+        # with its own embedder and top_n, via the same per-partition fan-out the
+        # named-partition path already uses (#708). Collapsing to self._pipeline
+        # embedded the query with the deployment-default embedder — near-random
+        # recall for any partition indexed with a different one — and dropped the
+        # reranker top_n (its default_top_k was None). "all" only reaches this
+        # layer post-authorization (a SUPER_ADMIN_MODE admin; regular users are
+        # already expanded to their memberships upstream), so every hydrated
+        # partition is in scope.
+        if "all" in partitions and configs:
+            partitions = list(configs.keys())
+        elif not partitions or not configs:
+            # Nothing to expand (no partitions exist yet) — keep the single
+            # legacy pipeline; there is no per-partition config to honour.
             return [(["all"] if "all" in partitions else partitions, self._pipeline, None)]
         return [
             ([partition], pipeline, default_top_k)
@@ -272,6 +289,34 @@ class RetrievalService:
     # Pipeline retrieval (powers QueryService — 8C.2)
     # ------------------------------------------------------------------
 
+    async def _gather_partition_groups(self, coros: list) -> list:
+        """Await one coroutine per partition group, bounding concurrency.
+
+        Small fan-outs (the common case: a handful of partitions) run fully
+        parallel via a plain gather — no added overhead, byte-identical to the
+        prior behaviour. Only a fan-out larger than ``max_partition_concurrency``
+        (e.g. a SUPER_ADMIN_MODE ``openrag-all`` expanded to every partition) is
+        throttled through a per-call semaphore, so one request cannot launch a
+        partition-count-proportional flood of embed+Milvus calls (#708).
+
+        The semaphore is per-call, not shared: it caps this request's own fan-out
+        without coupling concurrent requests, and the caps compose safely across
+        the ``retrieve_per_query`` → ``retrieve`` nesting (each inner call bounds
+        its own leaves; the coroutines being awaited hold no permit while
+        waiting for one, so there is no cross-level deadlock).
+        """
+        limit = self._config.retriever.max_partition_concurrency
+        if len(coros) <= limit:
+            return await asyncio.gather(*coros)
+
+        semaphore = asyncio.Semaphore(limit)
+
+        async def _bounded(coro):
+            async with semaphore:
+                return await coro
+
+        return await asyncio.gather(*(_bounded(c) for c in coros))
+
     async def retrieve(
         self,
         *,
@@ -281,8 +326,8 @@ class RetrievalService:
         filter_params: dict | None = None,
     ) -> list[Chunk]:
         """Single ``Query`` through retrieve → expand → rerank."""
-        ranked_lists = await asyncio.gather(
-            *[
+        ranked_lists = await self._gather_partition_groups(
+            [
                 pipeline.retrieve_docs(
                     partition=partition_group,
                     query=query,
@@ -303,8 +348,8 @@ class RetrievalService:
         filter_params: dict | None = None,
     ) -> list[Chunk]:
         """Every sub-query in parallel, fused with RRF."""
-        ranked_lists = await asyncio.gather(
-            *[
+        ranked_lists = await self._gather_partition_groups(
+            [
                 pipeline.get_relevant_docs(
                     partition=partition_group,
                     search_queries=search_queries,
