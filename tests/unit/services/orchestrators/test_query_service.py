@@ -108,6 +108,7 @@ def _config(mode="SimpleRag"):
         paths=_PROMPT_CFG.paths,
         prompts=_PROMPT_CFG.prompts,
         partitions={},
+        models=SimpleNamespace(llm={}),
     )
 
 
@@ -216,25 +217,42 @@ def test_resolve_llm_uses_partition_preset():
     assert factory.calls == ["mistral"]
 
 
-def test_resolve_llm_defaults_without_factory_partition_or_preset():
-    default_llm = FakeLLM()
-    factory = RecordingFactory()
-    svc = _svc(llm=default_llm, llm_factory=factory)
+def test_resolve_llm_default_paths_use_the_catalog_default_endpoint():
+    # No partition preset applies → resolve the catalog default endpoint
+    # (is_default=True, exposed by the factory's "default" alias), NOT the
+    # static env-built self._llm. Promoting a new default endpoint in the
+    # catalog must take effect on the default chat path.
+    static_llm, catalog_default = FakeLLM(), FakeLLM()
+    factory = RecordingFactory({"default": catalog_default, "mistral": FakeLLM()})
+    svc = _svc(llm=static_llm, llm_factory=factory)
     svc._config.partitions = {"p": _partition(chat_llm=None), "q": _partition(chat_llm="mistral")}
-    assert svc._resolve_llm(None) is default_llm  # direct/web-only mode
-    assert svc._resolve_llm(["all"]) is default_llm  # cross-partition sentinel
-    assert svc._resolve_llm(["p"]) is default_llm  # partition without a preset
-    assert svc._resolve_llm(["missing"]) is default_llm  # unknown partition
-    assert factory.calls == []  # default paths never hit the factory
-    no_factory = _svc(llm=default_llm)
+    assert svc._resolve_llm(None) is catalog_default  # direct/web-only mode
+    assert svc._resolve_llm(["all"]) is catalog_default  # cross-partition sentinel
+    assert svc._resolve_llm(["p"]) is catalog_default  # partition without a preset
+    assert svc._resolve_llm(["missing"]) is catalog_default  # unknown partition
+    assert factory.calls == ["default", "default", "default", "default"]
+
+
+def test_resolve_llm_falls_back_to_static_llm_without_factory_or_catalog_default():
+    # Last-resort static self._llm: no factory wired (unit tests), or the
+    # factory has no "default" alias yet (catalog not seeded).
+    static_llm = FakeLLM()
+    no_factory = _svc(llm=static_llm)
     no_factory._config.partitions = {"q": _partition(chat_llm="mistral")}
-    assert no_factory._resolve_llm(["q"]) is default_llm
+    assert no_factory._resolve_llm(["q"]) is static_llm
+    assert no_factory._resolve_llm(None) is static_llm
+
+    empty_catalog = RecordingFactory()  # raises KeyError for "default"
+    svc = _svc(llm=static_llm, llm_factory=empty_catalog)
+    svc._config.partitions = {"p": _partition(chat_llm=None)}
+    assert svc._resolve_llm(["p"]) is static_llm
+    assert empty_catalog.calls == ["default"]
 
 
 def test_resolve_llm_multi_partition_uses_preset_only_when_unanimous():
-    default_llm, preset_llm = FakeLLM(), FakeLLM()
-    factory = RecordingFactory({"mistral": preset_llm})
-    svc = _svc(llm=default_llm, llm_factory=factory)
+    catalog_default, preset_llm = FakeLLM(), FakeLLM()
+    factory = RecordingFactory({"default": catalog_default, "mistral": preset_llm})
+    svc = _svc(llm=FakeLLM(), llm_factory=factory)
     svc._config.partitions = {
         "a": _partition(chat_llm="mistral"),
         "b": _partition(chat_llm="mistral"),
@@ -242,18 +260,36 @@ def test_resolve_llm_multi_partition_uses_preset_only_when_unanimous():
         "d": _partition(chat_llm="llama"),
     }
     assert svc._resolve_llm(["a", "b", "c"]) is preset_llm  # unanimous among setters
-    assert svc._resolve_llm(["a", "d"]) is default_llm  # conflicting presets → default
+    assert svc._resolve_llm(["a", "d"]) is catalog_default  # conflicting presets → catalog default
 
 
-def test_resolve_llm_unknown_preset_falls_back_to_default():
+def test_default_llm_name_recovers_the_is_default_endpoint_name():
+    # load_all() stores the is_default row's config under both its own name
+    # and the "default" alias (same object) — _default_llm_name recovers the
+    # real name by identity, so the logs name the endpoint that answered.
+    svc = _svc(llm_factory=RecordingFactory())
+    toy_cfg = SimpleNamespace(endpoint="http://toy-llm")
+    svc._config.models.llm = {"base-llm": SimpleNamespace(endpoint="http://base"), "toy-llm": toy_cfg}
+    svc._config.models.llm["default"] = toy_cfg  # alias points at the same object
+    assert svc._default_llm_name() == "toy-llm"
+
+
+def test_default_llm_name_returns_default_when_alias_absent():
+    svc = _svc(llm_factory=RecordingFactory())
+    svc._config.models.llm = {"base-llm": SimpleNamespace(endpoint="http://base")}
+    assert svc._default_llm_name() == "default"
+
+
+def test_resolve_llm_unknown_preset_falls_through_to_catalog_default():
     # chat_llm is not validated on assignment (the endpoint may be deleted
-    # afterwards) — an unknown name must not fail the request.
-    default_llm = FakeLLM()
-    factory = RecordingFactory()  # raises KeyError for every name
-    svc = _svc(llm=default_llm, llm_factory=factory)
+    # afterwards) — an unknown name must not fail the request; it falls through
+    # to the catalog default endpoint, not the static env llm.
+    static_llm, catalog_default = FakeLLM(), FakeLLM()
+    factory = RecordingFactory({"default": catalog_default})  # "deleted" raises KeyError
+    svc = _svc(llm=static_llm, llm_factory=factory)
     svc._config.partitions = {"p": _partition(chat_llm="deleted")}
-    assert svc._resolve_llm(["p"]) is default_llm
-    assert factory.calls == ["deleted"]
+    assert svc._resolve_llm(["p"]) is catalog_default
+    assert factory.calls == ["deleted", "default"]
 
 
 @pytest.mark.asyncio
