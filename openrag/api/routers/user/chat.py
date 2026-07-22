@@ -52,6 +52,14 @@ if TYPE_CHECKING:
 # ``config.llm_context`` is the final fallback.
 _max_model_tokens_by_name: dict[str, int] = {}
 
+# Serializes ``prime_max_model_tokens`` refreshes. Model-endpoint writes each
+# schedule a refresh (best-effort, off the request path), so several can be
+# in flight at once; without this lock a slower, older probe could finish last
+# and overwrite a newer refresh's result, leaving the cache stale. Holding the
+# lock across the snapshot + probe means whichever refresh runs last observes
+# the latest registry state and publishes the newest result.
+_max_model_tokens_lock = asyncio.Lock()
+
 
 def _runtime_config(settings: "Settings | None" = None) -> "Settings":
     return settings if settings is not None else load_config()
@@ -72,29 +80,35 @@ async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
     matched in the ``/v1/models`` listing and are skipped. One endpoint's
     probe failure doesn't affect the others. Safe to call again — it just
     refreshes the cache.
+
+    Serialized under ``_max_model_tokens_lock`` so overlapping refreshes
+    (several endpoint writes in quick succession) can't publish a stale cache:
+    each refresh reads the live registry and probes while holding the lock, so
+    the last refresh to run always observes the latest state and wins.
     """
     global _max_model_tokens_by_name
-    config = _runtime_config(settings)
-    probed_by_identity: dict[int, int | None] = {}
-    results: dict[str, int] = {}
-    # Snapshot the endpoint dict up front: a concurrent model-endpoint reload
-    # replaces its contents in place (ModelEndpointService.load_all does
-    # dict.clear() + dict.update()), so iterating the live dict across the
-    # `await` below could raise "dictionary changed size during iteration".
-    for name, endpoint in list(config.models.llm.items()):
-        if not endpoint.model_name:
-            continue
-        identity = id(endpoint)
-        if identity not in probed_by_identity:
-            probed_by_identity[identity] = await _fetch_max_model_tokens(
-                base_url=endpoint.endpoint,
-                model_id=endpoint.model_name,
-                api_key=endpoint.extra.get("api_key", ""),
-            )
-        value = probed_by_identity[identity]
-        if value is not None:
-            results[name] = value
-    _max_model_tokens_by_name = results
+    async with _max_model_tokens_lock:
+        config = _runtime_config(settings)
+        probed_by_identity: dict[int, int | None] = {}
+        results: dict[str, int] = {}
+        # Snapshot the endpoint dict up front: a concurrent model-endpoint reload
+        # replaces its contents in place (ModelEndpointService.load_all does
+        # dict.clear() + dict.update()), so iterating the live dict across the
+        # `await` below could raise "dictionary changed size during iteration".
+        for name, endpoint in list(config.models.llm.items()):
+            if not endpoint.model_name:
+                continue
+            identity = id(endpoint)
+            if identity not in probed_by_identity:
+                probed_by_identity[identity] = await _fetch_max_model_tokens(
+                    base_url=endpoint.endpoint,
+                    model_id=endpoint.model_name,
+                    api_key=endpoint.extra.get("api_key", ""),
+                )
+            value = probed_by_identity[identity]
+            if value is not None:
+                results[name] = value
+        _max_model_tokens_by_name = results
 
 
 def _make_sse_error(message: str, code: str) -> str:

@@ -303,6 +303,38 @@ class TestPrimeMaxModelTokens:
 
         assert chat._max_model_tokens_by_name == {"default": 8192}
 
+    async def test_concurrent_refreshes_are_serialized(self, monkeypatch):
+        """Overlapping refreshes (e.g. several endpoint writes in quick
+        succession) run one at a time under the lock, so a slower, older probe
+        can't finish last and overwrite a newer refresh's cache."""
+        import asyncio
+
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+        from core.config.root import Settings
+
+        s = Settings()
+        s.models.llm["default"] = ModelEndpointConfig(endpoint="http://default:8000/v1", model_name="model-a")
+
+        in_flight = 0
+        max_in_flight = 0
+
+        async def fake_get_openai_models(base_url, api_key, timeout=30):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0)  # yield: a second, unserialized refresh would interleave here
+            in_flight -= 1
+            return [_FakeOpenAIModel("model-a", 8192)]
+
+        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+
+        await asyncio.gather(chat.prime_max_model_tokens(s), chat.prime_max_model_tokens(s))
+
+        assert max_in_flight == 1  # the lock prevents overlapping probes
+        assert chat._max_model_tokens_by_name == {"default": 8192}
+
 
 def _partition_config(chat_llm=None):
     from core.config.indexation_pipeline import IndexationPipelineConfig
