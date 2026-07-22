@@ -33,7 +33,7 @@ class CreatePartitionRequest(BaseModel):
     embedder: str = "default"
     indexation_preset: str = "default"
     retrieval_preset: str = "default"
-    chat_history_depth: int = Field(default=0, ge=0)
+    chat_history_depth: int = Field(default=4, ge=1)
     chat_llm: str | None = None
 
     @field_validator("name", "embedder", "indexation_preset", "retrieval_preset")
@@ -60,7 +60,7 @@ class UpdatePartitionRequest(BaseModel):
     embedder: str | None = None
     indexation_preset: str | None = None
     retrieval_preset: str | None = None
-    chat_history_depth: int | None = Field(default=None, ge=0)
+    chat_history_depth: int | None = Field(default=None, ge=1)
     chat_llm: str | None = None
 
     @field_validator("embedder", "indexation_preset", "retrieval_preset")
@@ -111,7 +111,7 @@ class PartitionDetailResponse(BaseModel):
     dimension: int
     created_at: datetime
     document_count: int = 0
-    chat_history_depth: int = 0
+    chat_history_depth: int = 4
     chat_llm: str | None = None
 
 
