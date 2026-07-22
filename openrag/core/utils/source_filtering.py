@@ -183,22 +183,12 @@ async def stream_with_source_filtering(
     # fall back to any earlier chunk so a preamble-only stream still gets flagged.
     template = chunk_template or last_chunk
 
-    if stream_error is not None:
-        logger.warning(
-            "Upstream stream raised before [DONE]; flushing buffered tail",
-            error=str(stream_error),
-            pending_len=len(pending) - emitted_len,
-        )
-        # Nothing was ever streamed to the client, so there is no partial answer
-        # to salvage. Re-raise so the router surfaces the real error rather than a
-        # silent, clean-looking empty `[DONE]`.
-        if template is None:
-            raise stream_error
-    elif not saw_done:
-        logger.warning(
-            "Upstream stream closed without [DONE]; flushing buffered tail",
-            pending_len=len(pending) - emitted_len,
-        )
+    # Nothing was ever streamed to the client, so there is no partial answer to
+    # salvage. Surface the real error instead of a silent, clean-looking empty
+    # `[DONE]` the caller can't distinguish from success.
+    if stream_error is not None and template is None:
+        logger.warning("Upstream stream raised before any content; surfacing error", error=str(stream_error))
+        raise stream_error
 
     final_clean, citations = extract_and_strip_sources_block(pending)
     final_clean = final_clean.rstrip()
@@ -207,6 +197,14 @@ async def stream_with_source_filtering(
     extra_payload = {"sources": filtered}
     if not saw_done:
         extra_payload["truncated"] = True
+        logger.warning(
+            "Answer truncated: upstream stream ended without [DONE] "
+            "(reason={reason}, model={model}, delivered_chars={chars}, sources={sources})",
+            reason=f"upstream error: {stream_error}" if stream_error is not None else "connection closed",
+            model=model_name,
+            chars=len(final_clean),
+            sources=len(filtered),
+        )
     filtered_json = json.dumps(extra_payload)
 
     if template and len(final_clean) > emitted_len:

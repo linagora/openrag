@@ -472,6 +472,36 @@ class TestStreamClosedWithoutDone:
         with pytest.raises(asyncio.CancelledError):
             await _collect(stream_with_source_filtering(stream, self.SOURCES, "test-model"))
 
+    @pytest.mark.asyncio
+    async def test_truncated_answer_is_logged(self):
+        # Truncation must surface an explicit, visible "Answer truncated" warning
+        # carrying the cause and context (model, delivered length, source count) —
+        # and must NOT fire on a clean, [DONE]-terminated stream.
+        from loguru import logger
+
+        # Truncated: the stream ends without [DONE].
+        records: list[str] = []
+        sink_id = logger.add(records.append, level="WARNING", format="{message}")
+        try:
+            lines = [_make_chunk("Partial answer only."), _make_finish()]
+            await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        finally:
+            logger.remove(sink_id)
+        truncation = [r for r in records if "Answer truncated" in r]
+        assert truncation, f"expected a truncation warning, got: {records}"
+        assert "model=test-model" in truncation[0]
+        assert "reason=connection closed" in truncation[0]
+
+        # Clean [DONE]-terminated stream: no truncation warning.
+        records = []
+        sink_id = logger.add(records.append, level="WARNING", format="{message}")
+        try:
+            lines = [_make_chunk("Complete answer."), _make_finish(), DONE_LINE]
+            await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        finally:
+            logger.remove(sink_id)
+        assert not any("Answer truncated" in r for r in records)
+
 
 def _parse_finish_extra(sse_lines: list[str]) -> dict:
     for line in reversed(sse_lines):
