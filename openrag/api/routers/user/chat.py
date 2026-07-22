@@ -23,7 +23,6 @@ from api.dependencies.auth import (
     current_user_or_admin_partitions_list,
 )
 from api.dependencies.llm import (
-    check_llm_model_availability,
     get_openai_models,
     get_partition_name,
     truncate,
@@ -343,7 +342,6 @@ async def openai_chat_completion(
     request: OpenAIChatCompletionRequest = Body(...),
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
-    _: None = Depends(check_llm_model_availability),
     service=Depends(get_query_service),
     partition_service=Depends(get_partition_service),
     config=Depends(get_config),
@@ -445,7 +443,6 @@ async def openai_completion(
     request: OpenAICompletionRequest,
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
-    _: None = Depends(check_llm_model_availability),
     service=Depends(get_query_service),
     partition_service=Depends(get_partition_service),
     config=Depends(get_config),
