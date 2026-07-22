@@ -1,7 +1,7 @@
 import { useMemo, useState, useCallback, useEffect } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Pencil, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle, XCircle, Loader2, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle, XCircle, Loader2, RefreshCw, ChevronLeft, ChevronRight, FilePlus, Info } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Dialog,
   DialogContent,
@@ -57,10 +58,12 @@ const PARTITIONS_REFETCH_INTERVAL_MS = 5000;
 
 function RowActions({
   partition,
+  showUpload,
   showEdit,
   showDelete,
 }: {
   partition: PartitionResponse;
+  showUpload: boolean;
   showEdit: boolean;
   showDelete: boolean;
 }) {
@@ -79,14 +82,25 @@ function RowActions({
 
   return (
     <div className="flex items-center gap-1">
+      {showUpload && (
+        <Button variant="ghost" size="icon-xs" asChild>
+          <Link
+            to={`/documents?partition=${encodeURIComponent(partition.name)}&upload=1`}
+            aria-label={`Upload documents to ${partition.name}`}
+            title={`Upload documents to ${partition.name}`}
+          >
+            <FilePlus className="h-3.5 w-3.5" />
+          </Link>
+        </Button>
+      )}
       {showEdit && (
-        <Button variant="ghost" size="sm" asChild>
+        <Button variant="ghost" size="icon-xs" asChild>
           <Link
             to={partitionDetailPath(partition.name)}
             aria-label={`Edit ${partition.name}`}
             title={`Edit ${partition.name}`}
           >
-            <Pencil className="h-3 w-3" />
+            <Pencil className="h-3.5 w-3.5" />
           </Link>
         </Button>
       )}
@@ -98,12 +112,12 @@ function RowActions({
         >
           <Button
             variant="ghost"
-            size="sm"
+            size="icon-xs"
             disabled={deleteMutation.isPending}
             aria-label={`Delete ${partition.name}`}
             title={`Delete ${partition.name}`}
           >
-            <Trash2 className="h-3 w-3 text-destructive" />
+            <Trash2 className="h-3.5 w-3.5 text-destructive" />
           </Button>
         </ConfirmDialog>
       )}
@@ -128,7 +142,7 @@ function SortButton({ label, active, direction, onClick }: { label: string; acti
 
 export default function PartitionListPage() {
   const queryClient = useQueryClient();
-  const { canManagePartitions, canConfigurePartition } = usePermissions();
+  const { canManagePartitions, canConfigurePartition, canWrite } = usePermissions();
   const [dialogOpen, setDialogOpen] = useState(false);
 
   // Open the create dialog directly when arriving from the Overview quick action
@@ -151,7 +165,7 @@ export default function PartitionListPage() {
   const [embedder, setEmbedder] = useState("");
   const [indexationPreset, setIndexationPreset] = useState("default");
   const [retrievalPreset, setRetrievalPreset] = useState("default");
-  const [chatHistoryDepth, setChatHistoryDepth] = useState("0");
+  const [chatHistoryDepth, setChatHistoryDepth] = useState("4");
   const [chatLlm, setChatLlm] = useState("__default__");
   const [llmValidated, setLlmValidated] = useState<boolean | null>(true);
   const [llmValidating, setLlmValidating] = useState(false);
@@ -262,12 +276,11 @@ export default function PartitionListPage() {
     return items;
   }, [partitionsQuery.data, search, sortDir, sortColumn]);
 
-  // Show a delete affordance for anyone the backend (`require_partition_owner`)
-  // would allow: admins (satisfied via SUPER_ADMIN_MODE) and partition owners.
-  // `canConfigurePartition(role)` is `superAdmin || role === "owner"`, so a
-  // non-admin owner can delete their own partition — not just admins.
+  // Show the actions column whenever the row has at least one available row
+  // action: upload for writable partitions, or edit/delete for admins/owners.
   const showActions =
-    canManagePartitions || filteredAndSorted.some((p) => canConfigurePartition(p.role));
+    canManagePartitions ||
+    filteredAndSorted.some((p) => canWrite(p.role) || canConfigurePartition(p.role));
 
   const pageCount = Math.ceil(filteredAndSorted.length / PARTITIONS_PAGE_SIZE);
   useEffect(() => {
@@ -350,7 +363,7 @@ export default function PartitionListPage() {
       setEmbedder("");
       setIndexationPreset("default");
       setRetrievalPreset("default");
-      setChatHistoryDepth("0");
+      setChatHistoryDepth("4");
       setChatLlm("__default__");
       setLlmValidated(true);
     },
@@ -380,6 +393,10 @@ export default function PartitionListPage() {
     e.preventDefault();
     if (!name.trim()) {
       toast.error("Name is required");
+      return;
+    }
+    if (canManagePartitions && intOr(chatHistoryDepth, 0) < 1) {
+      toast.error("Chat history depth must be at least 1");
       return;
     }
     createMutation.mutate();
@@ -583,6 +600,7 @@ export default function PartitionListPage() {
                       <TableCell>
                         <RowActions
                           partition={p}
+                          showUpload={canWrite(p.role)}
                           showEdit={canManagePartitions}
                           showDelete={canConfigurePartition(p.role)}
                         />
@@ -739,10 +757,25 @@ export default function PartitionListPage() {
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <Label>Chat History Depth</Label>
+                    <Label className="flex items-center gap-1.5">
+                      Chat History Depth *
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger type="button" className="cursor-help">
+                            <Info className="h-3.5 w-3.5 text-muted-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs">
+                            Number of previous chat messages (including the current question) kept as
+                            context for follow-up questions in this partition. Low values (e.g. 1) mean the
+                            assistant won&apos;t see earlier turns in the conversation. Default: 4.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </Label>
                     <Input
                       type="number"
-                      min={0}
+                      min={1}
+                      required
                       value={chatHistoryDepth}
                       onChange={(e) => setChatHistoryDepth(e.target.value)}
                     />
@@ -754,7 +787,14 @@ export default function PartitionListPage() {
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={createMutation.isPending || (canManagePartitions && (llmValidating || llmValidated === false || !embedder))}>
+              <Button
+                type="submit"
+                disabled={
+                  createMutation.isPending ||
+                  (canManagePartitions &&
+                    (llmValidating || llmValidated === false || !embedder || intOr(chatHistoryDepth, 0) < 1))
+                }
+              >
                 {createMutation.isPending ? "Creating..." : "Create"}
               </Button>
             </DialogFooter>

@@ -87,7 +87,7 @@ def test_create_partition_defaults_to_default_presets():
     assert request.embedder == "default"
     assert request.indexation_preset == "default"
     assert request.retrieval_preset == "default"
-    assert request.chat_history_depth == 0
+    assert request.chat_history_depth == 4
 
 
 def test_create_partition_rejects_empty_names():
@@ -106,6 +106,18 @@ def test_update_partition_rejects_negative_chat_history_depth():
     """Chat history depth cannot be negative."""
     with pytest.raises(ValidationError):
         UpdatePartitionRequest(chat_history_depth=-1)
+
+
+def test_update_partition_rejects_zero_chat_history_depth():
+    """Chat history depth cannot be zero — a value of 1 turn is the floor."""
+    with pytest.raises(ValidationError):
+        UpdatePartitionRequest(chat_history_depth=0)
+
+
+def test_create_partition_rejects_zero_chat_history_depth():
+    """Chat history depth cannot be zero at creation time either."""
+    with pytest.raises(ValidationError):
+        CreatePartitionRequest(name="legal", chat_history_depth=0)
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,8 @@ returned via ``HTTPException``.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -50,6 +52,14 @@ def _human_readable_size(size_bytes: int) -> str:
             return f"{size:.2f} {unit}"
         size /= 1024
     return f"{size:.2f} PB"
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class IndexingService:
@@ -99,6 +109,7 @@ class IndexingService:
         file_id: str,
         sanitized_filename: str,
         original_filename: str | None,
+        content_sha256: str | None,
     ) -> dict:
         """Assemble the indexing metadata exactly as the legacy router did."""
         metadata = dict(metadata or {})
@@ -112,6 +123,7 @@ class IndexingService:
         file_stat = Path(file_path).stat()
         metadata["file_size"] = _human_readable_size(file_stat.st_size)
         metadata["file_id"] = file_id
+        metadata["content_sha256"] = content_sha256
         metadata.update(extract_temporal_fields(metadata, temporal_fields=TEMPORAL_FIELDS))
         return metadata
 
@@ -119,6 +131,12 @@ class IndexingService:
         if self._config is None:
             return {}
         return getattr(self._config, "partitions", {}) or {}
+
+    def _deduplication_enabled(self) -> bool:
+        return bool(
+            self._config is not None
+            and getattr(getattr(self._config, "loader", None), "content_deduplication_enabled", False)
+        )
 
     @asynccontextmanager
     async def _partition_admission(self, partition: str) -> AsyncIterator[bool]:
@@ -200,18 +218,25 @@ class IndexingService:
         user: dict | None,
         workspace_ids: list[str] | None = None,
         replace: bool = False,
+        content_sha256: str | None = None,
     ) -> str:
         """Assemble metadata and queue an (re)indexing job; return its task id.
 
         Workspace association happens inside the worker's ``add_file``
         after a successful index — the router only pre-validates the ids.
         """
+        if self._deduplication_enabled() and content_sha256 is None:
+            content_sha256 = await asyncio.to_thread(_sha256_file, file_path)
+        if not self._deduplication_enabled():
+            content_sha256 = None
+
         full_metadata = self._build_metadata(
             metadata=metadata,
             file_path=file_path,
             file_id=file_id,
             sanitized_filename=sanitized_filename,
             original_filename=original_filename,
+            content_sha256=content_sha256,
         )
         async with self._partition_admission(partition) as partition_existed_at_admission:
             await self._ensure_partition_exists(partition, user)
@@ -253,6 +278,8 @@ class IndexingService:
             logger.bind(file_id=file_id, partition=partition).warning(
                 f"Dropped protected metadata keys from file metadata update: {dropped}"
             )
+        # content_sha256 is server-computed at ingest; never let a caller set it.
+        metadata.pop("content_sha256", None)
         metadata["file_id"] = file_id
         await self._dispatcher.update_file_metadata(file_id, metadata, partition, user)
 
@@ -273,8 +300,12 @@ class IndexingService:
             logger.bind(file_id=target_file_id, partition=target_partition).warning(
                 f"Dropped protected metadata keys from file copy: {dropped}"
             )
+        content_sha256 = None
+        if self._deduplication_enabled():
+            content_sha256 = await self._document_repo.get_content_sha256(source_file_id, source_partition)
         metadata["file_id"] = target_file_id
         metadata["partition"] = target_partition
+        metadata["content_sha256"] = content_sha256
         await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user)
 
     # ------------------------------------------------------------------

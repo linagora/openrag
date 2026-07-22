@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
@@ -13,14 +14,18 @@ from services.orchestrators.indexing_service import IndexingService
 
 
 class FakeDocumentRepo:
-    def __init__(self, *, exists: bool = False, raise_on_check: bool = False):
+    def __init__(self, *, exists: bool = False, raise_on_check: bool = False, content_sha256: str | None = None):
         self._exists = exists
         self._raise = raise_on_check
+        self._content_sha256 = content_sha256
 
     async def file_exists_in_partition(self, file_id: str, partition: str) -> bool:
         if self._raise:
             raise RuntimeError("boom")
         return self._exists
+
+    async def get_content_sha256(self, file_id: str, partition: str) -> str | None:
+        return self._content_sha256
 
 
 class FakeWorkspaceRepo:
@@ -243,6 +248,53 @@ async def test_add_file_builds_metadata_and_dispatches(tmp_path):
     assert md["original_filename"] == "Doc Original.txt"
     assert md["file_id"] == "f1"
     assert md["file_size"] == "11.00 B"
+    assert md["content_sha256"] is None
+
+
+@pytest.mark.asyncio
+async def test_add_file_uses_precomputed_content_hash_when_deduplication_is_enabled(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("hello world")
+    disp = FakeDispatcher()
+    config = SimpleNamespace(loader=SimpleNamespace(content_deduplication_enabled=True), partitions={})
+    svc = _service(disp=disp, config=config)
+
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="p1",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user={"id": 7},
+        content_sha256="abc123",
+    )
+
+    assert disp.dispatched[0]["metadata"]["content_sha256"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_add_file_hashes_non_http_input_when_digest_is_not_precomputed(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("hello world")
+    disp = FakeDispatcher()
+    config = SimpleNamespace(loader=SimpleNamespace(content_deduplication_enabled=True), partitions={})
+    svc = _service(disp=disp, config=config)
+
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="p1",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user={"id": 7},
+    )
+
+    assert (
+        disp.dispatched[0]["metadata"]["content_sha256"]
+        == "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    )
 
 
 @pytest.mark.asyncio
@@ -552,6 +604,21 @@ async def test_update_metadata_injects_file_id():
 
 
 @pytest.mark.asyncio
+async def test_update_metadata_cannot_override_content_hash():
+    disp = FakeDispatcher()
+    svc = _service(disp=disp)
+
+    await svc.update_metadata(
+        "f1",
+        {"content_sha256": "client-controlled", "author": "bob"},
+        "p1",
+        {"id": 1},
+    )
+
+    assert disp.updated[0][1] == {"author": "bob", "file_id": "f1"}
+
+
+@pytest.mark.asyncio
 async def test_copy_file_sets_target_fields():
     disp = FakeDispatcher()
     svc = _service(disp=disp)
@@ -566,8 +633,26 @@ async def test_copy_file_sets_target_fields():
     file_id, md, partition, user = disp.copied[0]
     assert file_id == "src"
     assert partition == "p-src"
-    assert md == {"k": "v", "file_id": "dst", "partition": "p-dst"}
+    assert md == {"k": "v", "file_id": "dst", "partition": "p-dst", "content_sha256": None}
     assert user == {"id": 2}
+
+
+@pytest.mark.asyncio
+async def test_copy_file_preserves_content_hash_when_deduplication_is_enabled():
+    disp = FakeDispatcher()
+    config = SimpleNamespace(loader=SimpleNamespace(content_deduplication_enabled=True), partitions={})
+    svc = _service(doc=FakeDocumentRepo(content_sha256="abc123"), disp=disp, config=config)
+
+    await svc.copy_file(
+        source_file_id="src",
+        source_partition="p-src",
+        target_file_id="dst",
+        target_partition="p-dst",
+        metadata={},
+        user={"id": 2},
+    )
+
+    assert disp.copied[0][1]["content_sha256"] == "abc123"
 
 
 @pytest.mark.asyncio

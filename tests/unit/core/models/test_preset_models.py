@@ -55,3 +55,22 @@ def test_partition_config_rejects_negative_chat_history_depth():
             retrieval=RetrievalPipelineConfig(),
             chat_history_depth=-1,
         )
+
+
+def test_partition_row_rejects_zero_chat_history_depth():
+    """Persisted partition rows reject zero chat history depth (minimum is 1)."""
+    now = _now()
+
+    with pytest.raises(ValidationError):
+        PartitionRow(name="tenant", chat_history_depth=0, created_at=now, updated_at=now)
+
+
+def test_partition_config_rejects_zero_chat_history_depth():
+    """Resolved partition configs reject zero chat history depth (minimum is 1)."""
+    with pytest.raises(ValidationError):
+        PartitionConfig(
+            name="tenant",
+            indexation=IndexationPipelineConfig(),
+            retrieval=RetrievalPipelineConfig(),
+            chat_history_depth=0,
+        )
