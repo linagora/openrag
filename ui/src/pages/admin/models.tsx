@@ -639,7 +639,7 @@ function EndpointDialog({
               <div className="space-y-2">
                 <LabelWithInfo
                   label="Max context size"
-                  tooltip="Fallback maximum token limit for chat/completion requests answered by this endpoint. At startup, the /v1/models endpoint is queried for the model's max_model_len; if that query fails this value is used instead. Requests whose total token count (prompt + max_tokens) exceeds the limit are rejected with a 413 error."
+                  tooltip="Maximum token limit for chat/completion requests answered by this endpoint. When set, this value takes precedence over the model's max_model_len (auto-probed from /v1/models at startup); leave it blank to use that probed value, or the global default if the probe fails. Requests whose total token count (prompt + max_tokens) exceeds the limit are rejected with a 413 error."
                 />
                 <Input
                   type="number"
