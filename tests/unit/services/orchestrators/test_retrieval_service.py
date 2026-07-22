@@ -280,3 +280,12 @@ async def test_retrieve_rejects_unknown_partition_when_partition_configs_exist()
 
     with pytest.raises(PartitionNotFoundError, match="tenant-b"):
         await svc.retrieve(partitions=["tenant-b"], query=Query(query="hello"))
+
+
+def test_pipeline_for_partition_threads_rrf_k():
+    """A partition's rrf_k must reach its RetrieverPipeline (#707)."""
+    cfg = _config()
+    cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(rrf_k=42))}
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg)
+    pipeline, _ = svc._pipeline_for_partition("tenant-a")
+    assert pipeline.rrf_k == 42
