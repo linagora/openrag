@@ -33,7 +33,7 @@ class PartitionRow(BaseModel):
     retrieval_preset: str = "default"
     dimension: int = Field(default=1024, gt=0)
     collection_name: str | None = None
-    chat_history_depth: int = Field(default=0, ge=0)
+    chat_history_depth: int = Field(default=4, ge=1)
     chat_llm: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -52,7 +52,7 @@ class PartitionConfig(BaseModel):
     indexation: IndexationPipelineConfig
     retrieval: RetrievalPipelineConfig
     collection_name: str | None = None
-    chat_history_depth: int = Field(default=0, ge=0)
+    chat_history_depth: int = Field(default=4, ge=1)
     chat_llm: str | None = None
 
 

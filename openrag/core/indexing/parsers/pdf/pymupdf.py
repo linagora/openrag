@@ -29,6 +29,7 @@ from typing import Literal
 
 import pymupdf
 import pymupdf4llm
+from core.utils.logging import get_logger
 
 from ....models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from ..document_parser import DocumentParser
@@ -36,17 +37,23 @@ from ..registry import parser_registry
 
 ParseMode = Literal["markdown", "text"]
 
+logger = get_logger()
+
 # Single dedicated worker for pymupdf — see "Threading note" in module docstring.
 _PYMUPDF_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pymupdf")
 
 
-def _extract_text(raw: bytes) -> tuple[list[str], list[ImageBlock]]:
+def _extract_text(raw: bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
     """Return one stripped plain-text string per page; no images."""
     with pymupdf.open(stream=raw, filetype="pdf") as doc:
         return [page.get_text().strip() for page in doc], []
 
 
-def _extract_markdown(raw: bytes) -> tuple[list[str], list[ImageBlock]]:
+def _to_markdown(doc: pymupdf.Document) -> list[dict]:
+    return pymupdf4llm.to_markdown(doc, page_chunks=True, embed_images=False, write_images=False)
+
+
+def _extract_markdown(raw: bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
     """Return structured Markdown per page (no images).
 
     pymupdf is the lightweight, no-VLM backend. ``pymupdf4llm`` preserves
@@ -58,12 +65,22 @@ def _extract_markdown(raw: bytes) -> tuple[list[str], list[ImageBlock]]:
     are produced here.
     """
     with pymupdf.open(stream=raw, filetype="pdf") as doc:
-        chunks = pymupdf4llm.to_markdown(
-            doc,
-            page_chunks=True,
-            embed_images=False,
-            write_images=False,
-        )
+        try:
+            chunks = _to_markdown(doc)
+        except RuntimeError as exc:
+            # MuPDF hard-errors on some legal-but-unusual object graphs — e.g.
+            # Type3 fonts with no embedded font file trip "code=4: no font file
+            # for digest" on a single page and take the whole document down
+            # with them (openrag#640). `garbage=4, clean=True` rewrites the PDF,
+            # dropping unreferenced/orphaned objects (including the bad font
+            # refs) without touching visible content, and recovers the full
+            # document — retry once against that cleaned copy before giving up.
+            logger.bind(filename=filename, error=str(exc)).warning(
+                "pymupdf4llm.to_markdown failed; retrying against a garbage-collected/cleaned copy"
+            )
+            cleaned = doc.tobytes(garbage=4, clean=True)
+            with pymupdf.open(stream=cleaned, filetype="pdf") as clean_doc:
+                chunks = _to_markdown(clean_doc)
     pages = [(chunk.get("text") or "").strip() for chunk in chunks]
     return pages, []
 
@@ -95,7 +112,7 @@ class PyMuPDFParser(DocumentParser):
             )
 
         pages, images = await asyncio.get_running_loop().run_in_executor(
-            _PYMUPDF_EXECUTOR, self._extract, document.raw_bytes
+            _PYMUPDF_EXECUTOR, self._extract, document.raw_bytes, document.filename
         )
         # Keep one TextBlock per source page (including empties) so callers
         # can preserve a 1-to-1 mapping with the original PDF's pagination.

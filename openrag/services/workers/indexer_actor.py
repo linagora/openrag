@@ -167,6 +167,7 @@ async def _write_catalog_record(
             relationship_id=metadata.get("relationship_id"),
             parent_id=metadata.get("parent_id"),
             indexed_at=indexed_at,
+            content_sha256=metadata.get("content_sha256"),
             **config_kwargs,
         )
 
@@ -179,6 +180,7 @@ async def _write_catalog_record(
         parent_id=metadata.get("parent_id"),
         indexed_at=indexed_at,
         require_existing_partition=require_existing_partition,
+        content_sha256=metadata.get("content_sha256"),
         **config_kwargs,
     )
 

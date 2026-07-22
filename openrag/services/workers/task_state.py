@@ -7,7 +7,15 @@ from typing import Any
 import ray
 from core.models.catalog import TERMINAL_TASK_STATES, DocumentStatus
 
-ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"})
+ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
+# Legacy indexing states removed from the public state machine in #721. Current
+# code never writes them, but an old detached Indexer actor surviving a rolling
+# deploy on an external Ray cluster still can. The delete/cancel fencing path
+# must keep treating them as in-flight so cleanup never misses such a task and
+# lets a stale worker write data after the file/partition is gone. Kept out of
+# the public active counts and the DocumentStatus enum on purpose — fencing only.
+LEGACY_ACTIVE_INDEXING_STATES = frozenset({"CHUNKING", "INSERTING"})
+CANCELLABLE_INDEXING_STATES = ACTIVE_INDEXING_STATES | LEGACY_ACTIVE_INDEXING_STATES
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
 PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
 
@@ -233,7 +241,7 @@ class TaskStateManager:
     ) -> dict[str, ray.ObjectRef | None | str]:
         matches = {}
         for task_id, info in self.tasks.items():
-            if info.state not in ACTIVE_INDEXING_STATES:
+            if info.state not in CANCELLABLE_INDEXING_STATES:
                 continue
             details = info.details or {}
             if not details:
@@ -294,6 +302,8 @@ class TaskStateManager:
 
 __all__ = [
     "ACTIVE_INDEXING_STATES",
+    "CANCELLABLE_INDEXING_STATES",
+    "LEGACY_ACTIVE_INDEXING_STATES",
     "PENDING_TASK_DETAILS",
     "TERMINAL_INDEXING_STATES",
     "TaskInfo",

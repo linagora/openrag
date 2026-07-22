@@ -117,9 +117,39 @@ class TestMakeComponentFactory:
 
         assert kwargs["endpoint"] == "http://host:8000/v1"
         assert kwargs["model_name"] == "m"
-        assert kwargs["batch_size"] == 8
         assert kwargs["timeout"] == 30.0
         assert kwargs["api_key"] == "secret"
+
+    def test_batch_size_is_not_forwarded_generically(self):
+        """batch_size must NOT reach LLM/VLM/reranker constructors (#712).
+
+        Only the embedder consumes it; the VLLM chat/vision clients absorb
+        unknown kwargs into ``self._defaults`` and splat them into the request
+        body, so an unconditional batch_size leaked a bogus field onto every
+        chat and caption call. The embedder factory injects it explicitly via
+        ``extra_kwargs_fn`` instead — see ``test_extra_kwargs_fn_merges_last``
+        for the inject-and-win path.
+        """
+        factory, _ = make_component_factory(
+            _registry(),
+            {"default": _FakeEndpoint(batch_size=64)},
+            default_impl="vllm",
+            client_caches=[],
+        )
+
+        assert "batch_size" not in factory("default").kwargs
+
+    def test_extra_kwargs_fn_can_reinject_batch_size_for_the_embedder(self):
+        """The embedder factory supplies batch_size through extra_kwargs_fn."""
+        factory, _ = make_component_factory(
+            _registry(),
+            {"default": _FakeEndpoint(batch_size=64)},
+            default_impl="vllm",
+            client_caches=[],
+            extra_kwargs_fn=lambda cfg: {"batch_size": cfg.batch_size},
+        )
+
+        assert factory("default").kwargs["batch_size"] == 64
 
     def test_extra_kwargs_fn_merges_last(self):
         """``extra_kwargs_fn`` output overrides config-derived kwargs."""

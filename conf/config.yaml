@@ -29,7 +29,7 @@ llm:
   api_key: ""
 
 # --- VLM (Vision Language Model) ---
-# Env: VLM_BASE_URL, VLM_MODEL, VLM_API_KEY, VLM_ENABLE_THINKING
+# Env: VLM_BASE_URL, VLM_MODEL, VLM_API_KEY, VLM_ENABLE_THINKING, VLM_TIMEOUT
 vlm:
   <<: *llm_params
   base_url: ""
@@ -154,13 +154,16 @@ prompts:
 
 # --- Document loader ---
 loader:
-  # Env: IMAGE_CAPTIONING, IMAGE_CAPTIONING_URL, SAVE_MARKDOWN, SAVE_UPLOADED_FILES
+  # Env: IMAGE_CAPTIONING, IMAGE_CAPTIONING_URL, SAVE_MARKDOWN, SAVE_UPLOADED_FILES,
+  #      CONTENT_DEDUPLICATION_ENABLED
   image_captioning: true
   image_captioning_url: true
   save_markdown: false
   # Keep the raw upload on disk after indexation (needed for source viewing in
   # Chainlit). Set false for clients that manage their own files (e.g. Twake).
   save_uploaded_files: true
+  # Reject identical content inside the same partition before indexing.
+  content_deduplication_enabled: true
 
   mimetypes:
     text/plain: .txt
