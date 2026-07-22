@@ -282,8 +282,7 @@ async def test_retrieve_rejects_unknown_partition_when_partition_configs_exist()
         await svc.retrieve(partitions=["tenant-b"], query=Query(query="hello"))
 
 
-@pytest.mark.asyncio
-async def test_pipeline_for_partition_threads_rrf_k():
+def test_pipeline_for_partition_threads_rrf_k():
     """A partition's rrf_k must reach its RetrieverPipeline (#707)."""
     cfg = _config()
     cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(rrf_k=42))}
