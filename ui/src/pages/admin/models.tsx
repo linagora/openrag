@@ -72,11 +72,12 @@ type RevealedApiKey = {
 
 const normalizeEndpointUrl = (value: string) => value.trim().replace(/\/+$/, "");
 
-// System-wide fallback values (MAX_LLM_CONTEXT_SIZE / MAX_OUTPUT_TOKENS env
-// vars — see core/config/endpoints.py:LLMContextConfig) shown as placeholders
-// so admins can see what an unset override falls back to.
-const DEFAULT_MAX_CONTEXT_SIZE = "8192";
-const DEFAULT_MAX_OUTPUT_TOKENS = "1024";
+// Placeholder shown when a per-endpoint budget is left blank. The real
+// fallback (the MAX_LLM_CONTEXT_SIZE / MAX_OUTPUT_TOKENS env vars — see
+// core/config/endpoints.py:LLMContextConfig) is environment-configurable, so
+// a generic label is used instead of a hard-coded number that could misstate
+// a given deployment's actual default.
+const BUDGET_PLACEHOLDER = "System default";
 
 function LabelWithInfo({ label, tooltip }: { label: string; tooltip: string }) {
   return (
@@ -647,7 +648,7 @@ function EndpointDialog({
                   step="1"
                   value={maxContextSize}
                   onChange={(e) => setMaxContextSize(e.target.value)}
-                  placeholder={DEFAULT_MAX_CONTEXT_SIZE}
+                  placeholder={BUDGET_PLACEHOLDER}
                 />
               </div>
               <div className="space-y-2">
@@ -661,7 +662,7 @@ function EndpointDialog({
                   step="1"
                   value={maxOutputTokens}
                   onChange={(e) => setMaxOutputTokens(e.target.value)}
-                  placeholder={DEFAULT_MAX_OUTPUT_TOKENS}
+                  placeholder={BUDGET_PLACEHOLDER}
                 />
               </div>
               <p className="col-span-2 text-xs text-muted-foreground">
