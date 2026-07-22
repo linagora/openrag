@@ -180,6 +180,17 @@ Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured
 If you prefer to use an **external embedding service**, simply comment out the embedder service in the [docker-compose.yaml](https://github.com/linagora/openrag/blob/dev/docker-compose.yaml#L117-L153) and provide the variables above in your environment.
 
 
+### Model Endpoint Registry
+Model endpoints (embedder, LLM, VLM, reranker) are stored in a **database-backed registry** and can be edited at runtime from the admin UI. On first boot, one default endpoint per type is **seeded** from the `*_BASE_URL` / `*_MODEL` / `*_API_KEY` env vars documented above, so existing env-only deployments keep working with no admin action. After that first seed, **the database is the source of truth** — changing an env var no longer overwrites an endpoint an operator may have edited.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | When `true`, the auto-seeded endpoint of each type (the one whose name matches the current env-derived model slug) is re-synced from the environment on **every** boot — its `endpoint`, `model_name`, `batch_size` and `timeout` are overwritten from the `*_BASE_URL` / `*_MODEL` / `EMBEDDER_BATCH_SIZE` / `EMBEDDER_TIMEOUT` values. This lets operators manage that endpoint purely via env vars + a pod rollout (e.g. a Helm values change). Its `extra` field is **never** touched, so a hand-set API key survives, and any endpoint created by hand under a different name is left untouched. Keep it `false` (the default) to preserve the "database wins after first boot" behavior. |
+
+:::note
+`MODEL_ENDPOINT_SYNC_ON_BOOT` only re-syncs the single endpoint whose name still matches the env-derived slug. Endpoints you renamed or created manually in the admin UI are never modified or deleted by boot-time sync.
+:::
+
 ### Database Configuration
 
 Our system uses two databases that work together:
