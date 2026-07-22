@@ -343,7 +343,14 @@ function EndpointDialog({
       if (editing) {
         const { apiKey: displayApiKey, extra: apiExtra } = splitModelEndpointApiKeyExtra(editing.extra);
         const { implementation, extra: implExtra } = splitModelEndpointImplementation(apiExtra);
-        const { llmContext, extra: displayExtra } = splitModelEndpointLlmContext(implExtra);
+        // Only carve the LLM token-budget keys out of the editable extra for LLM
+        // endpoints — the budget fields are LLM-only, and splitting for non-LLM
+        // types would drop any same-named keys from their extra on save (they are
+        // re-merged only when isLlm below), silently deleting them.
+        const { llmContext, extra: displayExtra } =
+          editing.model_type === "llm"
+            ? splitModelEndpointLlmContext(implExtra)
+            : { llmContext: { maxContextSize: "", maxOutputTokens: "" }, extra: implExtra };
         setName(editing.name);
         setEndpoint(editing.endpoint);
         setModelName(editing.model_name || "");
@@ -383,7 +390,14 @@ function EndpointDialog({
   useEffect(() => {
     const editingExtra = editing ? splitModelEndpointApiKeyExtra(editing.extra) : null;
     const editingImplExtra = editingExtra ? splitModelEndpointImplementation(editingExtra.extra).extra : null;
-    const editingRawExtra = editingImplExtra ? splitModelEndpointLlmContext(editingImplExtra).extra : null;
+    // Match the display path above: only strip the budget keys for LLM endpoints,
+    // otherwise the "unchanged" comparison would treat a non-LLM endpoint's
+    // same-named extra keys as already removed.
+    let editingRawExtra: Record<string, unknown> | null = null;
+    if (editingImplExtra) {
+      editingRawExtra =
+        editing?.model_type === "llm" ? splitModelEndpointLlmContext(editingImplExtra).extra : editingImplExtra;
+    }
     if (
       editing &&
       endpoint === editing.endpoint &&
