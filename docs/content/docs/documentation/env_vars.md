@@ -306,6 +306,7 @@ The retriever fetches relevant documents from the vector database based on query
 | `RELATED_LIMIT` | `int` | 10 | Maximum number of related/ancestor chunks fetched per matched result when expansion is enabled. |
 | `MAX_DEPTH` | `int` | 10 | Maximum ancestor depth traversed when `INCLUDE_ANCESTORS` is enabled. |
 | `RETRIEVER_ALLOW_FILTERLESS_FALLBACK` | `bool` | true | When a temporally-filtered retrieval returns no documents, re-run the query without the filter. Set to `false` for strict temporal retrieval. |
+| `RETRIEVER_MAX_PARTITION_CONCURRENCY` | `int` | 16 | Upper bound on how many per-partition retrievals run concurrently **per retrieval call**. Bounds fan-out for multi-partition / `openrag-all` searches; small fan-outs stay fully parallel. Note: a multi-query request (multiQuery/hyde) issues one such call per sub-query, so peak concurrency can reach `N × this value`, not a flat per-request cap. |
 
 #### Retrieval Strategies
 
