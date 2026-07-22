@@ -1,5 +1,6 @@
 """Tests for source citation extraction and filtering utilities."""
 
+import asyncio
 import json
 
 import pytest
@@ -202,9 +203,21 @@ def _make_finish(chunk_id: str = "chatcmpl-1") -> str:
 DONE_LINE = "data: [DONE]"
 
 
+def _make_preamble(chunk_id: str = "chatcmpl-1") -> str:
+    """Build an SSE line carrying only a role delta (no content, no finish_reason)."""
+    return "data: " + json.dumps({"id": chunk_id, "choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]})
+
+
 async def _fake_stream(lines: list[str]):
     for line in lines:
         yield line
+
+
+async def _stream_then_raise(lines: list[str], exc: Exception):
+    """Yield the given lines, then raise — mimics an upstream that drops mid-stream."""
+    for line in lines:
+        yield line
+    raise exc
 
 
 async def _collect(async_gen) -> list[str]:
@@ -410,6 +423,54 @@ class TestStreamClosedWithoutDone:
         ]
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert "truncated" not in _parse_finish_extra(result)
+
+    @pytest.mark.asyncio
+    async def test_preamble_only_close_still_flags_truncated(self):
+        # Upstream drops right after the role-preamble chunk, before any content
+        # or finish chunk arrives. There is no `chunk_template`, but the preamble
+        # must still let us surface `truncated` so the client can tell the stream
+        # was cut off rather than a clean empty completion.
+        lines = [_make_preamble()]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert result[-1].strip() == "data: [DONE]"
+        assert _parse_finish_extra(result).get("truncated") is True
+
+    @pytest.mark.asyncio
+    async def test_upstream_raises_after_content_flushes_tail_and_sources(self):
+        # A read timeout surfaces as the upstream generator raising mid-stream
+        # (not a clean close). The buffered tail + sources must still be flushed
+        # and flagged truncated, and no exception should propagate to the caller.
+        from core.utils.exceptions import InferenceTimeoutError
+
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_chunk("\n[Sources: 1, 3]"),
+        ]
+        stream = _stream_then_raise(lines, InferenceTimeoutError("LLM request timed out"))
+        result = await _collect(stream_with_source_filtering(stream, self.SOURCES, "test-model"))
+        assert _collect_content(result) == "Here is the answer."
+        assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
+        assert _parse_finish_extra(result).get("truncated") is True
+        assert result[-1].strip() == "data: [DONE]"
+
+    @pytest.mark.asyncio
+    async def test_upstream_raises_before_any_chunk_reraises(self):
+        # Nothing was ever streamed, so there is no partial answer to salvage:
+        # the real error must propagate instead of a silent, clean-looking [DONE].
+        from core.utils.exceptions import InferenceConnectionError
+
+        stream = _stream_then_raise([], InferenceConnectionError("Cannot reach LLM"))
+        with pytest.raises(InferenceConnectionError):
+            await _collect(stream_with_source_filtering(stream, self.SOURCES, "test-model"))
+
+    @pytest.mark.asyncio
+    async def test_client_disconnect_propagates_without_flush(self):
+        # CancelledError (client disconnect) is BaseException, not Exception, so it
+        # must propagate untouched rather than be captured as a truncation: no flush,
+        # no swallow, letting the router's cancellation handling run.
+        stream = _stream_then_raise([_make_chunk("partial")], asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await _collect(stream_with_source_filtering(stream, self.SOURCES, "test-model"))
 
 
 def _parse_finish_extra(sse_lines: list[str]) -> dict:
