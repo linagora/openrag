@@ -202,7 +202,10 @@ describe("JobListPage filters", () => {
     listTasksMock.mockResolvedValue({
       tasks: [
         task("docs-task", "COMPLETED", "docs.pdf", "docs"),
-        task("archive-task", "FAILED", "archive.pdf", "archive"),
+        task("archive-task", "FAILED", "archive.pdf", "archive", {
+          created_at: "2026-07-20T08:00:00Z",
+          duration_ms: 65_000,
+        }),
         task("all-named-task", "COMPLETED", "all-named.pdf", "__all__"),
       ],
     });
@@ -220,7 +223,10 @@ describe("JobListPage filters", () => {
 
     expect(downloadCsvMock).toHaveBeenCalledWith(
       "openrag-jobs.csv",
-      expect.any(Array),
+      expect.arrayContaining([
+        expect.objectContaining({ header: "created_at" }),
+        expect.objectContaining({ header: "duration_ms" }),
+      ]),
       [expect.objectContaining({ task_id: "archive-task" })],
     );
 
@@ -241,6 +247,18 @@ describe("JobListPage filters", () => {
 
     await userEvent.click(screen.getByRole("tab", { name: "FAILED" }));
     await waitFor(() => expect(screen.getByText("docs.pdf")).not.toBeNull());
+  });
+
+  it("reports CSV download failures", async () => {
+    downloadCsvMock.mockImplementationOnce(() => {
+      throw new Error("downloads unavailable");
+    });
+    renderJobs();
+
+    expect(await screen.findByText("completed.pdf")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    expect(toastErrorMock).toHaveBeenCalledWith("CSV export failed: downloads unavailable");
   });
 
   it("keeps long job values constrained while exposing full names", async () => {

@@ -228,17 +228,23 @@ export default function JobListPage() {
   });
 
   const exportJobs = () => {
-    downloadCsv(
-      "openrag-jobs.csv",
-      [
-        { header: "task_id", value: (task) => task.task_id },
-        { header: "state", value: (task) => task.state },
-        { header: "filename", value: (task) => str(task.details?.metadata?.filename) },
-        { header: "file_id", value: (task) => str(task.details?.file_id) },
-        { header: "partition", value: (task) => str(task.details?.partition) },
-      ],
-      filteredTasks,
-    );
+    try {
+      downloadCsv(
+        "openrag-jobs.csv",
+        [
+          { header: "task_id", value: (task) => task.task_id },
+          { header: "state", value: (task) => task.state },
+          { header: "filename", value: (task) => str(task.details?.metadata?.filename) },
+          { header: "file_id", value: (task) => str(task.details?.file_id) },
+          { header: "partition", value: (task) => str(task.details?.partition) },
+          { header: "created_at", value: (task) => task.created_at },
+          { header: "duration_ms", value: (task) => task.duration_ms },
+        ],
+        filteredTasks,
+      );
+    } catch (error) {
+      toast.error(`CSV export failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
   };
 
   const handleStatusTabChange = (value: string) => {

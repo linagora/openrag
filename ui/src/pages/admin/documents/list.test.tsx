@@ -55,7 +55,7 @@ vi.mock("@/lib/api/documents", () => ({
         partition: "docs",
         filename: "b.pdf",
         mimetype: "application/pdf",
-        indexed_at: "2026-01-02T00:00:00Z",
+        indexed_at: new Date(2026, 0, 2, 0, 30).toISOString(),
       },
     ],
   }),
@@ -147,6 +147,18 @@ describe("DocumentListPage", () => {
       expect.any(Array),
       [expect.objectContaining({ file_id: "file-b" })],
     );
+  });
+
+  it("reports CSV download failures", async () => {
+    downloadCsvMock.mockImplementationOnce(() => {
+      throw new Error("downloads unavailable");
+    });
+    renderDocuments();
+
+    expect(await screen.findByText("a.pdf")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    expect(toast.error).toHaveBeenCalledWith("CSV export failed: downloads unavailable");
   });
 
   it("opens the upload dialog for a partition upload link", async () => {

@@ -149,15 +149,16 @@ export default function DocumentListPage() {
   const fileRows = useMemo(() => filesQuery.data?.files ?? [], [filesQuery.data?.files]);
   const filteredFileRows = useMemo(() => {
     const q = fileSearch.trim().toLowerCase();
+    const indexedSinceTime = indexedSince ? new Date(`${indexedSince}T00:00:00`).getTime() : null;
     return fileRows.filter((file) => {
       const filename = fileLabel(file);
-      const fileDate = str(file.indexed_at ?? file.created_at).slice(0, 10);
+      const fileTime = Date.parse(str(file.indexed_at ?? file.created_at));
       const matchesSearch =
         !q ||
         [filename, file.file_id, file.mimetype].some((value) =>
           str(value).toLowerCase().includes(q),
         );
-      const matchesDate = !indexedSince || (fileDate && fileDate >= indexedSince);
+      const matchesDate = indexedSinceTime === null || (Number.isFinite(fileTime) && fileTime >= indexedSinceTime);
       return matchesSearch && matchesDate;
     });
   }, [fileRows, fileSearch, indexedSince]);
@@ -181,18 +182,22 @@ export default function DocumentListPage() {
   );
 
   const exportDocuments = () => {
-    downloadCsv(
-      `openrag-documents-${selected || "partition"}.csv`,
-      [
-        { header: "partition", value: () => selected },
-        { header: "file_id", value: (file) => file.file_id },
-        { header: "filename", value: (file) => fileLabel(file) },
-        { header: "mimetype", value: (file) => file.mimetype },
-        { header: "indexed_at", value: (file) => file.indexed_at },
-        { header: "created_at", value: (file) => file.created_at },
-      ],
-      filteredFileRows,
-    );
+    try {
+      downloadCsv(
+        `openrag-documents-${selected || "partition"}.csv`,
+        [
+          { header: "partition", value: () => selected },
+          { header: "file_id", value: (file) => file.file_id },
+          { header: "filename", value: (file) => fileLabel(file) },
+          { header: "mimetype", value: (file) => file.mimetype },
+          { header: "indexed_at", value: (file) => file.indexed_at },
+          { header: "created_at", value: (file) => file.created_at },
+        ],
+        filteredFileRows,
+      );
+    } catch (error) {
+      toast.error(`CSV export failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
   };
 
   useEffect(() => {
