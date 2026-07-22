@@ -362,6 +362,23 @@ async def test_chat_with_partition_retrieves_and_filters_sources():
 
 
 @pytest.mark.asyncio
+async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
+    # #707/#740: with a partition AND websearch enabled, the document branch must
+    # fuse through retrieve_multi (which honors the partition's rrf_k), NOT the
+    # legacy retrieve_per_query + fuse()@60. Revert-proves _gather_rag_and_web:
+    # reverting it to retrieve_per_query + fuse flips these call records and fails.
+    retrieval = FakeRetrieval()
+    web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
+    svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
+    _payload, _docs, web = await svc._prepare_chat(
+        ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"websearch": True}}
+    )
+    assert len(retrieval.retrieve_multi_calls) == 1  # doc branch fused via the rrf_k-aware retrieve_multi
+    assert retrieval.retrieve_per_query_calls == []  # legacy per-query + fuse()@60 path NOT used
+    assert web and web[0].url == "https://ex.com"  # websearch branch actually taken
+
+
+@pytest.mark.asyncio
 async def test_chat_with_valid_workspace_scopes_search_to_file_ids():
     scope = WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["fa", "fb"])
     retrieval = FakeRetrieval()
