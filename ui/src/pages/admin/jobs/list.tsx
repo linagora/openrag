@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef, RowSelectionState } from "@tanstack/react-table";
-import { Ban, RefreshCw, Search } from "lucide-react";
+import { Ban, Download, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { usePermissions } from "@/lib/permissions";
 
@@ -13,14 +13,23 @@ import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cancelTask, getQueueInfo, isActiveState, listTasks, type QueueInfo, type TaskListItem } from "@/lib/api/jobs";
+import { downloadCsv } from "@/lib/csv";
 import { formatDate } from "@/lib/utils";
 
 // OpenRag exposes per-file indexing tasks (TaskStateManager), not batch "jobs".
 const STATUS_TABS = ["ALL", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED"] as const;
 const JOBS_REFETCH_INTERVAL_MS = 5000;
 const JOB_SEARCH_DEBOUNCE_MS = 250;
+const ALL_PARTITIONS_FILTER = "__openrag/all_partitions__";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
 
@@ -149,6 +158,7 @@ export default function JobListPage() {
   const [statusTab, setStatusTab] = useState<string>("ALL");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [partitionFilter, setPartitionFilter] = useState(ALL_PARTITIONS_FILTER);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const taskStatusFilter = statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab;
@@ -171,18 +181,26 @@ export default function JobListPage() {
   });
 
   const tasks = useMemo(() => tasksQuery.data?.tasks ?? [], [tasksQuery.data?.tasks]);
+  const partitionOptions = useMemo(
+    () =>
+      Array.from(new Set(tasks.map((task) => str(task.details?.partition)).filter(Boolean))).sort(),
+    [tasks],
+  );
   const filteredTasks = useMemo(() => {
     const q = debouncedSearch.trim().toLowerCase();
-    if (!q) return tasks;
     return tasks.filter((task) => {
       const filename = str(task.details?.metadata?.filename);
       const fileId = str(task.details?.file_id);
       const partition = str(task.details?.partition);
-      return [task.task_id, task.state, filename, fileId, partition].some((value) =>
-        str(value).toLowerCase().includes(q),
-      );
+      const matchesSearch =
+        !q ||
+        [task.task_id, task.state, filename, fileId, partition].some((value) =>
+          str(value).toLowerCase().includes(q),
+        );
+      const matchesPartition = partitionFilter === ALL_PARTITIONS_FILTER || partition === partitionFilter;
+      return matchesSearch && matchesPartition;
     });
-  }, [tasks, debouncedSearch]);
+  }, [tasks, debouncedSearch, partitionFilter]);
   const selectedActiveTasks = useMemo(
     () => filteredTasks.filter((task) => rowSelection[task.task_id] && isActiveState(task.state)),
     [filteredTasks, rowSelection],
@@ -209,10 +227,31 @@ export default function JobListPage() {
     onError: (error: Error) => toast.error(`Bulk cancel failed: ${error.message}`),
   });
 
+  const exportJobs = () => {
+    try {
+      downloadCsv(
+        "openrag-jobs.csv",
+        [
+          { header: "task_id", value: (task) => task.task_id },
+          { header: "state", value: (task) => task.state },
+          { header: "filename", value: (task) => str(task.details?.metadata?.filename) },
+          { header: "file_id", value: (task) => str(task.details?.file_id) },
+          { header: "partition", value: (task) => str(task.details?.partition) },
+          { header: "created_at", value: (task) => task.created_at },
+          { header: "duration_ms", value: (task) => task.duration_ms },
+        ],
+        filteredTasks,
+      );
+    } catch (error) {
+      toast.error(`CSV export failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
+  };
+
   const handleStatusTabChange = (value: string) => {
     setStatusTab(value);
     setSearch("");
     setDebouncedSearch("");
+    setPartitionFilter(ALL_PARTITIONS_FILTER);
     setRowSelection({});
   };
 
@@ -234,6 +273,25 @@ export default function JobListPage() {
               className="pl-9"
             />
           </div>
+          <Select
+            value={partitionFilter}
+            onValueChange={(value) => {
+              setPartitionFilter(value);
+              setRowSelection({});
+            }}
+          >
+            <SelectTrigger className="w-[180px]" aria-label="Filter jobs by partition">
+              <SelectValue placeholder="All partitions" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL_PARTITIONS_FILTER}>All partitions</SelectItem>
+              {partitionOptions.map((partition) => (
+                <SelectItem key={partition} value={partition}>
+                  {partition}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             <p className="text-sm text-muted-foreground">
               {filteredTasks.length} job{filteredTasks.length === 1 ? "" : "s"}
@@ -262,6 +320,16 @@ export default function JobListPage() {
                 isError={queueInfoQuery.isError}
               />
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={exportJobs}
+              disabled={!filteredTasks.length}
+              title="Export filtered jobs"
+            >
+              <Download className="h-4 w-4" />
+              Export CSV
+            </Button>
             <Button
               variant="outline"
               size="icon-sm"
@@ -299,7 +367,7 @@ export default function JobListPage() {
             ) : (
               // Remounting resets pagination for a new tab/search context; sort state resets with it.
               <DataTable
-                key={`${statusTab}:${debouncedSearch}`}
+                key={`${statusTab}:${debouncedSearch}:${partitionFilter}`}
                 columns={columns}
                 data={filteredTasks}
                 enableSelection
