@@ -24,7 +24,7 @@ from core.models.catalog import (
     TERMINAL_TASK_STATES,
 )
 
-_ACTIVE_STATES = ("QUEUED", "SERIALIZING", "CHUNKING", "INSERTING")
+_ACTIVE_STATES = ("QUEUED", "SERIALIZING")
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 
 
@@ -86,7 +86,7 @@ class JobService:
         """Return task rows with details and lifecycle timing, filtered.
 
         - admins see every task; regular users only their own
-        - ``task_status='active'`` → QUEUED|SERIALIZING|CHUNKING|INSERTING
+        - ``task_status='active'`` → QUEUED|SERIALIZING
         - any other value → exact match (case-insensitive)
         - ``None`` → all tasks
 

@@ -443,7 +443,7 @@ async def test_create_partition_with_config_inside_indexing_admission_keeps_db_w
                 "embedder": "default",
                 "indexation_preset": "default",
                 "retrieval_preset": "default",
-                "chat_history_depth": 0,
+                "chat_history_depth": 4,
                 "chat_llm": None,
             },
         )

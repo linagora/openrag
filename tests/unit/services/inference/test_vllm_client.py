@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+import tenacity
 from core.utils.exceptions import (
     EmbeddingAPIError,
     EmbeddingResponseError,
@@ -206,6 +207,24 @@ class TestVLLMClient:
             return _chat_response()
 
         await self._make_client(handler).chat([{"role": "user", "content": "hi"}], temperature=0.9, max_tokens=100)
+
+    @pytest.mark.asyncio
+    async def test_max_retries_is_not_forwarded_to_request_body(self):
+        """max_retries is a config field (LLMParamsConfig), not a sampling param —
+        it must not leak into **kwargs/self._defaults and end up in the outgoing
+        chat payload the way batch_size once did for the embedder (#712)."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        client = self._make_client(capture, max_retries=9)
+        assert "max_retries" not in client._defaults
+
+        await client.chat([{"role": "user", "content": "hi"}])
+
+        assert "max_retries" not in captured
 
     @pytest.mark.asyncio
     async def test_trailing_slash_stripped(self):
@@ -529,6 +548,17 @@ class TestVLLMVision:
         await self._make_vision(handler, max_tokens=512).caption_image(b"img")
 
     @pytest.mark.asyncio
+    async def test_max_retries_is_not_forwarded_to_request_body(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "max_retries" not in json.loads(request.content)
+            return _chat_response("ok")
+
+        vision = self._make_vision(handler, max_retries=9)
+        assert "max_retries" not in vision._defaults
+
+        await vision.caption_image(b"img")
+
+    @pytest.mark.asyncio
     async def test_caption_image_sends_enable_thinking_as_chat_template_kwargs_when_configured(self):
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
@@ -602,3 +632,117 @@ class TestRegistryIntegration:
         from core.vlm import vlm_registry
 
         assert "vllm" in vlm_registry
+
+
+# ---------------------------------------------------------------------------
+# #704 — embedder transport failures must actually be retried
+# ---------------------------------------------------------------------------
+
+
+class TestEmbedderRetryFires:
+    """Assert the retry *re-invokes*, not merely that an exception type changed.
+
+    Before #704, ``EmbeddingAPIError`` hardcoded ``status_code=500``. Since
+    ``_is_retryable`` only accepts {429, 502, 503, 504} and the httpx exception
+    is translated *inside* the retried body, ``@with_retry(max_attempts=3)`` on
+    ``_embed_batch`` could never fire — one transient 503 failed the whole file.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_backoff(self):
+        """Drop the exponential backoff so these tests don't really sleep.
+
+        The retry decorator is applied at import time, so patching the module
+        function has no effect — reach into the tenacity Retrying object the
+        decorator attached and restore it afterwards.
+        """
+        retrying = VLLMEmbedder._embed_batch.retry
+        original = retrying.wait
+        retrying.wait = tenacity.wait_none()
+        yield
+        retrying.wait = original
+
+    def _embedder(self, handler):
+        embedder = VLLMEmbedder(
+            endpoint="http://embed.test/v1",
+            model_name="embed-model",
+            batch_size=8,
+        )
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+        return embedder
+
+    @pytest.mark.asyncio
+    async def test_retries_then_succeeds_on_transient_503(self):
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return httpx.Response(503, text="upstream busy")
+            return _embed_response([[0.1, 0.2]])
+
+        embedder = self._embedder(handler)
+        out = await embedder._embed_batch(["hello"])
+
+        assert out == [[0.1, 0.2]]
+        assert calls["n"] == 3, "expected two retries before success"
+
+    @pytest.mark.asyncio
+    async def test_retries_on_429_rate_limit(self):
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                return httpx.Response(429, text="slow down")
+            return _embed_response([[1.0]])
+
+        embedder = self._embedder(handler)
+        assert await embedder._embed_batch(["x"]) == [[1.0]]
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_retries_on_connection_reset_mid_request(self):
+        """A connection reset after the request starts is httpx.ReadError, not
+        ConnectError (a NetworkError under TransportError). The first fix only
+        caught ConnectError/TimeoutException, so a reset escaped raw and was not
+        retried. Regression for the #718 review."""
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise httpx.ReadError("connection reset by peer")
+            return _embed_response([[0.5]])
+
+        embedder = self._embedder(handler)
+        assert await embedder._embed_batch(["x"]) == [[0.5]]
+        assert calls["n"] == 2, "a ReadError mid-request must be retried"
+
+    @pytest.mark.asyncio
+    async def test_retries_on_connect_error(self):
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise httpx.ConnectError("cannot connect")
+            return _embed_response([[0.6]])
+
+        embedder = self._embedder(handler)
+        assert await embedder._embed_batch(["x"]) == [[0.6]]
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_client_error(self):
+        """A 400 is not transient — it must fail fast, not burn three attempts."""
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            return httpx.Response(400, text="bad request")
+
+        embedder = self._embedder(handler)
+        with pytest.raises(EmbeddingAPIError):
+            await embedder._embed_batch(["x"])
+        assert calls["n"] == 1, "4xx must not be retried"

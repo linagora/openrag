@@ -124,7 +124,7 @@ class RetrieverPipeline:
         if self.expansion_enabled:
             limit = self.reranker_top_k if top_k is None else max(self.reranker_top_k, top_k)
             head = copy.deepcopy(chunks[:limit])
-            expanded = await self.retriever.expand_search_results(results=head)
+            expanded = await self.retriever.expand_search_results(results=head, filter_params=filter_params)
             if len(expanded) > len(head):
                 chunks = expanded
                 if self.reranker_enabled:

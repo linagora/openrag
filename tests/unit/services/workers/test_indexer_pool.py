@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
+from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 
 
 class _NativeChunker:
@@ -89,7 +90,7 @@ async def test_catalog_initialization_is_single_flight() -> None:
     assert pool._catalog_initialized is True
 
 
-def test_build_indexer_pool_uses_new_detached_dispatcher_name(
+def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import core.config
@@ -120,9 +121,9 @@ def test_build_indexer_pool_uses_new_detached_dispatcher_name(
     assert pool == "dispatcher-actor"
     assert len(options_calls) == 1
     opts = options_calls[0]
-    # The dispatcher has a different public interface from the old detached
-    # IndexerPool actor, so it must not reuse that actor name during upgrades.
-    assert opts["name"] == "IndexerPoolDispatcher"
+    # A protocol-specific name prevents a rolling deployment from attaching to
+    # a detached actor that still runs the previous claim implementation.
+    assert opts["name"] == "IndexerPoolDispatcher-v2"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -157,7 +158,11 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
 
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
-    assert {c["name"] for c in calls} == {"IndexerWorker-0", "IndexerWorker-1", "IndexerWorker-2"}
+    assert {c["name"] for c in calls} == {
+        "IndexerWorker-v2-0",
+        "IndexerWorker-v2-1",
+        "IndexerWorker-v2-2",
+    }
     for c in calls:
         assert c["lifetime"] == "detached"
         assert c["max_concurrency"] == 4
@@ -767,6 +772,68 @@ def test_contextualizer_factory_rebuilds_on_api_key_rotation(tmp_path) -> None:
         llm_registry._registry.pop("key-probe-llm", None)
 
 
+def test_global_llm_endpoint_config_carries_sampling_params() -> None:
+    """The fallback LLM endpoint config must carry temperature/max_retries/
+    logprobs so it behaves the same as a named endpoint (#720) — and
+    ``logprobs`` must default to False (LLMParamsConfig's real default), not
+    True.
+    """
+    from services.workers.indexer_pool import _global_llm_endpoint_config
+
+    cfg = SimpleNamespace(
+        llm=SimpleNamespace(
+            base_url="http://llm.example/v1",
+            model="mistral",
+            api_key="llm-key",
+            temperature=0.42,
+            max_retries=9,
+            logprobs=True,
+            timeout=60,
+        )
+    )
+
+    endpoint_cfg = _global_llm_endpoint_config(cfg)
+
+    assert endpoint_cfg.extra["temperature"] == 0.42
+    assert endpoint_cfg.extra["max_retries"] == 9
+    assert endpoint_cfg.extra["logprobs"] is True
+
+
+def test_global_llm_endpoint_config_logprobs_defaults_false() -> None:
+    from services.workers.indexer_pool import _global_llm_endpoint_config
+
+    cfg = SimpleNamespace(llm=SimpleNamespace(base_url="http://llm.example/v1", model="mistral"))
+
+    endpoint_cfg = _global_llm_endpoint_config(cfg)
+
+    assert endpoint_cfg.extra["logprobs"] is False
+
+
+def test_global_vlm_endpoint_config_carries_sampling_params() -> None:
+    """Mirrors the LLM fallback: the VLM fallback must also carry sampling
+    params instead of dropping temperature/max_retries/logprobs entirely.
+    """
+    from services.workers.indexer_pool import _global_vlm_endpoint_config
+
+    cfg = SimpleNamespace(
+        vlm=SimpleNamespace(
+            base_url="http://vlm.example/v1",
+            model="pixtral",
+            api_key="vlm-key",
+            temperature=0.55,
+            max_retries=4,
+            logprobs=True,
+            timeout=60,
+        )
+    )
+
+    endpoint_cfg = _global_vlm_endpoint_config(cfg)
+
+    assert endpoint_cfg.extra["temperature"] == 0.55
+    assert endpoint_cfg.extra["max_retries"] == 4
+    assert endpoint_cfg.extra["logprobs"] is True
+
+
 def test_build_contextualizer_factory_uses_global_llm_fallback(tmp_path) -> None:
     from services.workers.indexer_pool import _build_contextualizer_factory
 
@@ -886,7 +953,9 @@ def _bare_pool(workers: list) -> object:
     actor_class = IndexerPool.__ray_metadata__.modified_class
     pool = actor_class.__new__(actor_class)
     pool._workers = list(workers)
+    pool._worker_names = [f"test-worker-{index}" for index in range(len(workers))]
     pool._inflight = [0] * len(workers)
+    pool._accepting_tasks = True
     pool._release_tasks = set()
     pool._claim_store = None
     pool._claim_store_lock = asyncio.Lock()
@@ -900,6 +969,32 @@ async def _settle_pool_release_tasks(pool: object, *futures: asyncio.Future[obje
     release_tasks = list(getattr(pool, "_release_tasks"))
     if release_tasks:
         await asyncio.gather(*release_tasks)
+
+
+@pytest.mark.asyncio
+async def test_claim_repo_preserves_configured_catalog_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.config
+    import services.storage.postgres_store as postgres_store
+
+    pool = _bare_pool([_FakeWorker()])
+    rdb = SimpleNamespace(database="custom_catalog")
+    cfg = SimpleNamespace(rdb=rdb, vectordb=SimpleNamespace(collection_name="ignored_collection"))
+    repo = object()
+    calls = []
+
+    class Store:
+        def __init__(self, config, *, run_migrations):
+            self.document_repo = repo
+            calls.append((config, run_migrations))
+
+        async def initialize(self) -> None:
+            calls.append("initialized")
+
+    monkeypatch.setattr(core.config, "load_config", lambda: cfg)
+    monkeypatch.setattr(postgres_store, "PostgresStore", Store)
+
+    assert await pool._claim_document_repo() is repo
+    assert calls == [(rdb, False), "initialized"]
 
 
 def test_pool_requires_positive_pool_size() -> None:
@@ -930,6 +1025,60 @@ async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
         workers[1].futures[0],
         workers[0].futures[1],
     )
+
+
+@pytest.mark.asyncio
+async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+
+    await pool.submit(task_id="accepted-before-drain")
+
+    assert await pool.begin_drain() == {
+        "protocol_version": "v2",
+        "accepting_tasks": False,
+        "inflight_jobs": 1,
+        "worker_names": ["test-worker-0"],
+    }
+    with pytest.raises(RuntimeError, match="draining"):
+        await pool.submit(task_id="rejected-after-drain")
+    assert len(worker.calls) == 1
+
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+    assert await pool.status() == {
+        "protocol_version": "v2",
+        "accepting_tasks": False,
+        "inflight_jobs": 0,
+        "worker_names": ["test-worker-0"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_pool_abort_drain_restores_acceptance() -> None:
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+
+    await pool.begin_drain()
+    with pytest.raises(RuntimeError, match="draining"):
+        await pool.submit(task_id="rejected-while-draining")
+
+    assert await pool.abort_drain() == {
+        "protocol_version": "v2",
+        "accepting_tasks": True,
+        "inflight_jobs": 0,
+        "worker_names": ["test-worker-0"],
+    }
+
+    await pool.submit(task_id="accepted-after-abort")
+    assert len(worker.calls) == 1
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+
+
+@pytest.mark.asyncio
+async def test_pool_reports_current_protocol_version() -> None:
+    pool = _bare_pool([_FakeWorker()])
+
+    assert await pool.protocol_version() == "v2"
 
 
 @pytest.mark.asyncio
@@ -1001,7 +1150,11 @@ async def test_pool_renews_content_claim_while_task_is_active(monkeypatch: pytes
     await pool.submit(
         task_id="task-1",
         partition="tenant-a",
-        metadata={"file_id": "file-1", "content_sha256": "abc123"},
+        metadata={
+            "file_id": "file-1",
+            "content_sha256": "abc123",
+            CONTENT_CLAIM_TOKEN_METADATA_KEY: "attempt-1",
+        },
     )
     await asyncio.wait_for(renewed.wait(), timeout=1)
     await _settle_pool_release_tasks(pool, worker.futures[0])
@@ -1011,11 +1164,13 @@ async def test_pool_renews_content_claim_while_task_is_active(monkeypatch: pytes
         "file_id": "file-1",
         "partition": "tenant-a",
         "content_sha256": "abc123",
+        "claim_token": "attempt-1",
     }
     repo.release_content_sha256_claim.assert_awaited_once_with(
         file_id="file-1",
         partition="tenant-a",
         content_sha256="abc123",
+        claim_token="attempt-1",
     )
 
 
@@ -1032,7 +1187,11 @@ async def test_pool_keeps_content_claim_until_cancelled_task_settles() -> None:
     await pool.submit(
         task_id="task-1",
         partition="tenant-a",
-        metadata={"file_id": "file-1", "content_sha256": "abc123"},
+        metadata={
+            "file_id": "file-1",
+            "content_sha256": "abc123",
+            CONTENT_CLAIM_TOKEN_METADATA_KEY: "attempt-1",
+        },
     )
 
     worker.futures[0].cancel()
@@ -1043,6 +1202,7 @@ async def test_pool_keeps_content_claim_until_cancelled_task_settles() -> None:
         file_id="file-1",
         partition="tenant-a",
         content_sha256="abc123",
+        claim_token="attempt-1",
     )
 
 
@@ -1061,6 +1221,8 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     vlm_factory = object()
 
     class RDBConfig:
+        database = "custom_catalog"
+
         def model_copy(self, *, update):
             return SimpleNamespace(**update)
 
@@ -1091,6 +1253,11 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
         captured.update(kwargs)
         return object()
 
+    def fake_postgres_store(config, *, run_migrations):
+        captured["catalog_config"] = config
+        captured["catalog_run_migrations"] = run_migrations
+        return Store()
+
     monkeypatch.setattr(core.config, "load_config", lambda: cfg)
     monkeypatch.setattr(module, "_build_chunker", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_embedder_factory", lambda _cfg: object())
@@ -1099,7 +1266,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(module, "_build_topic_tagger_factory", lambda _cfg: topic_tagger_factory)
     monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
     monkeypatch.setattr(milvus_store, "MilvusVectorStore", lambda _cfg: object())
-    monkeypatch.setattr(postgres_store, "PostgresStore", lambda *args, **kwargs: Store())
+    monkeypatch.setattr(postgres_store, "PostgresStore", fake_postgres_store)
     monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg: object())
     monkeypatch.setattr(parser_dispatcher, "build_caption_vlm", lambda _cfg: object())
     monkeypatch.setattr(pipeline_builder, "build_indexing_pipeline", fake_build_pipeline)
@@ -1121,6 +1288,9 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     assert captured["contextualizer_factory"] is contextualizer_factory
     assert captured["topic_tagger_factory"] is topic_tagger_factory
     assert captured["vlm_factory"] is vlm_factory
+    assert captured["catalog_config"] is cfg.rdb
+    assert captured["catalog_config"].database == "custom_catalog"
+    assert captured["catalog_run_migrations"] is False
 
 
 def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1139,6 +1309,8 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
     captured = {}
 
     class RDBConfig:
+        database = None
+
         def model_copy(self, *, update):
             return SimpleNamespace(**update)
 
@@ -1208,9 +1380,11 @@ class _RecordingWorker:
     def __init__(self, *, error: Exception | None = None) -> None:
         self._error = error
         self.calls = 0
+        self.last_kwargs = None
 
-    async def process_file(self, **_kwargs) -> dict:
+    async def process_file(self, **kwargs) -> dict:
         self.calls += 1
+        self.last_kwargs = kwargs
         if self._error is not None:
             raise self._error
         return {"stored_count": 1, "stage": "stored"}
@@ -1255,12 +1429,17 @@ async def test_actor_keeps_upload_by_default(tmp_path) -> None:
 async def test_actor_releases_content_claim_after_indexing(tmp_path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"x")
-    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
 
     await actor.process_file(
         task_id="t",
         path=str(path),
-        metadata={"file_id": "f", "content_sha256": "abc123"},
+        metadata={
+            "file_id": "f",
+            "content_sha256": "abc123",
+            CONTENT_CLAIM_TOKEN_METADATA_KEY: "attempt-1",
+        },
         partition="p",
     )
 
@@ -1268,7 +1447,9 @@ async def test_actor_releases_content_claim_after_indexing(tmp_path) -> None:
         file_id="f",
         partition="p",
         content_sha256="abc123",
+        claim_token="attempt-1",
     )
+    assert CONTENT_CLAIM_TOKEN_METADATA_KEY not in worker.last_kwargs["metadata"]
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING, Any
 
 from core.models.catalog import DocumentRecord, DocumentStatus
 from core.ports.document_repo import DocumentRepository
+from core.utils.logging import get_logger
+from services.persistence.file_count import decrement_file_counts
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -37,6 +39,8 @@ if TYPE_CHECKING:
 # on every connection, so reading a JSON column yields a Python dict and
 # binding a dict to a JSON parameter is encoded transparently. The repo
 # therefore never calls ``json.dumps`` itself.
+
+logger = get_logger()
 
 
 class PgDocumentRepository(DocumentRepository):
@@ -192,47 +196,45 @@ class PgDocumentRepository(DocumentRepository):
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
-                    "SELECT id, created_by FROM files WHERE file_id = $1 LIMIT 1",
+                    """
+                    WITH target AS (
+                        SELECT id
+                        FROM files
+                        WHERE file_id = $1
+                        ORDER BY id
+                        LIMIT 1
+                    )
+                    DELETE FROM files AS file
+                    USING target
+                    WHERE file.id = target.id
+                    RETURNING file.created_by
+                    """,
                     document_id,
                 )
-                if row is None:
-                    return False
-                await conn.execute("DELETE FROM files WHERE id = $1", row["id"])
-                if row["created_by"] is not None:
-                    await conn.execute(
-                        "UPDATE users SET file_count = GREATEST(file_count - 1, 0) WHERE id = $1",
-                        row["created_by"],
-                    )
-                return True
+                deleted_rows = [row] if row is not None else []
+                counters_adjusted = await decrement_file_counts(conn, deleted_rows)
+                logger.bind(
+                    operation="delete_document",
+                    deleted_rows=len(deleted_rows),
+                    counters_adjusted=counters_adjusted,
+                ).debug("Catalog file deletion accounted")
+                return row is not None
 
     async def delete_documents_by_partition(self, partition: str) -> int:
         """Bulk-delete every file in a partition and decrement uploader counts."""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                uploader_rows = await conn.fetch(
-                    """
-                    SELECT created_by, COUNT(*)::int AS n
-                    FROM files
-                    WHERE partition_name = $1 AND created_by IS NOT NULL
-                    GROUP BY created_by
-                    """,
+                deleted_rows = await conn.fetch(
+                    "DELETE FROM files WHERE partition_name = $1 RETURNING created_by",
                     partition,
                 )
-                result = await conn.execute(
-                    "DELETE FROM files WHERE partition_name = $1",
-                    partition,
-                )
-                for r in uploader_rows:
-                    await conn.execute(
-                        "UPDATE users SET file_count = GREATEST(file_count - $1, 0) WHERE id = $2",
-                        r["n"],
-                        r["created_by"],
-                    )
-        # asyncpg returns 'DELETE <n>' as the command tag.
-        try:
-            return int(result.split()[-1])
-        except (ValueError, IndexError):
-            return 0
+                counters_adjusted = await decrement_file_counts(conn, deleted_rows)
+                logger.bind(
+                    operation="delete_documents_by_partition",
+                    deleted_rows=len(deleted_rows),
+                    counters_adjusted=counters_adjusted,
+                ).debug("Catalog file deletion accounted")
+                return len(deleted_rows)
 
     async def count_documents(
         self,
@@ -273,6 +275,7 @@ class PgDocumentRepository(DocumentRepository):
         file_id: str,
         partition: str,
         content_sha256: str,
+        claim_token: str,
         replace: bool = False,
     ) -> str | None:
         """Atomically reserve content while it is being indexed."""
@@ -305,14 +308,15 @@ class PgDocumentRepository(DocumentRepository):
                 )
                 claimed = await conn.fetchval(
                     """
-                    INSERT INTO file_content_claims (partition_name, content_sha256, file_id)
-                    VALUES ($1, $2, $3)
+                    INSERT INTO file_content_claims (partition_name, content_sha256, file_id, claim_token)
+                    VALUES ($1, $2, $3, $4)
                     ON CONFLICT (partition_name, content_sha256) DO NOTHING
                     RETURNING file_id
                     """,
                     partition,
                     content_sha256,
                     file_id,
+                    claim_token,
                 )
                 if claimed is not None:
                     return None
@@ -331,16 +335,19 @@ class PgDocumentRepository(DocumentRepository):
         file_id: str,
         partition: str,
         content_sha256: str,
+        claim_token: str,
     ) -> bool:
         result = await self.pool.execute(
             """
             UPDATE file_content_claims
             SET expires_at = NOW() + interval '24 hours'
-            WHERE partition_name = $1 AND content_sha256 = $2 AND file_id = $3
+            WHERE partition_name = $1 AND content_sha256 = $2
+              AND file_id = $3 AND claim_token = $4
             """,
             partition,
             content_sha256,
             file_id,
+            claim_token,
         )
         return result.endswith(" 1")
 
@@ -350,6 +357,7 @@ class PgDocumentRepository(DocumentRepository):
         file_id: str,
         partition: str,
         content_sha256: str,
+        claim_token: str,
     ) -> None:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -361,11 +369,13 @@ class PgDocumentRepository(DocumentRepository):
                 await conn.execute(
                     """
                     DELETE FROM file_content_claims
-                    WHERE partition_name = $1 AND content_sha256 = $2 AND file_id = $3
+                    WHERE partition_name = $1 AND content_sha256 = $2
+                      AND file_id = $3 AND claim_token = $4
                     """,
                     partition,
                     content_sha256,
                     file_id,
+                    claim_token,
                 )
 
     # ── Legacy method names used by the Phase 7C shim ────────────────
@@ -481,19 +491,22 @@ class PgDocumentRepository(DocumentRepository):
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
-                    "SELECT id, created_by FROM files WHERE file_id = $1 AND partition_name = $2",
+                    """
+                    DELETE FROM files
+                    WHERE file_id = $1 AND partition_name = $2
+                    RETURNING created_by
+                    """,
                     file_id,
                     partition,
                 )
-                if row is None:
-                    return False
-                await conn.execute("DELETE FROM files WHERE id = $1", row["id"])
-                if row["created_by"] is not None:
-                    await conn.execute(
-                        "UPDATE users SET file_count = GREATEST(file_count - 1, 0) WHERE id = $1",
-                        row["created_by"],
-                    )
-                return True
+                deleted_rows = [row] if row is not None else []
+                counters_adjusted = await decrement_file_counts(conn, deleted_rows)
+                logger.bind(
+                    operation="remove_file_from_partition",
+                    deleted_rows=len(deleted_rows),
+                    counters_adjusted=counters_adjusted,
+                ).debug("Catalog file deletion accounted")
+                return row is not None
 
     async def update_file_metadata_in_db(
         self,

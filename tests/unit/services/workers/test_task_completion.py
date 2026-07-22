@@ -76,7 +76,7 @@ async def test_tracker_recovers_active_task_after_restart() -> None:
         "user_id": 42,
     }
     tsm = _task_state_manager(
-        all_info={"task-1": {"state": "INSERTING", "details": details}},
+        all_info={"task-1": {"state": "SERIALIZING", "details": details}},
         object_ref={"ref": ref},
     )
     tsm.get_details.remote.return_value = details
@@ -105,7 +105,7 @@ async def test_tracker_retries_active_task_without_stored_ref_after_restart() ->
         "user_id": 42,
     }
     tsm = _task_state_manager(
-        all_info={"task-1": {"state": "INSERTING", "details": details}},
+        all_info={"task-1": {"state": "SERIALIZING", "details": details}},
         object_ref=None,
     )
     tracker_handle = MagicMock()
@@ -133,7 +133,7 @@ async def test_tracker_records_recovered_refless_task_when_it_reaches_terminal_s
     }
     tsm = _task_state_manager(object_ref=None)
     tsm.get_details.remote.return_value = details
-    tsm.get_state.remote.side_effect = ["INSERTING", "COMPLETED"]
+    tsm.get_state.remote.side_effect = ["SERIALIZING", "COMPLETED"]
 
     with (
         patch("services.workers.task_completion.ray.get_actor", return_value=tsm),

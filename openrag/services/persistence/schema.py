@@ -170,6 +170,12 @@ file_content_claims = Table(
     Column("content_sha256", String(64), primary_key=True),
     Column("file_id", String, nullable=False),
     Column(
+        "claim_token",
+        String,
+        server_default=text("md5(random()::text || clock_timestamp()::text)"),
+        nullable=False,
+    ),
+    Column(
         "expires_at",
         DateTime(timezone=True),
         server_default=text("now() + interval '24 hours'"),

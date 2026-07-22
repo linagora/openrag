@@ -17,6 +17,8 @@ import pytest
 import services.orchestrators.query_service as qs
 from core.config import load_config
 from core.models.chunk import Chunk
+from core.models.workspace import WorkspaceScope
+from core.utils.exceptions import WorkspaceNotFoundError
 from services.orchestrators.query_service import QueryService
 
 # Real prompt-template config (dir + key->filename mapping) so QueryService
@@ -60,11 +62,15 @@ class FakeLLM:
 class FakeRetrieval:
     def __init__(self, chunks=None):
         self._chunks = chunks if chunks is not None else [Chunk(id="c1", text="ctx", metadata={"_id": "c1"})]
+        self.retrieve_multi_calls: list[dict] = []
+        self.retrieve_per_query_calls: list[dict] = []
 
     async def retrieve_multi(self, **kwargs):
+        self.retrieve_multi_calls.append(kwargs)
         return list(self._chunks)
 
     async def retrieve_per_query(self, *, queries, **kwargs):
+        self.retrieve_per_query_calls.append({"queries": queries, **kwargs})
         return [list(self._chunks) for _ in queries]
 
     @staticmethod
@@ -83,8 +89,14 @@ class FakeWeb:
 
 
 class FakeWorkspace:
+    def __init__(self, scope=None):
+        self._scope = scope
+
     async def get_workspace(self, wid):
         return None
+
+    async def resolve_scope(self, workspace_id, allowed_partitions):
+        return self._scope
 
 
 def _config(mode="SimpleRag"):
@@ -99,13 +111,13 @@ def _config(mode="SimpleRag"):
     )
 
 
-def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None) -> QueryService:
+def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None) -> QueryService:
     return QueryService(
         retrieval_service=retrieval or FakeRetrieval(),
         llm=llm or FakeLLM(),
         config=_config(mode),
         web_search_service=web or FakeWeb(),
-        workspace_service=FakeWorkspace(),
+        workspace_service=workspace or FakeWorkspace(),
         llm_factory=llm_factory,
     )
 
@@ -153,6 +165,25 @@ def test_resolve_chat_history_depth_multi_partition_takes_max_explicit():
         "c": SimpleNamespace(chat_history_depth=0),  # inherits → ignored
     }
     assert svc._resolve_chat_history_depth(["a", "b", "c"]) == 6
+
+
+@pytest.mark.parametrize("global_depth", [0, -1])
+def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
+    """RAGConfig.chat_history_depth carries no lower bound. Left unclamped, a
+    misconfigured global depth of 0 would make messages[-0:] keep the *entire*
+    history for chats with no partition (or the "all" sentinel) — the opposite
+    of what this depth is meant to limit."""
+    config = _config()
+    config.rag.chat_history_depth = global_depth
+    svc = QueryService(
+        retrieval_service=FakeRetrieval(),
+        llm=FakeLLM(),
+        config=config,
+        web_search_service=FakeWeb(),
+        workspace_service=FakeWorkspace(),
+    )
+    assert svc._default_chat_history_depth == 4
+    assert svc._resolve_chat_history_depth(None) == 4
 
 
 # --------------------------------------------------------------------------- #
@@ -335,36 +366,114 @@ async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
     # #707/#740: with a partition AND websearch enabled, the document branch must
     # fuse through retrieve_multi (which honors the partition's rrf_k), NOT the
     # legacy retrieve_per_query + fuse()@60. Revert-proves _gather_rag_and_web:
-    # reverting it back to retrieve_per_query + fuse flips these counters and fails.
-    calls = {"multi": 0, "per_query": 0, "fuse": 0}
+    # reverting it to retrieve_per_query + fuse flips these call records and fails.
     retrieval = FakeRetrieval()
-    base_multi = retrieval.retrieve_multi
-
-    async def _multi(**kwargs):
-        calls["multi"] += 1
-        return await base_multi(**kwargs)
-
-    async def _per_query(*, queries, **kwargs):
-        calls["per_query"] += 1
-        return [[] for _ in queries]
-
-    def _fuse(doc_lists, top_k=None):
-        calls["fuse"] += 1
-        return doc_lists[0] if doc_lists else []
-
-    retrieval.retrieve_multi = _multi
-    retrieval.retrieve_per_query = _per_query
-    retrieval.fuse = _fuse
-
     web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
     svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
     _payload, _docs, web = await svc._prepare_chat(
         ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"websearch": True}}
     )
-    assert calls["multi"] == 1  # doc branch fused via the rrf_k-aware retrieve_multi
-    assert calls["per_query"] == 0  # legacy per-query path NOT used
-    assert calls["fuse"] == 0  # hardcoded-60 fuse NOT used
+    assert len(retrieval.retrieve_multi_calls) == 1  # doc branch fused via the rrf_k-aware retrieve_multi
+    assert retrieval.retrieve_per_query_calls == []  # legacy per-query + fuse()@60 path NOT used
     assert web and web[0].url == "https://ex.com"  # websearch branch actually taken
+
+
+@pytest.mark.asyncio
+async def test_chat_with_valid_workspace_scopes_search_to_file_ids():
+    scope = WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["fa", "fb"])
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]), workspace=FakeWorkspace(scope)
+    )
+    await svc.chat(
+        partitions=["p1"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {"workspace": "w1"}},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    assert len(retrieval.retrieve_multi_calls) == 1
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["partitions"] == ["p1"]
+    assert call["filter_params"] == {"file_id": ["fa", "fb"]}
+
+
+@pytest.mark.asyncio
+async def test_chat_workspace_restricts_openrag_all_to_owning_partition():
+    # "openrag-all" reaches _prepare_chat as partitions=["all"] — a workspace
+    # must narrow retrieval to its single owning partition, never search
+    # every accessible partition with just a file_id filter (#706).
+    scope = WorkspaceScope(workspace_id="w1", partition="only-this-one", file_ids=["fa"])
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]), workspace=FakeWorkspace(scope)
+    )
+    await svc.chat(
+        partitions=["all"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {"workspace": "w1"}},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["partitions"] == ["only-this-one"]
+
+
+@pytest.mark.asyncio
+async def test_chat_empty_workspace_scopes_to_zero_files_not_full_partition():
+    scope = WorkspaceScope(workspace_id="w1", partition="p1", file_ids=[])
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]), workspace=FakeWorkspace(scope)
+    )
+    await svc.chat(
+        partitions=["p1"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {"workspace": "w1"}},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["filter_params"] == {"file_id": []}  # must stay explicit, never None/omitted
+
+
+@pytest.mark.asyncio
+async def test_chat_invalid_workspace_raises_instead_of_falling_back():
+    # Fail closed: an unknown/inaccessible workspace must error, never
+    # silently widen the search to the full partition (#706).
+    svc = _svc(workspace=FakeWorkspace(None))
+    with pytest.raises(WorkspaceNotFoundError):
+        await svc.chat(
+            partitions=["p1"],
+            payload={"messages": [{"role": "user", "content": "q"}], "metadata": {"workspace": "ghost"}},
+            prepare_sources=lambda d, w: [],
+            model_name="m",
+        )
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_invalid_workspace_raises_instead_of_falling_back():
+    svc = _svc(workspace=FakeWorkspace(None))
+    with pytest.raises(WorkspaceNotFoundError):
+        async for _ in svc.chat_stream(
+            partitions=["p1"],
+            payload={"messages": [{"role": "user", "content": "q"}], "metadata": {"workspace": "ghost"}},
+            prepare_sources=lambda d, w: [],
+            model_name="m",
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_chat_without_workspace_unaffected():
+    retrieval = FakeRetrieval()
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
+    await svc.chat(
+        partitions=["p1"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["partitions"] == ["p1"]
+    assert call["filter_params"] is None
 
 
 @pytest.mark.asyncio
