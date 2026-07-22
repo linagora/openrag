@@ -33,6 +33,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("VLM_MODEL", "vlm.model", str),
     ("VLM_API_KEY", "vlm.api_key", str),
     ("VLM_ENABLE_THINKING", "vlm.enable_thinking", bool),
+    ("VLM_TIMEOUT", "vlm.timeout", float),
     # Semaphore
     ("LLM_SEMAPHORE", "semaphore.llm_semaphore", int),
     ("VLM_SEMAPHORE", "semaphore.vlm_semaphore", int),
@@ -96,6 +97,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("IMAGE_CAPTIONING_URL", "loader.image_captioning_url", bool),
     ("SAVE_MARKDOWN", "loader.save_markdown", bool),
     ("SAVE_UPLOADED_FILES", "loader.save_uploaded_files", bool),
+    ("CONTENT_DEDUPLICATION_ENABLED", "loader.content_deduplication_enabled", bool),
     ("PDFLOADER", "loader.file_loaders.pdf", str),
     ("AUDIOLOADER", "loader.file_loaders.wav", str),
     ("MARKER_MAX_TASKS_PER_CHILD", "loader.marker_max_tasks_per_child", int),

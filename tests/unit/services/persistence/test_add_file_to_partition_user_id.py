@@ -102,6 +102,29 @@ async def test_add_file_to_partition_persists_indexation_config_column():
 
 
 @pytest.mark.asyncio
+async def test_add_file_to_partition_persists_content_hash_column():
+    from services.persistence.document_repo import PgDocumentRepository
+
+    pool = _FakePool()
+    repo = PgDocumentRepository(pool_getter=lambda: pool)
+
+    assert (
+        await repo.add_file_to_partition(
+            file_id="f1",
+            partition="new-part",
+            user_id=42,
+            content_sha256="abc123",
+        )
+        is True
+    )
+    insert_query, insert_params = next(
+        (query, params) for query, params in pool.conn.executed if "INSERT INTO files" in query
+    )
+    assert "content_sha256" in insert_query
+    assert "abc123" in insert_params
+
+
+@pytest.mark.asyncio
 async def test_require_existing_partition_does_not_auto_create_missing_partition():
     from services.persistence.document_repo import PgDocumentRepository
 
@@ -154,6 +177,20 @@ async def test_update_file_in_partition_persists_indexation_config_column():
     query, params = pool.executed[0]
     assert "indexation_config" in query
     assert snapshot in params
+
+
+@pytest.mark.asyncio
+async def test_update_file_in_partition_updates_content_hash_column():
+    from services.persistence.document_repo import PgDocumentRepository
+
+    pool = _DirectExecutePool()
+    repo = PgDocumentRepository(pool_getter=lambda: pool)
+
+    assert await repo.update_file_in_partition("f1", "tenant-a", content_sha256="abc123") is True
+
+    query, params = pool.executed[0]
+    assert "content_sha256" in query
+    assert "abc123" in params
 
 
 def test_row_to_document_exposes_indexation_config_snapshot():

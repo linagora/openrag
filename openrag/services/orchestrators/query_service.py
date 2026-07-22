@@ -49,6 +49,7 @@ from core.prompts import (
     format_web_context,
     load_template_by_key,
 )
+from core.utils.exceptions import WorkspaceNotFoundError
 from core.utils.logging import get_logger
 from core.utils.source_filtering import (
     extract_and_strip_sources_block,
@@ -99,6 +100,10 @@ class RAGMODE(Enum):
 class QueryService:
     """End-to-end RAG: query-gen → retrieve (+web) → map-reduce → answer."""
 
+    #: Used when the global ``rag.chat_history_depth`` config is < 1 — see
+    #: PartitionService._CHAT_HISTORY_DEPTH_DEFAULT for the matching partition-side clamp.
+    _CHAT_HISTORY_DEPTH_DEFAULT = 4
+
     def __init__(
         self,
         *,
@@ -120,7 +125,14 @@ class QueryService:
         # read at request time, not snapshotted once at startup.
         self._config = config
         self._rag_mode = config.rag.mode
-        self._default_chat_history_depth = config.rag.chat_history_depth
+        # RAGConfig.chat_history_depth carries no lower bound, so a deployment may
+        # configure it to 0 (or negative). Left unclamped, messages[-0:] would keep
+        # the *entire* history instead of none — the opposite of what this depth
+        # is meant to limit. Clamp here rather than reject at config-load time so a
+        # misconfigured global default degrades safely instead of crashing startup.
+        self._default_chat_history_depth = (
+            config.rag.chat_history_depth if config.rag.chat_history_depth >= 1 else self._CHAT_HISTORY_DEPTH_DEFAULT
+        )
         self._max_contextualized_query_len = config.rag.max_contextualized_query_len
         self._max_context_tokens = config.reranker.top_k * config.chunker.chunk_size
 
@@ -138,9 +150,16 @@ class QueryService:
         """Effective chat-history depth for this request.
 
         Honors a partition's configured ``chat_history_depth`` (set via the
-        admin API) over the global default. A partition value of ``0`` means
-        "inherit the global default" — it never reaches the ``messages[-depth:]``
-        slice, where ``0`` would otherwise select the *entire* history.
+        admin API) over the global default. The admin API now requires an
+        explicit ``chat_history_depth >= 1`` on create/update (``ge=1`` in
+        ``CreatePartitionRequest``/``UpdatePartitionRequest``), and
+        ``PartitionService.resolve_partition_row`` normalizes any pre-existing
+        row still holding the legacy ``0`` sentinel to the global default
+        value before it reaches ``Settings.partitions``. So in practice
+        ``cfg.chat_history_depth`` is always >= 1 here; the ``> 0`` filter
+        below is kept only as a defensive backstop — it must never reach the
+        ``messages[-depth:]`` slice, where ``0`` would select the *entire*
+        history rather than none.
 
         The ``"all"`` sentinel (``openrag-all``) reaches this layer un-expanded
         (retrieval resolves it to concrete partitions downstream) and is a
@@ -312,17 +331,21 @@ class QueryService:
 
         top_k = self._mr_max if use_map_reduce else None
 
-        if workspace:
-            ws = await self._workspace.get_workspace(workspace)
-            if not ws or ("all" not in partition and ws["partition_name"] not in partition):
-                logger.warning("Workspace not found in partition(s) — ignoring", workspace=workspace)
-                workspace = None
-        filter_params = {"workspace_id": workspace} if workspace else None
+        filter_params = None
+        if workspace and partition:
+            scope = await self._workspace.resolve_scope(workspace, partition)
+            if scope is None:
+                raise WorkspaceNotFoundError(f"Workspace '{workspace}' not found.")
+            # A workspace belongs to exactly one partition — narrow retrieval to
+            # it even for an "openrag-all" / multi-partition request, otherwise
+            # file_id-only filtering could match a same-named file in another
+            # partition the caller also has access to (#706).
+            partition = [scope.partition]
+            filter_params = {"file_id": scope.file_ids}
 
         web_results: list = []
         if partition is not None and use_websearch:
-            doc_lists, web_lists = await self._gather_rag_and_web(queries.query_list, partition, top_k, filter_params)
-            chunks = self._retrieval.fuse(doc_lists, top_k=top_k)
+            chunks, web_lists = await self._gather_rag_and_web(queries, partition, top_k, filter_params)
             web_results = _dedupe_web(web_lists)
         elif partition is not None:
             chunks = await self._retrieval.retrieve_multi(
@@ -380,13 +403,18 @@ class QueryService:
         payload["messages"] = new_messages
         return payload, docs, web_results
 
-    async def _gather_rag_and_web(self, query_list, partition, top_k, filter_params):
-        rag = self._retrieval.retrieve_per_query(
-            partitions=partition, queries=query_list, top_k=top_k, filter_params=filter_params
+    async def _gather_rag_and_web(self, queries, partition, top_k, filter_params):
+        # Fuse the doc branch through retrieve_multi so a partition's rrf_k drives
+        # its sub-query fusion here too (#707). Previously this used
+        # retrieve_per_query + fuse() at the hardcoded 60, so enabling websearch
+        # silently ignored rrf_k and the same preset fused differently depending
+        # on the websearch toggle.
+        rag = self._retrieval.retrieve_multi(
+            partitions=partition, search_queries=queries, top_k=top_k, filter_params=filter_params
         )
-        web = asyncio.gather(*[self._web.search(q.query) for q in query_list])
-        doc_lists, web_lists = await asyncio.gather(rag, web)
-        return doc_lists, web_lists
+        web = asyncio.gather(*[self._web.search(q.query) for q in queries.query_list])
+        chunks, web_lists = await asyncio.gather(rag, web)
+        return chunks, web_lists
 
     async def _prepare_completions(self, partition: list[str], payload: dict, llm: LLM | None = None):
         prompt = payload["prompt"]

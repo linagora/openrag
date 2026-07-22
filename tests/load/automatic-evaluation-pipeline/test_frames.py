@@ -103,14 +103,17 @@ class TestExtractAllTitles:
 class TestParsersAgree:
     """setup_frames and eval_frames must resolve the same article set."""
 
-    @pytest.mark.parametrize("wiki_links", [
-        None,
-        ["https://en.wikipedia.org/wiki/Alan_Turing"],
-        "['https://en.wikipedia.org/wiki/A', 'https://en.wikipedia.org/wiki/B']",
-        ["https://en.wikipedia.org/wiki/A https://en.wikipedia.org/wiki/B"],
-        ["https://example.com/x", "https://en.wikipedia.org/wiki/A"],
-        "https://en.wikipedia.org/wiki/A, https://en.wikipedia.org/wiki/B",
-    ])
+    @pytest.mark.parametrize(
+        "wiki_links",
+        [
+            None,
+            ["https://en.wikipedia.org/wiki/Alan_Turing"],
+            "['https://en.wikipedia.org/wiki/A', 'https://en.wikipedia.org/wiki/B']",
+            ["https://en.wikipedia.org/wiki/A https://en.wikipedia.org/wiki/B"],
+            ["https://example.com/x", "https://en.wikipedia.org/wiki/A"],
+            "https://en.wikipedia.org/wiki/A, https://en.wikipedia.org/wiki/B",
+        ],
+    )
     def test_parse_wiki_links_identical(self, wiki_links):
         row = {"wiki_links": wiki_links}
         assert su.parse_wiki_links(row) == ev.parse_wiki_links(row)
@@ -162,9 +165,7 @@ class TestRetryAfter:
         assert su._retry_after_seconds(_resp_with_retry_after("7"), 0) == 7.0
 
     def test_http_date_in_past_clamps_to_zero(self):
-        assert su._retry_after_seconds(
-            _resp_with_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"), 0
-        ) == 0.0
+        assert su._retry_after_seconds(_resp_with_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"), 0) == 0.0
 
     def test_unparseable_falls_back_to_backoff(self):
         # attempt=2 -> min(2**2+1, 60) == 5
@@ -258,15 +259,14 @@ class TestGoldHelpers:
 def no_sleep(monkeypatch):
     async def _instant(*_a, **_k):
         return None
+
     monkeypatch.setattr(asyncio, "sleep", _instant)
 
 
 @pytest.mark.asyncio
 @respx.mock
 async def test_http_with_retry_retries_5xx_then_succeeds(no_sleep):
-    route = respx.get("http://t/x").mock(
-        side_effect=[httpx.Response(503), httpx.Response(200, json={"ok": True})]
-    )
+    route = respx.get("http://t/x").mock(side_effect=[httpx.Response(503), httpx.Response(200, json={"ok": True})])
     async with httpx.AsyncClient() as client:
         resp = await ev._http_with_retry(client, "GET", "http://t/x")
     assert resp.json() == {"ok": True}
@@ -286,9 +286,7 @@ async def test_http_with_retry_raises_on_4xx_immediately(no_sleep):
 @pytest.mark.asyncio
 @respx.mock
 async def test_http_with_retry_retries_network_error(no_sleep):
-    route = respx.get("http://t/x").mock(
-        side_effect=[httpx.ConnectError("boom"), httpx.Response(200, json={})]
-    )
+    route = respx.get("http://t/x").mock(side_effect=[httpx.ConnectError("boom"), httpx.Response(200, json={})])
     async with httpx.AsyncClient() as client:
         resp = await ev._http_with_retry(client, "GET", "http://t/x")
     assert resp.status_code == 200
@@ -328,12 +326,17 @@ async def test_create_partition_201_409_and_error():
 @respx.mock
 async def test_get_available_partitions_filters_all():
     respx.get(f"{ev.OPENRAG_BASE_URL}/v1/models").mock(
-        return_value=httpx.Response(200, json={"data": [
-            {"id": "openrag-FRAMES"},
-            {"id": "openrag-all"},
-            {"id": "openrag-Other"},
-            {"id": "not-openrag"},
-        ]})
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "openrag-FRAMES"},
+                    {"id": "openrag-all"},
+                    {"id": "openrag-Other"},
+                    {"id": "not-openrag"},
+                ]
+            },
+        )
     )
     async with httpx.AsyncClient() as client:
         parts = await ev.get_available_openrag_partitions(client)
@@ -344,9 +347,16 @@ async def test_get_available_partitions_filters_all():
 @respx.mock
 async def test_get_available_workspaces():
     respx.get(f"{ev.OPENRAG_BASE_URL}/partition/P/workspaces").mock(
-        return_value=httpx.Response(200, json={"workspaces": [
-            {"workspace_id": "w1"}, {"workspace_id": "w2"}, {"no_id": True},
-        ]})
+        return_value=httpx.Response(
+            200,
+            json={
+                "workspaces": [
+                    {"workspace_id": "w1"},
+                    {"workspace_id": "w2"},
+                    {"no_id": True},
+                ]
+            },
+        )
     )
     async with httpx.AsyncClient() as client:
         assert await ev.get_available_workspaces(client, "P") == ["w1", "w2"]
@@ -360,14 +370,15 @@ async def test_get_available_workspaces():
 async def test_query_openrag_answer_with_sources():
     base = ev.OPENRAG_BASE_URL
     respx.post(f"{base}/v1/chat/completions").mock(
-        return_value=httpx.Response(200, json={
-            "choices": [{"message": {"content": "The answer is 42."}}],
-            "extra": json.dumps({"sources": [{"chunk_url": f"{base}/extract/abc"}]}),
-        })
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "The answer is 42."}}],
+                "extra": json.dumps({"sources": [{"chunk_url": f"{base}/extract/abc"}]}),
+            },
+        )
     )
-    respx.get(f"{base}/extract/abc").mock(
-        return_value=httpx.Response(200, json={"page_content": "chunk text"})
-    )
+    respx.get(f"{base}/extract/abc").mock(return_value=httpx.Response(200, json={"page_content": "chunk text"}))
     sem = asyncio.Semaphore(1)
     answer, sources = await ev.query_openrag_answer("Q?", "FRAMES", sem)
     assert answer == "The answer is 42."
@@ -421,9 +432,7 @@ async def test_ensure_workspace_states():
 async def test_add_files_to_workspace_tolerates_rejection():
     # A rejected attach must not raise, so one bad file can't abort the run.
     base = ev.OPENRAG_BASE_URL
-    respx.post(f"{base}/partition/P/workspaces/w/files").mock(
-        return_value=httpx.Response(400, text="file not found")
-    )
+    respx.post(f"{base}/partition/P/workspaces/w/files").mock(return_value=httpx.Response(400, text="file not found"))
     async with httpx.AsyncClient() as client:
         await ev.add_files_to_workspace(client, "P", "w", ["missing"])  # no raise
 
@@ -456,10 +465,12 @@ async def test_upload_and_track_completes(no_sleep, tmp_file, monkeypatch):
     respx.post(f"{base}/indexer/partition/P/file/Article").mock(
         return_value=httpx.Response(201, json={"task_status_url": "/indexer/task/t1"})
     )
-    respx.get(f"{base}/indexer/task/t1").mock(side_effect=[
-        httpx.Response(200, json={"task_state": "CHUNKING"}),
-        httpx.Response(200, json={"task_state": "COMPLETED"}),
-    ])
+    respx.get(f"{base}/indexer/task/t1").mock(
+        side_effect=[
+            httpx.Response(200, json={"task_state": "SERIALIZING"}),
+            httpx.Response(200, json={"task_state": "COMPLETED"}),
+        ]
+    )
     async with httpx.AsyncClient() as client:
         res = await su.upload_and_track(client, "P", "Article", tmp_file, "application/pdf", asyncio.Semaphore(1))
     assert res == {"file_id": "Article", "status": "COMPLETED"}
@@ -500,7 +511,7 @@ async def test_upload_and_track_poll_timeout(no_sleep, tmp_file, monkeypatch):
     respx.post(f"{base}/indexer/partition/P/file/Article").mock(
         return_value=httpx.Response(201, json={"task_status_url": "/indexer/task/t1"})
     )
-    respx.get(f"{base}/indexer/task/t1").mock(return_value=httpx.Response(200, json={"task_state": "CHUNKING"}))
+    respx.get(f"{base}/indexer/task/t1").mock(return_value=httpx.Response(200, json={"task_state": "SERIALIZING"}))
     async with httpx.AsyncClient() as client:
         res = await su.upload_and_track(client, "P", "Article", tmp_file, "application/pdf", asyncio.Semaphore(1))
     assert res["status"] == "ERROR" and "timed out" in res["error"]

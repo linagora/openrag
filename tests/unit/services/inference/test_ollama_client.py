@@ -153,6 +153,24 @@ class TestOllamaClient:
         )
 
     @pytest.mark.asyncio
+    async def test_max_retries_is_not_forwarded_to_request_body(self):
+        """max_retries is a config field (LLMParamsConfig), not a sampling param —
+        it must not leak into **kwargs/self._defaults and end up in the outgoing
+        chat payload the way batch_size once did for the embedder (#712)."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        client = self._make_client(capture, max_retries=9)
+        assert "max_retries" not in client._defaults
+
+        await client.chat([{"role": "user", "content": "hi"}])
+
+        assert "max_retries" not in captured
+
+    @pytest.mark.asyncio
     async def test_metadata_stripped_from_payload(self):
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
@@ -283,6 +301,30 @@ class TestOllamaEmbedder:
         embedder._client.post = fail
         with pytest.raises(EmbeddingAPIError):
             await embedder.embed(["text"])
+
+    @pytest.mark.asyncio
+    async def test_embed_retries_on_connection_reset(self):
+        """A mid-request reset is httpx.ReadError (NetworkError), not
+        ConnectError. It must be retried, not escape raw. Regression for #718."""
+        import tenacity
+
+        retrying = OllamaEmbedder.embed.retry
+        original_wait = retrying.wait
+        retrying.wait = tenacity.wait_none()
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise httpx.ReadError("connection reset by peer")
+            return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.7]}]})
+
+        try:
+            embedder = self._make_embedder(handler)
+            assert await embedder.embed(["text"]) == [[0.7]]
+            assert calls["n"] == 2, "a ReadError mid-request must be retried"
+        finally:
+            retrying.wait = original_wait
 
     @pytest.mark.asyncio
     async def test_embed_timeout(self):

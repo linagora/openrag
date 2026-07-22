@@ -210,6 +210,7 @@ class RetrievalService:
             reranker=reranker,
             reranker_top_k=pipeline_cfg.top_n,
             allow_filterless_fallback=self._legacy_retriever_value("allow_filterless_fallback", True),
+            rrf_k=pipeline_cfg.rrf_k,
         )
         return pipeline, pipeline_cfg.top_n
 
@@ -280,6 +281,7 @@ class RetrievalService:
                 include_ancestors=include_ancestors,
                 related_limit=related_limit,
                 max_ancestor_depth=max_ancestor_depth,
+                filter_params=filter_params,
             )
         return chunks
 
@@ -379,7 +381,13 @@ class RetrievalService:
 
     @staticmethod
     def fuse(doc_lists: list[list[Chunk]], top_k: int | None = None) -> list[Chunk]:
-        """RRF-fuse per-query ranked lists (same fusion the pipeline uses)."""
+        """RRF-fuse ranked lists across partitions (and doc+web).
+
+        Uses the canonical RRF constant (60) rather than a preset's ``rrf_k``:
+        this fuses lists from *different* partitions (and the web branch), so no
+        single partition's ``rrf_k`` applies. Per-partition ``rrf_k`` is honoured
+        one layer down, in ``RetrieverPipeline.get_relevant_docs`` (#707).
+        """
         fused = rrf_reranking(doc_lists, key_fn=_chunk_key)
         return fused[:top_k] if top_k is not None else fused
 

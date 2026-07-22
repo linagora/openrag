@@ -364,6 +364,7 @@ async def test_process_file_creates_catalog_record_after_successful_pipeline(tmp
         "relationship_id": "rel",
         "parent_id": "parent",
         "require_existing_partition": False,
+        "content_sha256": None,
     }
     assert repo.update_calls == []
 
@@ -478,6 +479,7 @@ async def test_process_file_updates_catalog_record_on_replace(tmp_path: Path) ->
         "file_metadata": {"file_id": "f1"},
         "relationship_id": None,
         "parent_id": None,
+        "content_sha256": None,
     }
     assert repo.add_calls == []
 

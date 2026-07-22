@@ -1,9 +1,11 @@
+import asyncio
 import io
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from api.dependencies import files as files_dep
-from api.dependencies.files import save_file_to_disk
+from api.dependencies.files import save_file_to_disk, save_file_to_disk_with_sha256
 from core.utils.exceptions import ValidationError
 from core.utils.filename import extract_temporal_fields, sanitize_filename
 from fastapi import UploadFile
@@ -32,6 +34,17 @@ async def test_save_file_to_disk_writes_content(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_save_file_to_disk_calculates_sha256_while_streaming(tmp_path: Path):
+    upload = UploadFile(file=io.BytesIO(b"hello world"), filename="test.bin")
+
+    saved = await save_file_to_disk_with_sha256(upload, tmp_path, chunk_size=4)
+
+    assert saved.path.read_bytes() == b"hello world"
+    assert saved.sha256 == "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    assert saved.size_bytes == 11
+
+
+@pytest.mark.asyncio
 async def test_save_file_to_disk_rejects_oversize_upload(tmp_path: Path, monkeypatch):
     # Cap at ~8 bytes; a larger upload must be rejected (413) and not left on disk.
     monkeypatch.setattr("api.dependencies.files._max_upload_size_bytes", lambda: 8)
@@ -44,6 +57,17 @@ async def test_save_file_to_disk_rejects_oversize_upload(tmp_path: Path, monkeyp
     assert exc.value.status_code == 413
     # The partially written file must have been cleaned up.
     assert not (dest_dir / "big.bin").exists()
+
+
+@pytest.mark.asyncio
+async def test_save_file_to_disk_removes_partial_file_when_upload_is_cancelled(tmp_path: Path):
+    upload = UploadFile(file=io.BytesIO(), filename="cancelled.bin")
+    upload.read = AsyncMock(side_effect=[b"partial", asyncio.CancelledError()])
+
+    with pytest.raises(asyncio.CancelledError):
+        await save_file_to_disk(file=upload, dest_dir=tmp_path, chunk_size=4)
+
+    assert not (tmp_path / "cancelled.bin").exists()
 
 
 def test_max_upload_size_reads_env_at_call_time(monkeypatch):

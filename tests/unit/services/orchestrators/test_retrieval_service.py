@@ -445,3 +445,12 @@ async def test_retrieve_small_fanout_stays_fully_parallel():
     await svc.retrieve(partitions=["all"], query=Query(query="hi"))
 
     assert state["max"] == 3, "all 3 partitions should run concurrently under the cap"
+
+
+def test_pipeline_for_partition_threads_rrf_k():
+    """A partition's rrf_k must reach its RetrieverPipeline (#707)."""
+    cfg = _config()
+    cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(rrf_k=42))}
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg)
+    pipeline, _ = svc._pipeline_for_partition("tenant-a")
+    assert pipeline.rrf_k == 42
