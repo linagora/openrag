@@ -53,7 +53,7 @@ async def test_get_queue_info_rolls_up_states():
     tsm = FakeTSM(
         states={
             "a": "QUEUED",
-            "b": "CHUNKING",
+            "b": "SERIALIZING",
             "c": "COMPLETED",
             "d": "FAILED",
             "e": "CANCELLED",
@@ -64,7 +64,7 @@ async def test_get_queue_info_rolls_up_states():
     assert out["workers"] == {"total_slots": 8, "pool_size": 2, "max_per_actor": 4}
     tasks = out["tasks"]
     assert tasks["active"] == 2
-    assert tasks["active_statuses"] == {"QUEUED": 1, "SERIALIZING": 0, "CHUNKING": 1, "INSERTING": 0}
+    assert tasks["active_statuses"] == {"QUEUED": 1, "SERIALIZING": 1}
     assert tasks["total_completed"] == 1
     assert tasks["total_failed"] == 1
     assert tasks["total_cancelled"] == 1
@@ -160,7 +160,7 @@ async def test_list_tasks_active_filter():
     info = {
         "t1": {"state": "QUEUED", "details": {}, "user": 1},
         "t2": {"state": "COMPLETED", "details": {}, "user": 1},
-        "t3": {"state": "INSERTING", "details": {}, "user": 1},
+        "t3": {"state": "SERIALIZING", "details": {}, "user": 1},
     }
     rows = await JobService(FakeTSM(info=info)).list_tasks(is_admin=True, user_id=1, task_status="active")
     assert sorted(r["task_id"] for r in rows) == ["t1", "t3"]

@@ -17,10 +17,22 @@ from typing import Literal
 
 from core.utils.text import clean_markdown_table_spacing
 
-# Header + delimiter + at least one row.
+# Header + delimiter + at least one row. The delimiter row is one or more cells
+# of ``:?-+:?`` with optional surrounding spaces/tabs — this matches canonical GFM
+# spacing (``| --- | --- |``), alignment colons (``| :--- | ---: |``, ``| :---: |``)
+# and the tight form (``|---|---|``) alike. A previous ``\s*[:-]+(?:\s*\|[:-]+)*``
+# allowed whitespace only *before* each pipe, so a space *after* a pipe (the
+# canonical form) failed to match and the table fell through to plain text (#710).
+# In-cell whitespace is ``[ \t]`` (not ``\s``) so a delimiter can't span line
+# breaks and swallow following rows as one multi-line "delimiter". No re.DOTALL,
+# so a row's ``.*?`` stays on its line (a pipe-looking text line can't be pulled
+# into a later table); the final row may end at a newline OR EOF. Each row's
+# closing pipe may be followed by ``[ \t]*`` before the line ends — GFM permits
+# trailing line whitespace, and without this a stray space after ``|`` would drop
+# the whole table back to plain text (the same failure class as #710).
 TABLE_RE = re.compile(
-    r"((?:^|\n)\|.*?\|\r?\n\|\s*[:-]+(?:\s*\|[:-]+)*\|\r?\n(?:\|.*?\|\r?\n)+)",
-    re.DOTALL | re.MULTILINE,
+    r"((?:^|\n)\|.*?\|[ \t]*\r?\n\|(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*\r?\n(?:\|.*?\|[ \t]*(?:\r?\n|$))+)",
+    re.MULTILINE,
 )
 
 # `<image_description>...</image_description>` block injected by the VLM step.

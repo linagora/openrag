@@ -57,6 +57,7 @@ async def test_claim_content_hash_reserves_new_content() -> None:
         file_id="new-file",
         partition="tenant-a",
         content_sha256="abc123",
+        claim_token="attempt-1",
     )
 
     assert conflict is None
@@ -74,6 +75,7 @@ async def test_claim_content_hash_returns_completed_duplicate() -> None:
         file_id="new-file",
         partition="tenant-a",
         content_sha256="abc123",
+        claim_token="attempt-1",
     )
 
     assert conflict == "existing-file"
@@ -91,6 +93,7 @@ async def test_claim_content_hash_returns_active_duplicate() -> None:
         file_id="new-file",
         partition="tenant-a",
         content_sha256="abc123",
+        claim_token="attempt-1",
     )
 
     assert conflict == "active-file"
@@ -107,6 +110,7 @@ async def test_replacement_can_claim_its_own_existing_content() -> None:
         file_id="same-file",
         partition="tenant-a",
         content_sha256="abc123",
+        claim_token="attempt-1",
         replace=True,
     )
 
@@ -114,7 +118,7 @@ async def test_replacement_can_claim_its_own_existing_content() -> None:
 
 
 @pytest.mark.asyncio
-async def test_release_content_hash_claim_is_scoped_to_its_owner() -> None:
+async def test_release_content_hash_claim_is_scoped_to_its_indexing_attempt() -> None:
     from services.persistence.document_repo import PgDocumentRepository
 
     pool = _ClaimPool([])
@@ -124,13 +128,15 @@ async def test_release_content_hash_claim_is_scoped_to_its_owner() -> None:
         file_id="new-file",
         partition="tenant-a",
         content_sha256="abc123",
+        claim_token="attempt-1",
     )
 
     query, params = next(
         (query, params) for query, params in pool.conn.executed if "DELETE FROM file_content_claims" in query
     )
     assert "file_id = $3" in query
-    assert params == ("tenant-a", "abc123", "new-file")
+    assert "claim_token = $4" in query
+    assert params == ("tenant-a", "abc123", "new-file", "attempt-1")
 
 
 @pytest.mark.asyncio
@@ -145,6 +151,7 @@ async def test_renew_content_hash_claim_extends_only_its_owner() -> None:
             file_id="new-file",
             partition="tenant-a",
             content_sha256="abc123",
+            claim_token="attempt-1",
         )
         is True
     )
@@ -152,7 +159,8 @@ async def test_renew_content_hash_claim_extends_only_its_owner() -> None:
     query, params = pool.executed[0]
     assert "SET expires_at" in query
     assert "file_id = $3" in query
-    assert params == ("tenant-a", "abc123", "new-file")
+    assert "claim_token = $4" in query
+    assert params == ("tenant-a", "abc123", "new-file", "attempt-1")
 
 
 def test_persistence_schema_enforces_partition_scoped_content_uniqueness() -> None:
@@ -163,3 +171,4 @@ def test_persistence_schema_enforces_partition_scoped_content_uniqueness() -> No
     assert index.unique is True
     assert [column.name for column in index.columns] == ["partition_name", "content_sha256"]
     assert set(file_content_claims.primary_key.columns.keys()) == {"partition_name", "content_sha256"}
+    assert file_content_claims.c.claim_token.nullable is False

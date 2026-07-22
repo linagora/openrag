@@ -273,6 +273,44 @@ async def test_dispatch_indexing_rejects_content_already_claimed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_indexing_passes_attempt_token_to_claim_and_worker() -> None:
+    from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    pool = _pool_with_ref(object())
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    repo.claim_content_sha256.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+        claim_token="task-1",
+        replace=False,
+    )
+    assert pool.submit.remote.await_args.kwargs["metadata"][CONTENT_CLAIM_TOKEN_METADATA_KEY] == "task-1"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_indexing_releases_claim_when_queueing_fails() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
@@ -303,6 +341,7 @@ async def test_dispatch_indexing_releases_claim_when_queueing_fails() -> None:
         file_id="new-file",
         partition="tenant-a",
         content_sha256="abc123",
+        claim_token=repo.claim_content_sha256.await_args.kwargs["claim_token"],
     )
 
 
