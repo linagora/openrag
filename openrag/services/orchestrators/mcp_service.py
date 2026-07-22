@@ -66,7 +66,7 @@ def _strip_protected_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]
     """
     md, removed = strip_protected_metadata(metadata)
     if removed:
-        logger.warning("Dropped protected metadata keys from MCP write", keys=removed)
+        logger.bind(keys=removed).warning("Dropped protected metadata keys from MCP write")
     return md
 
 
