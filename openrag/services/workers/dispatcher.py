@@ -6,7 +6,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from core.indexing.dispatcher import IndexingDispatcher
-from core.models.catalog import TASK_CREATED_AT_METADATA_KEY, TASK_FINISHED_AT_METADATA_KEY
+from core.models.catalog import (
+    CONTENT_CLAIM_TOKEN_METADATA_KEY,
+    TASK_CREATED_AT_METADATA_KEY,
+    TASK_FINISHED_AT_METADATA_KEY,
+)
 from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.exceptions import ConflictError
 from core.utils.logging import get_logger
@@ -152,6 +156,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 file_id=file_id,
                 partition=partition,
                 content_sha256=content_sha256,
+                claim_token=task_id,
                 replace=replace,
             )
             if conflicting_file_id is not None:
@@ -182,6 +187,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     file_id=file_id,
                     partition=partition,
                     content_sha256=content_sha256,
+                    claim_token=task_id,
                 )
             raise
         if not accepted:
@@ -190,6 +196,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     file_id=file_id,
                     partition=partition,
                     content_sha256=content_sha256,
+                    claim_token=task_id,
                 )
             raise RuntimeError(
                 f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
@@ -197,10 +204,13 @@ class WorkerDispatcher(IndexingDispatcher):
 
         task: Any | None = None
         try:
+            worker_metadata = dict(metadata)
+            if claimed_content:
+                worker_metadata[CONTENT_CLAIM_TOKEN_METADATA_KEY] = task_id
             submit_kwargs: dict[str, Any] = {
                 "task_id": task_id,
                 "path": path,
-                "metadata": metadata,
+                "metadata": worker_metadata,
                 "partition": partition,
                 "user": user,
                 "workspace_ids": workspace_ids,
@@ -239,6 +249,7 @@ class WorkerDispatcher(IndexingDispatcher):
                         file_id=file_id,
                         partition=partition,
                         content_sha256=content_sha256,
+                        claim_token=task_id,
                     )
             raise
         return task_id
@@ -453,11 +464,13 @@ class WorkerDispatcher(IndexingDispatcher):
         target_partition = metadata.get("partition", partition)
         content_sha256 = metadata.get("content_sha256")
         claimed_content = False
+        claim_token = uuid.uuid4().hex
         if content_sha256:
             conflicting_file_id = await self._document_repo.claim_content_sha256(
                 file_id=target_file_id,
                 partition=target_partition,
                 content_sha256=content_sha256,
+                claim_token=claim_token,
             )
             if conflicting_file_id is not None:
                 raise ConflictError(
@@ -503,6 +516,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     file_id=target_file_id,
                     partition=target_partition,
                     content_sha256=content_sha256,
+                    claim_token=claim_token,
                 )
 
     async def _upsert_entities(self, entities: list[dict[str, Any]]) -> None:

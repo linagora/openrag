@@ -8,11 +8,9 @@ import ray
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
 from services.workers.ray_utils import call_ray_actor_with_timeout
-from services.workers.task_state import PENDING_TASK_DETAILS
+from services.workers.task_state import CANCELLABLE_INDEXING_STATES, PENDING_TASK_DETAILS
 
 logger = get_logger()
-
-_ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"})
 _REF_WAIT_INTERVAL = 0.05
 _STALE_REFLESS_TASK_ERROR = (
     "Indexing task never exposed a cancellable worker ref before delete cleanup; marking it failed as stale."
@@ -141,7 +139,7 @@ async def _get_matching_active_task_refs_legacy(
     for task_id, info in all_info.items():
         if not isinstance(info, dict):
             continue
-        if info.get("state") not in _ACTIVE_INDEXING_STATES:
+        if info.get("state") not in CANCELLABLE_INDEXING_STATES:
             continue
         details = info.get("details") or {}
         if not isinstance(details, dict):

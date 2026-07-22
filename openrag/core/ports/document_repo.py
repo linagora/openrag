@@ -51,9 +51,10 @@ class DocumentRepository(ABC):
         file_id: str,
         partition: str,
         content_sha256: str,
+        claim_token: str,
         replace: bool = False,
     ) -> str | None:
-        """Reserve content for indexing, returning a conflicting file id."""
+        """Reserve content for one indexing attempt, returning a conflicting file id."""
         ...
 
     @abstractmethod
@@ -63,8 +64,9 @@ class DocumentRepository(ABC):
         file_id: str,
         partition: str,
         content_sha256: str,
+        claim_token: str,
     ) -> bool:
-        """Extend an active content claim owned by this file."""
+        """Extend an active content claim owned by this indexing attempt."""
         ...
 
     @abstractmethod
@@ -74,6 +76,7 @@ class DocumentRepository(ABC):
         file_id: str,
         partition: str,
         content_sha256: str,
+        claim_token: str,
     ) -> None: ...
 
     @abstractmethod

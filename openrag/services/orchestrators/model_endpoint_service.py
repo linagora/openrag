@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 _VALID_TYPES = frozenset({"embedder", "reranker", "llm", "vlm"})
+_SAMPLING_TYPES = frozenset({"llm", "vlm"})
 
 
 def _slug(model_name: str) -> str:
@@ -44,6 +45,28 @@ def _with_enable_thinking(extra: dict[str, Any], enable_thinking: bool | None) -
     if enable_thinking is None:
         return extra
     return {**extra, "enable_thinking": enable_thinking}
+
+
+def _sampling_params(llm_cfg: Any) -> dict[str, Any]:
+    """Extract the shared LLM/VLM sampling params (``LLMParamsConfig``) as a dict."""
+    return {
+        "temperature": llm_cfg.temperature,
+        "max_retries": llm_cfg.max_retries,
+        "logprobs": llm_cfg.logprobs,
+    }
+
+
+def _with_sampling_params(extra: dict[str, Any], llm_cfg: Any) -> dict[str, Any]:
+    """Add the shared LLM/VLM sampling params (``LLMParamsConfig``) to endpoint extras.
+
+    Without this, a named LLM/VLM endpoint built via the DB-backed registry
+    (di/factories.py's ``make_component_factory``, which splats ``extra``
+    straight into the client constructor) never receives ``temperature`` /
+    ``max_retries`` / ``logprobs`` and silently runs at the provider default.
+    Mirrors the fallback config built in
+    ``indexer_pool._global_llm_endpoint_config``.
+    """
+    return {**extra, **_sampling_params(llm_cfg)}
 
 
 class ModelEndpointService:
@@ -72,12 +95,20 @@ class ModelEndpointService:
         Seeds are derived from existing Settings / env-var values so that
         existing deployments continue working after the Phase 14 upgrade
         without any admin intervention.
+
+        For ``llm``/``vlm``, a type with existing rows is *not* skipped
+        outright: those rows are backfilled with any sampling params missing
+        from their ``extra`` first (see ``_backfill_sampling_params``), since
+        endpoints created before #720's fix never had them written and would
+        otherwise keep silently running at the provider default forever.
         """
         seeds = self._build_default_seeds()
         now = datetime.now(UTC)
         for model_type, data in seeds.items():
             existing = await self._repo.list_all(model_type=model_type)
             if existing:
+                if model_type in _SAMPLING_TYPES:
+                    await self._backfill_sampling_params(existing, getattr(self._config, model_type))
                 continue
             endpoint: str = data["endpoint"]
             model_name: str = data["model_name"]
@@ -124,7 +155,7 @@ class ModelEndpointService:
                 "model_name": os.getenv("LLM_MODEL", s.llm.model),
                 "timeout": s.llm.timeout,
                 "extra": _with_enable_thinking(
-                    _with_api_key({"implementation": "vllm"}, s.llm.api_key),
+                    _with_sampling_params(_with_api_key({"implementation": "vllm"}, s.llm.api_key), s.llm),
                     s.llm.enable_thinking,
                 ),
             },
@@ -133,7 +164,7 @@ class ModelEndpointService:
                 "model_name": os.getenv("VLM_MODEL", s.vlm.model),
                 "timeout": s.vlm.timeout,
                 "extra": _with_enable_thinking(
-                    _with_api_key({"implementation": "vllm"}, s.vlm.api_key),
+                    _with_sampling_params(_with_api_key({"implementation": "vllm"}, s.vlm.api_key), s.vlm),
                     s.vlm.enable_thinking,
                 ),
             },
@@ -150,6 +181,26 @@ class ModelEndpointService:
                 "extra": _with_api_key({"implementation": s.reranker.provider}, s.reranker.api_key),
             },
         }
+
+    async def _backfill_sampling_params(self, rows: list[ModelEndpointRow], llm_cfg: Any) -> None:
+        """Fill in sampling params missing from pre-existing llm/vlm rows' ``extra``.
+
+        ``seed_defaults()`` only seeds a type when the DB has no rows for it,
+        so an endpoint created before #720's fix keeps whatever ``extra`` it
+        was given — which never included ``temperature``/``max_retries``/
+        ``logprobs`` (see ``_with_sampling_params``). Only keys *absent* from
+        ``extra`` are filled in here, so a value an admin explicitly set (or a
+        prior backfill already wrote) is never overwritten.
+        """
+        for row in rows:
+            missing = {k: v for k, v in _sampling_params(llm_cfg).items() if k not in row.extra}
+            if not missing:
+                continue
+            await self._repo.update(row.name, row.model_type, extra={**row.extra, **missing})
+            logger.info(
+                f"Backfilled sampling params on existing {row.model_type} endpoint '{row.name}'.",
+                keys=sorted(missing),
+            )
 
     async def load_all(self) -> None:
         """Fetch all endpoints from DB, rebuild config.models dicts atomically.

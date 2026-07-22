@@ -445,6 +445,11 @@ class MilvusVectorStore(VectorStore):
     # must go through :meth:`drop_collection`.
     _TAUTOLOGICAL_EXPRS = frozenset({"true", "1==1"})
 
+    # Always-false predicate for an empty ``IN`` list. Milvus 2.6 rejects a
+    # bare ``false`` literal ("predicate is not a boolean expression"), so the
+    # match-nothing sentinel must be a comparison it can plan.
+    _MATCH_NOTHING_EXPR = "1 == 0"
+
     @staticmethod
     def _format_value(value: Any) -> str:
         """Render a scalar as a Milvus filter literal.
@@ -473,7 +478,9 @@ class MilvusVectorStore(VectorStore):
               for callers that need operators the dict form cannot express.
             * Any other key with a scalar value becomes ``key == <literal>``.
             * Any other key with a list/tuple value becomes ``key in [...]``.
-              Empty list/tuple short-circuits to ``"false"`` (matches no row).
+              Empty list/tuple short-circuits to :data:`_MATCH_NOTHING_EXPR`
+              (an always-false comparison Milvus can plan — a bare ``false``
+              literal is rejected).
 
         Workspace-id resolution, role checks, and other PG concerns are
         upstream concerns — they resolve to ``file_id`` lists before reaching
@@ -500,7 +507,7 @@ class MilvusVectorStore(VectorStore):
                 continue  # already handled above
             if isinstance(value, (list, tuple)):
                 if not value:
-                    return "false"  # empty IN list — match nothing
+                    return self._MATCH_NOTHING_EXPR  # empty IN list — match nothing
                 quoted = ", ".join(self._format_value(v) for v in value)
                 parts.append(f"{key} in [{quoted}]")
             else:

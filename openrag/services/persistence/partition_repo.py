@@ -7,10 +7,9 @@ collections. The legacy
 ``partition_exists``, ``get_partition_file_count``, ``get_total_file_count``
 here; all six map onto this class.
 
-Deleting a partition cascades to ``files``, ``partition_memberships``,
-and ``workspaces`` via the FK ``ON DELETE CASCADE`` rules in the schema.
-Per-uploader ``file_count`` is decremented in application code (no SQL
-trigger) so the books stay balanced.
+Deleting a partition explicitly removes ``files`` before the partition row;
+memberships and workspaces use FK cascades. Per-uploader ``file_count`` is
+decremented in application code (no SQL trigger) so the books stay balanced.
 """
 
 from __future__ import annotations
@@ -21,6 +20,8 @@ from typing import TYPE_CHECKING
 
 from core.ports.partition_repo import PartitionRepository
 from core.utils.exceptions import ValidationError
+from core.utils.logging import get_logger
+from services.persistence.file_count import decrement_file_counts
 
 if TYPE_CHECKING:
     import asyncpg
@@ -47,6 +48,8 @@ _PARTITION_UPDATE_COLUMNS = frozenset(
     }
 )
 _PARTITION_OPERATION_LOCK_NAMESPACE = 20260720
+
+logger = get_logger()
 
 
 def _partition_updates(fields: dict[str, object]) -> dict[str, object]:
@@ -203,44 +206,39 @@ class PgPartitionRepository(PartitionRepository):
         ``partition_memberships`` and ``workspaces`` cascade from the
         partition row.
 
-        Mirrors the legacy bookkeeping: before deleting we count files per
-        uploader and decrement each uploader's ``file_count`` by that
-        amount (clamped at zero) so quotas stay accurate.
+        Counter updates are derived from the rows actually deleted and remain
+        clamped at zero so retries and concurrent deletion paths stay safe.
         """
         async with self.pool.acquire() as conn:
             return await self._delete_partition_on_conn(conn, name)
 
     async def _delete_partition_on_conn(self, conn: asyncpg.Connection, name: str) -> bool:
         async with conn.transaction():
-            exists = await conn.fetchval(
-                "SELECT 1 FROM partitions WHERE partition = $1",
+            partition = await conn.fetchrow(
+                "SELECT partition FROM partitions WHERE partition = $1 FOR UPDATE",
                 name,
             )
-            if not exists:
+            if partition is None:
+                logger.bind(
+                    operation="delete_partition",
+                    deleted_rows=0,
+                    counters_adjusted=0,
+                ).debug("Catalog partition deletion accounted")
                 return False
-            uploader_counts = await conn.fetch(
-                """
-                SELECT created_by, COUNT(*)::int AS n
-                FROM files
-                WHERE partition_name = $1 AND created_by IS NOT NULL
-                GROUP BY created_by
-                """,
+            deleted_rows = await conn.fetch(
+                "DELETE FROM files WHERE partition_name = $1 RETURNING created_by",
                 name,
             )
-            await conn.execute(
-                "DELETE FROM files WHERE partition_name = $1",
-                name,
-            )
+            counters_adjusted = await decrement_file_counts(conn, deleted_rows)
             await conn.execute(
                 "DELETE FROM partitions WHERE partition = $1",
                 name,
             )
-            for r in uploader_counts:
-                await conn.execute(
-                    "UPDATE users SET file_count = GREATEST(file_count - $1, 0) WHERE id = $2",
-                    r["n"],
-                    r["created_by"],
-                )
+            logger.bind(
+                operation="delete_partition",
+                deleted_rows=len(deleted_rows),
+                counters_adjusted=counters_adjusted,
+            ).debug("Catalog partition deletion accounted")
             return True
 
     async def partition_exists(self, name: str) -> bool:

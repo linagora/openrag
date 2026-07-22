@@ -7,9 +7,10 @@ from services.orchestrators.workspace_service import WorkspaceService
 
 
 class FakeWorkspaceRepo:
-    def __init__(self, *, workspace=None, orphaned=None):
+    def __init__(self, *, workspace=None, orphaned=None, files=None):
         self._workspace = workspace
         self._orphaned = orphaned if orphaned is not None else []
+        self._files = files if files is not None else ["f1", "f2"]
         self.created: list[tuple] = []
         self.added: list[tuple[str, list[str]]] = []
         self.removed: list[tuple[str, str]] = []
@@ -37,7 +38,7 @@ class FakeWorkspaceRepo:
         return True
 
     async def list_workspace_files(self, workspace_id: str) -> list[str]:
-        return ["f1", "f2"]
+        return list(self._files)
 
     async def get_file_workspaces(self, file_id: str, partition: str) -> list[str]:
         return ["w1", "w2"]
@@ -151,3 +152,51 @@ async def test_delete_workspace_collects_per_file_failures():
 
     assert out["orphaned_files_deleted"] == 1
     assert out["orphaned_files_failed"] == ["bad"]
+
+
+# --------------------------------------------------------------------------- #
+# resolve_scope — the workspace scope resolver (issue #706)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_returns_partition_and_file_ids():
+    wrepo = FakeWorkspaceRepo(
+        workspace={"workspace_id": "w1", "partition_name": "p1"},
+        files=["f1", "f2"],
+    )
+    scope = await _svc(wrepo=wrepo).resolve_scope("w1", ["p1"])
+    assert scope is not None
+    assert scope.workspace_id == "w1"
+    assert scope.partition == "p1"
+    assert scope.file_ids == ["f1", "f2"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_none_when_workspace_missing():
+    wrepo = FakeWorkspaceRepo(workspace=None)
+    assert await _svc(wrepo=wrepo).resolve_scope("ghost", ["p1"]) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_none_when_partition_not_allowed():
+    # Workspace exists but belongs to a partition the caller has no access
+    # to — must look identical to "not found", never reveal the partition.
+    wrepo = FakeWorkspaceRepo(workspace={"workspace_id": "w1", "partition_name": "other"})
+    assert await _svc(wrepo=wrepo).resolve_scope("w1", ["p1"]) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_accepts_all_sentinel():
+    wrepo = FakeWorkspaceRepo(workspace={"workspace_id": "w1", "partition_name": "any-partition"}, files=["f1"])
+    scope = await _svc(wrepo=wrepo).resolve_scope("w1", ["all"])
+    assert scope is not None
+    assert scope.partition == "any-partition"
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_empty_workspace_returns_empty_file_ids():
+    wrepo = FakeWorkspaceRepo(workspace={"workspace_id": "w1", "partition_name": "p1"}, files=[])
+    scope = await _svc(wrepo=wrepo).resolve_scope("w1", ["p1"])
+    assert scope is not None
+    assert scope.file_ids == []
