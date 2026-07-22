@@ -140,10 +140,15 @@ async def stream_with_source_filtering(
             if data.get("choices"):
                 last_chunk = data
 
+            # `content` and `finish_reason` are handled independently: some
+            # OpenAI-compatible providers pack the last token and the terminal
+            # `finish_reason` into the *same* chunk, so gating content on
+            # `elif finish_reason` would silently drop that final token.
             if finish_reason:
                 last_finish_reason = finish_reason
                 chunk_template = data
-            elif content:
+
+            if content:
                 chunk_template = data
                 pending += content
 
@@ -168,7 +173,11 @@ async def stream_with_source_filtering(
                     }
                     yield f"data: {json.dumps(out)}\n\n"
                     emitted_len = safe_end
-            else:
+            elif not finish_reason:
+                # Neither content nor finish_reason (role preamble, usage-only or
+                # keep-alive chunk): pass it through untouched. A finish-only chunk
+                # is intentionally *not* re-emitted here — the terminal flush emits
+                # the finish chunk so it can carry `extra.sources`.
                 data["extra"] = "{}"
                 yield f"data: {json.dumps(data)}\n\n"
     except Exception as exc:

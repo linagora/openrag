@@ -200,6 +200,17 @@ def _make_finish(chunk_id: str = "chatcmpl-1") -> str:
     return "data: " + json.dumps({"id": chunk_id, "choices": [{"delta": {}, "finish_reason": "stop"}]})
 
 
+def _make_content_finish(content: str, chunk_id: str = "chatcmpl-1") -> str:
+    """Build a terminal SSE line carrying both a content delta and finish_reason.
+
+    Some OpenAI-compatible providers pack the last token and the stop reason into
+    the same final chunk.
+    """
+    return "data: " + json.dumps(
+        {"id": chunk_id, "choices": [{"delta": {"content": content}, "finish_reason": "stop"}]}
+    )
+
+
 DONE_LINE = "data: [DONE]"
 
 
@@ -263,6 +274,18 @@ class TestStreamWithSourceFiltering:
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "Here is the answer."
         assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
+
+    @pytest.mark.asyncio
+    async def test_content_and_finish_reason_in_same_chunk_keeps_last_token(self):
+        """A provider that packs the final token and finish_reason into one chunk
+        must not lose that token (regression: `Hello ` + final `world` → `Hello`)."""
+        lines = [
+            _make_chunk("Hello "),
+            _make_content_finish("world"),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert _collect_content(result) == "Hello world"
 
     @pytest.mark.asyncio
     async def test_content_tail_chunk_has_null_finish_reason(self):
