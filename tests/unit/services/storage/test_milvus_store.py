@@ -143,9 +143,10 @@ class TestBuildFilterExpr:
 
     def test_empty_list_field_matches_nothing(self, store: MilvusVectorStore) -> None:
         # An empty IN list cannot be expressed in Milvus, so short-circuit to
-        # the explicit no-match literal — callers get an empty result set
-        # instead of a syntax error.
-        assert store._build_filter_expr({"file_id": []}) == "false"
+        # an always-false comparison — callers get an empty result set instead
+        # of a syntax error. A bare ``false`` literal is rejected by Milvus 2.6
+        # ("predicate is not a boolean expression"), so it must be ``1 == 0``.
+        assert store._build_filter_expr({"file_id": []}) == "1 == 0"
 
     def test_raw_expr_appended(self, store: MilvusVectorStore) -> None:
         expr = store._build_filter_expr({"expr": "created_at > ISO '2025-01-01'"})

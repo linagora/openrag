@@ -87,6 +87,30 @@ async def test_matching_active_task_refs_treat_detail_less_queued_tasks_as_pendi
 
 
 @pytest.mark.asyncio
+async def test_delete_cleanup_still_fences_legacy_indexing_states() -> None:
+    # Regression for #721: CHUNKING/INSERTING are gone from the public state
+    # machine, but an old detached Indexer surviving a rolling deploy on an
+    # external Ray cluster can still report them. The delete/cancel fencing path
+    # must keep matching them, otherwise cleanup misses the in-flight task and the
+    # stale worker writes data back after the file is already gone.
+    manager = _task_state_manager()
+    chunking_ref = {"ref": object()}
+    inserting_ref = {"ref": object()}
+
+    for task_id, state, ref in (
+        ("chunking-task", "CHUNKING", chunking_ref),
+        ("inserting-task", "INSERTING", inserting_ref),
+    ):
+        await manager.set_details(task_id, file_id="file-1", partition="tenant-a", metadata={}, user_id=1)
+        await manager.set_state(task_id, state)
+        await manager.set_object_ref(task_id, ref)
+
+    expected = {"chunking-task": chunking_ref, "inserting-task": inserting_ref}
+    assert await manager.get_matching_active_task_refs(partition="tenant-a", file_id="file-1") == expected
+    assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == expected
+
+
+@pytest.mark.asyncio
 async def test_file_delete_fence_rejects_matching_queued_details() -> None:
     manager = _task_state_manager()
 

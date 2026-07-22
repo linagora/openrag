@@ -259,6 +259,155 @@ async def test_seed_defaults_preserves_llm_and_vlm_enable_thinking(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_carries_llm_and_vlm_sampling_params(monkeypatch):
+    """temperature/max_retries/logprobs must reach the seeded ``extra`` so a
+    named LLM/VLM endpoint (built by di/factories.py splatting ``extra``) does
+    not silently fall back to the provider's default sampling params (#720).
+    """
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    settings = Settings(
+        llm={
+            "base_url": "http://llm:8000/v1",
+            "model": "qwen",
+            "temperature": 0.3,
+            "max_retries": 5,
+            "logprobs": True,
+        },
+        vlm={
+            "base_url": "http://vlm:8000/v1",
+            "model": "qwen-vl",
+            "temperature": 0.7,
+            "max_retries": 1,
+            "logprobs": False,
+        },
+    )
+    repo = _FakeEndpointRepo()
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    rows = {row.model_type: row for row in repo._store.values()}
+    assert rows["llm"].extra["temperature"] == 0.3
+    assert rows["llm"].extra["max_retries"] == 5
+    assert rows["llm"].extra["logprobs"] is True
+    assert rows["vlm"].extra["temperature"] == 0.7
+    assert rows["vlm"].extra["max_retries"] == 1
+    assert rows["vlm"].extra["logprobs"] is False
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_backfills_missing_sampling_params_on_existing_llm_row(monkeypatch):
+    """Regression test for the upgrade path (#720 review): endpoints created
+    before the sampling-params fix never had temperature/max_retries/logprobs
+    written to ``extra``. seed_defaults() must backfill the existing row
+    instead of skipping the type outright, or upgraded deployments keep
+    silently running at the provider default forever.
+    """
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    pre_fix_row = _make_row(
+        name="default",
+        model_type="llm",
+        is_default=True,
+        extra={"implementation": "vllm", "api_key": "llm-key"},
+    )
+    settings = Settings(
+        llm={
+            "base_url": "http://llm:8000/v1",
+            "model": "mistral",
+            "temperature": 0.3,
+            "max_retries": 5,
+            "logprobs": True,
+        },
+    )
+    repo = _FakeEndpointRepo(rows=[pre_fix_row])
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    row = repo._store[("default", "llm")]
+    assert row.extra["temperature"] == 0.3
+    assert row.extra["max_retries"] == 5
+    assert row.extra["logprobs"] is True
+    assert row.extra["api_key"] == "llm-key"
+    assert row.extra["implementation"] == "vllm"
+    # No duplicate row was created — the existing one was updated in place.
+    creates = [c for c in repo.calls if c[0] == "create"]
+    assert not any(name_type[1] == "llm" for _, name_type in creates)
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_preserves_explicit_sampling_param_while_backfilling_others(monkeypatch):
+    """Backfilling missing keys must not clobber a value already present on the
+    row, even when other sampling keys on that same row are still missing.
+    """
+    from core.config.root import Settings
+
+    monkeypatch.delenv("VLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("VLM_MODEL", raising=False)
+
+    partially_fixed_row = _make_row(
+        name="default",
+        model_type="vlm",
+        is_default=True,
+        extra={"implementation": "vllm", "temperature": 0.9},
+    )
+    settings = Settings(
+        vlm={
+            "base_url": "http://vlm:8000/v1",
+            "model": "pixtral",
+            "temperature": 0.7,
+            "max_retries": 1,
+            "logprobs": False,
+        },
+    )
+    repo = _FakeEndpointRepo(rows=[partially_fixed_row])
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    row = repo._store[("default", "vlm")]
+    assert row.extra["temperature"] == 0.9  # explicit value left untouched
+    assert row.extra["max_retries"] == 1  # missing key filled in
+    assert row.extra["logprobs"] is False  # missing key filled in
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_backfill_does_not_clobber_fully_configured_row(monkeypatch):
+    """A row that already has all three sampling keys must be left exactly as
+    stored, even when current Settings would compute a different value.
+    """
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    already_fixed_row = _make_row(
+        name="default",
+        model_type="llm",
+        is_default=True,
+        extra={"implementation": "vllm", "temperature": 0.5, "max_retries": 3, "logprobs": True},
+    )
+    settings = Settings(llm={"base_url": "http://llm:8000/v1", "model": "mistral", "temperature": 0.9})
+    repo = _FakeEndpointRepo(rows=[already_fixed_row])
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    row = repo._store[("default", "llm")]
+    assert row.extra["temperature"] == 0.5
+    assert row.extra["max_retries"] == 3
+    assert row.extra["logprobs"] is True
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_skips_reranker_when_unconfigured(monkeypatch):
     from core.config.root import Settings
 

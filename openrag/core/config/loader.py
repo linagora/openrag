@@ -158,6 +158,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("RELATED_LIMIT", "retriever.related_limit", int),
     ("MAX_DEPTH", "retriever.max_ancestor_depth", int),
     ("RETRIEVER_ALLOW_FILTERLESS_FALLBACK", "retriever.allow_filterless_fallback", bool),
+    ("RETRIEVER_MAX_PARTITION_CONCURRENCY", "retriever.max_partition_concurrency", int),
     # RAG
     ("RAG_MODE", "rag.mode", str),
     # WebSearch

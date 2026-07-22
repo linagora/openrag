@@ -6,6 +6,7 @@ preserved through the move into core/.
 
 from __future__ import annotations
 
+import pytest
 from core.chunking.markdown_utils import (
     MDElement,
     chunk_table,
@@ -37,6 +38,79 @@ class TestSplitMdElements:
         elems = split_md_elements(md)
         assert [e.type for e in elems] == ["text", "table", "text"]
         assert "Header 1" in elems[1].content
+
+    @pytest.mark.parametrize(
+        "delimiter",
+        [
+            "| --- | --- |",  # canonical GFM (spaced)
+            "|---|---|",  # tight
+            "| :--- | ---: |",  # aligned, spaced
+            "|:---|---:|",  # aligned, tight
+            "| :---: | :---: |",  # centered
+            "| - | - |",  # single dash
+        ],
+    )
+    def test_delimiter_spacing_variants_detected_as_table(self, delimiter):
+        """Canonical GFM delimiter spacing (| --- | --- |) must be recognised as a
+        table, not fall through to plain text (#710)."""
+        md = f"before\n\n| A | B |\n{delimiter}\n| 1 | 2 |\n| 3 | 4 |\n\nafter"
+        elems = split_md_elements(md)
+        assert [e.type for e in elems] == ["text", "table", "text"]
+        assert "A" in elems[1].content and "1" in elems[1].content
+
+    def test_data_rows_without_delimiter_are_not_a_table(self):
+        """A pipe block with no delimiter row must NOT be treated as a table."""
+        md = "| a | b |\n| c | d |\n| e | f |\n"
+        elems = split_md_elements(md)
+        assert all(e.type != "table" for e in elems)
+
+    def test_crlf_spaced_delimiter_detected(self):
+        md = "| A | B |\r\n| --- | --- |\r\n| 1 | 2 |\r\n"
+        elems = split_md_elements(md)
+        assert any(e.type == "table" for e in elems)
+
+    def test_table_at_eof_without_trailing_newline(self):
+        """A table whose last row ends at EOF (no trailing newline) is detected."""
+        md = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        elems = split_md_elements(md)
+        assert any(e.type == "table" for e in elems)
+
+    def test_pipe_text_line_before_blank_not_swallowed_into_later_table(self):
+        """A pipe-looking text line before a blank line must not be pulled into a
+        later table by ``.*?`` crossing line breaks (hedhoud review on #710)."""
+        md = "| just some | inline pipes |\n\nintro\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+        elems = split_md_elements(md)
+        tables = [e for e in elems if e.type == "table"]
+        assert len(tables) == 1
+        assert "just some" not in tables[0].content
+        assert "A" in tables[0].content
+
+    def test_delimiter_cannot_span_line_breaks(self):
+        """In-cell whitespace is spaces/tabs only — a "delimiter" broken across
+        physical lines is not a valid GFM delimiter and must not match (hedhoud
+        review on #710)."""
+        md = "| A | B |\n| ---\n | --- |\n| 1 | 2 |\n"
+        elems = split_md_elements(md)
+        assert all(e.type != "table" for e in elems)
+
+    @pytest.mark.parametrize(
+        "md",
+        [
+            "| A | B |  \n| --- | --- |\n| 1 | 2 |\n",  # after header pipe
+            "| A | B |\n| --- | --- |   \n| 1 | 2 |\n",  # after delimiter pipe
+            "| A | B |\n| --- | --- |\n| 1 | 2 |  \n",  # after data-row pipe
+            "| A | B |\t\n| --- | --- |\t\n| 1 | 2 |\t\n",  # trailing tabs
+            "| A | B |  \n| --- | --- |  \n| 1 | 2 |  ",  # trailing whitespace + EOF
+        ],
+    )
+    def test_trailing_line_whitespace_still_detected_as_table(self, md):
+        """GFM permits trailing whitespace after a row's closing pipe; a stray
+        space/tab before the line end must not drop the table to plain text
+        (same failure class as #710)."""
+        elems = split_md_elements(md)
+        tables = [e for e in elems if e.type == "table"]
+        assert len(tables) == 1
+        assert "A" in tables[0].content and "1" in tables[0].content
 
     def test_single_image(self):
         md = (

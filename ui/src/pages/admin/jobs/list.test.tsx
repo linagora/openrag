@@ -81,7 +81,7 @@ describe("JobListPage filters", () => {
       workers: { total_slots: 4, pool_size: 2, max_per_actor: 2 },
       tasks: {
         active: 1,
-        active_statuses: { QUEUED: 0, SERIALIZING: 0, CHUNKING: 1, INSERTING: 0 },
+        active_statuses: { QUEUED: 0, SERIALIZING: 1 },
         total_completed: 12,
         total_cancelled: 0,
         total_failed: 1,
@@ -234,7 +234,7 @@ describe("JobListPage filters", () => {
       workers: { total_slots: 2, pool_size: 1, max_per_actor: 2 },
       tasks: {
         active: 4,
-        active_statuses: { QUEUED: 2, SERIALIZING: 0, CHUNKING: 2, INSERTING: 0 },
+        active_statuses: { QUEUED: 2, SERIALIZING: 2 },
         total_completed: 20,
         total_cancelled: 0,
         total_failed: 1,

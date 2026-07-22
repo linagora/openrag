@@ -254,9 +254,9 @@ async def test_search_file_id_builds_filter():
     svc = _service(retrieval=retrieval)
     await svc.search_documents(query="hi", partitions=["a"], top_k=3, allowed_partitions=["a"], file_id="f1")
     call = retrieval.calls[0]
-    # Inlined as a literal expr (the shared searcher drops filter_params).
-    assert call["filter"] == 'file_id == "f1"'
-    assert "filter_params" not in call
+    # Bound through filter_params (parameterized), not a hand-built literal expr.
+    assert call["filter_params"] == {"file_id": "f1"}
+    assert call.get("filter") is None
 
 
 @pytest.mark.asyncio

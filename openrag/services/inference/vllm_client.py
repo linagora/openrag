@@ -22,7 +22,9 @@ from core.embeddings import Embedder, embedder_registry
 from core.llm import LLM, llm_registry
 from core.utils.exceptions import (
     EmbeddingAPIError,
+    EmbeddingConnectionError,
     EmbeddingResponseError,
+    EmbeddingTimeoutError,
     InferenceConnectionError,
     InferenceError,
     InferenceTimeoutError,
@@ -86,8 +88,17 @@ class VLLMClient(LLM):
         api_key: str = "",
         timeout: float = 240.0,
         enable_thinking: bool | None = None,
+        max_retries: int = 2,
         **kwargs,
     ) -> None:
+        # max_retries is accepted (not forwarded into self._defaults) purely to
+        # stop it from leaking into the request body: LLMParamsConfig carries it
+        # as a config field, but retry attempts are fixed by the @with_retry
+        # decorator on each method, not by a per-instance value. Without this
+        # param it would fall into **kwargs like an unknown sampling field and
+        # get sent to the backend on every call — the same class of bug fixed
+        # for batch_size in di/factories.py (#712).
+        del max_retries
         self._endpoint = endpoint.rstrip("/")
         self._model = model_name
         self._api_key = api_key
@@ -320,31 +331,41 @@ class VLLMEmbedder(Embedder):
         try:
             resp = await self._client.post(f"{self._endpoint}/embeddings", json=body)
             resp.raise_for_status()
-        except httpx.ConnectError as exc:
-            raise EmbeddingAPIError(
-                f"Cannot reach embedder at {self._endpoint}",
-                model_name=self._model,
-                base_url=self._endpoint,
-                error=str(exc),
-            ) from exc
+        # Transport failures must carry a retryable status so @with_retry above
+        # actually fires (#704) — the translation happens inside the retried
+        # body, so the decorator never sees the underlying httpx exception and
+        # judges retryability purely on the status code we choose here.
+        #
+        # TimeoutException is caught first: it is a subclass of TransportError,
+        # so the broader clause below would otherwise swallow it as a 503. The
+        # TransportError net (not just ConnectError) covers a connection reset
+        # mid-request, which httpx raises as ReadError, plus WriteError/protocol
+        # errors — all transient and safe to retry since the embed POST is
+        # idempotent. HTTPStatusError is not a TransportError, so it is unaffected.
         except httpx.TimeoutException as exc:
-            raise EmbeddingAPIError(
+            raise EmbeddingTimeoutError(
                 f"Embedder request timed out at {self._endpoint}",
                 model_name=self._model,
                 base_url=self._endpoint,
                 error=str(exc),
             ) from exc
+        except httpx.TransportError as exc:
+            raise EmbeddingConnectionError(
+                f"Cannot reach embedder at {self._endpoint}",
+                model_name=self._model,
+                base_url=self._endpoint,
+                error=str(exc),
+            ) from exc
         except httpx.HTTPStatusError as exc:
-            extra: dict = {
-                "model_name": self._model,
-                "base_url": self._endpoint,
-                "error": exc.response.text,
-            }
-            if exc.response.status_code == 400:
-                suspect_texts = _find_suspect_escapes(texts)
-                if suspect_texts:
-                    extra["suspect_texts"] = suspect_texts
-            raise EmbeddingAPIError(f"Embedder API error ({exc.response.status_code})", **extra) from exc
+            # Preserve the upstream status, as the LLM path already does, so 429
+            # and 5xx are retried while 4xx (bad request, auth) fail fast.
+            raise EmbeddingAPIError(
+                f"Embedder API error ({exc.response.status_code})",
+                status_code=exc.response.status_code,
+                model_name=self._model,
+                base_url=self._endpoint,
+                error=exc.response.text,
+            ) from exc
 
         try:
             data = resp.json()["data"]
