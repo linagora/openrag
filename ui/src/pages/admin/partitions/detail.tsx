@@ -467,7 +467,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>User ID</TableHead>
+                  <TableHead>User</TableHead>
                   <TableHead>Role</TableHead>
                   <TableHead>Added</TableHead>
                   {canManage && <TableHead>Actions</TableHead>}
@@ -476,8 +476,10 @@ function UsersTab({ partitionName }: { partitionName: string }) {
               <TableBody>
                 {usersQuery.data.members.map((user) => (
                   <TableRow key={user.user_id}>
-                    <TableCell className="font-mono text-sm">
-                      {user.user_id}
+                    <TableCell className="text-sm">
+                      {user.display_name || (
+                        <span className="font-mono text-muted-foreground">{user.user_id}</span>
+                      )}
                     </TableCell>
                     <TableCell>
                       {canManage ? (
@@ -508,7 +510,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                       <TableCell>
                         <ConfirmDialog
                           title="Remove User"
-                          description={`Remove user "${user.user_id}" from this partition? They will lose access to partition data.`}
+                          description={`Remove user "${user.display_name || user.user_id}" from this partition? They will lose access to partition data.`}
                           onConfirm={() => removeMutation.mutate(user.user_id)}
                         >
                           <Button

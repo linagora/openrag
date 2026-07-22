@@ -674,7 +674,11 @@ class PartitionService:
 
     async def list_members(self, partition: str) -> list[dict]:
         await self._ensure_partition(partition)
-        return await self._membership_repo.list_partition_members(partition)
+        members = await self._membership_repo.list_partition_members(partition)
+        users = await asyncio.gather(*(self._user_repo.get_user(m["user_id"]) for m in members))
+        for member, user in zip(members, users, strict=True):
+            member["display_name"] = user.display_name if user else None
+        return members
 
     async def add_member(self, partition: str, user_id: int, role: str) -> None:
         await self._ensure_partition(partition)
