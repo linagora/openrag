@@ -61,6 +61,7 @@ def _config(rtype: str = "single", reranker_enabled: bool = False) -> SimpleName
             allow_filterless_fallback=True,
             k_queries=3,
             combine=False,
+            max_partition_concurrency=16,
         ),
         reranker=SimpleNamespace(enabled=reranker_enabled, top_k=5),
         partitions={},

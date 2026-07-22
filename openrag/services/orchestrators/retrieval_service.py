@@ -165,7 +165,10 @@ class RetrievalService:
         return getattr(self._config.retriever, name, default)
 
     def _pipeline_for_partition(self, partition: str) -> tuple[RetrieverPipeline, int | None]:
-        if partition == "all" or not self._partition_configs():
+        # Callers only ever pass a concrete partition name — the "all" sentinel is
+        # expanded to concrete keys by _pipeline_groups_for_partitions before this
+        # runs. With no per-partition configs at all, fall back to the legacy pipeline.
+        if not self._partition_configs():
             return self._pipeline, None
 
         partition_cfg = self._require_partition_config(partition)
@@ -300,7 +303,7 @@ class RetrievalService:
         its own leaves; the coroutines being awaited hold no permit while
         waiting for one, so there is no cross-level deadlock).
         """
-        limit = getattr(self._config.retriever, "max_partition_concurrency", 16) or 16
+        limit = self._config.retriever.max_partition_concurrency
         if len(coros) <= limit:
             return await asyncio.gather(*coros)
 
