@@ -26,9 +26,12 @@ from core.utils.text import clean_markdown_table_spacing
 # In-cell whitespace is ``[ \t]`` (not ``\s``) so a delimiter can't span line
 # breaks and swallow following rows as one multi-line "delimiter". No re.DOTALL,
 # so a row's ``.*?`` stays on its line (a pipe-looking text line can't be pulled
-# into a later table); the final row may end at a newline OR EOF.
+# into a later table); the final row may end at a newline OR EOF. Each row's
+# closing pipe may be followed by ``[ \t]*`` before the line ends — GFM permits
+# trailing line whitespace, and without this a stray space after ``|`` would drop
+# the whole table back to plain text (the same failure class as #710).
 TABLE_RE = re.compile(
-    r"((?:^|\n)\|.*?\|\r?\n\|(?:[ \t]*:?-+:?[ \t]*\|)+\r?\n(?:\|.*?\|(?:\r?\n|$))+)",
+    r"((?:^|\n)\|.*?\|[ \t]*\r?\n\|(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*\r?\n(?:\|.*?\|[ \t]*(?:\r?\n|$))+)",
     re.MULTILINE,
 )
 

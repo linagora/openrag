@@ -93,6 +93,25 @@ class TestSplitMdElements:
         elems = split_md_elements(md)
         assert all(e.type != "table" for e in elems)
 
+    @pytest.mark.parametrize(
+        "md",
+        [
+            "| A | B |  \n| --- | --- |\n| 1 | 2 |\n",  # after header pipe
+            "| A | B |\n| --- | --- |   \n| 1 | 2 |\n",  # after delimiter pipe
+            "| A | B |\n| --- | --- |\n| 1 | 2 |  \n",  # after data-row pipe
+            "| A | B |\t\n| --- | --- |\t\n| 1 | 2 |\t\n",  # trailing tabs
+            "| A | B |  \n| --- | --- |  \n| 1 | 2 |  ",  # trailing whitespace + EOF
+        ],
+    )
+    def test_trailing_line_whitespace_still_detected_as_table(self, md):
+        """GFM permits trailing whitespace after a row's closing pipe; a stray
+        space/tab before the line end must not drop the table to plain text
+        (same failure class as #710)."""
+        elems = split_md_elements(md)
+        tables = [e for e in elems if e.type == "table"]
+        assert len(tables) == 1
+        assert "A" in tables[0].content and "1" in tables[0].content
+
     def test_single_image(self):
         md = (
             "\nText before image.\n\n<image_description>\nA beautiful sunset over the ocean.\n"
