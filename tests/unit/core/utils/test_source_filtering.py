@@ -288,6 +288,29 @@ class TestStreamWithSourceFiltering:
         assert _collect_content(result) == "Hello world"
 
     @pytest.mark.asyncio
+    async def test_intermediate_content_chunk_never_marked_terminal(self):
+        """When the buffer has overflowed and the last token arrives packed with
+        finish_reason in one chunk, the mid-stream chunk emitted for it must NOT
+        carry finish_reason — else a spec client treats it as terminal, drops the
+        delta, and ignores the tail/finish chunks (truncating a long answer)."""
+        lines = [
+            _make_chunk("A" * 100),  # overflow the buffer (>80) so the next chunk emits mid-stream
+            _make_content_finish("B" * 100),  # last token + finish_reason in the same chunk
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        # The whole answer is still delivered.
+        assert _collect_content(result) == "A" * 100 + "B" * 100
+        # No content-bearing chunk may be marked terminal — only the empty finish chunk.
+        for line in result:
+            if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+                continue
+            data = json.loads(line[len("data: ") :])
+            choice = data.get("choices", [{}])[0]
+            if choice.get("delta", {}).get("content"):
+                assert choice.get("finish_reason") is None, f"content chunk marked terminal: {line}"
+
+    @pytest.mark.asyncio
     async def test_upstream_iterator_closed_after_done(self):
         """Breaking on [DONE] must close the upstream generator so the client's
         pooled HTTP connection is released now, not left suspended until GC (an

@@ -167,6 +167,12 @@ async def stream_with_source_filtering(
                                     **choice.get("delta", {}),
                                     "content": cleaned[emitted_len:safe_end],
                                 },
+                                # `choice` may carry finish_reason (a provider can pack
+                                # the last token + finish_reason into one chunk). Clear
+                                # it: a mid-stream chunk marked terminal makes spec
+                                # clients drop the delta and ignore the tail/finish
+                                # chunks. Same guard as the terminal tail chunk below.
+                                "finish_reason": None,
                             }
                         ],
                         "extra": "{}",
