@@ -77,7 +77,11 @@ async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
     config = _runtime_config(settings)
     probed_by_identity: dict[int, int | None] = {}
     results: dict[str, int] = {}
-    for name, endpoint in config.models.llm.items():
+    # Snapshot the endpoint dict up front: a concurrent model-endpoint reload
+    # replaces its contents in place (ModelEndpointService.load_all does
+    # dict.clear() + dict.update()), so iterating the live dict across the
+    # `await` below could raise "dictionary changed size during iteration".
+    for name, endpoint in list(config.models.llm.items()):
         if not endpoint.model_name:
             continue
         identity = id(endpoint)
