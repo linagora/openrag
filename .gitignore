@@ -102,5 +102,5 @@ i8n/*.json
 !i8n/en-US.json
 !i8n/fr.json
 
-# Graphify graph files
-graphify-out/**/*
+# graphify knowledge graph (local only, never pushed)
+graphify-out/
