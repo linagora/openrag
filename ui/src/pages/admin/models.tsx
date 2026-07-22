@@ -624,7 +624,10 @@ function EndpointDialog({
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
-            <Label>Name</Label>
+            <LabelWithInfo
+              label="Name"
+              tooltip="Unique name for this endpoint within its type. It's how the endpoint is referenced elsewhere — e.g. as a partition's chat LLM preset — so choose a stable, descriptive name."
+            />
             <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
