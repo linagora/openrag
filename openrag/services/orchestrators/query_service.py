@@ -180,50 +180,113 @@ class QueryService:
     def _resolve_llm(self, partition: list[str] | None) -> LLM:
         """Effective LLM for this request — query generation and answering.
 
-        Honors a partition's configured ``chat_llm`` model-endpoint preset
-        (set via the admin API) over the default LLM. Resolved once per
-        request (``chat`` / ``chat_stream`` / ``complete``) and used for
-        both the query-contextualization call and the final answer;
-        map-reduce stays on the default LLM until its post-release
-        refactor. Same partition semantics as
-        ``_resolve_chat_history_depth``: no partition and the ``"all"``
-        sentinel use the default; a multi-partition request uses the
-        preset only when every partition that sets one names the same
-        endpoint — with conflicting presets there is no single owning
-        partition, so the default applies.
+        Resolution order:
+
+        1. A partition's configured ``chat_llm`` model-endpoint preset (set
+           via the admin API) wins when the request scopes to one or more
+           named partitions that agree on a single preset. Resolved once per
+           request (``chat`` / ``chat_stream`` / ``complete``) and used for
+           both the query-contextualization call and the final answer;
+           map-reduce stays on the catalog default until its post-release
+           refactor.
+        2. Otherwise the **catalog default** endpoint — the ``is_default=True``
+           row, exposed by ``llm_factory`` under the ``"default"`` alias and
+           resolved fresh per request so promoting a new default endpoint at
+           runtime takes effect immediately. This covers a direct/web-only
+           request (no partition), the cross-partition ``"all"`` sentinel,
+           partitions that set no preset, and partitions whose presets
+           conflict (no single owning partition). Same partition semantics as
+           ``_resolve_chat_history_depth``.
+        3. The static ``self._llm`` (built from ``settings.llm`` at startup)
+           only as a last resort — no endpoint factory is wired (unit tests)
+           or the catalog has no default endpoint yet.
 
         ``chat_llm`` is validated against the endpoint catalog when it is
         assigned (``PartitionService`` rejects an unknown name at create /
         PATCH time), but a stored name can still go stale afterwards — the
         endpoint may be renamed or deleted after assignment — so an
-        unresolvable name here must not fail the chat request; it falls back
-        to the default LLM with a warning.
+        unresolvable name here must not fail the chat request; it falls
+        through to the catalog default with a warning.
+
+        The resolved preset name is always logged (at debug), including for
+        the default, so "which model answered?" is answerable from the logs.
+        """
+        chat_llm = self._agreed_partition_chat_llm(partition)
+        if chat_llm is not None:
+            try:
+                llm = self._llm_factory(chat_llm)  # factory is not None when chat_llm is set
+            except KeyError:
+                logger.warning(
+                    "Partition chat_llm preset not found in the model-endpoint catalog — "
+                    "falling back to the default LLM",
+                    chat_llm=chat_llm,
+                    partitions=partition,
+                )
+            else:
+                logger.bind(chat_llm=chat_llm, partitions=partition).debug(
+                    "Answering with the partition's chat_llm preset"
+                )
+                return llm
+        return self._default_llm(partition)
+
+    def _agreed_partition_chat_llm(self, partition: list[str] | None) -> str | None:
+        """The single ``chat_llm`` preset the request's partitions agree on, else None.
+
+        Returns None — meaning "use the catalog default" — when no endpoint
+        factory is wired, the request has no partition or uses the ``"all"``
+        sentinel, no named partition sets a preset, or the named partitions
+        name more than one preset (a conflict with no single owning partition).
         """
         if self._llm_factory is None or not partition or "all" in partition:
-            logger.bind(partitions=partition).debug("Answering with the default LLM (no partition-scoped preset)")
-            return self._llm
+            return None
         names = {
             cfg.chat_llm
             for name in partition
             if (cfg := self._config.partitions.get(name)) is not None and cfg.chat_llm
         }
-        if len(names) != 1:
-            logger.bind(partitions=partition, chat_llm_presets=sorted(names)).debug(
-                "Answering with the default LLM (no single chat_llm preset among the partitions)"
-            )
-            return self._llm
-        (chat_llm,) = names
-        try:
-            llm = self._llm_factory(chat_llm)
-        except KeyError:
-            logger.warning(
-                "Partition chat_llm preset not found in the model-endpoint catalog — using the default LLM",
-                chat_llm=chat_llm,
-                partitions=partition,
-            )
-            return self._llm
-        logger.bind(chat_llm=chat_llm, partitions=partition).debug("Answering with the partition's chat_llm preset")
-        return llm
+        return next(iter(names)) if len(names) == 1 else None
+
+    def _default_llm(self, partition: list[str] | None) -> LLM:
+        """The catalog default LLM endpoint (``is_default=True``), resolved fresh.
+
+        Bypassing this and returning the static ``self._llm`` was the bug
+        behind "the default chat model is still the one in .env" reports:
+        promoting a new default endpoint in the catalog had no effect on the
+        default chat path, which stayed pinned to the ``settings.llm`` (env)
+        client built at startup. Going through the factory's ``"default"``
+        alias — kept in sync with the ``is_default`` row and cache-invalidated
+        on every default change — makes the promotion take effect.
+
+        Falls back to the static ``self._llm`` only when no factory is wired
+        (unit tests) or the catalog has no default endpoint yet (KeyError).
+        """
+        if self._llm_factory is not None:
+            try:
+                llm = self._llm_factory("default")
+            except KeyError:
+                pass
+            else:
+                logger.bind(chat_llm=self._default_llm_name(), partitions=partition).debug(
+                    "Answering with the default chat_llm preset"
+                )
+                return llm
+        logger.bind(partitions=partition).debug("Answering with the static default LLM (no catalog default endpoint)")
+        return self._llm
+
+    def _default_llm_name(self) -> str:
+        """Real endpoint name behind the catalog ``"default"`` alias, for logging.
+
+        ``ModelEndpointService.load_all`` stores the ``is_default`` row's
+        config under both its own name and the ``"default"`` alias (the *same*
+        object), so the name is recovered by identity. Returns ``"default"``
+        when it can't be resolved (e.g. the alias isn't populated yet)."""
+        llms = self._config.models.llm
+        default_cfg = llms.get("default")
+        if default_cfg is not None:
+            for name, cfg in llms.items():
+                if name != "default" and cfg is default_cfg:
+                    return name
+        return "default"
 
     # ------------------------------------------------------------------
     # Query generation (was RagPipeline.generate_query — no LangChain)
