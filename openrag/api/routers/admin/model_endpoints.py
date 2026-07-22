@@ -21,7 +21,7 @@ from api.schemas.admin.model_endpoint_schemas import (
 from core.config.model_endpoints import ModelEndpointRow
 from core.utils.logging import get_logger
 from di.providers import get_model_endpoint_service
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 logger = get_logger()
@@ -44,6 +44,12 @@ async def _reprime_llm_token_cache(model_type: str) -> None:
     edited LLM endpoint keeps falling back to the global context-size
     default until the next restart. No-op for non-LLM endpoint types.
     Best-effort: a probe failure must not fail the admin's CRUD request.
+
+    Scheduled as a FastAPI background task (runs after the response is sent)
+    rather than awaited inline: ``prime_max_model_tokens`` probes every
+    registered LLM endpoint's ``/v1/models`` serially, so a single slow or
+    unreachable endpoint would otherwise stall the admin's write by several
+    probe timeouts for a refresh that is only best-effort anyway.
     """
     if model_type != "llm":
         return
@@ -60,13 +66,14 @@ async def _reprime_llm_token_cache(model_type: str) -> None:
 )
 async def create_model_endpoint(
     body: CreateModelEndpointRequest,
+    background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
 ):
     """Register a named inference endpoint."""
     now = datetime.now(UTC)
     row = ModelEndpointRow(**body.model_dump(), created_at=now, updated_at=now)
     result = await service.create_model_endpoint(row)
-    await _reprime_llm_token_cache(body.model_type)
+    background_tasks.add_task(_reprime_llm_token_cache, body.model_type)
     return result
 
 
@@ -94,6 +101,7 @@ async def update_model_endpoint(
     model_type: ModelEndpointType,
     name: str,
     body: UpdateModelEndpointRequest,
+    background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
 ):
     """Update a registered inference endpoint."""
@@ -105,7 +113,7 @@ async def update_model_endpoint(
         model_type=model_type,
         **fields,
     )
-    await _reprime_llm_token_cache(model_type)
+    background_tasks.add_task(_reprime_llm_token_cache, model_type)
     return result
 
 
@@ -113,11 +121,12 @@ async def update_model_endpoint(
 async def delete_model_endpoint(
     model_type: ModelEndpointType,
     name: str,
+    background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
 ):
     """Delete a registered inference endpoint."""
     await service.delete_model_endpoint(name=name, model_type=model_type)
-    await _reprime_llm_token_cache(model_type)
+    background_tasks.add_task(_reprime_llm_token_cache, model_type)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -125,11 +134,12 @@ async def delete_model_endpoint(
 async def set_default_model_endpoint(
     model_type: ModelEndpointType,
     name: str,
+    background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
 ):
     """Promote a registered endpoint to the default for its type."""
     await service.set_default(model_type=model_type, name=name)
-    await _reprime_llm_token_cache(model_type)
+    background_tasks.add_task(_reprime_llm_token_cache, model_type)
     return await service.get_model_endpoint(name=name, model_type=model_type)
 
 
