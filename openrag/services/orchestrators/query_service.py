@@ -186,9 +186,12 @@ class QueryService:
            via the admin API) wins when the request scopes to one or more
            named partitions that agree on a single preset. Resolved once per
            request (``chat`` / ``chat_stream`` / ``complete``) and used for
-           both the query-contextualization call and the final answer;
-           map-reduce stays on the catalog default until its post-release
-           refactor.
+           both the query-contextualization call and the final answer.
+           Map-reduce is the exception: its relevancy/summarisation passes
+           stay pinned to the static ``self._llm`` (see ``_infer_relevancy``),
+           so with a non-env default endpoint a map-reduce request's sub-calls
+           run on a different model than its answer, until that post-release
+           refactor lands.
         2. Otherwise the **catalog default** endpoint — the ``is_default=True``
            row, exposed by ``llm_factory`` under the ``"default"`` alias and
            resolved fresh per request so promoting a new default endpoint at
@@ -331,9 +334,11 @@ class QueryService:
     # ------------------------------------------------------------------
 
     async def _infer_relevancy(self, query: str, doc) -> tuple[bool, str]:
-        # Deliberately pinned to the default LLM: map-reduce is slated for a
-        # full post-release refactor, and routing it through the partition
-        # chat_llm preset is part of that work.
+        # Deliberately pinned to the static ``self._llm`` (the settings.llm env
+        # client) — NOT the resolved catalog default the answer uses, so a
+        # map-reduce request's sub-calls may run on a different model than its
+        # answer. Map-reduce is slated for a full post-release refactor; routing
+        # it through the resolved chat_llm is part of that work.
         async with get_llm_semaphore():
             try:
                 resp = await self._llm.chat(
