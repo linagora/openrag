@@ -16,6 +16,7 @@ The hierarchy is organised by concern:
     |   +-- DocumentNotFoundError
     |   +-- PartitionNotFoundError
     |   +-- UserNotFoundError
+    |   +-- WorkspaceNotFoundError
     +-- ConflictError                    (409)
     +-- QuotaExceededError               (429)
     +-- ServiceUnavailableError          (503)
@@ -166,6 +167,18 @@ class PartitionNotFoundError(NotFoundError):
 class UserNotFoundError(NotFoundError):
     def __init__(self, message: str, **kwargs):
         super().__init__(message, code="USER_NOT_FOUND", **kwargs)
+
+
+class WorkspaceNotFoundError(NotFoundError):
+    """Workspace missing or not accessible in the requested partition(s).
+
+    Used for both "no such workspace" and "workspace exists in a partition
+    the caller cannot access" — the two are intentionally indistinguishable
+    so an inaccessible workspace never reveals its existence.
+    """
+
+    def __init__(self, message: str, **kwargs):
+        super().__init__(message, code="WORKSPACE_NOT_FOUND", **kwargs)
 
 
 # ---------------------------------------------------------------------------
