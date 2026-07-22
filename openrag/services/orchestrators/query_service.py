@@ -49,6 +49,7 @@ from core.prompts import (
     format_web_context,
     load_template_by_key,
 )
+from core.utils.exceptions import WorkspaceNotFoundError
 from core.utils.logging import get_logger
 from core.utils.source_filtering import (
     extract_and_strip_sources_block,
@@ -330,12 +331,17 @@ class QueryService:
 
         top_k = self._mr_max if use_map_reduce else None
 
-        if workspace:
-            ws = await self._workspace.get_workspace(workspace)
-            if not ws or ("all" not in partition and ws["partition_name"] not in partition):
-                logger.warning("Workspace not found in partition(s) — ignoring", workspace=workspace)
-                workspace = None
-        filter_params = {"workspace_id": workspace} if workspace else None
+        filter_params = None
+        if workspace and partition:
+            scope = await self._workspace.resolve_scope(workspace, partition)
+            if scope is None:
+                raise WorkspaceNotFoundError(f"Workspace '{workspace}' not found.")
+            # A workspace belongs to exactly one partition — narrow retrieval to
+            # it even for an "openrag-all" / multi-partition request, otherwise
+            # file_id-only filtering could match a same-named file in another
+            # partition the caller also has access to (#706).
+            partition = [scope.partition]
+            filter_params = {"file_id": scope.file_ids}
 
         web_results: list = []
         if partition is not None and use_websearch:
