@@ -417,6 +417,27 @@ class TestPartitionResolvedMaxModelTokens:
 
         assert chat.get_max_model_tokens(partitions=["a", "b"], settings=s) == 8192
 
+    def test_stale_partition_preset_falls_back_to_default_endpoint_budget(self, monkeypatch):
+        """A partition ``chat_llm`` naming an endpoint that was later deleted or
+        renamed (nothing cascades the preset) must resolve the preflight to the
+        catalog default — mirroring ``QueryService._resolve_llm``'s KeyError
+        fallback — so the budget matches the endpoint that actually answers.
+
+        Otherwise the preflight would fall to the *global* budget while the
+        default endpoint (potentially smaller) answers, letting an oversized
+        request clear the 413 guard and then exceed the real window."""
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY
+
+        # Default endpoint configured smaller (4096) than the global fallback (8192).
+        s = _settings_with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 4096})
+        s.partitions["p"] = _partition_config(chat_llm="ghost")  # "ghost" is not in the catalog
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+
+        assert s.llm_context.max_llm_context_size == 8192  # global is larger — the bug returned this
+        # Resolves to the default endpoint's 4096 (what answers), not the global 8192.
+        assert chat.get_max_model_tokens(partitions=["p"], settings=s) == 4096
+
 
 class TestDefaultMaxTokensFactory:
     """The request-schema default_factory prefers the default endpoint's budget."""

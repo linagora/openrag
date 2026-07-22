@@ -233,8 +233,19 @@ def _resolve_llm_endpoint_name(config: "Settings", partitions: list[str] | None)
     model that will really be called, not always the global default. Falls
     back to the ``"default"`` alias (see ``ModelEndpointService``) when no
     single partition-scoped preset applies.
+
+    A partition's ``chat_llm`` can also go **stale** — the endpoint it names
+    may have been deleted or renamed after assignment (nothing cascades the
+    preset). ``QueryService._resolve_llm`` handles that by catching the
+    factory ``KeyError`` and answering with the catalog default; the preflight
+    must converge on the same endpoint, otherwise it would check the request
+    against the global budget while a differently-sized default endpoint
+    answers it. So an unresolvable name falls back to ``"default"`` here too.
     """
-    return resolve_partition_chat_llm(partitions, config.partitions) or "default"
+    name = resolve_partition_chat_llm(partitions, config.partitions)
+    if name is None or name not in config.models.llm:
+        return "default"
+    return name
 
 
 def _effective_max_output_tokens(config: "Settings", partitions: list[str] | None = None) -> int:
