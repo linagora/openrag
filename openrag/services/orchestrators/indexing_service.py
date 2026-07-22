@@ -278,8 +278,6 @@ class IndexingService:
             logger.bind(file_id=file_id, partition=partition).warning(
                 f"Dropped protected metadata keys from file metadata update: {dropped}"
             )
-        # content_sha256 is server-computed at ingest; never let a caller set it.
-        metadata.pop("content_sha256", None)
         metadata["file_id"] = file_id
         await self._dispatcher.update_file_metadata(file_id, metadata, partition, user)
 

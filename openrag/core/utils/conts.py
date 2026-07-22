@@ -25,6 +25,10 @@ def strip_internal_metadata(row: dict) -> dict:
 # it is the filesystem path served by ``GET /static/{extract_id}``, so letting a
 # caller set it turns a metadata write into a cross-tenant file read (#713).
 #
+# ``content_sha256`` is the server-computed dedup hash: a caller-set value would
+# corrupt dedup (spoofed ``DOCUMENT_CONTENT_EXISTS``), so it is protected here and
+# re-set from the server side on the copy path after this strip runs.
+#
 # ``partition`` is intentionally NOT here — the MCP update tool uses it as an
 # authorized move control and re-checks editor access on the destination.
 #
@@ -32,7 +36,7 @@ def strip_internal_metadata(row: dict) -> dict:
 # the upload path, the MCP tools, and the REST PATCH path previously each
 # re-implemented this and the REST one simply omitted it.
 PROTECTED_METADATA_KEYS: frozenset[str] = frozenset(
-    {"file_id", "source", "created_by", "file_size", "file_count", "_id", "vector", "text"}
+    {"file_id", "source", "created_by", "file_size", "file_count", "_id", "vector", "text", "content_sha256"}
 )
 
 
