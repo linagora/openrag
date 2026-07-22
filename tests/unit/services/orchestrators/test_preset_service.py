@@ -622,8 +622,7 @@ async def test_seed_defaults_does_not_update_existing_default_chunk_size():
     assert all(args[1] != "indexation" for _, args in upserts)
 
 
-@pytest.mark.asyncio
-async def test_seed_defaults_rejects_invalid_overlap_in_default_chunking():
+def test_seed_defaults_rejects_invalid_overlap_in_default_chunking():
     """A structurally-invalid finalized seed is rejected at seeding, not
     persisted (defense-in-depth on the seed path). Overlap out of [0,1) can't
     even be built into Settings, so validate the seed-path guard directly."""
@@ -634,3 +633,32 @@ async def test_seed_defaults_rejects_invalid_overlap_in_default_chunking():
     bad = {"chunking": {"name": "recursive_splitter", "chunk_size": 512, "chunk_overlap_rate": 1.5}}
     with pytest.raises(OpenRAGValidationError):
         svc._validate_config("indexation", bad)
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_rejects_unknown_global_chunker():
+    """A typo'd global CHUNKER must fail at seeding (startup), not per-file at
+    chunker build during indexing. #709 wired CHUNKER into the default preset,
+    so an unknown name now propagates here instead of being silently ignored."""
+    from core.config.root import Settings
+    from core.utils.exceptions import ValidationError as OpenRAGValidationError
+
+    repo = _FakePresetRepo()
+    settings = Settings(chunker={"name": "definitely_not_a_chunker"})
+    svc = _make_service(repo, settings=settings)
+    with pytest.raises(OpenRAGValidationError, match="Unknown chunker"):
+        await svc.seed_defaults()
+    # Nothing was persisted — the bad name is rejected before any upsert.
+    assert not any(c[0] == "upsert" for c in repo.calls)
+
+
+@pytest.mark.asyncio
+async def test_create_preset_rejects_unknown_chunker():
+    """The admin CRUD path also rejects an unregistered chunker name, so a bad
+    preset fails at create time rather than at chunker build during indexing."""
+    from core.utils.exceptions import ValidationError as OpenRAGValidationError
+
+    svc = _make_service()
+    bad = {"chunking": {"name": "nope_splitter", "chunk_size": 512, "chunk_overlap_rate": 0.2}}
+    with pytest.raises(OpenRAGValidationError, match="Unknown chunker"):
+        await svc.create_preset("bad", "indexation", bad)

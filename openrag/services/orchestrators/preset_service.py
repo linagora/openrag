@@ -309,14 +309,38 @@ class PresetService:
 
     def _validate_config(self, preset_type: str, config: dict[str, Any]) -> None:
         """Instantiate the Pydantic pipeline model to validate the config dict."""
+        indexation_model: IndexationPipelineConfig | None = None
         try:
             match preset_type:
                 case "indexation":
-                    IndexationPipelineConfig(**config)
+                    indexation_model = IndexationPipelineConfig(**config)
                 case "retrieval":
                     RetrievalPipelineConfig(**config)
         except Exception as exc:
             raise ValidationError(f"Invalid {preset_type} preset config: {exc}") from exc
+
+        # Structural validation accepts any chunker *name* (ChunkerConfig.name is a
+        # free string), but only registered strategies can actually be built. Reject
+        # an unknown name here — at seed time (startup) and on the admin CRUD path —
+        # so a typo fails fast instead of letting every document explode at chunker
+        # build during indexing. #709 wired the global CHUNKER into the default
+        # preset, so a bad env value now reaches this seed instead of being ignored.
+        if indexation_model is not None:
+            self._ensure_chunker_registered(indexation_model.chunking.name)
+
+    @staticmethod
+    def _ensure_chunker_registered(name: str) -> None:
+        """Raise ``ValidationError`` if *name* is not a registered chunking strategy."""
+        # Importing the factory triggers chunker registration (import side-effect),
+        # so the registry is populated before the membership check. Mirrors the
+        # trigger used by ``create_chunker`` itself.
+        import core.chunking.factory  # noqa: F401
+        from core.chunking.registry import chunking_registry
+
+        if name not in chunking_registry:
+            raise ValidationError(
+                f"Unknown chunker '{name}'. Available chunkers: {chunking_registry.list_registered()}"
+            )
 
 
 __all__ = ["PresetService"]
