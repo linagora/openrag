@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from core.utils.conts import is_internal_metadata_key
+from core.utils.conts import is_internal_metadata_key, strip_protected_metadata
 from core.utils.exceptions import ValidationError
 from core.utils.log_tail import collect_task_logs
 from core.utils.logging import get_logger
@@ -56,23 +56,16 @@ _MAX_REDIRECTS = 10
 _MAX_CHUNKS_PER_CALL = 200
 _MAX_FUZZY_CANDIDATES = 5000
 
-# Catalog/store-managed fields a caller must not be able to spoof via the
-# free-form metadata dict on write tools. ``partition`` is intentionally NOT
-# here — update_file_metadata uses it as an authorized move control (and
-# re-checks editor access on the destination).
-_PROTECTED_METADATA_KEYS: frozenset[str] = frozenset(
-    {"file_id", "source", "created_by", "file_size", "file_count", "_id", "vector", "text"}
-)
-
 
 def _strip_protected_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
-    """Drop server-managed keys from caller-supplied metadata (defense in depth)."""
-    md = dict(metadata or {})
-    removed = [k for k in md if k in _PROTECTED_METADATA_KEYS]
-    for k in removed:
-        del md[k]
+    """Drop server-managed keys from caller-supplied metadata (defense in depth).
+
+    Thin wrapper over the shared guard in ``core.utils.conts`` — the key set now
+    lives there so the REST and upload paths enforce the same one (#713).
+    """
+    md, removed = strip_protected_metadata(metadata)
     if removed:
-        logger.warning("Dropped protected metadata keys from MCP write", keys=sorted(removed))
+        logger.bind(keys=removed).warning("Dropped protected metadata keys from MCP write")
     return md
 
 

@@ -669,3 +669,57 @@ async def test_cancel_task_passthrough():
     svc = _service(disp=disp)
     assert await svc.cancel_task("t1") is False
     assert disp.cancelled == ["t1"]
+
+
+# --- #713: server-managed metadata keys must never come from the caller ----
+
+
+@pytest.mark.asyncio
+async def test_update_metadata_drops_protected_keys():
+    """A partition editor must not be able to repoint ``source``.
+
+    ``source`` is the filesystem path served by ``GET /static/{extract_id}``,
+    which authorizes on the chunk's partition — unchanged by this write. Left
+    unfiltered, an editor could aim it at another tenant's upload in the shared
+    data dir and read it back.
+    """
+    disp = FakeDispatcher()
+    svc = _service(disp=disp)
+    await svc.update_metadata(
+        "f1",
+        {
+            "author": "bob",
+            "source": "/app/data/other_tenant_secret.pdf",
+            "created_by": 999,
+            "file_size": 1,
+            "vector": [0.1],
+            "text": "spoofed",
+            "_id": "x",
+            "file_count": 42,
+        },
+        "p1",
+        {"id": 1},
+    )
+    _, md, _, _ = disp.updated[0]
+    assert md == {"author": "bob", "file_id": "f1"}
+    for key in ("source", "created_by", "file_size", "vector", "text", "_id", "file_count"):
+        assert key not in md
+
+
+@pytest.mark.asyncio
+async def test_copy_file_drops_protected_keys():
+    disp = FakeDispatcher()
+    svc = _service(disp=disp)
+    await svc.copy_file(
+        source_file_id="src",
+        source_partition="p1",
+        target_file_id="dst",
+        target_partition="p2",
+        metadata={"author": "bob", "source": "/app/data/other_tenant_secret.pdf"},
+        user={"id": 1},
+    )
+    _, md, _, _ = disp.copied[0]
+    assert "source" not in md
+    assert md["author"] == "bob"
+    assert md["file_id"] == "dst"
+    assert md["partition"] == "p2"
