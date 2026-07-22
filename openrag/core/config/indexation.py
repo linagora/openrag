@@ -166,6 +166,10 @@ class LoaderConfig(ConfigMixin):
     # keeps its own copy: the file is then removed from disk once indexing settles,
     # so only the derived chunks are retained.
     save_uploaded_files: bool = True
+    # Reject identical content inside one partition before expensive parsing,
+    # embedding, and storage. The upload hash is calculated while streaming the
+    # file to disk, so this does not add a second read for HTTP uploads.
+    content_deduplication_enabled: bool = True
     mimetypes: MimetypesConfig = Field(default_factory=MimetypesConfig)
     local_whisper: LocalWhisperConfig = Field(default_factory=LocalWhisperConfig)
     file_loaders: FileLoadersConfig = Field(default_factory=FileLoadersConfig)

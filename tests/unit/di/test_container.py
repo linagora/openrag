@@ -568,6 +568,12 @@ class TestPhase14NamedComponentFactories:
         assert vlm.kwargs["endpoint"] == "http://vlm:8000/v1"
         assert vlm.kwargs["max_tokens"] == 256
 
+        # batch_size is embedder-only. The LLM/VLM/reranker clients absorb
+        # unknown kwargs into the request body, so it must not reach them (#712).
+        assert "batch_size" not in llm.kwargs
+        assert "batch_size" not in vlm.kwargs
+        assert "batch_size" not in reranker.kwargs
+
     def test_embedder_extra_overrides_backfilled_embedder_defaults(self):
         """Per-endpoint embedder extras win over the settings defaults."""
         settings = _settings_with_named_models()
@@ -578,6 +584,20 @@ class TestPhase14NamedComponentFactories:
         embedder = c.embedder_factory("embed-a")
         assert embedder.kwargs["max_model_len"] == 4096
         assert embedder.kwargs["embed_concurrency"] == 9
+
+    def test_embedder_extra_batch_size_wins_over_top_level(self):
+        """An explicit extra['batch_size'] must override the top-level value.
+
+        The top-level field is backfilled only when extra omits it, so moving
+        batch_size into extra_kwargs_fn (#712) does not invert the precedence the
+        base kwargs applied — extra still wins.
+        """
+        settings = _settings_with_named_models()
+        settings.models.embedder["embed-a"].batch_size = 16
+        settings.models.embedder["embed-a"].extra["batch_size"] = 128
+        c = ServiceContainer(settings)
+
+        assert c.embedder_factory("embed-a").kwargs["batch_size"] == 128
 
     def test_named_factories_cache_by_endpoint_name(self):
         """Repeated factory calls for the same endpoint return one client."""

@@ -31,7 +31,7 @@ Returns system status including:
 
 **Tasks:**
 - `active`: Total active tasks
-- `active_statuses`: Breakdown by status (QUEUED, SERIALIZING, CHUNKING, INSERTING)
+- `active_statuses`: Breakdown by status (QUEUED, SERIALIZING)
 - `total_completed`: Count of completed tasks
 - `total_cancelled`: Count of cancelled tasks
 - `total_failed`: Count of failed tasks
@@ -54,7 +54,7 @@ async def get_queue_info(
 
 **Query Parameters:**
 - `task_status`: Filter by status (optional)
-  - `active`: Show QUEUED, SERIALIZING, CHUNKING, or INSERTING tasks
+  - `active`: Show QUEUED or SERIALIZING tasks
   - `completed`: Show completed tasks
   - `failed`: Show failed tasks
   - `cancelled`: Show cancelled tasks
@@ -70,14 +70,14 @@ Returns list of tasks with:
 - `task_id`: Unique task identifier
 - `state`: Current task state
 - `details`: Task metadata (file_id, partition, etc.)
+- `created_at`: Date and time when the task was created
+- `duration_ms`: Total task duration in milliseconds
 - `url`: Link to detailed task status
 - `error_url`: Link to error details (if failed)
 
 **Task States:**
 - `QUEUED`: Waiting to start
-- `SERIALIZING`: Converting document format
-- `CHUNKING`: Splitting into chunks
-- `INSERTING`: Adding to vector database
+- `SERIALIZING`: Parsing, chunking, embedding, and storing the document
 - `COMPLETED`: Successfully finished
 - `CANCELLED`: Cancelled by user/admin
 - `FAILED`: Error occurred
@@ -90,7 +90,7 @@ async def list_tasks(
     service=Depends(get_job_service),
 ):
     """
-    - ?task_status=active  → QUEUED | SERIALIZING | CHUNKING | INSERTING
+    - ?task_status=active  → QUEUED | SERIALIZING
     - ?task_status=<exact> → exact match (case-insensitive)
     - (none)               → all tasks
     """
@@ -107,6 +107,8 @@ async def list_tasks(
             "task_id": task_id,
             "state": row["state"],
             "details": row["details"],
+            "created_at": row["created_at"],
+            "duration_ms": row["duration_ms"],
             **(
                 {"error_url": str(request.url_for("get_task_error", task_id=task_id))}
                 if row["state"] == "FAILED"

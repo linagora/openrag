@@ -35,6 +35,10 @@ class VLMConfig(LLMParamsConfig):
     base_url: str = ""
     model: str = ""
     api_key: str = Field(default="", repr=False)
+    # Captioning large images through a shared/slow VLM endpoint routinely
+    # takes longer than a chat completion, so this is independently tunable
+    # (VLM_TIMEOUT) rather than silently inheriting the int llm.timeout.
+    timeout: float = 60.0
 
 
 class EmbedderConfig(ConfigMixin):

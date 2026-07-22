@@ -37,7 +37,13 @@ const getQueueInfoMock = vi.mocked(getQueueInfo);
 const listTasksMock = vi.mocked(listTasks);
 const toastErrorMock = vi.mocked(toast.error);
 
-const task = (task_id: string, state: TaskState, filename: string, partition = "docs") => ({
+const task = (
+  task_id: string,
+  state: TaskState,
+  filename: string,
+  partition = "docs",
+  timing: { created_at?: string; duration_ms?: number } = {},
+) => ({
   task_id,
   state,
   details: {
@@ -46,6 +52,7 @@ const task = (task_id: string, state: TaskState, filename: string, partition = "
     metadata: { filename },
     user_id: 1,
   },
+  ...timing,
   url: `/indexer/task/${task_id}`,
 });
 
@@ -74,7 +81,7 @@ describe("JobListPage filters", () => {
       workers: { total_slots: 4, pool_size: 2, max_per_actor: 2 },
       tasks: {
         active: 1,
-        active_statuses: { QUEUED: 0, SERIALIZING: 0, CHUNKING: 1, INSERTING: 0 },
+        active_statuses: { QUEUED: 0, SERIALIZING: 1 },
         total_completed: 12,
         total_cancelled: 0,
         total_failed: 1,
@@ -185,12 +192,49 @@ describe("JobListPage filters", () => {
     expect(screen.getByTitle(longPartition).className).toContain("truncate");
   });
 
+  it("shows task creation time and duration", async () => {
+    const createdAt = "2026-07-20T08:00:00+00:00";
+    listTasksMock.mockResolvedValue({
+      tasks: [task("timed-task", "COMPLETED", "timed.pdf", "docs", { created_at: createdAt, duration_ms: 65_000 })],
+    });
+
+    renderJobs();
+
+    expect((await screen.findByTitle(createdAt)).textContent).toBe(new Date(createdAt).toLocaleString());
+    expect(screen.getByText("1m 5s")).not.toBeNull();
+  });
+
+  it("sorts jobs by file and creation time", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("zeta-task", "COMPLETED", "zeta.pdf", "docs", {
+          created_at: "2026-07-20T08:00:00+00:00",
+          duration_ms: 2000,
+        }),
+        task("alpha-task", "COMPLETED", "alpha.pdf", "docs", {
+          created_at: "2026-07-20T09:00:00+00:00",
+          duration_ms: 1000,
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByText("zeta.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "File" }));
+    expect(screen.getAllByRole("row")[1].textContent).toContain("alpha.pdf");
+
+    await userEvent.click(screen.getByRole("button", { name: "Created" }));
+    expect(screen.getAllByRole("row")[1].textContent).toContain("zeta.pdf");
+  });
+
   it("shows queue and worker pressure from the backend", async () => {
     getQueueInfoMock.mockResolvedValue({
       workers: { total_slots: 2, pool_size: 1, max_per_actor: 2 },
       tasks: {
         active: 4,
-        active_statuses: { QUEUED: 2, SERIALIZING: 0, CHUNKING: 2, INSERTING: 0 },
+        active_statuses: { QUEUED: 2, SERIALIZING: 2 },
         total_completed: 20,
         total_cancelled: 0,
         total_failed: 1,

@@ -209,6 +209,24 @@ class TestVLLMClient:
         await self._make_client(handler).chat([{"role": "user", "content": "hi"}], temperature=0.9, max_tokens=100)
 
     @pytest.mark.asyncio
+    async def test_max_retries_is_not_forwarded_to_request_body(self):
+        """max_retries is a config field (LLMParamsConfig), not a sampling param —
+        it must not leak into **kwargs/self._defaults and end up in the outgoing
+        chat payload the way batch_size once did for the embedder (#712)."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        client = self._make_client(capture, max_retries=9)
+        assert "max_retries" not in client._defaults
+
+        await client.chat([{"role": "user", "content": "hi"}])
+
+        assert "max_retries" not in captured
+
+    @pytest.mark.asyncio
     async def test_trailing_slash_stripped(self):
         c = VLLMClient(endpoint="http://vllm:8000/v1/", model_name="m")
         assert c._endpoint == "http://vllm:8000/v1"
@@ -528,6 +546,17 @@ class TestVLLMVision:
             return _chat_response("ok")
 
         await self._make_vision(handler, max_tokens=512).caption_image(b"img")
+
+    @pytest.mark.asyncio
+    async def test_max_retries_is_not_forwarded_to_request_body(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "max_retries" not in json.loads(request.content)
+            return _chat_response("ok")
+
+        vision = self._make_vision(handler, max_retries=9)
+        assert "max_retries" not in vision._defaults
+
+        await vision.caption_image(b"img")
 
     @pytest.mark.asyncio
     async def test_caption_image_sends_enable_thinking_as_chat_template_kwargs_when_configured(self):

@@ -153,6 +153,24 @@ class TestOllamaClient:
         )
 
     @pytest.mark.asyncio
+    async def test_max_retries_is_not_forwarded_to_request_body(self):
+        """max_retries is a config field (LLMParamsConfig), not a sampling param —
+        it must not leak into **kwargs/self._defaults and end up in the outgoing
+        chat payload the way batch_size once did for the embedder (#712)."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        client = self._make_client(capture, max_retries=9)
+        assert "max_retries" not in client._defaults
+
+        await client.chat([{"role": "user", "content": "hi"}])
+
+        assert "max_retries" not in captured
+
+    @pytest.mark.asyncio
     async def test_metadata_stripped_from_payload(self):
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)

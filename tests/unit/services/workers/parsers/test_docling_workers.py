@@ -30,3 +30,21 @@ def test_docling_num_gpus_zero_when_not_requested(monkeypatch):
     monkeypatch.setattr(docling_workers.ray, "cluster_resources", lambda: {"GPU": 1.0})
 
     assert docling_workers._docling_num_gpus(_config(docling_num_gpus=0)) == 0
+
+
+# --- #722: the detached pool supervisor must survive its own crashes ----------
+
+
+def test_docling_pool_sets_max_restarts():
+    """DoclingPool had a bare @ray.remote — Ray's default max_restarts is 0, so
+    one crash left the detached actor permanently dead and every docling parse
+    afterwards failed. It must be restartable like MarkerPool/WhisperActor."""
+    assert docling_workers.DoclingPool.__ray_metadata__.max_restarts == 5
+
+
+def test_docling_pool_restart_policy_matches_marker():
+    """Parity guard: if MarkerPool's policy changes, this flags that DoclingPool
+    should be reconsidered too, rather than silently drifting apart."""
+    from services.workers.parsers.marker_workers import MarkerPool
+
+    assert docling_workers.DoclingPool.__ray_metadata__.max_restarts == MarkerPool.__ray_metadata__.max_restarts

@@ -52,7 +52,7 @@ logger = get_logger()
 
 _ROLE_HIERARCHY: dict[str, int] = {"viewer": 1, "editor": 2, "owner": 3}
 _FORBIDDEN_FILE_ID_CHARS: frozenset[str] = frozenset("/")
-_ACTIVE_STATES = {"QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"}
+_ACTIVE_STATES = {"QUEUED", "SERIALIZING"}
 _MAX_REDIRECTS = 10
 _MAX_CHUNKS_PER_CALL = 200
 _MAX_FUZZY_CANDIDATES = 5000
@@ -609,11 +609,15 @@ class MCPService:
         suffix = Path(filename).suffix or ""
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = Path(tmp.name)
+        download_complete = False
         try:
             await self._safe_download(url, tmp_path)
+            download_complete = True
         except Exception as exc:
-            tmp_path.unlink(missing_ok=True)
             raise RuntimeError(f"Failed to download '{url}': {exc}") from exc
+        finally:
+            if not download_complete:
+                tmp_path.unlink(missing_ok=True)
 
         metadata = _strip_protected_metadata(extra_metadata)
         metadata["source_url"] = url
@@ -621,15 +625,19 @@ class MCPService:
         if guessed_mime and "mimetype" not in metadata:
             metadata["mimetype"] = guessed_mime
 
-        task_id = await self._indexing.add_file(
-            file_path=str(tmp_path),
-            file_id=file_id,
-            partition=partition,
-            metadata=metadata,
-            sanitized_filename=filename,
-            original_filename=filename,
-            user={"id": user_id, "is_admin": is_admin} if user_id is not None else None,
-        )
+        try:
+            task_id = await self._indexing.add_file(
+                file_path=str(tmp_path),
+                file_id=file_id,
+                partition=partition,
+                metadata=metadata,
+                sanitized_filename=filename,
+                original_filename=filename,
+                user={"id": user_id, "is_admin": is_admin} if user_id is not None else None,
+            )
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
         return {
             "partition": partition,
             "file_id": file_id,

@@ -21,7 +21,8 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | `IMAGE_CAPTIONING` | `bool` | `true` | If `true`, an LLM is used to describe images and convert them into text using a [specific prompt](https://github.com/linagora/openrag/blob/main/openrag/prompts/templates/image_captioning_tmpl.txt). The image in files are replaced by their descriptions |
 | `IMAGE_CAPTIONING_URL` | `bool` | `true` | If `true`, HTTP/HTTPS image URLs in markdown files are fetched and described by the VLM. |
 | `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing is saved. Useful for debugging and verifying the correctness of the generated markdown. |
-|`SAVE_UPLOADED_FILES`|`bool`|`false`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
+|`SAVE_UPLOADED_FILES`|`bool`|`true`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
+| `CONTENT_DEDUPLICATION_ENABLED` | `bool` | `true` | Rejects a file when identical content already exists in the same partition. Set it to `false` when a test intentionally indexes duplicates. |
 | `PDFLOADER` | `str` | `PyMuPDFLoader` | PDF parsing engine. `PyMuPDFLoader` (default) is a lightweight, fast, CPU-friendly backend for searchable PDFs. Switch to `MarkerLoader` for OCR / scanned documents, complex layouts and embedded images (heavier; GPU-friendly). Other options: `DoclingLoader`, `DotsOCRLoader`.|
 | `PARSE_TIMEOUT` | `int` | `3600` | Outer wall-clock bound (in seconds) for a single file's parse stage, whichever loader runs it. Marker and Docling self-limit via their own timeouts, but `PyMuPDFLoader` has none — this bound stops a wedged parse from stalling indexing: the file fails and is reported instead. |
 
@@ -481,7 +482,7 @@ Web search allows the LLM to augment RAG document context with live web results.
 | `WEBSEARCH_FETCH_MAX_RESULTS` | `int` | `3` | Number of top URLs to fetch content from (the remaining results use their search snippet). |
 | `WEBSEARCH_FETCH_TIMEOUT` | `float` | `1.0` | Per-URL timeout in seconds for content fetching. URLs that don't respond within this time fall back to their snippet. |
 | `WEBSEARCH_FETCH_MAX_TOKENS` | `int` | `500` | Maximum approximate tokens of content to extract per page. Content is truncated at word boundaries. |
-| `WEBSEARCH_FETCH_VERIFY_SSL` | `bool` | `false` | Whether to verify SSL certificates when fetching page content. |
+| `WEBSEARCH_FETCH_VERIFY_SSL` | `bool` | `true` | Whether to verify SSL certificates when fetching page content. Set to `false` only for internal CAs — fetched pages are injected into the LLM context as cited sources. |
 
 :::tip[How to Enable Web Search?]
 When chatting, you can enable web search through the OpenAI-compatible API by setting `"websearch": true` in the `metadata` field of the request body. See the [API documentation](/openrag/documentation/api/#extra-arguments) for examples.

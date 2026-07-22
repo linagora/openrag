@@ -155,6 +155,25 @@ def test_resolve_chat_history_depth_multi_partition_takes_max_explicit():
     assert svc._resolve_chat_history_depth(["a", "b", "c"]) == 6
 
 
+@pytest.mark.parametrize("global_depth", [0, -1])
+def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
+    """RAGConfig.chat_history_depth carries no lower bound. Left unclamped, a
+    misconfigured global depth of 0 would make messages[-0:] keep the *entire*
+    history for chats with no partition (or the "all" sentinel) — the opposite
+    of what this depth is meant to limit."""
+    config = _config()
+    config.rag.chat_history_depth = global_depth
+    svc = QueryService(
+        retrieval_service=FakeRetrieval(),
+        llm=FakeLLM(),
+        config=config,
+        web_search_service=FakeWeb(),
+        workspace_service=FakeWorkspace(),
+    )
+    assert svc._default_chat_history_depth == 4
+    assert svc._resolve_chat_history_depth(None) == 4
+
+
 # --------------------------------------------------------------------------- #
 # chat LLM resolution (per-partition chat_llm model-endpoint preset)
 # --------------------------------------------------------------------------- #
