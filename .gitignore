@@ -102,5 +102,5 @@ i8n/*.json
 !i8n/en-US.json
 !i8n/fr.json
 
-.github/workflows/build_rc.yml
+# .github/workflows/build_rc.yml
 .codegraph

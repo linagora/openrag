@@ -212,11 +212,17 @@ class FakeVectorStore:
 
 
 class FakeUserRepo:
-    def __init__(self, existing: set[int] | None = None):
+    def __init__(self, existing: set[int] | None = None, display_names: dict[int, str] | None = None):
         self._existing = existing if existing is not None else set()
+        self._display_names = display_names or {}
 
     async def user_exists(self, user_id: int) -> bool:
         return user_id in self._existing
+
+    async def get_user(self, user_id: int):
+        if user_id not in self._existing:
+            return None
+        return SimpleNamespace(display_name=self._display_names.get(user_id))
 
 
 def _svc(
@@ -828,6 +834,24 @@ async def test_get_file_chunks_rejects_negative_limit():
 async def test_list_members_missing_partition_404():
     with pytest.raises(PartitionNotFoundError):
         await _svc(prepo=FakePartitionRepo(set())).list_members("x")
+
+
+@pytest.mark.asyncio
+async def test_list_members_enriches_with_display_name():
+    mrepo = FakeMembershipRepo(members={(9, "p")})
+    urepo = FakeUserRepo({9}, display_names={9: "Alice"})
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=urepo)
+    members = await svc.list_members("p")
+    assert members == [{"user_id": 9, "role": "viewer", "display_name": "Alice"}]
+
+
+@pytest.mark.asyncio
+async def test_list_members_missing_user_display_name_is_none():
+    mrepo = FakeMembershipRepo(members={(9, "p")})
+    urepo = FakeUserRepo(set())  # user_id 9 no longer exists
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=urepo)
+    members = await svc.list_members("p")
+    assert members[0]["display_name"] is None
 
 
 @pytest.mark.asyncio
