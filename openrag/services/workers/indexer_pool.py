@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import ray
+from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
 
 from openrag.core.config.root import Settings
@@ -16,7 +17,24 @@ from openrag.core.config.root import Settings
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
 _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
-_INDEXER_POOL_DISPATCHER_ACTOR_NAME = "IndexerPoolDispatcher"
+# Named detached actors survive API rolling deployments. Keep the dispatcher
+# and workers on the same protocol generation whenever their remote contract or
+# cross-process indexing semantics change, so new replicas cannot attach to a
+# partially compatible actor fleet left by the previous release.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v2"
+_INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
+
+
+def _indexer_worker_actor_name(index: int) -> str:
+    return f"IndexerWorker-{_INDEXER_ACTOR_PROTOCOL_VERSION}-{index}"
+
+
+def _catalog_rdb_config(settings: Settings) -> Any:
+    if settings.rdb.database is not None:
+        return settings.rdb
+    return settings.rdb.model_copy(
+        update={"database": f"partitions_for_collection_{settings.vectordb.collection_name}"}
+    )
 
 
 @ray.remote
@@ -91,8 +109,7 @@ class IndexerWorkerActor:
             topic_tagger_factory=topic_tagger_factory,
             defer_replace_cleanup=True,
         )
-        rdb_cfg = cfg.rdb.model_copy(update={"database": f"partitions_for_collection_{cfg.vectordb.collection_name}"})
-        self._catalog_store = PostgresStore(rdb_cfg, run_migrations=False)
+        self._catalog_store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
         self._catalog_initialized = False
         self._catalog_init_lock = asyncio.Lock()
         # Model-endpoint registry hydration. Unlike the API process, the indexer
@@ -227,13 +244,15 @@ class IndexerWorkerActor:
         embedder_name: str | None = None,
         require_existing_partition: bool = False,
     ) -> dict[str, Any]:
+        content_claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
+        worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
         try:
             await self._ensure_catalog()
             await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
             result = await self._worker.process_file(
                 task_id=task_id,
                 path=path,
-                metadata=metadata,
+                metadata=worker_metadata,
                 partition=partition,
                 user=user,
                 workspace_ids=workspace_ids,
@@ -257,13 +276,14 @@ class IndexerWorkerActor:
         finally:
             content_sha256 = metadata.get("content_sha256")
             file_id = metadata.get("file_id")
-            if content_sha256 and file_id:
+            if content_sha256 and file_id and content_claim_token:
                 try:
                     await self._ensure_catalog()
                     await self._catalog_store.document_repo.release_content_sha256_claim(
                         file_id=file_id,
                         partition=partition,
                         content_sha256=content_sha256,
+                        claim_token=content_claim_token,
                     )
                 except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
                     self._logger.warning(f"Failed to release content deduplication claim for {file_id}: {exc}")
@@ -279,13 +299,14 @@ class IndexerWorkerActor:
 class IndexerPool:
     """Single detached dispatcher actor over a fleet of ``IndexerWorkerActor``.
 
-    Exactly **one** instance exists cluster-wide — it is created named, detached
-    and with ``get_if_exists=True`` (see :func:`build_indexer_pool`). Every API
-    process and every Ray Serve replica therefore shares the *same* dispatcher,
-    so the least-loaded view is global. A per-replica client object would keep
-    its own ``_inflight`` counters, and since Ray Serve runs each replica as a
-    separate actor/process, those views would diverge and unbalance dispatch
-    across the shared workers under bursts.
+    Exactly **one** instance per protocol generation exists cluster-wide — it is
+    created named, detached and with ``get_if_exists=True`` (see
+    :func:`build_indexer_pool`). Every API process and every Ray Serve replica
+    on the current generation therefore shares the *same* dispatcher, so the
+    least-loaded view is global. A per-replica client object would keep its own
+    ``_inflight`` counters, and since Ray Serve runs each replica as a separate
+    actor/process, those views would diverge and unbalance dispatch across the
+    shared workers under bursts.
 
     It holds ``ray.indexer.pool_size`` worker actors and dispatches each file to
     the least-loaded one (fewest in-flight files). ``submit`` returns the
@@ -307,7 +328,7 @@ class IndexerPool:
         # are shared singletons too; only this dispatcher creates them.
         self._workers = [
             IndexerWorkerActor.options(  # type: ignore[attr-defined]
-                name=f"IndexerWorker-{i}",
+                name=_indexer_worker_actor_name(i),
                 namespace=namespace,
                 get_if_exists=True,
                 lifetime="detached",
@@ -315,13 +336,44 @@ class IndexerPool:
             ).remote()
             for i in range(pool_size)
         ]
+        self._worker_names = [_indexer_worker_actor_name(i) for i in range(pool_size)]
         self._inflight = [0] * len(self._workers)
+        self._accepting_tasks = True
         self._release_tasks: set[asyncio.Task[Any]] = set()
         self._claim_store: Any = None
         self._claim_store_lock = asyncio.Lock()
 
     async def size(self) -> int:
         return len(self._workers)
+
+    async def protocol_version(self) -> str:
+        """Return the remote contract generation implemented by this actor."""
+        return _INDEXER_ACTOR_PROTOCOL_VERSION
+
+    async def begin_drain(self) -> dict[str, Any]:
+        """Reject new submissions while allowing accepted work to settle."""
+        self._accepting_tasks = False
+        return await self.status()
+
+    async def abort_drain(self) -> dict[str, Any]:
+        """Resume accepting submissions after an abandoned drain.
+
+        When a retirement gives up (e.g. it times out waiting for accepted work
+        to settle), the actors are kept alive but ``begin_drain`` has already
+        stopped this pool from accepting work. Restore acceptance so the
+        retained generation keeps serving instead of rejecting every submission.
+        """
+        self._accepting_tasks = True
+        return await self.status()
+
+    async def status(self) -> dict[str, Any]:
+        """Expose the state a deployment controller needs before actor cleanup."""
+        return {
+            "protocol_version": _INDEXER_ACTOR_PROTOCOL_VERSION,
+            "accepting_tasks": self._accepting_tasks,
+            "inflight_jobs": sum(self._inflight),
+            "worker_names": list(self._worker_names),
+        }
 
     async def submit(self, **kwargs: Any) -> list[Any]:
         """Dispatch ``process_file`` to the least-loaded worker.
@@ -330,6 +382,8 @@ class IndexerPool:
         one-element list — see the class docstring); in-flight bookkeeping is
         released when the task settles (success, failure, or cancellation).
         """
+        if not self._accepting_tasks:
+            raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
         idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
         self._inflight[idx] += 1
         try:
@@ -342,12 +396,14 @@ class IndexerPool:
         metadata = kwargs.get("metadata") or {}
         content_sha256 = metadata.get("content_sha256")
         file_id = metadata.get("file_id")
+        claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
         claim = None
-        if content_sha256 and file_id:
+        if content_sha256 and file_id and claim_token:
             claim = {
                 "file_id": str(file_id),
                 "partition": str(kwargs.get("partition") or ""),
                 "content_sha256": str(content_sha256),
+                "claim_token": str(claim_token),
             }
         task = asyncio.get_running_loop().create_task(self._release(idx, ref, claim=claim))
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
@@ -387,10 +443,7 @@ class IndexerPool:
                     from services.storage.postgres_store import PostgresStore
 
                     cfg = load_config()
-                    rdb_cfg = cfg.rdb.model_copy(
-                        update={"database": f"partitions_for_collection_{cfg.vectordb.collection_name}"}
-                    )
-                    store = PostgresStore(rdb_cfg, run_migrations=False)
+                    store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
                     await store.initialize()
                     self._claim_store = store
         return self._claim_store.document_repo
@@ -401,6 +454,7 @@ class IndexerPool:
         file_id: str,
         partition: str,
         content_sha256: str,
+        claim_token: str,
     ) -> None:
         while True:
             await asyncio.sleep(_CONTENT_CLAIM_RENEW_INTERVAL_SECONDS)
@@ -410,6 +464,7 @@ class IndexerPool:
                     file_id=file_id,
                     partition=partition,
                     content_sha256=content_sha256,
+                    claim_token=claim_token,
                 )
                 if not renewed:
                     return
@@ -436,8 +491,10 @@ def build_indexer_pool(namespace: str = "openrag") -> Any:
     # the whole fleet's capacity. The constructor args are honoured only on the
     # first creation; later get_if_exists calls reuse the existing dispatcher
     # and ignore them — which is correct, since every replica loads the same cfg.
-    # Do not reuse the old "IndexerPool" name: that detached actor exposed
-    # process_file(), while this dispatcher exposes submit().
+    # The protocol-generation suffix prevents a rolling deployment from
+    # reusing an older detached dispatcher or its workers. This matters even
+    # when the public submit() signature is unchanged: claim ownership and
+    # catalog routing are implemented inside those long-lived actor processes.
     return IndexerPool.options(  # type: ignore[attr-defined]
         name=_INDEXER_POOL_DISPATCHER_ACTOR_NAME,
         namespace=namespace,
