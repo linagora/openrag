@@ -204,6 +204,52 @@ def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.Monke
     assert tagger._llm.kwargs["temperature"] == 0.1
 
 
+def test_worker_factories_do_not_forward_the_env_managed_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`managed_by` is bookkeeping, not a constructor kwarg — and never a request field.
+
+    Every seeded endpoint now carries the marker in `extra`, and the worker
+    factories splat `extra` straight into the client. Forwarding it would push
+    `managed_by: "env"` into the provider payload, which a strict
+    OpenAI-compatible service rejects with a 400 — failing indexing rather than
+    anything visibly related to the marker.
+    """
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.llm import llm_registry
+    from services.workers.indexer_pool import _build_topic_tagger_factory
+
+    class ProbeLLM:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    llm_registry.register("marker-probe")(ProbeLLM)
+    cfg = SimpleNamespace(
+        models=SimpleNamespace(
+            llm={
+                "topic-a": ModelEndpointConfig(
+                    endpoint="http://llm:8000/v1",
+                    model_name="topic-model",
+                    timeout=9.0,
+                    extra={
+                        "implementation": "marker-probe",
+                        "temperature": 0.1,
+                        ENV_MANAGED_KEY: ENV_MANAGED_VALUE,
+                    },
+                )
+            }
+        ),
+        llm=SimpleNamespace(base_url="", model=""),
+        paths=SimpleNamespace(prompts_dir="/tmp/prompts"),
+        prompts=SimpleNamespace(topic_tagger="topic.txt"),
+    )
+    monkeypatch.setattr("core.prompts.load_template_by_key", lambda *_args: "extract topics")
+
+    tagger = _build_topic_tagger_factory(cfg)("topic-a")
+
+    assert ENV_MANAGED_KEY not in tagger._llm.kwargs
+    assert "implementation" not in tagger._llm.kwargs
+    assert tagger._llm.kwargs["temperature"] == 0.1  # real kwargs still forwarded
+
+
 def test_build_contextualizer_factory_returns_factory_for_later_hydration(tmp_path) -> None:
     # With no LLM configured at build time the factory is still returned (the
     # registry is hydrated from the DB later) — resolving an unknown name raises

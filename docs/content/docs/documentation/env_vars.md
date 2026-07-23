@@ -185,12 +185,16 @@ Model endpoints (embedder, LLM, VLM, reranker) are stored in a **database-backed
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | When `true`, the endpoint each type was auto-seeded with is re-synced from the environment on **every** boot — its `endpoint`, `model_name`, `batch_size`, `timeout` and `api_key` are overwritten from the `*_BASE_URL` / `*_MODEL` / `*_API_KEY` / `EMBEDDER_BATCH_SIZE` / `EMBEDDER_TIMEOUT` values. This lets operators manage that endpoint via env vars + a pod rollout (e.g. a Helm values change), including **changing the model** and **rotating the API key**. Any endpoint created by hand is left untouched. Keep it `false` (the default) to preserve the "database wins after first boot" behavior. |
+| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | When `true`, the endpoint each type was auto-seeded with is re-synced from the environment on **every** boot — its `endpoint`, `model_name` and `api_key` are refreshed from the `*_BASE_URL` / `*_MODEL` / `*_API_KEY` values, and `batch_size` / `timeout` follow only when their own env var is set. This lets operators manage that endpoint via env vars + a pod rollout (e.g. a Helm values change), including **changing the model** and **rotating the API key**. Any endpoint created by hand is left untouched. Keep it `false` (the default) to preserve the "database wins after first boot" behavior. |
 
 :::note[How the synced endpoint is identified]
-The seeder stamps the endpoint it creates as env-managed (a `managed_by` marker in the endpoint's `extra`), and boot-time sync finds it by that marker rather than by name. So changing the model in env re-points the same endpoint and renames it to match the new model — it does not strand the old one. An endpoint seeded before this marker existed is adopted automatically on the first sync.
+The seeder stamps the endpoint it creates as env-managed (a `managed_by` marker in the endpoint's `extra`), and boot-time sync finds it by that marker rather than by name. Changing the model in env therefore re-points that same endpoint instead of stranding it.
 
-Two things are deliberately protected: an endpoint you created by hand is never modified, renamed or deleted, and the rename is skipped if the new name is already taken. The API key is only overwritten when env supplies a real one — leaving `*_API_KEY` unset (or at its `EMPTY` placeholder) will not wipe a key you set in the admin UI.
+The endpoint's **name never changes** — partitions (`chat_llm`) and presets store endpoint names by value and nothing cascades a rename, so a renamed row would leave those references dangling. After a model change the endpoint keeps its original name while serving the new model.
+
+Sync only writes what the environment actually owns: `endpoint`, `model_name` and `api_key` always, and `batch_size`/`timeout` only when their env var (`EMBEDDER_BATCH_SIZE`, `EMBEDDER_TIMEOUT`, `VLM_TIMEOUT`, `RERANKER_TIMEOUT`) is set — otherwise a value you tuned in the admin UI would be replaced by the config default. The API key is likewise only overwritten when env supplies a real one, so an unset `*_API_KEY` (or its `EMPTY` placeholder) will not wipe a key you set by hand.
+
+An endpoint created by hand is never modified or deleted. An endpoint seeded before the marker existed is adopted on the first sync **only if it still matches the environment exactly** — if you have edited it, it is left alone rather than silently taken over.
 :::
 
 ### Database Configuration

@@ -37,6 +37,14 @@ class ModelEndpointConfig(BaseModel):
 ENV_MANAGED_KEY = "managed_by"
 ENV_MANAGED_VALUE = "env"
 
+# Keys that live in ``extra`` for control/bookkeeping and are NOT constructor
+# kwargs. Every site that splats ``extra`` into a client must strip these, or
+# the key is forwarded to the provider — a strict OpenAI-compatible server
+# rejects the unknown field with a 400. Defined here (core) so the DI factories
+# and the Ray worker factories in services/ can share one list instead of each
+# hardcoding its own.
+CONTROL_EXTRA_KEYS = frozenset({"implementation", ENV_MANAGED_KEY})
+
 
 class ModelsConfig(ConfigMixin):
     """Named endpoint dictionaries — one per model type.
