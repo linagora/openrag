@@ -41,6 +41,11 @@ def test_indexation_pipeline_rejects_unknown_contextualization_mode():
         IndexationPipelineConfig(contextualization_mode="verbose")
 
 
+def test_indexation_pipeline_topic_tagging_defaults_off():
+    """Topic tagging is opt-in: tags are not yet surfaced or used in retrieval."""
+    assert IndexationPipelineConfig().enable_topic_tagging is False
+
+
 def test_retrieval_pipeline_rejects_unknown_type():
     """Retrieval presets reject unsupported retrieval modes."""
     with pytest.raises(ValidationError):
@@ -52,3 +57,17 @@ def test_retrieval_pipeline_rejects_out_of_range_similarity_threshold(threshold:
     """Retrieval presets keep similarity thresholds in the normalized range."""
     with pytest.raises(ValidationError):
         RetrievalPipelineConfig(similarity_threshold=threshold)
+
+
+@pytest.mark.parametrize("rate", [1.0, 1.5, -0.1])
+def test_indexation_pipeline_rejects_out_of_range_chunk_overlap_rate(rate: float):
+    """overlap must be in [0, 1): >= chunk_size makes the splitter raise at
+    construction, so it has to fail at config load, not per-file (#709)."""
+    with pytest.raises(ValidationError):
+        IndexationPipelineConfig(chunking={"chunk_size": 512, "chunk_overlap_rate": rate})
+
+
+@pytest.mark.parametrize("rate", [0.0, 0.2, 0.99])
+def test_indexation_pipeline_accepts_in_range_chunk_overlap_rate(rate: float):
+    cfg = IndexationPipelineConfig(chunking={"chunk_size": 512, "chunk_overlap_rate": rate})
+    assert cfg.chunking.chunk_overlap_rate == rate

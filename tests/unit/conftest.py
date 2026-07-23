@@ -76,6 +76,15 @@ class MockVectorStore(VectorStore):
                 removed += 1
         return removed
 
+    async def delete_by_filter(self, filters: dict[str, Any]) -> int:
+        removed = 0
+        for collection in self.collections.values():
+            for cid, chunk in list(collection.items()):
+                if all(getattr(chunk, key, None) == value for key, value in filters.items()):
+                    collection.pop(cid, None)
+                    removed += 1
+        return removed
+
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
         self.collections.setdefault(name, {})
 

@@ -130,9 +130,31 @@ class TestBuildFilterExpr:
         with pytest.raises(ValueError, match="cannot mix wildcard"):
             store._build_filter_expr({"partition": ["all", "p1"]})
 
-    def test_empty_partition_list_is_skipped(self, store: MilvusVectorStore) -> None:
-        # No partitions means no partition clause (not match-nothing).
-        assert store._build_filter_expr({"partition": []}) == ""
+    def test_empty_partition_list_matches_nothing(self, store: MilvusVectorStore) -> None:
+        # SECURITY (fail closed): an empty partition list means the caller
+        # resolved to NO accessible partition (e.g. a user with zero
+        # memberships hitting `openrag-all`). It must match nothing, never
+        # every partition. Failing open here dropped the clause and leaked
+        # cross-tenant rows — a query scoped to one partition returning
+        # another tenant's chunks. Reverting the fix yields "" (unfiltered →
+        # all partitions), so this test guards the regression.
+        assert store._build_filter_expr({"partition": []}) == "1 == 0"
+
+    def test_empty_partition_tuple_matches_nothing(self, store: MilvusVectorStore) -> None:
+        # Same fail-closed guarantee for a tuple (both list and tuple are
+        # accepted partition-scope shapes).
+        assert store._build_filter_expr({"partition": ()}) == "1 == 0"
+
+    def test_empty_partition_scope_dominates_other_filters(self, store: MilvusVectorStore) -> None:
+        # An empty partition scope must dominate: even with a permissive raw
+        # expr present, the result stays match-nothing — a caller cannot widen
+        # an empty scope back to every partition through another filter.
+        assert store._build_filter_expr({"partition": [], "expr": "text != ''"}) == "1 == 0"
+
+    def test_empty_partition_scope_dominates_file_id_filter(self, store: MilvusVectorStore) -> None:
+        # Same dominance against a scalar/IN co-filter — an empty partition
+        # scope short-circuits before any other key is rendered.
+        assert store._build_filter_expr({"partition": [], "file_id": ["f1"]}) == "1 == 0"
 
     def test_scalar_field(self, store: MilvusVectorStore) -> None:
         assert store._build_filter_expr({"file_id": "abc"}) == 'file_id == "abc"'
@@ -143,9 +165,10 @@ class TestBuildFilterExpr:
 
     def test_empty_list_field_matches_nothing(self, store: MilvusVectorStore) -> None:
         # An empty IN list cannot be expressed in Milvus, so short-circuit to
-        # the explicit no-match literal — callers get an empty result set
-        # instead of a syntax error.
-        assert store._build_filter_expr({"file_id": []}) == "false"
+        # an always-false comparison — callers get an empty result set instead
+        # of a syntax error. A bare ``false`` literal is rejected by Milvus 2.6
+        # ("predicate is not a boolean expression"), so it must be ``1 == 0``.
+        assert store._build_filter_expr({"file_id": []}) == "1 == 0"
 
     def test_raw_expr_appended(self, store: MilvusVectorStore) -> None:
         expr = store._build_filter_expr({"expr": "created_at > ISO '2025-01-01'"})

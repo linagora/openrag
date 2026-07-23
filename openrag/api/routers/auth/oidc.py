@@ -8,9 +8,11 @@ Routes exposed (all bypassed by ``AuthMiddleware``):
 
 One more route sits *behind* the middleware:
   - ``GET  /auth/me``                 — debug endpoint returning the current user.
+  - ``POST /auth/chainlit-session``   — short-lived Chainlit handoff for token users.
 
-All routes return ``400`` when ``AUTH_MODE != "oidc"`` — the feature is dormant
-in ``token`` mode.
+The OIDC flow routes return ``400`` when ``AUTH_MODE != "oidc"``. The
+middleware-protected utility routes stay available to authenticated users in
+both modes.
 
 Phase 8A.1: every business decision (PKCE/state generation, code exchange,
 user lookup / provisioning, session creation, logout-URL construction) now
@@ -22,7 +24,17 @@ the Secure-flag heuristic, and mapping :class:`OIDCFlowError` to responses.
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
+from api.dependencies.auth import current_user
+from core.auth.chainlit import (
+    CHAINLIT_AUTH_COOKIE_NAME,
+    CHAINLIT_LOGOUT_COOKIE_NAME,
+    CHAINLIT_LOGOUT_SIGNAL_HEADER,
+    CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS,
+    CHAINLIT_TOKEN_COOKIE_NAME,
+    CHAINLIT_TOKEN_COOKIE_PATH,
+)
 from core.auth.state_cookie import StateCookieSerializer
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
@@ -66,8 +78,34 @@ def _is_request_secure(request: Request) -> bool:
     return request.url.scheme == "https"
 
 
+def _is_cross_origin_request(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if not origin:
+        return False
+    origin_host = urlparse(origin).hostname
+    request_host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    request_host = urlparse(f"//{request_host}").hostname
+    return bool(origin_host and request_host and origin_host != request_host)
+
+
+def _chainlit_handoff_cookie_samesite(request: Request) -> str:
+    if _is_request_secure(request) and _is_cross_origin_request(request):
+        return "none"
+    return "lax"
+
+
 def _delete_state_cookie(response: Response) -> None:
     response.delete_cookie(key=StateCookieSerializer.COOKIE_NAME, path="/")
+
+
+def _clear_chainlit_auth_cookie(request: Request, response: Response) -> None:
+    cookie_names = {
+        CHAINLIT_AUTH_COOKIE_NAME,
+        *(name for name in request.cookies if name.startswith(f"{CHAINLIT_AUTH_COOKIE_NAME}_")),
+    }
+    for cookie_name in cookie_names:
+        response.delete_cookie(key=cookie_name, path="/")
+        response.delete_cookie(key=cookie_name, path=CHAINLIT_TOKEN_COOKIE_PATH)
 
 
 def _json_error(status_code: int, detail: str, *, delete_state_cookie: bool = False) -> JSONResponse:
@@ -75,6 +113,13 @@ def _json_error(status_code: int, detail: str, *, delete_state_cookie: bool = Fa
     if delete_state_cookie:
         _delete_state_cookie(r)
     return r
+
+
+def _bearer_token(request: Request) -> str | None:
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        return None
+    return auth.split(" ", 1)[1].strip() or None
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +267,58 @@ async def logout(
         # logout in-place. The cookie deletion below still takes effect.
         response = JSONResponse(status_code=200, content={"detail": "Logged out"})
     response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(key=CHAINLIT_TOKEN_COOKIE_NAME, path=CHAINLIT_TOKEN_COOKIE_PATH)
+    return response
+
+
+@router.get("/auth/chainlit-logout-signal", include_in_schema=False)
+async def chainlit_logout_signal(request: Request):
+    should_consume = request.headers.get(CHAINLIT_LOGOUT_SIGNAL_HEADER) == "1"
+    response = JSONResponse(content={"logged_out": should_consume and CHAINLIT_LOGOUT_COOKIE_NAME in request.cookies})
+    if should_consume:
+        response.delete_cookie(key=CHAINLIT_LOGOUT_COOKIE_NAME, path="/")
+    return response
+
+
+# ---------------------------------------------------------------------------
+# POST /auth/chainlit-session  — standard AuthMiddleware applies
+# ---------------------------------------------------------------------------
+
+
+@router.post("/auth/chainlit-session", include_in_schema=False)
+async def chainlit_session(request: Request, _user=Depends(current_user)):
+    """Prepare a short-lived Chainlit handoff for bearer-token users.
+
+    OIDC browser users already carry the ``openrag_session`` cookie to
+    ``/chainlit/``. Bearer-token users do not, so the Admin UI calls this route
+    before opening Chat. The route is protected by AuthMiddleware and stores the
+    already-validated bearer only in a short-lived, HTTP-only cookie scoped to
+    the Chainlit path.
+    """
+
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    _clear_chainlit_auth_cookie(request, response)
+    token = _bearer_token(request)
+    if not token or getattr(request.state, "oidc_session", None) is not None:
+        return response
+
+    response.set_cookie(
+        key=CHAINLIT_TOKEN_COOKIE_NAME,
+        value=token,
+        max_age=CHAINLIT_TOKEN_COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=_is_request_secure(request),
+        samesite=_chainlit_handoff_cookie_samesite(request),
+        path=CHAINLIT_TOKEN_COOKIE_PATH,
+    )
+    return response
+
+
+@router.delete("/auth/chainlit-session", include_in_schema=False)
+async def clear_chainlit_session(request: Request, _user=Depends(current_user)):
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    response.delete_cookie(key=CHAINLIT_TOKEN_COOKIE_NAME, path=CHAINLIT_TOKEN_COOKIE_PATH)
+    _clear_chainlit_auth_cookie(request, response)
     return response
 
 

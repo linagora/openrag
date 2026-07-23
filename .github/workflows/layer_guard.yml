@@ -3,11 +3,12 @@ name: Layer guard
 on:
   push:
     branches:
-      - "refactor/hexagonal"
-      - "refactor/phase-**"
+      - main
+      - develop
   pull_request:
     branches:
-      - "refactor/hexagonal"
+      - main
+      - develop
 
 jobs:
   layer-import-guard:

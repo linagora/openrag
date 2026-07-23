@@ -346,7 +346,7 @@ export const handlers = [
   http.get(`${API}/queue/info`, () =>
     HttpResponse.json({
       workers: { total_slots: 4, pool_size: 2, max_per_actor: 2 },
-      tasks: { active: 1, active_statuses: { CHUNKING: 1 }, total_completed: 12, total_cancelled: 0, total_failed: 1 },
+      tasks: { active: 1, active_statuses: { SERIALIZING: 1 }, total_completed: 12, total_cancelled: 0, total_failed: 1 },
     }),
   ),
 
@@ -354,10 +354,10 @@ export const handlers = [
     const filter = new URL(request.url).searchParams.get("task_status");
     const all = [
       { task_id: "task-001", state: "COMPLETED", details: { file_id: "doc-001", partition: "legal-docs", metadata: { filename: "contract-template-2024.pdf" }, user_id: 1 }, url: "/indexer/task/task-001" },
-      { task_id: "task-002", state: "CHUNKING", details: { file_id: "doc-004", partition: "legal-docs", metadata: { filename: "quarterly-report-Q4.pdf" }, user_id: 1 }, url: "/indexer/task/task-002" },
+      { task_id: "task-002", state: "SERIALIZING", details: { file_id: "doc-004", partition: "legal-docs", metadata: { filename: "quarterly-report-Q4.pdf" }, user_id: 1 }, url: "/indexer/task/task-002" },
       { task_id: "task-003", state: "FAILED", details: { file_id: "doc-006", partition: "legal-docs", metadata: { filename: "corrupted-file.pdf" }, user_id: 1 }, url: "/indexer/task/task-003", error_url: "/indexer/task/task-003/error" },
     ];
-    const ACTIVE = ["QUEUED", "SERIALIZING", "CHUNKING", "INSERTING"];
+    const ACTIVE = ["QUEUED", "SERIALIZING"];
     let tasks = all;
     if (filter === "active") tasks = all.filter((t) => ACTIVE.includes(t.state));
     else if (filter) tasks = all.filter((t) => t.state.toLowerCase() === filter.toLowerCase());
@@ -368,7 +368,7 @@ export const handlers = [
   http.get(`${API}/indexer/task/:taskId`, ({ params }) => {
     const states: Record<string, string> = {
       "task-001": "COMPLETED",
-      "task-002": "CHUNKING",
+      "task-002": "SERIALIZING",
       "task-003": "FAILED",
     };
     const meta: Record<string, { file_id: string; partition: string; filename: string }> = {
@@ -409,8 +409,8 @@ export const handlers = [
       logs: [
         `2024-01-15 10:32:01 | INFO | task ${id} QUEUED`,
         `2024-01-15 10:32:03 | INFO | task ${id} SERIALIZING`,
-        `2024-01-15 10:32:09 | INFO | task ${id} CHUNKING (47 chunks)`,
-        `2024-01-15 10:32:14 | INFO | task ${id} INSERTING`,
+        `2024-01-15 10:32:09 | INFO | task ${id} serializing: 47 chunks embedded`,
+        `2024-01-15 10:32:14 | INFO | task ${id} COMPLETED`,
       ],
     });
   }),

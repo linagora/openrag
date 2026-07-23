@@ -16,6 +16,7 @@ from pathlib import Path
 from types import ModuleType
 
 _MAIN_PATH = Path(__file__).resolve().parents[3] / "openrag" / "api" / "main.py"
+_ENTRYPOINT_PATH = Path(__file__).resolve().parents[3] / "infra" / "scripts" / "entrypoint.sh"
 
 
 def test_uvicorn_run_passes_forwarded_allow_ips():
@@ -62,6 +63,21 @@ def test_default_forwarded_allow_ips_env_var_used():
     with open(_MAIN_PATH) as f:
         src = f.read()
     assert "UVICORN_FORWARDED_ALLOW_IPS" in src
+
+
+def test_entrypoint_uvicorn_cli_passes_forwarded_allow_ips():
+    """The default container path is entrypoint.sh's bare ``uvicorn`` CLI, not
+    api.main's ``__main__`` block. The CLI reads ``FORWARDED_ALLOW_IPS``, so
+    ``UVICORN_FORWARDED_ALLOW_IPS`` must be forwarded explicitly or the
+    documented variable silently does nothing on that path — leaving the proxy
+    untrusted, which collapses every user onto one rate-limit bucket.
+    """
+    src = _ENTRYPOINT_PATH.read_text()
+    assert "--forwarded-allow-ips" in src, "entrypoint.sh must pass --forwarded-allow-ips to the uvicorn CLI"
+    assert "UVICORN_FORWARDED_ALLOW_IPS" in src, (
+        "entrypoint.sh must source the trusted-proxy list from UVICORN_FORWARDED_ALLOW_IPS, "
+        "the same variable api.main and the docs use."
+    )
 
 
 def test_phase14_admin_routers_are_mounted():

@@ -16,6 +16,7 @@ The hierarchy is organised by concern:
     |   +-- DocumentNotFoundError
     |   +-- PartitionNotFoundError
     |   +-- UserNotFoundError
+    |   +-- WorkspaceNotFoundError
     +-- ConflictError                    (409)
     +-- QuotaExceededError               (429)
     +-- ServiceUnavailableError          (503)
@@ -168,6 +169,18 @@ class UserNotFoundError(NotFoundError):
         super().__init__(message, code="USER_NOT_FOUND", **kwargs)
 
 
+class WorkspaceNotFoundError(NotFoundError):
+    """Workspace missing or not accessible in the requested partition(s).
+
+    Used for both "no such workspace" and "workspace exists in a partition
+    the caller cannot access" — the two are intentionally indistinguishable
+    so an inaccessible workspace never reveals its existence.
+    """
+
+    def __init__(self, message: str, **kwargs):
+        super().__init__(message, code="WORKSPACE_NOT_FOUND", **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Conflict
 # ---------------------------------------------------------------------------
@@ -295,10 +308,38 @@ class EmbeddingError(OpenRAGError):
 
 
 class EmbeddingAPIError(EmbeddingError):
-    """API error with the embedding provider."""
+    """API error with the embedding provider.
+
+    ``status_code`` is overridable so transport failures can carry a *retryable*
+    code. ``_retry._is_retryable`` only retries ``OpenRAGError`` when the status
+    is in {429, 502, 503, 504}; hardcoding 500 here made ``@with_retry`` on the
+    embedder dead code (#704). Callers should prefer the two subclasses below.
+    """
+
+    def __init__(self, message: str, *, status_code: int = 500, **kwargs):
+        super().__init__(message, code="EMBEDDING_API_ERROR", status_code=status_code, **kwargs)
+
+
+class EmbeddingTimeoutError(EmbeddingAPIError):
+    """Embedding request timed out. Maps to HTTP 504 — retryable.
+
+    Mirrors :class:`InferenceTimeoutError`, which the LLM/VLM/reranker clients
+    already use; the embedder was the only client whose transport failures
+    landed on a non-retryable 500.
+    """
 
     def __init__(self, message: str, **kwargs):
-        super().__init__(message, code="EMBEDDING_API_ERROR", status_code=500, **kwargs)
+        super().__init__(message, status_code=504, **kwargs)
+
+
+class EmbeddingConnectionError(EmbeddingAPIError):
+    """Cannot reach the embedding provider. Maps to HTTP 503 — retryable.
+
+    Mirrors :class:`InferenceConnectionError`.
+    """
+
+    def __init__(self, message: str, **kwargs):
+        super().__init__(message, status_code=503, **kwargs)
 
 
 class EmbeddingResponseError(EmbeddingError):

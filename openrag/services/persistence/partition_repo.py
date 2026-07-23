@@ -7,19 +7,21 @@ collections. The legacy
 ``partition_exists``, ``get_partition_file_count``, ``get_total_file_count``
 here; all six map onto this class.
 
-Deleting a partition cascades to ``files``, ``partition_memberships``,
-and ``workspaces`` via the FK ``ON DELETE CASCADE`` rules in the schema.
-Per-uploader ``file_count`` is decremented in application code (no SQL
-trigger) so the books stay balanced.
+Deleting a partition explicitly removes ``files`` before the partition row;
+memberships and workspaces use FK cascades. Per-uploader ``file_count`` is
+decremented in application code (no SQL trigger) so the books stay balanced.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from core.ports.partition_repo import PartitionRepository
 from core.utils.exceptions import ValidationError
+from core.utils.logging import get_logger
+from services.persistence.file_count import decrement_file_counts
 
 if TYPE_CHECKING:
     import asyncpg
@@ -33,6 +35,51 @@ _PRESET_COLUMN_TYPES = {
     "indexation_preset": "indexation",
     "retrieval_preset": "retrieval",
 }
+_PARTITION_UPDATE_COLUMNS = frozenset(
+    {
+        "description",
+        "embedder",
+        "indexation_preset",
+        "retrieval_preset",
+        "dimension",
+        "collection_name",
+        "chat_history_depth",
+        "chat_llm",
+    }
+)
+_PARTITION_OPERATION_LOCK_NAMESPACE = 20260720
+
+logger = get_logger()
+
+
+def _partition_updates(fields: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in fields.items() if key in _PARTITION_UPDATE_COLUMNS}
+
+
+class _PartitionOperationGuard:
+    def __init__(self, repo: PgPartitionRepository, conn: asyncpg.Connection) -> None:
+        self._repo = repo
+        self._conn = conn
+
+    async def partition_exists(self, name: str) -> bool:
+        return await self._repo._partition_exists_on_conn(self._conn, name)
+
+    async def create_partition(self, name: str, user_id: int | None = None, *, max_owned: int | None = None) -> dict:
+        return await self._repo._create_partition_on_conn(
+            self._conn,
+            name,
+            user_id=user_id,
+            max_owned=max_owned,
+        )
+
+    async def delete_partition(self, name: str) -> bool:
+        return await self._repo._delete_partition_on_conn(self._conn, name)
+
+    async def update_partition(self, name: str, **fields: object) -> dict | None:
+        return await self._repo._update_partition_on_conn(self._conn, name, **fields)
+
+    async def list_partition_rows(self) -> list[dict]:
+        return await self._repo._list_partition_rows_on_conn(self._conn)
 
 
 class PgPartitionRepository(PartitionRepository):
@@ -45,6 +92,24 @@ class PgPartitionRepository(PartitionRepository):
     def pool(self) -> asyncpg.Pool:
         return self._pool_getter()
 
+    @asynccontextmanager
+    async def partition_operation_lock(self, name: str) -> AsyncIterator[_PartitionOperationGuard]:
+        """Hold a cross-process fence for partition deletes and upload admission."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "SELECT pg_advisory_lock($1::integer, hashtext($2)::integer)",
+                _PARTITION_OPERATION_LOCK_NAMESPACE,
+                name,
+            )
+            try:
+                yield _PartitionOperationGuard(self, conn)
+            finally:
+                await conn.execute(
+                    "SELECT pg_advisory_unlock($1::integer, hashtext($2)::integer)",
+                    _PARTITION_OPERATION_LOCK_NAMESPACE,
+                    name,
+                )
+
     # ── PartitionRepository port methods ─────────────────────────────
 
     async def create_partition(self, name: str, user_id: int | None = None, *, max_owned: int | None = None) -> dict:
@@ -55,59 +120,69 @@ class PgPartitionRepository(PartitionRepository):
         for a partition it did not create.
         """
         async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                if user_id is not None and max_owned is not None and max_owned >= 0:
-                    await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", user_id)
+            return await self._create_partition_on_conn(conn, name, user_id=user_id, max_owned=max_owned)
+
+    async def _create_partition_on_conn(
+        self,
+        conn: asyncpg.Connection,
+        name: str,
+        user_id: int | None = None,
+        *,
+        max_owned: int | None = None,
+    ) -> dict:
+        async with conn.transaction():
+            if user_id is not None and max_owned is not None and max_owned >= 0:
+                await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", user_id)
+            row = await conn.fetchrow(
+                "SELECT * FROM partitions WHERE partition = $1",
+                name,
+            )
+            if row is not None:
+                raise ValidationError(
+                    f"Partition '{name}' already exists.",
+                    status_code=409,
+                    code="PARTITION_EXISTS",
+                )
+            if user_id is not None and max_owned is not None and max_owned >= 0:
+                owned = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)::int FROM partition_memberships
+                    WHERE user_id = $1 AND role = 'owner'
+                    """,
+                    user_id,
+                )
+                if owned >= max_owned:
+                    raise ValidationError(
+                        f"Partition limit reached ({max_owned}). Contact an administrator.",
+                        status_code=403,
+                        code="PARTITION_LIMIT_EXCEEDED",
+                    )
+            try:
                 row = await conn.fetchrow(
-                    "SELECT * FROM partitions WHERE partition = $1",
+                    """
+                    INSERT INTO partitions (partition, created_at)
+                    VALUES ($1, NOW())
+                    RETURNING *
+                    """,
                     name,
                 )
-                if row is not None:
-                    raise ValidationError(
-                        f"Partition '{name}' already exists.",
-                        status_code=409,
-                        code="PARTITION_EXISTS",
-                    )
-                if user_id is not None and max_owned is not None and max_owned >= 0:
-                    owned = await conn.fetchval(
-                        """
-                        SELECT COUNT(*)::int FROM partition_memberships
-                        WHERE user_id = $1 AND role = 'owner'
-                        """,
-                        user_id,
-                    )
-                    if owned >= max_owned:
-                        raise ValidationError(
-                            f"Partition limit reached ({max_owned}). Contact an administrator.",
-                            status_code=403,
-                            code="PARTITION_LIMIT_EXCEEDED",
-                        )
-                try:
-                    row = await conn.fetchrow(
-                        """
-                        INSERT INTO partitions (partition, created_at)
-                        VALUES ($1, NOW())
-                        RETURNING *
-                        """,
-                        name,
-                    )
-                except asyncpg.UniqueViolationError as exc:
-                    raise ValidationError(
-                        f"Partition '{name}' already exists.",
-                        status_code=409,
-                        code="PARTITION_EXISTS",
-                    ) from exc
-                if user_id is not None:
-                    await conn.execute(
-                        """
-                        INSERT INTO partition_memberships
-                            (partition_name, user_id, role, added_at)
-                        VALUES ($1, $2, 'owner', NOW())
-                        ON CONFLICT (partition_name, user_id) DO NOTHING
-                        """,
-                        name,
-                        user_id,
-                    )
+            except asyncpg.UniqueViolationError as exc:
+                raise ValidationError(
+                    f"Partition '{name}' already exists.",
+                    status_code=409,
+                    code="PARTITION_EXISTS",
+                ) from exc
+            if user_id is not None:
+                await conn.execute(
+                    """
+                    INSERT INTO partition_memberships
+                        (partition_name, user_id, role, added_at)
+                    VALUES ($1, $2, 'owner', NOW())
+                    ON CONFLICT (partition_name, user_id) DO NOTHING
+                    """,
+                    name,
+                    user_id,
+                )
         return self._row_to_dict(row)
 
     async def get_partition(self, name: str) -> dict | None:
@@ -131,45 +206,49 @@ class PgPartitionRepository(PartitionRepository):
         ``partition_memberships`` and ``workspaces`` cascade from the
         partition row.
 
-        Mirrors the legacy bookkeeping: before deleting we count files per
-        uploader and decrement each uploader's ``file_count`` by that
-        amount (clamped at zero) so quotas stay accurate.
+        Counter updates are derived from the rows actually deleted and remain
+        clamped at zero so retries and concurrent deletion paths stay safe.
         """
         async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                exists = await conn.fetchval(
-                    "SELECT 1 FROM partitions WHERE partition = $1",
-                    name,
-                )
-                if not exists:
-                    return False
-                uploader_counts = await conn.fetch(
-                    """
-                    SELECT created_by, COUNT(*)::int AS n
-                    FROM files
-                    WHERE partition_name = $1 AND created_by IS NOT NULL
-                    GROUP BY created_by
-                    """,
-                    name,
-                )
-                await conn.execute(
-                    "DELETE FROM files WHERE partition_name = $1",
-                    name,
-                )
-                await conn.execute(
-                    "DELETE FROM partitions WHERE partition = $1",
-                    name,
-                )
-                for r in uploader_counts:
-                    await conn.execute(
-                        "UPDATE users SET file_count = GREATEST(file_count - $1, 0) WHERE id = $2",
-                        r["n"],
-                        r["created_by"],
-                    )
-                return True
+            return await self._delete_partition_on_conn(conn, name)
+
+    async def _delete_partition_on_conn(self, conn: asyncpg.Connection, name: str) -> bool:
+        async with conn.transaction():
+            partition = await conn.fetchrow(
+                "SELECT partition FROM partitions WHERE partition = $1 FOR UPDATE",
+                name,
+            )
+            if partition is None:
+                logger.bind(
+                    operation="delete_partition",
+                    deleted_rows=0,
+                    counters_adjusted=0,
+                ).debug("Catalog partition deletion accounted")
+                return False
+            deleted_rows = await conn.fetch(
+                "DELETE FROM files WHERE partition_name = $1 RETURNING created_by",
+                name,
+            )
+            counters_adjusted = await decrement_file_counts(conn, deleted_rows)
+            await conn.execute(
+                "DELETE FROM partitions WHERE partition = $1",
+                name,
+            )
+            logger.bind(
+                operation="delete_partition",
+                deleted_rows=len(deleted_rows),
+                counters_adjusted=counters_adjusted,
+            ).debug("Catalog partition deletion accounted")
+            return True
 
     async def partition_exists(self, name: str) -> bool:
-        return await self.pool.fetchval(
+        return await self._partition_exists_on_conn(
+            self.pool,
+            name,
+        )
+
+    async def _partition_exists_on_conn(self, conn: asyncpg.Connection | asyncpg.Pool, name: str) -> bool:
+        return await conn.fetchval(
             "SELECT EXISTS (SELECT 1 FROM partitions WHERE partition = $1)",
             name,
         )
@@ -177,14 +256,24 @@ class PgPartitionRepository(PartitionRepository):
     # ── Phase 14 — full config row methods ───────────────────────────
 
     async def get_partition_row(self, name: str) -> dict | None:
-        row = await self.pool.fetchrow(
+        row = await self._get_partition_row_on_conn(
+            self.pool,
+            name,
+        )
+        return row
+
+    async def _get_partition_row_on_conn(self, conn: asyncpg.Connection | asyncpg.Pool, name: str) -> dict | None:
+        row = await conn.fetchrow(
             "SELECT * FROM partitions WHERE partition = $1",
             name,
         )
         return self._row_to_full_dict(row) if row else None
 
     async def list_partition_rows(self) -> list[dict]:
-        rows = await self.pool.fetch(
+        return await self._list_partition_rows_on_conn(self.pool)
+
+    async def _list_partition_rows_on_conn(self, conn: asyncpg.Connection | asyncpg.Pool) -> list[dict]:
+        rows = await conn.fetch(
             "SELECT * FROM partitions ORDER BY created_at",
         )
         return [self._row_to_full_dict(r) for r in rows]
@@ -207,21 +296,23 @@ class PgPartitionRepository(PartitionRepository):
           then the follow-up ``SELECT`` sees the vanished preset and the
           transaction rolls the write back (raising ``PRESET_NOT_FOUND``).
         """
-        _ALLOWED = frozenset(
-            {
-                "description",
-                "embedder",
-                "indexation_preset",
-                "retrieval_preset",
-                "dimension",
-                "collection_name",
-                "chat_history_depth",
-                "chat_llm",
-            }
-        )
-        updates = {k: v for k, v in fields.items() if k in _ALLOWED}
+        updates = _partition_updates(fields)
+        if updates:
+            preset_refs = {col: _PRESET_COLUMN_TYPES[col] for col in updates if col in _PRESET_COLUMN_TYPES}
+            if preset_refs:
+                async with self.pool.acquire() as conn:
+                    return await self._update_partition_on_conn(conn, name, **fields)
+        return await self._update_partition_on_conn(self.pool, name, **fields)
+
+    async def _update_partition_on_conn(
+        self,
+        conn: asyncpg.Connection | asyncpg.Pool,
+        name: str,
+        **fields: object,
+    ) -> dict | None:
+        updates = _partition_updates(fields)
         if not updates:
-            return await self.get_partition_row(name)
+            return await self._get_partition_row_on_conn(conn, name)
 
         params: list = [name]
         sets: list[str] = []
@@ -233,26 +324,28 @@ class PgPartitionRepository(PartitionRepository):
 
         preset_refs = {col: _PRESET_COLUMN_TYPES[col] for col in updates if col in _PRESET_COLUMN_TYPES}
         if not preset_refs:
-            row = await self.pool.fetchrow(sql, *params)
+            row = await conn.fetchrow(sql, *params)
             return self._row_to_full_dict(row) if row else None
 
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow(sql, *params)
-                if row is None:
-                    return None
-                for col, preset_type in preset_refs.items():
-                    exists = await conn.fetchval(
-                        "SELECT 1 FROM pipeline_presets WHERE name = $1 AND preset_type = $2",
-                        updates[col],
-                        preset_type,
+        transaction = getattr(conn, "transaction", None)
+        if transaction is None:
+            raise TypeError("preset-reference updates require a connection transaction")
+        async with transaction():
+            row = await conn.fetchrow(sql, *params)
+            if row is None:
+                return None
+            for col, preset_type in preset_refs.items():
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM pipeline_presets WHERE name = $1 AND preset_type = $2",
+                    updates[col],
+                    preset_type,
+                )
+                if not exists:
+                    raise ValidationError(
+                        f"{preset_type.capitalize()} preset '{updates[col]}' does not exist.",
+                        code="PRESET_NOT_FOUND",
                     )
-                    if not exists:
-                        raise ValidationError(
-                            f"{preset_type.capitalize()} preset '{updates[col]}' does not exist.",
-                            code="PRESET_NOT_FOUND",
-                        )
-                return self._row_to_full_dict(row)
+            return self._row_to_full_dict(row)
 
     # ── Legacy method names used by the Phase 7C shim ────────────────
 

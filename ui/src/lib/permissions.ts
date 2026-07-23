@@ -25,6 +25,9 @@ export interface Permissions {
   // will reject. TODO(org): becomes "platform super-admin OR org-admin of the
   // resource's org" once orgs exist.
   superAdmin: boolean;
+  // True once the SUPER_ADMIN_MODE lookup can no longer change the client-side
+  // partition permission decision for the current user.
+  superAdminModeResolved: boolean;
   // Platform-scoped (today: global admin). Models/Presets/Users/Partitions become
   // org-admin too under SaaS; System/Platform stay platform-operator only.
   canViewPlatform: boolean;
@@ -51,17 +54,21 @@ export function usePermissions(): Permissions {
   // SUPER_ADMIN_MODE governs the backend's admin→all-partitions bypass. /config is
   // admin-only and only admins need the flag (a non-admin never hits the bypass
   // branch), so the probe is admin-gated; it never changes at runtime.
-  const { data: config } = useQuery({
+  const configQuery = useQuery({
     queryKey: ["system-config"],
     queryFn: getConfig,
     enabled: isAdmin,
     staleTime: Infinity,
   });
+  const config = configQuery.data;
   const superAdmin = isAdmin && config?.super_admin_mode === true;
+  const superAdminModeResolved =
+    !isAdmin || configQuery.isSuccess || configQuery.isError || config !== undefined;
 
   return {
     isAdmin,
     superAdmin,
+    superAdminModeResolved,
     canViewPlatform: isAdmin,
     canViewSystem: isAdmin,
     canManageUsers: isAdmin,

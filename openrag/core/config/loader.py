@@ -33,6 +33,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("VLM_MODEL", "vlm.model", str),
     ("VLM_API_KEY", "vlm.api_key", str),
     ("VLM_ENABLE_THINKING", "vlm.enable_thinking", bool),
+    ("VLM_TIMEOUT", "vlm.timeout", float),
     # Semaphore
     ("LLM_SEMAPHORE", "semaphore.llm_semaphore", int),
     ("VLM_SEMAPHORE", "semaphore.vlm_semaphore", int),
@@ -44,6 +45,8 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("EMBEDDER_TIMEOUT", "embedder.timeout", float),
     ("EMBEDDER_BATCH_SIZE", "embedder.batch_size", int),
     ("EMBEDDER_CONCURRENCY", "embedder.embed_concurrency", int),
+    # Model endpoint registry
+    ("MODEL_ENDPOINT_SYNC_ON_BOOT", "models.sync_on_boot", bool),
     # VectorDB
     ("VDB_HOST", "vectordb.host", str),
     ("VDB_iPORT", "vectordb.port", int),
@@ -96,6 +99,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("IMAGE_CAPTIONING_URL", "loader.image_captioning_url", bool),
     ("SAVE_MARKDOWN", "loader.save_markdown", bool),
     ("SAVE_UPLOADED_FILES", "loader.save_uploaded_files", bool),
+    ("CONTENT_DEDUPLICATION_ENABLED", "loader.content_deduplication_enabled", bool),
     ("PDFLOADER", "loader.file_loaders.pdf", str),
     ("AUDIOLOADER", "loader.file_loaders.wav", str),
     ("MARKER_MAX_TASKS_PER_CHILD", "loader.marker_max_tasks_per_child", int),
@@ -154,6 +158,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("RELATED_LIMIT", "retriever.related_limit", int),
     ("MAX_DEPTH", "retriever.max_ancestor_depth", int),
     ("RETRIEVER_ALLOW_FILTERLESS_FALLBACK", "retriever.allow_filterless_fallback", bool),
+    ("RETRIEVER_MAX_PARTITION_CONCURRENCY", "retriever.max_partition_concurrency", int),
     # RAG
     ("RAG_MODE", "rag.mode", str),
     # WebSearch

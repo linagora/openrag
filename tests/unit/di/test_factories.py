@@ -104,6 +104,38 @@ class TestMakeComponentFactory:
         assert type(instance).__name__ == "_Other"
         assert "implementation" not in instance.kwargs
 
+    def test_llm_token_budgets_are_not_forwarded_as_kwargs(self):
+        """The admin-configured LLM token budgets must NOT reach the constructor.
+
+        ``max_llm_context_size`` / ``max_output_tokens`` live in the endpoint's
+        ``extra`` but are OpenRAG-side sizing settings read by the chat token
+        preflight — they are not OpenAI request fields. Forwarding them lands
+        them in the client's ``self._defaults``, which is splatted into *every*
+        outbound request body, so a strict provider would start 400-ing as soon
+        as an admin saved a budget. Same leak class as batch_size (#712).
+        """
+        factory, _ = make_component_factory(
+            _registry(),
+            {
+                "default": _FakeEndpoint(
+                    extra={
+                        "api_key": "secret",
+                        "max_llm_context_size": 8192,
+                        "max_output_tokens": 1024,
+                    }
+                )
+            },
+            default_impl="vllm",
+            client_caches=[],
+        )
+
+        kwargs = factory("default").kwargs
+
+        assert "max_llm_context_size" not in kwargs
+        assert "max_output_tokens" not in kwargs
+        # Genuinely impl-specific extras still get through.
+        assert kwargs["api_key"] == "secret"
+
     def test_config_fields_and_extra_forwarded_as_kwargs(self):
         """Endpoint fields plus impl-specific ``extra`` reach the constructor."""
         factory, _ = make_component_factory(
@@ -117,9 +149,39 @@ class TestMakeComponentFactory:
 
         assert kwargs["endpoint"] == "http://host:8000/v1"
         assert kwargs["model_name"] == "m"
-        assert kwargs["batch_size"] == 8
         assert kwargs["timeout"] == 30.0
         assert kwargs["api_key"] == "secret"
+
+    def test_batch_size_is_not_forwarded_generically(self):
+        """batch_size must NOT reach LLM/VLM/reranker constructors (#712).
+
+        Only the embedder consumes it; the VLLM chat/vision clients absorb
+        unknown kwargs into ``self._defaults`` and splat them into the request
+        body, so an unconditional batch_size leaked a bogus field onto every
+        chat and caption call. The embedder factory injects it explicitly via
+        ``extra_kwargs_fn`` instead — see ``test_extra_kwargs_fn_merges_last``
+        for the inject-and-win path.
+        """
+        factory, _ = make_component_factory(
+            _registry(),
+            {"default": _FakeEndpoint(batch_size=64)},
+            default_impl="vllm",
+            client_caches=[],
+        )
+
+        assert "batch_size" not in factory("default").kwargs
+
+    def test_extra_kwargs_fn_can_reinject_batch_size_for_the_embedder(self):
+        """The embedder factory supplies batch_size through extra_kwargs_fn."""
+        factory, _ = make_component_factory(
+            _registry(),
+            {"default": _FakeEndpoint(batch_size=64)},
+            default_impl="vllm",
+            client_caches=[],
+            extra_kwargs_fn=lambda cfg: {"batch_size": cfg.batch_size},
+        )
+
+        assert factory("default").kwargs["batch_size"] == 64
 
     def test_extra_kwargs_fn_merges_last(self):
         """``extra_kwargs_fn`` output overrides config-derived kwargs."""

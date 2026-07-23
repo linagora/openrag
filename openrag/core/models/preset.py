@@ -33,7 +33,7 @@ class PartitionRow(BaseModel):
     retrieval_preset: str = "default"
     dimension: int = Field(default=1024, gt=0)
     collection_name: str | None = None
-    chat_history_depth: int = Field(default=0, ge=0)
+    chat_history_depth: int = Field(default=4, ge=1)
     chat_llm: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -52,8 +52,28 @@ class PartitionConfig(BaseModel):
     indexation: IndexationPipelineConfig
     retrieval: RetrievalPipelineConfig
     collection_name: str | None = None
-    chat_history_depth: int = Field(default=0, ge=0)
+    chat_history_depth: int = Field(default=4, ge=1)
     chat_llm: str | None = None
 
 
-__all__ = ["PresetRow", "PartitionRow", "PartitionConfig", "PresetType"]
+def resolve_partition_chat_llm(
+    partitions: list[str] | None,
+    partition_configs: dict[str, PartitionConfig],
+) -> str | None:
+    """Resolve the ``chat_llm`` preset every partition in *partitions* agrees on.
+
+    ``None`` means "no single owning preset — the caller should fall back to
+    the default LLM": a direct-LLM request (no partitions), the ``"all"``
+    cross-partition sentinel, or a multi-partition request whose partitions
+    disagree (or none set a preset). Shared by the answering-LLM resolution
+    (``QueryService._resolve_llm``) and the chat-completions token preflight
+    (``api.routers.user.chat``), so the LLM that actually answers a request
+    and the budget it was checked against never fall out of sync.
+    """
+    if not partitions or "all" in partitions:
+        return None
+    names = {cfg.chat_llm for name in partitions if (cfg := partition_configs.get(name)) is not None and cfg.chat_llm}
+    return names.pop() if len(names) == 1 else None
+
+
+__all__ = ["PresetRow", "PartitionRow", "PartitionConfig", "PresetType", "resolve_partition_chat_llm"]

@@ -445,6 +445,11 @@ class MilvusVectorStore(VectorStore):
     # must go through :meth:`drop_collection`.
     _TAUTOLOGICAL_EXPRS = frozenset({"true", "1==1"})
 
+    # Always-false predicate for an empty ``IN`` list. Milvus 2.6 rejects a
+    # bare ``false`` literal ("predicate is not a boolean expression"), so the
+    # match-nothing sentinel must be a comparison it can plan.
+    _MATCH_NOTHING_EXPR = "1 == 0"
+
     @staticmethod
     def _format_value(value: Any) -> str:
         """Render a scalar as a Milvus filter literal.
@@ -464,16 +469,21 @@ class MilvusVectorStore(VectorStore):
 
         Rules:
             * ``filters['partition']`` builds the partition_key clause.
-              Value ``"all"`` (or ``["all"]``) skips the clause. List/tuple
-              values become ``partition in [...]``. Mixing a wildcard with
-              explicit partitions in the same list raises ``ValueError`` —
-              that combination is rejected rather than silently widened to
-              every partition.
+              Value ``"all"`` (or ``["all"]``) is the explicit wildcard and
+              skips the clause. A non-empty list/tuple becomes
+              ``partition in [...]``. An **empty** list/tuple means "no
+              accessible partition" and short-circuits to
+              :data:`_MATCH_NOTHING_EXPR` (fail closed) — it must never widen
+              to every partition. Mixing a wildcard with explicit partitions
+              in the same list raises ``ValueError`` — that combination is
+              rejected rather than silently widened to every partition.
             * ``filters['expr']`` is appended verbatim as an escape hatch
               for callers that need operators the dict form cannot express.
             * Any other key with a scalar value becomes ``key == <literal>``.
             * Any other key with a list/tuple value becomes ``key in [...]``.
-              Empty list/tuple short-circuits to ``"false"`` (matches no row).
+              Empty list/tuple short-circuits to :data:`_MATCH_NOTHING_EXPR`
+              (an always-false comparison Milvus can plan — a bare ``false``
+              literal is rejected).
 
         Workspace-id resolution, role checks, and other PG concerns are
         upstream concerns — they resolve to ``file_id`` lists before reaching
@@ -487,7 +497,18 @@ class MilvusVectorStore(VectorStore):
             has_wildcard = any(p in self._PARTITION_WILDCARDS for p in partition)
             if has_wildcard and len(partition) > 1:
                 raise ValueError("`partition` cannot mix wildcard with explicit values.")
-            if not has_wildcard and partition:
+            if has_wildcard:
+                pass  # explicit "all" wildcard → intentionally unscoped, no clause
+            elif not partition:
+                # SECURITY (fail closed): an empty partition list means the
+                # caller resolved to *no* accessible partition (e.g. a user
+                # with zero memberships hitting `openrag-all`). It must match
+                # NOTHING, never every partition. Failing open here dropped the
+                # clause entirely and leaked cross-tenant rows — a query scoped
+                # to one partition returning another tenant's chunks. Restore
+                # the pre-refactor behaviour (`partition in []` matched nothing).
+                return self._MATCH_NOTHING_EXPR
+            else:
                 quoted = ", ".join(self._format_value(p) for p in partition)
                 parts.append(f"partition in [{quoted}]")
         elif partition is not None and partition not in self._PARTITION_WILDCARDS:
@@ -500,7 +521,7 @@ class MilvusVectorStore(VectorStore):
                 continue  # already handled above
             if isinstance(value, (list, tuple)):
                 if not value:
-                    return "false"  # empty IN list — match nothing
+                    return self._MATCH_NOTHING_EXPR  # empty IN list — match nothing
                 quoted = ", ".join(self._format_value(v) for v in value)
                 parts.append(f"{key} in [{quoted}]")
             else:

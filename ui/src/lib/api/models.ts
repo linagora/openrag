@@ -184,6 +184,100 @@ export function mergeModelEndpointApiKeyExtra(
   return prepared;
 }
 
+// LLM token budgets stored in `extra` but surfaced as first-class number fields
+// in the endpoint modal (LLM endpoints only). Kept out of the raw "Extra (JSON)"
+// box, same as the API key. Backend: core/config/model_endpoints.py.
+export const LLM_CONTEXT_SIZE_KEY = "max_llm_context_size";
+export const LLM_OUTPUT_TOKENS_KEY = "max_output_tokens";
+
+export interface LlmContextFields {
+  maxContextSize: string;
+  maxOutputTokens: string;
+}
+
+/** Pull the two LLM budget keys out of `extra` into form-field strings. */
+export function splitModelEndpointLlmContext(extra: Record<string, unknown>): {
+  llmContext: LlmContextFields;
+  extra: Record<string, unknown>;
+} {
+  const { [LLM_CONTEXT_SIZE_KEY]: ctx, [LLM_OUTPUT_TOKENS_KEY]: out, ...rest } = extra;
+  const asField = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? String(v) : "");
+  return {
+    llmContext: { maxContextSize: asField(ctx), maxOutputTokens: asField(out) },
+    extra: rest,
+  };
+}
+
+/** Merge the two LLM budget fields back into `extra`. Blank clears the override
+ *  (deletes the key → server falls back to the global default); a non-blank
+ *  value is sent as a number for the server to validate as a positive int. */
+export function mergeModelEndpointLlmContext(
+  extra: Record<string, unknown>,
+  fields: LlmContextFields,
+): Record<string, unknown> {
+  const result = { ...extra };
+  const apply = (key: string, raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed === "") {
+      delete result[key];
+      return;
+    }
+    const n = Number(trimmed);
+    if (Number.isFinite(n)) result[key] = n;
+    else delete result[key];
+  };
+  apply(LLM_CONTEXT_SIZE_KEY, fields.maxContextSize);
+  apply(LLM_OUTPUT_TOKENS_KEY, fields.maxOutputTokens);
+  return result;
+}
+
+// Which client class an endpoint is built with — a control key inside `extra`
+// (see di/factories.py:make_component_factory), surfaced here as a per-type
+// "Vendor" dropdown instead of free-text JSON. Options mirror the registries
+// in openrag/services/inference/*.py; defaults mirror openrag/di/container.py.
+export const IMPLEMENTATION_KEY = "implementation";
+
+export const VENDOR_OPTIONS_BY_TYPE: Record<ModelType, string[]> = {
+  embedder: ["vllm", "ollama"],
+  reranker: ["infinity", "openai", "tei"],
+  llm: ["vllm", "ollama"],
+  vlm: ["vllm"],
+};
+
+export const DEFAULT_VENDOR_BY_TYPE: Record<ModelType, string> = {
+  embedder: "vllm",
+  reranker: "infinity",
+  llm: "vllm",
+  vlm: "vllm",
+};
+
+/** Pull the vendor/`implementation` control key out of `extra` into a form field. */
+export function splitModelEndpointImplementation(extra: Record<string, unknown>): {
+  implementation: string;
+  extra: Record<string, unknown>;
+} {
+  const { [IMPLEMENTATION_KEY]: implementation, ...rest } = extra;
+  return {
+    implementation: typeof implementation === "string" ? implementation : "",
+    extra: rest,
+  };
+}
+
+/** Merge the vendor field back into `extra`. Blank omits the key entirely
+ *  (server falls back to its own `default_impl` per model type). */
+export function mergeModelEndpointImplementation(
+  extra: Record<string, unknown>,
+  implementation: string,
+): Record<string, unknown> {
+  const result = { ...extra };
+  if (implementation.trim()) {
+    result[IMPLEMENTATION_KEY] = implementation.trim();
+  } else {
+    delete result[IMPLEMENTATION_KEY];
+  }
+  return result;
+}
+
 /** List endpoints (bare array). Optionally filter by model type. */
 export function listModelEndpoints(modelType?: ModelType) {
   const qs = modelType ? `?model_type=${enc(modelType)}` : "";

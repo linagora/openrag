@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef, OnChangeFn, RowSelectionState } from "@tanstack/react-table";
-import { Plus, Eye, Trash2, RefreshCw } from "lucide-react";
+import { Download, Plus, Eye, Trash2, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/shared/page-header";
@@ -32,15 +32,18 @@ import { listPartitionFiles, type PartitionFile } from "@/lib/api/documents";
 import { uploadFile, deleteFile, newFileId } from "@/lib/api/indexing";
 import { listPartitions } from "@/lib/api/partitions";
 import { usePermissions } from "@/lib/permissions";
+import { downloadCsv } from "@/lib/csv";
 import { resolveDocumentsPartition } from "./partition-selection";
 
 const fileHref = (partition: string, fileId: string) =>
   `/documents/${encodeURIComponent(partition)}/${encodeURIComponent(fileId)}`;
 const fileLabel = (f: PartitionFile) => (f.filename as string) || f.file_id;
+const str = (v: unknown) => (v == null ? "" : String(v));
 
 export default function DocumentListPage() {
   const queryClient = useQueryClient();
-  const { canWrite } = usePermissions();
+  const navigate = useNavigate();
+  const { canWrite, superAdminModeResolved } = usePermissions();
 
   // OpenRag has no flat/cross-partition file list — files live inside a
   // partition, so the view is partition-scoped (pick one, see its files). The
@@ -53,6 +56,8 @@ export default function DocumentListPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [fileSearch, setFileSearch] = useState("");
+  const [indexedSince, setIndexedSince] = useState("");
   const [fileSelection, setFileSelection] = useState<{
     partition: string;
     rows: RowSelectionState;
@@ -71,11 +76,11 @@ export default function DocumentListPage() {
   // must stop treating the (unverifiable) candidate as sticky, or the view stays
   // stuck on a phantom partition with the error swallowed. On error `partitions`
   // is [], so this resolves to "" → the empty-state branch surfaces the error.
-  const selected = resolveDocumentsPartition(
-    candidate,
-    partitions,
-    partitionsQuery.isSuccess || partitionsQuery.isError,
-  );
+  const partitionsSettled = partitionsQuery.isSuccess || partitionsQuery.isError;
+  const selected = resolveDocumentsPartition(candidate, partitions, partitionsSettled);
+  const selectedPartitionExists = partitions.some((p) => p.partition === selected);
+  const role = partitions.find((p) => p.partition === selected)?.role;
+  const writable = canWrite(role);
 
   // Keep the remembered partition in sync, and heal a stale ?partition= URL so a
   // refresh / shared link doesn't re-trigger the not-found error.
@@ -83,16 +88,42 @@ export default function DocumentListPage() {
     if (!selected) return;
     sessionStorage.setItem("documents.partition", selected);
     const urlPartition = searchParams.get("partition");
-    if (urlPartition && urlPartition !== selected) {
+    const requestedUpload = searchParams.get("upload") === "1";
+    const uploadPermissionResolved = writable || superAdminModeResolved;
+    const shouldOpenUpload = requestedUpload && urlPartition === selected && selectedPartitionExists && writable;
+    if (shouldOpenUpload) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Open the existing upload dialog from the route action.
+      setUploadOpen(true);
+    }
+    const shouldClearUpload =
+      requestedUpload &&
+      partitionsSettled &&
+      (shouldOpenUpload ||
+        !urlPartition ||
+        urlPartition !== selected ||
+        (selectedPartitionExists && uploadPermissionResolved));
+    const shouldUpdateRoute =
+      partitionsSettled && (shouldClearUpload || (urlPartition && urlPartition !== selected));
+    if (shouldUpdateRoute) {
       setSearchParams(
         (prev) => {
-          prev.set("partition", selected);
-          return prev;
+          const next = new URLSearchParams(prev);
+          next.set("partition", selected);
+          next.delete("upload");
+          return next;
         },
         { replace: true },
       );
     }
-  }, [selected, searchParams, setSearchParams]);
+  }, [
+    selected,
+    searchParams,
+    selectedPartitionExists,
+    partitionsSettled,
+    setSearchParams,
+    superAdminModeResolved,
+    writable,
+  ]);
 
   const selectPartition = (p: string) => {
     setFileSelection({ partition: p, rows: {} });
@@ -103,15 +134,12 @@ export default function DocumentListPage() {
     });
   };
 
-  const role = partitions.find((p) => p.partition === selected)?.role;
-  const writable = canWrite(role);
-
   const filesQuery = useQuery({
     queryKey: ["partition-files", selected],
     queryFn: () => listPartitionFiles(selected),
     // Only fetch once we've confirmed `selected` is a real, still-existing
     // partition — avoids a 404 flash for a stale/deleted selection during load.
-    enabled: !!selected && partitions.some((p) => p.partition === selected),
+    enabled: !!selected && selectedPartitionExists,
     // A file only appears here once its indexing job finishes (the catalog row
     // is written post-indexing), so poll to pick up freshly-indexed files
     // without the user having to switch partitions. Mirrors the Jobs page;
@@ -119,6 +147,21 @@ export default function DocumentListPage() {
     refetchInterval: 5000,
   });
   const fileRows = useMemo(() => filesQuery.data?.files ?? [], [filesQuery.data?.files]);
+  const filteredFileRows = useMemo(() => {
+    const q = fileSearch.trim().toLowerCase();
+    const indexedSinceTime = indexedSince ? new Date(`${indexedSince}T00:00:00`).getTime() : null;
+    return fileRows.filter((file) => {
+      const filename = fileLabel(file);
+      const fileTime = Date.parse(str(file.indexed_at ?? file.created_at));
+      const matchesSearch =
+        !q ||
+        [filename, file.file_id, file.mimetype].some((value) =>
+          str(value).toLowerCase().includes(q),
+        );
+      const matchesDate = indexedSinceTime === null || (Number.isFinite(fileTime) && fileTime >= indexedSinceTime);
+      return matchesSearch && matchesDate;
+    });
+  }, [fileRows, fileSearch, indexedSince]);
   const fileRowSelection = useMemo(
     () => (fileSelection.partition === selected ? fileSelection.rows : {}),
     [fileSelection.partition, fileSelection.rows, selected],
@@ -134,9 +177,28 @@ export default function DocumentListPage() {
     [selected],
   );
   const selectedFiles = useMemo(
-    () => fileRows.filter((file) => fileRowSelection[file.file_id]),
-    [fileRows, fileRowSelection],
+    () => filteredFileRows.filter((file) => fileRowSelection[file.file_id]),
+    [filteredFileRows, fileRowSelection],
   );
+
+  const exportDocuments = () => {
+    try {
+      downloadCsv(
+        `openrag-documents-${selected || "partition"}.csv`,
+        [
+          { header: "partition", value: () => selected },
+          { header: "file_id", value: (file) => file.file_id },
+          { header: "filename", value: (file) => fileLabel(file) },
+          { header: "mimetype", value: (file) => file.mimetype },
+          { header: "indexed_at", value: (file) => file.indexed_at },
+          { header: "created_at", value: (file) => file.created_at },
+        ],
+        filteredFileRows,
+      );
+    } catch (error) {
+      toast.error(`CSV export failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
+  };
 
   useEffect(() => {
     if (!writable && Object.keys(fileRowSelection).length > 0) {
@@ -198,7 +260,14 @@ export default function DocumentListPage() {
       return { ok, errors };
     },
     onSuccess: ({ ok, errors }) => {
-      if (ok) toast.success(`${ok} file(s) queued for indexing — track progress in Jobs.`);
+      if (ok) {
+        toast.success(`${ok} file(s) queued for indexing.`, {
+          action: {
+            label: "View Jobs",
+            onClick: () => navigate("/jobs"),
+          },
+        });
+      }
       if (errors.length) toast.error(`${errors.length} upload(s) failed: ${errors[0]}`);
       setUploadOpen(false);
       setFiles([]);
@@ -215,7 +284,11 @@ export default function DocumentListPage() {
       accessorFn: (f) => fileLabel(f).toLowerCase(),
       header: ({ column }) => <SortableHeader column={column} title="Filename" />,
       cell: ({ row }) => (
-        <Link to={fileHref(selected, row.original.file_id)} className="text-primary hover:underline font-medium">
+        <Link
+          to={fileHref(selected, row.original.file_id)}
+          className="block max-w-[280px] truncate font-medium text-primary hover:underline sm:max-w-[360px] lg:max-w-[480px]"
+          title={fileLabel(row.original)}
+        >
           {fileLabel(row.original)}
         </Link>
       ),
@@ -239,7 +312,11 @@ export default function DocumentListPage() {
       cell: ({ row }) => (
         <div className="flex items-center gap-1">
           <Button variant="ghost" size="icon-xs" asChild>
-            <Link to={fileHref(selected, row.original.file_id)}>
+            <Link
+              to={fileHref(selected, row.original.file_id)}
+              aria-label={`View ${fileLabel(row.original)}`}
+              title={`View ${fileLabel(row.original)}`}
+            >
               <Eye className="h-3.5 w-3.5" />
             </Link>
           </Button>
@@ -249,7 +326,12 @@ export default function DocumentListPage() {
               description={`Delete "${fileLabel(row.original)}"? This cannot be undone.`}
               onConfirm={() => deleteMutation.mutate(row.original.file_id)}
             >
-              <Button variant="ghost" size="icon-xs">
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`Delete ${fileLabel(row.original)}`}
+                title={`Delete ${fileLabel(row.original)}`}
+              >
                 <Trash2 className="h-3.5 w-3.5 text-destructive" />
               </Button>
             </ConfirmDialog>
@@ -314,7 +396,7 @@ export default function DocumentListPage() {
         }
       />
 
-      <div className="flex items-center gap-2 mb-4">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         <Label className="text-sm font-medium">Partition</Label>
         <Select value={selected} onValueChange={selectPartition}>
           <SelectTrigger className="w-[220px]">
@@ -328,6 +410,23 @@ export default function DocumentListPage() {
             ))}
           </SelectContent>
         </Select>
+        <div className="relative max-w-xs">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="Search files..."
+            value={fileSearch}
+            onChange={(e) => setFileSearch(e.target.value)}
+            className="pl-9"
+            aria-label="Search files"
+          />
+        </div>
+        <Input
+          type="date"
+          value={indexedSince}
+          onChange={(e) => setIndexedSince(e.target.value)}
+          className="w-[150px]"
+          aria-label="Indexed since"
+        />
         {writable && selectedFiles.length > 0 && (
           <>
             <ConfirmDialog
@@ -356,10 +455,23 @@ export default function DocumentListPage() {
             </p>
           </>
         )}
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           {filesQuery.data && (
-            <p className="text-sm text-muted-foreground">{fileRows.length} file(s)</p>
+            <p className="text-sm text-muted-foreground">
+              {filteredFileRows.length}
+              {(fileSearch || indexedSince) && ` of ${fileRows.length}`} file(s)
+            </p>
           )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={exportDocuments}
+            disabled={!filteredFileRows.length}
+            title="Export filtered documents"
+          >
+            <Download className="h-4 w-4" />
+            Export CSV
+          </Button>
           <Button
             variant="outline"
             size="icon-sm"
@@ -404,7 +516,7 @@ export default function DocumentListPage() {
       ) : (
         <DataTable
           columns={columns}
-          data={fileRows}
+          data={filteredFileRows}
           initialSorting={[{ id: "indexed_at", desc: true }]}
           enableSelection={writable}
           getRowId={(f) => f.file_id}

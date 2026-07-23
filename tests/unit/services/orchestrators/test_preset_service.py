@@ -156,6 +156,17 @@ async def test_seed_defaults_inserts_six_presets_when_empty():
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_indexation_leaves_topic_tagging_off():
+    repo = _FakePresetRepo()
+    svc = _make_service(repo)
+    await svc.seed_defaults()
+
+    idx = [r for r in repo._store.values() if r["preset_type"] == "indexation"]
+    assert idx  # sanity: indexation presets were seeded
+    assert all(r["config"].get("enable_topic_tagging", False) is False for r in idx)
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_retrieval_inherits_reranker_enabled():
     from core.config.root import Settings
 
@@ -210,6 +221,34 @@ async def test_seed_defaults_default_indexation_inherits_contextual_retrieval_en
     assert default_idx["enable_contextualization"] is True
     # finance preset explicitly disables it and must stay off.
     assert repo._store[("finance", "indexation")]["config"]["enable_contextualization"] is False
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_default_indexation_inherits_image_captioning_disabled():
+    from core.config.root import Settings
+
+    settings = Settings(loader={"image_captioning": False})
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    default_idx = repo._store[("default", "indexation")]["config"]
+    assert default_idx["enable_image_captioning"] is False
+    # Named presets keep their explicit seed value regardless of the global flag.
+    assert repo._store[("legal", "indexation")]["config"]["enable_image_captioning"] is True
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_default_indexation_inherits_image_captioning_enabled():
+    from core.config.root import Settings
+
+    settings = Settings(loader={"image_captioning": True})
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    default_idx = repo._store[("default", "indexation")]["config"]
+    assert default_idx["enable_image_captioning"] is True
 
 
 @pytest.mark.asyncio
@@ -505,3 +544,121 @@ async def test_delete_preset_removes_row():
     await svc.delete_preset("legal", "indexation")
 
     assert ("legal", "indexation") not in repo._store
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_default_indexation_inherits_global_chunk_size():
+    """The default preset must follow the global CHUNK_SIZE / CHUNK_OVERLAP_RATE
+    / CHUNKER, not the hardcoded 512/0.2 seed (#709)."""
+    from core.config.root import Settings
+
+    settings = Settings(chunker={"chunk_size": 1024, "chunk_overlap_rate": 0.3, "name": "recursive_splitter"})
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    default_chunking = repo._store[("default", "indexation")]["config"]["chunking"]
+    assert default_chunking["chunk_size"] == 1024
+    assert default_chunking["chunk_overlap_rate"] == 0.3
+    assert default_chunking["name"] == "recursive_splitter"
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_named_presets_keep_explicit_chunk_size():
+    """Named presets carry deliberate per-domain chunk sizes and must NOT be
+    overridden by the global chunker knob."""
+    from core.config.root import Settings
+
+    settings = Settings(chunker={"chunk_size": 1024})
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    # finance seeds 768 explicitly; global is 1024 — finance must stay 768.
+    finance_chunking = repo._store[("finance", "indexation")]["config"]["chunking"]
+    assert finance_chunking["chunk_size"] == 768
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_default_chunk_size_falls_back_to_seed_when_global_unset():
+    """With the global chunker at its own default (512/0.2), the default preset
+    reflects that — no behavioural change for a deployment that didn't tune it."""
+    from core.config.root import Settings
+
+    settings = Settings()
+    repo = _FakePresetRepo()
+    svc = _make_service(repo, settings=settings)
+    await svc.seed_defaults()
+
+    default_chunking = repo._store[("default", "indexation")]["config"]["chunking"]
+    assert default_chunking["chunk_size"] == 512
+    assert default_chunking["chunk_overlap_rate"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_does_not_update_existing_default_chunk_size():
+    """KNOWN LIMITATION (documented, not a bug): the global chunk-size overlay
+    is a *seed-time* default. Once a `default` indexation row exists, a changed
+    CHUNK_SIZE does NOT rewrite it — `seed_defaults` skips a type that already
+    has rows. Existing deployments change chunking by editing the preset. This
+    test pins that behaviour so it isn't 'fixed' accidentally without a
+    reconciliation design (see the #709 follow-up)."""
+    from core.config.root import Settings
+
+    current = _make_row(
+        "default",
+        "indexation",
+        {**_VALID_IDX_CONFIG, "chunking": {"name": "recursive_splitter", "chunk_size": 512, "chunk_overlap_rate": 0.2}},
+    )
+    repo = _FakePresetRepo(rows=[current])
+    settings = Settings(chunker={"chunk_size": 1024})  # operator raised it after first seed
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    # Unchanged: the stored 512 is the source of truth once the row exists.
+    assert repo._store[("default", "indexation")]["config"]["chunking"]["chunk_size"] == 512
+    upserts = [c for c in repo.calls if c[0] == "upsert"]
+    assert all(args[1] != "indexation" for _, args in upserts)
+
+
+def test_seed_defaults_rejects_invalid_overlap_in_default_chunking():
+    """A structurally-invalid finalized seed is rejected at seeding, not
+    persisted (defense-in-depth on the seed path). Overlap out of [0,1) can't
+    even be built into Settings, so validate the seed-path guard directly."""
+    from core.utils.exceptions import ValidationError as OpenRAGValidationError
+
+    repo = _FakePresetRepo()
+    svc = _make_service(repo)
+    bad = {"chunking": {"name": "recursive_splitter", "chunk_size": 512, "chunk_overlap_rate": 1.5}}
+    with pytest.raises(OpenRAGValidationError):
+        svc._validate_config("indexation", bad)
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_rejects_unknown_global_chunker():
+    """A typo'd global CHUNKER must fail at seeding (startup), not per-file at
+    chunker build during indexing. #709 wired CHUNKER into the default preset,
+    so an unknown name now propagates here instead of being silently ignored."""
+    from core.config.root import Settings
+    from core.utils.exceptions import ValidationError as OpenRAGValidationError
+
+    repo = _FakePresetRepo()
+    settings = Settings(chunker={"name": "definitely_not_a_chunker"})
+    svc = _make_service(repo, settings=settings)
+    with pytest.raises(OpenRAGValidationError, match="Unknown chunker"):
+        await svc.seed_defaults()
+    # Nothing was persisted — the bad name is rejected before any upsert.
+    assert not any(c[0] == "upsert" for c in repo.calls)
+
+
+@pytest.mark.asyncio
+async def test_create_preset_rejects_unknown_chunker():
+    """The admin CRUD path also rejects an unregistered chunker name, so a bad
+    preset fails at create time rather than at chunker build during indexing."""
+    from core.utils.exceptions import ValidationError as OpenRAGValidationError
+
+    svc = _make_service()
+    bad = {"chunking": {"name": "nope_splitter", "chunk_size": 512, "chunk_overlap_rate": 0.2}}
+    with pytest.raises(OpenRAGValidationError, match="Unknown chunker"):
+        await svc.create_preset("bad", "indexation", bad)

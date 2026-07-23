@@ -12,19 +12,26 @@ import {
   Eye,
   EyeOff,
   Copy,
+  Info,
 } from "lucide-react";
 import {
   listModelEndpoints,
   createModelEndpoint,
   updateModelEndpoint,
   deleteModelEndpoint,
+  DEFAULT_VENDOR_BY_TYPE,
   mergeModelEndpointApiKeyExtra,
+  mergeModelEndpointImplementation,
+  mergeModelEndpointLlmContext,
   prepareModelEndpointExtraForSubmit,
   revealModelEndpointApiKey,
   REDACTED_SECRET,
   setDefaultModelEndpoint,
   splitModelEndpointApiKeyExtra,
+  splitModelEndpointImplementation,
+  splitModelEndpointLlmContext,
   validateModelEndpoint,
+  VENDOR_OPTIONS_BY_TYPE,
 } from "@/lib/api/models";
 import type {
   ModelEndpointResponse,
@@ -47,9 +54,12 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { VendorIcon } from "@/components/ui/vendor-icon";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatDate, intOr, numOr } from "@/lib/utils";
 
 const MODEL_TYPES = ["embedder", "reranker", "llm", "vlm"] as const;
@@ -61,6 +71,35 @@ type RevealedApiKey = {
 };
 
 const normalizeEndpointUrl = (value: string) => value.trim().replace(/\/+$/, "");
+
+// Placeholder shown when a per-endpoint budget is left blank. The real
+// fallback (the MAX_LLM_CONTEXT_SIZE / MAX_OUTPUT_TOKENS env vars — see
+// core/config/endpoints.py:LLMContextConfig) is environment-configurable, so
+// a generic label is used instead of a hard-coded number that could misstate
+// a given deployment's actual default.
+const BUDGET_PLACEHOLDER = "System default";
+
+function LabelWithInfo({ label, tooltip }: { label: string; tooltip: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <Label>{label}</Label>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className="text-muted-foreground hover:text-foreground"
+              aria-label={`${label} info`}
+            >
+              <Info className="h-3.5 w-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-xs">{tooltip}</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </div>
+  );
+}
 
 export default function ModelsPage() {
   const queryClient = useQueryClient();
@@ -165,11 +204,11 @@ export default function ModelsPage() {
                     return (
                       <Card key={`${ep.model_type}-${ep.name}`}>
                         <CardHeader className="pb-3">
-                          <div className="flex items-center justify-between">
-                            <CardTitle className="text-base truncate">
+                          <div className="flex items-center justify-between gap-2">
+                            <CardTitle className="text-base truncate min-w-0">
                               {ep.name}
                             </CardTitle>
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5 shrink-0">
                               {isDefault && (
                                 <Badge variant="secondary" className="text-xs">Default</Badge>
                               )}
@@ -197,7 +236,7 @@ export default function ModelsPage() {
                           <div className="text-xs text-muted-foreground">
                             Updated {formatDate(ep.updated_at)}
                           </div>
-                          <div className="flex gap-2 pt-2">
+                          <div className="flex flex-wrap gap-2 pt-2">
                             {!isDefault && (
                               <Button
                                 size="sm"
@@ -272,7 +311,15 @@ function EndpointDialog({
   const [batchSize, setBatchSize] = useState("32");
   const [timeout, setTimeout] = useState("30");
   const [apiKey, setApiKey] = useState("");
+  const [maxContextSize, setMaxContextSize] = useState("");
+  const [maxOutputTokens, setMaxOutputTokens] = useState("");
+  const [vendor, setVendor] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
+
+  const modelType = (editing ? editing.model_type : activeTab) as ModelType;
+  // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
+  const isLlm = modelType === "llm";
+  const vendorOptions = VENDOR_OPTIONS_BY_TYPE[modelType];
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
   const [validationMsg, setValidationMsg] = useState<string | null>(null);
@@ -294,13 +341,25 @@ function EndpointDialog({
       setApiKeyVisible(false);
       setRevealingApiKey(false);
       if (editing) {
-        const { apiKey: displayApiKey, extra: displayExtra } = splitModelEndpointApiKeyExtra(editing.extra);
+        const { apiKey: displayApiKey, extra: apiExtra } = splitModelEndpointApiKeyExtra(editing.extra);
+        const { implementation, extra: implExtra } = splitModelEndpointImplementation(apiExtra);
+        // Only carve the LLM token-budget keys out of the editable extra for LLM
+        // endpoints — the budget fields are LLM-only, and splitting for non-LLM
+        // types would drop any same-named keys from their extra on save (they are
+        // re-merged only when isLlm below), silently deleting them.
+        const { llmContext, extra: displayExtra } =
+          editing.model_type === "llm"
+            ? splitModelEndpointLlmContext(implExtra)
+            : { llmContext: { maxContextSize: "", maxOutputTokens: "" }, extra: implExtra };
         setName(editing.name);
         setEndpoint(editing.endpoint);
         setModelName(editing.model_name || "");
         setBatchSize(String(editing.batch_size));
         setTimeout(String(editing.timeout));
         setApiKey(displayApiKey);
+        setMaxContextSize(llmContext.maxContextSize);
+        setMaxOutputTokens(llmContext.maxOutputTokens);
+        setVendor(implementation || DEFAULT_VENDOR_BY_TYPE[editing.model_type]);
         setExtraJson(JSON.stringify(displayExtra, null, 2));
         setValidated(true);
         setValidationMsg(
@@ -315,6 +374,9 @@ function EndpointDialog({
         setBatchSize("32");
         setTimeout("30");
         setApiKey("");
+        setMaxContextSize("");
+        setMaxOutputTokens("");
+        setVendor(DEFAULT_VENDOR_BY_TYPE[activeTab as ModelType]);
         setExtraJson("{}");
         setValidated(null);
         setValidationMsg(null);
@@ -322,15 +384,26 @@ function EndpointDialog({
     }
   }, [open, editing]);
 
-  // Reset validation when relevant fields change
+  // Reset validation when relevant fields change. The LLM token-budget fields
+  // don't affect endpoint reachability, so they're deliberately excluded — the
+  // raw extra is compared with them stripped out (as the textarea shows them).
   useEffect(() => {
     const editingExtra = editing ? splitModelEndpointApiKeyExtra(editing.extra) : null;
+    const editingImplExtra = editingExtra ? splitModelEndpointImplementation(editingExtra.extra).extra : null;
+    // Match the display path above: only strip the budget keys for LLM endpoints,
+    // otherwise the "unchanged" comparison would treat a non-LLM endpoint's
+    // same-named extra keys as already removed.
+    let editingRawExtra: Record<string, unknown> | null = null;
+    if (editingImplExtra) {
+      editingRawExtra =
+        editing?.model_type === "llm" ? splitModelEndpointLlmContext(editingImplExtra).extra : editingImplExtra;
+    }
     if (
       editing &&
       endpoint === editing.endpoint &&
       (modelName || "") === (editing.model_name || "") &&
       apiKey === editingExtra?.apiKey &&
-      extraJson === JSON.stringify(editingExtra.extra, null, 2)
+      extraJson === JSON.stringify(editingRawExtra, null, 2)
     ) {
       setValidated(true);
       setValidationMsg(
@@ -508,6 +581,10 @@ function EndpointDialog({
       toast.error("Invalid JSON in extra field");
       return;
     }
+    if (isLlm) {
+      extra = mergeModelEndpointLlmContext(extra, { maxContextSize, maxOutputTokens });
+    }
+    extra = mergeModelEndpointImplementation(extra, vendor);
 
     if (editing) {
       const updateData: UpdateModelEndpointRequest = {
@@ -547,7 +624,10 @@ function EndpointDialog({
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
-            <Label>Name</Label>
+            <LabelWithInfo
+              label="Name"
+              tooltip="Unique name for this endpoint within its type. It's how the endpoint is referenced elsewhere — e.g. as a partition's chat LLM preset — so choose a stable, descriptive name."
+            />
             <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -572,6 +652,42 @@ function EndpointDialog({
               <Input type="number" step="0.1" value={timeout} onChange={(e) => setTimeout(e.target.value)} />
             </div>
           </div>
+          {isLlm && (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <LabelWithInfo
+                  label="Max context size"
+                  tooltip="Maximum token limit for chat/completion requests answered by this endpoint. When set, this value takes precedence over the model's max_model_len (auto-probed from /v1/models at startup); leave it blank to use that probed value, or the global default if the probe fails. Requests whose total token count (prompt + max_tokens) exceeds the limit are rejected with a 413 error."
+                />
+                <Input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={maxContextSize}
+                  onChange={(e) => setMaxContextSize(e.target.value)}
+                  placeholder={BUDGET_PLACEHOLDER}
+                />
+              </div>
+              <div className="space-y-2">
+                <LabelWithInfo
+                  label="Max output tokens"
+                  tooltip="Default output-token budget (max_tokens) applied to chat completions answered by this endpoint when the request doesn't set one explicitly."
+                />
+                <Input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={maxOutputTokens}
+                  onChange={(e) => setMaxOutputTokens(e.target.value)}
+                  placeholder={BUDGET_PLACEHOLDER}
+                />
+              </div>
+              <p className="col-span-2 text-xs text-muted-foreground">
+                Token budgets for this endpoint. Leave blank to use the system default. Applied whenever this
+                endpoint answers a request — as the default LLM, or as a partition&apos;s chat LLM preset.
+              </p>
+            </div>
+          )}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label>API key</Label>
@@ -621,6 +737,27 @@ function EndpointDialog({
               {editing?.has_api_key
                 ? "Leave unchanged to keep the stored key, or type a new key to rotate it."
                 : "Stored in the endpoint extra payload when provided."}
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label>Vendor</Label>
+            <Select value={vendor} onValueChange={setVendor}>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {vendorOptions.map((option) => (
+                  <SelectItem key={option} value={option} className="py-2">
+                    <span className="flex items-center gap-2.5 text-base">
+                      <VendorIcon vendor={option} className="h-5 w-5" />
+                      {option}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Client implementation used to talk to this endpoint.
             </p>
           </div>
           <div className="space-y-2">
