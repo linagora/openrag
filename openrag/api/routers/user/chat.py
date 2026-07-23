@@ -210,8 +210,12 @@ async def _fetch_max_model_tokens(*, base_url: str, model_id: str, api_key: str)
         if model is None:
             logger.warning(f"No model found for {model_id} at {base_url}.")
             return None
+        # `max_model_len` is a vendor extension vLLM adds to the OpenAI /v1/models
+        # entry. The SDK model allows extras, and pydantic dumps those at the top
+        # level — `model_extra` is an instance property, never a key in the dump —
+        # so a top-level lookup is the only one that can ever match.
         model_data = model.model_dump() if hasattr(model, "model_dump") else model.dict()
-        max_len = model_data.get("max_model_len") or model_data.get("model_extra", {}).get("max_model_len")
+        max_len = model_data.get("max_model_len")
         if max_len is None:
             logger.warning(f"max_model_len not found for {model_id} at {base_url}.")
             return None

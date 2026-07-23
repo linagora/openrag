@@ -53,15 +53,22 @@ def test_update_model_endpoint_requires_at_least_one_field():
 
 
 @pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
-@pytest.mark.parametrize("bad", [0, -1, 2.5, "4096", True])
+@pytest.mark.parametrize("bad", [0, -1, 2.5, "4096", True, False])
 def test_create_model_endpoint_rejects_bad_llm_token_budget(key, bad):
-    """LLM token budgets in extra must be positive ints (bool/float/str rejected)."""
+    """LLM token budgets in extra must be positive ints (bool/float/str rejected).
+
+    Both bools are covered on purpose: ``bool`` is an ``int`` subclass, so
+    ``True`` would otherwise slip through the positive-int check as ``1``, and
+    ``False`` must be rejected as a *type* error rather than incidentally by
+    the ``<= 0`` bound — the explicit ``isinstance(value, bool)`` guard is what
+    both cases pin.
+    """
     with pytest.raises(ValidationError, match=key):
         CreateModelEndpointRequest(name="default", model_type="llm", endpoint="http://host", extra={key: bad})
 
 
 @pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
-@pytest.mark.parametrize("bad", [0, -1, 2.5, "4096", True])
+@pytest.mark.parametrize("bad", [0, -1, 2.5, "4096", True, False])
 def test_update_model_endpoint_rejects_bad_llm_token_budget(key, bad):
     with pytest.raises(ValidationError, match=key):
         UpdateModelEndpointRequest(extra={key: bad})

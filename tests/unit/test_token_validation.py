@@ -230,6 +230,31 @@ class _FakeOpenAIModel:
         return {"id": self.id, "max_model_len": self._max_model_len}
 
 
+async def test_fetch_max_model_tokens_reads_vendor_extra_from_real_sdk_model(monkeypatch):
+    """`max_model_len` is a vLLM vendor extension on the OpenAI /v1/models entry.
+
+    Uses the *real* SDK ``Model`` rather than a stand-in, because the shape is
+    the whole point: pydantic dumps extras at the top level, so a top-level
+    lookup is the only one that can match. The helper previously also consulted
+    ``model_data["model_extra"]`` — `model_extra` is an instance property, never
+    a key in the dump, so that branch was unreachable. This pins the live path
+    against the shape the SDK actually produces.
+    """
+    import api.routers.user.chat as chat
+    from openai.types import Model
+
+    sdk_model = Model.construct(id="model-a", created=0, object="model", owned_by="vllm", max_model_len=8192)
+    assert "model_extra" not in sdk_model.model_dump()  # the removed branch could never fire
+
+    async def fake_get_openai_models(*, base_url, api_key):
+        return [sdk_model]
+
+    monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
+
+    got = await chat._fetch_max_model_tokens(base_url="http://default:8000/v1", model_id="model-a", api_key="k")
+    assert got == 8192
+
+
 class TestPrimeMaxModelTokens:
     """prime_max_model_tokens probes every registered LLM endpoint's
     /v1/models for max_model_len — not just the default — caching per
