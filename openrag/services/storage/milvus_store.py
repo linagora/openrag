@@ -469,11 +469,14 @@ class MilvusVectorStore(VectorStore):
 
         Rules:
             * ``filters['partition']`` builds the partition_key clause.
-              Value ``"all"`` (or ``["all"]``) skips the clause. List/tuple
-              values become ``partition in [...]``. Mixing a wildcard with
-              explicit partitions in the same list raises ``ValueError`` —
-              that combination is rejected rather than silently widened to
-              every partition.
+              Value ``"all"`` (or ``["all"]``) is the explicit wildcard and
+              skips the clause. A non-empty list/tuple becomes
+              ``partition in [...]``. An **empty** list/tuple means "no
+              accessible partition" and short-circuits to
+              :data:`_MATCH_NOTHING_EXPR` (fail closed) — it must never widen
+              to every partition. Mixing a wildcard with explicit partitions
+              in the same list raises ``ValueError`` — that combination is
+              rejected rather than silently widened to every partition.
             * ``filters['expr']`` is appended verbatim as an escape hatch
               for callers that need operators the dict form cannot express.
             * Any other key with a scalar value becomes ``key == <literal>``.
@@ -494,7 +497,18 @@ class MilvusVectorStore(VectorStore):
             has_wildcard = any(p in self._PARTITION_WILDCARDS for p in partition)
             if has_wildcard and len(partition) > 1:
                 raise ValueError("`partition` cannot mix wildcard with explicit values.")
-            if not has_wildcard and partition:
+            if has_wildcard:
+                pass  # explicit "all" wildcard → intentionally unscoped, no clause
+            elif not partition:
+                # SECURITY (fail closed): an empty partition list means the
+                # caller resolved to *no* accessible partition (e.g. a user
+                # with zero memberships hitting `openrag-all`). It must match
+                # NOTHING, never every partition. Failing open here dropped the
+                # clause entirely and leaked cross-tenant rows — a query scoped
+                # to one partition returning another tenant's chunks. Restore
+                # the pre-refactor behaviour (`partition in []` matched nothing).
+                return self._MATCH_NOTHING_EXPR
+            else:
                 quoted = ", ".join(self._format_value(p) for p in partition)
                 parts.append(f"partition in [{quoted}]")
         elif partition is not None and partition not in self._PARTITION_WILDCARDS:
