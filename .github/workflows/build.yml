@@ -11,9 +11,34 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
-  build-and-push-image:
+  # GA images build for release tags (vX.Y.Z), never for RC tags (build_rc.yml
+  # owns those). This job also enforces "the tag is on main": we can't use
+  # github.event.base_ref for that — it is empty for a tag pushed to a
+  # branch-protected main (which only receives PR-merge commits, not client
+  # pushes), so the old base_ref guard silently skipped every release build.
+  # Instead we verify reachability from origin/main explicitly and fail loud.
+  verify-tag:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc.')
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fail if the tagged commit is not on main
+        run: |
+          git fetch --no-tags origin main
+          if git merge-base --is-ancestor "${{ github.sha }}" FETCH_HEAD; then
+            echo "OK: ${{ github.ref_name }} (${{ github.sha }}) is on main"
+          else
+            echo "::error::Tag ${{ github.ref_name }} is not on main — refusing to build GA images."
+            exit 1
+          fi
+
+  build-and-push-image:
+    needs: verify-tag
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -68,8 +93,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-and-push-image-ray:
+    needs: verify-tag
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write
@@ -116,8 +141,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-and-push-image-admin-ui:
+    needs: verify-tag
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write
