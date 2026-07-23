@@ -4,6 +4,23 @@ persistence:
   annotations:
     "helm.sh/resource-policy": keep
 
+# values.yaml wires the postgresql/milvus sub-charts' storageClass through a
+# YAML alias to persistence.storageClass above — aliases resolve when
+# values.yaml is parsed, before Helm merges this overlay, so the top-level
+# override alone never reaches them. Set it explicitly per sub-chart here too.
+postgresql:
+  primary:
+    persistence:
+      storageClass: longhorn
+
+milvus:
+  minio:
+    persistence:
+      storageClass: longhorn
+  etcd:
+    persistence:
+      storageClass: longhorn
+
 openrag:
   ingress:
     className: nginx

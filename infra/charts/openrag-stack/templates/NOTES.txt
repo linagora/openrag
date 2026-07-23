@@ -11,15 +11,22 @@ The vLLM sub-chart values still reference: {{ $configuredVllmSecret }}
 
 vLLM serving pods will fail to mount HF_TOKEN unless you fix this.
 
-DO NOT use "--set vllm.servingEngineSpec.modelSpec[N].hf_token.secretName=...".
-Helm never merges lists across values sources — it replaces the whole list —
-so a --set (or a values file) that only touches one field of one modelSpec
-entry silently wipes out repository/tag/modelURL/resources for ALL FOUR
-entries, breaking every vLLM deployment.
+Careful how you override this: Helm never merges *whole lists* across values
+sources, it replaces them — so supplying your own
+vllm.servingEngineSpec.modelSpec array (a values file, or a --set that
+redefines the entire array) silently drops any of the 4 entries you don't
+repeat, breaking those deployments.
 
-Instead, supply the *complete* vllm.servingEngineSpec.modelSpec array (copy
-the 4 entries from values.yaml, keep every field, just change hf_token.secretName
-— an anchor keeps all 4 in sync from one line), either:
+An indexed override like
+"--set vllm.servingEngineSpec.modelSpec[0].hf_token.secretName=..." is fine —
+it only touches that one field of that one entry and leaves the other 3
+entries (and the other fields of that entry) untouched. The wholesale-replace
+risk above only applies when the *entire* modelSpec array is redefined.
+
+To fix this mismatch, either edit hfTokenSecretName's anchor directly (its
+value already flows to all 4 entries), or supply the *complete* vllm.servingEngineSpec.modelSpec
+array (copy the 4 entries from values.yaml, keep every field, just change
+hf_token.secretName — an anchor keeps all 4 in sync from one line), either:
   - directly in values.yaml (vllm.hfTokenSecretName's anchor already does this), or
   - in your own values file / ArgoCD Application values block, reusing an
     anchor the same way, e.g.:
