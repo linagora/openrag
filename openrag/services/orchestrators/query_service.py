@@ -414,13 +414,8 @@ class QueryService:
             partition = [scope.partition]
             filter_params = {"file_id": scope.file_ids}
         elif attachment_ids and partition:
-            # Client-scoped chat on specific files (Cozy attachments). Mirror the
-            # workspace flow: a Postgres catalog lookup resolves the real indexed
-            # subset, which both drives the filter and is reported back to the
-            # client in `extra` (see chat/chat_stream). A non-indexed id is simply
-            # left out. The file_id filter is ANDed with the partition filter
-            # downstream and the partition is fixed server-side, so no DB-side
-            # security check is needed — this lookup is purely resolution/reporting.
+            # No security check on the ids: file_id is ANDed with the
+            # server-fixed partition, so a foreign id can never match.
             indexed_attachment_ids = await self._existing_file_ids(attachment_ids, partition)
             filter_params = {"file_id": indexed_attachment_ids}
 
@@ -435,17 +430,6 @@ class QueryService:
         else:
             web_results = _dedupe_web(await asyncio.gather(*[self._web.search(q.query) for q in queries.query_list]))
             chunks = []
-
-        if attachment_ids and not chunks:
-            # Diagnostic: attachments were requested but the file_id filter matched
-            # nothing. Usually a file_id/partition mismatch or an eventual-consistency
-            # race (file attached before its indexing reached COMPLETED). The chat
-            # still proceeds without context.
-            logger.warning(
-                "Attachments specified but no chunks matched — check file_id/partition mapping",
-                file_ids=attachment_ids,
-                partition=partition,
-            )
 
         if not chunks and not web_results and partition is None:
             return payload, [], [], []
@@ -496,19 +480,14 @@ class QueryService:
         return payload, docs, web_results, indexed_attachment_ids
 
     async def _existing_file_ids(self, file_ids: list[str], partitions: list[str]) -> list[str]:
-        """The order-preserving subset of ``file_ids`` actually indexed in ``partitions``.
+        """Order-preserving subset of ``file_ids`` indexed in ``partitions``.
 
-        Mirrors the workspace ``resolve_scope`` flow for a client-supplied
-        attachment list: one batched Postgres catalog lookup per concrete
-        partition, unioned. The ``"all"`` sentinel (super-admin cross-partition)
-        can't be validated against a real partition, so the list passes through
-        unchanged.
+        Each lookup is partition-scoped: ``(file_id, partition)`` is the catalog's
+        unique key, so file_id alone is not. A wildcard like ``"all"`` matches no
+        real ``partition_name`` and so contributes nothing (fail-closed).
         """
-        concrete = [p for p in partitions if p != "all"]
-        if not concrete:
-            return list(file_ids)
         found: set[str] = set()
-        for p in concrete:
+        for p in partitions:
             found.update(await self._workspace.get_existing_file_ids(p, file_ids))
         return [fid for fid in file_ids if fid in found]
 
@@ -622,8 +601,7 @@ class QueryService:
         chunk["choices"][0]["message"]["content"] = clean
         extra = {"sources": filter_sources_by_citations(sources, citations)}
         if metadata.get("attachments"):
-            # Report the attachment file_ids actually indexed/used so the client
-            # can tell which of its attachments were leveraged (vs not yet indexed).
+            # Indicate which attachments were actually leveraged to generate the answer.
             extra["attachments"] = attachments
         chunk["extra"] = json.dumps(extra)
         return chunk
@@ -645,7 +623,6 @@ class QueryService:
             payload, docs, web_results, attachments = await self._prepare_chat(partitions, payload, llm)
         sources = prepare_sources(docs, web_results)
 
-        # Report indexed attachment file_ids in the streamed `extra` (same as chat()).
         extra_fields = {"attachments": attachments} if metadata.get("attachments") else None
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
@@ -694,17 +671,11 @@ def _summary_doc(chunk, summary: str):
 
 
 def _extract_attachment_ids(metadata: dict) -> list[str]:
-    """Extract the file_id allowlist from a chat request's attachments.
-
-    Cozy (via cozy-stack) sends ``metadata.attachments = [{"id": "<file_id>"},
-    ...]``. Parse defensively — an item without a usable ``id`` (or not a dict)
-    is skipped rather than raising, so a malformed attachments blob degrades to
-    a normal unscoped chat instead of failing the request.
-    """
+    """file_ids from ``metadata.attachments = [{"id": ...}, ...]``; malformed payloads dropped."""
     raw = metadata.get("attachments")
-    if not raw:
+    if not isinstance(raw, list):
         return []
-    return [a["id"] for a in raw if isinstance(a, dict) and a.get("id")]
+    return [a["id"] for a in raw if isinstance(a, dict) and isinstance(a.get("id"), str) and a["id"]]
 
 
 def _dedupe_web(web_lists: list[list]) -> list:
