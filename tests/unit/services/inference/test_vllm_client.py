@@ -16,6 +16,7 @@ from core.utils.exceptions import (
 )
 from services.inference._circuit_breaker import _breakers
 from services.inference.vllm_client import (
+    _SUSPECT_UNICODE_ESCAPE,
     VLLMClient,
     VLLMEmbedder,
     VLLMVision,
@@ -384,7 +385,7 @@ class TestVLLMEmbedder:
         started: list[str] = []
         cancelled: list[str] = []
 
-        async def fake_embed_batch(texts: list[str]) -> list[list[float]]:
+        async def fake_embed_batch(texts: list[str], *, offset: int = 0) -> list[list[float]]:
             value = texts[0]
             started.append(value)
             if value == "fail":
@@ -830,3 +831,44 @@ class TestEmbedderFailureLogOmitsDocumentText:
         """`except BaseException` also catches plain exceptions — no `.extra`,
         nothing to summarize, and no crash in the failure path."""
         assert _log_safe_error_detail(RuntimeError("boom")) == {}
+
+
+class TestSuspectIndexIsDocumentGlobal:
+    """The reported position must identify the chunk in the *document*.
+
+    `_embed_batch` only ever sees one batch, so a raw `enumerate` position is
+    batch-local: under `batch_size=32` the offending chunk 97 reports as 1, and
+    every batch reports the same 0..31 range. Since the failure log carries only
+    these positions, a batch-local one silently points at an innocent chunk.
+    """
+
+    def test_offset_shifts_reported_positions(self):
+        findings = _find_suspect_escapes(["fine", "bad \\umlaut"], offset=96)
+
+        assert [f["index"] for f in findings] == [97]
+
+    def test_offset_defaults_to_zero_for_a_single_batch(self):
+        findings = _find_suspect_escapes(["bad \\umlaut"])
+
+        assert [f["index"] for f in findings] == [0]
+
+    @pytest.mark.asyncio
+    async def test_multi_batch_embed_reports_the_document_position(self):
+        """End-to-end through `embed()`: the bad chunk sits in the fourth batch,
+        so a batch-local index would report 1 instead of 97."""
+        texts = ["clean chunk"] * 200
+        texts[97] = "contract \\umlaut clause"
+
+        def handler(request):
+            payload = json.loads(request.content.decode())
+            if any(_SUSPECT_UNICODE_ESCAPE.search(t) for t in payload["input"]):
+                return httpx.Response(400, text="invalid character in \\u escape")
+            return _embed_response([[0.1]] * len(payload["input"]))
+
+        embedder = VLLMEmbedder(endpoint="http://embed.test/v1", model_name="embed-model", batch_size=32)
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+
+        with pytest.raises(EmbeddingAPIError) as excinfo:
+            await embedder.embed(texts)
+
+        assert [f["index"] for f in excinfo.value.extra["suspect_texts"]] == [97]

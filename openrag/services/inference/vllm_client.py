@@ -55,7 +55,7 @@ def _parse_response(resp: httpx.Response) -> dict:
 _SUSPECT_UNICODE_ESCAPE = re.compile(r"\\u(?![0-9a-fA-F]{4})")
 
 
-def _find_suspect_escapes(texts: list[str], *, limit: int = 5) -> list[dict]:
+def _find_suspect_escapes(texts: list[str], *, limit: int = 5, offset: int = 0) -> list[dict]:
     r"""Locate inputs carrying a suspect ``\u`` escape — at most *limit* of them.
 
     Findings land in ``EmbeddingAPIError.extra``, which is not log-only:
@@ -63,6 +63,13 @@ def _find_suspect_escapes(texts: list[str], *, limit: int = 5) -> list[dict]:
     are client-visible. Stopping at *limit* keeps that payload bounded — naming
     a few offending chunks is the point, not mirroring every bad input of a
     512-chunk batch.
+
+    *offset* is the position of this batch within the caller's full input, so
+    ``index`` identifies the chunk in the document rather than in the batch.
+    Without it a bad chunk at position 97 reports as 1 under ``batch_size=32``,
+    pointing whoever reads the log at an innocent chunk — and since the log
+    carries only these positions (see ``_log_safe_error_detail``), a wrong one
+    is the whole diagnostic being wrong.
     """
     findings = []
     for i, text in enumerate(texts):
@@ -70,7 +77,7 @@ def _find_suspect_escapes(texts: list[str], *, limit: int = 5) -> list[dict]:
         if match:
             start = max(0, match.start() - 15)
             end = min(len(text), match.end() + 15)
-            findings.append({"index": i, "snippet": text[start:end]})
+            findings.append({"index": offset + i, "snippet": text[start:end]})
             if len(findings) >= limit:
                 break
     return findings
@@ -315,18 +322,21 @@ class VLLMEmbedder(Embedder):
         if len(texts) <= self._batch_size:
             return await self._embed_batch(texts)
 
-        batches = [texts[i : i + self._batch_size] for i in range(0, len(texts), self._batch_size)]
+        # Keep each batch's start index: it is what turns a batch-local suspect
+        # position back into a position in `texts`.
+        offsets = list(range(0, len(texts), self._batch_size))
+        batches = [texts[i : i + self._batch_size] for i in offsets]
         semaphore = asyncio.Semaphore(self._embed_concurrency)
 
-        async def _run(batch: list[str]) -> list[list[float]]:
+        async def _run(batch: list[str], offset: int) -> list[list[float]]:
             async with semaphore:
-                return await self._embed_batch(batch)
+                return await self._embed_batch(batch, offset=offset)
 
         # Explicit tasks so that when one batch fails we can cancel the rest.
         # tqdm.gather (like asyncio.gather) propagates the first exception but
         # leaves the other in-flight batches running, where they would keep
         # consuming embedder capacity after embed() has already failed.
-        tasks = [asyncio.ensure_future(_run(batch)) for batch in batches]
+        tasks = [asyncio.ensure_future(_run(batch, offset)) for batch, offset in zip(batches, offsets, strict=True)]
         try:
             results = await tqdm.gather(
                 *tasks,
@@ -357,7 +367,7 @@ class VLLMEmbedder(Embedder):
 
     @with_circuit_breaker("embedder")
     @with_retry(max_attempts=3)
-    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def _embed_batch(self, texts: list[str], *, offset: int = 0) -> list[list[float]]:
         body: dict = {"model": self._model, "input": texts}
         if self._max_model_len is not None:
             # Truncate one token *below* max_model_len. vLLM pooling models
@@ -407,7 +417,7 @@ class VLLMEmbedder(Embedder):
             # pinpoint the offending chunk(s) so operators know which input to
             # inspect (observed: literal `\u…` escapes choking a Go gateway).
             if exc.response.status_code == 400:
-                suspect_texts = _find_suspect_escapes(texts)
+                suspect_texts = _find_suspect_escapes(texts, offset=offset)
                 if suspect_texts:
                     extra["suspect_texts"] = suspect_texts
             raise EmbeddingAPIError(
