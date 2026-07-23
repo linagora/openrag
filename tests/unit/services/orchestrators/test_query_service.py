@@ -91,8 +91,8 @@ class FakeWeb:
 class FakeWorkspace:
     def __init__(self, scope=None, existing=None):
         self._scope = scope
-        # None => every requested file_id is treated as indexed (default);
-        # a set/list => only those ids exist in the partition.
+        # None => every requested file_id is indexed in any partition (default);
+        # dict {partition: set(file_ids)} => partition-scoped existence.
         self._existing = existing
 
     async def get_workspace(self, wid):
@@ -104,7 +104,8 @@ class FakeWorkspace:
     async def get_existing_file_ids(self, partition, file_ids):
         if self._existing is None:
             return list(file_ids)
-        return [fid for fid in file_ids if fid in self._existing]
+        allowed = self._existing.get(partition, set())
+        return [fid for fid in file_ids if fid in allowed]
 
 
 def _config(mode="SimpleRag"):
@@ -521,7 +522,7 @@ async def test_chat_without_workspace_unaffected():
 
 
 # --------------------------------------------------------------------------- #
-# attachment scoping (Cozy attachments: metadata.attachments = [{"id": ...}])
+# attachment scoping (metadata.attachments = [{"id": ...}])
 # --------------------------------------------------------------------------- #
 
 
@@ -563,6 +564,38 @@ async def test_chat_attachments_malformed_ignored():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [123, True, "abc", {"id": "x"}])
+async def test_chat_attachments_scalar_payload_is_unscoped(bad):
+    # A non-list attachments payload must degrade to a normal unscoped chat,
+    # never raise (a scalar like 123 is not iterable).
+    retrieval = FakeRetrieval()
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
+    await svc.chat(
+        partitions=["p1"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {"attachments": bad}},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    assert retrieval.retrieve_multi_calls[0]["filter_params"] is None
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_non_string_ids_ignored():
+    retrieval = FakeRetrieval()
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"id": 123}, {"id": None}, {"id": ["x"]}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    assert retrieval.retrieve_multi_calls[0]["filter_params"] is None
+
+
+@pytest.mark.asyncio
 async def test_chat_empty_attachments_unaffected():
     retrieval = FakeRetrieval()
     svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
@@ -599,30 +632,12 @@ async def test_chat_workspace_and_attachments_both_present_workspace_wins():
 
 
 @pytest.mark.asyncio
-async def test_chat_attachments_zero_matches_logs_warning(monkeypatch):
-    warnings: list[str] = []
-    monkeypatch.setattr(qs.logger, "warning", lambda msg, *a, **kw: warnings.append(msg))
-    retrieval = FakeRetrieval(chunks=[])  # filter matches nothing
-    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
-    await svc.chat(
-        partitions=["p1"],
-        payload={
-            "messages": [{"role": "user", "content": "q"}],
-            "metadata": {"attachments": [{"id": "fa"}]},
-        },
-        prepare_sources=lambda d, w: [],
-        model_name="m",
-    )
-    assert any("no chunks matched" in msg for msg in warnings)
-
-
-@pytest.mark.asyncio
 async def test_chat_attachments_drops_unindexed_and_reports_in_extra():
     retrieval = FakeRetrieval()
     svc = _svc(
         retrieval=retrieval,
         llm=FakeLLM(chat_responses=["answer [Sources: none]"]),
-        workspace=FakeWorkspace(existing={"fa"}),  # only fa is indexed; fb is not
+        workspace=FakeWorkspace(existing={"p1": {"fa"}}),  # only fa is indexed; fb is not
     )
     chunk = await svc.chat(
         partitions=["p1"],
@@ -641,7 +656,7 @@ async def test_chat_attachments_drops_unindexed_and_reports_in_extra():
 
 @pytest.mark.asyncio
 async def test_chat_stream_reports_indexed_attachments_in_extra():
-    svc = _svc(workspace=FakeWorkspace(existing={"fa"}))  # only fa indexed
+    svc = _svc(workspace=FakeWorkspace(existing={"p1": {"fa"}}))  # only fa indexed in p1
     out = "".join(
         [
             line
@@ -658,6 +673,29 @@ async def test_chat_stream_reports_indexed_attachments_in_extra():
     )
     assert "attachments" in out and "fa" in out
     assert "fb" not in out  # unindexed id dropped, never reported
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_all_partition_is_fail_closed():
+    # "all" is a search wildcard, not a real partition_name, so nothing validates
+    # against it — attachments scope to zero rather than passing through unchecked.
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval,
+        llm=FakeLLM(chat_responses=["answer [Sources: none]"]),
+        workspace=FakeWorkspace(existing={"p1": {"fa"}}),
+    )
+    chunk = await svc.chat(
+        partitions=["all"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"id": "fa"}, {"id": "fb"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": []}
+    assert json.loads(chunk["extra"])["attachments"] == []
 
 
 @pytest.mark.asyncio
