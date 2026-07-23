@@ -213,7 +213,12 @@ def test_worker_factories_do_not_forward_the_env_managed_marker(monkeypatch: pyt
     OpenAI-compatible service rejects with a 400 — failing indexing rather than
     anything visibly related to the marker.
     """
-    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.model_endpoints import (
+        ENV_MANAGED_KEY,
+        ENV_MANAGED_VALUE,
+        LLM_CONTEXT_SIZE_KEY,
+        LLM_OUTPUT_TOKENS_KEY,
+    )
     from core.llm import llm_registry
     from services.workers.indexer_pool import _build_topic_tagger_factory
 
@@ -233,6 +238,8 @@ def test_worker_factories_do_not_forward_the_env_managed_marker(monkeypatch: pyt
                         "implementation": "marker-probe",
                         "temperature": 0.1,
                         ENV_MANAGED_KEY: ENV_MANAGED_VALUE,
+                        LLM_CONTEXT_SIZE_KEY: 8192,
+                        LLM_OUTPUT_TOKENS_KEY: 1024,
                     },
                 )
             }
@@ -247,6 +254,11 @@ def test_worker_factories_do_not_forward_the_env_managed_marker(monkeypatch: pyt
 
     assert ENV_MANAGED_KEY not in tagger._llm.kwargs
     assert "implementation" not in tagger._llm.kwargs
+    # The LLM token budgets are the same class of control key. di/factories.py
+    # already stripped them, but these worker factories did not — so they leaked
+    # into every worker-issued request until both sides shared one set.
+    assert LLM_CONTEXT_SIZE_KEY not in tagger._llm.kwargs
+    assert LLM_OUTPUT_TOKENS_KEY not in tagger._llm.kwargs
     assert tagger._llm.kwargs["temperature"] == 0.1  # real kwargs still forwarded
 
 

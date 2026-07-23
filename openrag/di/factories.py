@@ -86,8 +86,15 @@ def make_component_factory(
             model_cfg = config_section.get(name)
             if model_cfg is None:
                 raise KeyError(f"Unknown model '{name}'. Available: {list(config_section)}")
-            # `implementation` is a control key (which class to build), not a
-            # constructor argument, so it is read out before splatting `extra`.
+            # `implementation` selects which class to build, the LLM token
+            # budgets are OpenRAG-side sizing settings read by the chat token
+            # preflight (ModelsConfig.llm_context_size / llm_output_tokens), and
+            # the env-managed marker is seeder bookkeeping — none of them are
+            # constructor arguments, so they are stripped before splatting
+            # `extra`. Leaving any of them in would land it in the client's
+            # ``self._defaults`` and therefore in *every* outbound request body
+            # as a non-OpenAI field (a strict provider 400s) — the same leak
+            # fixed for batch_size in #712.
             impl_kwargs = {k: v for k, v in model_cfg.extra.items() if k not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", default_impl)
             # NOTE: batch_size is deliberately NOT passed here. Only the embedder

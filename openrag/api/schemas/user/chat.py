@@ -3,12 +3,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-def default_max_tokens():
-    from core.config import load_config
-
-    return load_config().llm_context.max_output_tokens
-
-
 class OpenAIMessage(BaseModel):
     role: Literal["user", "assistant", "system"]
     content: str
@@ -23,7 +17,13 @@ class OpenAIChatCompletionRequest(BaseModel):
     temperature: float | None = Field(0.3)
     top_p: float | None = Field(1.0)
     stream: bool | None = Field(False)
-    max_tokens: int | None = Field(default_factory=default_max_tokens)
+    # Deliberately left unset rather than defaulted here: this schema is parsed
+    # before the request's partition (and therefore the answering LLM endpoint)
+    # is known, so a default_factory could only ever read the *default*
+    # endpoint's budget — capping a partition whose own chat_llm endpoint allows
+    # more. The router fills it from the resolved endpoint via
+    # ``_apply_default_max_tokens`` once the partition is known.
+    max_tokens: int | None = Field(None)
     # Client-controlled and forwarded as-is to the downstream model; the server
     # default is off (see LLMParamsConfig.logprobs). For chat completions
     # `logprobs` is a boolean — `top_logprobs` carries the count — unlike the
@@ -70,7 +70,13 @@ class OpenAICompletionRequest(BaseModel):
     frequency_penalty: float | None = Field(0.0)
     logit_bias: dict | None = Field(None)
     logprobs: int | None = Field(None)
-    max_tokens: int | None = Field(default_factory=default_max_tokens)
+    # Deliberately left unset rather than defaulted here: this schema is parsed
+    # before the request's partition (and therefore the answering LLM endpoint)
+    # is known, so a default_factory could only ever read the *default*
+    # endpoint's budget — capping a partition whose own chat_llm endpoint allows
+    # more. The router fills it from the resolved endpoint via
+    # ``_apply_default_max_tokens`` once the partition is known.
+    max_tokens: int | None = Field(None)
     n: int | None = Field(1, ge=1, le=8)
     presence_penalty: float | None = Field(0.0)
     seed: int | None = Field(None)
