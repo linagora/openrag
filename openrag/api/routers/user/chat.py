@@ -320,6 +320,28 @@ def validate_tokens_limit(
         return True, ""
 
 
+def _apply_default_max_tokens(
+    request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
+    config: "Settings",
+    partitions: list[str] | None,
+) -> None:
+    """Fill an omitted ``max_tokens`` from the endpoint that will actually answer.
+
+    The request schema leaves ``max_tokens`` unset because it is parsed before
+    the partition is resolved; defaulting it there could only ever read the
+    *default* endpoint's budget, so a partition whose ``chat_llm`` preset
+    allows more output would still be capped at the default endpoint's value
+    (and that value was then sent downstream, since the payload forwards
+    ``max_tokens`` verbatim). Resolving it here — once the partition, and
+    therefore the answering endpoint, is known — keeps the output budget
+    consistent with the endpoint that serves the request.
+
+    An explicit client-supplied value is always honoured.
+    """
+    if request.max_tokens is None:
+        request.max_tokens = _effective_max_output_tokens(config, partitions)
+
+
 def check_tokens_limit(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
     log,
@@ -403,6 +425,10 @@ async def openai_chat_completion(
     # LLM endpoint). RAG-injected context is added server-side and separately
     # capped (max_context_tokens), but the user's own messages must be limited
     # regardless of direct-LLM vs RAG.
+    # Resolve the output budget now that the answering endpoint is known, so the
+    # preflight below and the payload sent downstream both use the resolved
+    # endpoint's budget rather than the default endpoint's.
+    _apply_default_max_tokens(request, config, partitions)
     check_tokens_limit(request, log, config, partitions=partitions)
 
     def prep(docs, web):
@@ -503,6 +529,10 @@ async def openai_completion(
     # Bound the caller's input size in every mode (RAG context is capped
     # separately), against the resolved partition's chat_llm preset budget
     # when one applies.
+    # Resolve the output budget now that the answering endpoint is known, so the
+    # preflight below and the payload sent downstream both use the resolved
+    # endpoint's budget rather than the default endpoint's.
+    _apply_default_max_tokens(request, config, partitions)
     check_tokens_limit(request, log, config, partitions=partitions)
 
     resp = await service.complete(

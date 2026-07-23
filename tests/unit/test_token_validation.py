@@ -462,22 +462,56 @@ class TestPartitionResolvedMaxModelTokens:
         assert chat.get_max_model_tokens(partitions=["p"], settings=s) == 4096
 
 
-class TestDefaultMaxTokensFactory:
-    """The request-schema default_factory prefers the default endpoint's budget."""
+class TestApplyDefaultMaxTokens:
+    """An omitted ``max_tokens`` is resolved against the endpoint that actually
+    answers, *after* the partition is known — not baked in at body-parse time
+    from the default endpoint (which would cap a partition whose own chat_llm
+    endpoint allows more, and send that wrong cap downstream)."""
 
-    def test_prefers_endpoint_output_tokens(self, monkeypatch):
-        import core.config
-        from api.schemas.user.chat import default_max_tokens
+    def test_schema_leaves_max_tokens_unset(self):
+        """The schema must not pre-fill it — that is what defeated the
+        partition-aware fallback."""
+        req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
+        assert req.max_tokens is None
+
+    def test_partition_preset_output_budget_wins_over_default(self):
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import LLM_OUTPUT_TOKENS_KEY, ModelEndpointConfig
+
+        s = _settings_with_default_llm(**{LLM_OUTPUT_TOKENS_KEY: 1024})
+        s.models.llm["mistral"] = ModelEndpointConfig(
+            endpoint="http://mistral:8000/v1", extra={LLM_OUTPUT_TOKENS_KEY: 4096}
+        )
+        s.partitions["p"] = _partition_config(chat_llm="mistral")
+
+        req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
+        chat._apply_default_max_tokens(req, s, ["p"])
+        # The answering endpoint allows 4096 — not the default endpoint's 1024.
+        assert req.max_tokens == 4096
+
+    def test_no_partition_uses_default_endpoint_budget(self):
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import LLM_OUTPUT_TOKENS_KEY
+
+        s = _settings_with_default_llm(**{LLM_OUTPUT_TOKENS_KEY: 1024})
+        req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
+        chat._apply_default_max_tokens(req, s, None)
+        assert req.max_tokens == 1024
+
+    def test_global_fallback_when_endpoint_has_no_override(self):
+        import api.routers.user.chat as chat
+
+        s = _settings_with_default_llm()  # no per-endpoint override
+        req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
+        chat._apply_default_max_tokens(req, s, None)
+        assert req.max_tokens == s.llm_context.max_output_tokens
+
+    def test_explicit_client_value_is_honoured(self):
+        """A caller-supplied max_tokens is never overwritten."""
+        import api.routers.user.chat as chat
         from core.config.model_endpoints import LLM_OUTPUT_TOKENS_KEY
 
         s = _settings_with_default_llm(**{LLM_OUTPUT_TOKENS_KEY: 4096})
-        monkeypatch.setattr(core.config, "load_config", lambda: s)
-        assert default_max_tokens() == 4096
-
-    def test_global_fallback(self, monkeypatch):
-        import core.config
-        from api.schemas.user.chat import default_max_tokens
-
-        s = _settings_with_default_llm()  # no override
-        monkeypatch.setattr(core.config, "load_config", lambda: s)
-        assert default_max_tokens() == s.llm_context.max_output_tokens
+        req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}], max_tokens=7)
+        chat._apply_default_max_tokens(req, s, None)
+        assert req.max_tokens == 7
