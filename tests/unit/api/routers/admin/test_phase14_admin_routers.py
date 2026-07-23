@@ -736,3 +736,50 @@ async def test_non_llm_write_does_not_invalidate_the_probed_cache(async_client_f
 
     assert response.status_code == 200
     assert events == []
+
+
+# --------------------------------------------------------------------------- #
+# The LLM token-budget keys are validated for LLM endpoints only. They are
+# meaningless elsewhere, so enforcing their shape globally would reserve the
+# names for every endpoint type — and since the admin UI preserves same-named
+# non-LLM keys verbatim, an untouched endpoint would 422 on its next save.
+# UpdateModelEndpointRequest has no model_type, so the route scopes the check
+# from the path parameter.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
+async def test_update_llm_endpoint_rejects_bad_token_budget(async_client_factory, key):
+    """An LLM update still gets the positive-int rule, now applied route-side."""
+    from api.error_handlers import register_error_handlers
+
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    register_error_handlers(app)
+
+    async with async_client_factory(app) as client:
+        response = await client.put("/model-endpoints/llm/default", json={"extra": {key: 0}})
+
+    assert response.status_code == 422
+    assert key in response.text
+    assert model_service.calls == []  # rejected before reaching the service
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
+@pytest.mark.parametrize("model_type", ["embedder", "reranker", "vlm"])
+async def test_update_non_llm_endpoint_accepts_same_named_extra_keys(async_client_factory, key, model_type):
+    """A non-LLM endpoint may carry these names as provider metadata of any
+    shape — re-saving it must not 422."""
+    from api.error_handlers import register_error_handlers
+
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    register_error_handlers(app)
+
+    async with async_client_factory(app) as client:
+        response = await client.put(f"/model-endpoints/{model_type}/default", json={"extra": {key: "auto"}})
+
+    assert response.status_code == 200
+    assert model_service.calls[0][1]["extra"] == {key: "auto"}

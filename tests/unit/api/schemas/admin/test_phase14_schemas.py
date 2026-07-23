@@ -69,9 +69,32 @@ def test_create_model_endpoint_rejects_bad_llm_token_budget(key, bad):
 
 @pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
 @pytest.mark.parametrize("bad", [0, -1, 2.5, "4096", True, False])
-def test_update_model_endpoint_rejects_bad_llm_token_budget(key, bad):
-    with pytest.raises(ValidationError, match=key):
-        UpdateModelEndpointRequest(extra={key: bad})
+@pytest.mark.parametrize("model_type", ["embedder", "reranker", "vlm"])
+def test_create_non_llm_endpoint_keeps_budget_key_names_unreserved(key, bad, model_type):
+    """The budget rules apply to LLM endpoints only.
+
+    These two names are meaningful just for LLMs, so enforcing their shape on
+    every endpoint type would reserve them globally and reject an embedder /
+    reranker / VLM carrying same-named provider metadata — which the admin UI
+    now preserves verbatim, so it would be resubmitted on the next save.
+    """
+    request = CreateModelEndpointRequest(
+        name="default", model_type=model_type, endpoint="http://host", extra={key: bad}
+    )
+    assert request.extra[key] == bad
+
+
+@pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
+@pytest.mark.parametrize("bad", [0, -1, 2.5, "4096", True, False])
+def test_update_model_endpoint_defers_budget_validation_to_the_route(key, bad):
+    """``UpdateModelEndpointRequest`` deliberately does not validate budgets.
+
+    It carries no ``model_type`` — that is a path parameter — so it cannot tell
+    an LLM update from a non-LLM one, and validating here would reserve the key
+    names for every type. The route applies the check once it knows the type;
+    ``test_phase14_admin_routers`` pins both sides of that.
+    """
+    assert UpdateModelEndpointRequest(extra={key: bad}).extra == {key: bad}
 
 
 def test_create_model_endpoint_accepts_valid_llm_token_budgets():

@@ -17,8 +17,10 @@ from api.schemas.admin.model_endpoint_schemas import (
     UpdateModelEndpointRequest,
     ValidateEndpointRequest,
     ValidateEndpointResponse,
+    validate_llm_token_extra,
 )
 from core.config.model_endpoints import ModelEndpointRow
+from core.utils.exceptions import ValidationError
 from core.utils.logging import get_logger
 from di.providers import get_model_endpoint_service
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
@@ -80,6 +82,24 @@ def _refresh_llm_token_cache(background_tasks: BackgroundTasks, model_type: str)
     background_tasks.add_task(_reprime_llm_token_cache, model_type)
 
 
+def _reject_non_llm_token_budgets(model_type: str, extra: dict | None) -> None:
+    """Apply the LLM token-budget rules to *extra*, but only for LLM endpoints.
+
+    ``UpdateModelEndpointRequest`` carries no ``model_type`` (it is a path
+    parameter), so unlike the create schema it cannot scope this check itself.
+    Validating here keeps ``max_llm_context_size`` / ``max_output_tokens`` from
+    being globally reserved names: an embedder, reranker or VLM may legitimately
+    carry same-named provider metadata of any shape, and the admin UI now
+    preserves those keys, so re-submitting an untouched endpoint must not 422.
+    """
+    if model_type != "llm":
+        return
+    try:
+        validate_llm_token_extra(extra)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+
 @router.post(
     "/",
     response_model=ModelEndpointResponse,
@@ -127,6 +147,7 @@ async def update_model_endpoint(
 ):
     """Update a registered inference endpoint."""
     fields = body.model_dump(exclude_unset=True)
+    _reject_non_llm_token_budgets(model_type, fields.get("extra"))
     if "name" in fields:
         fields["new_name"] = fields.pop("name")
     result = await service.update_model_endpoint(

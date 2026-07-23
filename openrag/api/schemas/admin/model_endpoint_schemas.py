@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY
 from core.utils.redaction import redact_secret_mapping
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm"]
 
@@ -32,11 +32,21 @@ def _normalize_endpoint(value: str) -> str:
     return normalized
 
 
-def _validate_llm_token_extra(extra: dict[str, Any] | None) -> dict[str, Any] | None:
+def validate_llm_token_extra(extra: dict[str, Any] | None) -> dict[str, Any] | None:
     """Reject non-positive-int LLM token budgets carried in ``extra``.
 
     ``bool`` is an ``int`` subclass in Python, so it is excluded explicitly —
     ``true`` must not slip through as ``1``.
+
+    Only ever applied to **LLM** endpoints. These two keys are meaningful only
+    there, so enforcing them globally would reserve the names across every
+    endpoint type and reject an embedder / reranker / VLM carrying same-named
+    provider metadata of a different shape. The create schema scopes the call
+    by reading its own ``model_type``; the update route scopes it from the path
+    parameter (``UpdateModelEndpointRequest`` has no ``model_type`` field).
+
+    Raises ``ValueError`` so a pydantic ``field_validator`` can surface it as a
+    normal 422; callers outside pydantic translate it themselves.
     """
     if not extra:
         return extra
@@ -77,9 +87,16 @@ class CreateModelEndpointRequest(BaseModel):
 
     @field_validator("extra")
     @classmethod
-    def validate_extra_token_budgets(cls, value: dict[str, Any]) -> dict[str, Any]:
-        """Reject non-positive-int LLM token budgets in ``extra``."""
-        return _validate_llm_token_extra(value)
+    def validate_extra_token_budgets(cls, value: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
+        """Reject non-positive-int LLM token budgets in ``extra`` — LLMs only.
+
+        ``model_type`` is declared before ``extra``, so it is already validated
+        and present in ``info.data`` here (absent only when it failed its own
+        validation, in which case the request is rejected regardless).
+        """
+        if info.data.get("model_type") != "llm":
+            return value
+        return validate_llm_token_extra(value)
 
 
 class UpdateModelEndpointRequest(BaseModel):
@@ -109,11 +126,12 @@ class UpdateModelEndpointRequest(BaseModel):
             return None
         return _normalize_endpoint(value)
 
-    @field_validator("extra")
-    @classmethod
-    def validate_extra_token_budgets(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Reject non-positive-int LLM token budgets in ``extra``."""
-        return _validate_llm_token_extra(value)
+    # NOTE: no ``extra`` token-budget validator here on purpose. This schema
+    # carries no ``model_type`` (it is a path parameter), so it cannot tell an
+    # LLM update from an embedder/reranker/VLM one, and validating
+    # unconditionally would reserve the budget key names across every endpoint
+    # type. The update route applies the check once it has the path's
+    # ``model_type`` — see ``_reject_non_llm_token_budgets``.
 
     @model_validator(mode="after")
     def require_at_least_one_update(self) -> UpdateModelEndpointRequest:
