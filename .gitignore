@@ -101,6 +101,3 @@ docker-compose.override.yml
 i8n/*.json
 !i8n/en-US.json
 !i8n/fr.json
-
-# graphify knowledge graph (local only, never pushed)
-graphify-out/
