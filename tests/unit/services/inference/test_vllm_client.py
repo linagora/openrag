@@ -15,7 +15,14 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
 )
 from services.inference._circuit_breaker import _breakers
-from services.inference.vllm_client import VLLMClient, VLLMEmbedder, VLLMVision
+from services.inference.vllm_client import (
+    _SUSPECT_UNICODE_ESCAPE,
+    VLLMClient,
+    VLLMEmbedder,
+    VLLMVision,
+    _find_suspect_escapes,
+    _log_safe_error_detail,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -378,7 +385,7 @@ class TestVLLMEmbedder:
         started: list[str] = []
         cancelled: list[str] = []
 
-        async def fake_embed_batch(texts: list[str]) -> list[list[float]]:
+        async def fake_embed_batch(texts: list[str], *, offset: int = 0) -> list[list[float]]:
             value = texts[0]
             started.append(value)
             if value == "fail":
@@ -746,3 +753,122 @@ class TestEmbedderRetryFires:
         with pytest.raises(EmbeddingAPIError):
             await embedder._embed_batch(["x"])
         assert calls["n"] == 1, "4xx must not be retried"
+
+
+class TestEmbedderErrorPayloadIsBounded:
+    """``EmbeddingAPIError.extra`` is not log-only — error_handlers.py serializes
+    it into the HTTP error body, so anything put there is client-visible and has
+    to stay bounded.
+    """
+
+    def _embedder(self, handler):
+        embedder = VLLMEmbedder(endpoint="http://embed.test/v1", model_name="embed-model", batch_size=8)
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+        return embedder
+
+    @pytest.mark.asyncio
+    async def test_upstream_error_body_is_truncated(self):
+        """A huge upstream error page (e.g. an HTML 400) must not be echoed whole."""
+        embedder = self._embedder(lambda request: httpx.Response(400, text="E" * 10_000))
+
+        with pytest.raises(EmbeddingAPIError) as excinfo:
+            await embedder._embed_batch(["x"])
+
+        assert len(excinfo.value.extra["error"]) == 500
+
+    def test_suspect_findings_are_capped(self):
+        r"""One snippet per offending chunk would mirror a whole batch of document
+        text into the payload; a few examples identify the problem just as well."""
+        findings = _find_suspect_escapes([f"bad \\umlaut {i}" for i in range(50)])
+
+        assert len(findings) == 5
+
+    def test_suspect_snippet_is_a_window_not_the_whole_chunk(self):
+        """The snippet is a window around the match, so a multi-KB chunk
+        contributes only its neighbourhood of the offending escape."""
+        findings = _find_suspect_escapes(["A" * 5_000 + "\\umlaut" + "B" * 5_000])
+
+        assert len(findings) == 1
+        # 15 chars either side of the 2-char `\u` match.
+        assert len(findings[0]["snippet"]) == 32
+
+
+class TestEmbedderFailureLogOmitsDocumentText:
+    """The log pipeline has a different audience from the API error: operators
+    read container / centralized logs across tenants, while the API error goes
+    back to the uploader who already owns the document. Document text may reach
+    the second but never the first.
+    """
+
+    def test_log_detail_carries_positions_not_snippets(self):
+        exc = EmbeddingAPIError(
+            "Embedder API error (400)",
+            status_code=400,
+            model_name="embed-model",
+            base_url="http://embed.test/v1",
+            error='{"message": "invalid character in \\u escape"}',
+            suspect_texts=[
+                {"index": 3, "snippet": "contrat de M. Dupont \\uXY salaire"},
+                {"index": 7, "snippet": "numero de securite sociale \\uZZ"},
+            ],
+        )
+
+        detail = _log_safe_error_detail(exc)
+
+        assert detail["suspect_count"] == 2
+        assert detail["suspect_indices"] == [3, 7]
+        assert detail["status_code"] == 400
+        assert detail["model_name"] == "embed-model"
+        # The point of the whole helper: no document text, and not the
+        # provider body either (it can echo the rejected input back).
+        flat = repr(detail)
+        assert "Dupont" not in flat
+        assert "securite sociale" not in flat
+        assert "snippet" not in flat
+        assert "invalid character" not in flat
+
+    def test_log_detail_is_empty_for_an_exception_without_extra(self):
+        """`except BaseException` also catches plain exceptions — no `.extra`,
+        nothing to summarize, and no crash in the failure path."""
+        assert _log_safe_error_detail(RuntimeError("boom")) == {}
+
+
+class TestSuspectIndexIsDocumentGlobal:
+    """The reported position must identify the chunk in the *document*.
+
+    `_embed_batch` only ever sees one batch, so a raw `enumerate` position is
+    batch-local: under `batch_size=32` the offending chunk 97 reports as 1, and
+    every batch reports the same 0..31 range. Since the failure log carries only
+    these positions, a batch-local one silently points at an innocent chunk.
+    """
+
+    def test_offset_shifts_reported_positions(self):
+        findings = _find_suspect_escapes(["fine", "bad \\umlaut"], offset=96)
+
+        assert [f["index"] for f in findings] == [97]
+
+    def test_offset_defaults_to_zero_for_a_single_batch(self):
+        findings = _find_suspect_escapes(["bad \\umlaut"])
+
+        assert [f["index"] for f in findings] == [0]
+
+    @pytest.mark.asyncio
+    async def test_multi_batch_embed_reports_the_document_position(self):
+        """End-to-end through `embed()`: the bad chunk sits in the fourth batch,
+        so a batch-local index would report 1 instead of 97."""
+        texts = ["clean chunk"] * 200
+        texts[97] = "contract \\umlaut clause"
+
+        def handler(request):
+            payload = json.loads(request.content.decode())
+            if any(_SUSPECT_UNICODE_ESCAPE.search(t) for t in payload["input"]):
+                return httpx.Response(400, text="invalid character in \\u escape")
+            return _embed_response([[0.1]] * len(payload["input"]))
+
+        embedder = VLLMEmbedder(endpoint="http://embed.test/v1", model_name="embed-model", batch_size=32)
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+
+        with pytest.raises(EmbeddingAPIError) as excinfo:
+            await embedder.embed(texts)
+
+        assert [f["index"] for f in excinfo.value.extra["suspect_texts"]] == [97]

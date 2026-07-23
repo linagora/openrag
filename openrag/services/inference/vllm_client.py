@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import AsyncIterator
+import re
+from collections.abc import AsyncIterator, Mapping
 
 import httpx
 from core.embeddings import Embedder, embedder_registry
@@ -43,6 +44,70 @@ def _parse_response(resp: httpx.Response) -> dict:
         return resp.json()
     except ValueError as e:
         raise InferenceError(f"Invalid JSON from inference server ({resp.url}): {e}", status_code=502) from e
+
+
+# A literal backslash followed by "u" and anything other than 4 hex digits.
+# json.dumps always escapes a literal backslash to `\\`, so this pattern can
+# only appear in a text's *decoded* content, never in a properly-serialized
+# JSON body — but some downstream JSON parsers (observed: a Go-based embedder
+# gateway) still choke on it with "invalid character ... in \u hexadecimal
+# character escape". Flagging it here pinpoints which input text to inspect.
+_SUSPECT_UNICODE_ESCAPE = re.compile(r"\\u(?![0-9a-fA-F]{4})")
+
+
+def _find_suspect_escapes(texts: list[str], *, limit: int = 5, offset: int = 0) -> list[dict]:
+    r"""Locate inputs carrying a suspect ``\u`` escape — at most *limit* of them.
+
+    Findings land in ``EmbeddingAPIError.extra``, which is not log-only:
+    error_handlers.py serializes it into the HTTP error body, so these snippets
+    are client-visible. Stopping at *limit* keeps that payload bounded — naming
+    a few offending chunks is the point, not mirroring every bad input of a
+    512-chunk batch.
+
+    *offset* is the position of this batch within the caller's full input, so
+    ``index`` identifies the chunk in the document rather than in the batch.
+    Without it a bad chunk at position 97 reports as 1 under ``batch_size=32``,
+    pointing whoever reads the log at an innocent chunk — and since the log
+    carries only these positions (see ``_log_safe_error_detail``), a wrong one
+    is the whole diagnostic being wrong.
+    """
+    findings = []
+    for i, text in enumerate(texts):
+        match = _SUSPECT_UNICODE_ESCAPE.search(text)
+        if match:
+            start = max(0, match.start() - 15)
+            end = min(len(text), match.end() + 15)
+            findings.append({"index": offset + i, "snippet": text[start:end]})
+            if len(findings) >= limit:
+                break
+    return findings
+
+
+def _log_safe_error_detail(exc: BaseException) -> dict:
+    """Summarize a failed embedding call without copying document text to logs.
+
+    ``EmbeddingAPIError.extra`` carries the provider's raw response and, for a
+    400, snippets of the indexed document. That detail belongs in the API error,
+    whose audience is the uploader who already owns the document — but not in
+    container / centralized logs, which operators read across tenants. Keep only
+    what makes the failure diagnosable there: the model, the status, and which
+    chunk indices look malformed.
+    """
+    extra = getattr(exc, "extra", None)
+    if not isinstance(extra, Mapping):
+        return {}
+    detail: dict = {
+        "model_name": extra.get("model_name"),
+        "base_url": extra.get("base_url"),
+        "status_code": getattr(exc, "status_code", None),
+    }
+    suspects = extra.get("suspect_texts") or []
+    if suspects:
+        # Positions, not snippets — enough to go and inspect the offending
+        # chunks without mirroring their text into the log pipeline.
+        detail["suspect_count"] = len(suspects)
+        detail["suspect_indices"] = [s.get("index") for s in suspects]
+    return detail
 
 
 # ---------------------------------------------------------------------------
@@ -257,18 +322,21 @@ class VLLMEmbedder(Embedder):
         if len(texts) <= self._batch_size:
             return await self._embed_batch(texts)
 
-        batches = [texts[i : i + self._batch_size] for i in range(0, len(texts), self._batch_size)]
+        # Keep each batch's start index: it is what turns a batch-local suspect
+        # position back into a position in `texts`.
+        offsets = list(range(0, len(texts), self._batch_size))
+        batches = [texts[i : i + self._batch_size] for i in offsets]
         semaphore = asyncio.Semaphore(self._embed_concurrency)
 
-        async def _run(batch: list[str]) -> list[list[float]]:
+        async def _run(batch: list[str], offset: int) -> list[list[float]]:
             async with semaphore:
-                return await self._embed_batch(batch)
+                return await self._embed_batch(batch, offset=offset)
 
         # Explicit tasks so that when one batch fails we can cancel the rest.
         # tqdm.gather (like asyncio.gather) propagates the first exception but
         # leaves the other in-flight batches running, where they would keep
         # consuming embedder capacity after embed() has already failed.
-        tasks = [asyncio.ensure_future(_run(batch)) for batch in batches]
+        tasks = [asyncio.ensure_future(_run(batch, offset)) for batch, offset in zip(batches, offsets, strict=True)]
         try:
             results = await tqdm.gather(
                 *tasks,
@@ -276,9 +344,17 @@ class VLLMEmbedder(Embedder):
             )
         except BaseException as exc:
             done = sum(1 for task in tasks if task.done() and not task.cancelled() and task.exception() is None)
-            logger.bind(batches_done=done, n_batches=len(batches), error=repr(exc)).warning(
-                "Embedding failed after {d}/{b} batches", d=done, b=len(batches)
-            )
+            # `.extra` carries the provider's raw response and, on a 400, snippets
+            # of the indexed document. Summarize instead of binding it wholesale:
+            # a failed upload of sensitive text must not copy that content into
+            # container / centralized logs. The full detail still reaches the
+            # uploader on the API error.
+            logger.bind(
+                batches_done=done,
+                n_batches=len(batches),
+                error=repr(exc),
+                error_detail=_log_safe_error_detail(exc),
+            ).warning("Embedding failed after {d}/{b} batches", d=done, b=len(batches))
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -291,7 +367,7 @@ class VLLMEmbedder(Embedder):
 
     @with_circuit_breaker("embedder")
     @with_retry(max_attempts=3)
-    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def _embed_batch(self, texts: list[str], *, offset: int = 0) -> list[list[float]]:
         body: dict = {"model": self._model, "input": texts}
         if self._max_model_len is not None:
             # Truncate one token *below* max_model_len. vLLM pooling models
@@ -332,12 +408,22 @@ class VLLMEmbedder(Embedder):
         except httpx.HTTPStatusError as exc:
             # Preserve the upstream status, as the LLM path already does, so 429
             # and 5xx are retried while 4xx (bad request, auth) fail fast.
+            extra: dict = {
+                "model_name": self._model,
+                "base_url": self._endpoint,
+                "error": exc.response.text[:500],
+            }
+            # A 400 usually means the embedder rejected the payload itself;
+            # pinpoint the offending chunk(s) so operators know which input to
+            # inspect (observed: literal `\u…` escapes choking a Go gateway).
+            if exc.response.status_code == 400:
+                suspect_texts = _find_suspect_escapes(texts, offset=offset)
+                if suspect_texts:
+                    extra["suspect_texts"] = suspect_texts
             raise EmbeddingAPIError(
                 f"Embedder API error ({exc.response.status_code})",
                 status_code=exc.response.status_code,
-                model_name=self._model,
-                base_url=self._endpoint,
-                error=exc.response.text,
+                **extra,
             ) from exc
 
         try:

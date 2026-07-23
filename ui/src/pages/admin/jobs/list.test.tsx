@@ -3,8 +3,9 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { toast } from "sonner";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { cancelTask, getQueueInfo, listTasks, type TaskState } from "@/lib/api/jobs";
+import { downloadCsv } from "@/lib/csv";
 import JobListPage from "./list";
 
 vi.mock("sonner", () => ({
@@ -32,10 +33,30 @@ vi.mock("@/lib/api/jobs", async () => {
   };
 });
 
+vi.mock("@/lib/csv", () => ({
+  downloadCsv: vi.fn(),
+}));
+
 const cancelTaskMock = vi.mocked(cancelTask);
 const getQueueInfoMock = vi.mocked(getQueueInfo);
 const listTasksMock = vi.mocked(listTasks);
 const toastErrorMock = vi.mocked(toast.error);
+const downloadCsvMock = vi.mocked(downloadCsv);
+
+beforeAll(() => {
+  if (!Element.prototype.hasPointerCapture) {
+    Element.prototype.hasPointerCapture = () => false;
+  }
+  if (!Element.prototype.setPointerCapture) {
+    Element.prototype.setPointerCapture = () => {};
+  }
+  if (!Element.prototype.releasePointerCapture) {
+    Element.prototype.releasePointerCapture = () => {};
+  }
+  if (!Element.prototype.scrollIntoView) {
+    Element.prototype.scrollIntoView = () => {};
+  }
+});
 
 const task = (
   task_id: string,
@@ -175,6 +196,69 @@ describe("JobListPage filters", () => {
     await userEvent.type(screen.getByPlaceholderText("Search jobs..."), "other");
 
     await waitFor(() => expect(screen.queryByText("1 selected")).toBeNull());
+  });
+
+  it("filters jobs by partition and exports the filtered rows", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("docs-task", "COMPLETED", "docs.pdf", "docs"),
+        task("archive-task", "FAILED", "archive.pdf", "archive", {
+          created_at: "2026-07-20T08:00:00Z",
+          duration_ms: 65_000,
+        }),
+        task("all-named-task", "COMPLETED", "all-named.pdf", "__all__"),
+      ],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByText("docs.pdf")).not.toBeNull();
+    await userEvent.click(screen.getByRole("combobox", { name: /filter jobs by partition/i }));
+    await userEvent.click(await screen.findByRole("option", { name: "archive" }));
+
+    expect(screen.queryByText("docs.pdf")).toBeNull();
+    expect(screen.getByText("archive.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    expect(downloadCsvMock).toHaveBeenCalledWith(
+      "openrag-jobs.csv",
+      expect.arrayContaining([
+        expect.objectContaining({ header: "created_at" }),
+        expect.objectContaining({ header: "duration_ms" }),
+      ]),
+      [expect.objectContaining({ task_id: "archive-task" })],
+    );
+
+    await userEvent.click(screen.getByRole("combobox", { name: /filter jobs by partition/i }));
+    await userEvent.click(await screen.findByRole("option", { name: "__all__" }));
+
+    expect(screen.queryByText("docs.pdf")).toBeNull();
+    expect(screen.queryByText("archive.pdf")).toBeNull();
+    expect(screen.getByText("all-named.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    expect(downloadCsvMock).toHaveBeenLastCalledWith(
+      "openrag-jobs.csv",
+      expect.any(Array),
+      [expect.objectContaining({ task_id: "all-named-task" })],
+    );
+
+    await userEvent.click(screen.getByRole("tab", { name: "FAILED" }));
+    await waitFor(() => expect(screen.getByText("docs.pdf")).not.toBeNull());
+  });
+
+  it("reports CSV download failures", async () => {
+    downloadCsvMock.mockImplementationOnce(() => {
+      throw new Error("downloads unavailable");
+    });
+    renderJobs();
+
+    expect(await screen.findByText("completed.pdf")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    expect(toastErrorMock).toHaveBeenCalledWith("CSV export failed: downloads unavailable");
   });
 
   it("keeps long job values constrained while exposing full names", async () => {

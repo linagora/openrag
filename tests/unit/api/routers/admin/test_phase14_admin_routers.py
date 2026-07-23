@@ -420,6 +420,146 @@ async def test_set_default_model_endpoint_returns_promoted_endpoint(async_client
     ]
 
 
+# --------------------------------------------------------------------------- #
+# Auto-probed max_model_len cache refresh after an LLM endpoint write (#639) —
+# config.models.llm itself is refreshed synchronously inside the service call
+# (ModelEndpointService.load_all()), but the separate /v1/models auto-probe
+# cache otherwise only refreshes once at process startup. These tests stub
+# out prime_max_model_tokens itself (no real network calls) and just verify
+# it's invoked — its own probing/caching behavior is covered by
+# tests/unit/test_token_validation.py::TestPrimeMaxModelTokens.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_create_llm_endpoint_reprimes_token_cache(async_client_factory, monkeypatch):
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    calls: list[str] = []
+
+    async def fake_prime() -> None:
+        calls.append("primed")
+
+    monkeypatch.setattr(model_endpoints, "prime_max_model_tokens", fake_prime)
+
+    async with async_client_factory(app) as client:
+        response = await client.post(
+            "/model-endpoints/",
+            json={
+                "name": "mistral",
+                "model_type": "llm",
+                "endpoint": "http://mistral:8000/v1",
+                "model_name": "mistral",
+            },
+        )
+
+    assert response.status_code == 201
+    assert calls == ["primed"]
+
+
+@pytest.mark.asyncio
+async def test_create_non_llm_endpoint_does_not_reprime_token_cache(async_client_factory, monkeypatch):
+    """The auto-probe cache is LLM-only — writes to embedder/reranker/vlm
+    endpoints must not trigger a refresh."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    calls: list[str] = []
+
+    async def fake_prime() -> None:
+        calls.append("primed")
+
+    monkeypatch.setattr(model_endpoints, "prime_max_model_tokens", fake_prime)
+
+    async with async_client_factory(app) as client:
+        response = await client.post(
+            "/model-endpoints/",
+            json={"name": "embedder-1", "model_type": "embedder", "endpoint": "http://emb:8000/v1"},
+        )
+
+    assert response.status_code == 201
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_update_llm_endpoint_reprimes_token_cache(async_client_factory, monkeypatch):
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    calls: list[str] = []
+
+    async def fake_prime() -> None:
+        calls.append("primed")
+
+    monkeypatch.setattr(model_endpoints, "prime_max_model_tokens", fake_prime)
+
+    async with async_client_factory(app) as client:
+        response = await client.put("/model-endpoints/llm/default", json={"timeout": 45})
+
+    assert response.status_code == 200
+    assert calls == ["primed"]
+
+
+@pytest.mark.asyncio
+async def test_delete_llm_endpoint_reprimes_token_cache(async_client_factory, monkeypatch):
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    calls: list[str] = []
+
+    async def fake_prime() -> None:
+        calls.append("primed")
+
+    monkeypatch.setattr(model_endpoints, "prime_max_model_tokens", fake_prime)
+
+    async with async_client_factory(app) as client:
+        response = await client.delete("/model-endpoints/llm/default")
+
+    assert response.status_code == 204
+    assert calls == ["primed"]
+
+
+@pytest.mark.asyncio
+async def test_set_default_llm_endpoint_reprimes_token_cache(async_client_factory, monkeypatch):
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    calls: list[str] = []
+
+    async def fake_prime() -> None:
+        calls.append("primed")
+
+    monkeypatch.setattr(model_endpoints, "prime_max_model_tokens", fake_prime)
+
+    async with async_client_factory(app) as client:
+        response = await client.post("/model-endpoints/llm/default/set-default")
+
+    assert response.status_code == 200
+    assert calls == ["primed"]
+
+
+@pytest.mark.asyncio
+async def test_reprime_failure_does_not_fail_the_request(async_client_factory, monkeypatch):
+    """A cache-refresh failure is logged, not raised — the admin's write must
+    still succeed even if the post-write auto-probe refresh fails."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async def failing_prime() -> None:
+        raise RuntimeError("probe boom")
+
+    monkeypatch.setattr(model_endpoints, "prime_max_model_tokens", failing_prime)
+
+    async with async_client_factory(app) as client:
+        response = await client.post(
+            "/model-endpoints/",
+            json={
+                "name": "mistral",
+                "model_type": "llm",
+                "endpoint": "http://mistral:8000/v1",
+                "model_name": "mistral",
+            },
+        )
+
+    assert response.status_code == 201
+
+
 @pytest.mark.asyncio
 async def test_preset_options_return_registered_choices(async_client_factory):
     """Preset options should expose available registry choices."""
@@ -501,3 +641,145 @@ async def test_update_preset_maps_name_to_new_name(async_client_factory):
             },
         )
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Stale-window closure: the service swaps config.models.llm synchronously, but
+# the /v1/models probe runs in a background task. Between the two, the probed
+# cache still describes the *previous* endpoint — so a chat request would be
+# answered by the new endpoint and preflighted against the old one's limit.
+# The route therefore invalidates inline (degrading to the conservative global
+# fallback) and only re-probes afterwards.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_llm_write_invalidates_probed_cache_before_the_background_refresh(async_client_factory, monkeypatch):
+    """Invalidation must happen inline, ahead of the background re-probe.
+
+    Ordering is the whole point: if the invalidation ran inside the background
+    task it would land no earlier than the re-probe it precedes, leaving the
+    stale window exactly as wide as before.
+    """
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    events: list[str] = []
+
+    async def fake_prime() -> None:
+        events.append("primed")
+
+    monkeypatch.setattr(model_endpoints, "prime_max_model_tokens", fake_prime)
+    monkeypatch.setattr(model_endpoints, "invalidate_max_model_tokens", lambda: events.append("invalidated"))
+
+    async with async_client_factory(app) as client:
+        response = await client.post(
+            "/model-endpoints/",
+            json={
+                "name": "mistral",
+                "model_type": "llm",
+                "endpoint": "http://mistral:8000/v1",
+                "model_name": "mistral",
+            },
+        )
+
+    assert response.status_code == 201
+    assert events == ["invalidated", "primed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method,path,payload",
+    [
+        ("put", "/model-endpoints/llm/default", {"timeout": 45}),
+        ("delete", "/model-endpoints/llm/default", None),
+        ("post", "/model-endpoints/llm/default/set-default", None),
+    ],
+)
+async def test_every_llm_mutation_invalidates_the_probed_cache(
+    async_client_factory, monkeypatch, method, path, payload
+):
+    """Update, delete and set-default repoint the registry just like create."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    events: list[str] = []
+
+    async def fake_prime() -> None:
+        events.append("primed")
+
+    monkeypatch.setattr(model_endpoints, "prime_max_model_tokens", fake_prime)
+    monkeypatch.setattr(model_endpoints, "invalidate_max_model_tokens", lambda: events.append("invalidated"))
+
+    async with async_client_factory(app) as client:
+        kwargs = {"json": payload} if payload is not None else {}
+        response = await getattr(client, method)(path, **kwargs)
+
+    assert response.status_code in (200, 204)
+    assert events == ["invalidated", "primed"]
+
+
+@pytest.mark.asyncio
+async def test_non_llm_write_does_not_invalidate_the_probed_cache(async_client_factory, monkeypatch):
+    """The probed cache holds LLM entries only — a non-LLM write must not clear
+    every other endpoint's probed limit as a side effect."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    events: list[str] = []
+
+    async def fake_prime() -> None:
+        events.append("primed")
+
+    monkeypatch.setattr(model_endpoints, "prime_max_model_tokens", fake_prime)
+    monkeypatch.setattr(model_endpoints, "invalidate_max_model_tokens", lambda: events.append("invalidated"))
+
+    async with async_client_factory(app) as client:
+        response = await client.put("/model-endpoints/embedder/default", json={"timeout": 45})
+
+    assert response.status_code == 200
+    assert events == []
+
+
+# --------------------------------------------------------------------------- #
+# The LLM token-budget keys are validated for LLM endpoints only. They are
+# meaningless elsewhere, so enforcing their shape globally would reserve the
+# names for every endpoint type — and since the admin UI preserves same-named
+# non-LLM keys verbatim, an untouched endpoint would 422 on its next save.
+# UpdateModelEndpointRequest has no model_type, so the route scopes the check
+# from the path parameter.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
+async def test_update_llm_endpoint_rejects_bad_token_budget(async_client_factory, key):
+    """An LLM update still gets the positive-int rule, now applied route-side."""
+    from api.error_handlers import register_error_handlers
+
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    register_error_handlers(app)
+
+    async with async_client_factory(app) as client:
+        response = await client.put("/model-endpoints/llm/default", json={"extra": {key: 0}})
+
+    assert response.status_code == 422
+    assert key in response.text
+    assert model_service.calls == []  # rejected before reaching the service
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
+@pytest.mark.parametrize("model_type", ["embedder", "reranker", "vlm"])
+async def test_update_non_llm_endpoint_accepts_same_named_extra_keys(async_client_factory, key, model_type):
+    """A non-LLM endpoint may carry these names as provider metadata of any
+    shape — re-saving it must not 422."""
+    from api.error_handlers import register_error_handlers
+
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    register_error_handlers(app)
+
+    async with async_client_factory(app) as client:
+        response = await client.put(f"/model-endpoints/{model_type}/default", json={"extra": {key: "auto"}})
+
+    assert response.status_code == 200
+    assert model_service.calls[0][1]["extra"] == {key: "auto"}
