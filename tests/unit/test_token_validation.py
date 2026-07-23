@@ -50,6 +50,29 @@ def _completion_request(prompt: str, max_tokens: int = 512) -> OpenAICompletionR
     )
 
 
+def test_make_sse_error_envelope():
+    """Streaming half of the availability-preflight removal's error contract:
+    once headers are flushed a down/errored LLM can't change the HTTP status,
+    so the failure is emitted as an OpenAI-shaped SSE ``error`` event followed
+    by ``[DONE]`` (the response stays 200). Pin that envelope so the contract
+    can't silently regress."""
+    import json
+
+    from api.routers.user.chat import _make_sse_error
+
+    out = _make_sse_error("cannot reach LLM", "INFERENCE_CONNECTION_ERROR")
+    assert out.endswith("data: [DONE]\n\n")
+    payload = json.loads(out.split("data: ", 1)[1].split("\n\n", 1)[0])
+    assert payload == {
+        "error": {
+            "message": "cannot reach LLM",
+            "type": "error",
+            "param": None,
+            "code": "INFERENCE_CONNECTION_ERROR",
+        }
+    }
+
+
 # ---------------------------------------------------------------------------
 # Parametrized: both request types
 # ---------------------------------------------------------------------------
