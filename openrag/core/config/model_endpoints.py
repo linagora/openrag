@@ -28,6 +28,16 @@ class ModelEndpointConfig(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
+# Provenance marker written into an endpoint's ``extra`` when the seeder creates
+# it from env. It is what lets boot-time sync find *its own* row again after the
+# configured model — and therefore the slug the row was named after — changes.
+# Kept in ``extra`` rather than a new column so this needs no Alembic migration;
+# ``extra`` already carries control keys (``implementation``), and factories.py
+# filters both out before splatting the rest into a client constructor.
+ENV_MANAGED_KEY = "managed_by"
+ENV_MANAGED_VALUE = "env"
+
+
 class ModelsConfig(ConfigMixin):
     """Named endpoint dictionaries — one per model type.
 

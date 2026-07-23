@@ -478,8 +478,13 @@ async def test_seed_defaults_syncs_env_named_row_when_sync_on_boot_enabled(monke
     updated = repo._store[("embed-model", "embedder")]
     assert updated.batch_size == 64
     assert updated.endpoint == "http://embedder:8000/v1"
-    # extra (e.g. a hand-set API key) is deliberately never touched by sync.
-    assert updated.extra == {"api_key": "hand-set-secret"}
+    # Sync now writes `extra` (it must, to rotate a key), but a hand-set key still
+    # survives: env has no real key here, only the `EMPTY` placeholder, which is
+    # never treated as a credential. The row is stamped as env-managed so a later
+    # model change can find it by marker instead of by slug.
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+
+    assert updated.extra == {"api_key": "hand-set-secret", ENV_MANAGED_KEY: ENV_MANAGED_VALUE}
 
 
 @pytest.mark.asyncio
@@ -508,23 +513,28 @@ async def test_seed_defaults_sync_on_boot_never_touches_differently_named_endpoi
 
 
 @pytest.mark.asyncio
-async def test_seed_defaults_sync_on_boot_does_not_follow_a_changed_model_slug(monkeypatch):
-    """Known limitation, pinned so it cannot change silently.
+async def test_seed_defaults_sync_on_boot_follows_a_changed_model_slug(monkeypatch):
+    """Changing the model must actually take effect under sync_on_boot.
 
-    Rows are matched by the env-derived slug, so changing the *model* (rather
-    than the URL/batch size/timeout) yields a slug that matches no row; the
-    seed then declines to create a competing default, and the previously
-    seeded endpoint silently stays in use. Switching models therefore still
-    needs an admin edit. Following the rename would require persisting an
-    "env-managed" marker on the row — see the caution in env_vars.md.
+    The row is found by its env-managed marker, not by the slug it was named
+    after, so a new model is written onto the same row and the row is renamed
+    to match. Before the marker this silently did nothing: the new slug matched
+    no row, the seed declined to create a competing default, and the old model
+    stayed live.
     """
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
     from core.config.root import Settings
 
     monkeypatch.delenv("LLM_ENDPOINT", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
 
     existing = _make_row(
-        name="old-model", model_type="embedder", model_name="old-model", batch_size=512, is_default=True
+        name="old-model",
+        model_type="embedder",
+        model_name="old-model",
+        batch_size=512,
+        extra={"implementation": "vllm", ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
+        is_default=True,
     )
     repo = _FakeEndpointRepo(rows=[existing])
     settings = Settings(
@@ -535,10 +545,115 @@ async def test_seed_defaults_sync_on_boot_does_not_follow_a_changed_model_slug(m
 
     await svc.seed_defaults()
 
-    # Neither synced onto the new slug nor created as a second endpoint.
-    assert ("new-model", "embedder") not in repo._store
-    assert repo._store[("old-model", "embedder")].model_name == "old-model"
-    assert not [c for c in repo.calls if c[0] in ("update", "create") and c[1][1] == "embedder"]
+    assert ("old-model", "embedder") not in repo._store
+    synced = repo._store[("new-model", "embedder")]
+    assert synced.model_name == "new-model"
+    assert synced.batch_size == 64
+    assert synced.endpoint == "http://embedder:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_rotates_the_api_key(monkeypatch):
+    """A rotated *_API_KEY must reach the row it owns.
+
+    ``extra`` was previously never written by sync, so rotating the key left the
+    old one in the DB and requests failed as soon as the provider revoked it.
+    Only the key is taken from env — an admin's other ``extra`` keys survive.
+    """
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="embed-model",
+        model_type="embedder",
+        model_name="embed-model",
+        extra={
+            "implementation": "vllm",
+            "api_key": "old-revoked-key",
+            "custom_kwarg": "set-by-admin",
+            ENV_MANAGED_KEY: ENV_MANAGED_VALUE,
+        },
+        is_default=True,
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        embedder={
+            "base_url": "http://embedder:8000/v1",
+            "model_name": "embed-model",
+            "api_key": "new-rotated-key",
+        },
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    extra = repo._store[("embed-model", "embedder")].extra
+    assert extra["api_key"] == "new-rotated-key"
+    assert extra["custom_kwarg"] == "set-by-admin"
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_adopts_a_row_seeded_before_the_marker(monkeypatch):
+    """Deployments upgraded from a build without the marker must not be stranded.
+
+    The row has no marker, so it is matched by slug once and stamped — from then
+    on it is found by marker and a model change can follow it.
+    """
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="embed-model", model_type="embedder", model_name="embed-model", extra={"implementation": "vllm"}
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "embed-model"},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    assert repo._store[("embed-model", "embedder")].extra[ENV_MANAGED_KEY] == ENV_MANAGED_VALUE
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_will_not_rename_over_a_hand_created_name(monkeypatch):
+    """The rename must never collide with an endpoint an admin created."""
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    managed = _make_row(
+        name="old-model",
+        model_type="embedder",
+        model_name="old-model",
+        extra={ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
+        is_default=True,
+    )
+    hand_made = _make_row(name="new-model", model_type="embedder", model_name="something-else", batch_size=999)
+    repo = _FakeEndpointRepo(rows=[managed, hand_made])
+    settings = Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "new-model"},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    # The hand-created row is intact and the managed row kept its old name.
+    assert repo._store[("new-model", "embedder")].batch_size == 999
+    assert repo._store[("new-model", "embedder")].model_name == "something-else"
+    assert repo._store[("old-model", "embedder")].model_name == "new-model"
 
 
 # ------------------------------------------------------------------

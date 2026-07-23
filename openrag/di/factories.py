@@ -31,10 +31,18 @@ import threading
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
+from core.config.model_endpoints import ENV_MANAGED_KEY
+
 if TYPE_CHECKING:
     from core.utils.registry import Registry
 
 T = TypeVar("T")
+
+
+# Keys that live in ``extra`` for control/bookkeeping purposes and are NOT
+# constructor kwargs. Splatting one into a client would raise TypeError on an
+# unexpected keyword (the class of bug #712 fixed for ``batch_size``).
+_CONTROL_EXTRA_KEYS = frozenset({"implementation", ENV_MANAGED_KEY})
 
 
 class ModelEndpointConfig(Protocol):
@@ -86,7 +94,7 @@ def make_component_factory(
                 raise KeyError(f"Unknown model '{name}'. Available: {list(config_section)}")
             # `implementation` is a control key (which class to build), not a
             # constructor argument, so it is read out before splatting `extra`.
-            impl_kwargs = {k: v for k, v in model_cfg.extra.items() if k != "implementation"}
+            impl_kwargs = {k: v for k, v in model_cfg.extra.items() if k not in _CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", default_impl)
             # NOTE: batch_size is deliberately NOT passed here. Only the embedder
             # constructor consumes it; the LLM/VLM clients absorb unknown kwargs
