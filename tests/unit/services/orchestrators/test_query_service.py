@@ -89,14 +89,22 @@ class FakeWeb:
 
 
 class FakeWorkspace:
-    def __init__(self, scope=None):
+    def __init__(self, scope=None, existing=None):
         self._scope = scope
+        # None => every requested file_id is treated as indexed (default);
+        # a set/list => only those ids exist in the partition.
+        self._existing = existing
 
     async def get_workspace(self, wid):
         return None
 
     async def resolve_scope(self, workspace_id, allowed_partitions):
         return self._scope
+
+    async def get_existing_file_ids(self, partition, file_ids):
+        if self._existing is None:
+            return list(file_ids)
+        return [fid for fid in file_ids if fid in self._existing]
 
 
 def _config(mode="SimpleRag"):
@@ -406,7 +414,7 @@ async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
     retrieval = FakeRetrieval()
     web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
     svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
-    _payload, _docs, web = await svc._prepare_chat(
+    _payload, _docs, web, _attachments = await svc._prepare_chat(
         ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"websearch": True}}
     )
     assert len(retrieval.retrieve_multi_calls) == 1  # doc branch fused via the rrf_k-aware retrieve_multi
@@ -510,6 +518,146 @@ async def test_chat_without_workspace_unaffected():
     call = retrieval.retrieve_multi_calls[0]
     assert call["partitions"] == ["p1"]
     assert call["filter_params"] is None
+
+
+# --------------------------------------------------------------------------- #
+# attachment scoping (Cozy attachments: metadata.attachments = [{"id": ...}])
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_chat_with_valid_attachments_scopes_search_to_file_ids():
+    retrieval = FakeRetrieval()
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"id": "fa"}, {"id": "fb"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["partitions"] == ["p1"]  # attachments do NOT narrow the partition
+    assert call["filter_params"] == {"file_id": ["fa", "fb"]}
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_malformed_ignored():
+    # Items without a usable id (or not dicts) are skipped; an all-malformed
+    # attachments blob degrades to a normal unscoped chat, never raises.
+    retrieval = FakeRetrieval()
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"nope": "x"}, "raw-string", 123, {"id": ""}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["filter_params"] is None
+
+
+@pytest.mark.asyncio
+async def test_chat_empty_attachments_unaffected():
+    retrieval = FakeRetrieval()
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
+    await svc.chat(
+        partitions=["p1"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {"attachments": []}},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["filter_params"] is None
+
+
+@pytest.mark.asyncio
+async def test_chat_workspace_and_attachments_both_present_workspace_wins():
+    # workspace is checked first (elif) — when both are present the workspace
+    # scope wins and the attachments are ignored.
+    scope = WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["wsa", "wsb"])
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]), workspace=FakeWorkspace(scope)
+    )
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"workspace": "w1", "attachments": [{"id": "att"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["filter_params"] == {"file_id": ["wsa", "wsb"]}
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_zero_matches_logs_warning(monkeypatch):
+    warnings: list[str] = []
+    monkeypatch.setattr(qs.logger, "warning", lambda msg, *a, **kw: warnings.append(msg))
+    retrieval = FakeRetrieval(chunks=[])  # filter matches nothing
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"id": "fa"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    assert any("no chunks matched" in msg for msg in warnings)
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_drops_unindexed_and_reports_in_extra():
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval,
+        llm=FakeLLM(chat_responses=["answer [Sources: none]"]),
+        workspace=FakeWorkspace(existing={"fa"}),  # only fa is indexed; fb is not
+    )
+    chunk = await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"id": "fa"}, {"id": "fb"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    # Only the indexed id drives the filter...
+    assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
+    # ...and the same validated list is reported back to the client in extra.
+    assert json.loads(chunk["extra"])["attachments"] == ["fa"]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_reports_indexed_attachments_in_extra():
+    svc = _svc(workspace=FakeWorkspace(existing={"fa"}))  # only fa indexed
+    out = "".join(
+        [
+            line
+            async for line in svc.chat_stream(
+                partitions=["p1"],
+                payload={
+                    "messages": [{"role": "user", "content": "q"}],
+                    "metadata": {"attachments": [{"id": "fa"}, {"id": "fb"}]},
+                },
+                prepare_sources=lambda d, w: [],
+                model_name="m",
+            )
+        ]
+    )
+    assert "attachments" in out and "fa" in out
+    assert "fb" not in out  # unindexed id dropped, never reported
 
 
 @pytest.mark.asyncio

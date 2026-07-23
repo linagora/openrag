@@ -83,6 +83,7 @@ async def stream_with_source_filtering(
     sources: list,
     model_name: str,
     buffer_size: int | None = None,
+    extra_fields: dict | None = None,
 ):
     """Process an LLM SSE stream, stripping line-terminal source tags.
 
@@ -221,6 +222,8 @@ async def stream_with_source_filtering(
 
     filtered = filter_sources_by_citations(sources, citations)
     extra_payload = {"sources": filtered}
+    if extra_fields:
+        extra_payload.update(extra_fields)
     if not saw_done:
         extra_payload["truncated"] = True
         logger.warning(
