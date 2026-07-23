@@ -456,6 +456,11 @@ async def test_seed_defaults_syncs_env_named_row_when_sync_on_boot_enabled(monke
 
     monkeypatch.delenv("LLM_ENDPOINT", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
+    # _sync_env_managed reads these directly, so an inherited value from the dev
+    # or CI environment would make the "batch_size is preserved" assertion below
+    # pass or fail for reasons that have nothing to do with the code under test.
+    monkeypatch.delenv("EMBEDDER_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("EMBEDDER_TIMEOUT", raising=False)
 
     existing = _make_row(
         name="embed-model",
