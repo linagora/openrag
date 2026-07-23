@@ -31,10 +31,20 @@ import threading
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
+from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY
+
 if TYPE_CHECKING:
     from core.utils.registry import Registry
 
 T = TypeVar("T")
+
+# Keys that live in an endpoint's ``extra`` but must never reach the client
+# constructor. ``implementation`` selects the class to build; the two LLM token
+# budgets are OpenRAG-side sizing settings consumed by the chat token preflight.
+# Any key left here is absorbed into the client's ``self._defaults`` and splatted
+# into every outbound request body (see VLLMClient.__init__), which is how
+# batch_size once leaked a bogus field onto every call (#712).
+_NON_CONSTRUCTOR_EXTRA_KEYS = frozenset({"implementation", LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY})
 
 
 class ModelEndpointConfig(Protocol):
@@ -84,9 +94,15 @@ def make_component_factory(
             model_cfg = config_section.get(name)
             if model_cfg is None:
                 raise KeyError(f"Unknown model '{name}'. Available: {list(config_section)}")
-            # `implementation` is a control key (which class to build), not a
-            # constructor argument, so it is read out before splatting `extra`.
-            impl_kwargs = {k: v for k, v in model_cfg.extra.items() if k != "implementation"}
+            # `implementation` selects which class to build, and the LLM token
+            # budgets are OpenRAG-side sizing settings read by the chat token
+            # preflight (ModelsConfig.llm_context_size / llm_output_tokens) —
+            # none of them are constructor arguments, so they are stripped
+            # before splatting `extra`. Leaving the budgets in would land them
+            # in the client's ``self._defaults`` and therefore in *every*
+            # outbound request body as non-OpenAI fields (a strict provider
+            # 400s) — the same leak fixed for batch_size in #712.
+            impl_kwargs = {k: v for k, v in model_cfg.extra.items() if k not in _NON_CONSTRUCTOR_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", default_impl)
             # NOTE: batch_size is deliberately NOT passed here. Only the embedder
             # constructor consumes it; the LLM/VLM clients absorb unknown kwargs
