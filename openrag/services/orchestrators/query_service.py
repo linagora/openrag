@@ -42,6 +42,7 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
 from core.prompts import (
     SOURCE_SEPARATOR,
@@ -239,15 +240,15 @@ class QueryService:
         factory is wired, the request has no partition or uses the ``"all"``
         sentinel, no named partition sets a preset, or the named partitions
         name more than one preset (a conflict with no single owning partition).
+
+        The partition-consensus decision itself is delegated to the shared
+        ``resolve_partition_chat_llm`` — the same rule the chat-completions
+        token preflight uses — so the LLM that answers and the budget it was
+        checked against can't fall out of sync.
         """
-        if self._llm_factory is None or not partition or "all" in partition:
+        if self._llm_factory is None:
             return None
-        names = {
-            cfg.chat_llm
-            for name in partition
-            if (cfg := self._config.partitions.get(name)) is not None and cfg.chat_llm
-        }
-        return next(iter(names)) if len(names) == 1 else None
+        return resolve_partition_chat_llm(partition, self._config.partitions)
 
     def _default_llm(self, partition: list[str] | None) -> LLM:
         """The catalog default LLM endpoint (``is_default=True``), resolved fresh.

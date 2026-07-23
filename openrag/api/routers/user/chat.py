@@ -23,7 +23,6 @@ from api.dependencies.auth import (
     current_user_or_admin_partitions_list,
 )
 from api.dependencies.llm import (
-    check_llm_model_availability,
     get_openai_models,
     get_partition_name,
     truncate,
@@ -31,6 +30,7 @@ from api.dependencies.llm import (
 from api.routers.user.source_links import build_document_source_link
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
 from core.config import load_config
+from core.models.preset import resolve_partition_chat_llm
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens, sanitize_text
@@ -44,25 +44,124 @@ router = APIRouter()
 if TYPE_CHECKING:
     from core.config.root import Settings
 
-# Cached max model token limit. Populated by ``prime_max_model_tokens``
-# which the application lifespan invokes during startup; ``get_max_model_tokens``
-# falls back to ``config.llm_context.max_llm_context_size`` until then.
-_max_model_tokens: int | None = None
+# Auto-probed max model token limits, keyed by LLM endpoint registry name.
+# Populated by ``prime_max_model_tokens`` which the application lifespan
+# invokes during startup, once the model-endpoint registry is loaded. It is
+# only the *middle* tier of ``get_max_model_tokens``: an admin-configured
+# context size on the resolved LLM endpoint takes precedence, and
+# ``config.llm_context`` is the final fallback.
+_max_model_tokens_by_name: dict[str, int] = {}
+
+# Serializes ``prime_max_model_tokens`` refreshes. Model-endpoint writes each
+# schedule a refresh (best-effort, off the request path), so several can be
+# in flight at once; without this lock a slower, older probe could finish last
+# and overwrite a newer refresh's result, leaving the cache stale. Holding the
+# lock across the snapshot + probe means whichever refresh runs last observes
+# the latest registry state and publishes the newest result.
+_max_model_tokens_lock = asyncio.Lock()
+
+# Bumped by every ``invalidate_max_model_tokens`` call. A refresh captures the
+# generation before probing and discards its results if the value moved while
+# it was in flight — the registry it probed is no longer the current one, and a
+# newer refresh is already queued behind the lock. Without this an in-flight
+# probe that started before an endpoint write would republish pre-write values
+# on top of the invalidation, re-opening the stale window it just closed.
+_max_model_tokens_generation = 0
 
 
 def _runtime_config(settings: "Settings | None" = None) -> "Settings":
     return settings if settings is not None else load_config()
 
 
+def invalidate_max_model_tokens() -> None:
+    """Drop every auto-probed limit, synchronously.
+
+    Model-endpoint writes refresh ``config.models.llm`` *synchronously* (inside
+    ``ModelEndpointService.load_all``) but re-probe ``/v1/models`` in a
+    background task, so between the two the registry describes the new endpoint
+    while this cache still holds the previous one's ``max_model_len``. A chat
+    request landing in that window would be answered by the new endpoint and
+    preflighted against the old endpoint's limit — precisely the
+    preflight/answer divergence the partition-scoped resolution exists to
+    prevent, and the window is as wide as the probes are slow (an unreachable
+    endpoint costs its full timeout).
+
+    Clearing here collapses that window: until the refresh lands,
+    ``get_max_model_tokens`` falls through to the endpoint's admin-configured
+    size (still read live from the registry, so unaffected) or the global
+    ``llm_context`` fallback — an intentionally conservative "not probed yet",
+    the same state the cache is in before startup priming, rather than a
+    confidently wrong value belonging to a different endpoint.
+
+    Deliberately not locked: rebinding the dict is atomic, so a concurrent
+    reader sees either the old mapping or the empty one, never a half-built
+    dict — and taking ``_max_model_tokens_lock`` here would make an admin write
+    wait behind an in-flight probe, which is the stall the background task was
+    introduced to avoid.
+    """
+    global _max_model_tokens_by_name, _max_model_tokens_generation
+    _max_model_tokens_generation += 1
+    _max_model_tokens_by_name = {}
+
+
 async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
-    """Populate the cached max model token limit.
+    """Populate the per-endpoint auto-probed max model token cache.
 
     Called once from the FastAPI lifespan in ``api/main.py`` (replaces the
-    deprecated ``@router.on_event("startup")`` hook). Safe to call again —
-    it just refreshes the cache.
+    deprecated ``@router.on_event("startup")`` hook), after the model-endpoint
+    registry is loaded. Probes every registered LLM endpoint's ``/v1/models``
+    for ``max_model_len`` — not just the default — so a partition's
+    ``chat_llm`` preset gets its own auto-probed budget instead of silently
+    falling back to the global ``llm_context`` default. Endpoints that alias
+    the same underlying config (the ``"default"`` name always points at
+    whichever endpoint is ``is_default``) are probed once and the result
+    cached under every alias; endpoints with no ``model_name`` can't be
+    matched in the ``/v1/models`` listing and are skipped. One endpoint's
+    probe failure doesn't affect the others. Safe to call again — it just
+    refreshes the cache.
+
+    Serialized under ``_max_model_tokens_lock`` so overlapping refreshes
+    (several endpoint writes in quick succession) can't publish a stale cache:
+    each refresh reads the live registry and probes while holding the lock, so
+    the last refresh to run always observes the latest state and wins. A
+    refresh whose generation was invalidated mid-probe discards its results
+    rather than publishing them over the invalidation.
     """
-    global _max_model_tokens
-    _max_model_tokens = await _fetch_max_model_tokens(_runtime_config(settings))
+    global _max_model_tokens_by_name
+    async with _max_model_tokens_lock:
+        generation = _max_model_tokens_generation
+        config = _runtime_config(settings)
+        probed_by_identity: dict[int, int | None] = {}
+        results: dict[str, int] = {}
+        # Snapshot the endpoint dict up front: a concurrent model-endpoint reload
+        # replaces its contents in place (ModelEndpointService.load_all does
+        # dict.clear() + dict.update()), so iterating the live dict across the
+        # `await` below could raise "dictionary changed size during iteration".
+        for name, endpoint in list(config.models.llm.items()):
+            if not endpoint.model_name:
+                continue
+            identity = id(endpoint)
+            if identity not in probed_by_identity:
+                probed_by_identity[identity] = await _fetch_max_model_tokens(
+                    base_url=endpoint.endpoint,
+                    model_id=endpoint.model_name,
+                    api_key=endpoint.extra.get("api_key", ""),
+                    # Honour the endpoint's own configured timeout rather than
+                    # the probe helper's generic default: probes run serially
+                    # under the lock, so an unreachable endpoint holds up every
+                    # later refresh for its full timeout.
+                    timeout=endpoint.timeout,
+                )
+            value = probed_by_identity[identity]
+            if value is not None:
+                results[name] = value
+        if generation != _max_model_tokens_generation:
+            # An endpoint write invalidated the cache while these probes were in
+            # flight, so `results` describes a registry that is already gone.
+            # Drop them; the write scheduled its own refresh behind this lock.
+            logger.debug("Discarding auto-probed LLM token results invalidated mid-refresh")
+            return
+        _max_model_tokens_by_name = results
 
 
 def _make_sse_error(message: str, code: str) -> str:
@@ -149,43 +248,102 @@ def is_direct_llm_model(
     return request.model is None or request.model == "" or request.model == config.llm.model
 
 
-async def _fetch_max_model_tokens(config: "Settings") -> int:
-    """Fetch the max model token limit from vLLM's OpenAI server.
+async def _fetch_max_model_tokens(
+    *, base_url: str, model_id: str, api_key: str, timeout: float | None = None
+) -> int | None:
+    """Fetch one endpoint's max model token limit from its ``/v1/models`` listing.
 
-    Falls back to ``config.llm_context.max_llm_context_size`` if unavailable.
+    Returns ``None`` — not a fallback value — when the endpoint is
+    unreachable, doesn't serve ``model_id``, or doesn't report
+    ``max_model_len``: this probes a single endpoint among potentially many,
+    so the fallback decision belongs to the caller (``get_max_model_tokens``),
+    not this helper.
+
+    *timeout* defaults to ``get_openai_models``' own when omitted; callers that
+    know the endpoint's configured timeout should pass it, so a slow endpoint
+    is bounded by the value the admin set for it.
     """
-    default_limit = int(config.llm_context.max_llm_context_size)
-    model_id = config.llm.model
     try:
-        openai_models = await get_openai_models(base_url=config.llm.base_url, api_key=config.llm.api_key)
+        timeout_kwargs = {} if timeout is None else {"timeout": timeout}
+        openai_models = await get_openai_models(base_url=base_url, api_key=api_key, **timeout_kwargs)
         model = next((m for m in openai_models if m.id == model_id), None)
         if model is None:
-            logger.warning(f"No model found for {model_id}. Using default context size.")
-            return default_limit
+            logger.warning(f"No model found for {model_id} at {base_url}.")
+            return None
+        # `max_model_len` is a vendor extension vLLM adds to the OpenAI /v1/models
+        # entry. The SDK model allows extras, and pydantic dumps those at the top
+        # level — `model_extra` is an instance property, never a key in the dump —
+        # so a top-level lookup is the only one that can ever match.
         model_data = model.model_dump() if hasattr(model, "model_dump") else model.dict()
-        max_len = model_data.get("max_model_len") or model_data.get("model_extra", {}).get("max_model_len")
+        max_len = model_data.get("max_model_len")
         if max_len is None:
-            logger.warning(f"max_model_len not found for {model_id}. Using default context size.")
-            return default_limit
-        logger.info("Fetched max_model_len from vLLM at startup", model=model_id, max_model_len=int(max_len))
+            logger.warning(f"max_model_len not found for {model_id} at {base_url}.")
+            return None
+        logger.info(
+            "Fetched max_model_len from vLLM at startup", model=model_id, base_url=base_url, max_model_len=int(max_len)
+        )
         return int(max_len)
     except Exception as e:
-        logger.warning("Failed to query /v1/models for max_model_len; using default", error=str(e))
-        return default_limit
+        logger.warning("Failed to query /v1/models for max_model_len", base_url=base_url, model=model_id, error=str(e))
+        return None
 
 
-def get_max_model_tokens() -> int:
-    """Return the cached max model token limit (populated at startup)."""
-    if _max_model_tokens is not None:
-        return _max_model_tokens
-    config = _runtime_config()
-    return int(config.llm_context.max_llm_context_size)
+def _resolve_llm_endpoint_name(config: "Settings", partitions: list[str] | None) -> str:
+    """Effective LLM endpoint registry name for *partitions*.
+
+    Delegates to ``resolve_partition_chat_llm`` — the same consensus rule
+    ``QueryService._resolve_llm`` uses to pick the LLM that actually answers
+    the request — so the token preflight is checked against the budget of the
+    model that will really be called, not always the global default. Falls
+    back to the ``"default"`` alias (see ``ModelEndpointService``) when no
+    single partition-scoped preset applies.
+
+    A partition's ``chat_llm`` can also go **stale** — the endpoint it names
+    may have been deleted or renamed after assignment (nothing cascades the
+    preset). ``QueryService._resolve_llm`` handles that by catching the
+    factory ``KeyError`` and answering with the catalog default; the preflight
+    must converge on the same endpoint, otherwise it would check the request
+    against the global budget while a differently-sized default endpoint
+    answers it. So an unresolvable name falls back to ``"default"`` here too.
+    """
+    name = resolve_partition_chat_llm(partitions, config.partitions)
+    if name is None or name not in config.models.llm:
+        return "default"
+    return name
+
+
+def _effective_max_output_tokens(config: "Settings", partitions: list[str] | None = None) -> int:
+    """Default output-token budget: the resolved LLM endpoint's admin-configured
+    value when set, else the global ``llm_context`` fallback."""
+    configured = config.models.llm_output_tokens(_resolve_llm_endpoint_name(config, partitions))
+    return configured or int(config.llm_context.max_output_tokens)
+
+
+def get_max_model_tokens(partitions: list[str] | None = None, settings: "Settings | None" = None) -> int:
+    """Effective max context size for the token preflight.
+
+    Precedence: the resolved LLM endpoint's admin-configured
+    ``max_llm_context_size`` (editable in the admin UI; resolved from the
+    partition's ``chat_llm`` preset when the request is scoped to partitions
+    that agree on one, else the "default" endpoint) > the value auto-probed
+    from that same endpoint's ``/v1/models`` at startup (see
+    ``prime_max_model_tokens`` — cached per endpoint name, not just the
+    default) > the global ``llm_context`` fallback.
+    """
+    config = _runtime_config(settings)
+    name = _resolve_llm_endpoint_name(config, partitions)
+    configured = config.models.llm_context_size(name)
+    if configured is not None:
+        return configured
+    probed = _max_model_tokens_by_name.get(name)
+    return probed or int(config.llm_context.max_llm_context_size)
 
 
 def validate_tokens_limit(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
     max_tokens_allowed: int,
     settings: "Settings | None" = None,
+    partitions: list[str] | None = None,
 ) -> tuple[bool, str]:
     """Validate if the request respects the maximum token limit."""
     try:
@@ -194,7 +352,7 @@ def validate_tokens_limit(
 
         if isinstance(request, OpenAIChatCompletionRequest):
             message_tokens = sum(_length_function(m.content or "") + 4 for m in request.messages)
-            default_output_tokens = int(config.llm_context.max_output_tokens)
+            default_output_tokens = _effective_max_output_tokens(config, partitions)
             requested_tokens = request.max_tokens or default_output_tokens
             total_tokens_needed = message_tokens + requested_tokens
             if total_tokens_needed > max_tokens_allowed:
@@ -208,7 +366,7 @@ def validate_tokens_limit(
 
         elif isinstance(request, OpenAICompletionRequest):
             prompt_tokens = _length_function(request.prompt)
-            default_output_tokens = int(config.llm_context.max_output_tokens)
+            default_output_tokens = _effective_max_output_tokens(config, partitions)
             requested_tokens = request.max_tokens or default_output_tokens
             total_tokens_needed = prompt_tokens + requested_tokens
             if total_tokens_needed > max_tokens_allowed:
@@ -226,16 +384,40 @@ def validate_tokens_limit(
         return True, ""
 
 
+def _apply_default_max_tokens(
+    request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
+    config: "Settings",
+    partitions: list[str] | None,
+) -> None:
+    """Fill an omitted ``max_tokens`` from the endpoint that will actually answer.
+
+    The request schema leaves ``max_tokens`` unset because it is parsed before
+    the partition is resolved; defaulting it there could only ever read the
+    *default* endpoint's budget, so a partition whose ``chat_llm`` preset
+    allows more output would still be capped at the default endpoint's value
+    (and that value was then sent downstream, since the payload forwards
+    ``max_tokens`` verbatim). Resolving it here — once the partition, and
+    therefore the answering endpoint, is known — keeps the output budget
+    consistent with the endpoint that serves the request.
+
+    An explicit client-supplied value is always honoured.
+    """
+    if request.max_tokens is None:
+        request.max_tokens = _effective_max_output_tokens(config, partitions)
+
+
 def check_tokens_limit(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
     log,
     settings: "Settings | None" = None,
+    partitions: list[str] | None = None,
 ):
     """Validate token limit and raise HTTPException(413) if exceeded."""
     is_valid, error_message = validate_tokens_limit(
         request,
-        max_tokens_allowed=get_max_model_tokens(),
+        max_tokens_allowed=get_max_model_tokens(partitions=partitions, settings=settings),
         settings=settings,
+        partitions=partitions,
     )
     if not is_valid:
         log.info("Request exceeds token limit", detail=error_message)
@@ -275,7 +457,6 @@ async def openai_chat_completion(
     request: OpenAIChatCompletionRequest = Body(...),
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
-    _: None = Depends(check_llm_model_availability),
     service=Depends(get_query_service),
     partition_service=Depends(get_partition_service),
     config=Depends(get_config),
@@ -292,10 +473,6 @@ async def openai_chat_completion(
 
     log.debug("Received chat completion request with messages: {}", truncate(str(request.messages)))
 
-    # Bound the caller's input size in every mode. RAG-injected context is added
-    # server-side and separately capped (max_context_tokens), but the user's own
-    # messages must be limited regardless of direct-LLM vs RAG.
-    check_tokens_limit(request, log, config)
     if is_direct_llm_model(request, config):
         partitions = None
     else:
@@ -306,6 +483,17 @@ async def openai_chat_completion(
             is_admin=user["is_admin"],
         )
         log.debug(f"Using partitions: {partitions}")
+
+    # Bound the caller's input size in every mode, against the resolved
+    # partition's chat_llm preset budget when one applies (else the default
+    # LLM endpoint). RAG-injected context is added server-side and separately
+    # capped (max_context_tokens), but the user's own messages must be limited
+    # regardless of direct-LLM vs RAG.
+    # Resolve the output budget now that the answering endpoint is known, so the
+    # preflight below and the payload sent downstream both use the resolved
+    # endpoint's budget rather than the default endpoint's.
+    _apply_default_max_tokens(request, config, partitions)
+    check_tokens_limit(request, log, config, partitions=partitions)
 
     def prep(docs, web):
         return __prepare_sources(request2, docs, web)
@@ -374,7 +562,6 @@ async def openai_completion(
     request: OpenAICompletionRequest,
     user=Depends(current_user),
     user_partitions=Depends(current_user_or_admin_partitions_list),
-    _: None = Depends(check_llm_model_availability),
     service=Depends(get_query_service),
     partition_service=Depends(get_partition_service),
     config=Depends(get_config),
@@ -393,8 +580,6 @@ async def openai_completion(
             detail="Streaming is not supported for this endpoint",
         )
 
-    # Bound the caller's input size in every mode (RAG context is capped separately).
-    check_tokens_limit(request, log, config)
     if is_direct_llm_model(request, config):
         partitions = None
     else:
@@ -404,6 +589,15 @@ async def openai_completion(
             partition_service=partition_service,
             is_admin=user["is_admin"],
         )
+
+    # Bound the caller's input size in every mode (RAG context is capped
+    # separately), against the resolved partition's chat_llm preset budget
+    # when one applies.
+    # Resolve the output budget now that the answering endpoint is known, so the
+    # preflight below and the payload sent downstream both use the resolved
+    # endpoint's budget rather than the default endpoint's.
+    _apply_default_max_tokens(request, config, partitions)
+    check_tokens_limit(request, log, config, partitions=partitions)
 
     resp = await service.complete(
         partitions=partitions,

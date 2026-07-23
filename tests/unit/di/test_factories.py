@@ -104,6 +104,38 @@ class TestMakeComponentFactory:
         assert type(instance).__name__ == "_Other"
         assert "implementation" not in instance.kwargs
 
+    def test_llm_token_budgets_are_not_forwarded_as_kwargs(self):
+        """The admin-configured LLM token budgets must NOT reach the constructor.
+
+        ``max_llm_context_size`` / ``max_output_tokens`` live in the endpoint's
+        ``extra`` but are OpenRAG-side sizing settings read by the chat token
+        preflight — they are not OpenAI request fields. Forwarding them lands
+        them in the client's ``self._defaults``, which is splatted into *every*
+        outbound request body, so a strict provider would start 400-ing as soon
+        as an admin saved a budget. Same leak class as batch_size (#712).
+        """
+        factory, _ = make_component_factory(
+            _registry(),
+            {
+                "default": _FakeEndpoint(
+                    extra={
+                        "api_key": "secret",
+                        "max_llm_context_size": 8192,
+                        "max_output_tokens": 1024,
+                    }
+                )
+            },
+            default_impl="vllm",
+            client_caches=[],
+        )
+
+        kwargs = factory("default").kwargs
+
+        assert "max_llm_context_size" not in kwargs
+        assert "max_output_tokens" not in kwargs
+        # Genuinely impl-specific extras still get through.
+        assert kwargs["api_key"] == "secret"
+
     def test_config_fields_and_extra_forwarded_as_kwargs(self):
         """Endpoint fields plus impl-specific ``extra`` reach the constructor."""
         factory, _ = make_component_factory(
