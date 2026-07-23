@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 
 import httpx
 from core.embeddings import Embedder, embedder_registry
@@ -30,7 +30,6 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
 )
 from core.utils.logging import get_logger
-from core.utils.redaction import redact_secrets
 from core.vlm import VLM, vlm_registry
 from tqdm.asyncio import tqdm
 
@@ -75,6 +74,33 @@ def _find_suspect_escapes(texts: list[str], *, limit: int = 5) -> list[dict]:
             if len(findings) >= limit:
                 break
     return findings
+
+
+def _log_safe_error_detail(exc: BaseException) -> dict:
+    """Summarize a failed embedding call without copying document text to logs.
+
+    ``EmbeddingAPIError.extra`` carries the provider's raw response and, for a
+    400, snippets of the indexed document. That detail belongs in the API error,
+    whose audience is the uploader who already owns the document — but not in
+    container / centralized logs, which operators read across tenants. Keep only
+    what makes the failure diagnosable there: the model, the status, and which
+    chunk indices look malformed.
+    """
+    extra = getattr(exc, "extra", None)
+    if not isinstance(extra, Mapping):
+        return {}
+    detail: dict = {
+        "model_name": extra.get("model_name"),
+        "base_url": extra.get("base_url"),
+        "status_code": getattr(exc, "status_code", None),
+    }
+    suspects = extra.get("suspect_texts") or []
+    if suspects:
+        # Positions, not snippets — enough to go and inspect the offending
+        # chunks without mirroring their text into the log pipeline.
+        detail["suspect_count"] = len(suspects)
+        detail["suspect_indices"] = [s.get("index") for s in suspects]
+    return detail
 
 
 # ---------------------------------------------------------------------------
@@ -308,17 +334,16 @@ class VLLMEmbedder(Embedder):
             )
         except BaseException as exc:
             done = sum(1 for task in tasks if task.done() and not task.cancelled() and task.exception() is None)
-            # `.extra` (set on OpenRAGError subclasses like EmbeddingAPIError) carries
-            # the embedder's actual response body — repr(exc) alone only has the
-            # generic "Embedder API error (400)" message, not why it was rejected.
-            # Redacted on the way out: this binds whatever `.extra` the raised
-            # exception happens to carry, which today is secret-free but is not
-            # a property this call site controls.
+            # `.extra` carries the provider's raw response and, on a 400, snippets
+            # of the indexed document. Summarize instead of binding it wholesale:
+            # a failed upload of sensitive text must not copy that content into
+            # container / centralized logs. The full detail still reaches the
+            # uploader on the API error.
             logger.bind(
                 batches_done=done,
                 n_batches=len(batches),
                 error=repr(exc),
-                error_detail=redact_secrets(getattr(exc, "extra", None)),
+                error_detail=_log_safe_error_detail(exc),
             ).warning("Embedding failed after {d}/{b} batches", d=done, b=len(batches))
             for task in tasks:
                 if not task.done():

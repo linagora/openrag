@@ -15,7 +15,13 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
 )
 from services.inference._circuit_breaker import _breakers
-from services.inference.vllm_client import VLLMClient, VLLMEmbedder, VLLMVision, _find_suspect_escapes
+from services.inference.vllm_client import (
+    VLLMClient,
+    VLLMEmbedder,
+    VLLMVision,
+    _find_suspect_escapes,
+    _log_safe_error_detail,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -784,3 +790,43 @@ class TestEmbedderErrorPayloadIsBounded:
         assert len(findings) == 1
         # 15 chars either side of the 2-char `\u` match.
         assert len(findings[0]["snippet"]) == 32
+
+
+class TestEmbedderFailureLogOmitsDocumentText:
+    """The log pipeline has a different audience from the API error: operators
+    read container / centralized logs across tenants, while the API error goes
+    back to the uploader who already owns the document. Document text may reach
+    the second but never the first.
+    """
+
+    def test_log_detail_carries_positions_not_snippets(self):
+        exc = EmbeddingAPIError(
+            "Embedder API error (400)",
+            status_code=400,
+            model_name="embed-model",
+            base_url="http://embed.test/v1",
+            error='{"message": "invalid character in \\u escape"}',
+            suspect_texts=[
+                {"index": 3, "snippet": "contrat de M. Dupont \\uXY salaire"},
+                {"index": 7, "snippet": "numero de securite sociale \\uZZ"},
+            ],
+        )
+
+        detail = _log_safe_error_detail(exc)
+
+        assert detail["suspect_count"] == 2
+        assert detail["suspect_indices"] == [3, 7]
+        assert detail["status_code"] == 400
+        assert detail["model_name"] == "embed-model"
+        # The point of the whole helper: no document text, and not the
+        # provider body either (it can echo the rejected input back).
+        flat = repr(detail)
+        assert "Dupont" not in flat
+        assert "securite sociale" not in flat
+        assert "snippet" not in flat
+        assert "invalid character" not in flat
+
+    def test_log_detail_is_empty_for_an_exception_without_extra(self):
+        """`except BaseException` also catches plain exceptions — no `.extra`,
+        nothing to summarize, and no crash in the failure path."""
+        assert _log_safe_error_detail(RuntimeError("boom")) == {}
