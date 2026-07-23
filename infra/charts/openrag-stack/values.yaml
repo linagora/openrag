@@ -653,6 +653,13 @@ env:
     RERANKER_BASE_URL: '{{ if .Values.reranker.externalUrl }}{{ .Values.reranker.externalUrl }}{{ else }}http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.servicePort }}{{ end }}'
     RERANKER_PROVIDER: "infinity"
 
+    # Model Endpoint Registry: when true, re-syncs each type's env-seeded
+    # endpoint (URL/model/api_key/...) from the vars above on every boot, so a
+    # Helm values change + rollout takes effect after the first deploy. Keep
+    # false to let endpoints edited from the admin UI stay as the source of
+    # truth. See docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
+    MODEL_ENDPOINT_SYNC_ON_BOOT: "false"
+
     # Prompts: templates ship inside the package (openrag/prompts/templates);
     # set PROMPTS_DIR only to override with a custom template directory.
 
