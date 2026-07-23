@@ -185,10 +185,12 @@ Model endpoints (embedder, LLM, VLM, reranker) are stored in a **database-backed
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | When `true`, the auto-seeded endpoint of each type (the one whose name matches the current env-derived model slug) is re-synced from the environment on **every** boot — its `endpoint`, `model_name`, `batch_size` and `timeout` are overwritten from the `*_BASE_URL` / `*_MODEL` / `EMBEDDER_BATCH_SIZE` / `EMBEDDER_TIMEOUT` values. This lets operators manage that endpoint purely via env vars + a pod rollout (e.g. a Helm values change). Its `extra` field is **never** touched, so a hand-set API key survives, and any endpoint created by hand under a different name is left untouched. Keep it `false` (the default) to preserve the "database wins after first boot" behavior. |
+| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | When `true`, the auto-seeded endpoint of each type (the one whose name matches the current env-derived model slug) is re-synced from the environment on **every** boot — its `endpoint`, `model_name`, `batch_size` and `timeout` are overwritten from the `*_BASE_URL` / `*_MODEL` / `EMBEDDER_BATCH_SIZE` / `EMBEDDER_TIMEOUT` values. This lets operators re-point or re-tune that endpoint via env vars + a pod rollout (e.g. a Helm values change). Its `extra` field is **never** touched, so a hand-set API key survives, and any endpoint created by hand under a different name is left untouched. Keep it `false` (the default) to preserve the "database wins after first boot" behavior. |
 
-:::note
-`MODEL_ENDPOINT_SYNC_ON_BOOT` only re-syncs the single endpoint whose name still matches the env-derived slug. Endpoints you renamed or created manually in the admin UI are never modified or deleted by boot-time sync.
+:::caution[Sync matches on the model slug]
+The endpoint is matched by name, which is derived from the model (`org/my-model` → `my-model`). So sync covers changes to the **URL, batch size and timeout**, but **changing the model itself does not take effect**: the new slug matches no existing row, and the boot-time seed then declines to create a competing default — so the old endpoint silently stays in use. Switching models still requires editing (or deleting) the endpoint in the admin UI.
+
+Endpoints you renamed or created manually are likewise never modified or deleted by boot-time sync.
 :::
 
 ### Database Configuration

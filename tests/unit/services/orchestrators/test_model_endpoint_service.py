@@ -507,6 +507,40 @@ async def test_seed_defaults_sync_on_boot_never_touches_differently_named_endpoi
     assert repo._store[("custom", "embedder")].batch_size == 999
 
 
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_does_not_follow_a_changed_model_slug(monkeypatch):
+    """Known limitation, pinned so it cannot change silently.
+
+    Rows are matched by the env-derived slug, so changing the *model* (rather
+    than the URL/batch size/timeout) yields a slug that matches no row; the
+    seed then declines to create a competing default, and the previously
+    seeded endpoint silently stays in use. Switching models therefore still
+    needs an admin edit. Following the rename would require persisting an
+    "env-managed" marker on the row — see the caution in env_vars.md.
+    """
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="old-model", model_type="embedder", model_name="old-model", batch_size=512, is_default=True
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "new-model", "batch_size": 64},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    # Neither synced onto the new slug nor created as a second endpoint.
+    assert ("new-model", "embedder") not in repo._store
+    assert repo._store[("old-model", "embedder")].model_name == "old-model"
+    assert not [c for c in repo.calls if c[0] in ("update", "create") and c[1][1] == "embedder"]
+
+
 # ------------------------------------------------------------------
 # load_all
 # ------------------------------------------------------------------
