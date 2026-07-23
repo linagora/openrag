@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from core.models.workspace import WorkspaceScope
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -93,6 +94,35 @@ class WorkspaceService:
 
     async def get_file_workspaces(self, file_id: str, partition: str) -> list[str]:
         return await self._workspace_repo.get_file_workspaces(file_id, partition)
+
+    # ------------------------------------------------------------------
+    # Search-scope resolution (single source of truth for workspace-scoped
+    # search / chat — issue #706)
+    # ------------------------------------------------------------------
+
+    async def resolve_scope(self, workspace_id: str, allowed_partitions: list[str]) -> WorkspaceScope | None:
+        """Resolve ``workspace_id`` to its owning partition and file allowlist.
+
+        Returns ``None`` when the workspace does not exist *or* exists in a
+        partition outside ``allowed_partitions`` — the two cases are
+        intentionally indistinguishable to the caller so a workspace living
+        in another tenant's partition is never revealed to exist. ``"all"``
+        in ``allowed_partitions`` (the ``openrag-all`` / multi-partition
+        sentinel) accepts a workspace from any partition, matching how
+        partition access is resolved elsewhere.
+
+        The returned ``file_ids`` may be empty — a workspace with no files
+        yet is valid and must scope the search to zero results, not fall
+        back to the full partition.
+        """
+        ws = await self._workspace_repo.get_workspace_dict(workspace_id)
+        if not ws:
+            return None
+        partition = ws["partition_name"]
+        if "all" not in allowed_partitions and partition not in allowed_partitions:
+            return None
+        file_ids = await self._workspace_repo.list_workspace_files(workspace_id)
+        return WorkspaceScope(workspace_id=workspace_id, partition=partition, file_ids=file_ids)
 
     # ------------------------------------------------------------------
     # Cross-cutting: delete workspace + clean up orphaned files

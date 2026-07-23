@@ -9,6 +9,7 @@ import PartitionListPage from "./list";
 const permissions = vi.hoisted(() => ({
   canManagePartitions: false,
   canConfigurePartition: vi.fn((role?: string) => role === "owner"),
+  canWrite: vi.fn((role?: string) => role === "owner" || role === "editor"),
 }));
 
 vi.mock("@/lib/permissions", () => ({
@@ -77,6 +78,7 @@ describe("PartitionListPage bulk actions", () => {
   beforeEach(() => {
     permissions.canManagePartitions = false;
     permissions.canConfigurePartition.mockImplementation((role?: string) => role === "owner");
+    permissions.canWrite.mockImplementation((role?: string) => role === "owner" || role === "editor");
     deletePartitionMock.mockClear();
     deletePartitionMock.mockResolvedValue();
     listPartitionsMock.mockResolvedValue({
@@ -85,6 +87,60 @@ describe("PartitionListPage bulk actions", () => {
         makePartition("viewer-b", "viewer"),
       ],
     });
+  });
+
+  it("keeps the create dialog actions reachable with a scrollable form body", async () => {
+    renderPartitions();
+
+    await userEvent.click(screen.getByRole("button", { name: /create personal partition/i }));
+
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.className).toContain("max-h-[calc(100vh-2rem)]");
+    expect(dialog.className).toContain("overflow-hidden");
+
+    const form = dialog.querySelector("form");
+    expect(form?.className).toContain("min-h-0");
+    expect(form?.firstElementChild?.className).toContain("overflow-y-auto");
+    expect(screen.getByRole("button", { name: "Cancel" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Create" })).not.toBeNull();
+  });
+
+  it("labels row icon actions", async () => {
+    permissions.canManagePartitions = true;
+    renderPartitions();
+
+    const upload = await screen.findByRole("link", { name: /upload documents to owned-a/i });
+    const edit = await screen.findByRole("link", { name: /edit owned-a/i });
+    const deleteAction = screen.getByRole("button", { name: /delete owned-a/i });
+
+    expect(upload.getAttribute("href")).toBe("/documents?partition=owned-a&upload=1");
+    expect(upload.getAttribute("data-size")).toBe("icon-xs");
+    expect(edit.getAttribute("data-size")).toBe("icon-xs");
+    expect(deleteAction.getAttribute("data-size")).toBe("icon-xs");
+  });
+
+  it("keeps long partition names constrained while exposing the full name", async () => {
+    const longName = "partition-with-a-very-long-benchmark-name-that-should-not-stretch-the-table";
+    listPartitionsMock.mockResolvedValue({
+      partitions: [makePartition(longName)],
+    });
+
+    renderPartitions();
+
+    const partitionLink = await screen.findByRole("link", { name: longName });
+    expect(partitionLink.getAttribute("title")).toBe(longName);
+    expect(partitionLink.className).toContain("truncate");
+  });
+
+  it("shows the upload action for editor-only partitions", async () => {
+    listPartitionsMock.mockResolvedValue({
+      partitions: [makePartition("editable-docs", "editor")],
+    });
+
+    renderPartitions();
+
+    expect(await screen.findByRole("link", { name: /upload documents to editable-docs/i })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: /delete editable-docs/i })).toBeNull();
   });
 
   it("selects all deletable partitions and deletes only those partitions", async () => {

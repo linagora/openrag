@@ -85,7 +85,7 @@ The main application entry point is `openrag/api/main.py` which creates a FastAP
 
 **Ray Actors** (distributed components):
 - `Indexer` (`openrag/services/workers/indexer_pool.py`) - Handles document ingestion, chunking, and insertion into vector DB
-- `TaskStateManager` (`openrag/services/workers/task_state.py`) - Tracks async task states: QUEUED → SERIALIZING → CHUNKING → INSERTING → COMPLETED (or FAILED or CANCELLED)
+- `TaskStateManager` (`openrag/services/workers/task_state.py`) - Tracks async task states: QUEUED → SERIALIZING → COMPLETED (or FAILED or CANCELLED)
 - `Vectordb` / `MilvusDB` (`openrag/services/storage/milvus_store.py`) - Vector database operations with hybrid search (dense + BM25 sparse)
 - `DocSerializer` (`openrag/services/workers/parsers/doc_serializer.py`) - Serializes files to Document objects using appropriate loaders
 - `MarkerPool` / `MarkerWorker` (`openrag/services/workers/parsers/marker_workers.py`) - Pool of workers for PDF processing with Marker

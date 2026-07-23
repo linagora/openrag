@@ -4,6 +4,19 @@ include:
   - ../../extern/reranker/${RERANKER_PROVIDER:-infinity}.yaml
   - ${TRANSCRIBER_COMPOSE:-../../extern/dummy.yaml}
 
+# Env shared by both API variants. Kept as its own anchor because a service's
+# own `environment:` key REPLACES the one merged in via `<<:` (YAML merge is
+# shallow) — so each variant must merge this explicitly rather than rely on the
+# template. Merging requires mapping form, not list form.
+x-openrag-env: &openrag_env
+  # Marker lazily downloads its rendering font on first PDF conversion, and its
+  # default target is inside the installed package (site-packages/static/fonts/).
+  # The app drops to a non-root user (see entrypoint.sh) which cannot write the
+  # root-owned venv volume -> every conversion dies with PermissionError. Point
+  # the font at a bind-mounted dir the app user owns, so the ~15MB download
+  # happens once and persists across restarts.
+  FONT_PATH: ${FONT_PATH:-/app/data/fonts/GoNotoCurrent-Regular.ttf}
+
 x-openrag: &openrag_template
   image: linagoraai/openrag:v2.0.0
   # Start as root so entrypoint.sh can grant GID-0 write on the bind-mounted
@@ -61,6 +74,8 @@ x-openrag: &openrag_template
         - openrag
   env_file:
     - ${SHARED_ENV:-.env}
+  environment:
+    <<: *openrag_env
   shm_size: 10.24gb
 
 x-vllm-env: &vllm_env
@@ -124,9 +139,12 @@ services:
   openrag:
     <<: *openrag_template
     runtime: nvidia
+    # Mapping form (not a list) so the shared env can be merged in; a bare
+    # `environment:` here would drop *openrag_env entirely.
     environment:
-     - NVIDIA_VISIBLE_DEVICES=all
-     - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      <<: *openrag_env
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
     deploy:
       resources:
         reservations:

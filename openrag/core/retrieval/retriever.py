@@ -22,14 +22,14 @@ from abc import ABC, abstractmethod
 from itertools import chain as ichain
 from typing import Any
 
-from core.llm.llm import LLM
+from core.llm.llm import LLM, chat_content
 from core.models.chunk import Chunk
 from core.prompts.query_rewriter import (
     build_hyde_prompt,
     build_multi_query_prompt,
     split_multi_query_response,
 )
-from core.retrieval.searcher import RetrievalSearcher
+from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
 from core.utils.registry import Registry
 
 logger = logging.getLogger(__name__)
@@ -50,8 +50,13 @@ class Retriever(ABC):
         ...
 
     @abstractmethod
-    async def expand_search_results(self, results: list[Chunk]) -> list[Chunk]:
-        """Optionally enrich a result set with related/ancestor chunks."""
+    async def expand_search_results(self, results: list[Chunk], filter_params: dict | None = None) -> list[Chunk]:
+        """Optionally enrich a result set with related/ancestor chunks.
+
+        ``filter_params`` carries the same restriction (e.g. a workspace's
+        ``file_id`` allowlist) the initial search was scoped by — expansion
+        must never surface a chunk that restriction would have excluded.
+        """
         ...
 
 
@@ -97,7 +102,7 @@ class BaseRetriever(Retriever):
             with_surrounding_chunks=self.with_surrounding_chunks,
         )
 
-    async def expand_search_results(self, results: list[Chunk]) -> list[Chunk]:
+    async def expand_search_results(self, results: list[Chunk], filter_params: dict | None = None) -> list[Chunk]:
         return await _expand_with_related_chunks(
             searcher=self.searcher,
             results=results,
@@ -105,6 +110,7 @@ class BaseRetriever(Retriever):
             include_ancestors=self.include_ancestors,
             related_limit=self.related_limit,
             max_ancestor_depth=self.max_ancestor_depth,
+            filter_params=filter_params,
         )
 
 
@@ -135,7 +141,7 @@ class MultiQueryRetriever(BaseRetriever):
         response = await self.llm.chat([{"role": "user", "content": prompt}])
         # Cap to k_queries — a non-compliant LLM response can otherwise fan
         # out far more searches than configured.
-        queries = split_multi_query_response(response)[: self.k_queries]
+        queries = split_multi_query_response(chat_content(response))[: self.k_queries]
         return queries or [query]
 
     async def retrieve(
@@ -181,7 +187,8 @@ class HyDeRetriever(BaseRetriever):
 
     async def get_hyde(self, query: str) -> str:
         prompt = build_hyde_prompt(self.hyde_template, query)
-        return await self.llm.chat([{"role": "user", "content": prompt}])
+        response = await self.llm.chat([{"role": "user", "content": prompt}])
+        return chat_content(response)
 
     async def retrieve(
         self,
@@ -213,16 +220,23 @@ async def _expand_with_related_chunks(
     include_ancestors: bool,
     related_limit: int = 10,
     max_ancestor_depth: int | None = None,
+    filter_params: dict | None = None,
 ) -> list[Chunk]:
     """Append related and/or ancestor chunks to a result set, deduplicated by id.
 
     Failures on individual related/ancestor lookups are logged and treated
     as empty results, matching legacy behavior so retrieval remains
     resilient to per-document errors.
+
+    ``filter_params`` carries the same restriction the initial search was
+    scoped by (e.g. a workspace's ``file_id`` allowlist) — passed through so
+    related/ancestor expansion cannot surface a chunk outside that scope
+    (#706).
     """
     if not results or (not include_related and not include_ancestors):
         return results
 
+    allowed_file_ids = file_id_restriction(filter_params)
     seen_ids = {c.id for c in results if c.id}
     expanded: list[Chunk] = list(results)
 
@@ -239,7 +253,9 @@ async def _expand_with_related_chunks(
 
     async def _safe_related(part: str, rel_id: str) -> list[Chunk]:
         try:
-            return await searcher.get_related_chunks(partition=part, relationship_id=rel_id, limit=related_limit)
+            return await searcher.get_related_chunks(
+                partition=part, relationship_id=rel_id, limit=related_limit, allowed_file_ids=allowed_file_ids
+            )
         except Exception:
             logger.warning("get_related_chunks failed (partition=%s, relationship_id=%s)", part, rel_id, exc_info=True)
             return []
@@ -251,6 +267,7 @@ async def _expand_with_related_chunks(
                 file_id=file_id,
                 limit=related_limit,
                 max_ancestor_depth=max_ancestor_depth,
+                allowed_file_ids=allowed_file_ids,
             )
         except Exception:
             logger.warning("get_ancestor_chunks failed (partition=%s, file_id=%s)", part, file_id, exc_info=True)

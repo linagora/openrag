@@ -52,6 +52,62 @@ def test_update_model_endpoint_requires_at_least_one_field():
         UpdateModelEndpointRequest()
 
 
+@pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
+@pytest.mark.parametrize("bad", [0, -1, 2.5, "4096", True, False])
+def test_create_model_endpoint_rejects_bad_llm_token_budget(key, bad):
+    """LLM token budgets in extra must be positive ints (bool/float/str rejected).
+
+    Both bools are covered on purpose: ``bool`` is an ``int`` subclass, so
+    ``True`` would otherwise slip through the positive-int check as ``1``, and
+    ``False`` must be rejected as a *type* error rather than incidentally by
+    the ``<= 0`` bound — the explicit ``isinstance(value, bool)`` guard is what
+    both cases pin.
+    """
+    with pytest.raises(ValidationError, match=key):
+        CreateModelEndpointRequest(name="default", model_type="llm", endpoint="http://host", extra={key: bad})
+
+
+@pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
+@pytest.mark.parametrize("bad", [0, -1, 2.5, "4096", True, False])
+@pytest.mark.parametrize("model_type", ["embedder", "reranker", "vlm"])
+def test_create_non_llm_endpoint_keeps_budget_key_names_unreserved(key, bad, model_type):
+    """The budget rules apply to LLM endpoints only.
+
+    These two names are meaningful just for LLMs, so enforcing their shape on
+    every endpoint type would reserve them globally and reject an embedder /
+    reranker / VLM carrying same-named provider metadata — which the admin UI
+    now preserves verbatim, so it would be resubmitted on the next save.
+    """
+    request = CreateModelEndpointRequest(
+        name="default", model_type=model_type, endpoint="http://host", extra={key: bad}
+    )
+    assert request.extra[key] == bad
+
+
+@pytest.mark.parametrize("key", ["max_llm_context_size", "max_output_tokens"])
+@pytest.mark.parametrize("bad", [0, -1, 2.5, "4096", True, False])
+def test_update_model_endpoint_defers_budget_validation_to_the_route(key, bad):
+    """``UpdateModelEndpointRequest`` deliberately does not validate budgets.
+
+    It carries no ``model_type`` — that is a path parameter — so it cannot tell
+    an LLM update from a non-LLM one, and validating here would reserve the key
+    names for every type. The route applies the check once it knows the type;
+    ``test_phase14_admin_routers`` pins both sides of that.
+    """
+    assert UpdateModelEndpointRequest(extra={key: bad}).extra == {key: bad}
+
+
+def test_create_model_endpoint_accepts_valid_llm_token_budgets():
+    request = CreateModelEndpointRequest(
+        name="default",
+        model_type="llm",
+        endpoint="http://host",
+        extra={"max_llm_context_size": 32768, "max_output_tokens": 2048, "implementation": "vllm"},
+    )
+    assert request.extra["max_llm_context_size"] == 32768
+    assert request.extra["max_output_tokens"] == 2048
+
+
 def test_create_preset_accepts_indexation_and_retrieval_configs():
     """Preset creation accepts both supported preset families."""
     indexation = CreatePresetRequest(name="fast", preset_type="indexation", config={"chunk_size": 512})
@@ -87,7 +143,7 @@ def test_create_partition_defaults_to_default_presets():
     assert request.embedder == "default"
     assert request.indexation_preset == "default"
     assert request.retrieval_preset == "default"
-    assert request.chat_history_depth == 0
+    assert request.chat_history_depth == 4
 
 
 def test_create_partition_rejects_empty_names():
@@ -106,6 +162,18 @@ def test_update_partition_rejects_negative_chat_history_depth():
     """Chat history depth cannot be negative."""
     with pytest.raises(ValidationError):
         UpdatePartitionRequest(chat_history_depth=-1)
+
+
+def test_update_partition_rejects_zero_chat_history_depth():
+    """Chat history depth cannot be zero — a value of 1 turn is the floor."""
+    with pytest.raises(ValidationError):
+        UpdatePartitionRequest(chat_history_depth=0)
+
+
+def test_create_partition_rejects_zero_chat_history_depth():
+    """Chat history depth cannot be zero at creation time either."""
+    with pytest.raises(ValidationError):
+        CreatePartitionRequest(name="legal", chat_history_depth=0)
 
 
 @pytest.mark.parametrize(

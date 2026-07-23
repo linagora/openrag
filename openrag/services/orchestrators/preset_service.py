@@ -34,12 +34,14 @@ _VALID_PRESET_TYPES = frozenset({"indexation", "retrieval"})
 _RESERVED_PRESET_NAME = "default"
 
 _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
-    # ``enable_contextualization`` and ``parsing_strategy`` are intentionally
-    # omitted from the ``default`` indexation preset below. The former is injected
-    # at seed time from the global ``chunker.contextual_retrieval``
-    # (``CONTEXTUAL_RETRIEVAL``) toggle in _finalize_seed; the latter stays unset
-    # so the default preset inherits the global ``file_loaders.pdf`` (``PDFLOADER``)
-    # backend at parse time. Named presets (legal/finance) keep their explicit choice.
+    # ``enable_contextualization``, ``enable_image_captioning``, and
+    # ``parsing_strategy`` are intentionally omitted from the ``default``
+    # indexation preset below. The first two are injected at seed time from
+    # the global ``chunker.contextual_retrieval`` (``CONTEXTUAL_RETRIEVAL``)
+    # and ``loader.image_captioning`` (``IMAGE_CAPTIONING``) toggles in
+    # _finalize_seed; the last stays unset so the default preset inherits the
+    # global ``file_loaders.pdf`` (``PDFLOADER``) backend at parse time.
+    # Named presets (legal/finance) keep their explicit choice.
     "indexation": {
         "default": {
             "chunking": {"name": "recursive_splitter", "chunk_size": 512, "chunk_overlap_rate": 0.2},
@@ -49,9 +51,8 @@ _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
             # value here would override the operator's global choice and lazily
             # spin up that backend's Ray pool — e.g. forcing marker on a
             # pymupdf-configured deployment. Named presets below opt in explicitly.
-            "enable_image_captioning": True,
             "enable_entity_extraction": True,
-            "enable_topic_tagging": True,
+            "enable_topic_tagging": False,
         },
         "legal": {
             "chunking": {"name": "recursive_splitter", "chunk_size": 1024, "chunk_overlap_rate": 0.25},
@@ -121,27 +122,59 @@ class PresetService:
             if existing:
                 continue
             for name, config in presets.items():
-                await self._repo.upsert(name, preset_type, self._finalize_seed(name, preset_type, config))
+                finalized = self._finalize_seed(name, preset_type, config)
+                # Validate the finalized seed the same way the CRUD path does, so
+                # a structurally-invalid global override folded in here is rejected
+                # at seeding rather than persisted and exploded later. (An
+                # out-of-range CHUNK_OVERLAP_RATE is already rejected earlier at
+                # config load via ChunkerConfig's bounds; a bad CHUNKER *name* is
+                # an unvalidated string here but fails fast at chunker build — this
+                # call is defense-in-depth over both.)
+                self._validate_config(preset_type, finalized)
+                await self._repo.upsert(name, preset_type, finalized)
                 logger.info(f"Seeded default {preset_type} preset '{name}'.")
 
     def _finalize_seed(self, name: str, preset_type: str, config: dict[str, Any]) -> dict[str, Any]:
         """Overlay env-derived global toggles onto a static default seed.
 
-        Two top-level kill-switches are folded into the seeded presets so a
+        Top-level kill-switches are folded into the seeded presets so a
         fresh deployment honours the env flags without admin action:
 
         * every retrieval preset inherits ``reranker.enabled`` (``enable_reranker``)
           so a deployment without a reranker never builds one against a
           missing/unreachable endpoint;
         * the ``default`` indexation preset inherits ``chunker.contextual_retrieval``
-          (``CONTEXTUAL_RETRIEVAL``) as ``enable_contextualization`` so the global
-          toggle still drives contextualization. Named presets keep the explicit
-          value carried in the seed.
+          (``CONTEXTUAL_RETRIEVAL``) as ``enable_contextualization`` and
+          ``loader.image_captioning`` (``IMAGE_CAPTIONING``) as
+          ``enable_image_captioning``, so the global toggles still drive
+          these enrichments on a fresh deployment. Named presets keep the
+          explicit value carried in the seed.
+
+        This is a one-time seed-time default, not a live runtime gate: once a
+        preset row exists, it is the sole source of truth (an admin can flip
+        ``enable_image_captioning`` per partition regardless of the current
+        ``IMAGE_CAPTIONING`` env value) — see ``IndexingPipeline._should_caption``.
         """
         if preset_type == "retrieval":
             return {**config, "enable_reranker": self._config.reranker.enabled}
         if preset_type == "indexation" and name == "default":
-            return {**config, "enable_contextualization": self._config.chunker.contextual_retrieval}
+            chunker = self._config.chunker
+            return {
+                **config,
+                # The default preset follows the deployment's global chunking
+                # knobs (CHUNKER / CHUNK_SIZE / CHUNK_OVERLAP_RATE). Without this
+                # the seeded 512/0.2 was hardcoded and the operator's global
+                # values were silently ignored for every document (#709). Named
+                # presets keep their explicit, deliberate chunk sizes.
+                "chunking": {
+                    **config.get("chunking", {}),
+                    "name": chunker.name,
+                    "chunk_size": chunker.chunk_size,
+                    "chunk_overlap_rate": chunker.chunk_overlap_rate,
+                },
+                "enable_contextualization": self._config.chunker.contextual_retrieval,
+                "enable_image_captioning": self._config.loader.image_captioning,
+            }
         return config
 
     async def load_all(self) -> None:
@@ -276,14 +309,38 @@ class PresetService:
 
     def _validate_config(self, preset_type: str, config: dict[str, Any]) -> None:
         """Instantiate the Pydantic pipeline model to validate the config dict."""
+        indexation_model: IndexationPipelineConfig | None = None
         try:
             match preset_type:
                 case "indexation":
-                    IndexationPipelineConfig(**config)
+                    indexation_model = IndexationPipelineConfig(**config)
                 case "retrieval":
                     RetrievalPipelineConfig(**config)
         except Exception as exc:
             raise ValidationError(f"Invalid {preset_type} preset config: {exc}") from exc
+
+        # Structural validation accepts any chunker *name* (ChunkerConfig.name is a
+        # free string), but only registered strategies can actually be built. Reject
+        # an unknown name here — at seed time (startup) and on the admin CRUD path —
+        # so a typo fails fast instead of letting every document explode at chunker
+        # build during indexing. #709 wired the global CHUNKER into the default
+        # preset, so a bad env value now reaches this seed instead of being ignored.
+        if indexation_model is not None:
+            self._ensure_chunker_registered(indexation_model.chunking.name)
+
+    @staticmethod
+    def _ensure_chunker_registered(name: str) -> None:
+        """Raise ``ValidationError`` if *name* is not a registered chunking strategy."""
+        # Importing the factory triggers chunker registration (import side-effect),
+        # so the registry is populated before the membership check. Mirrors the
+        # trigger used by ``create_chunker`` itself.
+        import core.chunking.factory  # noqa: F401
+        from core.chunking.registry import chunking_registry
+
+        if name not in chunking_registry:
+            raise ValidationError(
+                f"Unknown chunker '{name}'. Available chunkers: {chunking_registry.list_registered()}"
+            )
 
 
 __all__ = ["PresetService"]

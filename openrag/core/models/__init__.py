@@ -1,6 +1,6 @@
 """Domain models — pure Pydantic, no infrastructure imports."""
 
-from .catalog import DocumentRecord, DocumentStatus, IndexationJob, JobStatus
+from .catalog import TERMINAL_TASK_STATES, DocumentRecord, DocumentStatus, IndexationJob, JobStatus
 from .chunk import Chunk, ChunkType
 from .contextualization import ContextualizedQuery
 from .conversation import Conversation, Message
@@ -13,6 +13,7 @@ from .user import ApiKey, OIDCSession, PartitionRole, TokenPayload, User, UserPa
 from .workspace import Workspace
 
 __all__ = [
+    "TERMINAL_TASK_STATES",
     "ApiKey",
     "Chunk",
     "ChunkType",

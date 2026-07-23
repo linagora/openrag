@@ -15,6 +15,7 @@ from core.models.document import Document, DocumentType
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
+from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.caption import caption_stage
 from services.workers.stages.chunk import chunk_stage
 from services.workers.stages.contextualize import contextualize_stage
@@ -24,6 +25,9 @@ from services.workers.stages.store import store_stage
 from services.workers.stages.topic_tag import topic_tag_stage
 
 logger = get_logger()
+
+REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY = "_replace_old_chunk_collection"
+REPLACE_OLD_CHUNK_IDS_ROW_KEY = "_replace_old_chunk_ids"
 
 
 @dataclass(slots=True, frozen=True)
@@ -52,10 +56,7 @@ class IndexingPipeline:
     embedder: Embedder
     vector_store: VectorStore
     vlm: VLM | None = None
-    # Global gate for captioning images *embedded* in other documents
-    # (mirrors ``config.loader.image_captioning``). Standalone image files are
-    # always captioned when a VLM is available, regardless of this flag.
-    image_captioning: bool = True
+    caption_prompt: str | None = None
     contextualizer: ChunkContextualizer | None = None
     topic_tagger: TopicTagger | None = None
     timeouts: PipelineTimeouts = PipelineTimeouts()
@@ -66,6 +67,7 @@ class IndexingPipeline:
     vlm_factory: Callable[[str], VLM] | None = None
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None
+    defer_replace_cleanup: bool = False
 
     async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store.
@@ -116,6 +118,19 @@ class IndexingPipeline:
                 embedder=str(row.get("embedder_name") or "default"),
             ).debug("model endpoints resolved for indexing (None = stage disabled)")
             if vlm is not None:
+                # Inject the configured captioning template (image_describer)
+                # unless the row already carries an explicit override, so the VLM
+                # gets the real prompt instead of its bare built-in fallback.
+                #
+                # FORWARD-COMPAT: this ``row["caption_prompt"]`` seam is the
+                # intended hook for the planned DB-backed prompt management — a
+                # future ``PromptService.resolve(partition, "image_captioning")``
+                # would populate it per-partition here (partition override →
+                # global default → disk seed), superseding the process-wide
+                # ``self.caption_prompt`` default. ``setdefault`` already lets a
+                # per-row value win, so that migration is a one-line change.
+                if self.caption_prompt is not None:
+                    row.setdefault("caption_prompt", self.caption_prompt)
                 await _timed(
                     "caption",
                     caption_stage(
@@ -156,6 +171,30 @@ class IndexingPipeline:
                     per_chunk_timeout=self.timeouts.embed_per_chunk,
                 ),
             )
+            # Re-index (``replace=True``) is insert-before-delete: snapshot the
+            # file's existing chunk ids *before* the store stage inserts the new
+            # set, then delete exactly that old set after a successful insert.
+            # Worker pipelines defer that delete until after the catalog row is
+            # successfully written; direct pipeline callers clean it up here.
+            # The Milvus collection is ``auto_id``, so a plain insert can never
+            # overwrite the previous chunks — without this cleanup every re-index
+            # duplicates the whole file (#657). Insert-before-delete also means a
+            # re-index that fails before/at store leaves the old chunks intact
+            # (never an empty window).
+            #
+            # KNOWN SEAMS (Milvus has no transactions — both are strictly better
+            # than the pre-fix behaviour, which duplicated on every re-index):
+            #   * Not atomic under concurrency. Two overlapping re-indexes of the
+            #     *same* file snapshot the same old ids and both keep their new
+            #     set, leaving duplicates. Serializing replace per (partition,
+            #     file_id) belongs with the durable job/lifecycle work (#658/#660).
+            #   * A crash after store but before cleanup can orphan the old
+            #     chunks with no reconciler yet — the reconciliation job is
+            #     tracked in #658/#660.
+            row.pop(REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY, None)
+            row.pop(REPLACE_OLD_CHUNK_IDS_ROW_KEY, None)
+            replace = bool(row.get("replace"))
+            old_chunk_ids = await self._existing_chunk_ids(row) if replace else []
             await _timed(
                 "store",
                 store_stage(
@@ -165,6 +204,23 @@ class IndexingPipeline:
                     per_chunk_timeout=self.timeouts.store_per_chunk,
                 ),
             )
+            # BUG (#657 follow-up): ``store_stage`` completes successfully even
+            # when it stores zero chunks — an empty/whitespace-only file, a
+            # parser that extracts no text, etc. all legitimately chunk down to
+            # ``[]`` without raising (see chunk_stage / BaseChunker.chunk). If the
+            # delete below fired on ``old_chunk_ids`` alone, a re-index that
+            # produces no new chunks would delete the *entire* previous chunk set
+            # and leave the file with zero chunks in Milvus — worse than the
+            # pre-fix duplication bug, and a violation of the "no empty window"
+            # guarantee this whole insert-before-delete design is built on.
+            # Gating on ``stored_count`` ensures cleanup only runs once we know
+            # the new set actually replaced the old one.
+            if replace and old_chunk_ids and row.get("stored_count"):
+                if self.defer_replace_cleanup:
+                    row[REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY] = "default"
+                    row[REPLACE_OLD_CHUNK_IDS_ROW_KEY] = old_chunk_ids
+                else:
+                    await self._delete_replaced_chunks(row, old_chunk_ids)
             return row
         finally:
             logger.bind(
@@ -174,6 +230,46 @@ class IndexingPipeline:
                 **{f"ms_{name}": round(value) for name, value in timings.items()},
                 ms_total=round(sum(timings.values())),
             ).info("indexing stage timings (ms)")
+
+    async def _existing_chunk_ids(self, row: MutableMapping[str, Any]) -> list[str]:
+        """Snapshot the chunk ids currently stored for this file (re-index only).
+
+        Returns an empty list — skipping stale-chunk cleanup — when the target
+        can't be resolved or the lookup fails. A snapshot failure must never lose
+        the newly-indexed chunks: leftover duplicates are recoverable, deleting
+        blindly is not.
+        """
+        file_id, partition = _replace_target(row)
+        if not file_id or not partition:
+            return []
+
+        async def _lookup() -> list[str]:
+            if not await self.vector_store.collection_exists("default"):
+                return []
+            return await self.vector_store.query_ids_by_filter("default", {"partition": partition, "file_id": file_id})
+
+        try:
+            # Bound the lookup by the store budget so a stalled Milvus can't hang
+            # replace indexing indefinitely (a timeout just skips cleanup).
+            return await run_with_optional_timeout(_lookup, self.timeouts.store)
+        except Exception as exc:  # noqa: BLE001 - cleanup lookup must not fail the index
+            logger.bind(task_id=row.get("task_id"), file_id=file_id, partition=partition).warning(
+                f"re-index: could not snapshot existing chunks; skipping stale-chunk cleanup: {exc}"
+            )
+            return []
+
+    async def _delete_replaced_chunks(self, row: MutableMapping[str, Any], ids: list[str]) -> None:
+        """Delete the pre-re-index chunk set after the new chunks are stored."""
+        try:
+            deleted = await run_with_optional_timeout(
+                lambda: self.vector_store.delete(ids, "default"), self.timeouts.store
+            )
+            logger.bind(task_id=row.get("task_id")).debug(f"re-index: removed {deleted} stale chunk(s) after replace")
+        except Exception as exc:  # noqa: BLE001 - new chunks are stored; cleanup is best-effort
+            logger.bind(task_id=row.get("task_id")).error(
+                f"re-index: stored new chunks but failed to delete {len(ids)} stale chunk(s); "
+                f"duplicates remain until reconciliation: {exc}"
+            )
 
     def _effective_indexation_config(self, row: MutableMapping[str, Any]) -> IndexationPipelineConfig | None:
         raw_config = row.get("indexation_config", self.indexation_config)
@@ -230,14 +326,17 @@ class IndexingPipeline:
 
         A standalone image file's caption is its only text content, so it is
         always captioned when a VLM is available (legacy ``ImageLoader``
-        parity). Images embedded in other documents are gated by the global
-        ``image_captioning`` flag and the per-partition setting.
+        parity). Images embedded in other documents are gated solely by the
+        per-partition ``enable_image_captioning`` setting — the deployment's
+        ``IMAGE_CAPTIONING`` env flag only seeds that setting's default on the
+        ``default`` preset at first boot (see ``PresetService._finalize_seed``);
+        it is not re-checked here, so a preset can enable/disable captioning
+        independent of the current env value.
         """
         document = row.get("document")
         if isinstance(document, Document) and document.content_type is DocumentType.IMAGE:
             return True
-        per_partition = config.enable_image_captioning if config is not None else True
-        return self.image_captioning and per_partition
+        return config.enable_image_captioning if config is not None else True
 
     def _select_contextualizer(
         self, config: IndexationPipelineConfig | None
@@ -285,7 +384,7 @@ def build_indexing_pipeline(
     embedder: Embedder,
     vector_store: VectorStore,
     vlm: VLM | None = None,
-    image_captioning: bool = True,
+    caption_prompt: str | None = None,
     contextualizer: ChunkContextualizer | None = None,
     topic_tagger: TopicTagger | None = None,
     timeouts: PipelineTimeouts | None = None,
@@ -296,6 +395,7 @@ def build_indexing_pipeline(
     vlm_factory: Callable[[str], VLM] | None = None,
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None,
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None,
+    defer_replace_cleanup: bool = False,
 ) -> IndexingPipeline:
     """Build the default sequential indexing pipeline."""
 
@@ -305,7 +405,7 @@ def build_indexing_pipeline(
         embedder=embedder,
         vector_store=vector_store,
         vlm=vlm,
-        image_captioning=image_captioning,
+        caption_prompt=caption_prompt,
         contextualizer=contextualizer,
         topic_tagger=topic_tagger,
         timeouts=timeouts or PipelineTimeouts(),
@@ -316,7 +416,21 @@ def build_indexing_pipeline(
         vlm_factory=vlm_factory,
         contextualizer_factory=contextualizer_factory,
         topic_tagger_factory=topic_tagger_factory,
+        defer_replace_cleanup=defer_replace_cleanup,
     )
+
+
+def _replace_target(row: MutableMapping[str, Any]) -> tuple[str | None, str | None]:
+    """Resolve ``(file_id, partition)`` for a re-index row.
+
+    ``file_id`` is the document's identity (``Document.id`` == ``Chunk.file_id``
+    in Milvus); ``partition`` scopes the delete so only this file's chunks in
+    this partition are ever touched.
+    """
+    document = row.get("document")
+    file_id = getattr(document, "id", None)
+    partition = row.get("partition") or getattr(document, "partition", None)
+    return file_id, partition
 
 
 __all__ = ["IndexingPipeline", "PipelineTimeouts", "build_indexing_pipeline"]

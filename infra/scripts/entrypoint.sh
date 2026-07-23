@@ -16,7 +16,12 @@
 # membership plus the image's group-writable paths already cover it.
 APP_UID="${APP_UID:-10001}"
 if [ "$(id -u)" = "0" ]; then
-  for d in /app/data /app/logs /app/model_weights; do
+  # /app/openrag/.chainlit/translations can be a bind mount (compose maps the
+  # host i8n/ folder there for custom translations). Like the dirs below, a
+  # host-owned mount keeps its host ownership, so Chainlit — which writes any
+  # bundled language file missing from the mount on startup — hits
+  # PermissionError as the non-root app user. Grant GID-0 write here too.
+  for d in /app/data /app/logs /app/model_weights /app/openrag/.chainlit/translations; do
     mkdir -p "$d" 2>/dev/null || true
     chgrp -R 0 "$d" 2>/dev/null || true
     chmod -R g+rwX "$d" 2>/dev/null || true
@@ -50,5 +55,13 @@ else
   if [[ "${UVICORN_RELOAD}" == "true" ]]; then
     RELOAD_ARGS+=("--reload")
   fi
-  uv run --no-dev "${ENV_ARGS[@]}" uvicorn api.main:app --host 0.0.0.0 --port "${APP_iPORT:-8080}" "${RELOAD_ARGS[@]}" --workers 1
+  # uvicorn only honours X-Forwarded-* from peers listed in --forwarded-allow-ips
+  # (default: 127.0.0.1), so a reverse proxy outside loopback — the admin-ui
+  # container, a k8s ingress — is ignored: request.client.host stays the proxy's
+  # address (collapsing every user into one rate-limit bucket) and
+  # X-Forwarded-Proto is dropped. Forward the same UVICORN_FORWARDED_ALLOW_IPS
+  # that api.main's __main__ block reads, so one documented variable covers both
+  # entrypoints — the bare `uvicorn` CLI otherwise only reads FORWARDED_ALLOW_IPS.
+  uv run --no-dev "${ENV_ARGS[@]}" uvicorn api.main:app --host 0.0.0.0 --port "${APP_iPORT:-8080}" "${RELOAD_ARGS[@]}" --workers 1 \
+    --proxy-headers --forwarded-allow-ips "${UVICORN_FORWARDED_ALLOW_IPS:-127.0.0.1}"
 fi

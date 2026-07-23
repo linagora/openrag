@@ -28,6 +28,23 @@ from abc import ABC, abstractmethod
 from core.models.chunk import Chunk
 
 
+def file_id_restriction(filter_params: dict | None) -> list[str] | None:
+    """Extract a ``file_id`` allowlist from a ``filter_params`` dict, if any.
+
+    Normalises both shapes callers use: a list (workspace scoping —
+    ``{"file_id": [...]}``) and a scalar (single-file search —
+    ``{"file_id": "abc123"}``). Returns ``None`` when no ``file_id``
+    restriction is present, which callers must treat as "unrestricted" —
+    an empty list means "restricted to nothing" and is a different thing.
+    """
+    if not filter_params or "file_id" not in filter_params:
+        return None
+    value = filter_params["file_id"]
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+
+
 class RetrievalSearcher(ABC):
     """Operations a retriever needs from the chunk store."""
 
@@ -65,8 +82,14 @@ class RetrievalSearcher(ABC):
         partition: str,
         relationship_id: str,
         limit: int,
+        allowed_file_ids: list[str] | None = None,
     ) -> list[Chunk]:
-        """Fetch other chunks belonging to the same relationship group."""
+        """Fetch other chunks belonging to the same relationship group.
+
+        ``allowed_file_ids``, when not ``None``, restricts results to that
+        file-id set (workspace scoping) — expansion must never surface a
+        related file outside the caller's authorized scope.
+        """
         ...
 
     @abstractmethod
@@ -76,6 +99,12 @@ class RetrievalSearcher(ABC):
         file_id: str,
         limit: int,
         max_ancestor_depth: int | None = None,
+        allowed_file_ids: list[str] | None = None,
     ) -> list[Chunk]:
-        """Walk parent links up the document tree from a file."""
+        """Walk parent links up the document tree from a file.
+
+        ``allowed_file_ids``, when not ``None``, restricts results to that
+        file-id set (workspace scoping) — expansion must never surface an
+        ancestor file outside the caller's authorized scope.
+        """
         ...

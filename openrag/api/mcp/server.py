@@ -322,7 +322,7 @@ async def get_chunk_by_id(chunk_id: str) -> dict:
 @server.tool(
     description=(
         "Get the current status and details of an indexation task. "
-        "Task states: QUEUED → SERIALIZING → CHUNKING → INSERTING → COMPLETED (or FAILED). "
+        "Task states: QUEUED → SERIALIZING → COMPLETED (or FAILED). "
         "If the task failed, the error message is included in the response."
     )
 )

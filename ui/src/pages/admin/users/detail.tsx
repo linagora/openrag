@@ -517,9 +517,9 @@ function ApiTokenTab({ userId }: { userId: number }) {
     onError: (e) => toast.error((e as Error).message),
   });
 
-  const copyToken = async () => {
+  const copyToken = async (e: React.MouseEvent<HTMLButtonElement>) => {
     if (token) {
-      const ok = await copyToClipboard(token);
+      const ok = await copyToClipboard(token, e.currentTarget);
       toast[ok ? "success" : "error"](
         ok ? "Token copied to clipboard" : "Couldn't copy — copy it manually",
       );
@@ -543,7 +543,7 @@ function ApiTokenTab({ userId }: { userId: number }) {
             </p>
             <div className="flex gap-2">
               <Input value={token} readOnly className="font-mono text-xs" />
-              <Button size="icon" variant="outline" onClick={copyToken}>
+              <Button size="icon" variant="outline" onClick={copyToken} aria-label="Copy API token" title="Copy API token">
                 <Copy className="h-4 w-4" />
               </Button>
             </div>

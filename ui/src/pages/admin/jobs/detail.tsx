@@ -1,6 +1,7 @@
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Ban } from "lucide-react";
+import type { MouseEvent } from "react";
+import { ArrowLeft, Ban, Copy } from "lucide-react";
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/shared/status-badge";
@@ -20,8 +21,19 @@ import {
   isActiveState,
   isTerminalState,
 } from "@/lib/api/jobs";
+import { copyToClipboard } from "@/lib/utils";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
+
+function errorSummary(lines: string[]): string {
+  return [...lines].reverse().find((line) => line.trim() && !line.trim().startsWith("Traceback"))?.trim() ?? "";
+}
+
+function failedStage(details: unknown): string {
+  if (!details || typeof details !== "object") return "";
+  const record = details as Record<string, unknown>;
+  return str(record.failed_stage);
+}
 
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -79,6 +91,28 @@ export default function JobDetailPage() {
 
   const details = task.details;
   const filename = str(details?.metadata?.filename) || str(details?.file_id) || "—";
+  const traceback = errorQuery.data?.traceback ?? [];
+  const summary = errorSummary(traceback);
+  const stage = failedStage(details);
+  const diagnostics = [
+    `Task ID: ${task.task_id}`,
+    `State: ${task.task_state}`,
+    `File: ${filename}`,
+    `Partition: ${str(details?.partition) || "—"}`,
+    stage ? `Failed stage: ${stage}` : null,
+    summary ? `Reason: ${summary}` : null,
+    traceback.length ? `\nTraceback:\n${traceback.join("\n")}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const copyDiagnostics = async (event: MouseEvent<HTMLButtonElement>) => {
+    if (!diagnostics) return;
+    const ok = await copyToClipboard(diagnostics, event.currentTarget);
+    toast[ok ? "success" : "error"](
+      ok ? "Diagnostics copied to clipboard" : "Couldn't copy diagnostics",
+    );
+  };
 
   return (
     <div className="space-y-6">
@@ -173,16 +207,50 @@ export default function JobDetailPage() {
 
       {failed && (
         <Card className="border-destructive/40">
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between gap-4">
             <CardTitle className="text-destructive">Error</CardTitle>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={copyDiagnostics}
+              disabled={!diagnostics || errorQuery.isLoading}
+            >
+              <Copy className="h-4 w-4" />
+              Copy diagnostics
+            </Button>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
             {errorQuery.isLoading ? (
               <p className="text-sm text-muted-foreground">Loading error…</p>
+            ) : errorQuery.isError ? (
+              <p className="text-sm text-destructive">
+                Failed to load error details: {(errorQuery.error as Error).message}
+              </p>
             ) : errorQuery.data?.traceback?.length ? (
-              <pre className="overflow-x-auto rounded-md bg-muted p-4 text-xs leading-relaxed text-destructive whitespace-pre-wrap">
-                {errorQuery.data.traceback.join("\n")}
-              </pre>
+              <>
+                <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">
+                  <dl className="grid gap-2 sm:grid-cols-[8rem_1fr]">
+                    <dt className="text-muted-foreground">Reason</dt>
+                    <dd className="font-medium break-words">{summary || "Task failed"}</dd>
+                    {stage && (
+                      <>
+                        <dt className="text-muted-foreground">Failed stage</dt>
+                        <dd className="font-medium">{stage}</dd>
+                      </>
+                    )}
+                    <dt className="text-muted-foreground">Task ID</dt>
+                    <dd className="font-mono text-xs break-all">{task.task_id}</dd>
+                    <dt className="text-muted-foreground">File</dt>
+                    <dd className="break-words">{filename}</dd>
+                  </dl>
+                </div>
+                <details className="rounded-md border bg-muted/40 p-3" open>
+                  <summary className="cursor-pointer text-sm font-medium">Raw traceback</summary>
+                  <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-destructive">
+                    {traceback.join("\n")}
+                  </pre>
+                </details>
+              </>
             ) : (
               <p className="text-sm text-muted-foreground">No error details available.</p>
             )}

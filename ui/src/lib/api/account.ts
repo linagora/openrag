@@ -17,9 +17,21 @@ export interface MyInfo {
   external_user_id?: string | null;
 }
 
+export interface CurrentAuthInfo {
+  user_id: number | null;
+  email?: string | null;
+  auth_method: "token" | "oidc" | string;
+  session_expires_at?: string | null;
+}
+
 /** Current authenticated user (from the bearer token / session). */
 export function getMyInfo() {
   return request<MyInfo>("/users/info");
+}
+
+/** Current authentication method resolved by the backend middleware. */
+export function getCurrentAuthInfo() {
+  return request<CurrentAuthInfo>("/auth/me");
 }
 
 /**

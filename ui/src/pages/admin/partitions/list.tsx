@@ -1,7 +1,7 @@
 import { useMemo, useState, useCallback, useEffect } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Pencil, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle, XCircle, Loader2, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle, XCircle, Loader2, RefreshCw, ChevronLeft, ChevronRight, FilePlus, Info } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Dialog,
   DialogContent,
@@ -57,10 +58,12 @@ const PARTITIONS_REFETCH_INTERVAL_MS = 5000;
 
 function RowActions({
   partition,
+  showUpload,
   showEdit,
   showDelete,
 }: {
   partition: PartitionResponse;
+  showUpload: boolean;
   showEdit: boolean;
   showDelete: boolean;
 }) {
@@ -79,10 +82,25 @@ function RowActions({
 
   return (
     <div className="flex items-center gap-1">
+      {showUpload && (
+        <Button variant="ghost" size="icon-xs" asChild>
+          <Link
+            to={`/documents?partition=${encodeURIComponent(partition.name)}&upload=1`}
+            aria-label={`Upload documents to ${partition.name}`}
+            title={`Upload documents to ${partition.name}`}
+          >
+            <FilePlus className="h-3.5 w-3.5" />
+          </Link>
+        </Button>
+      )}
       {showEdit && (
-        <Button variant="ghost" size="sm" asChild>
-          <Link to={partitionDetailPath(partition.name)}>
-            <Pencil className="h-3 w-3" />
+        <Button variant="ghost" size="icon-xs" asChild>
+          <Link
+            to={partitionDetailPath(partition.name)}
+            aria-label={`Edit ${partition.name}`}
+            title={`Edit ${partition.name}`}
+          >
+            <Pencil className="h-3.5 w-3.5" />
           </Link>
         </Button>
       )}
@@ -92,8 +110,14 @@ function RowActions({
           description={`Delete "${partition.name}"? This cannot be undone.`}
           onConfirm={() => deleteMutation.mutate()}
         >
-          <Button variant="ghost" size="sm" disabled={deleteMutation.isPending}>
-            <Trash2 className="h-3 w-3 text-destructive" />
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            disabled={deleteMutation.isPending}
+            aria-label={`Delete ${partition.name}`}
+            title={`Delete ${partition.name}`}
+          >
+            <Trash2 className="h-3.5 w-3.5 text-destructive" />
           </Button>
         </ConfirmDialog>
       )}
@@ -118,7 +142,7 @@ function SortButton({ label, active, direction, onClick }: { label: string; acti
 
 export default function PartitionListPage() {
   const queryClient = useQueryClient();
-  const { canManagePartitions, canConfigurePartition } = usePermissions();
+  const { canManagePartitions, canConfigurePartition, canWrite } = usePermissions();
   const [dialogOpen, setDialogOpen] = useState(false);
 
   // Open the create dialog directly when arriving from the Overview quick action
@@ -141,7 +165,7 @@ export default function PartitionListPage() {
   const [embedder, setEmbedder] = useState("");
   const [indexationPreset, setIndexationPreset] = useState("default");
   const [retrievalPreset, setRetrievalPreset] = useState("default");
-  const [chatHistoryDepth, setChatHistoryDepth] = useState("0");
+  const [chatHistoryDepth, setChatHistoryDepth] = useState("4");
   const [chatLlm, setChatLlm] = useState("__default__");
   const [llmValidated, setLlmValidated] = useState<boolean | null>(true);
   const [llmValidating, setLlmValidating] = useState(false);
@@ -252,12 +276,11 @@ export default function PartitionListPage() {
     return items;
   }, [partitionsQuery.data, search, sortDir, sortColumn]);
 
-  // Show a delete affordance for anyone the backend (`require_partition_owner`)
-  // would allow: admins (satisfied via SUPER_ADMIN_MODE) and partition owners.
-  // `canConfigurePartition(role)` is `superAdmin || role === "owner"`, so a
-  // non-admin owner can delete their own partition — not just admins.
+  // Show the actions column whenever the row has at least one available row
+  // action: upload for writable partitions, or edit/delete for admins/owners.
   const showActions =
-    canManagePartitions || filteredAndSorted.some((p) => canConfigurePartition(p.role));
+    canManagePartitions ||
+    filteredAndSorted.some((p) => canWrite(p.role) || canConfigurePartition(p.role));
 
   const pageCount = Math.ceil(filteredAndSorted.length / PARTITIONS_PAGE_SIZE);
   useEffect(() => {
@@ -340,7 +363,7 @@ export default function PartitionListPage() {
       setEmbedder("");
       setIndexationPreset("default");
       setRetrievalPreset("default");
-      setChatHistoryDepth("0");
+      setChatHistoryDepth("4");
       setChatLlm("__default__");
       setLlmValidated(true);
     },
@@ -370,6 +393,10 @@ export default function PartitionListPage() {
     e.preventDefault();
     if (!name.trim()) {
       toast.error("Name is required");
+      return;
+    }
+    if (canManagePartitions && intOr(chatHistoryDepth, 0) < 1) {
+      toast.error("Chat history depth must be at least 1");
       return;
     }
     createMutation.mutate();
@@ -516,10 +543,11 @@ export default function PartitionListPage() {
                       </TableCell>
                     )}
                     <TableCell>
-                      <div className="flex items-center gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
                         <Link
                           to={partitionDetailPath(p.name)}
-                          className="font-medium text-primary hover:underline"
+                          className="block max-w-[220px] truncate font-medium text-primary hover:underline"
+                          title={p.name}
                         >
                           {p.name}
                         </Link>
@@ -544,11 +572,25 @@ export default function PartitionListPage() {
                     <TableCell>{p.document_count}</TableCell>
                     {canManagePartitions && (
                       <TableCell className="text-sm">
-                        {resolveEmbedderName(p.embedder, embedderEndpoints)}
+                        <span className="block max-w-[180px] truncate" title={resolveEmbedderName(p.embedder, embedderEndpoints)}>
+                          {resolveEmbedderName(p.embedder, embedderEndpoints)}
+                        </span>
                       </TableCell>
                     )}
-                    {canManagePartitions && <TableCell>{p.indexation_preset}</TableCell>}
-                    {canManagePartitions && <TableCell>{p.retrieval_preset}</TableCell>}
+                    {canManagePartitions && (
+                      <TableCell>
+                        <span className="block max-w-[180px] truncate" title={p.indexation_preset}>
+                          {p.indexation_preset}
+                        </span>
+                      </TableCell>
+                    )}
+                    {canManagePartitions && (
+                      <TableCell>
+                        <span className="block max-w-[180px] truncate" title={p.retrieval_preset}>
+                          {p.retrieval_preset}
+                        </span>
+                      </TableCell>
+                    )}
                     <TableCell className="text-sm text-muted-foreground">
                       {p.created_at
                         ? new Date(p.created_at).toLocaleDateString()
@@ -558,6 +600,7 @@ export default function PartitionListPage() {
                       <TableCell>
                         <RowActions
                           partition={p}
+                          showUpload={canWrite(p.role)}
                           showEdit={canManagePartitions}
                           showDelete={canConfigurePartition(p.role)}
                         />
@@ -613,121 +656,145 @@ export default function PartitionListPage() {
       )}
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col overflow-hidden sm:max-w-lg">
+          <DialogHeader className="shrink-0">
             <DialogTitle>{createPartitionLabel}</DialogTitle>
             <DialogDescription>
               {createPartitionDescription}
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Label>Name *</Label>
-              <Input
-                placeholder="my-partition"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Description</Label>
-              <Textarea
-                placeholder="Optional description..."
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </div>
-            {canManagePartitions && (
-              <>
-                <div className="space-y-2">
-                  <Label>Embedder *</Label>
-                  <Select value={embedder} onValueChange={setEmbedder}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select embedder..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(embedderEndpoints ?? []).map((ep) => (
-                        <SelectItem key={ep.name} value={ep.name}>
-                          {ep.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
+          <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+            <div className="-mx-1 min-h-0 flex-1 space-y-4 overflow-y-auto px-1 pb-1">
+              <div className="space-y-2">
+                <Label>Name *</Label>
+                <Input
+                  placeholder="my-partition"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Description</Label>
+                <Textarea
+                  placeholder="Optional description..."
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                />
+              </div>
+              {canManagePartitions && (
+                <>
                   <div className="space-y-2">
-                    <Label>Indexation Preset</Label>
-                    <Select value={indexationPreset} onValueChange={setIndexationPreset}>
+                    <Label>Embedder *</Label>
+                    <Select value={embedder} onValueChange={setEmbedder}>
                       <SelectTrigger>
-                        <SelectValue placeholder="Select preset" />
+                        <SelectValue placeholder="Select embedder..." />
                       </SelectTrigger>
                       <SelectContent>
-                        {indexationPresets.map((p) => (
-                          <SelectItem key={p.name} value={p.name}>
-                            {p.name}
+                        {(embedderEndpoints ?? []).map((ep) => (
+                          <SelectItem key={ep.name} value={ep.name}>
+                            {ep.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>Indexation Preset</Label>
+                      <Select value={indexationPreset} onValueChange={setIndexationPreset}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select preset" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {indexationPresets.map((p) => (
+                            <SelectItem key={p.name} value={p.name}>
+                              {p.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Retrieval Preset</Label>
+                      <Select value={retrievalPreset} onValueChange={setRetrievalPreset}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select preset" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {retrievalPresets.map((p) => (
+                            <SelectItem key={p.name} value={p.name}>
+                              {p.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="flex items-center gap-1.5">
+                      Chat LLM
+                      {llmValidating && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+                      {!llmValidating && llmValidated === true && chatLlm !== "__default__" && (
+                        <CheckCircle className="h-3.5 w-3.5 text-green-500" />
+                      )}
+                      {!llmValidating && llmValidated === false && (
+                        <XCircle className="h-3.5 w-3.5 text-destructive" />
+                      )}
+                    </Label>
+                    <Select value={chatLlm} onValueChange={handleChatLlmChange}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select LLM" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__default__">Default (from retrieval config)</SelectItem>
+                        {llmEndpoints?.map((ep) => (
+                          <SelectItem key={ep.name} value={ep.name}>
+                            {ep.name}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <Label>Retrieval Preset</Label>
-                    <Select value={retrievalPreset} onValueChange={setRetrievalPreset}>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select preset" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {retrievalPresets.map((p) => (
-                          <SelectItem key={p.name} value={p.name}>
-                            {p.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <Label className="flex items-center gap-1.5">
+                      Chat History Depth *
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger type="button" className="cursor-help">
+                            <Info className="h-3.5 w-3.5 text-muted-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs">
+                            Number of previous chat messages (including the current question) kept as
+                            context for follow-up questions in this partition. Low values (e.g. 1) mean the
+                            assistant won&apos;t see earlier turns in the conversation. Default: 4.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      required
+                      value={chatHistoryDepth}
+                      onChange={(e) => setChatHistoryDepth(e.target.value)}
+                    />
                   </div>
-                </div>
-                <div className="space-y-2">
-                  <Label className="flex items-center gap-1.5">
-                    Chat LLM
-                    {llmValidating && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
-                    {!llmValidating && llmValidated === true && chatLlm !== "__default__" && (
-                      <CheckCircle className="h-3.5 w-3.5 text-green-500" />
-                    )}
-                    {!llmValidating && llmValidated === false && (
-                      <XCircle className="h-3.5 w-3.5 text-destructive" />
-                    )}
-                  </Label>
-                  <Select value={chatLlm} onValueChange={handleChatLlmChange}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select LLM" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__default__">Default (from retrieval config)</SelectItem>
-                      {llmEndpoints?.map((ep) => (
-                        <SelectItem key={ep.name} value={ep.name}>
-                          {ep.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label>Chat History Depth</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={chatHistoryDepth}
-                    onChange={(e) => setChatHistoryDepth(e.target.value)}
-                  />
-                </div>
-              </>
-            )}
-            <DialogFooter>
+                </>
+              )}
+            </div>
+            <DialogFooter className="shrink-0 pt-4">
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={createMutation.isPending || (canManagePartitions && (llmValidating || llmValidated === false || !embedder))}>
+              <Button
+                type="submit"
+                disabled={
+                  createMutation.isPending ||
+                  (canManagePartitions &&
+                    (llmValidating || llmValidated === false || !embedder || intOr(chatHistoryDepth, 0) < 1))
+                }
+              >
                 {createMutation.isPending ? "Creating..." : "Create"}
               </Button>
             </DialogFooter>

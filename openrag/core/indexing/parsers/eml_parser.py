@@ -2,6 +2,8 @@
 
 Extracts the message body (``text/plain`` preferred, ``text/html``
 fallback) and dispatches each attachment to a parser supplied via DI.
+HTML-only bodies use the HTML parser so embedded images are extracted
+and their base64 payloads do not reach chunks.
 Email headers (subject, from, to, date, message-id) and an attachment
 manifest are merged into the output ``ProcessedDocument.metadata``.
 
@@ -34,6 +36,7 @@ from email.utils import parsedate_to_datetime
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from .document_parser import DocumentParser
+from .html_parser import HtmlParser
 from .registry import parser_registry
 
 logger = logging.getLogger(__name__)
@@ -54,6 +57,7 @@ class EmlParser(DocumentParser):
 
     def __init__(self, attachment_parsers: Mapping[str, DocumentParser] | None = None) -> None:
         self._attachment_parsers = dict(attachment_parsers or {})
+        self._body_html_parser = HtmlParser()
 
     def supported_types(self) -> list[str]:
         return [DocumentType.EML.value]
@@ -75,10 +79,12 @@ class EmlParser(DocumentParser):
             )
 
         headers = self._extract_headers(msg)
-        body, attachments = self._walk_parts(msg)
+        body, body_content_type, attachments = self._walk_parts_with_type(msg)
 
-        attachments_text, images = await self._render_attachments(attachments)
-        full_text = (body + attachments_text).strip()
+        body_text, body_images = await self._render_body(document, body, body_content_type)
+        attachments_text, attachment_images = await self._render_attachments(attachments)
+        full_text = (body_text + attachments_text).strip()
+        images = [*body_images, *attachment_images]
 
         metadata = dict(document.metadata)
         metadata.update(
@@ -129,7 +135,13 @@ class EmlParser(DocumentParser):
 
     @staticmethod
     def _walk_parts(msg: email.message.Message) -> tuple[str, list[dict]]:
+        body, _, attachments = EmlParser._walk_parts_with_type(msg)
+        return body, attachments
+
+    @staticmethod
+    def _walk_parts_with_type(msg: email.message.Message) -> tuple[str, str, list[dict]]:
         body = ""
+        body_content_type = ""
         attachments: list[dict] = []
         attachment_candidates = 0
 
@@ -168,8 +180,30 @@ class EmlParser(DocumentParser):
                 # text/plain wins; only use text/html if we have nothing yet
                 if content_type == "text/plain" or not body:
                     body = text
+                    body_content_type = content_type
 
-        return body.strip(), attachments
+        return body.strip(), body_content_type, attachments
+
+    async def _render_body(
+        self,
+        document: Document,
+        body: str,
+        content_type: str,
+    ) -> tuple[str, list[ImageBlock]]:
+        if not body or content_type != "text/html":
+            return body, []
+
+        processed = await self._body_html_parser.parse(
+            Document(
+                id=document.id,
+                filename=f"{document.filename or document.id}.html",
+                content_type=DocumentType.HTML,
+                text=body,
+                metadata=dict(document.metadata),
+            )
+        )
+        rendered = "\n\n".join(block.text for block in processed.text_blocks if block.text)
+        return rendered, list(processed.images)
 
     async def _render_attachments(self, attachments: list[dict]) -> tuple[str, list[ImageBlock]]:
         """Render the attachment-section text and collect any ImageBlocks.

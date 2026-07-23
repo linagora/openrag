@@ -1,8 +1,22 @@
+from contextlib import asynccontextmanager
+
 import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from services.workers.pipeline_builder import build_indexing_pipeline
+from services.workers.stages import caption as caption_module
+
+
+@pytest.fixture(autouse=True)
+def _noop_vlm_semaphore(monkeypatch):
+    """Stub the cluster-wide VLM semaphore so caption tests don't boot Ray."""
+
+    @asynccontextmanager
+    async def _noop():
+        yield
+
+    monkeypatch.setattr(caption_module, "get_vlm_semaphore", _noop)
 
 
 class FakeParser:
@@ -57,9 +71,11 @@ class FakeVectorStore:
 class FakeVLM:
     def __init__(self) -> None:
         self.calls: list[bytes] = []
+        self.prompts: list[str | None] = []
 
     async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
         self.calls.append(image_bytes)
+        self.prompts.append(prompt)
         return "caption"
 
 
@@ -173,6 +189,45 @@ async def test_pipeline_indexation_config_disables_caption_and_contextualization
     assert vlm.calls == []
     assert contextualizer.calls == []
     assert row["stage"] == "stored"
+
+
+def _caption_pipeline(vlm: FakeVLM, caption_prompt: str | None):
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        caption_prompt=caption_prompt,
+    )
+    return pipeline, document
+
+
+@pytest.mark.asyncio
+async def test_pipeline_injects_configured_caption_prompt():
+    # The captioning template configured on the pipeline (image_describer) must
+    # reach the VLM instead of its bare built-in fallback.
+    vlm = FakeVLM()
+    pipeline, document = _caption_pipeline(vlm, caption_prompt="DESCRIBE THE IMAGE TEMPLATE")
+    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "note.txt"})
+    assert vlm.prompts == ["DESCRIBE THE IMAGE TEMPLATE"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_row_caption_prompt_overrides_configured_default():
+    # An explicit per-row caption_prompt wins over the pipeline default.
+    vlm = FakeVLM()
+    pipeline, document = _caption_pipeline(vlm, caption_prompt="DEFAULT TEMPLATE")
+    await pipeline.run(
+        {"document": document, "partition": "tenant-a", "filename": "note.txt", "caption_prompt": "ROW OVERRIDE"}
+    )
+    assert vlm.prompts == ["ROW OVERRIDE"]
 
 
 @pytest.mark.asyncio
@@ -483,9 +538,10 @@ async def test_pipeline_propagates_non_keyerror_contextualizer_factory_error():
 
 
 @pytest.mark.asyncio
-async def test_pipeline_always_captions_standalone_image_even_when_globally_off():
+async def test_pipeline_always_captions_standalone_image_even_when_partition_disables_it():
     # A standalone image file's caption is its only text content, so it is
-    # captioned even when global image captioning is off (legacy parity).
+    # captioned even when the partition's enable_image_captioning is off
+    # (legacy parity).
     document = Document(filename="logo.png", content_type=DocumentType.IMAGE, raw_bytes=b"img")
     processed = ProcessedDocument(
         document_id=document.id,
@@ -499,7 +555,7 @@ async def test_pipeline_always_captions_standalone_image_even_when_globally_off(
         embedder=FakeEmbedder([[1.0]]),
         vector_store=FakeVectorStore(),
         vlm=vlm,
-        image_captioning=False,
+        indexation_config=IndexationPipelineConfig(enable_image_captioning=False),
     )
     row = {"document": document, "partition": "tenant-a", "filename": "logo.png"}
 
@@ -509,8 +565,9 @@ async def test_pipeline_always_captions_standalone_image_even_when_globally_off(
 
 
 @pytest.mark.asyncio
-async def test_pipeline_skips_embedded_image_caption_when_globally_off():
-    # Images embedded in a non-image document stay gated by the global flag.
+async def test_pipeline_skips_embedded_image_caption_when_partition_disables_it():
+    # Images embedded in a non-image document stay gated by the per-partition
+    # (preset) enable_image_captioning setting.
     document = Document(filename="note.txt", text="hello", partition="tenant-a")
     processed = ProcessedDocument(
         document_id=document.id,
@@ -524,7 +581,7 @@ async def test_pipeline_skips_embedded_image_caption_when_globally_off():
         embedder=FakeEmbedder([[1.0]]),
         vector_store=FakeVectorStore(),
         vlm=vlm,
-        image_captioning=False,
+        indexation_config=IndexationPipelineConfig(enable_image_captioning=False),
     )
     row = {"document": document, "partition": "tenant-a", "filename": "note.txt"}
 
@@ -678,3 +735,169 @@ async def test_pipeline_breadcrumb_reflects_resolved_named_endpoints(monkeypatch
     assert recorder.debug_bound["contextualization_llm"] == "ctx-llm"
     assert recorder.debug_bound["topic_tagging_llm"] == "topic-llm"
     assert recorder.debug_bound["embedder"] == "embed-fast"
+
+
+class RecordingVectorStore:
+    """Vector store fake that logs call order so tests can assert the re-index
+    insert-before-delete contract (#657)."""
+
+    def __init__(self, existing_ids: list[str] | None = None) -> None:
+        self.existing_ids = list(existing_ids or [])
+        self.events: list[str] = []
+        self.query_filters: list[dict] = []
+        self.deleted: list[list[str]] = []
+        self.collection_exists_result = True
+        self.query_error: Exception | None = None
+        self.delete_error: Exception | None = None
+
+    async def collection_exists(self, name: str) -> bool:
+        return self.collection_exists_result
+
+    async def query_ids_by_filter(self, collection: str, filters: dict) -> list[str]:
+        self.events.append("query")
+        self.query_filters.append(filters)
+        if self.query_error is not None:
+            raise self.query_error
+        return list(self.existing_ids)
+
+    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+        self.events.append("upsert")
+        return len(chunks)
+
+    async def ensure_collection(self, name: str, dimension: int, **kwargs) -> None:
+        pass
+
+    async def delete(self, ids: list[str], collection: str = "default") -> int:
+        self.events.append("delete")
+        if self.delete_error is not None:
+            raise self.delete_error
+        self.deleted.append(list(ids))
+        return len(ids)
+
+
+def _reindex_pipeline(vector_store, *, defer_replace_cleanup: bool = False):
+    document = Document(filename="note.txt", text="hi", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hi")])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hi", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=vector_store,
+        defer_replace_cleanup=defer_replace_cleanup,
+    )
+    return pipeline, document
+
+
+@pytest.mark.asyncio
+async def test_reindex_direct_pipeline_deletes_prior_chunks_after_store():
+    # #657: replace=True must snapshot the file's existing chunks, store the new
+    # set, then delete exactly that old set for direct pipeline callers.
+    vs = RecordingVectorStore(existing_ids=["101", "102"])
+    pipeline, document = _reindex_pipeline(vs)
+
+    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+
+    # Snapshot is scoped to this file + partition only.
+    assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
+    assert "_replace_old_chunk_collection" not in row
+    assert "_replace_old_chunk_ids" not in row
+    assert vs.deleted == [["101", "102"]]
+    assert vs.events == ["query", "upsert", "delete"]
+
+
+@pytest.mark.asyncio
+async def test_reindex_deferred_pipeline_exposes_prior_chunks_for_worker_cleanup():
+    # Worker indexing updates the catalog after storing vectors. In that path,
+    # cleanup is deferred so a catalog failure cannot remove the old chunk set.
+    vs = RecordingVectorStore(existing_ids=["101", "102"])
+    pipeline, document = _reindex_pipeline(vs, defer_replace_cleanup=True)
+
+    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+
+    assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
+    assert row["_replace_old_chunk_collection"] == "default"
+    assert row["_replace_old_chunk_ids"] == ["101", "102"]
+    assert vs.deleted == []
+    assert vs.events == ["query", "upsert"]
+
+
+@pytest.mark.asyncio
+async def test_reindex_no_delete_when_file_had_no_prior_chunks():
+    vs = RecordingVectorStore(existing_ids=[])
+    pipeline, document = _reindex_pipeline(vs)
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+
+    assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
+    assert vs.deleted == []
+    assert "delete" not in vs.events
+
+
+@pytest.mark.asyncio
+async def test_first_time_index_never_queries_or_deletes():
+    # Without replace, the plain insert path is untouched (no snapshot, no delete).
+    vs = RecordingVectorStore(existing_ids=["999"])
+    pipeline, document = _reindex_pipeline(vs)
+
+    await pipeline.run({"document": document, "partition": "tenant-a"})
+
+    assert vs.query_filters == []
+    assert vs.deleted == []
+    assert vs.events == ["upsert"]
+
+
+@pytest.mark.asyncio
+async def test_reindex_snapshot_failure_skips_cleanup_but_still_indexes():
+    # A snapshot lookup failure must not lose the new indexing: duplicates are
+    # recoverable, deleting blindly is not. Indexing completes; cleanup is skipped.
+    vs = RecordingVectorStore(existing_ids=["1"])
+    vs.query_error = RuntimeError("milvus unavailable")
+    pipeline, document = _reindex_pipeline(vs)
+
+    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+
+    assert row["stage"] == "stored"
+    assert "upsert" in vs.events
+    assert vs.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_reindex_defers_cleanup_delete_to_worker():
+    # The pipeline must not delete stale chunks itself. The worker does that
+    # after the catalog write, so a later catalog failure cannot leave the file
+    # with neither the old nor the new vector set.
+    vs = RecordingVectorStore(existing_ids=["1"])
+    vs.delete_error = RuntimeError("delete failed")
+    pipeline, document = _reindex_pipeline(vs, defer_replace_cleanup=True)
+
+    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+
+    assert row["stage"] == "stored"
+    assert row["_replace_old_chunk_ids"] == ["1"]
+    assert vs.events == ["query", "upsert"]
+
+
+@pytest.mark.asyncio
+async def test_reindex_with_zero_new_chunks_keeps_old_chunks():
+    # Regression guard: a blank/whitespace-only file, or a parser that extracts
+    # no text, legitimately chunks down to [] without raising (chunk_stage /
+    # BaseChunker.chunk both treat this as success). If the old snapshot were
+    # deleted whenever it was merely non-empty, a re-index that stores zero new
+    # chunks would wipe the file's entire previous chunk set — worse than the
+    # pre-fix duplication bug, and a violation of the "no empty window"
+    # guarantee. The old chunks must survive when nothing new was stored.
+    vs = RecordingVectorStore(existing_ids=["101", "102"])
+    document = Document(filename="blank.txt", text="", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([]),
+        embedder=FakeEmbedder([]),
+        vector_store=vs,
+    )
+
+    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+
+    assert row["stored_count"] == 0
+    assert vs.deleted == []
+    assert "delete" not in vs.events

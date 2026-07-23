@@ -192,7 +192,6 @@ async def _run_pipeline(
         embedder=embedder,
         vector_store=_FakeVectorStore(),
         vlm=vlm,
-        image_captioning=True,
         embedder_factory=embedder_factory or _build_embedder_factory(settings),
         vlm_factory=vlm_factory or _build_vlm_factory(settings),
     )

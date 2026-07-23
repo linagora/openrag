@@ -5,17 +5,23 @@ import { renderHook } from "@testing-library/react";
 // /config query — mock both (vi.hoisted so the factories may reference the shared
 // state) instead of standing up AuthProvider + a QueryClient.
 const auth = vi.hoisted(() => ({ isAdmin: false }));
-const cfg = vi.hoisted(() => ({ superAdminMode: false }));
+const cfg = vi.hoisted(() => ({ superAdminMode: false, loading: false, error: false }));
 vi.mock("./auth", () => ({ useAuth: () => ({ isAdmin: auth.isAdmin }) }));
 vi.mock("@tanstack/react-query", () => ({
-  useQuery: () => ({ data: { super_admin_mode: cfg.superAdminMode } }),
+  useQuery: () => ({
+    data: cfg.loading || cfg.error ? undefined : { super_admin_mode: cfg.superAdminMode },
+    isSuccess: !cfg.loading && !cfg.error,
+    isError: cfg.error,
+  }),
 }));
 
 import { usePermissions } from "./permissions";
 
-function perms(isAdmin: boolean, superAdminMode = false) {
+function perms(isAdmin: boolean, superAdminMode = false, state: Partial<typeof cfg> = {}) {
   auth.isAdmin = isAdmin;
   cfg.superAdminMode = superAdminMode;
+  cfg.loading = state.loading ?? false;
+  cfg.error = state.error ?? false;
   return renderHook(() => usePermissions()).result.current;
 }
 
@@ -23,6 +29,7 @@ describe("usePermissions — platform scopes", () => {
   it("grants every platform capability to admins", () => {
     const p = perms(true);
     expect(p.isAdmin).toBe(true);
+    expect(p.superAdminModeResolved).toBe(true);
     expect(p.canViewPlatform).toBe(true);
     expect(p.canViewSystem).toBe(true);
     expect(p.canManageUsers).toBe(true);
@@ -33,6 +40,7 @@ describe("usePermissions — platform scopes", () => {
 
   it("denies platform capabilities to non-admins", () => {
     const p = perms(false);
+    expect(p.superAdminModeResolved).toBe(true);
     expect(p.canViewSystem).toBe(false);
     expect(p.canManageUsers).toBe(false);
     expect(p.canManageModels).toBe(false);
@@ -70,6 +78,12 @@ describe("usePermissions — partition-scoped roles (non-admin)", () => {
 });
 
 describe("usePermissions — admin bypass is gated on SUPER_ADMIN_MODE", () => {
+  it("keeps the admin bypass unresolved while /config is loading", () => {
+    const p = perms(true, false, { loading: true });
+    expect(p.superAdmin).toBe(false);
+    expect(p.superAdminModeResolved).toBe(false);
+  });
+
   it("a plain admin (mode off) does NOT bypass partition-role checks", () => {
     const p = perms(true, false);
     expect(p.superAdmin).toBe(false);

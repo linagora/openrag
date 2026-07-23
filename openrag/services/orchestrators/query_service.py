@@ -42,6 +42,7 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
 from core.prompts import (
     SOURCE_SEPARATOR,
@@ -49,6 +50,7 @@ from core.prompts import (
     format_web_context,
     load_template_by_key,
 )
+from core.utils.exceptions import WorkspaceNotFoundError
 from core.utils.logging import get_logger
 from core.utils.source_filtering import (
     extract_and_strip_sources_block,
@@ -99,6 +101,10 @@ class RAGMODE(Enum):
 class QueryService:
     """End-to-end RAG: query-gen → retrieve (+web) → map-reduce → answer."""
 
+    #: Used when the global ``rag.chat_history_depth`` config is < 1 — see
+    #: PartitionService._CHAT_HISTORY_DEPTH_DEFAULT for the matching partition-side clamp.
+    _CHAT_HISTORY_DEPTH_DEFAULT = 4
+
     def __init__(
         self,
         *,
@@ -120,7 +126,14 @@ class QueryService:
         # read at request time, not snapshotted once at startup.
         self._config = config
         self._rag_mode = config.rag.mode
-        self._default_chat_history_depth = config.rag.chat_history_depth
+        # RAGConfig.chat_history_depth carries no lower bound, so a deployment may
+        # configure it to 0 (or negative). Left unclamped, messages[-0:] would keep
+        # the *entire* history instead of none — the opposite of what this depth
+        # is meant to limit. Clamp here rather than reject at config-load time so a
+        # misconfigured global default degrades safely instead of crashing startup.
+        self._default_chat_history_depth = (
+            config.rag.chat_history_depth if config.rag.chat_history_depth >= 1 else self._CHAT_HISTORY_DEPTH_DEFAULT
+        )
         self._max_contextualized_query_len = config.rag.max_contextualized_query_len
         self._max_context_tokens = config.reranker.top_k * config.chunker.chunk_size
 
@@ -138,9 +151,16 @@ class QueryService:
         """Effective chat-history depth for this request.
 
         Honors a partition's configured ``chat_history_depth`` (set via the
-        admin API) over the global default. A partition value of ``0`` means
-        "inherit the global default" — it never reaches the ``messages[-depth:]``
-        slice, where ``0`` would otherwise select the *entire* history.
+        admin API) over the global default. The admin API now requires an
+        explicit ``chat_history_depth >= 1`` on create/update (``ge=1`` in
+        ``CreatePartitionRequest``/``UpdatePartitionRequest``), and
+        ``PartitionService.resolve_partition_row`` normalizes any pre-existing
+        row still holding the legacy ``0`` sentinel to the global default
+        value before it reaches ``Settings.partitions``. So in practice
+        ``cfg.chat_history_depth`` is always >= 1 here; the ``> 0`` filter
+        below is kept only as a defensive backstop — it must never reach the
+        ``messages[-depth:]`` slice, where ``0`` would select the *entire*
+        history rather than none.
 
         The ``"all"`` sentinel (``openrag-all``) reaches this layer un-expanded
         (retrieval resolves it to concrete partitions downstream) and is a
@@ -161,50 +181,116 @@ class QueryService:
     def _resolve_llm(self, partition: list[str] | None) -> LLM:
         """Effective LLM for this request — query generation and answering.
 
-        Honors a partition's configured ``chat_llm`` model-endpoint preset
-        (set via the admin API) over the default LLM. Resolved once per
-        request (``chat`` / ``chat_stream`` / ``complete``) and used for
-        both the query-contextualization call and the final answer;
-        map-reduce stays on the default LLM until its post-release
-        refactor. Same partition semantics as
-        ``_resolve_chat_history_depth``: no partition and the ``"all"``
-        sentinel use the default; a multi-partition request uses the
-        preset only when every partition that sets one names the same
-        endpoint — with conflicting presets there is no single owning
-        partition, so the default applies.
+        Resolution order:
+
+        1. A partition's configured ``chat_llm`` model-endpoint preset (set
+           via the admin API) wins when the request scopes to one or more
+           named partitions that agree on a single preset. Resolved once per
+           request (``chat`` / ``chat_stream`` / ``complete``) and used for
+           both the query-contextualization call and the final answer.
+           Map-reduce is the exception: its relevancy/summarisation passes
+           stay pinned to the static ``self._llm`` (see ``_infer_relevancy``),
+           so with a non-env default endpoint a map-reduce request's sub-calls
+           run on a different model than its answer, until that post-release
+           refactor lands.
+        2. Otherwise the **catalog default** endpoint — the ``is_default=True``
+           row, exposed by ``llm_factory`` under the ``"default"`` alias and
+           resolved fresh per request so promoting a new default endpoint at
+           runtime takes effect immediately. This covers a direct/web-only
+           request (no partition), the cross-partition ``"all"`` sentinel,
+           partitions that set no preset, and partitions whose presets
+           conflict (no single owning partition). Same partition semantics as
+           ``_resolve_chat_history_depth``.
+        3. The static ``self._llm`` (built from ``settings.llm`` at startup)
+           only as a last resort — no endpoint factory is wired (unit tests)
+           or the catalog has no default endpoint yet.
 
         ``chat_llm`` is validated against the endpoint catalog when it is
         assigned (``PartitionService`` rejects an unknown name at create /
         PATCH time), but a stored name can still go stale afterwards — the
         endpoint may be renamed or deleted after assignment — so an
-        unresolvable name here must not fail the chat request; it falls back
-        to the default LLM with a warning.
+        unresolvable name here must not fail the chat request; it falls
+        through to the catalog default with a warning.
+
+        The resolved preset name is always logged (at debug), including for
+        the default, so "which model answered?" is answerable from the logs.
         """
-        if self._llm_factory is None or not partition or "all" in partition:
-            logger.bind(partitions=partition).debug("Answering with the default LLM (no partition-scoped preset)")
-            return self._llm
-        names = {
-            cfg.chat_llm
-            for name in partition
-            if (cfg := self._config.partitions.get(name)) is not None and cfg.chat_llm
-        }
-        if len(names) != 1:
-            logger.bind(partitions=partition, chat_llm_presets=sorted(names)).debug(
-                "Answering with the default LLM (no single chat_llm preset among the partitions)"
-            )
-            return self._llm
-        (chat_llm,) = names
-        try:
-            llm = self._llm_factory(chat_llm)
-        except KeyError:
-            logger.warning(
-                "Partition chat_llm preset not found in the model-endpoint catalog — using the default LLM",
-                chat_llm=chat_llm,
-                partitions=partition,
-            )
-            return self._llm
-        logger.bind(chat_llm=chat_llm, partitions=partition).debug("Answering with the partition's chat_llm preset")
-        return llm
+        chat_llm = self._agreed_partition_chat_llm(partition)
+        if chat_llm is not None:
+            try:
+                llm = self._llm_factory(chat_llm)  # factory is not None when chat_llm is set
+            except KeyError:
+                logger.warning(
+                    "Partition chat_llm preset not found in the model-endpoint catalog — "
+                    "falling back to the default LLM",
+                    chat_llm=chat_llm,
+                    partitions=partition,
+                )
+            else:
+                logger.bind(chat_llm=chat_llm, partitions=partition).debug(
+                    "Answering with the partition's chat_llm preset"
+                )
+                return llm
+        return self._default_llm(partition)
+
+    def _agreed_partition_chat_llm(self, partition: list[str] | None) -> str | None:
+        """The single ``chat_llm`` preset the request's partitions agree on, else None.
+
+        Returns None — meaning "use the catalog default" — when no endpoint
+        factory is wired, the request has no partition or uses the ``"all"``
+        sentinel, no named partition sets a preset, or the named partitions
+        name more than one preset (a conflict with no single owning partition).
+
+        The partition-consensus decision itself is delegated to the shared
+        ``resolve_partition_chat_llm`` — the same rule the chat-completions
+        token preflight uses — so the LLM that answers and the budget it was
+        checked against can't fall out of sync.
+        """
+        if self._llm_factory is None:
+            return None
+        return resolve_partition_chat_llm(partition, self._config.partitions)
+
+    def _default_llm(self, partition: list[str] | None) -> LLM:
+        """The catalog default LLM endpoint (``is_default=True``), resolved fresh.
+
+        Bypassing this and returning the static ``self._llm`` was the bug
+        behind "the default chat model is still the one in .env" reports:
+        promoting a new default endpoint in the catalog had no effect on the
+        default chat path, which stayed pinned to the ``settings.llm`` (env)
+        client built at startup. Going through the factory's ``"default"``
+        alias — kept in sync with the ``is_default`` row and cache-invalidated
+        on every default change — makes the promotion take effect.
+
+        Falls back to the static ``self._llm`` only when no factory is wired
+        (unit tests) or the catalog has no default endpoint yet (KeyError).
+        """
+        if self._llm_factory is not None:
+            try:
+                llm = self._llm_factory("default")
+            except KeyError:
+                pass
+            else:
+                logger.bind(chat_llm=self._default_llm_name(), partitions=partition).debug(
+                    "Answering with the default chat_llm preset"
+                )
+                return llm
+        logger.bind(partitions=partition).debug("Answering with the static default LLM (no catalog default endpoint)")
+        return self._llm
+
+    def _default_llm_name(self) -> str:
+        """Real endpoint name behind the catalog ``"default"`` alias, for logging.
+
+        ``ModelEndpointService.load_all`` stores the ``is_default`` row's
+        config under both its own name and the ``"default"`` alias (the *same*
+        object), so the name is recovered by identity. Returns ``"default"``
+        when it can't be resolved (e.g. the alias isn't populated yet)."""
+        llms = self._config.models.llm
+        default_cfg = llms.get("default")
+        if default_cfg is not None:
+            for name, cfg in llms.items():
+                if name != "default" and cfg is default_cfg:
+                    return name
+        return "default"
 
     # ------------------------------------------------------------------
     # Query generation (was RagPipeline.generate_query — no LangChain)
@@ -249,9 +335,11 @@ class QueryService:
     # ------------------------------------------------------------------
 
     async def _infer_relevancy(self, query: str, doc) -> tuple[bool, str]:
-        # Deliberately pinned to the default LLM: map-reduce is slated for a
-        # full post-release refactor, and routing it through the partition
-        # chat_llm preset is part of that work.
+        # Deliberately pinned to the static ``self._llm`` (the settings.llm env
+        # client) — NOT the resolved catalog default the answer uses, so a
+        # map-reduce request's sub-calls may run on a different model than its
+        # answer. Map-reduce is slated for a full post-release refactor; routing
+        # it through the resolved chat_llm is part of that work.
         async with get_llm_semaphore():
             try:
                 resp = await self._llm.chat(
@@ -312,17 +400,21 @@ class QueryService:
 
         top_k = self._mr_max if use_map_reduce else None
 
-        if workspace:
-            ws = await self._workspace.get_workspace(workspace)
-            if not ws or ("all" not in partition and ws["partition_name"] not in partition):
-                logger.warning("Workspace not found in partition(s) — ignoring", workspace=workspace)
-                workspace = None
-        filter_params = {"workspace_id": workspace} if workspace else None
+        filter_params = None
+        if workspace and partition:
+            scope = await self._workspace.resolve_scope(workspace, partition)
+            if scope is None:
+                raise WorkspaceNotFoundError(f"Workspace '{workspace}' not found.")
+            # A workspace belongs to exactly one partition — narrow retrieval to
+            # it even for an "openrag-all" / multi-partition request, otherwise
+            # file_id-only filtering could match a same-named file in another
+            # partition the caller also has access to (#706).
+            partition = [scope.partition]
+            filter_params = {"file_id": scope.file_ids}
 
         web_results: list = []
         if partition is not None and use_websearch:
-            doc_lists, web_lists = await self._gather_rag_and_web(queries.query_list, partition, top_k, filter_params)
-            chunks = self._retrieval.fuse(doc_lists, top_k=top_k)
+            chunks, web_lists = await self._gather_rag_and_web(queries, partition, top_k, filter_params)
             web_results = _dedupe_web(web_lists)
         elif partition is not None:
             chunks = await self._retrieval.retrieve_multi(
@@ -380,13 +472,18 @@ class QueryService:
         payload["messages"] = new_messages
         return payload, docs, web_results
 
-    async def _gather_rag_and_web(self, query_list, partition, top_k, filter_params):
-        rag = self._retrieval.retrieve_per_query(
-            partitions=partition, queries=query_list, top_k=top_k, filter_params=filter_params
+    async def _gather_rag_and_web(self, queries, partition, top_k, filter_params):
+        # Fuse the doc branch through retrieve_multi so a partition's rrf_k drives
+        # its sub-query fusion here too (#707). Previously this used
+        # retrieve_per_query + fuse() at the hardcoded 60, so enabling websearch
+        # silently ignored rrf_k and the same preset fused differently depending
+        # on the websearch toggle.
+        rag = self._retrieval.retrieve_multi(
+            partitions=partition, search_queries=queries, top_k=top_k, filter_params=filter_params
         )
-        web = asyncio.gather(*[self._web.search(q.query) for q in query_list])
-        doc_lists, web_lists = await asyncio.gather(rag, web)
-        return doc_lists, web_lists
+        web = asyncio.gather(*[self._web.search(q.query) for q in queries.query_list])
+        chunks, web_lists = await asyncio.gather(rag, web)
+        return chunks, web_lists
 
     async def _prepare_completions(self, partition: list[str], payload: dict, llm: LLM | None = None):
         prompt = payload["prompt"]

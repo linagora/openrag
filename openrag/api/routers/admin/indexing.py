@@ -25,11 +25,13 @@ from api.dependencies.auth import (
 )
 from api.dependencies.files import (
     save_file_to_disk,
+    save_file_to_disk_with_sha256,
     validate_file_format,
     validate_file_id,
     validate_metadata,
 )
 from api.routers.admin.task_logs import collect_task_logs
+from core.models.catalog import TERMINAL_TASK_STATES
 from core.utils.exceptions import OpenRAGError
 from core.utils.filename import sanitize_filename
 from core.utils.log_tail import app_log_file
@@ -135,24 +137,6 @@ async def add_file(
             detail=f"File '{file_id}' already exists in partition {partition}",
         )
 
-    original_filename = file.filename
-    file.filename = sanitize_filename(file.filename)
-    try:
-        file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
-    except OpenRAGError:
-        # Domain errors (e.g. 413 too-large, 400 bad filename) carry their own
-        # HTTP status; let the OpenRAGError handler map them instead of masking
-        # the upload rejection as a 500.
-        raise
-    except Exception as e:
-        # Log the full error server-side; return a generic message so we don't
-        # leak filesystem paths or internals to the client.
-        logger.exception("Failed to save file to disk.", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to save uploaded file.",
-        )
-
     parsed_workspace_ids = None
     if workspace_ids:
         try:
@@ -172,16 +156,49 @@ async def add_file(
                     detail=f"Workspace '{ws_id}' not found in partition '{partition}'",
                 )
 
-    task_id = await service.add_file(
-        file_path=str(file_path),
-        file_id=file_id,
-        partition=partition,
-        metadata=metadata,
-        sanitized_filename=file.filename,
-        original_filename=original_filename,
-        user=user,
-        workspace_ids=parsed_workspace_ids,
-    )
+    original_filename = file.filename
+    file.filename = sanitize_filename(file.filename)
+    try:
+        if getattr(getattr(config, "loader", None), "content_deduplication_enabled", True):
+            saved_upload = await save_file_to_disk_with_sha256(
+                file,
+                Path(config.paths.data_dir),
+                with_random_prefix=True,
+            )
+            file_path = saved_upload.path
+            content_sha256 = saved_upload.sha256
+        else:
+            file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+            content_sha256 = None
+    except OpenRAGError:
+        # Domain errors (e.g. 413 too-large, 400 bad filename) carry their own
+        # HTTP status; let the OpenRAGError handler map them instead of masking
+        # the upload rejection as a 500.
+        raise
+    except Exception as e:
+        # Log the full error server-side; return a generic message so we don't
+        # leak filesystem paths or internals to the client.
+        logger.exception("Failed to save file to disk.", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save uploaded file.",
+        )
+
+    try:
+        task_id = await service.add_file(
+            file_path=str(file_path),
+            file_id=file_id,
+            partition=partition,
+            metadata=metadata,
+            sanitized_filename=file.filename,
+            original_filename=original_filename,
+            user=user,
+            workspace_ids=parsed_workspace_ids,
+            content_sha256=content_sha256,
+        )
+    except BaseException:
+        file_path.unlink(missing_ok=True)
+        raise
 
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
@@ -273,23 +290,50 @@ async def put_file(
             detail=f"'{file_id}' not found in partition '{partition}'",
         )
 
-    # No Milvus deletion here. The Indexer's add_file(replace=True) flow uses
-    # insert-before-delete: it snapshots old chunk IDs, inserts new chunks,
-    # then deletes old ones — so the file is never left in a half-replaced state.
+    # No Milvus deletion here. The indexing pipeline is insert-before-delete on
+    # replace: it snapshots the file's existing chunk ids, stores the new chunks,
+    # then deletes the old set (see ``IndexingPipeline.run``, #657). The guarantee
+    # is "no empty window" — a failed/crashed re-index keeps the old chunks rather
+    # than zero — not atomicity: a crash between store and delete can leave stale
+    # duplicates behind (recoverable; #658/#660 reconciliation covers that).
     original_filename = file.filename
     file.filename = sanitize_filename(file.filename)
-    file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+    try:
+        if getattr(getattr(config, "loader", None), "content_deduplication_enabled", True):
+            saved_upload = await save_file_to_disk_with_sha256(
+                file,
+                Path(config.paths.data_dir),
+                with_random_prefix=True,
+            )
+            file_path = saved_upload.path
+            content_sha256 = saved_upload.sha256
+        else:
+            file_path = await save_file_to_disk(file, Path(config.paths.data_dir), with_random_prefix=True)
+            content_sha256 = None
+    except OpenRAGError:
+        raise
+    except Exception as e:
+        logger.exception("Failed to save file to disk.", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save uploaded file.",
+        )
 
-    task_id = await service.add_file(
-        file_path=str(file_path),
-        file_id=file_id,
-        partition=partition,
-        metadata=metadata,
-        sanitized_filename=file.filename,
-        original_filename=original_filename,
-        user=user,
-        replace=True,
-    )
+    try:
+        task_id = await service.add_file(
+            file_path=str(file_path),
+            file_id=file_id,
+            partition=partition,
+            metadata=metadata,
+            sanitized_filename=file.filename,
+            original_filename=original_filename,
+            user=user,
+            replace=True,
+            content_sha256=content_sha256,
+        )
+    except BaseException:
+        file_path.unlink(missing_ok=True)
+        raise
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
@@ -554,5 +598,11 @@ async def cancel_task(
 ):
     cancelled = await service.cancel_task(task_id)
     if not cancelled:
+        task_state = await service.get_task_state(task_id)
+        if task_state in TERMINAL_TASK_STATES:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Task {task_id} is already {task_state.lower()} and cannot be cancelled",
+            )
         raise HTTPException(404, f"No ObjectRef stored for task {task_id}")
     return {"message": f"Cancellation signal sent for task {task_id}"}

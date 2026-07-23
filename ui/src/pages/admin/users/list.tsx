@@ -119,30 +119,36 @@ export default function UserListPage() {
     {
       id: "actions",
       header: "Actions",
-      cell: ({ row }) => (
-        <div className="flex gap-1">
-          <Button size="sm" variant="ghost" asChild>
-            <Link to={`/users/${row.original.id}`}>
-              <Eye className="h-3 w-3" />
-            </Link>
-          </Button>
-          <ConfirmDialog
-            title="Delete user?"
-            description={`Permanently delete "${row.original.display_name || `User #${row.original.id}`}"? This removes them from all partitions and invalidates their token.`}
-            onConfirm={() => deleteMut.mutate(row.original.id)}
-          >
-            <Button
-              size="sm"
-              variant="ghost"
-              className="text-destructive"
-              disabled={row.original.id === 1}
-              title={row.original.id === 1 ? "The default admin cannot be deleted" : undefined}
-            >
-              <Trash2 className="h-3 w-3" />
+      cell: ({ row }) => {
+        const label = row.original.display_name || `User #${row.original.id}`;
+        const deleteLabel = row.original.id === 1 ? "The default admin cannot be deleted" : `Delete ${label}`;
+
+        return (
+          <div className="flex items-center gap-1">
+            <Button size="icon-xs" variant="ghost" asChild>
+              <Link to={`/users/${row.original.id}`} aria-label={`View ${label}`} title={`View ${label}`}>
+                <Eye className="h-3.5 w-3.5" />
+              </Link>
             </Button>
-          </ConfirmDialog>
-        </div>
-      ),
+            <ConfirmDialog
+              title="Delete user?"
+              description={`Permanently delete "${label}"? This removes them from all partitions and invalidates their token.`}
+              onConfirm={() => deleteMut.mutate(row.original.id)}
+            >
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                className="text-destructive"
+                disabled={row.original.id === 1}
+                aria-label={deleteLabel}
+                title={deleteLabel}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </ConfirmDialog>
+          </div>
+        );
+      },
     },
   ];
 
@@ -215,9 +221,9 @@ function PreProvisionDialog({
     onError: (e) => toast.error((e as Error).message),
   });
 
-  const copyToken = async () => {
+  const copyToken = async (e: React.MouseEvent<HTMLButtonElement>) => {
     if (created?.token) {
-      const ok = await copyToClipboard(created.token);
+      const ok = await copyToClipboard(created.token, e.currentTarget);
       toast[ok ? "success" : "error"](
         ok ? "Token copied to clipboard" : "Couldn't copy — copy it manually",
       );
@@ -241,7 +247,7 @@ function PreProvisionDialog({
               <Label>API token</Label>
               <div className="flex gap-2">
                 <Input value={created.token} readOnly className="font-mono text-xs" />
-                <Button size="icon" variant="outline" onClick={copyToken}>
+                <Button size="icon" variant="outline" onClick={copyToken} aria-label="Copy API token" title="Copy API token">
                   <Copy className="h-4 w-4" />
                 </Button>
               </div>

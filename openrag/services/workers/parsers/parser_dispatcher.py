@@ -307,4 +307,29 @@ def build_caption_vlm(config: Any) -> Any | None:
     )
 
 
-__all__ = ["ParserDispatcher", "build_parser_dispatcher", "build_caption_vlm"]
+def load_caption_prompt(config: Any) -> str | None:
+    """Load the configured image-captioning template (``prompts.image_describer``).
+
+    Returns the template text, or ``None`` if it can't be resolved — in which
+    case captioning falls back to the VLM client's built-in default rather than
+    failing indexing. Mirrors how the contextualizer/topic-tagger prompts are
+    loaded (``load_template_by_key``).
+
+    FORWARD-COMPAT: the config key is ``image_describer`` but the corresponding
+    ``PromptType`` in the planned prompt-management work is ``image_captioning``
+    — the two will be unified there. This disk-template load is that design's
+    tier-3 (ultimate) fallback; a future ``PromptService`` will front it with
+    per-partition and global-default tiers.
+    """
+    from core.prompts import load_template_by_key
+
+    try:
+        return load_template_by_key(config.paths.prompts_dir, config.prompts, "image_describer")
+    except (ValueError, FileNotFoundError, AttributeError) as exc:
+        # Missing template / partial config must never break indexing — captioning
+        # degrades to the VLM client's built-in default prompt.
+        logger.warning(f"Could not load image-captioning prompt (image_describer); using VLM default: {exc}")
+        return None
+
+
+__all__ = ["ParserDispatcher", "build_parser_dispatcher", "build_caption_vlm", "load_caption_prompt"]

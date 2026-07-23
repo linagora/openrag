@@ -7,7 +7,51 @@ import {
   type ReactNode,
 } from "react";
 import { getMyInfo, type MyInfo } from "./api/account";
-import { TOKEN_KEY } from "./api/client";
+import { apiUrl, TOKEN_KEY } from "./api/client";
+
+const CHAINLIT_LOGOUT_COOKIE_NAME = "openrag_chainlit_logout";
+const CHAINLIT_LOGOUT_SIGNAL_HEADER = "x-openrag-chainlit-logout-signal";
+
+type ChainlitLogoutSignalResponse = {
+  logged_out?: boolean;
+};
+
+function hasCookie(name: string): boolean {
+  if (typeof document === "undefined") return false;
+  return document.cookie.split(";").some((cookie) => cookie.trim().startsWith(`${name}=`));
+}
+
+function clearCookie(name: string) {
+  if (typeof document === "undefined") return;
+  document.cookie = `${name}=; Max-Age=0; path=/; SameSite=Lax`;
+}
+
+function consumeLocalChainlitLogoutSignal(): boolean {
+  if (!hasCookie(CHAINLIT_LOGOUT_COOKIE_NAME)) return false;
+  clearCookie(CHAINLIT_LOGOUT_COOKIE_NAME);
+  return true;
+}
+
+async function consumeRemoteChainlitLogoutSignal(): Promise<boolean> {
+  const response = await fetch(apiUrl("/auth/chainlit-logout-signal"), {
+    credentials: "include",
+    headers: {
+      [CHAINLIT_LOGOUT_SIGNAL_HEADER]: "1",
+    },
+  });
+  if (!response.ok) return false;
+  const body = (await response.json()) as ChainlitLogoutSignalResponse;
+  return body.logged_out === true;
+}
+
+async function consumeChainlitLogoutSignal(): Promise<boolean> {
+  if (consumeLocalChainlitLogoutSignal()) return true;
+  try {
+    return await consumeRemoteChainlitLogoutSignal();
+  } catch {
+    return false;
+  }
+}
 
 // Identity comes from the backend, not a decoded token: /users/info resolves the
 // current principal from either a stored bearer token (AUTH_MODE=token) or the
@@ -34,20 +78,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<MyInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
+  const applyExternalLogout = useCallback(async () => {
+    if (!(await consumeChainlitLogoutSignal())) return false;
+    localStorage.removeItem(TOKEN_KEY);
+    setUser(null);
+    return true;
+  }, []);
+
   const load = useCallback(async () => {
     setIsLoading(true);
     try {
+      if (await applyExternalLogout()) return;
       setUser(await getMyInfo());
     } catch {
       setUser(null);
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [applyExternalLogout]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const handleFocus = () => {
+      void applyExternalLogout();
+    };
+    const handleVisibilityChange = () => {
+      if (!document.hidden) void applyExternalLogout();
+    };
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [applyExternalLogout]);
 
   const loginWithToken = useCallback(async (token: string) => {
     localStorage.setItem(TOKEN_KEY, token.trim());

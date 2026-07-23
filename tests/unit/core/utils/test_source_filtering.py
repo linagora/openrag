@@ -1,5 +1,6 @@
 """Tests for source citation extraction and filtering utilities."""
 
+import asyncio
 import json
 
 import pytest
@@ -199,12 +200,35 @@ def _make_finish(chunk_id: str = "chatcmpl-1") -> str:
     return "data: " + json.dumps({"id": chunk_id, "choices": [{"delta": {}, "finish_reason": "stop"}]})
 
 
+def _make_content_finish(content: str, chunk_id: str = "chatcmpl-1") -> str:
+    """Build a terminal SSE line carrying both a content delta and finish_reason.
+
+    Some OpenAI-compatible providers pack the last token and the stop reason into
+    the same final chunk.
+    """
+    return "data: " + json.dumps(
+        {"id": chunk_id, "choices": [{"delta": {"content": content}, "finish_reason": "stop"}]}
+    )
+
+
 DONE_LINE = "data: [DONE]"
+
+
+def _make_preamble(chunk_id: str = "chatcmpl-1") -> str:
+    """Build an SSE line carrying only a role delta (no content, no finish_reason)."""
+    return "data: " + json.dumps({"id": chunk_id, "choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]})
 
 
 async def _fake_stream(lines: list[str]):
     for line in lines:
         yield line
+
+
+async def _stream_then_raise(lines: list[str], exc: Exception):
+    """Yield the given lines, then raise — mimics an upstream that drops mid-stream."""
+    for line in lines:
+        yield line
+    raise exc
 
 
 async def _collect(async_gen) -> list[str]:
@@ -250,6 +274,64 @@ class TestStreamWithSourceFiltering:
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "Here is the answer."
         assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
+
+    @pytest.mark.asyncio
+    async def test_content_and_finish_reason_in_same_chunk_keeps_last_token(self):
+        """A provider that packs the final token and finish_reason into one chunk
+        must not lose that token (regression: `Hello ` + final `world` → `Hello`)."""
+        lines = [
+            _make_chunk("Hello "),
+            _make_content_finish("world"),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert _collect_content(result) == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_intermediate_content_chunk_never_marked_terminal(self):
+        """When the buffer has overflowed and the last token arrives packed with
+        finish_reason in one chunk, the mid-stream chunk emitted for it must NOT
+        carry finish_reason — else a spec client treats it as terminal, drops the
+        delta, and ignores the tail/finish chunks (truncating a long answer)."""
+        lines = [
+            _make_chunk("A" * 100),  # overflow the buffer (>80) so the next chunk emits mid-stream
+            _make_content_finish("B" * 100),  # last token + finish_reason in the same chunk
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        # The whole answer is still delivered.
+        assert _collect_content(result) == "A" * 100 + "B" * 100
+        # No content-bearing chunk may be marked terminal — only the empty finish chunk.
+        for line in result:
+            if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+                continue
+            data = json.loads(line[len("data: ") :])
+            choice = data.get("choices", [{}])[0]
+            if choice.get("delta", {}).get("content"):
+                assert choice.get("finish_reason") is None, f"content chunk marked terminal: {line}"
+
+    @pytest.mark.asyncio
+    async def test_upstream_iterator_closed_after_done(self):
+        """Breaking on [DONE] must close the upstream generator so the client's
+        pooled HTTP connection is released now, not left suspended until GC (an
+        `async for` does not close its iterator on break)."""
+        closed = {"value": False}
+
+        async def _tracking_stream():
+            try:
+                yield _make_chunk("Answer.")
+                yield _make_finish()
+                yield DONE_LINE
+                yield _make_chunk("after-done-never-consumed")
+            finally:
+                closed["value"] = True
+
+        # Hold a reference so a passing assertion can only mean an explicit
+        # aclose() ran — not that GC happened to reclaim the generator.
+        stream = _tracking_stream()
+        result = await _collect(stream_with_source_filtering(stream, self.SOURCES, "test-model"))
+        assert result[-1].strip() == "data: [DONE]"
+        assert closed["value"] is True, "upstream generator was not closed after [DONE]"
 
     @pytest.mark.asyncio
     async def test_content_tail_chunk_has_null_finish_reason(self):
@@ -361,6 +443,143 @@ def test_min_sources_tag_buffer_size_fits_many_sources():
         tag = "\n[Sources: " + ", ".join(str(i) for i in range(1, n + 1)) + "]"
         assert _min_sources_tag_buffer_size(n) >= len(tag), n
     assert _min_sources_tag_buffer_size(0) >= 1
+
+
+class TestStreamClosedWithoutDone:
+    """Regression for #715 — upstream closing without `data: [DONE]` must not
+    silently drop the answer tail or `extra.sources`."""
+
+    SOURCES = [{"file": "a.pdf"}, {"file": "b.pdf"}, {"file": "c.pdf"}]
+
+    @pytest.mark.asyncio
+    async def test_tail_and_sources_still_flushed_without_done(self):
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_chunk("\n[Sources: 1, 3]"),
+            _make_finish(),
+            # No DONE_LINE: upstream connection drops here.
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert _collect_content(result) == "Here is the answer."
+        assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
+        # A [DONE] marker is still emitted downstream so clients don't hang.
+        assert result[-1].strip() == "data: [DONE]"
+
+    @pytest.mark.asyncio
+    async def test_finish_chunk_flagged_truncated_without_done(self):
+        lines = [
+            _make_chunk("Partial answer only."),
+            _make_finish(),
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        finish_extra = None
+        for line in reversed(result):
+            if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                data = json.loads(line[len("data: ") :])
+                extra = data.get("extra")
+                if extra and extra != "{}":
+                    finish_extra = json.loads(extra)
+                    break
+        assert finish_extra is not None
+        assert finish_extra.get("truncated") is True
+
+    @pytest.mark.asyncio
+    async def test_clean_done_stream_has_no_truncated_flag(self):
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert "truncated" not in _parse_finish_extra(result)
+
+    @pytest.mark.asyncio
+    async def test_preamble_only_close_still_flags_truncated(self):
+        # Upstream drops right after the role-preamble chunk, before any content
+        # or finish chunk arrives. There is no `chunk_template`, but the preamble
+        # must still let us surface `truncated` so the client can tell the stream
+        # was cut off rather than a clean empty completion.
+        lines = [_make_preamble()]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert result[-1].strip() == "data: [DONE]"
+        assert _parse_finish_extra(result).get("truncated") is True
+
+    @pytest.mark.asyncio
+    async def test_upstream_raises_after_content_flushes_tail_and_sources(self):
+        # A read timeout surfaces as the upstream generator raising mid-stream
+        # (not a clean close). The buffered tail + sources must still be flushed
+        # and flagged truncated, and no exception should propagate to the caller.
+        from core.utils.exceptions import InferenceTimeoutError
+
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_chunk("\n[Sources: 1, 3]"),
+        ]
+        stream = _stream_then_raise(lines, InferenceTimeoutError("LLM request timed out"))
+        result = await _collect(stream_with_source_filtering(stream, self.SOURCES, "test-model"))
+        assert _collect_content(result) == "Here is the answer."
+        assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
+        assert _parse_finish_extra(result).get("truncated") is True
+        assert result[-1].strip() == "data: [DONE]"
+
+    @pytest.mark.asyncio
+    async def test_upstream_raises_before_any_chunk_reraises(self):
+        # Nothing was ever streamed, so there is no partial answer to salvage:
+        # the real error must propagate instead of a silent, clean-looking [DONE].
+        from core.utils.exceptions import InferenceConnectionError
+
+        stream = _stream_then_raise([], InferenceConnectionError("Cannot reach LLM"))
+        with pytest.raises(InferenceConnectionError):
+            await _collect(stream_with_source_filtering(stream, self.SOURCES, "test-model"))
+
+    @pytest.mark.asyncio
+    async def test_client_disconnect_propagates_without_flush(self):
+        # CancelledError (client disconnect) is BaseException, not Exception, so it
+        # must propagate untouched rather than be captured as a truncation: no flush,
+        # no swallow, letting the router's cancellation handling run.
+        stream = _stream_then_raise([_make_chunk("partial")], asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await _collect(stream_with_source_filtering(stream, self.SOURCES, "test-model"))
+
+    @pytest.mark.asyncio
+    async def test_truncated_answer_is_logged(self):
+        # Truncation must surface an explicit, visible "Answer truncated" warning
+        # carrying the cause and context (model, delivered length, source count) —
+        # and must NOT fire on a clean, [DONE]-terminated stream.
+        from loguru import logger
+
+        # Truncated: the stream ends without [DONE].
+        records: list[str] = []
+        sink_id = logger.add(records.append, level="WARNING", format="{message}")
+        try:
+            lines = [_make_chunk("Partial answer only."), _make_finish()]
+            await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        finally:
+            logger.remove(sink_id)
+        truncation = [r for r in records if "Answer truncated" in r]
+        assert truncation, f"expected a truncation warning, got: {records}"
+        assert "model=test-model" in truncation[0]
+        assert "reason=connection closed" in truncation[0]
+
+        # Clean [DONE]-terminated stream: no truncation warning.
+        records = []
+        sink_id = logger.add(records.append, level="WARNING", format="{message}")
+        try:
+            lines = [_make_chunk("Complete answer."), _make_finish(), DONE_LINE]
+            await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        finally:
+            logger.remove(sink_id)
+        assert not any("Answer truncated" in r for r in records)
+
+
+def _parse_finish_extra(sse_lines: list[str]) -> dict:
+    for line in reversed(sse_lines):
+        if line.startswith("data: ") and line.strip() != "data: [DONE]":
+            data = json.loads(line[len("data: ") :])
+            extra = data.get("extra")
+            if extra and extra != "{}":
+                return json.loads(extra)
+    return {}
 
 
 class TestStreamWithManySources:

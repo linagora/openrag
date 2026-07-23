@@ -42,6 +42,44 @@ class DocumentRepository(ABC):
     async def file_exists_in_partition(self, file_id: str, partition: str) -> bool: ...
 
     @abstractmethod
+    async def get_content_sha256(self, file_id: str, partition: str) -> str | None: ...
+
+    @abstractmethod
+    async def claim_content_sha256(
+        self,
+        *,
+        file_id: str,
+        partition: str,
+        content_sha256: str,
+        claim_token: str,
+        replace: bool = False,
+    ) -> str | None:
+        """Reserve content for one indexing attempt, returning a conflicting file id."""
+        ...
+
+    @abstractmethod
+    async def renew_content_sha256_claim(
+        self,
+        *,
+        file_id: str,
+        partition: str,
+        content_sha256: str,
+        claim_token: str,
+    ) -> bool:
+        """Extend an active content claim owned by this indexing attempt."""
+        ...
+
+    @abstractmethod
+    async def release_content_sha256_claim(
+        self,
+        *,
+        file_id: str,
+        partition: str,
+        content_sha256: str,
+        claim_token: str,
+    ) -> None: ...
+
+    @abstractmethod
     async def get_file_ids_by_relationship(self, partition: str, relationship_id: str) -> list[str]: ...
 
     @abstractmethod

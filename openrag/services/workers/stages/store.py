@@ -8,6 +8,8 @@ from core.models.chunk import Chunk
 from core.vector_stores.vector_store import VectorStore
 from services.workers.stages._common import run_with_optional_timeout, scrub_credentials, stage_timeout
 
+INDEXING_TASK_ID_METADATA_KEY = "_openrag_indexing_task_id"
+
 
 async def store_stage(
     row: MutableMapping[str, Any],
@@ -31,6 +33,10 @@ async def store_stage(
             if embedding is None:
                 raise ValueError("store_stage received chunks without embeddings")
             await vector_store.ensure_collection("default", len(embedding))
+            task_id = row.get("task_id")
+            if task_id:
+                for chunk in chunks:
+                    chunk.metadata[INDEXING_TASK_ID_METADATA_KEY] = str(task_id)
 
         effective_timeout = stage_timeout(timeout, len(chunks), per_item_timeout=per_chunk_timeout)
         # One indexation timestamp shared by the Milvus chunks (via the upsert
