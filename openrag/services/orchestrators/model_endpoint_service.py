@@ -203,8 +203,12 @@ class ModelEndpointService:
             model_type,
             endpoint=data["endpoint"],
             model_name=data["model_name"] or None,
-            batch_size=data.get("batch_size", 32),
-            timeout=data.get("timeout", 30.0),
+            # Fall back to what the row already holds, never to a literal:
+            # _build_default_seeds only supplies batch_size for `embedder`, so a
+            # hardcoded default would silently reset an admin-tuned llm/vlm/
+            # reranker row to 32 on every boot. Same reasoning for timeout.
+            batch_size=data.get("batch_size", row.batch_size),
+            timeout=data.get("timeout", row.timeout),
             extra=new_extra,
         )
 

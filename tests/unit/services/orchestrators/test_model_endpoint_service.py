@@ -625,6 +625,44 @@ async def test_seed_defaults_sync_on_boot_adopts_a_row_seeded_before_the_marker(
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_keeps_admin_batch_size_for_non_embedder_types(monkeypatch):
+    """Sync must not invent values the environment never supplied.
+
+    `_build_default_seeds` only carries a `batch_size` for `embedder`; the
+    llm/vlm/reranker seeds have none. Defaulting to a literal therefore reset an
+    admin-tuned row to 32 on every boot, even though nothing in env asked for a
+    batch_size at all. The fallback is the row's own value.
+    """
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    existing = _make_row(
+        name="chat-model",
+        model_type="llm",
+        model_name="chat-model",
+        batch_size=256,
+        timeout=99.0,
+        extra={ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
+        is_default=True,
+    )
+    repo = _FakeEndpointRepo(rows=[existing])
+    settings = Settings(
+        llm={"base_url": "http://llm:8000/v1", "model": "chat-model"},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    synced = repo._store[("chat-model", "llm")]
+    assert synced.batch_size == 256, "env supplied no batch_size for llm — the admin value must stand"
+    assert synced.endpoint == "http://llm:8000/v1"
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_sync_on_boot_will_not_rename_over_a_hand_created_name(monkeypatch):
     """The rename must never collide with an endpoint an admin created."""
     from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
