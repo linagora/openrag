@@ -30,6 +30,7 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
 )
 from core.utils.logging import get_logger
+from core.utils.redaction import redact_secrets
 from core.vlm import VLM, vlm_registry
 from tqdm.asyncio import tqdm
 
@@ -55,7 +56,15 @@ def _parse_response(resp: httpx.Response) -> dict:
 _SUSPECT_UNICODE_ESCAPE = re.compile(r"\\u(?![0-9a-fA-F]{4})")
 
 
-def _find_suspect_escapes(texts: list[str]) -> list[dict]:
+def _find_suspect_escapes(texts: list[str], *, limit: int = 5) -> list[dict]:
+    r"""Locate inputs carrying a suspect ``\u`` escape — at most *limit* of them.
+
+    Findings land in ``EmbeddingAPIError.extra``, which is not log-only:
+    error_handlers.py serializes it into the HTTP error body, so these snippets
+    are client-visible. Stopping at *limit* keeps that payload bounded — naming
+    a few offending chunks is the point, not mirroring every bad input of a
+    512-chunk batch.
+    """
     findings = []
     for i, text in enumerate(texts):
         match = _SUSPECT_UNICODE_ESCAPE.search(text)
@@ -63,6 +72,8 @@ def _find_suspect_escapes(texts: list[str]) -> list[dict]:
             start = max(0, match.start() - 15)
             end = min(len(text), match.end() + 15)
             findings.append({"index": i, "snippet": text[start:end]})
+            if len(findings) >= limit:
+                break
     return findings
 
 
@@ -300,11 +311,14 @@ class VLLMEmbedder(Embedder):
             # `.extra` (set on OpenRAGError subclasses like EmbeddingAPIError) carries
             # the embedder's actual response body — repr(exc) alone only has the
             # generic "Embedder API error (400)" message, not why it was rejected.
+            # Redacted on the way out: this binds whatever `.extra` the raised
+            # exception happens to carry, which today is secret-free but is not
+            # a property this call site controls.
             logger.bind(
                 batches_done=done,
                 n_batches=len(batches),
                 error=repr(exc),
-                error_detail=getattr(exc, "extra", None),
+                error_detail=redact_secrets(getattr(exc, "extra", None)),
             ).warning("Embedding failed after {d}/{b} batches", d=done, b=len(batches))
             for task in tasks:
                 if not task.done():
@@ -362,7 +376,7 @@ class VLLMEmbedder(Embedder):
             extra: dict = {
                 "model_name": self._model,
                 "base_url": self._endpoint,
-                "error": exc.response.text,
+                "error": exc.response.text[:500],
             }
             # A 400 usually means the embedder rejected the payload itself;
             # pinpoint the offending chunk(s) so operators know which input to

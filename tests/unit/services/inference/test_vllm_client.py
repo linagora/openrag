@@ -15,7 +15,7 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
 )
 from services.inference._circuit_breaker import _breakers
-from services.inference.vllm_client import VLLMClient, VLLMEmbedder, VLLMVision
+from services.inference.vllm_client import VLLMClient, VLLMEmbedder, VLLMVision, _find_suspect_escapes
 
 
 @pytest.fixture(autouse=True)
@@ -746,3 +746,41 @@ class TestEmbedderRetryFires:
         with pytest.raises(EmbeddingAPIError):
             await embedder._embed_batch(["x"])
         assert calls["n"] == 1, "4xx must not be retried"
+
+
+class TestEmbedderErrorPayloadIsBounded:
+    """``EmbeddingAPIError.extra`` is not log-only — error_handlers.py serializes
+    it into the HTTP error body, so anything put there is client-visible and has
+    to stay bounded.
+    """
+
+    def _embedder(self, handler):
+        embedder = VLLMEmbedder(endpoint="http://embed.test/v1", model_name="embed-model", batch_size=8)
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+        return embedder
+
+    @pytest.mark.asyncio
+    async def test_upstream_error_body_is_truncated(self):
+        """A huge upstream error page (e.g. an HTML 400) must not be echoed whole."""
+        embedder = self._embedder(lambda request: httpx.Response(400, text="E" * 10_000))
+
+        with pytest.raises(EmbeddingAPIError) as excinfo:
+            await embedder._embed_batch(["x"])
+
+        assert len(excinfo.value.extra["error"]) == 500
+
+    def test_suspect_findings_are_capped(self):
+        r"""One snippet per offending chunk would mirror a whole batch of document
+        text into the payload; a few examples identify the problem just as well."""
+        findings = _find_suspect_escapes([f"bad \\umlaut {i}" for i in range(50)])
+
+        assert len(findings) == 5
+
+    def test_suspect_snippet_is_a_window_not_the_whole_chunk(self):
+        """The snippet is a window around the match, so a multi-KB chunk
+        contributes only its neighbourhood of the offending escape."""
+        findings = _find_suspect_escapes(["A" * 5_000 + "\\umlaut" + "B" * 5_000])
+
+        assert len(findings) == 1
+        # 15 chars either side of the 2-char `\u` match.
+        assert len(findings[0]["snippet"]) == 32
