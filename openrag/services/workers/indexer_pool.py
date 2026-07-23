@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import ray
+from core.config.model_endpoints import CONTROL_EXTRA_KEYS
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
 
@@ -661,7 +662,7 @@ def _build_embedder_factory(cfg: Settings) -> Any:
             entry = cache.get(name)
             if entry is not None and entry[0] == identity:
                 return entry[1]
-            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
+            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
             # Backfill max_model_len/embed_concurrency from static settings when the
             # endpoint's `extra` omits them — otherwise truncate_prompt_tokens is off
@@ -712,7 +713,7 @@ def _build_vlm_factory(cfg: Settings) -> Any:
             entry = cache.get(name)
             if entry is not None and entry[0] == identity:
                 return entry[1]
-            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
+            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
             instance = vlm_registry.create(
                 impl,
@@ -791,7 +792,7 @@ def _build_contextualizer_factory(cfg: Settings) -> Any:
                 )
                 shared["system_prompt"] = system_prompt
                 shared["llm_semaphore"] = llm_semaphore
-            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
+            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
             llm = llm_registry.create(
                 impl,
@@ -853,7 +854,7 @@ def _build_topic_tagger_factory(cfg: Settings) -> Any:
                 return entry[1]
             if "system_prompt" not in shared:
                 shared["system_prompt"] = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "topic_tagger")
-            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
+            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
             llm = llm_registry.create(
                 impl,
