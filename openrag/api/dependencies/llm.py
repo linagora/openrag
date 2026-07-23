@@ -4,7 +4,7 @@ from fastapi import HTTPException, status
 from openai import AsyncOpenAI
 
 
-async def get_openai_models(base_url: str, api_key: str, timeout: int = 30):
+async def get_openai_models(base_url: str, api_key: str, timeout: float = 30):
     async with AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout) as client:
         models_response = await client.models.list()
         return models_response.data

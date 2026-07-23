@@ -383,6 +383,115 @@ class TestPrimeMaxModelTokens:
         assert max_in_flight == 1  # the lock prevents overlapping probes
         assert chat._max_model_tokens_by_name == {"default": 8192}
 
+    async def test_probe_uses_the_endpoints_configured_timeout(self, monkeypatch):
+        """Each probe is bounded by that endpoint's own timeout.
+
+        Probes run serially under the lock, so an endpoint falling back to the
+        helper's generic default would hold every later refresh for longer than
+        the admin asked for — widening the window in which the cache is empty.
+        """
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+        from core.config.root import Settings
+
+        s = Settings()
+        s.models.llm["default"] = ModelEndpointConfig(
+            endpoint="http://default:8000/v1", model_name="model-a", timeout=7.5
+        )
+        seen: list[float] = []
+
+        async def fake_get_openai_models(base_url, api_key, timeout=30):
+            seen.append(timeout)
+            return [_FakeOpenAIModel("model-a", 8192)]
+
+        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+
+        await chat.prime_max_model_tokens(s)
+
+        assert seen == [7.5]
+
+
+class TestInvalidateMaxModelTokens:
+    """A model-endpoint write swaps config.models.llm synchronously but
+    re-probes /v1/models in a background task. Invalidating inline keeps that
+    window falling back to the global default rather than serving another
+    endpoint's probed limit."""
+
+    def test_clears_the_probed_cache(self, monkeypatch):
+        import api.routers.user.chat as chat
+
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 8192})
+
+        chat.invalidate_max_model_tokens()
+
+        assert chat._max_model_tokens_by_name == {}
+
+    def test_cleared_cache_falls_back_to_the_global_default(self, monkeypatch):
+        """The window degrades to the conservative global value, not to another
+        endpoint's probed limit."""
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+        from core.config.root import Settings
+
+        s = Settings()
+        s.models.llm["default"] = ModelEndpointConfig(endpoint="http://default:8000/v1", model_name="model-a")
+        # Probed value deliberately unlike the global fallback, so the assertion
+        # below can only pass by actually falling through to the global tier.
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 128000})
+
+        assert chat.get_max_model_tokens(settings=s) == 128000  # probed value while fresh
+
+        chat.invalidate_max_model_tokens()
+
+        assert chat.get_max_model_tokens(settings=s) == int(s.llm_context.max_llm_context_size)
+
+    async def test_refresh_invalidated_mid_probe_discards_its_results(self, monkeypatch):
+        """An in-flight probe must not republish over a later invalidation.
+
+        The probe snapshots the registry before awaiting; if a write lands while
+        it is in flight, its results describe a registry that no longer exists.
+        Publishing them would silently re-open the stale window the write's own
+        invalidation just closed.
+        """
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+        from core.config.root import Settings
+
+        s = Settings()
+        s.models.llm["default"] = ModelEndpointConfig(endpoint="http://default:8000/v1", model_name="model-a")
+
+        async def fake_get_openai_models(base_url, api_key, timeout=30):
+            # A model-endpoint write lands while this probe is in flight.
+            chat.invalidate_max_model_tokens()
+            return [_FakeOpenAIModel("model-a", 8192)]
+
+        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+
+        await chat.prime_max_model_tokens(s)
+
+        assert chat._max_model_tokens_by_name == {}  # discarded, not published
+
+    async def test_uninvalidated_refresh_still_publishes(self, monkeypatch):
+        """The generation guard must not block the normal path."""
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+        from core.config.root import Settings
+
+        s = Settings()
+        s.models.llm["default"] = ModelEndpointConfig(endpoint="http://default:8000/v1", model_name="model-a")
+
+        async def fake_get_openai_models(base_url, api_key, timeout=30):
+            return [_FakeOpenAIModel("model-a", 8192)]
+
+        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+
+        await chat.prime_max_model_tokens(s)
+
+        assert chat._max_model_tokens_by_name == {"default": 8192}
+
 
 def _partition_config(chat_llm=None):
     from core.config.indexation_pipeline import IndexationPipelineConfig

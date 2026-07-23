@@ -8,7 +8,7 @@ delegated to the service resolved from the DI container.
 from datetime import UTC, datetime
 
 from api.dependencies.auth import require_admin
-from api.routers.user.chat import prime_max_model_tokens
+from api.routers.user.chat import invalidate_max_model_tokens, prime_max_model_tokens
 from api.schemas.admin.model_endpoint_schemas import (
     CreateModelEndpointRequest,
     ModelEndpointResponse,
@@ -59,6 +59,27 @@ async def _reprime_llm_token_cache(model_type: str) -> None:
         logger.exception("Failed to refresh auto-probed LLM token cache after endpoint write")
 
 
+def _refresh_llm_token_cache(background_tasks: BackgroundTasks, model_type: str) -> None:
+    """Invalidate the auto-probed token cache now; re-probe after the response.
+
+    The two halves are deliberately split across the response boundary. The
+    service has already swapped ``config.models.llm`` synchronously, so leaving
+    the probed cache untouched until the background task finishes would let a
+    chat request in that window resolve the *new* endpoint but preflight
+    against the *old* one's probed ``max_model_len``. Invalidating inline makes
+    that window fall back to the conservative global default instead of a wrong
+    value, while the slow part — probing every endpoint — still runs off the
+    request path so a dead endpoint can't stall an admin write.
+
+    No-op for non-LLM endpoint types: they have no entry in this cache, so
+    neither half has anything to do.
+    """
+    if model_type != "llm":
+        return
+    invalidate_max_model_tokens()
+    background_tasks.add_task(_reprime_llm_token_cache, model_type)
+
+
 @router.post(
     "/",
     response_model=ModelEndpointResponse,
@@ -73,7 +94,7 @@ async def create_model_endpoint(
     now = datetime.now(UTC)
     row = ModelEndpointRow(**body.model_dump(), created_at=now, updated_at=now)
     result = await service.create_model_endpoint(row)
-    background_tasks.add_task(_reprime_llm_token_cache, body.model_type)
+    _refresh_llm_token_cache(background_tasks, body.model_type)
     return result
 
 
@@ -113,7 +134,7 @@ async def update_model_endpoint(
         model_type=model_type,
         **fields,
     )
-    background_tasks.add_task(_reprime_llm_token_cache, model_type)
+    _refresh_llm_token_cache(background_tasks, model_type)
     return result
 
 
@@ -126,7 +147,7 @@ async def delete_model_endpoint(
 ):
     """Delete a registered inference endpoint."""
     await service.delete_model_endpoint(name=name, model_type=model_type)
-    background_tasks.add_task(_reprime_llm_token_cache, model_type)
+    _refresh_llm_token_cache(background_tasks, model_type)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -139,7 +160,7 @@ async def set_default_model_endpoint(
 ):
     """Promote a registered endpoint to the default for its type."""
     await service.set_default(model_type=model_type, name=name)
-    background_tasks.add_task(_reprime_llm_token_cache, model_type)
+    _refresh_llm_token_cache(background_tasks, model_type)
     return await service.get_model_endpoint(name=name, model_type=model_type)
 
 

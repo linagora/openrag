@@ -60,9 +60,48 @@ _max_model_tokens_by_name: dict[str, int] = {}
 # the latest registry state and publishes the newest result.
 _max_model_tokens_lock = asyncio.Lock()
 
+# Bumped by every ``invalidate_max_model_tokens`` call. A refresh captures the
+# generation before probing and discards its results if the value moved while
+# it was in flight — the registry it probed is no longer the current one, and a
+# newer refresh is already queued behind the lock. Without this an in-flight
+# probe that started before an endpoint write would republish pre-write values
+# on top of the invalidation, re-opening the stale window it just closed.
+_max_model_tokens_generation = 0
+
 
 def _runtime_config(settings: "Settings | None" = None) -> "Settings":
     return settings if settings is not None else load_config()
+
+
+def invalidate_max_model_tokens() -> None:
+    """Drop every auto-probed limit, synchronously.
+
+    Model-endpoint writes refresh ``config.models.llm`` *synchronously* (inside
+    ``ModelEndpointService.load_all``) but re-probe ``/v1/models`` in a
+    background task, so between the two the registry describes the new endpoint
+    while this cache still holds the previous one's ``max_model_len``. A chat
+    request landing in that window would be answered by the new endpoint and
+    preflighted against the old endpoint's limit — precisely the
+    preflight/answer divergence the partition-scoped resolution exists to
+    prevent, and the window is as wide as the probes are slow (an unreachable
+    endpoint costs its full timeout).
+
+    Clearing here collapses that window: until the refresh lands,
+    ``get_max_model_tokens`` falls through to the endpoint's admin-configured
+    size (still read live from the registry, so unaffected) or the global
+    ``llm_context`` fallback — an intentionally conservative "not probed yet",
+    the same state the cache is in before startup priming, rather than a
+    confidently wrong value belonging to a different endpoint.
+
+    Deliberately not locked: rebinding the dict is atomic, so a concurrent
+    reader sees either the old mapping or the empty one, never a half-built
+    dict — and taking ``_max_model_tokens_lock`` here would make an admin write
+    wait behind an in-flight probe, which is the stall the background task was
+    introduced to avoid.
+    """
+    global _max_model_tokens_by_name, _max_model_tokens_generation
+    _max_model_tokens_generation += 1
+    _max_model_tokens_by_name = {}
 
 
 async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
@@ -84,10 +123,13 @@ async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
     Serialized under ``_max_model_tokens_lock`` so overlapping refreshes
     (several endpoint writes in quick succession) can't publish a stale cache:
     each refresh reads the live registry and probes while holding the lock, so
-    the last refresh to run always observes the latest state and wins.
+    the last refresh to run always observes the latest state and wins. A
+    refresh whose generation was invalidated mid-probe discards its results
+    rather than publishing them over the invalidation.
     """
     global _max_model_tokens_by_name
     async with _max_model_tokens_lock:
+        generation = _max_model_tokens_generation
         config = _runtime_config(settings)
         probed_by_identity: dict[int, int | None] = {}
         results: dict[str, int] = {}
@@ -104,10 +146,21 @@ async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
                     base_url=endpoint.endpoint,
                     model_id=endpoint.model_name,
                     api_key=endpoint.extra.get("api_key", ""),
+                    # Honour the endpoint's own configured timeout rather than
+                    # the probe helper's generic default: probes run serially
+                    # under the lock, so an unreachable endpoint holds up every
+                    # later refresh for its full timeout.
+                    timeout=endpoint.timeout,
                 )
             value = probed_by_identity[identity]
             if value is not None:
                 results[name] = value
+        if generation != _max_model_tokens_generation:
+            # An endpoint write invalidated the cache while these probes were in
+            # flight, so `results` describes a registry that is already gone.
+            # Drop them; the write scheduled its own refresh behind this lock.
+            logger.debug("Discarding auto-probed LLM token results invalidated mid-refresh")
+            return
         _max_model_tokens_by_name = results
 
 
@@ -195,7 +248,9 @@ def is_direct_llm_model(
     return request.model is None or request.model == "" or request.model == config.llm.model
 
 
-async def _fetch_max_model_tokens(*, base_url: str, model_id: str, api_key: str) -> int | None:
+async def _fetch_max_model_tokens(
+    *, base_url: str, model_id: str, api_key: str, timeout: float | None = None
+) -> int | None:
     """Fetch one endpoint's max model token limit from its ``/v1/models`` listing.
 
     Returns ``None`` — not a fallback value — when the endpoint is
@@ -203,9 +258,14 @@ async def _fetch_max_model_tokens(*, base_url: str, model_id: str, api_key: str)
     ``max_model_len``: this probes a single endpoint among potentially many,
     so the fallback decision belongs to the caller (``get_max_model_tokens``),
     not this helper.
+
+    *timeout* defaults to ``get_openai_models``' own when omitted; callers that
+    know the endpoint's configured timeout should pass it, so a slow endpoint
+    is bounded by the value the admin set for it.
     """
     try:
-        openai_models = await get_openai_models(base_url=base_url, api_key=api_key)
+        timeout_kwargs = {} if timeout is None else {"timeout": timeout}
+        openai_models = await get_openai_models(base_url=base_url, api_key=api_key, **timeout_kwargs)
         model = next((m for m in openai_models if m.id == model_id), None)
         if model is None:
             logger.warning(f"No model found for {model_id} at {base_url}.")
