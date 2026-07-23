@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
   displayModelEndpointExtra,
   mergeModelEndpointApiKeyExtra,
+  mergeModelEndpointLlmContext,
   pickDefaultEndpoint,
   prepareModelEndpointExtraForSubmit,
   revealModelEndpointApiKey,
   resolveEmbedderName,
   splitModelEndpointApiKeyExtra,
+  splitModelEndpointLlmContext,
   validateModelEndpoint,
 } from "./models";
 import type { ModelEndpointResponse } from "./models";
@@ -253,6 +255,63 @@ describe("model endpoint secret placeholders", () => {
       ),
     ).toEqual({
       implementation: "vllm",
+    });
+  });
+});
+
+describe("LLM context token-budget extra fields", () => {
+  it("splits the two budgets out of extra into form-field strings", () => {
+    expect(
+      splitModelEndpointLlmContext({
+        implementation: "vllm",
+        max_llm_context_size: 32768,
+        max_output_tokens: 2048,
+      }),
+    ).toEqual({
+      llmContext: { maxContextSize: "32768", maxOutputTokens: "2048" },
+      extra: { implementation: "vllm" },
+    });
+  });
+
+  it("yields blank fields when the budgets are absent", () => {
+    expect(splitModelEndpointLlmContext({ implementation: "vllm" })).toEqual({
+      llmContext: { maxContextSize: "", maxOutputTokens: "" },
+      extra: { implementation: "vllm" },
+    });
+  });
+
+  it("merges non-blank budget fields back into extra as numbers", () => {
+    expect(
+      mergeModelEndpointLlmContext(
+        { implementation: "vllm" },
+        { maxContextSize: "32768", maxOutputTokens: "2048" },
+      ),
+    ).toEqual({
+      implementation: "vllm",
+      max_llm_context_size: 32768,
+      max_output_tokens: 2048,
+    });
+  });
+
+  it("clears a budget key when its field is left blank", () => {
+    expect(
+      mergeModelEndpointLlmContext(
+        { implementation: "vllm", max_llm_context_size: 8192, max_output_tokens: 1024 },
+        { maxContextSize: "16384", maxOutputTokens: "" },
+      ),
+    ).toEqual({
+      implementation: "vllm",
+      max_llm_context_size: 16384,
+    });
+  });
+
+  it("round-trips split → merge without touching unrelated extra keys", () => {
+    const stored = { implementation: "vllm", api_key: "sk-x", max_output_tokens: 512 };
+    const { llmContext, extra } = splitModelEndpointLlmContext(stored);
+    expect(mergeModelEndpointLlmContext(extra, llmContext)).toEqual({
+      implementation: "vllm",
+      api_key: "sk-x",
+      max_output_tokens: 512,
     });
   });
 });

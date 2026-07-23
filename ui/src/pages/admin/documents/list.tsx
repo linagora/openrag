@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef, OnChangeFn, RowSelectionState } from "@tanstack/react-table";
-import { Plus, Eye, Trash2, RefreshCw } from "lucide-react";
+import { Download, Plus, Eye, Trash2, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/shared/page-header";
@@ -32,11 +32,13 @@ import { listPartitionFiles, type PartitionFile } from "@/lib/api/documents";
 import { uploadFile, deleteFile, newFileId } from "@/lib/api/indexing";
 import { listPartitions } from "@/lib/api/partitions";
 import { usePermissions } from "@/lib/permissions";
+import { downloadCsv } from "@/lib/csv";
 import { resolveDocumentsPartition } from "./partition-selection";
 
 const fileHref = (partition: string, fileId: string) =>
   `/documents/${encodeURIComponent(partition)}/${encodeURIComponent(fileId)}`;
 const fileLabel = (f: PartitionFile) => (f.filename as string) || f.file_id;
+const str = (v: unknown) => (v == null ? "" : String(v));
 
 export default function DocumentListPage() {
   const queryClient = useQueryClient();
@@ -54,6 +56,8 @@ export default function DocumentListPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [fileSearch, setFileSearch] = useState("");
+  const [indexedSince, setIndexedSince] = useState("");
   const [fileSelection, setFileSelection] = useState<{
     partition: string;
     rows: RowSelectionState;
@@ -143,6 +147,21 @@ export default function DocumentListPage() {
     refetchInterval: 5000,
   });
   const fileRows = useMemo(() => filesQuery.data?.files ?? [], [filesQuery.data?.files]);
+  const filteredFileRows = useMemo(() => {
+    const q = fileSearch.trim().toLowerCase();
+    const indexedSinceTime = indexedSince ? new Date(`${indexedSince}T00:00:00`).getTime() : null;
+    return fileRows.filter((file) => {
+      const filename = fileLabel(file);
+      const fileTime = Date.parse(str(file.indexed_at ?? file.created_at));
+      const matchesSearch =
+        !q ||
+        [filename, file.file_id, file.mimetype].some((value) =>
+          str(value).toLowerCase().includes(q),
+        );
+      const matchesDate = indexedSinceTime === null || (Number.isFinite(fileTime) && fileTime >= indexedSinceTime);
+      return matchesSearch && matchesDate;
+    });
+  }, [fileRows, fileSearch, indexedSince]);
   const fileRowSelection = useMemo(
     () => (fileSelection.partition === selected ? fileSelection.rows : {}),
     [fileSelection.partition, fileSelection.rows, selected],
@@ -158,9 +177,28 @@ export default function DocumentListPage() {
     [selected],
   );
   const selectedFiles = useMemo(
-    () => fileRows.filter((file) => fileRowSelection[file.file_id]),
-    [fileRows, fileRowSelection],
+    () => filteredFileRows.filter((file) => fileRowSelection[file.file_id]),
+    [filteredFileRows, fileRowSelection],
   );
+
+  const exportDocuments = () => {
+    try {
+      downloadCsv(
+        `openrag-documents-${selected || "partition"}.csv`,
+        [
+          { header: "partition", value: () => selected },
+          { header: "file_id", value: (file) => file.file_id },
+          { header: "filename", value: (file) => fileLabel(file) },
+          { header: "mimetype", value: (file) => file.mimetype },
+          { header: "indexed_at", value: (file) => file.indexed_at },
+          { header: "created_at", value: (file) => file.created_at },
+        ],
+        filteredFileRows,
+      );
+    } catch (error) {
+      toast.error(`CSV export failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    }
+  };
 
   useEffect(() => {
     if (!writable && Object.keys(fileRowSelection).length > 0) {
@@ -358,7 +396,7 @@ export default function DocumentListPage() {
         }
       />
 
-      <div className="flex items-center gap-2 mb-4">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         <Label className="text-sm font-medium">Partition</Label>
         <Select value={selected} onValueChange={selectPartition}>
           <SelectTrigger className="w-[220px]">
@@ -372,6 +410,23 @@ export default function DocumentListPage() {
             ))}
           </SelectContent>
         </Select>
+        <div className="relative max-w-xs">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="Search files..."
+            value={fileSearch}
+            onChange={(e) => setFileSearch(e.target.value)}
+            className="pl-9"
+            aria-label="Search files"
+          />
+        </div>
+        <Input
+          type="date"
+          value={indexedSince}
+          onChange={(e) => setIndexedSince(e.target.value)}
+          className="w-[150px]"
+          aria-label="Indexed since"
+        />
         {writable && selectedFiles.length > 0 && (
           <>
             <ConfirmDialog
@@ -400,10 +455,23 @@ export default function DocumentListPage() {
             </p>
           </>
         )}
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           {filesQuery.data && (
-            <p className="text-sm text-muted-foreground">{fileRows.length} file(s)</p>
+            <p className="text-sm text-muted-foreground">
+              {filteredFileRows.length}
+              {(fileSearch || indexedSince) && ` of ${fileRows.length}`} file(s)
+            </p>
           )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={exportDocuments}
+            disabled={!filteredFileRows.length}
+            title="Export filtered documents"
+          >
+            <Download className="h-4 w-4" />
+            Export CSV
+          </Button>
           <Button
             variant="outline"
             size="icon-sm"
@@ -448,7 +516,7 @@ export default function DocumentListPage() {
       ) : (
         <DataTable
           columns={columns}
-          data={fileRows}
+          data={filteredFileRows}
           initialSorting={[{ id: "indexed_at", desc: true }]}
           enableSelection={writable}
           getRowId={(f) => f.file_id}
