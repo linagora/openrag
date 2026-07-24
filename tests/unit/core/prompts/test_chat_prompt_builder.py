@@ -90,6 +90,29 @@ def test_prepend_system_prompt_does_not_mutate_input():
     assert out[1] == {"role": "user", "content": "hi"}
 
 
+def test_prepend_system_prompt_wraps_prefix_in_unsafe_custom_prompt_tag():
+    out = prepend_system_prompt(
+        [],
+        system_template="intro\n{custom_prompt}\nctx={context} date={current_date}",
+        context="C",
+        current_date="2026-04-29",
+        prefix="CUSTOM",
+    )
+    content = out[0]["content"]
+    assert "<unsafe_custom_prompt>\nCUSTOM\n</unsafe_custom_prompt>" in content
+    assert not content.startswith("CUSTOM")  # not prepended raw; framed and spliced at the placeholder
+
+
+def test_prepend_system_prompt_without_prefix_leaves_placeholder_blank():
+    out = prepend_system_prompt(
+        [],
+        system_template="intro\n{custom_prompt}\nctx={context} date={current_date}",
+        context="C",
+        current_date="2026-04-29",
+    )
+    assert out[0]["content"] == "intro\n\nctx=C date=2026-04-29"
+
+
 def test_format_web_context_empty_returns_empty_tuple():
     text, nums, total = format_web_context([], length_function=_word_tokens)
     assert text == ""

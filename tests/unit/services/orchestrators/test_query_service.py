@@ -512,6 +512,129 @@ async def test_chat_without_workspace_unaffected():
     assert call["filter_params"] is None
 
 
+# --------------------------------------------------------------------------- #
+# custom system prompt (client-supplied leading role="system" message)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_chat_custom_system_prompt_prepended_to_rag_context():
+    llm = FakeLLM(chat_responses=["answer [Sources: none]"])
+    svc = _svc(llm=llm)
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [
+                {"role": "system", "content": "CUSTOM"},
+                {"role": "user", "content": "q"},
+            ],
+            "metadata": {},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    sent = llm.chat_calls[0][0]
+    system_messages = [m for m in sent if m["role"] == "system"]
+    assert len(system_messages) == 1
+    content = system_messages[0]["content"]
+    assert not content.startswith("CUSTOM")  # spliced after the intro paragraph, not prepended
+    assert content.index("CUSTOM") < content.index("# Context")
+
+
+@pytest.mark.asyncio
+async def test_chat_custom_system_prompt_survives_history_truncation():
+    llm = FakeLLM(chat_responses=["answer [Sources: none]"])
+    svc = _svc(llm=llm)  # default chat_history_depth=4 (see _config)
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [
+                {"role": "system", "content": "CUSTOM"},
+                {"role": "user", "content": "m1"},
+                {"role": "assistant", "content": "m2"},
+                {"role": "user", "content": "m3"},
+                {"role": "assistant", "content": "m4"},
+                {"role": "user", "content": "m5"},
+            ],
+            "metadata": {},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    sent = llm.chat_calls[0][0]
+    system_messages = [m for m in sent if m["role"] == "system"]
+    assert len(system_messages) == 1
+    content = system_messages[0]["content"]
+    assert not content.startswith("CUSTOM")
+    assert content.index("CUSTOM") < content.index("# Context")
+
+
+@pytest.mark.asyncio
+async def test_chat_without_custom_system_prompt_unaffected():
+    llm = FakeLLM(chat_responses=["answer [Sources: none]"])
+    svc = _svc(llm=llm)
+    await svc.chat(
+        partitions=["p1"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    sent = llm.chat_calls[0][0]
+    system_messages = [m for m in sent if m["role"] == "system"]
+    assert len(system_messages) == 1
+    assert not system_messages[0]["content"].startswith("CUSTOM")
+
+
+@pytest.mark.asyncio
+async def test_chat_mid_conversation_system_message_not_dropped():
+    # A system message that isn't the client's leading pin (raw index 0) but
+    # lands first in the truncated window must survive untouched, not be
+    # mistaken for the pin and silently dropped.
+    llm = FakeLLM(chat_responses=["answer [Sources: none]"])
+    svc = _svc(llm=llm)
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [
+                {"role": "user", "content": "u0"},
+                {"role": "system", "content": "MID"},
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+            ],
+            "metadata": {},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    sent = llm.chat_calls[0][0]
+    assert any(m["content"] == "MID" for m in sent)
+
+
+@pytest.mark.asyncio
+async def test_chat_multiple_leading_system_prompts_all_merged():
+    llm = FakeLLM(chat_responses=["answer [Sources: none]"])
+    svc = _svc(llm=llm)
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [
+                {"role": "system", "content": "SYS1"},
+                {"role": "system", "content": "SYS2"},
+                {"role": "user", "content": "hi"},
+            ],
+            "metadata": {},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    sent = llm.chat_calls[0][0]
+    system_messages = [m for m in sent if m["role"] == "system"]
+    assert len(system_messages) == 1
+    assert "SYS1" in system_messages[0]["content"]
+    assert "SYS2" in system_messages[0]["content"]
+
+
 @pytest.mark.asyncio
 async def test_complete_strips_and_filters():
     svc = _svc(llm=FakeLLM(gen_text="text body [Sources: none]"))

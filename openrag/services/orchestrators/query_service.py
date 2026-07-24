@@ -35,7 +35,6 @@ verbatim (no langchain import in this module).
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime
@@ -49,6 +48,7 @@ from core.prompts import (
     format_context,
     format_web_context,
     load_template_by_key,
+    prepend_system_prompt,
 )
 from core.utils.exceptions import WorkspaceNotFoundError
 from core.utils.logging import get_logger
@@ -390,6 +390,7 @@ class QueryService:
 
     async def _prepare_chat(self, partition: list[str] | None, payload: dict, llm: LLM | None = None):
         messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
+        custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
         queries = await self.generate_query(messages, llm=llm)
 
         metadata = payload.get("metadata") or {}
@@ -458,16 +459,13 @@ class QueryService:
                 context = ""
             context = f"{context}{SOURCE_SEPARATOR}{web_formatted}" if context else web_formatted
 
-        new_messages = copy.deepcopy(messages)
         tmpl = self._spoken_style_answer_prompt if spoken_style else self._sys_prompt_tmplt
-        new_messages.insert(
-            0,
-            {
-                "role": "system",
-                "content": tmpl.format(
-                    context=context, current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
-                ),
-            },
+        new_messages = prepend_system_prompt(
+            messages,
+            tmpl,
+            context=context,
+            current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
+            prefix=custom_prompt,
         )
         payload["messages"] = new_messages
         return payload, docs, web_results
@@ -643,6 +641,31 @@ def _json_slice(text: str) -> str:
 def _summary_doc(chunk, summary: str):
     """A summarised copy of a LangChain Document (page_content replaced)."""
     return chunk.__class__(page_content=summary, metadata=chunk.metadata)
+
+
+def _split_leading_system_prompt(raw_messages: list[dict], truncated: list[dict]) -> tuple[str | None, list[dict]]:
+    """Pull a client-pinned leading system prompt out of ``raw_messages``.
+
+    A leading run of ``role="system"`` messages in ``raw_messages`` (the
+    untruncated payload) is a pinned instruction, not a chat turn. The same
+    entries are stripped from ``truncated`` only when identity-matched against
+    ``raw_messages`` at the same position, so a system message elsewhere in
+    history that merely lands first after chat_history_depth truncation is
+    never mistaken for the pin and dropped.
+    """
+    parts: list[str] = []
+    i = 0
+    while i < len(raw_messages) and raw_messages[i]["role"] == "system":
+        parts.append(raw_messages[i]["content"])
+        i += 1
+
+    strip = 0
+    for j in range(min(i, len(truncated))):
+        if truncated[j] is not raw_messages[j]:
+            break
+        strip += 1
+
+    return ("\n\n".join(parts) if parts else None), truncated[strip:]
 
 
 def _dedupe_web(web_lists: list[list]) -> list:
