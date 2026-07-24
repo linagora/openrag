@@ -26,13 +26,29 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Fail if the tagged commit is not on main
+          persist-credentials: false
+      # Tag name and SHA are passed as env data, never interpolated into the
+      # script body: ${{ }} expands before the shell runs, and git permits
+      # ; $ ` " | & in ref names — so a crafted tag could otherwise execute
+      # arbitrary code in this privileged publishing workflow.
+      - name: Verify this is an exact GA release tag on main
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          TAG_SHA: ${{ github.sha }}
         run: |
+          # The job-level `if` only filters well-formed `-rc.` tags (owned by
+          # build_rc.yml). Anything else reaching here must be an exact GA tag:
+          # a near-miss like `v1.2.3-rc1` matches neither workflow's intent and
+          # would otherwise publish a prerelease as GA and move `latest`.
+          if ! printf '%s' "$TAG_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::$TAG_NAME is not an exact GA release tag (vMAJOR.MINOR.PATCH) — refusing to publish GA images."
+            exit 1
+          fi
           git fetch --no-tags origin main
-          if git merge-base --is-ancestor "${{ github.sha }}" FETCH_HEAD; then
-            echo "OK: ${{ github.ref_name }} (${{ github.sha }}) is on main"
+          if git merge-base --is-ancestor "$TAG_SHA" FETCH_HEAD; then
+            echo "OK: $TAG_NAME ($TAG_SHA) is an exact GA tag on main"
           else
-            echo "::error::Tag ${{ github.ref_name }} is not on main — refusing to build GA images."
+            echo "::error::$TAG_NAME is not on main — refusing to publish GA images."
             exit 1
           fi
 
