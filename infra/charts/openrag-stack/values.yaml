@@ -33,7 +33,7 @@ ray:
   image:
     repository: ghcr.io/linagora/openrag-ray
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "1.1.13"
+    tag: "v2.0.1"
 
 # === PostgreSQL (bitnami) ===
 postgresql:
@@ -262,7 +262,7 @@ adminUi:
     repository: linagoraai/openrag-admin-ui
     # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
     # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
-    tag: "v2.0.0"
+    tag: "v2.0.1"
   imagePullPolicy: IfNotPresent
   replicaCount: 1
   service:
@@ -276,7 +276,7 @@ openrag:
   image:
     repository: linagoraai/openrag
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "1.1.13"
+    tag: "v2.0.1"
   service:
     type: ClusterIP
     port: 8080
