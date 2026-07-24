@@ -48,6 +48,31 @@ def test_registered():
     assert "structured_section" in chunking_registry
 
 
+def test_registered_via_package_import_only():
+    # Production never imports ``core.chunking.structured_section`` directly: the
+    # factory and the admin preset options both go through ``core.chunking`` and
+    # rely on the strategy self-registering when the package is imported. This
+    # test file imports the module at the top (registering it process-wide), so
+    # it can't observe the gap — a clean subprocess that imports ONLY the package
+    # can. Regression: the strategy was registered nowhere in the import graph,
+    # so ``create_chunker('structured_section')`` raised and the admin UI never
+    # listed it.
+    import os
+    import subprocess
+    import sys
+
+    import core
+
+    src = os.path.dirname(os.path.dirname(os.path.abspath(core.__file__)))
+    code = (
+        "from core.chunking import chunking_registry\n"
+        "assert 'structured_section' in chunking_registry, sorted(chunking_registry.list_registered())\n"
+    )
+    env = {**os.environ, "PYTHONPATH": src + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, f"structured_section not registered via package import: {r.stderr}"
+
+
 def test_returns_chunks_with_structure_metadata():
     chunks = _chunker(chunk_size=40).chunk(_doc(LEGAL), partition="p1")
     assert chunks
