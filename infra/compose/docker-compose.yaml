@@ -18,7 +18,7 @@ x-openrag-env: &openrag_env
   FONT_PATH: ${FONT_PATH:-/app/data/fonts/GoNotoCurrent-Regular.ttf}
 
 x-openrag: &openrag_template
-  image: linagoraai/openrag:v2.0.1
+  image: linagoraai/openrag:v2.0.2
   # Start as root so entrypoint.sh can grant GID-0 write on the bind-mounted
   # writable dirs (data/, logs/, the HF cache) — which a non-root container
   # can't write when Docker auto-creates them root-owned — then it immediately
@@ -113,7 +113,7 @@ x-vllm: &vllm_template
 services:
   # ── Admin UI (React SPA + nginx, same-origin reverse proxy to the API) ──
   admin-ui:
-    image: linagoraai/openrag-admin-ui:v2.0.1
+    image: linagoraai/openrag-admin-ui:v2.0.2
     build:
       context: ../..
       dockerfile: infra/docker/ui.Dockerfile
