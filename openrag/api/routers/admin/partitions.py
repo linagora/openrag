@@ -383,8 +383,10 @@ async def get_partition_config(
 **Response:**
 Returns list of partition members with:
 - `user_id`: User identifier
+- `display_name`: Human-readable name, when available
+- `email`: Account email, when available
 - `role`: User's role (owner, editor, or viewer)
-- Additional user details
+- `added_at`: Membership creation time
 
 **Permissions:**
 - Requires partition owner role

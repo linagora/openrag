@@ -212,9 +212,16 @@ class FakeVectorStore:
 
 
 class FakeUserRepo:
-    def __init__(self, existing: set[int] | None = None, display_names: dict[int, str] | None = None):
+    def __init__(
+        self,
+        existing: set[int] | None = None,
+        display_names: dict[int, str] | None = None,
+        emails: dict[int, str] | None = None,
+    ):
         self._existing = existing if existing is not None else set()
         self._display_names = display_names or {}
+        self._emails = emails or {}
+        self.requested_user_ids: list[int] = []
 
     async def user_exists(self, user_id: int) -> bool:
         return user_id in self._existing
@@ -222,7 +229,23 @@ class FakeUserRepo:
     async def get_user(self, user_id: int):
         if user_id not in self._existing:
             return None
-        return SimpleNamespace(display_name=self._display_names.get(user_id))
+        return SimpleNamespace(
+            id=user_id,
+            display_name=self._display_names.get(user_id),
+            email=self._emails.get(user_id),
+        )
+
+    async def get_users_by_ids(self, user_ids: list[int]):
+        self.requested_user_ids = user_ids
+        return [
+            SimpleNamespace(
+                id=user_id,
+                display_name=self._display_names.get(user_id),
+                email=self._emails.get(user_id),
+            )
+            for user_id in user_ids
+            if user_id in self._existing
+        ]
 
 
 def _svc(
@@ -837,12 +860,24 @@ async def test_list_members_missing_partition_404():
 
 
 @pytest.mark.asyncio
-async def test_list_members_enriches_with_display_name():
+async def test_list_members_enriches_with_user_identity_in_one_lookup():
     mrepo = FakeMembershipRepo(members={(9, "p")})
-    urepo = FakeUserRepo({9}, display_names={9: "Alice"})
+    urepo = FakeUserRepo(
+        {9},
+        display_names={9: "Alice"},
+        emails={9: "alice@example.com"},
+    )
     svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=urepo)
     members = await svc.list_members("p")
-    assert members == [{"user_id": 9, "role": "viewer", "display_name": "Alice"}]
+    assert members == [
+        {
+            "user_id": 9,
+            "role": "viewer",
+            "display_name": "Alice",
+            "email": "alice@example.com",
+        }
+    ]
+    assert urepo.requested_user_ids == [9]
 
 
 @pytest.mark.asyncio
@@ -852,6 +887,7 @@ async def test_list_members_missing_user_display_name_is_none():
     svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=urepo)
     members = await svc.list_members("p")
     assert members[0]["display_name"] is None
+    assert members[0]["email"] is None
 
 
 @pytest.mark.asyncio

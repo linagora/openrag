@@ -169,3 +169,41 @@ async def test_list_users_dict_includes_email():
     users = await repo.list_users_dict()
 
     assert users[0]["email"] == "alice@example.com"
+
+
+@pytest.mark.asyncio
+async def test_get_users_by_ids_fetches_all_users_in_one_query():
+    from services.persistence.user_repo import PgUserRepository
+
+    pool = _FakePool()
+    pool.set_rows(
+        _FakeRow(
+            id=42,
+            display_name="Alice",
+            external_user_id="kc-alice",
+            email="alice@example.com",
+            token=None,
+            is_admin=False,
+            file_quota=None,
+            file_count=0,
+            created_at=__import__("datetime").datetime(2026, 1, 1),
+        ),
+        _FakeRow(
+            id=84,
+            display_name="Bob",
+            external_user_id="kc-bob",
+            email="bob@example.com",
+            token=None,
+            is_admin=False,
+            file_quota=None,
+            file_count=0,
+            created_at=__import__("datetime").datetime(2026, 1, 2),
+        ),
+    )
+    repo = PgUserRepository(pool_getter=lambda: pool)
+
+    users = await repo.get_users_by_ids([42, 84])
+
+    assert [user.id for user in users] == [42, 84]
+    assert pool.last_params == ([42, 84],)
+    assert "ANY($1::int[])" in (pool.last_query or "")

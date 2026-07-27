@@ -51,6 +51,8 @@ import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 import { formatDate, intOr } from "@/lib/utils";
+import { PartitionMemberIdentity } from "./partition-member-identity";
+import { describePartitionMember } from "./partition-member";
 
 // --- General Tab ---
 
@@ -477,9 +479,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                 {usersQuery.data.members.map((user) => (
                   <TableRow key={user.user_id}>
                     <TableCell className="text-sm">
-                      {user.display_name || (
-                        <span className="font-mono text-muted-foreground">{user.user_id}</span>
-                      )}
+                      <PartitionMemberIdentity member={user} />
                     </TableCell>
                     <TableCell>
                       {canManage ? (
@@ -510,13 +510,14 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                       <TableCell>
                         <ConfirmDialog
                           title="Remove User"
-                          description={`Remove user "${user.display_name || user.user_id}" from this partition? They will lose access to partition data.`}
+                          description={`Remove ${describePartitionMember(user)} from this partition? They will lose access to partition data.`}
                           onConfirm={() => removeMutation.mutate(user.user_id)}
                         >
                           <Button
                             variant="ghost"
                             size="sm"
                             disabled={removeMutation.isPending}
+                            aria-label={`Remove ${describePartitionMember(user)} from partition`}
                           >
                             <Trash2 className="h-3 w-3 text-destructive" />
                           </Button>
