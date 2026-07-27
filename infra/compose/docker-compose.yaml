@@ -125,7 +125,7 @@ services:
         # to CORS_EXTRA_ORIGINS on the API.
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
         VITE_BASE_PATH: "/app/"
-        # Optional Grafana dashboard link on the admin "System" page; branding name.
+        # Build-time Grafana fallback; prefer runtime GRAFANA_URL in .env.
         VITE_GRAFANA_URL: ${VITE_GRAFANA_URL:-}
         VITE_APP_NAME: ${VITE_APP_NAME:-OpenRAG}
     restart: unless-stopped

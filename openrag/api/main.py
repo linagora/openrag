@@ -57,6 +57,7 @@ from api.routers.user.extract import router as extract_router
 from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
 from api.runtime_flags import WITH_CHAINLIT_UI, WITH_OPENAI_API
+from api.runtime_ui import get_grafana_url
 from core.config import load_config
 from core.utils.banner import print_startup_banner
 from core.utils.logging import get_logger
@@ -340,6 +341,7 @@ def get_config():
         **redact_secrets(jsonable_encoder(settings)),
         "super_admin_mode": SUPER_ADMIN_MODE,
         "chainlit_enabled": WITH_CHAINLIT_UI,
+        "grafana_url": get_grafana_url(),
     }
 
 

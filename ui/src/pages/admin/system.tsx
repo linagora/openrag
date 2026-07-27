@@ -17,7 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 
-const GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || "";
+const BUILD_TIME_GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || "";
 
 function actorStateColor(state: string): string {
   const s = state.toUpperCase();
@@ -27,15 +27,29 @@ function actorStateColor(state: string): string {
 }
 
 export default function SystemPage() {
+  const { data: config } = useQuery({
+    queryKey: ["system-config"],
+    queryFn: getConfig,
+    staleTime: Infinity,
+  });
+  const runtimeGrafanaUrl =
+    typeof config?.grafana_url === "string" ? config.grafana_url.trim() : "";
+  const grafanaUrl = runtimeGrafanaUrl || BUILD_TIME_GRAFANA_URL;
+
   return (
     <div>
       <PageHeader
         title="System"
         description="Status, Ray actors, metrics and configuration"
         actions={
-          GRAFANA_URL ? (
+          grafanaUrl ? (
             <Button variant="outline" asChild>
-              <a href={GRAFANA_URL} target="_blank" rel="noopener noreferrer">
+              <a
+                href={grafanaUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="View Grafana dashboard (opens in a new tab)"
+              >
                 <ExternalLink className="mr-2 h-4 w-4" />
                 View in Grafana
               </a>
@@ -59,7 +73,7 @@ export default function SystemPage() {
           <ActorsTab />
         </TabsContent>
         <TabsContent value="metrics">
-          <MetricsTab />
+          <MetricsTab grafanaUrl={grafanaUrl} />
         </TabsContent>
         <TabsContent value="config">
           <ConfigTab />
@@ -174,7 +188,7 @@ function ActorsTab() {
   );
 }
 
-function MetricsTab() {
+function MetricsTab({ grafanaUrl }: { grafanaUrl: string }) {
   const { data, isLoading } = useQuery({
     queryKey: ["system-metrics"],
     queryFn: getMetrics,
@@ -196,11 +210,16 @@ function MetricsTab() {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle>Prometheus Metrics</CardTitle>
-        {GRAFANA_URL && (
+        {grafanaUrl && (
           <Button variant="outline" size="sm" asChild>
-            <a href={GRAFANA_URL} target="_blank" rel="noopener noreferrer">
+            <a
+              href={grafanaUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Open metrics dashboard in Grafana (opens in a new tab)"
+            >
               <ExternalLink className="mr-2 h-3.5 w-3.5" />
-              Grafana
+              Open in Grafana
             </a>
           </Button>
         )}

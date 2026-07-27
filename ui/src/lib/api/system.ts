@@ -12,6 +12,12 @@ export interface VersionResponse {
   version: string;
 }
 
+export interface SystemConfig extends Record<string, unknown> {
+  chainlit_enabled?: boolean;
+  grafana_url?: string | null;
+  super_admin_mode?: boolean;
+}
+
 export interface RayActor {
   actor_id: string;
   name: string;
@@ -29,7 +35,7 @@ export function getVersion() {
 }
 
 export function getConfig() {
-  return request<Record<string, unknown>>("/config");
+  return request<SystemConfig>("/config");
 }
 
 export function getMetrics() {

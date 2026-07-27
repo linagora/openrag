@@ -334,6 +334,7 @@ env:
     ENABLE_RAY_SERVE: "true"
     RAY_SERVE_NUM_REPLICAS: "4"
     RAY_SERVE_PORT: "80"
+    GRAFANA_URL: ""
 
     WITH_CHAINLIT_UI: "false"
     SAVE_UPLOADED_FILES: "false"
