@@ -318,10 +318,17 @@ class PartitionService:
         # error rather than the generic identifier-allowlist rejection.
         #
         # The ``__eval_`` prefix is reserved for the same reason it is filtered
-        # out of the listings below: a user-created ``__eval_x`` would be a real
-        # partition that no listing, and therefore no admin audit and no
-        # ``partitions=all`` search, can see. Lowercased before the prefix test
-        # so ``__EVAL_x`` cannot be used to sit just outside the filter.
+        # out of the listings below: a user-created ``__eval_x`` would be a
+        # real, quota-consuming partition that no listing — and therefore no
+        # admin audit — can see. Lowercased before the prefix test so
+        # ``__EVAL_x`` cannot be used to sit just outside the filter.
+        #
+        # The prefix is hidden from the listings and from the ``all`` fan-out
+        # in ``RetrievalService``; it is *not* hidden from a SUPER_ADMIN_MODE
+        # admin's raw ``GET /search?partitions=all``, where the wildcard is an
+        # intentionally unscoped Milvus query with no partition clause to
+        # narrow. Reserving the name is what keeps that surface honest: the
+        # only ``__eval_*`` rows that can exist are a live run's own.
         #
         # ``allow_reserved`` covers the eval namespace only. ``all`` stays
         # rejected for every caller: it collides with the cross-partition

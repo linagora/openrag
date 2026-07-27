@@ -28,6 +28,7 @@ import asyncio
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from core.models.evaluation import is_eval_partition
 from core.prompts import load_template_by_key
 from core.retrieval.pipeline import RetrieverPipeline
 from core.retrieval.retriever import (
@@ -227,8 +228,16 @@ class RetrievalService:
         # layer post-authorization (a SUPER_ADMIN_MODE admin; regular users are
         # already expanded to their memberships upstream), so every hydrated
         # partition is in scope.
+        #
+        # Every *user-facing* one, that is. A run's throwaway ``__eval_*``
+        # partition is hydrated like any other — it has to be, because the run
+        # measures retrieval by searching it by name — but it is filtered out
+        # of the partition listings, so letting the wildcard put it back would
+        # feed an admin's ``openrag-all`` chat context from a partition no
+        # listing shows and no detail view can reach. Named access is
+        # unaffected; only the meaning of "all" is narrowed.
         if "all" in partitions and configs:
-            partitions = list(configs.keys())
+            partitions = [name for name in configs if not is_eval_partition(name)]
         elif not partitions or not configs:
             # Nothing to expand (no partitions exist yet) — keep the single
             # legacy pipeline; there is no per-partition config to honour.

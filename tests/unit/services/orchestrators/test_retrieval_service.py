@@ -330,6 +330,83 @@ async def test_retrieve_all_expands_to_per_partition_embedders():
 
 
 @pytest.mark.asyncio
+async def test_retrieve_all_skips_throwaway_eval_partitions():
+    """A run's `__eval_*` partition is hydrated like any other — the run has to
+    search it by name to measure retrieval — but it is filtered out of the
+    partition listings. The wildcard must not put it back, or a super-admin's
+    `openrag-all` chat draws context from a partition no listing shows.
+    """
+    per_partition: dict[str, FakeSearcher] = {}
+
+    def factory(name: str) -> FakeSearcher:
+        s = per_partition.setdefault(name, FakeSearcher())
+        s.search_result = [_chunk(f"{name}-hit")]
+        return s
+
+    cfg = _config()
+    cfg.partitions = {
+        "p1": _partition(name="p1", embedder="embed-1"),
+        "__eval_deadbeef": _partition(name="__eval_deadbeef", embedder="embed-eval"),
+    }
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=factory,
+    )
+
+    out = await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+    assert set(per_partition) == {"embed-1"}
+    assert {c.id for c in out} == {"embed-1-hit"}
+
+
+@pytest.mark.asyncio
+async def test_retrieve_names_an_eval_partition_explicitly():
+    """Narrowing "all" must not cost the run its own retrieval: the eval
+    partition stays reachable by name, which is how the run is measured."""
+    s = FakeSearcher()
+    s.search_result = [_chunk("eval-hit")]
+    cfg = _config()
+    cfg.partitions = {"__eval_deadbeef": _partition(name="__eval_deadbeef")}
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda name: s,
+    )
+
+    out = await svc.retrieve(partitions=["__eval_deadbeef"], query=Query(query="hello"))
+
+    assert s.search_calls[0]["partition"] == ["__eval_deadbeef"]
+    assert {c.id for c in out} == {"eval-hit"}
+
+
+@pytest.mark.asyncio
+async def test_retrieve_all_with_only_eval_partitions_returns_nothing():
+    """Fail closed rather than falling back to the unscoped legacy pipeline:
+    with nothing user-facing to search, "all" matches nothing."""
+    s = FakeSearcher()
+    s.search_result = [_chunk("eval-hit")]
+    cfg = _config()
+    cfg.partitions = {"__eval_deadbeef": _partition(name="__eval_deadbeef")}
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda name: s,
+    )
+
+    out = await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+    assert out == []
+    assert s.search_calls == []
+
+
+@pytest.mark.asyncio
 async def test_retrieve_all_applies_partition_top_n():
     """The reranker top_n was dropped on the `all` path (default_top_k was None).
     With expansion, each partition's top_n truncates its results."""
