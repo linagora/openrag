@@ -285,17 +285,25 @@ class EvalRunner:
         outputs: dict[str, Any] = {}
         with tempfile.TemporaryDirectory(prefix="openrag-eval-") as workdir:
             root = Path(workdir)
+            # promptfoo keeps a SQLite eval history under its config dir,
+            # defaulting to $HOME/.promptfoo. That path is not reliably writable
+            # by the container's non-root user, and the failure is silent: the
+            # migration fails and the CLI exits 1 with no output on either
+            # stream. A per-run directory sidesteps that and any contention
+            # between deployments sharing a home.
+            config_dir = root / "promptfoo-home"
+            config_dir.mkdir()
             for name, config in configs.items():
                 self._check_cancelled()
                 config_path = root / f"{name}.yaml"
                 output_path = root / f"{name}-results.json"
-                config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
-                await self._exec_promptfoo(config_path, output_path)
+                config_path.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8")
+                await self._exec_promptfoo(config_path, output_path, config_dir)
                 outputs[name] = json.loads(output_path.read_text(encoding="utf-8"))
 
         return outputs["retrieval"], outputs["answer"]
 
-    async def _exec_promptfoo(self, config_path: Path, output_path: Path) -> None:
+    async def _exec_promptfoo(self, config_path: Path, output_path: Path, config_dir: Path) -> None:
         binary = os.getenv("PROMPTFOO_BIN", "promptfoo")
         env = {
             **os.environ,
@@ -304,6 +312,10 @@ class EvalRunner:
             # Results are already persisted on the run row; the local eval
             # history database would just grow inside the container.
             "PROMPTFOO_DISABLE_SHARING": "1",
+            "PROMPTFOO_CONFIG_DIR": str(config_dir),
+            # WAL mode fails on some container filesystems; disabling it keeps
+            # that warning out of the failure output.
+            "PROMPTFOO_DISABLE_WAL_MODE": "true",
         }
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -326,7 +338,7 @@ class EvalRunner:
             ) from exc
 
         try:
-            _, stderr = await asyncio.wait_for(self._process.communicate(), timeout=_PROMPTFOO_TIMEOUT_SECONDS)
+            stdout, stderr = await asyncio.wait_for(self._process.communicate(), timeout=_PROMPTFOO_TIMEOUT_SECONDS)
         except TimeoutError as exc:
             self._process.kill()
             raise EvalRunError("promptfoo timed out.") from exc
@@ -338,8 +350,17 @@ class EvalRunner:
         # promptfoo exits non-zero when assertions fail, which is a result, not
         # an error — the output file is what decides.
         if not output_path.exists():
-            detail = (stderr or b"").decode("utf-8", "replace")[-_ERROR_TAIL_CHARS:]
-            raise EvalRunError(f"promptfoo produced no output (exit {returncode}): {detail}")
+            # Both streams: promptfoo reports config errors on stdout, and a
+            # failure to open its database produces nothing on either.
+            detail = "\n".join(
+                part
+                for part in (
+                    (stdout or b"").decode("utf-8", "replace").strip(),
+                    (stderr or b"").decode("utf-8", "replace").strip(),
+                )
+                if part
+            )[-_ERROR_TAIL_CHARS:]
+            raise EvalRunError(f"promptfoo produced no output (exit {returncode}): {detail or '(no output)'}")
 
     # ── teardown ─────────────────────────────────────────────────────
 
