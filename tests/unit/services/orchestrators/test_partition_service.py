@@ -130,12 +130,15 @@ class FakeMembershipRepo:
         self,
         members: set[tuple[int, str]] | None = None,
         owned: dict[int, int] | None = None,
+        candidate_rows: list[dict] | None = None,
     ):
         self._members = members or set()
         self._owned = owned or {}  # user_id -> number of partitions owned
+        self._candidate_rows = candidate_rows or []
         self.added: list[tuple[str, int, str]] = []
         self.removed: list[tuple[str, int]] = []
         self.role_updates: list[tuple[str, int, str]] = []
+        self.candidate_calls: list[dict] = []
 
     async def list_user_partitions(self, user_id: int):
         from core.models.user import PartitionRole, UserPartition
@@ -150,6 +153,32 @@ class FakeMembershipRepo:
 
     async def list_partition_members(self, partition: str) -> list[dict]:
         return [{"user_id": u, "role": "viewer"} for (u, p) in self._members if p == partition]
+
+    async def list_partition_member_candidates(
+        self,
+        partition: str,
+        *,
+        search: str | None,
+        offset: int,
+        limit: int,
+    ) -> list[dict]:
+        self.candidate_calls.append(
+            {
+                "partition": partition,
+                "search": search,
+                "offset": offset,
+                "limit": limit,
+            }
+        )
+        rows = [
+            row
+            for row in self._candidate_rows
+            if (row["user_id"], partition) not in self._members
+            and (
+                search is None or search.lower() in (row["display_name"] or "").lower() or search in str(row["user_id"])
+            )
+        ]
+        return rows[offset : offset + limit]
 
     async def add_partition_member(self, partition: str, user_id: int, role: str) -> bool:
         self.added.append((partition, user_id, role))
@@ -837,33 +866,64 @@ async def test_list_members_missing_partition_404():
 
 @pytest.mark.asyncio
 async def test_list_member_candidates_excludes_existing_members():
-    users = [
-        User(id=1, display_name="Partition owner"),
-        User(id=2, display_name="Sam"),
-        User(id=3, display_name="Sam"),
+    candidate_rows = [
+        {"user_id": 1, "display_name": "Partition owner"},
+        {"user_id": 2, "display_name": "Sam"},
+        {"user_id": 3, "display_name": "Sam"},
     ]
+    mrepo = FakeMembershipRepo(
+        {(1, "p"), (3, "p")},
+        candidate_rows=candidate_rows,
+    )
     svc = _svc(
         prepo=FakePartitionRepo({"p"}),
-        mrepo=FakeMembershipRepo({(1, "p"), (3, "p")}),
-        urepo=FakeUserRepo({1, 2, 3}, users),
+        mrepo=mrepo,
     )
 
-    assert await svc.list_member_candidates("p") == [
-        {"user_id": 2, "display_name": "Sam"},
+    assert await svc.list_member_candidates("p", search="  sam  ") == {
+        "candidates": [{"user_id": 2, "display_name": "Sam"}],
+        "offset": 0,
+        "limit": 25,
+        "has_more": False,
+        "next_offset": None,
+    }
+    assert mrepo.candidate_calls == [
+        {
+            "partition": "p",
+            "search": "sam",
+            "offset": 0,
+            "limit": 26,
+        }
     ]
 
 
 @pytest.mark.asyncio
-async def test_list_member_candidates_reads_every_user_page():
-    users = [User(id=user_id, display_name=f"User {user_id}") for user_id in range(1, 102)]
+async def test_list_member_candidates_returns_bounded_page_with_continuation():
+    candidate_rows = [{"user_id": user_id, "display_name": f"User {user_id}"} for user_id in range(1, 102)]
+    mrepo = FakeMembershipRepo(candidate_rows=candidate_rows)
     svc = _svc(
         prepo=FakePartitionRepo({"p"}),
-        urepo=FakeUserRepo(set(range(1, 102)), users),
+        mrepo=mrepo,
     )
 
-    candidates = await svc.list_member_candidates("p")
+    page = await svc.list_member_candidates("p", offset=10, limit=20)
 
-    assert [candidate["user_id"] for candidate in candidates] == list(range(1, 102))
+    assert [candidate["user_id"] for candidate in page["candidates"]] == list(range(11, 31))
+    assert page == {
+        "candidates": candidate_rows[10:30],
+        "offset": 10,
+        "limit": 20,
+        "has_more": True,
+        "next_offset": 30,
+    }
+    assert mrepo.candidate_calls == [
+        {
+            "partition": "p",
+            "search": None,
+            "offset": 10,
+            "limit": 21,
+        }
+    ]
 
 
 @pytest.mark.asyncio

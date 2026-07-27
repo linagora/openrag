@@ -17,6 +17,11 @@ describe("MemberPicker", () => {
         candidates={candidates}
         isLoading={false}
         isError={false}
+        search=""
+        onSearchChange={vi.fn()}
+        hasMore={false}
+        isLoadingMore={false}
+        onLoadMore={vi.fn()}
         selectedUserIds={[]}
         onSelectionChange={vi.fn()}
       />,
@@ -28,13 +33,19 @@ describe("MemberPicker", () => {
     expect(screen.getByText("User #4")).not.toBeNull();
   });
 
-  it("searches by display name and user ID", async () => {
+  it("forwards search changes to the server-backed query", async () => {
+    const onSearchChange = vi.fn();
     const user = userEvent.setup();
     render(
       <MemberPicker
         candidates={candidates}
         isLoading={false}
         isError={false}
+        search=""
+        onSearchChange={onSearchChange}
+        hasMore={false}
+        isLoadingMore={false}
+        onLoadMore={vi.fn()}
         selectedUserIds={[]}
         onSelectionChange={vi.fn()}
       />,
@@ -43,8 +54,7 @@ describe("MemberPicker", () => {
     const search = screen.getByRole("textbox", { name: "Users" });
     await user.type(search, "3");
 
-    expect(screen.getByText("User ID 3")).not.toBeNull();
-    expect(screen.queryByText("User ID 2")).toBeNull();
+    expect(onSearchChange).toHaveBeenCalledWith("3");
   });
 
   it("returns all selected user IDs when a candidate is checked", async () => {
@@ -55,6 +65,11 @@ describe("MemberPicker", () => {
         candidates={candidates}
         isLoading={false}
         isError={false}
+        search=""
+        onSearchChange={vi.fn()}
+        hasMore={false}
+        isLoadingMore={false}
+        onLoadMore={vi.fn()}
         selectedUserIds={[2]}
         onSelectionChange={onSelectionChange}
       />,
@@ -63,5 +78,28 @@ describe("MemberPicker", () => {
     await user.click(screen.getByRole("checkbox", { name: /select sam lee, user id 3/i }));
 
     expect(onSelectionChange).toHaveBeenCalledWith([2, 3]);
+  });
+
+  it("loads the next server page on request", async () => {
+    const onLoadMore = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MemberPicker
+        candidates={candidates}
+        isLoading={false}
+        isError={false}
+        search=""
+        onSearchChange={vi.fn()}
+        hasMore
+        isLoadingMore={false}
+        onLoadMore={onLoadMore}
+        selectedUserIds={[]}
+        onSelectionChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Load more users" }));
+
+    expect(onLoadMore).toHaveBeenCalledOnce();
   });
 });

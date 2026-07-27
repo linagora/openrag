@@ -203,15 +203,36 @@ export interface PartitionMemberCandidate {
   display_name: string | null;
 }
 
+export interface PartitionMemberCandidatePage {
+  candidates: PartitionMemberCandidate[];
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  next_offset: number | null;
+}
+
+interface ListPartitionMemberCandidatesOptions {
+  search?: string;
+  offset?: number;
+  limit?: number;
+}
+
 export function listPartitionMembers(name: string): Promise<{ members: PartitionMember[] }> {
   return request<{ members: PartitionMember[] }>(`${P}/${enc(name)}/users`);
 }
 
 export function listPartitionMemberCandidates(
   name: string,
-): Promise<{ candidates: PartitionMemberCandidate[] }> {
-  return request<{ candidates: PartitionMemberCandidate[] }>(
-    `${P}/${enc(name)}/users/candidates`,
+  options: ListPartitionMemberCandidatesOptions = {},
+): Promise<PartitionMemberCandidatePage> {
+  const query = new URLSearchParams();
+  const search = options.search?.trim();
+  if (search) query.set("search", search);
+  if (options.offset !== undefined) query.set("offset", String(options.offset));
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  const suffix = query.toString();
+  return request<PartitionMemberCandidatePage>(
+    `${P}/${enc(name)}/users/candidates${suffix ? `?${suffix}` : ""}`,
   );
 }
 

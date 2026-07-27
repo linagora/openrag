@@ -411,9 +411,12 @@ async def list_partition_users(
 
 **Parameters:**
 - `partition`: The partition name
+- `search`: Optional display name or user ID fragment
+- `offset`: Page offset
+- `limit`: Page size (maximum 100)
 
 **Response:**
-Returns non-member users with their display name and stable user ID.
+Returns a bounded page of non-member users and continuation metadata.
 
 **Permissions:**
 - Requires partition owner role
@@ -421,12 +424,20 @@ Returns non-member users with their display name and stable user ID.
 )
 async def list_partition_user_candidates(
     partition: str,
+    search: str | None = Query(default=None, max_length=200),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=25, ge=1, le=100),
     partition_owner=Depends(require_partition_owner),
     service=Depends(get_partition_service),
 ):
-    """List users who are not already members of the given partition."""
-    candidates = await service.list_member_candidates(partition=partition)
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"candidates": candidates})
+    """List a searchable page of users who are not partition members."""
+    page = await service.list_member_candidates(
+        partition=partition,
+        search=search,
+        offset=offset,
+        limit=limit,
+    )
+    return JSONResponse(status_code=status.HTTP_200_OK, content=page)
 
 
 @router.post(

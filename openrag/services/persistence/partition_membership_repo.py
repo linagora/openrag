@@ -123,6 +123,46 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
             partition,
         )
 
+    async def list_partition_member_candidates(
+        self,
+        partition: str,
+        *,
+        search: str | None,
+        offset: int,
+        limit: int,
+    ) -> list[dict]:
+        """Return a bounded page of users who are not partition members."""
+        rows = await self.pool.fetch(
+            """
+            SELECT u.id AS user_id, u.display_name
+            FROM users u
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM partition_memberships m
+                WHERE m.partition_name = $1
+                  AND m.user_id = u.id
+            )
+              AND (
+                $2::text IS NULL
+                OR STRPOS(LOWER(COALESCE(u.display_name, '')), LOWER($2)) > 0
+                OR STRPOS(u.id::text, $2) > 0
+              )
+            ORDER BY u.id
+            LIMIT $3 OFFSET $4
+            """,
+            partition,
+            search,
+            limit,
+            offset,
+        )
+        return [
+            {
+                "user_id": row["user_id"],
+                "display_name": row["display_name"],
+            }
+            for row in rows
+        ]
+
     # ── Legacy method names used by the Phase 7C shim ────────────────
 
     async def list_partition_members(self, partition: str) -> list[dict]:

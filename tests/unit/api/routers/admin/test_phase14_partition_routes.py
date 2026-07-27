@@ -10,7 +10,7 @@ from api.dependencies.auth import (
 )
 from api.routers.admin import partitions
 from di.providers import get_partition_service
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 
 
 def _partition_detail(**overrides: Any) -> dict[str, Any]:
@@ -95,14 +95,34 @@ class FakeMemberCandidateService:
     """Service double for the partition member candidate route."""
 
     def __init__(self) -> None:
-        self.partitions: list[str] = []
+        self.calls: list[dict[str, Any]] = []
 
-    async def list_member_candidates(self, partition: str) -> list[dict[str, Any]]:
-        self.partitions.append(partition)
-        return [
-            {"user_id": 2, "display_name": "Sam"},
-            {"user_id": 3, "display_name": "Sam"},
-        ]
+    async def list_member_candidates(
+        self,
+        partition: str,
+        *,
+        search: str | None,
+        offset: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "partition": partition,
+                "search": search,
+                "offset": offset,
+                "limit": limit,
+            }
+        )
+        return {
+            "candidates": [
+                {"user_id": 2, "display_name": "Sam"},
+                {"user_id": 3, "display_name": "Sam"},
+            ],
+            "offset": offset,
+            "limit": limit,
+            "has_more": True,
+            "next_offset": offset + limit,
+        }
 
 
 def _build_list_app(*, is_admin: bool) -> FastAPI:
@@ -161,16 +181,50 @@ async def test_list_partition_member_candidates_returns_stable_identities(async_
     app = _build_app(service)
 
     async with async_client_factory(app) as client:
-        response = await client.get("/partition/legal/users/candidates")
+        response = await client.get(
+            "/partition/legal/users/candidates",
+            params={"search": "sam", "offset": 20, "limit": 10},
+        )
 
     assert response.status_code == 200
     assert response.json() == {
         "candidates": [
             {"user_id": 2, "display_name": "Sam"},
             {"user_id": 3, "display_name": "Sam"},
-        ]
+        ],
+        "offset": 20,
+        "limit": 10,
+        "has_more": True,
+        "next_offset": 30,
     }
-    assert service.partitions == ["legal"]
+    assert service.calls == [
+        {
+            "partition": "legal",
+            "search": "sam",
+            "offset": 20,
+            "limit": 10,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_partition_member_candidates_rejects_non_owner(async_client_factory):
+    service = FakeMemberCandidateService()
+    app = _build_app(service)
+
+    async def reject_non_owner():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Partition owner role required",
+        )
+
+    app.dependency_overrides[require_partition_owner] = reject_non_owner
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/users/candidates")
+
+    assert response.status_code == 403
+    assert service.calls == []
 
 
 @pytest.mark.asyncio

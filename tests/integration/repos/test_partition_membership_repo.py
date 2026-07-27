@@ -59,3 +59,52 @@ class TestPartitionMemberships:
         )
         assert await postgres_store.membership_repo.remove_partition(user.id, "docs") is True
         assert await postgres_store.membership_repo.list_user_partitions(user.id) == []
+
+    async def test_candidate_search_is_paginated_and_excludes_members(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        member = await postgres_store.user_repo.create_user(
+            _user(display_name="Sam Lee", email="member@example.com"),
+        )
+        candidate = await postgres_store.user_repo.create_user(
+            _user(display_name="Sam Lee", email="candidate@example.com"),
+        )
+        third = await postgres_store.user_repo.create_user(
+            _user(display_name="Taylor", email="taylor@example.com"),
+        )
+        fourth = await postgres_store.user_repo.create_user(
+            _user(display_name="Jordan", email="jordan@example.com"),
+        )
+        await postgres_store.partition_repo.create_partition("docs")
+        await postgres_store.membership_repo.assign_partition(
+            UserPartition(user_id=member.id, partition="docs"),
+        )
+
+        matches = await postgres_store.membership_repo.list_partition_member_candidates(
+            "docs",
+            search="SAM",
+            offset=0,
+            limit=10,
+        )
+        assert matches == [
+            {
+                "user_id": candidate.id,
+                "display_name": "Sam Lee",
+            }
+        ]
+
+        first_page = await postgres_store.membership_repo.list_partition_member_candidates(
+            "docs",
+            search=None,
+            offset=0,
+            limit=2,
+        )
+        second_page = await postgres_store.membership_repo.list_partition_member_candidates(
+            "docs",
+            search=str(fourth.id),
+            offset=0,
+            limit=2,
+        )
+        assert [row["user_id"] for row in first_page] == [candidate.id, third.id]
+        assert [row["user_id"] for row in second_page] == [fourth.id]

@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Search } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,6 +12,11 @@ interface MemberPickerProps {
   candidates: PartitionMemberCandidate[];
   isLoading: boolean;
   isError: boolean;
+  search: string;
+  onSearchChange: (search: string) => void;
+  hasMore: boolean;
+  isLoadingMore: boolean;
+  onLoadMore: () => void;
   selectedUserIds: number[];
   onSelectionChange: (userIds: number[]) => void;
 }
@@ -23,18 +29,15 @@ export function MemberPicker({
   candidates,
   isLoading,
   isError,
+  search,
+  onSearchChange,
+  hasMore,
+  isLoadingMore,
+  onLoadMore,
   selectedUserIds,
   onSelectionChange,
 }: MemberPickerProps) {
-  const [search, setSearch] = useState("");
   const selected = useMemo(() => new Set(selectedUserIds), [selectedUserIds]);
-  const filteredCandidates = useMemo(() => {
-    const query = search.trim().toLocaleLowerCase();
-    if (!query) return candidates;
-    return candidates.filter((candidate) =>
-      `${candidateLabel(candidate)} ${candidate.user_id}`.toLocaleLowerCase().includes(query),
-    );
-  }, [candidates, search]);
 
   const toggleCandidate = (userId: number, checked: boolean) => {
     const next = new Set(selected);
@@ -62,7 +65,7 @@ export function MemberPicker({
         <Input
           id="partition-member-search"
           value={search}
-          onChange={(event) => setSearch(event.target.value)}
+          onChange={(event) => onSearchChange(event.target.value)}
           placeholder="Search by name or user ID..."
           className="pl-9"
         />
@@ -81,39 +84,53 @@ export function MemberPicker({
           </p>
         ) : candidates.length === 0 ? (
           <p className="p-4 text-center text-sm text-muted-foreground">
-            All users are already members of this partition.
-          </p>
-        ) : filteredCandidates.length === 0 ? (
-          <p className="p-4 text-center text-sm text-muted-foreground">
-            No users match this search.
+            {search.trim()
+              ? "No users match this search."
+              : "All users are already members of this partition."}
           </p>
         ) : (
-          <div className="divide-y">
-            {filteredCandidates.map((candidate) => {
-              const label = candidateLabel(candidate);
-              const checkboxId = `partition-member-${candidate.user_id}`;
-              return (
-                <label
-                  key={candidate.user_id}
-                  htmlFor={checkboxId}
-                  className="flex min-h-11 cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/50"
-                >
-                  <Checkbox
-                    id={checkboxId}
-                    checked={selected.has(candidate.user_id)}
-                    onCheckedChange={(checked) => toggleCandidate(candidate.user_id, checked === true)}
-                    aria-label={`Select ${label}, user ID ${candidate.user_id}`}
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium">{label}</span>
-                    <span className="block font-mono text-xs text-muted-foreground">
-                      User ID {candidate.user_id}
+          <>
+            <div className="divide-y">
+              {candidates.map((candidate) => {
+                const label = candidateLabel(candidate);
+                const checkboxId = `partition-member-${candidate.user_id}`;
+                return (
+                  <label
+                    key={candidate.user_id}
+                    htmlFor={checkboxId}
+                    className="flex min-h-11 cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/50"
+                  >
+                    <Checkbox
+                      id={checkboxId}
+                      checked={selected.has(candidate.user_id)}
+                      onCheckedChange={(checked) => toggleCandidate(candidate.user_id, checked === true)}
+                      aria-label={`Select ${label}, user ID ${candidate.user_id}`}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium">{label}</span>
+                      <span className="block font-mono text-xs text-muted-foreground">
+                        User ID {candidate.user_id}
+                      </span>
                     </span>
-                  </span>
-                </label>
-              );
-            })}
-          </div>
+                  </label>
+                );
+              })}
+            </div>
+            {hasMore && (
+              <div className="border-t p-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="w-full"
+                  onClick={onLoadMore}
+                  disabled={isLoadingMore}
+                >
+                  {isLoadingMore ? "Loading..." : "Load more users"}
+                </Button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

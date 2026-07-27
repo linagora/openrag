@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Save, UserPlus, Trash2, CheckCircle, XCircle, Loader2, Info } from "lucide-react";
 import { toast } from "sonner";
 
@@ -382,6 +382,8 @@ function UsersTab({ partitionName }: { partitionName: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
   const [role, setRole] = useState("viewer");
+  const [candidateSearch, setCandidateSearch] = useState("");
+  const [debouncedCandidateSearch, setDebouncedCandidateSearch] = useState("");
   const queryClient = useQueryClient();
   const { canManageMembers } = usePermissions();
 
@@ -397,11 +399,27 @@ function UsersTab({ partitionName }: { partitionName: string }) {
   const callerRole = partitionsQuery.data?.partitions.find((p) => p.partition === partitionName)?.role;
   const canManage = canManageMembers(callerRole);
 
-  const candidatesQuery = useQuery({
-    queryKey: ["partition", partitionName, "member-candidates"],
-    queryFn: () => listPartitionMemberCandidates(partitionName),
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      setDebouncedCandidateSearch(candidateSearch.trim());
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [candidateSearch]);
+
+  const candidatesQuery = useInfiniteQuery({
+    queryKey: ["partition", partitionName, "member-candidates", debouncedCandidateSearch],
+    queryFn: ({ pageParam }) =>
+      listPartitionMemberCandidates(partitionName, {
+        search: debouncedCandidateSearch,
+        offset: pageParam,
+        limit: 25,
+      }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => lastPage.next_offset ?? undefined,
     enabled: dialogOpen && canManage,
   });
+  const candidates = candidatesQuery.data?.pages.flatMap((page) => page.candidates) ?? [];
+  const candidateSearchPending = candidateSearch.trim() !== debouncedCandidateSearch;
 
   const addMutation = useMutation({
     mutationFn: async ({
@@ -447,6 +465,8 @@ function UsersTab({ partitionName }: { partitionName: string }) {
       setDialogOpen(false);
       setSelectedUserIds([]);
       setRole("viewer");
+      setCandidateSearch("");
+      setDebouncedCandidateSearch("");
     },
   });
 
@@ -492,6 +512,8 @@ function UsersTab({ partitionName }: { partitionName: string }) {
     if (!open) {
       setSelectedUserIds([]);
       setRole("viewer");
+      setCandidateSearch("");
+      setDebouncedCandidateSearch("");
     }
   };
 
@@ -593,9 +615,16 @@ function UsersTab({ partitionName }: { partitionName: string }) {
             </DialogHeader>
             <div className="space-y-4">
               <MemberPicker
-                candidates={candidatesQuery.data?.candidates ?? []}
-                isLoading={candidatesQuery.isLoading}
-                isError={candidatesQuery.isError}
+                candidates={candidates}
+                isLoading={candidatesQuery.isLoading || candidateSearchPending}
+                isError={candidatesQuery.isError && candidatesQuery.data === undefined}
+                search={candidateSearch}
+                onSearchChange={setCandidateSearch}
+                hasMore={Boolean(candidatesQuery.hasNextPage)}
+                isLoadingMore={candidatesQuery.isFetchingNextPage}
+                onLoadMore={() => {
+                  void candidatesQuery.fetchNextPage();
+                }}
                 selectedUserIds={selectedUserIds}
                 onSelectionChange={setSelectedUserIds}
               />
@@ -617,7 +646,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setDialogOpen(false)}
+                onClick={() => handleDialogOpenChange(false)}
                 disabled={addMutation.isPending}
               >
                 Cancel
