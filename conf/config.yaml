@@ -122,9 +122,14 @@ verbose:
   level: INFO
 
 # --- Server ---
-# Env: PREFERRED_URL_SCHEME
+# Env: PREFERRED_URL_SCHEME, OPENRAG_INTERNAL_URL
 server:
   preferred_url_scheme: null
+  # internal_url — how out-of-process workers (e.g. the evaluation runner) reach
+  # the API from inside the deployment. Left unset here so it defaults to
+  # http://openrag:$APP_iPORT, following the port uvicorn actually binds. Set
+  # OPENRAG_INTERNAL_URL if the API is not reachable under the compose service
+  # name.
 
 # --- LLM Context ---
 # Env: MAX_LLM_CONTEXT_SIZE, MAX_OUTPUT_TOKENS
@@ -363,3 +368,19 @@ mcp:
   similarity_threshold: 0.8
   download_timeout: 30.0
   max_download_bytes: 104857600  # 100 MiB
+
+# --- Evaluation ---
+# Env: PROMPTFOO_BIN, EVAL_MAX_CORPUS_MB, EVAL_MAX_TESTSET_MB,
+#      EVAL_MAX_TESTSET_ROWS, EVAL_TOP_K, EVAL_TASK_TIMEOUT,
+#      EVAL_TASK_POLL_SECONDS, EVAL_HTTP_TIMEOUT, EVAL_PROMPTFOO_TIMEOUT
+# The runner reaches the API via server.internal_url.
+evaluation:
+  promptfoo_bin: promptfoo
+  max_corpus_mb: 512
+  max_testset_mb: 5
+  max_testset_rows: 500
+  top_k: 5
+  task_timeout_seconds: 1800.0
+  task_poll_seconds: 1.0
+  http_timeout_seconds: 300.0
+  promptfoo_timeout_seconds: 3600.0
