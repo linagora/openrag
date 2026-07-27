@@ -28,6 +28,7 @@ interface BaseDataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[];
   data: TData[];
   pageSize?: number;
+  emptyMessage?: string;
   initialSorting?: SortingState;
   /** Render a leading checkbox column. */
   enableSelection?: boolean;
@@ -54,6 +55,7 @@ export function DataTable<TData, TValue>({
   columns,
   data,
   pageSize = 10,
+  emptyMessage = "No results.",
   initialSorting = [],
   enableSelection = false,
   canSelectRow,
@@ -177,7 +179,7 @@ export function DataTable<TData, TValue>({
                   colSpan={columnCount}
                   className="h-24 text-center text-muted-foreground"
                 >
-                  No results.
+                  {emptyMessage}
                 </TableCell>
               </TableRow>
             )}

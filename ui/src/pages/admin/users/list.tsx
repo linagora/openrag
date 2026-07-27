@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
-import { Trash2, Eye, Plus, Copy } from "lucide-react";
+import { Trash2, Eye, Plus, Copy, Search, X } from "lucide-react";
 import { listUsers, deleteUser, createUser, effectiveQuota } from "@/lib/api/users";
 import type { UserResponse, UserWithToken } from "@/lib/api/users";
 import { getConfig } from "@/lib/api/system";
@@ -26,6 +26,8 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
+const EMPTY_USERS: UserResponse[] = [];
+
 // "indexed / effective-quota", e.g. "11 / 200". ∞ for unlimited; `over` flags
 // users at or past their cap (shown in red) so admins spot blocked uploaders.
 function formatUsage(
@@ -44,6 +46,7 @@ function formatUsage(
 export default function UserListPage() {
   const queryClient = useQueryClient();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [search, setSearch] = useState("");
 
   const { data, isLoading } = useQuery({
     queryKey: ["users"],
@@ -55,6 +58,30 @@ export default function UserListPage() {
   const { data: config } = useQuery({ queryKey: ["system-config"], queryFn: getConfig });
   const globalDefault =
     (config?.rdb as { default_file_quota?: number } | undefined)?.default_file_quota ?? null;
+  const users = data?.users ?? EMPTY_USERS;
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredUsers = useMemo(() => {
+    if (!normalizedSearch) return users;
+    return users.filter((user) =>
+      [
+        user.display_name,
+        user.external_user_id,
+        user.email,
+        String(user.id),
+        `User #${user.id}`,
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(normalizedSearch)),
+    );
+  }, [normalizedSearch, users]);
+  const totalUsersLabel = `${users.length} ${users.length === 1 ? "user" : "users"}`;
+  const resultSummary = normalizedSearch
+    ? `${filteredUsers.length} of ${totalUsersLabel}`
+    : totalUsersLabel;
+  const emptyMessage =
+    users.length === 0
+      ? "No users have been created yet."
+      : `No users match “${search.trim()}”.`;
 
   const deleteMut = useMutation({
     mutationFn: deleteUser,
@@ -167,7 +194,48 @@ export default function UserListPage() {
       {isLoading ? (
         <Skeleton className="h-64" />
       ) : (
-        <DataTable columns={columns} data={data?.users || []} />
+        <div className="space-y-4">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="relative w-full sm:max-w-md">
+              <Label htmlFor="user-search" className="sr-only">
+                Search users
+              </Label>
+              <Search
+                aria-hidden="true"
+                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+              />
+              <Input
+                id="user-search"
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search by name, email or external ID"
+                className="pl-9 pr-10"
+              />
+              {search && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => setSearch("")}
+                  className="absolute right-0.5 top-1/2 -translate-y-1/2"
+                  aria-label="Clear user search"
+                  title="Clear search"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
+            <p
+              role="status"
+              aria-live="polite"
+              className="text-sm text-muted-foreground tabular-nums"
+            >
+              {resultSummary}
+            </p>
+          </div>
+          <DataTable columns={columns} data={filteredUsers} emptyMessage={emptyMessage} />
+        </div>
       )}
 
       <PreProvisionDialog open={dialogOpen} onOpenChange={setDialogOpen} />
