@@ -331,6 +331,68 @@ workspace_files = Table(
 )
 
 
+eval_datasets = Table(
+    "eval_datasets",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("name", String, nullable=False),
+    Column("corpus_file_count", Integer, server_default="0", nullable=False),
+    Column("testset_row_count", Integer, server_default="0", nullable=False),
+    Column(
+        "created_by",
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+    ),
+)
+
+
+eval_runs = Table(
+    "eval_runs",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column(
+        "dataset_id",
+        String,
+        ForeignKey("eval_datasets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("status", String, server_default=text("'QUEUED'"), nullable=False),
+    # Metric payloads, shaped by core.models.evaluation. Stored as JSONB rather
+    # than columns because the metric set is expected to grow.
+    Column("indexing", JSONB, nullable=True),
+    Column("retrieval", JSONB, nullable=True),
+    Column("answer", JSONB, nullable=True),
+    Column("cases", JSONB, nullable=True),
+    Column("error", String, nullable=True),
+    Column(
+        "created_by",
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
+    Column(
+        "started_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+        index=True,
+    ),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    CheckConstraint(
+        "status IN ('QUEUED','INDEXING','EVALUATING','COMPLETED','FAILED','CANCELLED')",
+        name="ck_eval_run_status",
+    ),
+)
+
+
 __all__ = [
     "metadata",
     "model_endpoints",
@@ -343,4 +405,6 @@ __all__ = [
     "partition_memberships",
     "workspaces",
     "workspace_files",
+    "eval_datasets",
+    "eval_runs",
 ]

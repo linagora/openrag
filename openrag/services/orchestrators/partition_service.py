@@ -34,6 +34,7 @@ import numpy as np
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
+from core.models.evaluation import is_eval_partition
 from core.models.preset import PartitionConfig
 from core.utils.conts import is_internal_metadata_key
 from core.utils.exceptions import (
@@ -242,7 +243,8 @@ class PartitionService:
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
 
     async def list_partitions(self) -> list[dict]:
-        return await self._partition_repo.list_partitions()
+        rows = await self._partition_repo.list_partitions()
+        return [row for row in rows if not is_eval_partition(str(row.get("partition", "")))]
 
     async def file_counts_by_partition(self) -> dict[str, int]:
         """Return a ``{partition: document_count}`` map for all partitions (one query)."""

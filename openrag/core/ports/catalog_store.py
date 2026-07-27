@@ -13,6 +13,7 @@ from .chunk_repo import ChunkRepository
 from .conversation_repo import ConversationRepository
 from .document_repo import DocumentRepository
 from .entity_repo import EntityRepository
+from .evaluation_repo import EvaluationRepository
 from .idempotency_repo import IdempotencyRepository
 from .job_repo import JobRepository
 from .model_endpoint_repo import ModelEndpointRepository
@@ -69,6 +70,10 @@ class CatalogStore(ABC):
     @property
     @abstractmethod
     def preset_repo(self) -> PresetRepository: ...
+
+    @property
+    @abstractmethod
+    def evaluation_repo(self) -> EvaluationRepository: ...
 
     @property
     @abstractmethod
