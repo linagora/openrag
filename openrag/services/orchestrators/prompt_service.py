@@ -119,6 +119,12 @@ class PromptService:
 
     async def create_prompt(self, *, prompt_type: str, name: str, content: str, is_default: bool = False) -> Prompt:
         self._validate_type(prompt_type)
+        if await self._repo.get_by_name(prompt_type, name) is not None:
+            raise ValidationError(
+                f"A '{prompt_type}' prompt named '{name}' already exists.",
+                status_code=409,
+                code="PROMPT_EXISTS",
+            )
         return await self._repo.create(
             Prompt(prompt_type=prompt_type, name=name, content=content, is_default=is_default)
         )
@@ -145,6 +151,16 @@ class PromptService:
         existing = await self._repo.get(prompt_id)
         if existing is None:
             raise NotFoundError(f"Prompt '{prompt_id}' not found.")
+
+        new_name = fields.get("name")
+        if new_name is not None and new_name != existing.name:
+            clash = await self._repo.get_by_name(existing.prompt_type, new_name)
+            if clash is not None and clash.id != prompt_id:
+                raise ValidationError(
+                    f"A '{existing.prompt_type}' prompt named '{new_name}' already exists.",
+                    status_code=409,
+                    code="PROMPT_EXISTS",
+                )
 
         promote_to_default = bool(fields.pop("is_default", None))
         updated = existing

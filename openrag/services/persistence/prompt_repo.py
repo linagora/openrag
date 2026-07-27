@@ -140,8 +140,10 @@ class PgPromptRepository(PromptRepository):
         return self._to_model(rec) if rec else None
 
     async def delete(self, prompt_id: str) -> bool:
-        # partition_prompts.prompt_id FKs prompts.id ON DELETE CASCADE, so any
-        # assignments pointing here are removed by the same statement.
+        # Presets/partitions reference prompts by *name* (soft refs in JSONB), so
+        # there is no FK cascade: a deleted prompt's stale references simply
+        # resolve to the global default. The service guards against deleting a
+        # default; callers surface usage counts before offering delete.
         result = await self.pool.execute("DELETE FROM prompts WHERE id = $1", prompt_id)
         return result == "DELETE 1"
 

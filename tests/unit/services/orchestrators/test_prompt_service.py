@@ -142,6 +142,23 @@ class TestCrud:
         with pytest.raises(NotFoundError):
             await _service().get_prompt("nope")
 
+    async def test_create_duplicate_name_per_type_is_rejected(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await svc.create_prompt(prompt_type="sys_prompt", name="formal", content="a")
+        with pytest.raises(ValidationError):
+            await svc.create_prompt(prompt_type="sys_prompt", name="formal", content="b")
+        # Same name under a different type is fine.
+        await svc.create_prompt(prompt_type="hyde", name="formal", content="c")
+
+    async def test_rename_collision_is_rejected(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await svc.create_prompt(prompt_type="sys_prompt", name="a", content="a")
+        b = await svc.create_prompt(prompt_type="sys_prompt", name="b", content="b")
+        with pytest.raises(ValidationError):
+            await svc.update_prompt(b.id, name="a")
+
     async def test_update_promotes_default_via_set_default(self):
         repo = FakePromptRepo()
         svc = _service(repo)

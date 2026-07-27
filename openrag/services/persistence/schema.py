@@ -131,6 +131,10 @@ prompts = Table(
     ),
     CheckConstraint(_PROMPT_TYPE_IN, name="ck_prompt_type"),
     Index("ix_prompts_type", "prompt_type"),
+    # Name is the selection key: presets and partitions reference a prompt by
+    # (type, name), so it must be unique per type for get_by_name to be
+    # deterministic.
+    Index("uix_prompts_type_name", "prompt_type", "name", unique=True),
     # At most one global default per type — the DB-level guardrail behind
     # PromptService.set_default's clear-then-set (same shape as the model
     # endpoint default invariant, enforced there in application code).

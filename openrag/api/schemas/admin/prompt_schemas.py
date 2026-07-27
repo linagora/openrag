@@ -35,14 +35,14 @@ class CreatePromptRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     prompt_type: PromptTypeName
-    name: str = ""
+    name: str
     content: str
     is_default: bool = False
 
-    @field_validator("content")
+    @field_validator("name", "content")
     @classmethod
-    def validate_content(cls, value: str) -> str:
-        return _require_non_empty("content", value)
+    def validate_non_empty(cls, value: str, info: ValidationInfo) -> str:
+        return _require_non_empty(info.field_name, value)
 
 
 class UpdatePromptRequest(BaseModel):
@@ -66,7 +66,7 @@ class UpdatePromptRequest(BaseModel):
     def validate_name(cls, value: str | None, info: ValidationInfo) -> str | None:
         if value is None:
             raise ValueError(f"{info.field_name} cannot be null")
-        return value
+        return _require_non_empty(info.field_name, value)
 
     @model_validator(mode="after")
     def require_at_least_one_update(self) -> UpdatePromptRequest:

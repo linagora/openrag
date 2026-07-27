@@ -129,6 +129,7 @@ class PartitionDetailResponse(BaseModel):
     document_count: int = 0
     chat_history_depth: int = 4
     chat_llm: str | None = None
+    generation_prompt_names: dict[str, str] = Field(default_factory=dict)
 
 
 __all__ = [

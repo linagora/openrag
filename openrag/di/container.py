@@ -430,6 +430,7 @@ class ServiceContainer:
                 collection=settings.vectordb.collection_name,
                 config=settings,
                 task_state_manager_factory=get_task_state_manager,
+                prompt_repo=self.prompt_repo,
             )
         return self._partition_service
 

@@ -66,6 +66,8 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint("id"),
         )
         op.create_index("ix_prompts_type", "prompts", ["prompt_type"])
+        # Name is the selection key — unique per type.
+        op.create_index("uix_prompts_type_name", "prompts", ["prompt_type", "name"], unique=True)
         # At most one global default per type.
         op.create_index(
             "uix_prompts_default_per_type",
