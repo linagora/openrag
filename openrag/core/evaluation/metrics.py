@@ -149,7 +149,10 @@ def _retrieved_documents(output: Any) -> list[tuple[str, set[str]]]:
         # matches the "A_B.pdf" the indexer had to store.
         identifiers = {sanitize_file_id(value) for value in (source_name, file_id) if value}
         if identifiers:
-            documents.append((source_name or file_id, identifiers))
+            # ``source`` is the server's storage path
+            # ("/app/data/1785151308957_c270_report.pdf"), so the file_id is the
+            # name worth showing a human.
+            documents.append((file_id or source_name, identifiers))
     return documents
 
 

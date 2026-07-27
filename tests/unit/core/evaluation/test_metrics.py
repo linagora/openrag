@@ -225,7 +225,8 @@ def test_ground_truth_matches_the_original_filename_when_the_file_id_was_sanitis
 
     assert retrieval.hit_rate == 1.0
     assert retrieval.recall == 1.0
-    assert details[0].retrieved_file_ids == ["A B.pdf"]
+    # Display uses the file_id — `source` is a server-side storage path.
+    assert details[0].retrieved_file_ids == ["A_B.pdf"]
 
 
 def test_ground_truth_still_matches_a_sanitised_file_id_directly():
@@ -253,3 +254,26 @@ def test_matching_survives_file_id_sanitisation_on_either_side():
         row = {"vars": {"query": "q1"}, "response": {"output": [{"content": "c", "metadata": metadata}]}}
         retrieval, _, _ = summarize(cases=cases, retrieval_payload=[row], answer_payload=[])
         assert retrieval.hit_rate == 1.0, metadata
+
+
+def test_retrieved_documents_are_named_by_file_id_not_the_storage_path():
+    """metadata.source is the server's temp path ('/app/data/17851..._x.pdf'),
+    which is meaningless in the per-question table."""
+    cases = [EvalTestCase(query="q1", expected_answer="a", expected_file_ids=("report.pdf",))]
+    row = {
+        "vars": {"query": "q1"},
+        "response": {
+            "output": [
+                {
+                    "content": "c",
+                    "metadata": {
+                        "file_id": "report.pdf",
+                        "source": "/app/data/1785151308957_c270_report.pdf",
+                    },
+                }
+            ]
+        },
+    }
+    _, _, details = summarize(cases=cases, retrieval_payload=[row], answer_payload=[])
+
+    assert details[0].retrieved_file_ids == ["report.pdf"]
