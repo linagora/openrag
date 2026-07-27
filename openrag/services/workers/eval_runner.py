@@ -21,6 +21,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import ray
 
@@ -183,12 +184,16 @@ class EvalRunner:
         samples: list[FileIndexingSample] = []
         started = time.perf_counter()
 
-        for index, path in enumerate(files):
+        for path in files:
             self._check_cancelled()
             file_started = time.perf_counter()
             failed = False
             try:
-                await self._index_one(client, partition, f"eval-{index}-{path.name}", path)
+                # The file_id is the bare filename: it is what an author writes
+                # in the CSV's expected_file_ids, and what the ranking metrics
+                # match against metadata.file_id. Any prefix here would make
+                # every expected_file_ids entry miss.
+                await self._index_one(client, partition, path.name, path)
             except Exception as exc:  # noqa: BLE001 — one bad file must not void the run
                 failed = True
                 self._logger.warning(f"Eval corpus file '{path.name}' failed to index: {exc}")
@@ -208,9 +213,11 @@ class EvalRunner:
 
     async def _index_one(self, client: Any, partition: str, file_id: str, path: Path) -> None:
         """Upload one file and wait for its indexing task to settle."""
+        # Corpus filenames routinely contain spaces and accents, so the id has
+        # to be percent-encoded before it becomes a path segment.
         with path.open("rb") as handle:
             response = await client.post(
-                f"/indexer/partition/{partition}/file/{file_id}",
+                f"/indexer/partition/{partition}/file/{quote(file_id, safe='')}",
                 files={"file": (path.name, handle)},
             )
         if response.status_code >= 400:
