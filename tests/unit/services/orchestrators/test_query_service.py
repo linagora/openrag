@@ -107,6 +107,12 @@ class FakeWorkspace:
         allowed = self._existing.get(partition, set())
         return [fid for fid in file_ids if fid in allowed]
 
+    async def get_existing_file_ids_any_partition(self, file_ids):
+        if self._existing is None:
+            return list(file_ids)
+        allowed = {fid for partition_ids in self._existing.values() for fid in partition_ids}
+        return [fid for fid in file_ids if fid in allowed]
+
 
 def _config(mode="SimpleRag"):
     return SimpleNamespace(
@@ -655,6 +661,27 @@ async def test_chat_attachments_drops_unindexed_and_reports_in_extra():
 
 
 @pytest.mark.asyncio
+async def test_chat_attachments_duplicate_ids_deduped():
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval,
+        llm=FakeLLM(chat_responses=["answer [Sources: none]"]),
+        workspace=FakeWorkspace(existing={"p1": {"fa"}}),
+    )
+    chunk = await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"id": "fa"}, {"id": "fa"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
+    assert json.loads(chunk["extra"])["attachments"] == ["fa"]
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_reports_indexed_attachments_in_extra():
     svc = _svc(workspace=FakeWorkspace(existing={"p1": {"fa"}}))  # only fa indexed in p1
     out = "".join(
@@ -676,9 +703,7 @@ async def test_chat_stream_reports_indexed_attachments_in_extra():
 
 
 @pytest.mark.asyncio
-async def test_chat_attachments_all_partition_is_fail_closed():
-    # "all" is a search wildcard, not a real partition_name, so nothing validates
-    # against it — attachments scope to zero rather than passing through unchecked.
+async def test_chat_attachments_all_partition_looks_up_any_partition():
     retrieval = FakeRetrieval()
     svc = _svc(
         retrieval=retrieval,
@@ -694,8 +719,23 @@ async def test_chat_attachments_all_partition_is_fail_closed():
         prepare_sources=lambda d, w: [],
         model_name="m",
     )
-    assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": []}
-    assert json.loads(chunk["extra"])["attachments"] == []
+    assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
+    assert json.loads(chunk["extra"])["attachments"] == ["fa"]
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_all_mixed_with_explicit_partition_raises():
+    svc = _svc(workspace=FakeWorkspace(existing={"p1": {"fa"}}))
+    with pytest.raises(ValueError):
+        await svc.chat(
+            partitions=["all", "p1"],
+            payload={
+                "messages": [{"role": "user", "content": "q"}],
+                "metadata": {"attachments": [{"id": "fa"}]},
+            },
+            prepare_sources=lambda d, w: [],
+            model_name="m",
+        )
 
 
 @pytest.mark.asyncio

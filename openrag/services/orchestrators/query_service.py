@@ -482,14 +482,17 @@ class QueryService:
     async def _existing_file_ids(self, file_ids: list[str], partitions: list[str]) -> list[str]:
         """Order-preserving subset of ``file_ids`` indexed in ``partitions``.
 
-        Each lookup is partition-scoped: ``(file_id, partition)`` is the catalog's
-        unique key, so file_id alone is not. A wildcard like ``"all"`` matches no
-        real ``partition_name`` and so contributes nothing (fail-closed).
+        ``"all"`` (``SUPER_ADMIN_MODE`` wildcard) takes an unscoped lookup instead
+        of a per-partition one.
         """
-        found: set[str] = set()
-        for p in partitions:
-            found.update(await self._workspace.get_existing_file_ids(p, file_ids))
-        return [fid for fid in file_ids if fid in found]
+        if "all" in partitions:
+            if len(partitions) > 1:
+                raise ValueError("`partitions` cannot mix the wildcard with explicit values.")
+            found = set(await self._workspace.get_existing_file_ids_any_partition(file_ids))
+        else:
+            results = await asyncio.gather(*(self._workspace.get_existing_file_ids(p, file_ids) for p in partitions))
+            found = {fid for r in results for fid in r}
+        return [fid for fid in dict.fromkeys(file_ids) if fid in found]
 
     async def _gather_rag_and_web(self, queries, partition, top_k, filter_params):
         # Fuse the doc branch through retrieve_multi so a partition's rrf_k drives
