@@ -266,8 +266,9 @@ API → shell out to `promptfoo eval` twice → fold the outputs into metrics �
   is regenerated at the start of every run, so no usable plaintext token is stored at rest.
 - **Concurrency**: one run at a time (`POST /evaluation/runs` returns 409 otherwise) so
   indexing timings stay comparable.
-- Requires Node + a pinned promptfoo in `infra/docker/ray.Dockerfile`; the runner reaches the
-  API via `OPENRAG_INTERNAL_URL`.
+- Requires Node + a pinned promptfoo in **both** `infra/docker/api.Dockerfile` (compose runs
+  Ray inside the API container) and `infra/docker/ray.Dockerfile` (separate Ray cluster);
+  the runner reaches the API via `OPENRAG_INTERNAL_URL`.
 
 ### File Quota System
 
