@@ -53,7 +53,7 @@ class EvalRunner:
 
         self._logger = get_logger()
         self._config = load_config()
-        self._connection = ConnectionManager(self._config.rdb)
+        self._connection = ConnectionManager(self._config.resolved_rdb())
         self._connection_ready = False
         self._repo = PgEvaluationRepository(lambda: self._connection.pool)
         self._cancelled = False

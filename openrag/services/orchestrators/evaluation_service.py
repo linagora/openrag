@@ -29,7 +29,7 @@ from core.models.evaluation import (
     is_eval_partition,
 )
 from core.models.user import UserCreate
-from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
+from core.utils.exceptions import ConflictError, NotFoundError, OpenRAGError, ValidationError
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -47,6 +47,9 @@ EVAL_USER_DISPLAY_NAME = "OpenRAG Evaluation"
 TESTSET_FILENAME = "testset.csv"
 CORPUS_DIRNAME = "corpus"
 
+#: Bound on the pre-dispatch liveness check.
+_RUNNER_PING_TIMEOUT_SECONDS = 60
+
 #: The Ray worker runs in its own container, so it reaches the API by service
 #: name rather than through whatever host the admin's browser used.
 DEFAULT_INTERNAL_URL = "http://openrag:8080"
@@ -54,6 +57,13 @@ DEFAULT_INTERNAL_URL = "http://openrag:8080"
 
 def eval_partition_name(run_id: str) -> str:
     return f"{EVAL_PARTITION_PREFIX}{run_id}"
+
+
+class EvaluationRunnerUnavailableError(OpenRAGError):
+    """The runner actor could not be reached. Maps to HTTP 503."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="EVAL_RUNNER_UNAVAILABLE", status_code=503)
 
 
 class EvaluationService:
@@ -166,6 +176,13 @@ class EvaluationService:
             raise NotFoundError(f"Test set for dataset '{dataset_id}' is missing on disk")
         cases = parse_testset(testset_path.read_bytes())
 
+        # Reach the runner *before* provisioning anything. The dispatch below is
+        # fire-and-forget, so an actor that dies in its constructor would
+        # otherwise leave the run sitting in QUEUED forever with no error, and
+        # a partition and token already created for nobody.
+        runner = self._runner()
+        await self._ping_runner(runner)
+
         run_id = uuid.uuid4().hex
         partition = eval_partition_name(run_id)
 
@@ -184,7 +201,6 @@ class EvaluationService:
 
         # Fire and forget: the worker owns the run from here and records its
         # own outcome, so the ObjectRef is deliberately dropped.
-        runner = self._runner()
         runner.run.remote(
             run_id=run_id,
             partition=partition,
@@ -220,6 +236,25 @@ class EvaluationService:
         return await self.get_run(run_id)
 
     # ── internals ────────────────────────────────────────────────────
+
+    async def _ping_runner(self, runner: Any) -> None:
+        """Fail fast when the runner actor cannot start.
+
+        Raises:
+            OpenRAGError: The actor is unreachable — surfaced to the caller
+                instead of being discovered as a run that never leaves QUEUED.
+        """
+        from services.workers.ray_utils import call_ray_actor_with_timeout
+
+        try:
+            await call_ray_actor_with_timeout(
+                future=runner.is_busy.remote(),
+                timeout=_RUNNER_PING_TIMEOUT_SECONDS,
+                task_description="reaching the evaluation runner",
+            )
+        except Exception as exc:
+            logger.exception(f"Evaluation runner is unavailable: {exc}")
+            raise EvaluationRunnerUnavailableError(f"The evaluation runner could not be reached: {exc}") from exc
 
     def _runner(self) -> Any:
         if self._runner_factory is not None:
