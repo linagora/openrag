@@ -29,6 +29,38 @@ import {
 
 const EMPTY_USERS: UserResponse[] = [];
 
+function UserDirectoryError({
+  title,
+  message,
+  isRetrying,
+  onRetry,
+}: {
+  title: string;
+  message: string;
+  isRetrying: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <Alert variant="destructive">
+      <AlertCircle aria-hidden="true" />
+      <AlertTitle>{title}</AlertTitle>
+      <AlertDescription>
+        <p>{message}</p>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onRetry}
+          disabled={isRetrying}
+        >
+          <RefreshCw className={isRetrying ? "animate-spin" : ""} aria-hidden="true" />
+          Try again
+        </Button>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 // "indexed / effective-quota", e.g. "11 / 200". ∞ for unlimited; `over` flags
 // users at or past their cap (shown in red) so admins spot blocked uploaders.
 function formatUsage(
@@ -83,6 +115,10 @@ export default function UserListPage() {
     users.length === 0
       ? "No users have been created yet."
       : `No users match “${search.trim()}”.`;
+  const usersErrorMessage =
+    usersQuery.error instanceof Error
+      ? usersQuery.error.message
+      : "The user directory request failed.";
 
   const deleteMut = useMutation({
     mutationFn: deleteUser,
@@ -194,33 +230,27 @@ export default function UserListPage() {
 
       {usersQuery.isLoading ? (
         <Skeleton className="h-64" />
-      ) : usersQuery.isError ? (
-        <Alert variant="destructive">
-          <AlertCircle aria-hidden="true" />
-          <AlertTitle>Users could not be loaded</AlertTitle>
-          <AlertDescription>
-            <p>
-              {usersQuery.error instanceof Error
-                ? usersQuery.error.message
-                : "The user directory request failed."}
-            </p>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => usersQuery.refetch()}
-              disabled={usersQuery.isFetching}
-            >
-              <RefreshCw
-                className={usersQuery.isFetching ? "animate-spin" : ""}
-                aria-hidden="true"
-              />
-              Try again
-            </Button>
-          </AlertDescription>
-        </Alert>
+      ) : usersQuery.isLoadingError ? (
+        <UserDirectoryError
+          title="Users could not be loaded"
+          message={usersErrorMessage}
+          isRetrying={usersQuery.isFetching}
+          onRetry={() => {
+            usersQuery.refetch();
+          }}
+        />
       ) : (
         <div className="space-y-4">
+          {usersQuery.isRefetchError && (
+            <UserDirectoryError
+              title="Users could not be refreshed"
+              message={`Showing previously loaded users. ${usersErrorMessage}`}
+              isRetrying={usersQuery.isFetching}
+              onRetry={() => {
+                usersQuery.refetch();
+              }}
+            />
+          )}
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="relative w-full sm:max-w-md">
               <Label htmlFor="user-search" className="sr-only">

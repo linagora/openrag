@@ -44,13 +44,16 @@ function makeUser(overrides: Partial<UserResponse> = {}): UserResponse {
   };
 }
 
-function renderUsers() {
+function renderUsers(cachedUsers?: UserResponse[]) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
       mutations: { retry: false },
     },
   });
+  if (cachedUsers) {
+    queryClient.setQueryData(["users"], { users: cachedUsers });
+  }
 
   return render(
     <QueryClientProvider client={queryClient}>
@@ -161,5 +164,17 @@ describe("UserListPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(await screen.findByText("Ada Lovelace")).toBeTruthy();
+  });
+
+  it("keeps cached users visible when a background refresh fails", async () => {
+    listUsersMock.mockRejectedValueOnce(new Error("Refresh unavailable"));
+
+    renderUsers([makeUser()]);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Users could not be refreshed");
+    expect(alert.textContent).toContain("Showing previously loaded users");
+    expect(screen.getByText("Ada Lovelace")).toBeTruthy();
+    expect(screen.getByRole("searchbox", { name: "Search users" })).toBeTruthy();
   });
 });
