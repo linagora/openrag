@@ -22,13 +22,15 @@ _INDEX_NAME = "ix_users_lower_display_name_pattern"
 
 def upgrade() -> None:
     if table_exists("users") and not index_exists("users", _INDEX_NAME):
-        op.execute(
-            sa.text(
-                f"CREATE INDEX {_INDEX_NAME} ON users (LOWER(display_name) text_pattern_ops)",
-            ),
-        )
+        with op.get_context().autocommit_block():
+            op.execute(
+                sa.text(
+                    f"CREATE INDEX CONCURRENTLY {_INDEX_NAME} ON users (LOWER(display_name) text_pattern_ops)",
+                ),
+            )
 
 
 def downgrade() -> None:
     if table_exists("users") and index_exists("users", _INDEX_NAME):
-        op.drop_index(_INDEX_NAME, table_name="users")
+        with op.get_context().autocommit_block():
+            op.execute(sa.text(f"DROP INDEX CONCURRENTLY {_INDEX_NAME}"))

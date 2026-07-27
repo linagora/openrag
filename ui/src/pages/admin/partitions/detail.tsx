@@ -53,6 +53,7 @@ import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } 
 import { usePermissions } from "@/lib/permissions";
 import { formatDate, intOr } from "@/lib/utils";
 import { MemberPicker } from "./member-picker";
+import { candidateLabel } from "./member-candidate";
 import { addPartitionMembers } from "./member-batch";
 import type { MemberAddFailure } from "./member-batch";
 import {
@@ -450,6 +451,9 @@ function UsersTab({ partitionName }: { partitionName: string }) {
         candidates: selected,
         role: selectedRole,
       }),
+    onError: (error: Error) => {
+      toast.error(`Failed to add users: ${error.message}`);
+    },
     onSuccess: ({ addedCandidates, failures }) => {
       queryClient.invalidateQueries({
         queryKey: ["partition", partitionName, "users"],
@@ -668,8 +672,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                     <ul className="list-disc space-y-1 pl-4">
                       {addFailures.map((failure) => (
                         <li key={failure.candidate.user_id}>
-                          {failure.candidate.display_name?.trim() || "Unnamed user"} (user ID{" "}
-                          {failure.candidate.user_id}):
+                          {candidateLabel(failure.candidate)} (user ID {failure.candidate.user_id}):
                           {" "}
                           {failure.message}
                         </li>

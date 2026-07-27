@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { PartitionMemberCandidate } from "@/lib/api/partitions";
+import { candidateLabel } from "./member-candidate";
 
 interface MemberPickerProps {
   candidates: PartitionMemberCandidate[];
@@ -24,10 +25,6 @@ interface MemberPickerProps {
   onLoadMore: () => void;
   selectedCandidates: PartitionMemberCandidate[];
   onSelectionChange: (candidates: PartitionMemberCandidate[]) => void;
-}
-
-function candidateLabel(candidate: PartitionMemberCandidate): string {
-  return candidate.display_name?.trim() || `User #${candidate.user_id}`;
 }
 
 export function MemberPicker({

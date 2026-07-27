@@ -41,7 +41,7 @@ describe("MemberPicker", () => {
     expect(screen.getAllByText("Sam Lee")).toHaveLength(2);
     expect(screen.getByText("User ID 2")).not.toBeNull();
     expect(screen.getByText("User ID 3")).not.toBeNull();
-    expect(screen.getByText("User #4")).not.toBeNull();
+    expect(screen.getByText("Unnamed user")).not.toBeNull();
   });
 
   it("forwards search changes to the server-backed query", async () => {
