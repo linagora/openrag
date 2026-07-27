@@ -220,20 +220,45 @@ class EvaluationService:
         return run
 
     async def cancel_run(self, run_id: str) -> EvalRun:
-        """Ask the worker to stop; the worker writes the terminal status."""
+        """Ask the worker to stop, or reap the run if no worker owns it.
+
+        The worker writes the terminal status for a run it is executing. When
+        it disowns the run — it restarted, or died before picking the run up —
+        nothing else would ever move that row out of an active status, and it
+        would block every subsequent run. Cancelling reaps it instead.
+        """
         run = await self.get_run(run_id)
         if run.status.is_terminal:
             raise ConflictError(f"Evaluation run '{run_id}' has already finished.")
 
         from services.workers.ray_utils import call_ray_actor_with_timeout
 
-        runner = self._runner()
-        await call_ray_actor_with_timeout(
-            future=runner.cancel.remote(run_id),
-            timeout=30,
-            task_description=f"cancelling evaluation run {run_id}",
-        )
+        owned = False
+        try:
+            runner = self._runner()
+            owned = await call_ray_actor_with_timeout(
+                future=runner.cancel.remote(run_id),
+                timeout=_RUNNER_PING_TIMEOUT_SECONDS,
+                task_description=f"cancelling evaluation run {run_id}",
+            )
+        except Exception as exc:  # noqa: BLE001 — an unreachable runner still has to be reaped
+            logger.warning(f"Evaluation runner unreachable while cancelling {run_id}: {exc}")
+
+        if not owned:
+            await self._repo.update_run_status(
+                run_id,
+                EvalRunStatus.CANCELLED,
+                error="No runner owns this run — it was orphaned and has been reaped.",
+            )
+            await self._drop_orphaned_partition(run_id)
         return await self.get_run(run_id)
+
+    async def _drop_orphaned_partition(self, run_id: str) -> None:
+        """Best-effort cleanup of the throwaway partition of a reaped run."""
+        try:
+            await self._partition_service.delete_partition(eval_partition_name(run_id))
+        except Exception as exc:  # noqa: BLE001 — it may never have been created
+            logger.debug(f"No eval partition to drop for run {run_id}: {exc}")
 
     # ── internals ────────────────────────────────────────────────────
 

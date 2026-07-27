@@ -27,7 +27,10 @@ RUN apt update && \
 # `npx promptfoo@latest` so a run never depends on npm reachability, or on the
 # CLI changing under a deployment that was not rebuilt.
 ARG PROMPTFOO_VERSION=0.121.19
-RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
+# Debian's nodejs package is 20.19.x, below promptfoo's floor
+# (^20.20.0 || >=22.22.0), so Node comes from NodeSource instead.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && npm install -g promptfoo@${PROMPTFOO_VERSION} \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*

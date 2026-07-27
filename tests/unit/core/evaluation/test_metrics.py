@@ -13,7 +13,11 @@ def _sample(name: str, seconds: float, size: int = 1024, failed: bool = False):
 def _retrieval_row(query: str, file_ids: list[str], score: float | None = None):
     row = {
         "vars": {"query": query},
-        "response": {"output": [{"content": f"chunk from {fid}", "metadata": {"file_id": fid}} for fid in file_ids]},
+        "response": {
+            "output": [
+                {"content": f"chunk from {fid}", "metadata": {"file_id": fid, "source": fid}} for fid in file_ids
+            ]
+        },
     }
     if score is not None:
         row["gradingResult"] = {
@@ -206,3 +210,31 @@ def test_missing_rows_leave_the_case_unscored_rather_than_crashing():
     assert retrieval.hit_rate == 0.0
     assert answer.scored_cases == 0
     assert details[0].answer is None
+
+
+def test_ground_truth_matches_the_original_filename_when_the_file_id_was_sanitised():
+    """The indexer rewrites 'A B.pdf' to 'A_B.pdf' because the API rejects
+    spaces in a file_id — a test set still names the real file, so matching
+    falls back to metadata.source."""
+    cases = [EvalTestCase(query="q1", expected_answer="a", expected_file_ids=("A B.pdf",))]
+    row = {
+        "vars": {"query": "q1"},
+        "response": {"output": [{"content": "chunk", "metadata": {"file_id": "A_B.pdf", "source": "/data/A B.pdf"}}]},
+    }
+    retrieval, _, details = summarize(cases=cases, retrieval_payload=[row], answer_payload=[])
+
+    assert retrieval.hit_rate == 1.0
+    assert retrieval.recall == 1.0
+    assert details[0].retrieved_file_ids == ["A B.pdf"]
+
+
+def test_ground_truth_still_matches_a_sanitised_file_id_directly():
+    """Authors who wrote the sanitised id are not punished for it."""
+    cases = [EvalTestCase(query="q1", expected_answer="a", expected_file_ids=("A_B.pdf",))]
+    row = {
+        "vars": {"query": "q1"},
+        "response": {"output": [{"content": "chunk", "metadata": {"file_id": "A_B.pdf", "source": "/data/A B.pdf"}}]},
+    }
+    retrieval, _, _ = summarize(cases=cases, retrieval_payload=[row], answer_payload=[])
+
+    assert retrieval.hit_rate == 1.0

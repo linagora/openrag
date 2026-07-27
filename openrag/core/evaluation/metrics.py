@@ -124,19 +124,33 @@ def _index_by_query(rows: Iterable[Mapping[str, Any]]) -> dict[str, Mapping[str,
     return indexed
 
 
-def _retrieved_file_ids(output: Any) -> list[str]:
-    """Rank-ordered ``file_id``s from a ``/search`` response."""
+def _retrieved_documents(output: Any) -> list[tuple[str, set[str]]]:
+    """Rank-ordered ``(display_name, identifiers)`` from a ``/search`` response.
+
+    A test set names its ground truth by *filename*, but the indexer cannot use
+    a raw filename as a ``file_id`` — the API only accepts letters, digits and
+    ``._:-``, so anything with a space is sanitised on the way in. Matching
+    therefore accepts either form: the original name from ``metadata.source``
+    or the stored ``metadata.file_id``.
+    """
     if not isinstance(output, list):
         return []
-    file_ids: list[str] = []
+    documents: list[tuple[str, set[str]]] = []
     for document in output:
         if not isinstance(document, Mapping):
             continue
         metadata = document.get("metadata")
-        file_id = metadata.get("file_id") if isinstance(metadata, Mapping) else None
-        if file_id:
-            file_ids.append(str(file_id))
-    return file_ids
+        if not isinstance(metadata, Mapping):
+            continue
+        identifiers: set[str] = set()
+        source_name = Path(str(metadata.get("source") or "")).name
+        file_id = str(metadata.get("file_id") or "")
+        for value in (source_name, file_id):
+            if value:
+                identifiers.add(value)
+        if identifiers:
+            documents.append((source_name or file_id, identifiers))
+    return documents
 
 
 def _grading_score(row: Mapping[str, Any], assertion_type: str | None = None) -> float | None:
@@ -198,10 +212,10 @@ def summarize(
         retrieval_row = retrieval_rows.get(case.query)
         answer_row = answer_rows.get(case.query)
 
-        retrieved = _retrieved_file_ids(_row_output(retrieval_row)) if retrieval_row else []
+        documents = _retrieved_documents(_row_output(retrieval_row)) if retrieval_row else []
         detail = EvalCaseResult(
             query=case.query,
-            retrieved_file_ids=retrieved,
+            retrieved_file_ids=[name for name, _ in documents],
             expected_file_ids=list(case.expected_file_ids),
         )
 
@@ -212,12 +226,13 @@ def summarize(
 
         if case.has_ground_truth_sources:
             expected = set(case.expected_file_ids)
-            matched = [rank for rank, fid in enumerate(retrieved, start=1) if fid in expected]
+            matched = [rank for rank, (_, identifiers) in enumerate(documents, start=1) if identifiers & expected]
             detail.hit = bool(matched)
             detail.reciprocal_rank = 1.0 / matched[0] if matched else 0.0
             hits.append(1.0 if matched else 0.0)
             reciprocal_ranks.append(detail.reciprocal_rank)
-            recalls.append(len(expected & set(retrieved)) / len(expected))
+            found = {name for name in expected if any(name in ids for _, ids in documents)}
+            recalls.append(len(found) / len(expected))
 
         if answer_row is not None:
             output = _row_output(answer_row)

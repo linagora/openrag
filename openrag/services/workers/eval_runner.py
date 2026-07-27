@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -35,6 +36,21 @@ _HTTP_TIMEOUT_SECONDS = 300.0
 _PROMPTFOO_TIMEOUT_SECONDS = 3600.0
 #: Only the tail of promptfoo's stderr is kept for the failure message.
 _ERROR_TAIL_CHARS = 2000
+
+
+#: The indexing API accepts only these characters in a ``file_id``.
+_FILE_ID_ALLOWED = re.compile(r"[^A-Za-z0-9._:-]")
+
+
+def _file_id_for(filename: str) -> str:
+    """Sanitise a corpus filename into an acceptable ``file_id``.
+
+    Corpus filenames routinely contain spaces and accents, which the indexing
+    API rejects outright. The original name survives in the chunk metadata's
+    ``source``, which is what the ranking metrics match a test set's
+    ``expected_file_ids`` against — so an author still writes real filenames.
+    """
+    return _FILE_ID_ALLOWED.sub("_", filename)
 
 
 class EvalRunError(RuntimeError):
@@ -189,11 +205,7 @@ class EvalRunner:
             file_started = time.perf_counter()
             failed = False
             try:
-                # The file_id is the bare filename: it is what an author writes
-                # in the CSV's expected_file_ids, and what the ranking metrics
-                # match against metadata.file_id. Any prefix here would make
-                # every expected_file_ids entry miss.
-                await self._index_one(client, partition, path.name, path)
+                await self._index_one(client, partition, _file_id_for(path.name), path)
             except Exception as exc:  # noqa: BLE001 — one bad file must not void the run
                 failed = True
                 self._logger.warning(f"Eval corpus file '{path.name}' failed to index: {exc}")
@@ -213,8 +225,6 @@ class EvalRunner:
 
     async def _index_one(self, client: Any, partition: str, file_id: str, path: Path) -> None:
         """Upload one file and wait for its indexing task to settle."""
-        # Corpus filenames routinely contain spaces and accents, so the id has
-        # to be percent-encoded before it becomes a path segment.
         with path.open("rb") as handle:
             response = await client.post(
                 f"/indexer/partition/{partition}/file/{quote(file_id, safe='')}",
