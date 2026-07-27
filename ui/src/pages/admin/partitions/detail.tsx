@@ -49,6 +49,9 @@ import {
 import type { PartitionConfig, PartitionRole } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
+import { listPrompts } from "@/lib/api/prompts";
+import type { PromptResponse } from "@/lib/api/prompts";
+import { PROMPT_GROUPS } from "@/lib/prompt-meta";
 import { usePermissions } from "@/lib/permissions";
 import { formatDate, intOr } from "@/lib/utils";
 import {
@@ -56,6 +59,10 @@ import {
   PartitionMemberIdentity,
 } from "./partition-member-identity";
 import { describePartitionMember } from "./partition-member";
+
+// Generation prompts are selected on the partition (keyed by prompt type). This
+// mirrors the "Generation" concern in the prompt library.
+const GENERATION_PROMPT_TYPES = PROMPT_GROUPS.find((g) => g.name === "Generation")!.types;
 
 // --- General Tab ---
 
@@ -76,6 +83,9 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
   const [indexationPreset, setIndexationPreset] = useState(partition.indexation_preset);
   const [retrievalPreset, setRetrievalPreset] = useState(partition.retrieval_preset);
   const [chatLlm, setChatLlm] = useState(partition.chat_llm ?? "__default__");
+  const [generationPrompts, setGenerationPrompts] = useState<Record<string, string>>(
+    partition.generation_prompt_names ?? {},
+  );
   const [llmValidated, setLlmValidated] = useState<boolean | null>(
     partition.chat_llm ? null : true,
   );
@@ -100,6 +110,23 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
     queryFn: () => listModelEndpoints("embedder"),
     enabled: isAdmin,
   });
+
+  const { data: promptsData } = useQuery({
+    queryKey: ["prompts-library"],
+    queryFn: () => listPrompts({ limit: 500 }),
+    enabled: isAdmin,
+  });
+  const promptsByType = (type: string): PromptResponse[] =>
+    (promptsData ?? []).filter((p) => p.prompt_type === type);
+
+  const setGenerationPrompt = (type: string, name: string) => {
+    setGenerationPrompts((prev) => {
+      const next = { ...prev };
+      if (name) next[type] = name;
+      else delete next[type];
+      return next;
+    });
+  };
 
   const validateLlm = useCallback(
     async (name: string) => {
@@ -150,6 +177,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
         indexation_preset: indexationPreset,
         retrieval_preset: retrievalPreset,
         chat_llm: chatLlm === "__default__" ? null : chatLlm,
+        generation_prompt_names: generationPrompts,
       }),
     onSuccess: () => {
       toast.success("Partition updated");
@@ -300,6 +328,46 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               disabled={!canEdit}
             />
           </div>
+          {isAdmin && (
+            <div className="space-y-3">
+              <div>
+                <Label>Generation Prompts</Label>
+                <p className="text-xs text-muted-foreground">
+                  Override the prompts used when answering in this partition. Leave as{" "}
+                  <span className="font-medium">Use default</span> to inherit the library default. Manage the
+                  prompt options in{" "}
+                  <Link to="/prompts" className="underline underline-offset-2">Prompts</Link>.
+                </p>
+              </div>
+              <div className="grid grid-cols-3 gap-6">
+                {GENERATION_PROMPT_TYPES.map((t) => {
+                  const options = promptsByType(t.value);
+                  return (
+                    <div key={t.value} className="space-y-2">
+                      <Label className="text-muted-foreground">{t.label}</Label>
+                      <Select
+                        value={generationPrompts[t.value] ?? "__default__"}
+                        onValueChange={(v) => setGenerationPrompt(t.value, v === "__default__" ? "" : v)}
+                        disabled={!canEdit}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__default__">Use default</SelectItem>
+                          {options.map((p) => (
+                            <SelectItem key={p.id} value={p.name}>
+                              {p.name}{p.is_default ? " (default)" : ""}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {canEdit && (
             <Button
               type="submit"
