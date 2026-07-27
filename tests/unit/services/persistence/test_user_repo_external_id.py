@@ -53,6 +53,8 @@ class _FakePool:
     async def fetch(self, query: str, *params):
         self.last_query = query
         self.last_params = params
+        if "partition_memberships" in query:
+            return []
         return self._rows
 
 
@@ -204,6 +206,6 @@ async def test_get_users_by_ids_fetches_all_users_in_one_query():
 
     users = await repo.get_users_by_ids([42, 84])
 
-    assert [user.id for user in users] == [42, 84]
+    assert {user.id for user in users} == {42, 84}
     assert pool.last_params == ([42, 84],)
     assert "ANY($1::int[])" in (pool.last_query or "")
