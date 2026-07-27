@@ -51,7 +51,10 @@ import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 import { formatDate, intOr } from "@/lib/utils";
-import { PartitionMemberIdentity } from "./partition-member-identity";
+import {
+  PartitionMemberEmail,
+  PartitionMemberIdentity,
+} from "./partition-member-identity";
 import { describePartitionMember } from "./partition-member";
 
 // --- General Tab ---
@@ -465,11 +468,12 @@ function UsersTab({ partitionName }: { partitionName: string }) {
             ))}
           </div>
         ) : usersQuery.data && usersQuery.data.members.length > 0 ? (
-          <div className="rounded-md border">
+          <div className="overflow-x-auto rounded-md border">
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>User</TableHead>
+                  <TableHead>Email</TableHead>
                   <TableHead>Role</TableHead>
                   <TableHead>Added</TableHead>
                   {canManage && <TableHead>Actions</TableHead>}
@@ -480,6 +484,9 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                   <TableRow key={user.user_id}>
                     <TableCell className="text-sm">
                       <PartitionMemberIdentity member={user} />
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      <PartitionMemberEmail member={user} />
                     </TableCell>
                     <TableCell>
                       {canManage ? (

@@ -1,7 +1,10 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { PartitionMember } from "@/lib/api/partitions";
-import { PartitionMemberIdentity } from "./partition-member-identity";
+import {
+  PartitionMemberEmail,
+  PartitionMemberIdentity,
+} from "./partition-member-identity";
 import { describePartitionMember } from "./partition-member";
 
 function member(overrides: Partial<PartitionMember> = {}): PartitionMember {
@@ -16,19 +19,28 @@ function member(overrides: Partial<PartitionMember> = {}): PartitionMember {
 }
 
 describe("PartitionMemberIdentity", () => {
-  it("shows the display name, email, and stable user ID", () => {
+  it("shows the display name and stable user ID", () => {
     render(<PartitionMemberIdentity member={member()} />);
 
     expect(screen.getByText("Alice")).not.toBeNull();
-    expect(screen.getByText("alice@example.com")).not.toBeNull();
     expect(screen.getByText("User ID 9")).not.toBeNull();
   });
 
-  it("uses email as the primary identity while retaining the user ID", () => {
+  it("retains a useful identity when the display name is missing", () => {
     render(<PartitionMemberIdentity member={member({ display_name: null })} />);
 
-    expect(screen.getByText("alice@example.com")).not.toBeNull();
+    expect(screen.getByText("User 9")).not.toBeNull();
     expect(screen.getByText("User ID 9")).not.toBeNull();
+  });
+
+  it("shows email explicitly with a clear missing-value state", () => {
+    const { rerender } = render(<PartitionMemberEmail member={member()} />);
+
+    expect(screen.getByText("alice@example.com")).not.toBeNull();
+
+    rerender(<PartitionMemberEmail member={member({ email: null })} />);
+
+    expect(screen.getByText("Not available")).not.toBeNull();
   });
 
   it("describes a member unambiguously in destructive actions", () => {
