@@ -36,13 +36,7 @@ def create_catalog_store(
     ``settings.vectordb.collection_name`` so the new adapter targets the same
     Postgres database the legacy actor has always used.
     """
-    rdb = settings.rdb
-    if rdb.database is None:
-        rdb = rdb.model_copy(
-            update={
-                "database": f"partitions_for_collection_{settings.vectordb.collection_name}",
-            },
-        )
+    rdb = settings.resolved_rdb()
     if run_migrations is None:
         run_migrations = rdb.run_migrations
     return PostgresStore(rdb, run_migrations=run_migrations)

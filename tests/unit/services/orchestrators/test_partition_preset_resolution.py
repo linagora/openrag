@@ -53,6 +53,9 @@ class _FakePartitionRepo:
     async def list_partition_rows(self) -> list[dict]:
         return list(self._store.values())
 
+    async def list_partitions(self) -> list[dict]:
+        return list(self._store.values())
+
     async def update_partition(self, name: str, **fields) -> dict | None:
         self.calls.append(("update_partition", (name,)))
         row = self._store.get(name)
@@ -472,6 +475,28 @@ async def test_list_partition_summaries_has_counts_and_no_pipelines():
     # lightweight: stored columns only, pipelines are resolved on detail
     assert "indexation_pipeline" not in summaries["p1"]
     assert "retrieval_pipeline" not in summaries["p1"]
+
+
+@pytest.mark.asyncio
+async def test_list_partition_summaries_hides_throwaway_eval_partitions():
+    """GET /partition/ responds from here, so an orphaned __eval_<run_id> would
+    otherwise surface as a user-facing collection."""
+    repo = _FakePartitionRepo(rows=[_full_row("p1"), _full_row("__eval_deadbeef")])
+    svc = _make_service(repo)
+
+    summaries = await svc.list_partition_summaries()
+
+    assert set(summaries) == {"p1"}
+
+
+@pytest.mark.asyncio
+async def test_list_partitions_hides_throwaway_eval_partitions():
+    repo = _FakePartitionRepo(rows=[_full_row("p1"), _full_row("__eval_deadbeef")])
+    svc = _make_service(repo)
+
+    names = [row["partition"] for row in await svc.list_partitions()]
+
+    assert names == ["p1"]
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from .endpoints import (
     SemaphoreConfig,
     VLMConfig,
 )
+from .evaluation import EvaluationConfig
 from .indexation import LoaderConfig
 from .infrastructure import (
     PathsConfig,
@@ -66,6 +67,22 @@ class Settings(ConfigMixin):
     rag: RAGConfig = Field(default_factory=RAGConfig)
     websearch: WebSearchConfig = Field(default_factory=StaanWebSearchConfig)
     mcp: MCPServerConfig = Field(default_factory=MCPServerConfig)
+    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     presets: PresetsConfig = Field(default_factory=PresetsConfig)
     partitions: dict[str, PartitionConfig] = Field(default_factory=dict)
+
+    def resolved_rdb(self) -> RDBConfig:
+        """``rdb`` with its database name filled in.
+
+        ``rdb.database`` is optional: historically the name is derived from the
+        Milvus collection. Any process opening its own Postgres connection —
+        the API's catalog store, or a Ray worker such as ``EvalRunner`` — must
+        resolve it the same way, so the derivation lives here rather than in
+        the callers.
+        """
+        if self.rdb.database is not None:
+            return self.rdb
+        return self.rdb.model_copy(
+            update={"database": f"partitions_for_collection_{self.vectordb.collection_name}"},
+        )

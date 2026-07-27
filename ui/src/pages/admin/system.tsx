@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { EvaluationTab } from "./evaluation";
 import { Skeleton } from "@/components/ui/skeleton";
 
 const GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || "";
@@ -31,7 +32,7 @@ export default function SystemPage() {
     <div>
       <PageHeader
         title="System"
-        description="Status, Ray actors, metrics and configuration"
+        description="Status, Ray actors, metrics, configuration and evaluation"
         actions={
           GRAFANA_URL ? (
             <Button variant="outline" asChild>
@@ -50,6 +51,7 @@ export default function SystemPage() {
           <TabsTrigger value="actors">Actors</TabsTrigger>
           <TabsTrigger value="metrics">Metrics</TabsTrigger>
           <TabsTrigger value="config">Config</TabsTrigger>
+          <TabsTrigger value="evaluation">Evaluation</TabsTrigger>
         </TabsList>
 
         <TabsContent value="status">
@@ -63,6 +65,9 @@ export default function SystemPage() {
         </TabsContent>
         <TabsContent value="config">
           <ConfigTab />
+        </TabsContent>
+        <TabsContent value="evaluation">
+          <EvaluationTab />
         </TabsContent>
       </Tabs>
     </div>
