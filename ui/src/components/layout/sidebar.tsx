@@ -6,6 +6,7 @@ import {
   Clock,
   Cpu,
   Settings,
+  MessageSquareText,
   Users,
   Activity,
   UserCog,
@@ -40,6 +41,7 @@ const navItems: NavItem[] = [
   { title: "Jobs", href: "/jobs", icon: Clock },
   { title: "Models", href: "/models", icon: Cpu, requires: (p) => p.canManageModels },
   { title: "Presets", href: "/presets", icon: Settings, requires: (p) => p.canManagePresets },
+  { title: "Prompts", href: "/prompts", icon: MessageSquareText, requires: (p) => p.canManagePrompts },
   { title: "Users", href: "/users", icon: Users, requires: (p) => p.canManageUsers },
   { title: "System", href: "/system", icon: Activity, requires: (p) => p.canViewSystem },
 ];
