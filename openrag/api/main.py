@@ -40,6 +40,7 @@ from api.middleware import (
     SecurityHeadersMiddleware,
 )
 from api.routers.admin.cluster import router as actors_router
+from api.routers.admin.evaluation import router as evaluation_router
 from api.routers.admin.indexing import router as indexer_router
 from api.routers.admin.jobs import router as queue_router
 from api.routers.admin.model_endpoints import router as model_endpoints_router
@@ -117,6 +118,7 @@ class Tags(Enum):
     PARTITION = "Partitions & files"
     MODEL_ENDPOINTS = "Model Endpoints"
     PRESETS = "Presets"
+    EVALUATION = "Evaluation"
     QUEUE = "Queue management"
     ACTORS = "Ray Actors"
     USERS = "User management"
@@ -357,6 +359,7 @@ app.include_router(search_router, prefix="/search", tags=[Tags.SEARCH])
 app.include_router(partition_router, prefix="/partition", tags=[Tags.PARTITION])
 app.include_router(model_endpoints_router, prefix="/model-endpoints", tags=[Tags.MODEL_ENDPOINTS])
 app.include_router(presets_router, prefix="/presets", tags=[Tags.PRESETS])
+app.include_router(evaluation_router, prefix="/evaluation", tags=[Tags.EVALUATION])
 app.include_router(queue_router, prefix="/queue", tags=[Tags.QUEUE])
 app.include_router(actors_router, prefix="/actors", tags=[Tags.ACTORS])
 app.include_router(users_router, prefix="/users", tags=[Tags.USERS])
