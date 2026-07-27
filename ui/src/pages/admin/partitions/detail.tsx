@@ -55,6 +55,11 @@ import { formatDate, intOr } from "@/lib/utils";
 import { MemberPicker } from "./member-picker";
 import { addPartitionMembers } from "./member-batch";
 import type { MemberAddFailure } from "./member-batch";
+import {
+  PartitionMemberEmail,
+  PartitionMemberIdentity,
+} from "./partition-member-identity";
+import { describePartitionMember } from "./partition-member";
 
 // --- General Tab ---
 
@@ -543,11 +548,12 @@ function UsersTab({ partitionName }: { partitionName: string }) {
             ))}
           </div>
         ) : usersQuery.data && usersQuery.data.members.length > 0 ? (
-          <div className="rounded-md border">
+          <div className="overflow-x-auto rounded-md border">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>User ID</TableHead>
+                  <TableHead>User</TableHead>
+                  <TableHead>Email</TableHead>
                   <TableHead>Role</TableHead>
                   <TableHead>Added</TableHead>
                   {canManage && <TableHead>Actions</TableHead>}
@@ -556,8 +562,11 @@ function UsersTab({ partitionName }: { partitionName: string }) {
               <TableBody>
                 {usersQuery.data.members.map((user) => (
                   <TableRow key={user.user_id}>
-                    <TableCell className="font-mono text-sm">
-                      {user.user_id}
+                    <TableCell className="text-sm">
+                      <PartitionMemberIdentity member={user} />
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      <PartitionMemberEmail member={user} />
                     </TableCell>
                     <TableCell>
                       {canManage ? (
@@ -588,13 +597,14 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                       <TableCell>
                         <ConfirmDialog
                           title="Remove User"
-                          description={`Remove user "${user.user_id}" from this partition? They will lose access to partition data.`}
+                          description={`Remove ${describePartitionMember(user)} from this partition? They will lose access to partition data.`}
                           onConfirm={() => removeMutation.mutate(user.user_id)}
                         >
                           <Button
                             variant="ghost"
                             size="sm"
                             disabled={removeMutation.isPending}
+                            aria-label={`Remove ${describePartitionMember(user)} from partition`}
                           >
                             <Trash2 className="h-3 w-3 text-destructive" />
                           </Button>

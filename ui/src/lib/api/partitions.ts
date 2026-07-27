@@ -8,7 +8,7 @@ import { request } from "./client";
 //   POST   /partition/{p}                   create (name in path, NO body; caller becomes owner) → 201
 //   PATCH  /partition/{p}                   update config → PartitionDetailResponse
 //   DELETE /partition/{p}                   delete → 204
-//   GET    /partition/{p}/users             members → { members: [{ user_id, role, added_at }] }
+//   GET    /partition/{p}/users             members → { members: [{ user_id, display_name, email, role, added_at }] }
 //   POST   /partition/{p}/users             add member   (multipart: user_id, role)
 //   PATCH  /partition/{p}/users/{user_id}   change role  (multipart: role)
 //   DELETE /partition/{p}/users/{user_id}   remove member
@@ -194,6 +194,8 @@ export function listPartitionFiles(name: string, limit?: number): Promise<{ file
 
 export interface PartitionMember {
   user_id: number;
+  display_name: string | null;
+  email: string | null;
   role: PartitionRole;
   added_at: string | null;
 }

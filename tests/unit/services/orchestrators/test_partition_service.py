@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from core.models.user import User
 from core.utils.exceptions import (
     ConflictError,
     NotFoundError,
@@ -254,15 +253,40 @@ class FakeVectorStore:
 
 
 class FakeUserRepo:
-    def __init__(self, existing: set[int] | None = None, users: list[User] | None = None):
+    def __init__(
+        self,
+        existing: set[int] | None = None,
+        display_names: dict[int, str] | None = None,
+        emails: dict[int, str] | None = None,
+    ):
         self._existing = existing if existing is not None else set()
-        self._users = users or []
+        self._display_names = display_names or {}
+        self._emails = emails or {}
+        self.requested_user_id_batches: list[list[int]] = []
 
     async def user_exists(self, user_id: int) -> bool:
         return user_id in self._existing
 
-    async def list_users(self, offset: int = 0, limit: int = 50) -> list[User]:
-        return self._users[offset : offset + limit]
+    async def get_user(self, user_id: int):
+        if user_id not in self._existing:
+            return None
+        return SimpleNamespace(
+            id=user_id,
+            display_name=self._display_names.get(user_id),
+            email=self._emails.get(user_id),
+        )
+
+    async def get_users_by_ids(self, user_ids: list[int]):
+        self.requested_user_id_batches.append(list(user_ids))
+        return [
+            SimpleNamespace(
+                id=user_id,
+                display_name=self._display_names.get(user_id),
+                email=self._emails.get(user_id),
+            )
+            for user_id in user_ids
+            if user_id in self._existing
+        ]
 
 
 def _svc(
@@ -977,6 +1001,56 @@ async def test_list_member_candidates_rejects_ids_outside_postgres_range(search,
 
     with pytest.raises(ValidationError):
         await svc.list_member_candidates("p", search=search, cursor=cursor)
+
+
+@pytest.mark.asyncio
+async def test_list_members_does_not_lookup_user_identities():
+    mrepo = FakeMembershipRepo(members={(9, "p")})
+    urepo = FakeUserRepo({9})
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=urepo)
+
+    members = await svc.list_members("p")
+
+    assert members == [{"user_id": 9, "role": "viewer"}]
+    assert urepo.requested_user_id_batches == []
+
+
+@pytest.mark.asyncio
+async def test_list_members_with_identities_uses_one_lookup():
+    mrepo = FakeMembershipRepo(members={(9, "p"), (10, "p")})
+    urepo = FakeUserRepo(
+        {9, 10},
+        display_names={9: "Alice", 10: "Bob"},
+        emails={9: "alice@example.com", 10: "bob@example.com"},
+    )
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=urepo)
+    members = await svc.list_members_with_identities("p")
+    assert {member["user_id"]: member for member in members} == {
+        9: {
+            "user_id": 9,
+            "role": "viewer",
+            "display_name": "Alice",
+            "email": "alice@example.com",
+        },
+        10: {
+            "user_id": 10,
+            "role": "viewer",
+            "display_name": "Bob",
+            "email": "bob@example.com",
+        },
+    }
+    assert len(urepo.requested_user_id_batches) == 1
+    assert set(urepo.requested_user_id_batches[0]) == {9, 10}
+
+
+@pytest.mark.asyncio
+async def test_list_members_missing_user_display_name_is_none():
+    mrepo = FakeMembershipRepo(members={(9, "p")})
+    urepo = FakeUserRepo(set())  # user_id 9 no longer exists
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo, urepo=urepo)
+    members = await svc.list_members_with_identities("p")
+    assert members[0]["display_name"] is None
+    assert members[0]["email"] is None
 
 
 @pytest.mark.asyncio
