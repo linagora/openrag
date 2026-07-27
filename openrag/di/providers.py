@@ -149,6 +149,11 @@ def get_preset_service(request: Request = None) -> Any:
     return _get_optional_service(_require_initialized(request), "preset_service")
 
 
+def get_prompt_service(request: Request = None) -> Any:
+    """Resolve the prompt-management orchestrator from the active container."""
+    return _get_optional_service(_require_initialized(request), "prompt_service")
+
+
 def get_config(request: Request = None):
     """Resolve application configuration from the active container."""
     return _require_initialized(request).config
@@ -165,6 +170,7 @@ __all__ = [
     "get_model_endpoint_service",
     "get_partition_service",
     "get_preset_service",
+    "get_prompt_service",
     "get_query_service",
     "get_retrieval_service",
     "get_user_service",
