@@ -383,8 +383,10 @@ async def get_partition_config(
 **Response:**
 Returns list of partition members with:
 - `user_id`: User identifier
+- `display_name`: Human-readable name, when available
+- `email`: Account email, when available
 - `role`: User's role (owner, editor, or viewer)
-- Additional user details
+- `added_at`: Membership creation time
 
 **Permissions:**
 - Requires partition owner role
@@ -401,7 +403,7 @@ async def list_partition_users(
     service=Depends(get_partition_service),
 ):
     """List all users who are members of the given partition."""
-    members = await service.list_members(partition=partition)
+    members = await service.list_members_with_identities(partition=partition)
     return JSONResponse(status_code=status.HTTP_200_OK, content={"members": members})
 
 

@@ -673,8 +673,21 @@ class PartitionService:
     # ------------------------------------------------------------------
 
     async def list_members(self, partition: str) -> list[dict]:
+        """Return role data without identity lookups for authorization callers."""
         await self._ensure_partition(partition)
         return await self._membership_repo.list_partition_members(partition)
+
+    async def list_members_with_identities(self, partition: str) -> list[dict]:
+        """Enrich the admin-facing member list with one bulk user lookup."""
+        members = await self.list_members(partition)
+        users = {
+            user.id: user for user in await self._user_repo.get_users_by_ids([member["user_id"] for member in members])
+        }
+        for member in members:
+            user = users.get(member["user_id"])
+            member["display_name"] = user.display_name if user else None
+            member["email"] = user.email if user else None
+        return members
 
     async def add_member(self, partition: str, user_id: int, role: str) -> None:
         await self._ensure_partition(partition)

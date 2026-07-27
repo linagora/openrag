@@ -102,6 +102,15 @@ class PgUserRepository(UserRepository):
         memberships = await self._fetch_memberships(user_id)
         return self._row_to_user(row, memberships)
 
+    async def get_users_by_ids(self, user_ids: list[int]) -> list[User]:
+        if not user_ids:
+            return []
+        rows = await self.pool.fetch(
+            "SELECT * FROM users WHERE id = ANY($1::int[])",
+            user_ids,
+        )
+        return [self._row_to_user(row) for row in rows]
+
     async def get_user_by_email(self, email: str) -> User | None:
         row = await self.pool.fetchrow(
             "SELECT * FROM users WHERE email = $1",
@@ -332,6 +341,7 @@ class PgUserRepository(UserRepository):
                 "id": r["id"],
                 "display_name": r["display_name"],
                 "external_user_id": r["external_user_id"],
+                "email": r["email"],
                 "is_admin": r["is_admin"],
                 "file_quota": r["file_quota"],
                 "file_count": r["file_count"],
