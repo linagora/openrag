@@ -674,7 +674,10 @@ class PartitionService:
 
     async def list_members(self, partition: str) -> list[dict]:
         await self._ensure_partition(partition)
-        members = await self._membership_repo.list_partition_members(partition)
+        return await self._membership_repo.list_partition_members(partition)
+
+    async def list_members_with_identities(self, partition: str) -> list[dict]:
+        members = await self.list_members(partition)
         users = {
             user.id: user for user in await self._user_repo.get_users_by_ids([member["user_id"] for member in members])
         }

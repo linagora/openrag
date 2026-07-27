@@ -143,6 +143,38 @@ describe("UserListPage", () => {
     expect(screen.getByRole("status").textContent).toBe("1 user");
   });
 
+  it("returns to the first page when search changes or is cleared", async () => {
+    const users = Array.from({ length: 30 }, (_, index) =>
+      makeUser({
+        id: index + 2,
+        display_name: `Match ${index + 1}`,
+        external_user_id: `subject-${index + 2}`,
+        email: `user-${index + 2}@example.test`,
+      }),
+    );
+    listUsersMock.mockResolvedValue({ users });
+
+    renderUsers();
+
+    expect(await screen.findByText("Page 1 of 3")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await userEvent.click(screen.getByRole("button", { name: "Next page" }));
+    expect(screen.getByText("Page 3 of 3")).toBeTruthy();
+
+    const search = screen.getByRole("searchbox", { name: "Search users" });
+    await userEvent.type(search, "match");
+
+    expect(await screen.findByText("Page 1 of 3")).toBeTruthy();
+    expect(screen.getByText("Match 1")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Next page" }));
+    expect(screen.getByText("Page 2 of 3")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Clear user search" }));
+
+    expect(await screen.findByText("Page 1 of 3")).toBeTruthy();
+    expect(screen.getByText("Match 1")).toBeTruthy();
+  });
+
   it("distinguishes an empty directory from an unsuccessful search", async () => {
     listUsersMock.mockResolvedValue({ users: [] });
 

@@ -403,7 +403,7 @@ async def list_partition_users(
     service=Depends(get_partition_service),
 ):
     """List all users who are members of the given partition."""
-    members = await service.list_members(partition=partition)
+    members = await service.list_members_with_identities(partition=partition)
     return JSONResponse(status_code=status.HTTP_200_OK, content={"members": members})
 
 

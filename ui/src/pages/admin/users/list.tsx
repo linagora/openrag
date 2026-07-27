@@ -290,7 +290,12 @@ export default function UserListPage() {
               {resultSummary}
             </p>
           </div>
-          <DataTable columns={columns} data={filteredUsers} emptyMessage={emptyMessage} />
+          <DataTable
+            columns={columns}
+            data={filteredUsers}
+            emptyMessage={emptyMessage}
+            pageResetKey={normalizedSearch}
+          />
         </div>
       )}
 
