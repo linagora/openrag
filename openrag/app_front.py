@@ -465,26 +465,52 @@ async def __fetch_page_content(chunk_url, headers=None):
 
 
 async def _format_sources(metadata_sources, only_txt=False, api_key=None):
-    external_url = get_external_url()  # used to override the base URL when the front-end requests a file resource
     if not metadata_sources:
-        return None, None
+        return [], []
 
     d = {}
     headers = get_headers(api_key)
+    external_url = get_external_url()  # used to override the base URL when the front-end requests a file resource
     for i, s in enumerate(metadata_sources):
+        if not isinstance(s, dict):
+            continue
+
         if s.get("source_type") == "web":
-            title = s.get("title") or s.get("url", f"Web source {i + 1}")
+            title = s.get("title", "")
             url = s.get("url", "")
             snippet = s.get("snippet", "")
-            content = f"**[{title}]({url})**\n\n{snippet}"
-            source_name = title
+            title = title.strip() if isinstance(title, str) else ""
+            url = url.strip() if isinstance(url, str) else ""
+            snippet = snippet.strip() if isinstance(snippet, str) else ""
+            parsed_url = urlparse(url)
+            if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+                continue
+
+            source_label = title or url
+            source_name = source_label
             if source_name in d:
-                source_name = f"{title} ({i})"
+                source_name = f"{source_name} ({i})"
+            content = f"**[{source_label}]({url})**"
+            if snippet:
+                content += f"\n\n{snippet}"
             d[source_name] = cl.Text(content=content, name=source_name, display="side")
             continue
 
-        filename = Path(s["filename"])
-        file_url = s["file_url"]
+        filename_value = s.get("filename")
+        file_url = s.get("file_url")
+        page = s.get("page")
+        if (
+            not isinstance(filename_value, str)
+            or not filename_value.strip()
+            or not isinstance(file_url, str)
+            or not file_url.strip()
+            or page is None
+            or not str(page).strip()
+        ):
+            continue
+
+        filename = Path(filename_value.strip())
+        file_url = file_url.strip()
         file_url = file_url.replace(INTERNAL_BASE_URL, external_url)  # put the correct base url
         # Avoid leaking the credential in the URL (browser history, proxy logs,
         # Referer headers). In OIDC mode the browser already sends the
@@ -495,32 +521,45 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
         # authenticate the fetch.
         if api_key and (AUTH_MODE != "oidc" or _current_openrag_auth_provider() == "credentials"):
             file_url = f"{file_url}?token={api_key}"
-        page = s["page"]
         source_name = f"{filename}" + (
             f" (page: {page})" if filename.suffix in [".pdf", ".pptx", ".docx", ".doc"] else ""
         )
 
-        if only_txt:
-            chunk_content = await __fetch_page_content(chunk_url=s["chunk_url"], headers=headers)
-            elem = cl.Text(content=chunk_content, name=source_name, display="side")
-        else:
-            match filename.suffix.lower():
-                case ".pdf":
-                    elem = cl.Pdf(
-                        name=source_name,
-                        url=file_url,
-                        page=int(s["page"]),
-                        display="side",
-                    )
-                case suffix if suffix in [".png", ".jpg", ".jpeg"]:
-                    elem = cl.Image(name=source_name, url=file_url, display="side")
-                case ".mp4":
-                    elem = cl.Video(name=source_name, url=file_url, display="side")
-                case ".mp3":
-                    elem = cl.Audio(name=source_name, url=file_url, display="side")
-                case _:
-                    chunk_content = await __fetch_page_content(chunk_url=s["chunk_url"], headers=headers)
-                    elem = cl.Text(content=chunk_content, name=source_name, display="side")
+        try:
+            if only_txt:
+                chunk_url = s.get("chunk_url")
+                if not isinstance(chunk_url, str) or not chunk_url.strip():
+                    continue
+                chunk_content = await __fetch_page_content(chunk_url=chunk_url, headers=headers)
+                if not isinstance(chunk_content, str) or not chunk_content.strip():
+                    continue
+                elem = cl.Text(content=chunk_content, name=source_name, display="side")
+            else:
+                match filename.suffix.lower():
+                    case ".pdf":
+                        elem = cl.Pdf(
+                            name=source_name,
+                            url=file_url,
+                            page=int(page),
+                            display="side",
+                        )
+                    case suffix if suffix in [".png", ".jpg", ".jpeg"]:
+                        elem = cl.Image(name=source_name, url=file_url, display="side")
+                    case ".mp4":
+                        elem = cl.Video(name=source_name, url=file_url, display="side")
+                    case ".mp3":
+                        elem = cl.Audio(name=source_name, url=file_url, display="side")
+                    case _:
+                        chunk_url = s.get("chunk_url")
+                        if not isinstance(chunk_url, str) or not chunk_url.strip():
+                            continue
+                        chunk_content = await __fetch_page_content(chunk_url=chunk_url, headers=headers)
+                        if not isinstance(chunk_content, str) or not chunk_content.strip():
+                            continue
+                        elem = cl.Text(content=chunk_content, name=source_name, display="side")
+        except (httpx.HTTPError, TypeError, ValueError):
+            logger.warning("Skipping an unavailable source", source_index=i)
+            continue
 
         d[source_name] = elem
 
@@ -582,7 +621,7 @@ async def on_message(message: cl.Message):
             # Show sources
             elements, source_names = await _format_sources(sources, api_key=api_key, only_txt=False)
             msg.elements = elements if elements else []
-            if source_names:
+            if elements and source_names:
                 s = "\n\n" + "-" * 50 + f"\n\n{t('sources_label')}: \n" + "\n".join(source_names)
                 await msg.stream_token(s)
                 await msg.update()

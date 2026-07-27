@@ -29,6 +29,16 @@ def _load_app_front(monkeypatch, *, auth_mode: str, module_name: str):
     return module
 
 
+def _stub_chainlit_elements(module):
+    module.cl = SimpleNamespace(
+        Pdf=lambda **kwargs: SimpleNamespace(**kwargs),
+        Text=lambda **kwargs: SimpleNamespace(**kwargs),
+        Image=lambda **kwargs: SimpleNamespace(**kwargs),
+        Video=lambda **kwargs: SimpleNamespace(**kwargs),
+        Audio=lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+
 def test_no_hardcoded_default_secret_assignment_in_source():
     """The fall-through to a literal default secret must be gone.
 
@@ -398,6 +408,77 @@ async def test_chainlit_cookie_auth_retries_handoff_after_stale_oidc_session(mon
     assert module._OPENRAG_TOKEN_STORE[auth_handle][0] == "handoff-token"
 
 
+@pytest.mark.parametrize(
+    "sources",
+    [
+        None,
+        [],
+        [{}],
+        [None],
+        [{"source_type": "web", "title": "", "url": "", "snippet": ""}],
+        [{"filename": "", "file_url": "", "page": ""}],
+    ],
+)
+@pytest.mark.asyncio
+async def test_chainlit_hides_sources_when_none_are_displayable(monkeypatch, sources):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_empty_sources_test")
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    elements, source_names = await module._format_sources(sources)
+
+    assert elements == []
+    assert source_names == []
+
+
+@pytest.mark.asyncio
+async def test_chainlit_keeps_valid_web_sources(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_web_source_test")
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    elements, source_names = await module._format_sources(
+        [
+            {
+                "source_type": "web",
+                "title": "Example reference",
+                "url": "https://example.test/reference",
+                "snippet": "Supporting evidence",
+            }
+        ]
+    )
+
+    assert source_names == ["Example reference"]
+    assert elements[0].name == "Example reference"
+    assert elements[0].content == ("**[Example reference](https://example.test/reference)**\n\nSupporting evidence")
+
+
+@pytest.mark.asyncio
+async def test_chainlit_skips_unavailable_text_sources(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_unavailable_source_test")
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    async def unavailable_chunk(*_args, **_kwargs):
+        raise httpx.ConnectError("source unavailable")
+
+    monkeypatch.setattr(module, "__fetch_page_content", unavailable_chunk)
+
+    elements, source_names = await module._format_sources(
+        [
+            {
+                "filename": "notes.txt",
+                "file_url": "http://internal:8080/static/source-id",
+                "page": "1",
+                "chunk_url": "http://internal:8080/chunks/source-id",
+            }
+        ]
+    )
+
+    assert elements == []
+    assert source_names == []
+
+
 @pytest.mark.asyncio
 async def test_oidc_token_handoff_keeps_bearer_on_static_source_urls(monkeypatch):
     module = _load_app_front(monkeypatch, auth_mode="oidc", module_name="app_front_source_token_test")
@@ -410,14 +491,8 @@ async def test_oidc_token_handoff_keeps_bearer_on_static_source_urls(monkeypatch
                 return SimpleNamespace(metadata={"provider": "credentials"})
             return None
 
-    module.cl = SimpleNamespace(
-        user_session=UserSession(),
-        Pdf=lambda **kwargs: SimpleNamespace(**kwargs),
-        Text=lambda **kwargs: SimpleNamespace(**kwargs),
-        Image=lambda **kwargs: SimpleNamespace(**kwargs),
-        Video=lambda **kwargs: SimpleNamespace(**kwargs),
-        Audio=lambda **kwargs: SimpleNamespace(**kwargs),
-    )
+    _stub_chainlit_elements(module)
+    module.cl.user_session = UserSession()
 
     elements, _ = await module._format_sources(
         [
@@ -445,14 +520,8 @@ async def test_oidc_session_does_not_put_bearer_on_static_source_urls(monkeypatc
                 return SimpleNamespace(metadata={"provider": "oidc"})
             return None
 
-    module.cl = SimpleNamespace(
-        user_session=UserSession(),
-        Pdf=lambda **kwargs: SimpleNamespace(**kwargs),
-        Text=lambda **kwargs: SimpleNamespace(**kwargs),
-        Image=lambda **kwargs: SimpleNamespace(**kwargs),
-        Video=lambda **kwargs: SimpleNamespace(**kwargs),
-        Audio=lambda **kwargs: SimpleNamespace(**kwargs),
-    )
+    _stub_chainlit_elements(module)
+    module.cl.user_session = UserSession()
 
     elements, _ = await module._format_sources(
         [
