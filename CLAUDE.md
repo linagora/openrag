@@ -242,6 +242,59 @@ Optional web search augmentation via the Staan API, allowing the LLM to combine 
 - `openrag/services/orchestrators/query_service.py` — `_prepare_for_web_only()`, web search logic in `_prepare_for_chat_completion()`
 - `openrag/api/routers/user/chat.py` — `__prepare_sources()` merges document and web sources
 
+### Evaluation (admin System page → Evaluation tab)
+
+On-demand benchmarking of indexing speed, retrieval quality and answer quality.
+
+**Flow** (`EvalRunner` Ray actor, `openrag/services/workers/eval_runner.py`): create the
+throwaway partition `__eval_<run_id>` → upload and time each corpus file over the real HTTP
+API → shell out to `promptfoo eval` twice → fold the outputs into metrics → drop the partition.
+
+- **Layering**: `EvaluationService` never touches Ray. It dispatches through the
+  `EvaluationRunner` port (`openrag/core/evaluation/runner.py`), implemented by
+  `RayEvaluationRunner` (`openrag/services/workers/eval_dispatcher.py`) and injected by the
+  container — the same port/adapter shape as `IndexingDispatcher`. The adapter resolves its
+  detached actor on first use, so building the service does not spawn a worker.
+- **Datasets** are admin-uploaded: a corpus plus a CSV test set
+  (`question,expected_answer,expected_file_ids`; the last column is optional and
+  `;`-separated). Files live under `<data_dir>/eval/<dataset_id>/`. The corpus is
+  streamed to disk rather than buffered, so its cap is a disk cost, not a RAM one.
+- **`file_id` sanitisation** (`sanitize_file_id`, `openrag/core/evaluation/identity.py`):
+  the indexing API accepts only `[A-Za-z0-9._:-]` in a `file_id`, so a corpus file cannot be
+  uploaded under a raw human filename. The runner uploads a sanitised id, and
+  `metrics.summarize` sanitises **both** sides of the ground-truth comparison, so a test set
+  naming `A B.pdf` still matches the stored `A_B.pdf`. Note `metadata.source` is the
+  server's storage path, not the original name — the `file_id` is what a human sees.
+- **Two promptfoo configs, not one** (`openrag/core/evaluation/promptfoo_config.py`):
+  retrieval hits `GET /search/partition/{partition}` (documents carry the chunk under
+  `content`, plus `metadata.file_id`), answers hit `POST /v1/chat/completions`. Each config
+  has one provider, so no assertion runs against an output shape it cannot read.
+  `transformResponse` must be a single JavaScript **expression** — an IIFE or any statement
+  makes promptfoo error every row before grading.
+- **Metrics** (`openrag/core/evaluation/metrics.py`): throughput from wall-clock, plus
+  hit rate / MRR / recall using the definitions in
+  `tests/load/automatic-evaluation-pipeline/README.md`. Rows without `expected_file_ids`
+  are reported as `skipped_cases`, never as misses. Percentiles are nearest-rank
+  (`ceil`) — `round` would break ties to even and report the wrong observation.
+- **Auth**: runs authenticate as the non-admin service user `__openrag_eval__`, whose token
+  is regenerated at the start of every run, so no usable plaintext token is stored at rest.
+- **Concurrency**: one run at a time. Enforced by the partial unique index
+  `ux_eval_runs_single_active`, not by a read-then-insert — the run row is created *before*
+  the token is regenerated, so two racing starts cannot revoke each other's credentials.
+  `POST /evaluation/runs` returns 409 on the loser, and 503 if the runner cannot be pinged.
+  A run orphaned by an actor restart is reaped by cancelling it, which writes the terminal
+  status directly; a failed provision releases the row the same way.
+- **Config** (`openrag/core/config/evaluation.py`, `evaluation:` in `conf/config.yaml`):
+  limits and timeouts are env-overridable (`EVAL_*`, `PROMPTFOO_BIN`). The API base URL the
+  runner calls back on is `server.internal_url` (env: `OPENRAG_INTERNAL_URL`) — it is a
+  server property, not an eval one. The reserved partition prefix, CSV column names and the
+  `file_id` alphabet are deliberately *not* config — they are contracts with stored datasets.
+- Requires **Node 22** (from NodeSource; distro packages predate promptfoo's floor) + a
+  pinned promptfoo in **both** `infra/docker/api.Dockerfile` (compose runs Ray inside the
+  API container) and `infra/docker/ray.Dockerfile` (separate Ray cluster). Dataset files are
+  read from disk by the runner, so a **separate** Ray cluster needs `<data_dir>` on shared
+  storage.
+
 ### File Quota System
 
 Per-user file quota enforcement tracked via the `file_count` and `file_quota` columns on `users`, and `created_by` on `files`.

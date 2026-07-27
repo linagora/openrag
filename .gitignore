@@ -65,6 +65,8 @@ volumes/*
 !/services/.gitkeep # Keep the placeholder
 
 *.csv
+# The committed evaluation test set is source, not scratch data.
+!tests/evaluation/*.csv
 *.pkl
 
 #helm
