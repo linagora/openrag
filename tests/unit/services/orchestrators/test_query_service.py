@@ -26,6 +26,23 @@ from services.orchestrators.query_service import QueryService
 _PROMPT_CFG = load_config()
 
 
+class _EmptyPromptRepo:
+    """No DB rows → PromptService.resolve_prompt falls back to the disk seed,
+    preserving the pre-DB behaviour these tests assert."""
+
+    async def get_by_name(self, prompt_type, name):
+        return None
+
+    async def get_default(self, prompt_type):
+        return None
+
+
+def _disk_prompt_service():
+    from services.orchestrators.prompt_service import PromptService
+
+    return PromptService(prompt_repo=_EmptyPromptRepo(), config=_PROMPT_CFG)
+
+
 @pytest.fixture(autouse=True)
 def _patch_infra(monkeypatch):
     @asynccontextmanager
@@ -119,6 +136,7 @@ def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=No
         config=_config(mode),
         web_search_service=web or FakeWeb(),
         workspace_service=workspace or FakeWorkspace(),
+        prompt_service=_disk_prompt_service(),
         llm_factory=llm_factory,
     )
 
@@ -182,6 +200,7 @@ def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
         config=config,
         web_search_service=FakeWeb(),
         workspace_service=FakeWorkspace(),
+        prompt_service=_disk_prompt_service(),
     )
     assert svc._default_chat_history_depth == 4
     assert svc._resolve_chat_history_depth(None) == 4
@@ -412,6 +431,61 @@ async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
     assert len(retrieval.retrieve_multi_calls) == 1  # doc branch fused via the rrf_k-aware retrieve_multi
     assert retrieval.retrieve_per_query_calls == []  # legacy per-query + fuse()@60 path NOT used
     assert web and web[0].url == "https://ex.com"  # websearch branch actually taken
+
+
+@pytest.mark.asyncio
+async def test_answer_system_prompt_comes_from_prompt_service():
+    # Revert-proves the query seam: the payload's system message is built from
+    # prompt_service.resolve_prompt("sys_prompt", ...), resolved request-time —
+    # not a startup snapshot. Reverting query_service to load_template_by_key at
+    # __init__ makes the marker disappear.
+    class MarkerPromptService:
+        def __init__(self):
+            self.seen: list = []
+
+        async def resolve_prompt(self, prompt_type, names=None):
+            self.seen.append(prompt_type)
+            return "MARKER-SYS::{context}"
+
+    svc = _svc(retrieval=FakeRetrieval())  # SimpleRag → no contextualizer call
+    marker = MarkerPromptService()
+    svc._prompt_service = marker
+
+    payload, _docs, _web = await svc._prepare_chat(
+        ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}}
+    )
+
+    assert payload["messages"][0]["role"] == "system"
+    assert payload["messages"][0]["content"].startswith("MARKER-SYS::")
+    assert "sys_prompt" in marker.seen
+
+
+@pytest.mark.asyncio
+async def test_generation_prompt_name_from_partition_reaches_resolver():
+    # Revert-proves #12: a single owning partition's generation_prompt_names is
+    # passed to resolve_prompt as the candidate name. Multi-partition / "all"
+    # pass None (global default).
+    class RecordingPromptService:
+        def __init__(self):
+            self.calls: list = []
+
+        async def resolve_prompt(self, prompt_type, names=None):
+            self.calls.append((prompt_type, tuple(names or ())))
+            return "SYS::{context}"
+
+    svc = _svc(retrieval=FakeRetrieval())
+    rec = RecordingPromptService()
+    svc._prompt_service = rec
+    svc._config.partitions = {
+        "p": SimpleNamespace(generation_prompt_names={"sys_prompt": "legal"}, chat_history_depth=4)
+    }
+
+    await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    assert ("sys_prompt", ("legal",)) in rec.calls
+
+    rec.calls.clear()
+    await svc._prepare_chat(["p", "q"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    assert ("sys_prompt", (None,)) in rec.calls  # no single owning partition
 
 
 @pytest.mark.asyncio

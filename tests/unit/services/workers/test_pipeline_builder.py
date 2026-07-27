@@ -83,7 +83,9 @@ class FakeContextualizer:
     def __init__(self) -> None:
         self.calls: list[tuple[list[Chunk], str, str]] = []
 
-    async def contextualize(self, chunks, *, filename: str = "", lang: str = "en") -> list[Chunk]:
+    async def contextualize(
+        self, chunks, *, filename: str = "", lang: str = "en", system_prompt: str | None = None
+    ) -> list[Chunk]:
         self.calls.append((list(chunks), filename, lang))
         return [chunk.model_copy(update={"text": f"ctx {chunk.text}", "context": "ctx"}) for chunk in chunks]
 
@@ -100,6 +102,7 @@ class FakeTopicTagger:
         filename: str = "",
         max_tags: int = 7,
         lang: str = "en",
+        system_prompt: str | None = None,
     ) -> list[str]:
         self.calls.append((list(chunks), filename, max_tags, lang))
         return self.tags

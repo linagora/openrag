@@ -38,8 +38,13 @@ class TopicTagger:
         filename: str = "",
         max_tags: int = 7,
         lang: str = "en",
+        system_prompt: str | None = None,
     ) -> list[str]:
-        """Return normalized, unique topic tags for a document."""
+        """Return normalized, unique topic tags for a document.
+
+        ``system_prompt`` overrides the instance default (the DB-resolved prompt
+        for this file's partition) when provided.
+        """
         chunks = list(chunks)
         if not chunks:
             return []
@@ -48,7 +53,7 @@ class TopicTagger:
 
         try:
             messages = _build_messages(
-                system_prompt=self._system_prompt,
+                system_prompt=system_prompt or self._system_prompt,
                 chunks=chunks,
                 filename=filename,
                 max_tags=max_tags,

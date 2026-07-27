@@ -45,6 +45,7 @@ _PARTITION_UPDATE_COLUMNS = frozenset(
         "collection_name",
         "chat_history_depth",
         "chat_llm",
+        "generation_prompt_names",
     }
 )
 _PARTITION_OPERATION_LOCK_NAMESPACE = 20260720
@@ -318,7 +319,7 @@ class PgPartitionRepository(PartitionRepository):
         sets: list[str] = []
         for col, val in updates.items():
             idx = len(params) + 1
-            sets.append(f"{col} = ${idx}")
+            sets.append(f"{col} = ${idx}::jsonb" if col == "generation_prompt_names" else f"{col} = ${idx}")
             params.append(val)
         sql = f"UPDATE partitions SET {', '.join(sets)}, updated_at = now() WHERE partition = $1 RETURNING *"
 
@@ -391,6 +392,7 @@ class PgPartitionRepository(PartitionRepository):
             "collection_name": row["collection_name"],
             "chat_history_depth": row["chat_history_depth"],
             "chat_llm": row["chat_llm"],
+            "generation_prompt_names": row["generation_prompt_names"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

@@ -29,5 +29,11 @@ class RetrievalPipelineConfig(BaseModel):
     include_ancestors: bool = True
     rrf_k: int = Field(default=60, gt=0, le=1000)  # Reciprocal Rank Fusion constant
 
+    # Prompt selection: name a library prompt for this preset's query-expansion
+    # strategies (None = the type's global default, then the disk seed).
+    # Resolved per request in RetrievalService.resolve_prompt.
+    hyde_prompt_name: str | None = None
+    multi_query_prompt_name: str | None = None
+
 
 __all__ = ["RetrievalPipelineConfig"]

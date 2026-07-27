@@ -540,6 +540,7 @@ class PartitionService:
             # QueryService._resolve_chat_history_depth actually reads at chat time.
             chat_history_depth=row.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
             chat_llm=row.get("chat_llm"),
+            generation_prompt_names=row.get("generation_prompt_names") or {},
         )
 
     async def load_partitions(self) -> None:
