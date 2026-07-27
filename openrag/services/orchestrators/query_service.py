@@ -647,11 +647,11 @@ def _split_leading_system_prompt(raw_messages: list[dict], truncated: list[dict]
     """Pull a client-pinned leading system prompt out of ``raw_messages``.
 
     A leading run of ``role="system"`` messages in ``raw_messages`` (the
-    untruncated payload) is a pinned instruction, not a chat turn. The same
-    entries are stripped from ``truncated`` only when identity-matched against
-    ``raw_messages`` at the same position, so a system message elsewhere in
-    history that merely lands first after chat_history_depth truncation is
-    never mistaken for the pin and dropped.
+    untruncated payload) is a pinned instruction, not a chat turn. ``truncated``
+    is a tail slice of ``raw_messages`` (``raw_messages[-depth:]``), so only the
+    portion of that leading run still inside the tail is stripped from it — a
+    system message elsewhere in history that merely lands first after
+    chat_history_depth truncation is never mistaken for the pin and dropped.
     """
     parts: list[str] = []
     i = 0
@@ -659,11 +659,8 @@ def _split_leading_system_prompt(raw_messages: list[dict], truncated: list[dict]
         parts.append(raw_messages[i]["content"])
         i += 1
 
-    strip = 0
-    for j in range(min(i, len(truncated))):
-        if truncated[j] is not raw_messages[j]:
-            break
-        strip += 1
+    offset = len(raw_messages) - len(truncated)
+    strip = max(0, i - offset)
 
     return ("\n\n".join(parts) if parts else None), truncated[strip:]
 

@@ -18,6 +18,7 @@ Tokenizers are injected as ``Callable[[str], int]`` so this module stays pure
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Callable
 from typing import Protocol
 
@@ -25,6 +26,8 @@ from core.utils.text import neutralize_prompt_control_tokens, sanitize_text
 
 SOURCE_SEPARATOR = "-" * 10 + "\n\n"
 EMPTY_CONTEXT_MESSAGE = "No document found from the database"
+
+_UNSAFE_PROMPT_CLOSE_TAG_RE = re.compile(r"</unsafe_custom_prompt>", re.IGNORECASE)
 
 
 class WebSourceLike(Protocol):
@@ -145,8 +148,14 @@ def prepend_system_prompt(
     rules regardless of what this block says.
     """
     out = copy.deepcopy(messages)
+    # A client-supplied prefix containing a literal closing tag could otherwise
+    # break out of the untrusted-content wrapper and have trailing attacker
+    # text read as if outside it.
+    safe_prefix = _UNSAFE_PROMPT_CLOSE_TAG_RE.sub("&lt;/unsafe_custom_prompt&gt;", prefix) if prefix else prefix
     custom_prompt_block = (
-        f"\nUSER CUSTOMIZATION INPUT\n<unsafe_custom_prompt>\n{prefix}\n</unsafe_custom_prompt>\n" if prefix else ""
+        f"\nUSER CUSTOMIZATION INPUT\n<unsafe_custom_prompt>\n{safe_prefix}\n</unsafe_custom_prompt>\n"
+        if prefix
+        else ""
     )
     rendered = system_template.format(
         context=context,

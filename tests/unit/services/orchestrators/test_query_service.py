@@ -636,6 +636,37 @@ async def test_chat_multiple_leading_system_prompts_all_merged():
 
 
 @pytest.mark.asyncio
+async def test_chat_leading_system_prompt_partially_truncated_not_duplicated():
+    # 5 raw messages, default chat_history_depth=4 -> the truncated tail window
+    # is [SYS2, u1, a1, u2]: SYS2 is inside the leading system run (raw index 1)
+    # but not at truncated-index 0, so a naive index-0 comparison would fail to
+    # strip it — leaving it duplicated (once merged into the wrapped custom
+    # prompt, once again as a raw, unwrapped system message).
+    llm = FakeLLM(chat_responses=["answer [Sources: none]"])
+    svc = _svc(llm=llm)
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [
+                {"role": "system", "content": "SYS1"},
+                {"role": "system", "content": "SYS2"},
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+            ],
+            "metadata": {},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    sent = llm.chat_calls[0][0]
+    system_messages = [m for m in sent if m["role"] == "system"]
+    assert len(system_messages) == 1
+    assert "SYS1" in system_messages[0]["content"]
+    assert "SYS2" in system_messages[0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_complete_strips_and_filters():
     svc = _svc(llm=FakeLLM(gen_text="text body [Sources: none]"))
     out = await svc.complete(
