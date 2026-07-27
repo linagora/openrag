@@ -80,13 +80,16 @@ describe("SystemPage Grafana action", () => {
     expect(link.getAttribute("rel")).toBe("noopener noreferrer");
   });
 
-  it("hides Grafana actions when the deployment has no dashboard URL", async () => {
+  it("explains how to configure Grafana when the dashboard URL is missing", async () => {
     render(<SystemPage />);
 
     expect(screen.queryByRole("link", { name: /grafana/i })).toBeNull();
 
     await userEvent.click(screen.getByRole("tab", { name: "Metrics" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open in Grafana" }));
 
-    expect(screen.queryByRole("link", { name: /grafana/i })).toBeNull();
+    expect(screen.getByRole("dialog")).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "Grafana is not configured" })).not.toBeNull();
+    expect(screen.getByText("GRAFANA_URL")).not.toBeNull();
   });
 });

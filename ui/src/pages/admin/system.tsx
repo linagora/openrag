@@ -16,6 +16,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 
 const BUILD_TIME_GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || "";
 
@@ -41,21 +50,6 @@ export default function SystemPage() {
       <PageHeader
         title="System"
         description="Status, Ray actors, metrics and configuration"
-        actions={
-          grafanaUrl ? (
-            <Button variant="outline" asChild>
-              <a
-                href={grafanaUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label="View Grafana dashboard (opens in a new tab)"
-              >
-                <ExternalLink className="mr-2 h-4 w-4" />
-                View in Grafana
-              </a>
-            </Button>
-          ) : undefined
-        }
       />
 
       <Tabs defaultValue="status">
@@ -210,7 +204,7 @@ function MetricsTab({ grafanaUrl }: { grafanaUrl: string }) {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle>Prometheus Metrics</CardTitle>
-        {grafanaUrl && (
+        {grafanaUrl ? (
           <Button variant="outline" size="sm" asChild>
             <a
               href={grafanaUrl}
@@ -222,6 +216,26 @@ function MetricsTab({ grafanaUrl }: { grafanaUrl: string }) {
               Open in Grafana
             </a>
           </Button>
+        ) : (
+          <Dialog>
+            <DialogTrigger asChild>
+              <Button variant="outline" size="sm">
+                <ExternalLink className="mr-2 h-3.5 w-3.5" />
+                Open in Grafana
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Grafana is not configured</DialogTitle>
+                <DialogDescription>
+                  Set <code className="font-mono text-foreground">GRAFANA_URL</code> to the
+                  browser-reachable OpenRAG dashboard URL, then restart the API. This action will
+                  open that dashboard without rebuilding the Admin UI.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter showCloseButton />
+            </DialogContent>
+          </Dialog>
         )}
       </CardHeader>
       <CardContent>
