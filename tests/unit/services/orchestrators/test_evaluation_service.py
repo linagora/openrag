@@ -36,6 +36,7 @@ def _stub_ray_utils(monkeypatch):
 
 class FakeRepo:
     def __init__(self, run: EvalRun | None = None) -> None:
+        self.deleted_datasets: list[str] = []
         self.dataset = EvalDataset(id=DATASET_ID, name="d", corpus_file_count=1, testset_row_count=1)
         self.run = run
         self.status_updates: list[tuple[str, EvalRunStatus, str | None]] = []
@@ -49,6 +50,15 @@ class FakeRepo:
 
     async def get_run(self, run_id):
         return self.run
+
+    async def active_run(self):
+        if self.run is not None and not self.run.status.is_terminal:
+            return self.run
+        return None
+
+    async def delete_dataset(self, dataset_id):
+        self.deleted_datasets.append(dataset_id)
+        return True
 
     async def update_run_status(self, run_id, status, *, error=None):
         self.status_updates.append((run_id, status, error))
@@ -250,3 +260,57 @@ async def test_a_failed_provision_releases_the_run_lock(tmp_path):
     statuses = [status for _, status, _ in repo.status_updates]
     assert EvalRunStatus.FAILED in statuses, "the lock must be released"
     assert partitions.deleted, "the throwaway partition must not leak"
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_dataset_in_use_is_refused(tmp_path):
+    """The runner reads the corpus off disk for the whole indexing phase, so
+    removing it mid-run would surface as a FileNotFoundError."""
+    from core.utils.exceptions import ConflictError
+
+    _dataset_on_disk(tmp_path)
+    run = EvalRun(id="run-1", dataset_id=DATASET_ID, status=EvalRunStatus.INDEXING)
+    repo = FakeRepo(run=run)
+    service = _service(repo, FakeRunnerHandle(), tmp_path=tmp_path)
+
+    with pytest.raises(ConflictError):
+        await service.delete_dataset(DATASET_ID)
+
+    assert repo.deleted_datasets == []
+    assert (tmp_path / "eval" / DATASET_ID).exists(), "files must survive a refused delete"
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_dataset_an_idle_run_used_is_allowed(tmp_path):
+    """Only an *active* run blocks deletion; history keeps its results."""
+    _dataset_on_disk(tmp_path)
+    run = EvalRun(id="run-1", dataset_id=DATASET_ID, status=EvalRunStatus.COMPLETED)
+    repo = FakeRepo(run=run)
+    service = _service(repo, FakeRunnerHandle(), tmp_path=tmp_path)
+
+    await service.delete_dataset(DATASET_ID)
+
+    assert repo.deleted_datasets == [DATASET_ID]
+    assert not (tmp_path / "eval" / DATASET_ID).exists()
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_test_set_is_rejected_without_buffering_it_all(tmp_path):
+    """The stream is read to one byte past the cap, not to its end."""
+    import io
+
+    from core.utils.exceptions import ValidationError
+
+    service = _service(FakeRepo(), FakeRunnerHandle(), tmp_path=tmp_path)
+    cap = service._settings.max_testset_bytes
+    oversized = io.BytesIO(b"x" * (cap + 5000))
+
+    with pytest.raises(ValidationError) as excinfo:
+        await service.create_dataset(
+            name="d",
+            corpus=[("a.txt", io.BytesIO(b"hello"))],
+            testset=oversized,
+            user_id=1,
+        )
+    assert excinfo.value.status_code == 413
+    assert oversized.tell() <= cap + 1, "must stop reading once the cap is exceeded"

@@ -27,6 +27,8 @@ from core.utils.exceptions import ConflictError
 if TYPE_CHECKING:
     import asyncpg
 
+_ACTIVE_STATUSES = ("QUEUED", "INDEXING", "EVALUATING")
+
 
 def _dump(payload: Any) -> str | None:
     """Serialise a metrics dataclass — or a list of them — for a JSONB column."""
@@ -112,6 +114,18 @@ class PgEvaluationRepository(EvaluationRepository):
 
     async def get_run(self, run_id: str) -> EvalRun | None:
         row = await self.pool.fetchrow("SELECT * FROM eval_runs WHERE id = $1", run_id)
+        return self._row_to_run(row) if row else None
+
+    async def active_run(self) -> EvalRun | None:
+        row = await self.pool.fetchrow(
+            """
+            SELECT * FROM eval_runs
+            WHERE status = ANY($1::text[])
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            list(_ACTIVE_STATUSES),
+        )
         return self._row_to_run(row) if row else None
 
     async def update_run_status(self, run_id: str, status: EvalRunStatus, *, error: str | None = None) -> None:

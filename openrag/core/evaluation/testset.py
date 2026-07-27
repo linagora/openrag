@@ -93,6 +93,7 @@ def parse_testset(raw: bytes | str, *, max_rows: int) -> list[EvalTestCase]:
 
     cases: list[EvalTestCase] = []
     errors: list[str] = []
+    error_count = 0
 
     for offset, row in enumerate(reader):
         # +2: one for the header line, one to make it 1-based like a spreadsheet.
@@ -102,22 +103,30 @@ def parse_testset(raw: bytes | str, *, max_rows: int) -> list[EvalTestCase]:
 
         if not query and not expected:
             continue  # blank trailing line
-        if not query:
-            errors.append(f"row {line}: '{QUERY_COLUMN}' is empty")
-            continue
-        if not expected:
-            errors.append(f"row {line}: '{ANSWER_COLUMN}' is empty")
+        if not query or not expected:
+            column = QUERY_COLUMN if not query else ANSWER_COLUMN
+            error_count += 1
+            # Only the reported ones are retained; the rest are just counted.
+            if len(errors) < _MAX_REPORTED_ERRORS:
+                errors.append(f"row {line}: '{column}' is empty")
             continue
 
         file_ids_key = key_for.get(FILE_IDS_COLUMN)
+        # Reject on the row that would exceed the cap, rather than
+        # materialising every remaining row only to count them afterwards.
+        if len(cases) >= max_rows:
+            raise ValidationError(
+                f"Test set has more than {max_rows} rows.",
+                code="EVAL_TESTSET_TOO_LARGE",
+                status_code=400,
+            )
         file_ids = _split_file_ids(row.get(file_ids_key) or "") if file_ids_key else ()
         cases.append(EvalTestCase(query=query, expected_answer=expected, expected_file_ids=file_ids))
 
     if errors:
-        shown = errors[:_MAX_REPORTED_ERRORS]
-        suffix = f" (+{len(errors) - len(shown)} more)" if len(errors) > len(shown) else ""
+        suffix = f" (+{error_count - len(errors)} more)" if error_count > len(errors) else ""
         raise ValidationError(
-            "Test set has invalid rows — " + "; ".join(shown) + suffix,
+            "Test set has invalid rows — " + "; ".join(errors) + suffix,
             code="EVAL_TESTSET_ROWS",
             status_code=400,
         )
@@ -125,12 +134,6 @@ def parse_testset(raw: bytes | str, *, max_rows: int) -> list[EvalTestCase]:
         raise ValidationError(
             "Test set contains no usable rows.",
             code="EVAL_TESTSET_EMPTY",
-            status_code=400,
-        )
-    if len(cases) > max_rows:
-        raise ValidationError(
-            f"Test set has {len(cases)} rows; the maximum is {max_rows}.",
-            code="EVAL_TESTSET_TOO_LARGE",
             status_code=400,
         )
     return cases

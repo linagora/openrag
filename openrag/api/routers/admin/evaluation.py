@@ -78,11 +78,11 @@ async def create_dataset(
     run has already indexed the corpus.
     """
     # Pass the open streams, not the bytes: large uploads are already spooled
-    # to disk, and reading them here would pull the corpus into memory.
+    # to disk, and reading them here would pull them into memory unbounded.
     dataset = await service.create_dataset(
         name=name,
         corpus=[(upload.filename or "unnamed", upload.file) for upload in corpus],
-        testset_csv=await testset.read(),
+        testset=testset.file,
         user_id=user.get("id") if isinstance(user, dict) else None,
     )
     return asdict(dataset)

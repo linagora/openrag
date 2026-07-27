@@ -154,8 +154,15 @@ function UploadDialog({
 
   const canSubmit = name.trim() !== "" && testset !== null && corpus.length > 0;
 
+  // Every dismissal path — backdrop, Escape, Cancel — clears the form, so a
+  // reopened dialog never silently resubmits the previous selection.
+  const close = () => {
+    reset();
+    onOpenChange(false);
+  };
+
   return (
-    <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : (reset(), onOpenChange(false)))}>
+    <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : close())}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>New evaluation dataset</DialogTitle>
@@ -202,7 +209,7 @@ function UploadDialog({
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+          <Button variant="outline" onClick={close}>
             Cancel
           </Button>
           <Button disabled={!canSubmit || createMut.isPending} onClick={() => createMut.mutate()}>

@@ -264,6 +264,10 @@ class PartitionService:
         summaries: dict[str, dict] = {}
         for r in rows:
             name = r["partition"]
+            # Throwaway eval partitions are hidden here as well as in
+            # list_partitions: this is what GET /partition/ responds from.
+            if is_eval_partition(str(name)):
+                continue
             created = r.get("created_at")
             summaries[name] = {
                 "partition": name,

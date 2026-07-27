@@ -363,7 +363,6 @@ mcp:
   similarity_threshold: 0.8
   download_timeout: 30.0
   max_download_bytes: 104857600  # 100 MiB
-  max_download_bytes: 104857600  # 100 MiB
 
 # --- Evaluation ---
 # Env: OPENRAG_INTERNAL_URL, PROMPTFOO_BIN, EVAL_MAX_CORPUS_MB,

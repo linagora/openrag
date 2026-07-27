@@ -92,7 +92,16 @@ export function EvaluationTab() {
                   <TableRow
                     key={run.id}
                     className={`cursor-pointer ${run.id === shownRunId ? "bg-muted/50" : ""}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-current={run.id === shownRunId}
                     onClick={() => setSelectedRunId(run.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setSelectedRunId(run.id);
+                      }
+                    }}
                   >
                     <TableCell>
                       {run.started_at ? new Date(run.started_at).toLocaleString() : "—"}

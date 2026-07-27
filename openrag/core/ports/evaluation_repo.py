@@ -44,6 +44,14 @@ class EvaluationRepository(ABC):
         """One run with its metrics, or ``None``."""
 
     @abstractmethod
+    async def active_run(self) -> EvalRun | None:
+        """The run currently occupying the runner, if any.
+
+        Advisory only — mutual exclusion between starts is enforced by the
+        store's single-active-run index, not by reading this.
+        """
+
+    @abstractmethod
     async def update_run_status(self, run_id: str, status: EvalRunStatus, *, error: str | None = None) -> None:
         """Move a run to a new status, stamping ``finished_at`` when terminal."""
 
