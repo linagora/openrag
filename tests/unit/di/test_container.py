@@ -349,7 +349,11 @@ _ORCHESTRATORS = [
     ("mcp_service", "get_mcp_service"),
 ]
 
-_OPTIONAL_PHASE_PROVIDERS = {"get_model_endpoint_service", "get_preset_service"}
+_OPTIONAL_PHASE_PROVIDERS = {
+    "get_model_endpoint_service",
+    "get_preset_service",
+    "get_evaluation_service",
+}
 
 
 class TestPhase8OrchestratorWiring:

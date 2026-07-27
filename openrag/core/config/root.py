@@ -14,6 +14,7 @@ from .endpoints import (
     SemaphoreConfig,
     VLMConfig,
 )
+from .evaluation import EvaluationConfig
 from .indexation import LoaderConfig
 from .infrastructure import (
     PathsConfig,
@@ -66,6 +67,7 @@ class Settings(ConfigMixin):
     rag: RAGConfig = Field(default_factory=RAGConfig)
     websearch: WebSearchConfig = Field(default_factory=StaanWebSearchConfig)
     mcp: MCPServerConfig = Field(default_factory=MCPServerConfig)
+    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     presets: PresetsConfig = Field(default_factory=PresetsConfig)
     partitions: dict[str, PartitionConfig] = Field(default_factory=dict)

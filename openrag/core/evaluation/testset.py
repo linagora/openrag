@@ -25,10 +25,6 @@ OPTIONAL_COLUMNS = (FILE_IDS_COLUMN,)
 #: ``expected_file_ids`` holds several ids in one cell, separated by this.
 FILE_ID_SEPARATOR = ";"
 
-#: Guardrail against an accidental multi-megabyte upload: every row costs at
-#: least one retrieval call plus one graded generation at run time.
-MAX_ROWS = 500
-
 #: Row numbers are reported to the user, so cap how many we list at once.
 _MAX_REPORTED_ERRORS = 10
 
@@ -49,18 +45,21 @@ def _split_file_ids(cell: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in cell.split(FILE_ID_SEPARATOR) if part.strip())
 
 
-def parse_testset(raw: bytes | str) -> list[EvalTestCase]:
+def parse_testset(raw: bytes | str, *, max_rows: int) -> list[EvalTestCase]:
     """Parse the CSV upload into test cases.
 
     Args:
         raw: Raw upload bytes, or already-decoded text.
+        max_rows: Reject test sets longer than this (``EVAL_MAX_TESTSET_ROWS``).
+            Every row costs a retrieval call plus a graded generation per run,
+            so the cap is a deployment concern rather than a fixed limit.
 
     Returns:
         One :class:`EvalTestCase` per data row, in file order.
 
     Raises:
         ValidationError: On a missing/duplicated header, an empty file, a row
-            with a blank required cell, or more than :data:`MAX_ROWS` rows.
+            with a blank required cell, or more than ``max_rows`` rows.
     """
     text = _decode(raw) if isinstance(raw, bytes) else raw
     reader = csv.DictReader(io.StringIO(text))
@@ -128,9 +127,9 @@ def parse_testset(raw: bytes | str) -> list[EvalTestCase]:
             code="EVAL_TESTSET_EMPTY",
             status_code=400,
         )
-    if len(cases) > MAX_ROWS:
+    if len(cases) > max_rows:
         raise ValidationError(
-            f"Test set has {len(cases)} rows; the maximum is {MAX_ROWS}.",
+            f"Test set has {len(cases)} rows; the maximum is {max_rows}.",
             code="EVAL_TESTSET_TOO_LARGE",
             status_code=400,
         )
@@ -141,7 +140,6 @@ __all__ = [
     "ANSWER_COLUMN",
     "FILE_IDS_COLUMN",
     "FILE_ID_SEPARATOR",
-    "MAX_ROWS",
     "QUERY_COLUMN",
     "REQUIRED_COLUMNS",
     "parse_testset",

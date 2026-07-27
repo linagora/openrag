@@ -22,17 +22,18 @@ from core.models.evaluation import (
     RetrievalMetrics,
 )
 from core.ports.evaluation_repo import EvaluationRepository
+from core.utils.exceptions import ConflictError
 
 if TYPE_CHECKING:
     import asyncpg
 
-_ACTIVE_STATUSES = ("QUEUED", "INDEXING", "EVALUATING")
-
 
 def _dump(payload: Any) -> str | None:
-    """Serialise a metrics dataclass for a JSONB column."""
+    """Serialise a metrics dataclass — or a list of them — for a JSONB column."""
     if payload is None:
         return None
+    if isinstance(payload, list):
+        return json.dumps([asdict(item) for item in payload])
     return json.dumps(asdict(payload) if hasattr(payload, "__dataclass_fields__") else payload)
 
 
@@ -86,17 +87,23 @@ class PgEvaluationRepository(EvaluationRepository):
     # ── runs ─────────────────────────────────────────────────────────
 
     async def create_run(self, run: EvalRun) -> EvalRun:
-        row = await self.pool.fetchrow(
-            """
-            INSERT INTO eval_runs (id, dataset_id, status, created_by)
-            VALUES ($1, $2, $3, $4)
-            RETURNING *
-            """,
-            run.id,
-            run.dataset_id,
-            run.status.value,
-            run.created_by,
-        )
+        import asyncpg
+
+        try:
+            row = await self.pool.fetchrow(
+                """
+                INSERT INTO eval_runs (id, dataset_id, status, created_by)
+                VALUES ($1, $2, $3, $4)
+                RETURNING *
+                """,
+                run.id,
+                run.dataset_id,
+                run.status.value,
+                run.created_by,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            # ux_eval_runs_single_active — another run is already in flight.
+            raise ConflictError("An evaluation run is already in progress.") from exc
         return self._row_to_run(row)
 
     async def list_runs(self, limit: int = 50) -> list[EvalRun]:
@@ -105,18 +112,6 @@ class PgEvaluationRepository(EvaluationRepository):
 
     async def get_run(self, run_id: str) -> EvalRun | None:
         row = await self.pool.fetchrow("SELECT * FROM eval_runs WHERE id = $1", run_id)
-        return self._row_to_run(row) if row else None
-
-    async def active_run(self) -> EvalRun | None:
-        row = await self.pool.fetchrow(
-            """
-            SELECT * FROM eval_runs
-            WHERE status = ANY($1::text[])
-            ORDER BY started_at DESC
-            LIMIT 1
-            """,
-            list(_ACTIVE_STATUSES),
-        )
         return self._row_to_run(row) if row else None
 
     async def update_run_status(self, run_id: str, status: EvalRunStatus, *, error: str | None = None) -> None:
@@ -152,7 +147,7 @@ class PgEvaluationRepository(EvaluationRepository):
             _dump(run.indexing),
             _dump(run.retrieval),
             _dump(run.answer),
-            json.dumps([asdict(case) for case in run.cases]),
+            _dump(run.cases),
             run.error,
         )
 
@@ -175,7 +170,7 @@ class PgEvaluationRepository(EvaluationRepository):
         retrieval = _load(row["retrieval"])
         answer = _load(row["answer"])
         cases = _load(row["cases"]) or []
-        samples = (indexing or {}).pop("samples", []) if indexing else []
+        samples = indexing.pop("samples", []) if indexing else []
         return EvalRun(
             id=row["id"],
             dataset_id=row["dataset_id"],

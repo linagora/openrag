@@ -28,7 +28,12 @@ class EvaluationRepository(ABC):
 
     @abstractmethod
     async def create_run(self, run: EvalRun) -> EvalRun:
-        """Persist a queued run."""
+        """Persist a queued run.
+
+        Raises:
+            ConflictError: A run is already active. At most one may be, and the
+                store is what enforces it.
+        """
 
     @abstractmethod
     async def list_runs(self, limit: int = 50) -> list[EvalRun]:
@@ -37,10 +42,6 @@ class EvaluationRepository(ABC):
     @abstractmethod
     async def get_run(self, run_id: str) -> EvalRun | None:
         """One run with its metrics, or ``None``."""
-
-    @abstractmethod
-    async def active_run(self) -> EvalRun | None:
-        """The run currently occupying the runner, if any."""
 
     @abstractmethod
     async def update_run_status(self, run_id: str, status: EvalRunStatus, *, error: str | None = None) -> None:

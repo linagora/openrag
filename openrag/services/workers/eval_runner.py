@@ -25,14 +25,10 @@ from urllib.parse import quote
 
 import ray
 
-#: Terminal states of an indexing task (``services.workers.task_state``).
+#: Terminal states of an indexing task — a protocol contract with
+#: ``services.workers.task_state``, not a setting.
 _TERMINAL_TASK_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 
-_TASK_POLL_SECONDS = 1.0
-_TASK_TIMEOUT_SECONDS = 1800.0
-_HTTP_TIMEOUT_SECONDS = 300.0
-#: promptfoo grades every row with an LLM, so allow for a slow grader.
-_PROMPTFOO_TIMEOUT_SECONDS = 3600.0
 #: Only the tail of promptfoo's stderr is kept for the failure message.
 _ERROR_TAIL_CHARS = 2000
 
@@ -53,6 +49,7 @@ class EvalRunner:
 
         self._logger = get_logger()
         self._config = load_config()
+        self._settings = self._config.evaluation
         self._connection = ConnectionManager(self._config.resolved_rdb())
         self._connection_ready = False
         self._repo = PgEvaluationRepository(lambda: self._connection.pool)
@@ -67,7 +64,18 @@ class EvalRunner:
             await self._connection.initialize()
             self._connection_ready = True
 
+    def _api_client(self, api_base_url: str, token: str) -> Any:
+        import httpx
+
+        return httpx.AsyncClient(
+            base_url=api_base_url.rstrip("/"),
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._settings.http_timeout_seconds,
+            follow_redirects=True,
+        )
+
     async def is_busy(self) -> bool:
+        """Liveness probe; also what ``EvaluationService`` pings before dispatch."""
         return self._active_run_id is not None
 
     async def cancel(self, run_id: str) -> bool:
@@ -94,7 +102,6 @@ class EvalRunner:
         api_base_url: str,
         corpus_dir: str,
         cases: list[dict[str, Any]],
-        top_k: int = 5,
     ) -> None:
         """Execute a full run, persisting its outcome.
 
@@ -119,14 +126,7 @@ class EvalRunner:
         run = EvalRun(id=run_id, dataset_id="", status=EvalRunStatus.QUEUED)
 
         try:
-            import httpx
-
-            async with httpx.AsyncClient(
-                base_url=api_base_url.rstrip("/"),
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=_HTTP_TIMEOUT_SECONDS,
-                follow_redirects=True,
-            ) as client:
+            async with self._api_client(api_base_url, token) as client:
                 await self._repo.update_run_status(run_id, EvalRunStatus.INDEXING)
                 run.indexing = await self._index_corpus(client, partition, Path(corpus_dir))
                 log.info(
@@ -141,7 +141,6 @@ class EvalRunner:
                     partition=partition,
                     token=token,
                     api_base_url=api_base_url,
-                    top_k=top_k,
                 )
 
             from core.evaluation import summarize
@@ -223,7 +222,7 @@ class EvalRunner:
         await self._await_task(client, status_url, path.name)
 
     async def _await_task(self, client: Any, status_url: str, label: str) -> None:
-        deadline = time.monotonic() + _TASK_TIMEOUT_SECONDS
+        deadline = time.monotonic() + self._settings.task_timeout_seconds
         while True:
             self._check_cancelled()
             response = await client.get(status_url)
@@ -234,7 +233,7 @@ class EvalRunner:
                 return
             if time.monotonic() > deadline:
                 raise EvalRunError(f"Indexing of '{label}' timed out.")
-            await asyncio.sleep(_TASK_POLL_SECONDS)
+            await asyncio.sleep(self._settings.task_poll_seconds)
 
     # ── promptfoo phase ──────────────────────────────────────────────
 
@@ -245,7 +244,6 @@ class EvalRunner:
         partition: str,
         token: str,
         api_base_url: str,
-        top_k: int,
     ) -> tuple[Any, Any]:
         """Render both configs, run them, and return the parsed outputs."""
         import yaml
@@ -259,10 +257,10 @@ class EvalRunner:
             "token": token,
             "grader_model": grader.model,
             "grader_base_url": grader.base_url,
-            "grader_api_key": getattr(grader, "api_key", None),
+            "grader_api_key": grader.api_key,
         }
         configs = {
-            "retrieval": build_retrieval_config(**shared, top_k=top_k),
+            "retrieval": build_retrieval_config(**shared, top_k=self._settings.top_k),
             "answer": build_answer_config(**shared),
         }
 
@@ -288,7 +286,7 @@ class EvalRunner:
         return outputs["retrieval"], outputs["answer"]
 
     async def _exec_promptfoo(self, config_path: Path, output_path: Path, config_dir: Path) -> None:
-        binary = os.getenv("PROMPTFOO_BIN", "promptfoo")
+        binary = self._settings.promptfoo_bin
         env = {
             **os.environ,
             "PROMPTFOO_DISABLE_TELEMETRY": "1",
@@ -322,7 +320,9 @@ class EvalRunner:
             ) from exc
 
         try:
-            stdout, stderr = await asyncio.wait_for(self._process.communicate(), timeout=_PROMPTFOO_TIMEOUT_SECONDS)
+            stdout, stderr = await asyncio.wait_for(
+                self._process.communicate(), timeout=self._settings.promptfoo_timeout_seconds
+            )
         except TimeoutError as exc:
             self._process.kill()
             raise EvalRunError("promptfoo timed out.") from exc
@@ -351,13 +351,7 @@ class EvalRunner:
     async def _drop_partition(self, api_base_url: str, token: str, partition: str) -> None:
         """Delete the throwaway partition, logging rather than raising."""
         try:
-            import httpx
-
-            async with httpx.AsyncClient(
-                base_url=api_base_url.rstrip("/"),
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=_HTTP_TIMEOUT_SECONDS,
-            ) as client:
+            async with self._api_client(api_base_url, token) as client:
                 response = await client.delete(f"/partition/{partition}")
                 if response.status_code >= 400:
                     self._logger.warning(f"Could not drop eval partition '{partition}': {response.status_code}")

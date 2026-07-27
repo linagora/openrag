@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Ban } from "lucide-react";
-import { cancelEvalRun, isActiveStatus, listEvalRuns } from "@/lib/api/evaluation";
+import { EVAL_POLL_MS, cancelEvalRun, isActiveStatus, listEvalRuns } from "@/lib/api/evaluation";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,8 +10,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DatasetCard } from "./dataset-card";
 import { RunDetail } from "./run-detail";
-
-const POLL_MS = 3000;
 
 function percent(value: number | null): string {
   return value === null ? "—" : `${(value * 100).toFixed(0)}%`;
@@ -31,7 +29,7 @@ export function EvaluationTab() {
     queryKey: ["eval-runs"],
     queryFn: () => listEvalRuns(),
     refetchInterval: (query) =>
-      (query.state.data ?? []).some((run) => isActiveStatus(run.status)) ? POLL_MS : false,
+      (query.state.data ?? []).some((run) => isActiveStatus(run.status)) ? EVAL_POLL_MS : false,
   });
 
   const cancelMut = useMutation({

@@ -14,7 +14,6 @@ stops working the moment a new run starts.
 
 from __future__ import annotations
 
-import os
 import shutil
 import uuid
 from pathlib import Path
@@ -34,6 +33,7 @@ from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from typing import IO
 
     from core.config.root import Settings
     from core.ports.evaluation_repo import EvaluationRepository
@@ -47,12 +47,11 @@ EVAL_USER_DISPLAY_NAME = "OpenRAG Evaluation"
 TESTSET_FILENAME = "testset.csv"
 CORPUS_DIRNAME = "corpus"
 
+#: Copy buffer, not a deployment concern.
+_COPY_CHUNK_BYTES = 1024 * 1024
+
 #: Bound on the pre-dispatch liveness check.
 _RUNNER_PING_TIMEOUT_SECONDS = 60
-
-#: The Ray worker runs in its own container, so it reaches the API by service
-#: name rather than through whatever host the admin's browser used.
-DEFAULT_INTERNAL_URL = "http://openrag:8080"
 
 
 def eval_partition_name(run_id: str) -> str:
@@ -84,6 +83,7 @@ class EvaluationService:
         self._user_repo = user_repo
         self._partition_service = partition_service
         self._config = config
+        self._settings = config.evaluation
         self._runner_factory = runner_factory
         self._root = Path(config.paths.data_dir) / "eval"
 
@@ -96,7 +96,7 @@ class EvaluationService:
         self,
         *,
         name: str,
-        corpus: Sequence[tuple[str, bytes]],
+        corpus: Sequence[tuple[str, IO[bytes]]],
         testset_csv: bytes,
         user_id: int | None,
     ) -> EvalDataset:
@@ -104,29 +104,48 @@ class EvaluationService:
 
         The CSV is parsed here so a malformed test set is rejected at upload
         rather than after a run has already spent minutes indexing.
+
+        Corpus entries are open binary streams rather than ``bytes`` so a
+        multi-hundred-megabyte upload is copied to disk in fixed-size blocks
+        instead of being held in memory all at once.
         """
         if not name.strip():
             raise ValidationError("Dataset name is required.", status_code=400)
         if not corpus:
             raise ValidationError("At least one corpus file is required.", status_code=400)
 
-        cases = parse_testset(testset_csv)
+        if len(testset_csv) > self._settings.max_testset_bytes:
+            raise ValidationError(
+                f"Test set exceeds the {self._settings.max_testset_mb} MB limit.",
+                status_code=413,
+            )
+        cases = parse_testset(testset_csv, max_rows=self._settings.max_testset_rows)
 
         dataset_id = uuid.uuid4().hex
         directory = self._dataset_dir(dataset_id)
         corpus_dir = directory / CORPUS_DIRNAME
         corpus_dir.mkdir(parents=True, exist_ok=True)
         try:
-            for filename, payload in corpus:
+            written = 0
+            budget = self._settings.max_corpus_bytes
+            for filename, stream in corpus:
                 # Flatten any path components a browser may have sent.
-                (corpus_dir / Path(filename).name).write_bytes(payload)
+                target = corpus_dir / Path(filename).name
+                if target.exists():
+                    raise ValidationError(
+                        f"Corpus contains more than one file named '{target.name}'.",
+                        status_code=400,
+                    )
+                budget -= self._copy_within_budget(stream, target, budget, self._settings.max_corpus_mb)
+                written += 1
+
             (directory / TESTSET_FILENAME).write_bytes(testset_csv)
 
             return await self._repo.create_dataset(
                 EvalDataset(
                     id=dataset_id,
                     name=name.strip(),
-                    corpus_file_count=len(corpus),
+                    corpus_file_count=written,
                     testset_row_count=len(cases),
                     created_by=user_id,
                 )
@@ -134,6 +153,26 @@ class EvaluationService:
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
             raise
+
+    @staticmethod
+    def _copy_within_budget(stream: IO[bytes], target: Path, budget: int, limit_mb: int) -> int:
+        """Stream ``stream`` into ``target``, refusing to exceed ``budget``.
+
+        The cap is enforced while copying rather than from a client-supplied
+        length, so a lying ``Content-Length`` cannot get past it.
+        """
+        stream.seek(0)
+        written = 0
+        with target.open("wb") as handle:
+            while chunk := stream.read(_COPY_CHUNK_BYTES):
+                written += len(chunk)
+                if written > budget:
+                    raise ValidationError(
+                        f"Corpus exceeds the {limit_mb} MB limit.",
+                        status_code=413,
+                    )
+                handle.write(chunk)
+        return written
 
     async def list_datasets(self) -> list[EvalDataset]:
         return await self._repo.list_datasets()
@@ -157,6 +196,12 @@ class EvaluationService:
     async def start_run(self, dataset_id: str, user_id: int | None) -> EvalRun:
         """Provision a run's partition and token, then dispatch it.
 
+        The run row is inserted *before* anything is provisioned: the partial
+        unique index ``ux_eval_runs_single_active`` makes that insert the mutual
+        exclusion between concurrent starts. A read-then-insert would let two
+        racing requests both regenerate the shared eval user's token, the second
+        revoking the credentials the first is still indexing with.
+
         Raises:
             NotFoundError: The dataset does not exist.
             ConflictError: Another run is already in flight — the runner
@@ -166,17 +211,13 @@ class EvaluationService:
         if dataset is None:
             raise NotFoundError(f"Evaluation dataset '{dataset_id}' not found")
 
-        active = await self._repo.active_run()
-        if active is not None:
-            raise ConflictError(f"Evaluation run '{active.id}' is already in progress.")
-
         directory = self._dataset_dir(dataset_id)
         testset_path = directory / TESTSET_FILENAME
         if not testset_path.exists():
             raise NotFoundError(f"Test set for dataset '{dataset_id}' is missing on disk")
-        cases = parse_testset(testset_path.read_bytes())
+        cases = parse_testset(testset_path.read_bytes(), max_rows=self._settings.max_testset_rows)
 
-        # Reach the runner *before* provisioning anything. The dispatch below is
+        # Reach the runner *before* claiming the slot. The dispatch below is
         # fire-and-forget, so an actor that dies in its constructor would
         # otherwise leave the run sitting in QUEUED forever with no error, and
         # a partition and token already created for nobody.
@@ -185,11 +226,6 @@ class EvaluationService:
 
         run_id = uuid.uuid4().hex
         partition = eval_partition_name(run_id)
-
-        eval_user_id = await self._ensure_eval_user()
-        token = (await self._user_service.regenerate_token(eval_user_id))["token"]
-        await self._partition_service.create_partition(partition, user_id=eval_user_id)
-
         run = await self._repo.create_run(
             EvalRun(
                 id=run_id,
@@ -199,13 +235,45 @@ class EvaluationService:
             )
         )
 
-        # Fire and forget: the worker owns the run from here and records its
-        # own outcome, so the ObjectRef is deliberately dropped.
+        try:
+            eval_user_id = await self._ensure_eval_user()
+            token = (await self._user_service.regenerate_token(eval_user_id))["token"]
+            await self._partition_service.create_partition(partition, user_id=eval_user_id)
+            self._dispatch(runner, run_id, partition, token, directory, cases)
+        except Exception as exc:
+            # The run row is the lock. Leaving it QUEUED after a failed
+            # provision would block every later run with no way to clear it.
+            logger.exception(f"Could not start evaluation run {run_id}: {exc}")
+            await self._repo.update_run_status(
+                run_id,
+                EvalRunStatus.FAILED,
+                error=f"Could not start the run: {exc}",
+            )
+            await self._drop_orphaned_partition(run_id)
+            raise
+
+        logger.bind(run_id=run_id, dataset_id=dataset_id).info("Dispatched evaluation run")
+        return run
+
+    def _dispatch(
+        self,
+        runner: Any,
+        run_id: str,
+        partition: str,
+        token: str,
+        directory: Path,
+        cases: Sequence[Any],
+    ) -> None:
+        """Hand the run to the worker.
+
+        Fire and forget: the worker owns the run from here and records its own
+        outcome, so the ObjectRef is deliberately dropped.
+        """
         runner.run.remote(
             run_id=run_id,
             partition=partition,
             token=token,
-            api_base_url=os.getenv("OPENRAG_INTERNAL_URL", DEFAULT_INTERNAL_URL),
+            api_base_url=self._settings.internal_url,
             corpus_dir=str(directory / CORPUS_DIRNAME),
             cases=[
                 {
@@ -216,8 +284,6 @@ class EvaluationService:
                 for case in cases
             ],
         )
-        logger.bind(run_id=run_id, dataset_id=dataset_id).info("Dispatched evaluation run")
-        return run
 
     async def cancel_run(self, run_id: str) -> EvalRun:
         """Ask the worker to stop, or reap the run if no worker owns it.

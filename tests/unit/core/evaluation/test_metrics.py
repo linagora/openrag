@@ -68,6 +68,22 @@ def test_percentiles_on_a_single_file_return_that_file():
     assert metrics.p95_seconds == 3.0
 
 
+def test_p50_of_an_even_sample_takes_the_lower_middle():
+    """Nearest-rank p50 is ceil(n/2); rounding half-to-even would report the
+    slower file for n = 2, 6, 10, ..."""
+    metrics = indexing_metrics([_sample("a.pdf", 1.0), _sample("b.pdf", 10.0)], wall_seconds=11.0)
+    assert metrics.p50_seconds == 1.0
+    assert metrics.p95_seconds == 10.0
+
+
+def test_p50_ignores_files_that_failed_to_index():
+    metrics = indexing_metrics(
+        [_sample("a.pdf", 5.0), _sample("b.pdf", 0.0, failed=True)],
+        wall_seconds=5.0,
+    )
+    assert metrics.p50_seconds == 5.0
+
+
 def test_zero_wall_time_does_not_divide_by_zero():
     metrics = indexing_metrics([_sample("a.pdf", 0.0)], wall_seconds=0.0)
     assert metrics.files_per_minute == 0.0

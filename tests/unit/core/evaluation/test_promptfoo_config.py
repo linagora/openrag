@@ -83,10 +83,17 @@ def test_grader_points_at_the_configured_openrag_llm():
 
 
 def test_every_case_becomes_a_test_with_its_vars():
+    """Only the vars an assertion actually templates are emitted — the ranking
+    metrics read expected_file_ids from the test set, not from promptfoo."""
     config = build_retrieval_config(cases=CASES, **COMMON)
     assert len(config["tests"]) == 2
     assert config["tests"][0]["vars"] == {
         "query": "What is the refund window?",
         "expected_answer": "30 days",
-        "expected_file_ids": ["p.pdf"],
     }
+
+
+def test_assertions_are_not_shared_between_tests():
+    """A shared list would serialise as a YAML anchor plus aliases."""
+    tests = build_answer_config(cases=CASES, **COMMON)["tests"]
+    assert tests[0]["assert"][0] is not tests[1]["assert"][0]

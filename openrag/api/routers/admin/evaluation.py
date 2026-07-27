@@ -17,16 +17,10 @@ from api.schemas.admin.evaluation_schemas import (
     EvalRunSummaryResponse,
     StartRunRequest,
 )
-from core.utils.exceptions import ValidationError
 from di.providers import get_evaluation_service
 from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 
 router = APIRouter(dependencies=[Depends(require_admin)])
-
-#: Total corpus bytes accepted in one upload. A dataset is re-indexed on every
-#: run, so an oversized one costs far more than the upload itself.
-MAX_CORPUS_BYTES = 512 * 1024 * 1024
-MAX_TESTSET_BYTES = 5 * 1024 * 1024
 
 
 def _run_summary(run: Any) -> EvalRunSummaryResponse:
@@ -83,26 +77,13 @@ async def create_dataset(
     The CSV is validated here, so a bad test set fails now rather than after a
     run has already indexed the corpus.
     """
-    testset_bytes = await testset.read()
-    if len(testset_bytes) > MAX_TESTSET_BYTES:
-        raise ValidationError("Test set file is too large.", status_code=413)
-
-    payloads: list[tuple[str, bytes]] = []
-    total = 0
-    for upload in corpus:
-        content = await upload.read()
-        total += len(content)
-        if total > MAX_CORPUS_BYTES:
-            raise ValidationError(
-                f"Corpus exceeds the {MAX_CORPUS_BYTES // (1024 * 1024)} MB limit.",
-                status_code=413,
-            )
-        payloads.append((upload.filename or "unnamed", content))
-
+    # Hand the service the open streams rather than the bytes: Starlette has
+    # already spooled anything sizeable to disk, and reading them here would
+    # pull the whole corpus back into memory to no purpose.
     dataset = await service.create_dataset(
         name=name,
-        corpus=payloads,
-        testset_csv=testset_bytes,
+        corpus=[(upload.filename or "unnamed", upload.file) for upload in corpus],
+        testset_csv=await testset.read(),
         user_id=user.get("id") if isinstance(user, dict) else None,
     )
     return asdict(dataset)

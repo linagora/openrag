@@ -10,7 +10,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from schema_helpers import table_exists
+from schema_helpers import index_exists, table_exists
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
@@ -82,10 +82,24 @@ def upgrade() -> None:
                 name="ck_eval_run_status",
             ),
         )
+    # Guarantees at most one active run: starting one regenerates the shared
+    # eval user's token, so two concurrent runs would revoke each other's
+    # credentials mid-flight. Created separately from the table so a database
+    # bootstrapped by an earlier create_all() picks it up too.
+    if not index_exists("eval_runs", "ux_eval_runs_single_active"):
+        op.create_index(
+            "ux_eval_runs_single_active",
+            "eval_runs",
+            [sa.text("(status IS NOT NULL)")],
+            unique=True,
+            postgresql_where=sa.text("status IN ('QUEUED','INDEXING','EVALUATING')"),
+        )
 
 
 def downgrade() -> None:
     """Downgrade schema."""
+    if index_exists("eval_runs", "ux_eval_runs_single_active"):
+        op.drop_index("ux_eval_runs_single_active", table_name="eval_runs")
     if table_exists("eval_runs"):
         op.drop_table("eval_runs")
     if table_exists("eval_datasets"):

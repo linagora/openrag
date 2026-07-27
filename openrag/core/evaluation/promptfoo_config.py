@@ -59,14 +59,18 @@ def _grader(model: str, base_url: str, api_key: str | None) -> dict[str, Any]:
 
 
 def _tests(cases: Sequence[EvalTestCase], asserts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One promptfoo test per case, all sharing the same assertions.
+
+    ``expected_file_ids`` is deliberately absent from ``vars``: no assertion
+    reads it. The ranking metrics are computed from the retrieved ids in
+    ``metrics.summarize``, not by promptfoo.
+    """
     return [
         {
-            "vars": {
-                "query": case.query,
-                "expected_answer": case.expected_answer,
-                "expected_file_ids": list(case.expected_file_ids),
-            },
-            "assert": asserts,
+            "vars": {"query": case.query, "expected_answer": case.expected_answer},
+            # A fresh copy per test: a shared list would round-trip through
+            # yaml.safe_dump as an anchor plus aliases.
+            "assert": [dict(assertion) for assertion in asserts],
         }
         for case in cases
     ]

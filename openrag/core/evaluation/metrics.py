@@ -17,6 +17,7 @@ optional.
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -49,8 +50,12 @@ def _percentile(values: Sequence[float], fraction: float) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
-    index = max(0, min(len(ordered) - 1, round(fraction * len(ordered) + 0.5) - 1))
-    return float(ordered[index])
+    # ceil, not round: the rank is ceil(fraction * n) by definition, and
+    # round() breaks ties to even, which picks the wrong element whenever
+    # fraction * n lands on an odd integer (p50 of two files would report the
+    # slower one).
+    rank = math.ceil(fraction * len(ordered))
+    return float(ordered[min(max(rank, 1), len(ordered)) - 1])
 
 
 def indexing_metrics(samples: Sequence[FileIndexingSample], wall_seconds: float) -> IndexingMetrics:

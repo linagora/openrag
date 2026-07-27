@@ -36,17 +36,12 @@ def _stub_ray_utils(monkeypatch):
 
 class FakeRepo:
     def __init__(self, run: EvalRun | None = None) -> None:
-        self.dataset = EvalDataset(
-            id=DATASET_ID, name="d", corpus_file_count=1, testset_row_count=1
-        )
+        self.dataset = EvalDataset(id=DATASET_ID, name="d", corpus_file_count=1, testset_row_count=1)
         self.run = run
         self.status_updates: list[tuple[str, EvalRunStatus, str | None]] = []
 
     async def get_dataset(self, dataset_id):
         return self.dataset if dataset_id == DATASET_ID else None
-
-    async def active_run(self):
-        return None
 
     async def create_run(self, run):
         self.run = run
@@ -102,25 +97,46 @@ class FakeRunnerHandle:
 
 
 class FakePartitionService:
-    def __init__(self) -> None:
+    def __init__(self, create_error: Exception | None = None) -> None:
         self.deleted: list[str] = []
+        self.created: list[str] = []
+        self._create_error = create_error
+
+    async def create_partition(self, partition, user_id=None):
+        if self._create_error:
+            raise self._create_error
+        self.created.append(partition)
 
     async def delete_partition(self, partition):
         self.deleted.append(partition)
 
 
-def _service(repo, runner, partition_service=None, tmp_path=None):
+class FakeUserService:
+    """Records token regeneration — the side effect the run lock protects."""
+
+    def __init__(self) -> None:
+        self.regenerated = 0
+
+    async def regenerate_token(self, user_id):
+        self.regenerated += 1
+        return {"token": "or-fake"}
+
+
+class FakeUserRepo:
+    async def get_user_by_external_id_dict(self, external_user_id):
+        return {"id": 7}
+
+
+def _service(repo, runner, partition_service=None, tmp_path=None, user_service=None):
     from core.config.root import Settings
 
     settings = Settings()
     if tmp_path is not None:
-        settings = settings.model_copy(
-            update={"paths": settings.paths.model_copy(update={"data_dir": str(tmp_path)})}
-        )
+        settings = settings.model_copy(update={"paths": settings.paths.model_copy(update={"data_dir": str(tmp_path)})})
     return EvaluationService(
         repo=repo,
-        user_service=object(),
-        user_repo=object(),
+        user_service=user_service or FakeUserService(),
+        user_repo=FakeUserRepo(),
         partition_service=partition_service or FakePartitionService(),
         config=settings,
         runner_factory=lambda: runner,
@@ -180,3 +196,58 @@ async def test_cancel_rejects_an_already_finished_run():
 
     with pytest.raises(ConflictError):
         await service.cancel_run("r1")
+
+
+def _dataset_on_disk(tmp_path):
+    dataset_dir = tmp_path / "eval" / DATASET_ID
+    (dataset_dir / "corpus").mkdir(parents=True)
+    (dataset_dir / "testset.csv").write_text("question,expected_answer\nq,a\n", encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_second_start_is_refused_before_the_token_is_regenerated(tmp_path):
+    """The run row is the lock, so the 409 has to land *before* provisioning.
+
+    Regenerating the shared eval user's token is what makes a lost race
+    destructive: it would revoke the credentials the in-flight run is still
+    indexing with.
+    """
+    from core.utils.exceptions import ConflictError
+
+    _dataset_on_disk(tmp_path)
+
+    class BusyRepo(FakeRepo):
+        async def create_run(self, run):
+            raise ConflictError("An evaluation run is already in progress.")
+
+    repo = BusyRepo()
+    runner = FakeRunnerHandle()
+    users = FakeUserService()
+    partitions = FakePartitionService()
+    service = _service(repo, runner, partition_service=partitions, tmp_path=tmp_path, user_service=users)
+
+    with pytest.raises(ConflictError):
+        await service.start_run(DATASET_ID, user_id=1)
+
+    assert users.regenerated == 0, "the loser must not touch the in-flight run's token"
+    assert partitions.created == []
+    assert runner.dispatched is False
+
+
+@pytest.mark.asyncio
+async def test_a_failed_provision_releases_the_run_lock(tmp_path):
+    """A run left in an active status would block every later run forever."""
+    _dataset_on_disk(tmp_path)
+
+    repo = FakeRepo()
+    runner = FakeRunnerHandle()
+    partitions = FakePartitionService(create_error=RuntimeError("milvus unreachable"))
+    service = _service(repo, runner, partition_service=partitions, tmp_path=tmp_path)
+
+    with pytest.raises(RuntimeError):
+        await service.start_run(DATASET_ID, user_id=1)
+
+    assert runner.dispatched is False
+    statuses = [status for _, status, _ in repo.status_updates]
+    assert EvalRunStatus.FAILED in statuses, "the lock must be released"
+    assert partitions.deleted, "the throwaway partition must not leak"

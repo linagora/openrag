@@ -1,12 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
-import { getEvalRun, isActiveStatus, type EvalRun } from "@/lib/api/evaluation";
+import { EVAL_POLL_MS, getEvalRun, isActiveStatus, type EvalRun } from "@/lib/api/evaluation";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-
-const POLL_MS = 3000;
 
 function percent(value: number | null | undefined): string {
   return value === null || value === undefined ? "—" : `${(value * 100).toFixed(1)}%`;
@@ -33,7 +31,7 @@ export function RunDetail({ runId }: { runId: string }) {
     // Poll only while the run can still change.
     refetchInterval: (query) => {
       const status = query.state.data?.status;
-      return status && isActiveStatus(status) ? POLL_MS : false;
+      return status && isActiveStatus(status) ? EVAL_POLL_MS : false;
     },
   });
 

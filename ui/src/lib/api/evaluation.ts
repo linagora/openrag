@@ -32,6 +32,9 @@ export function isActiveStatus(status: EvalRunStatus): boolean {
   return ACTIVE_RUN_STATUSES.includes(status);
 }
 
+/** Refetch cadence while a run can still change, shared by both eval views. */
+export const EVAL_POLL_MS = 3000;
+
 export interface FileIndexingSample {
   filename: string;
   size_bytes: number;
