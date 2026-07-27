@@ -676,8 +676,7 @@ class PartitionService:
         await self._ensure_partition(partition)
         members = await self._membership_repo.list_partition_members(partition)
         users = {
-            user.id: user
-            for user in await self._user_repo.get_users_by_ids([member["user_id"] for member in members])
+            user.id: user for user in await self._user_repo.get_users_by_ids([member["user_id"] for member in members])
         }
         for member in members:
             user = users.get(member["user_id"])
