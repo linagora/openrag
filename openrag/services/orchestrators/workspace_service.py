@@ -82,6 +82,9 @@ class WorkspaceService:
     async def get_existing_file_ids(self, partition: str, file_ids: list[str]) -> list[str]:
         return list(await self._workspace_repo.get_existing_file_ids(partition, file_ids))
 
+    async def get_existing_file_ids_any_partition(self, file_ids: list[str]) -> list[str]:
+        return list(await self._workspace_repo.get_existing_file_ids_any_partition(file_ids))
+
     async def add_files(self, workspace_id: str, file_ids: list[str]) -> list[str]:
         """Associate files; returns any file_ids that were not found."""
         return await self._workspace_repo.add_files_to_workspace(workspace_id, file_ids)
