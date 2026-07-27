@@ -85,6 +85,9 @@ class PromptResponse(BaseModel):
     is_default: bool
     created_at: datetime
     updated_at: datetime
+    # Number of partitions/presets referencing this prompt by name. Populated by
+    # the list endpoint; 0 on single-item responses where usage isn't computed.
+    used_by: int = 0
 
 
 __all__ = [

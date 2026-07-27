@@ -135,10 +135,14 @@ class PromptService:
             raise NotFoundError(f"Prompt '{prompt_id}' not found.")
         return prompt
 
-    async def list_prompts(self, *, prompt_type: str | None = None, offset: int = 0, limit: int = 100) -> list[Prompt]:
+    async def list_prompts(self, *, prompt_type: str | None = None, offset: int = 0, limit: int = 100) -> list[dict]:
+        """List prompts, each annotated with ``used_by`` — the number of
+        partitions/presets that reference it by name (one bulk aggregate)."""
         if prompt_type is not None:
             self._validate_type(prompt_type)
-        return await self._repo.list(prompt_type=prompt_type, offset=offset, limit=limit)
+        prompts = await self._repo.list(prompt_type=prompt_type, offset=offset, limit=limit)
+        counts = await self._repo.reference_counts()
+        return [{**p.model_dump(), "used_by": counts.get((p.prompt_type, p.name), 0)} for p in prompts]
 
     async def update_prompt(self, prompt_id: str, **fields: object) -> Prompt:
         """Update ``name``/``content`` and/or promote to default.

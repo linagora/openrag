@@ -60,6 +60,9 @@ class FakePromptRepo:
             None,
         )
 
+    async def reference_counts(self) -> dict[tuple[str, str], int]:
+        return getattr(self, "_ref_counts", {})
+
     async def get_default(self, prompt_type: str) -> Prompt | None:
         return next((p for p in self.prompts.values() if p.prompt_type == prompt_type and p.is_default), None)
 
@@ -186,10 +189,12 @@ class TestCrud:
         with pytest.raises(NotFoundError):
             await _service().set_default("nope")
 
-    async def test_list_filters_by_type(self):
+    async def test_list_filters_and_annotates_used_by(self):
         repo = FakePromptRepo()
         svc = _service(repo)
-        await repo.create(Prompt(prompt_type="sys_prompt", name="a", content="c"))
-        await repo.create(Prompt(prompt_type="hyde", name="b", content="c"))
+        p = await repo.create(Prompt(prompt_type="hyde", name="b", content="c"))
+        repo._ref_counts = {("hyde", "b"): 3}
         listed = await svc.list_prompts(prompt_type="hyde")
-        assert [p.prompt_type for p in listed] == ["hyde"]
+        assert [row["prompt_type"] for row in listed] == ["hyde"]
+        assert listed[0]["used_by"] == 3
+        assert p.id == listed[0]["id"]

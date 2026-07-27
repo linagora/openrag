@@ -52,3 +52,13 @@ class TestSeedAndResolve:
         assert await svc.resolve_prompt("sys_prompt", names=["legal"]) == "LEGAL"
         # First resolvable candidate wins (the per-user tier extension point).
         assert await svc.resolve_prompt("sys_prompt", names=["missing", "legal"]) == "LEGAL"
+
+    async def test_reference_counts_across_partitions_and_presets(self, postgres_store: PostgresStore):
+        repo = postgres_store.prompt_repo
+        # A partition names a generation prompt; a preset names an indexation prompt.
+        await postgres_store.partition_repo.create_partition("rc1")
+        await postgres_store.partition_repo.update_partition("rc1", generation_prompt_names={"sys_prompt": "formal"})
+        await postgres_store.preset_repo.upsert("legal", "indexation", {"contextualization_prompt_name": "ctx1"})
+        counts = await repo.reference_counts()
+        assert counts.get(("sys_prompt", "formal")) == 1  # partition generation_prompt_names
+        assert counts.get(("chunk_contextualizer", "ctx1")) == 1  # preset config field mapped to type

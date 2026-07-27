@@ -30,6 +30,16 @@ _ALLOWED_UPDATE_FIELDS = frozenset({"name", "content"})
 _COLS = ("id", "prompt_type", "name", "content", "is_default", "created_at", "updated_at")
 _SELECT_COLS = ", ".join(_COLS)
 
+# Indexation/retrieval preset config field -> the prompt_type it names. Partition
+# generation_prompt_names keys ARE prompt_type values, so they need no mapping.
+_PRESET_FIELD_TO_TYPE = {
+    "contextualization_prompt_name": "chunk_contextualizer",
+    "image_captioning_prompt_name": "image_captioning",
+    "topic_tagging_prompt_name": "topic_tagger",
+    "hyde_prompt_name": "hyde",
+    "multi_query_prompt_name": "multi_query",
+}
+
 
 class PgPromptRepository(PromptRepository):
     """asyncpg-backed implementation of :class:`PromptRepository`."""
@@ -198,6 +208,33 @@ class PgPromptRepository(PromptRepository):
                     prompt_id,
                 )
         return self._to_model(rec)
+
+    async def reference_counts(self) -> dict[tuple[str, str], int]:
+        counts: dict[tuple[str, str], int] = {}
+        # Partition generation prompts: the JSONB keys ARE prompt_type values.
+        part_rows = await self.pool.fetch(
+            """
+            SELECT j.key AS prompt_type, j.value AS name, count(*)::int AS n
+            FROM partitions p, jsonb_each_text(p.generation_prompt_names) j
+            GROUP BY 1, 2
+            """
+        )
+        for r in part_rows:
+            counts[(r["prompt_type"], r["name"])] = r["n"]
+        # Preset *_prompt_name config fields, mapped to their prompt_type.
+        preset_rows = await self.pool.fetch(
+            """
+            SELECT c.key AS field, c.value AS name, count(*)::int AS n
+            FROM pipeline_presets p, jsonb_each_text(p.config) c
+            GROUP BY 1, 2
+            """
+        )
+        for r in preset_rows:
+            prompt_type = _PRESET_FIELD_TO_TYPE.get(r["field"])
+            if prompt_type and r["name"]:
+                key = (prompt_type, r["name"])
+                counts[key] = counts.get(key, 0) + r["n"]
+        return counts
 
 
 __all__ = ["PgPromptRepository"]

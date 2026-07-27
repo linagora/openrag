@@ -66,6 +66,15 @@ class PromptRepository(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
+    async def reference_counts(self) -> dict[tuple[str, str], int]:
+        """``{(prompt_type, name): times_referenced}`` in one bulk pass.
+
+        Counts explicit references by name across partitions
+        (``generation_prompt_names``) and presets (``*_prompt_name`` config), for
+        the admin "used by" annotation."""
+        ...
+
+    @abstractmethod
     async def get_default(self, prompt_type: str) -> Prompt | None: ...
 
     @abstractmethod
