@@ -210,28 +210,42 @@ class PgPromptRepository(PromptRepository):
         return self._to_model(rec)
 
     async def reference_counts(self) -> dict[tuple[str, str], int]:
+        # The "used by" badge counts *partitions*, so every reference is resolved
+        # to a partition — directly for generation prompts, transitively (partition
+        # -> its active preset -> prompt name) for indexation/retrieval prompts.
         counts: dict[tuple[str, str], int] = {}
-        # Partition generation prompts: the JSONB keys ARE prompt_type values.
+        # Generation prompts: named directly on the partition. The JSONB keys ARE
+        # prompt_type values.
         part_rows = await self.pool.fetch(
             """
             SELECT j.key AS prompt_type, j.value AS name, count(*)::int AS n
             FROM partitions p, jsonb_each_text(p.generation_prompt_names) j
+            WHERE j.value <> ''
             GROUP BY 1, 2
             """
         )
         for r in part_rows:
             counts[(r["prompt_type"], r["name"])] = r["n"]
-        # Preset *_prompt_name config fields, mapped to their prompt_type.
+        # Indexation/retrieval prompts: named on a *preset*, but counted per
+        # partition that selects that preset. Join each partition to the preset it
+        # uses (indexation_preset / retrieval_preset), then read the *_prompt_name
+        # fields off the preset config. count(DISTINCT partition) so a partition is
+        # counted once per prompt even if two of its presets happened to name it.
         preset_rows = await self.pool.fetch(
             """
-            SELECT c.key AS field, c.value AS name, count(*)::int AS n
-            FROM pipeline_presets p, jsonb_each_text(p.config) c
+            SELECT c.key AS field, c.value AS name, count(DISTINCT part.partition)::int AS n
+            FROM partitions part
+            JOIN pipeline_presets pre
+              ON (pre.preset_type = 'indexation' AND pre.name = part.indexation_preset)
+              OR (pre.preset_type = 'retrieval'  AND pre.name = part.retrieval_preset)
+            CROSS JOIN LATERAL jsonb_each_text(pre.config) c
+            WHERE c.value <> ''
             GROUP BY 1, 2
             """
         )
         for r in preset_rows:
             prompt_type = _PRESET_FIELD_TO_TYPE.get(r["field"])
-            if prompt_type and r["name"]:
+            if prompt_type:
                 key = (prompt_type, r["name"])
                 counts[key] = counts.get(key, 0) + r["n"]
         return counts

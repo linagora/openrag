@@ -67,11 +67,13 @@ class PromptRepository(ABC):
 
     @abstractmethod
     async def reference_counts(self) -> dict[tuple[str, str], int]:
-        """``{(prompt_type, name): times_referenced}`` in one bulk pass.
+        """``{(prompt_type, name): partitions_referencing}`` in one bulk pass.
 
-        Counts explicit references by name across partitions
-        (``generation_prompt_names``) and presets (``*_prompt_name`` config), for
-        the admin "used by" annotation."""
+        Counts the *partitions* that reference each prompt by name — directly for
+        generation prompts (``generation_prompt_names``), transitively for
+        indexation/retrieval prompts (partition -> its active preset ->
+        ``*_prompt_name`` config field). Feeds the admin "used by N partitions"
+        annotation."""
         ...
 
     @abstractmethod

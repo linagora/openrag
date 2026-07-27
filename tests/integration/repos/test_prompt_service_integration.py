@@ -53,12 +53,27 @@ class TestSeedAndResolve:
         # First resolvable candidate wins (the per-user tier extension point).
         assert await svc.resolve_prompt("sys_prompt", names=["missing", "legal"]) == "LEGAL"
 
-    async def test_reference_counts_across_partitions_and_presets(self, postgres_store: PostgresStore):
+    async def test_reference_counts_are_partition_centric(self, postgres_store: PostgresStore):
         repo = postgres_store.prompt_repo
-        # A partition names a generation prompt; a preset names an indexation prompt.
-        await postgres_store.partition_repo.create_partition("rc1")
-        await postgres_store.partition_repo.update_partition("rc1", generation_prompt_names={"sys_prompt": "formal"})
+        partition_repo = postgres_store.partition_repo
+        # An indexation preset naming a prompt, plus one that no partition uses.
         await postgres_store.preset_repo.upsert("legal", "indexation", {"contextualization_prompt_name": "ctx1"})
+        await postgres_store.preset_repo.upsert("orphan", "indexation", {"contextualization_prompt_name": "ghost"})
+        # Two partitions select the "legal" preset; one of them also names a
+        # generation prompt directly.
+        await partition_repo.create_partition("rc1")
+        await partition_repo.update_partition(
+            "rc1", indexation_preset="legal", generation_prompt_names={"sys_prompt": "formal"}
+        )
+        await partition_repo.create_partition("rc2")
+        await partition_repo.update_partition("rc2", indexation_preset="legal")
+
         counts = await repo.reference_counts()
-        assert counts.get(("sys_prompt", "formal")) == 1  # partition generation_prompt_names
-        assert counts.get(("chunk_contextualizer", "ctx1")) == 1  # preset config field mapped to type
+
+        # Generation prompt: the one partition that names it directly.
+        assert counts.get(("sys_prompt", "formal")) == 1
+        # Indexation prompt: counted per *partition* that selects the preset (2),
+        # not per preset (1).
+        assert counts.get(("chunk_contextualizer", "ctx1")) == 2
+        # A preset naming a prompt but selected by no partition contributes nothing.
+        assert counts.get(("chunk_contextualizer", "ghost")) is None
