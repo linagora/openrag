@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createPartition } from "./partitions";
+import { createPartition, listPartitionMemberCandidates } from "./partitions";
 
 // Minimal Response-like object covering what `request` reads (mirrors client.test.ts).
 function fakeResponse({ status = 200, body = "" }: { status?: number; body?: string } = {}): Response {
@@ -60,5 +60,25 @@ describe("createPartition", () => {
     await createPartition({ name: "p", embedder: "good" });
 
     expect(fetchMock.mock.calls.map(methodOf)).not.toContain("DELETE");
+  });
+});
+
+describe("listPartitionMemberCandidates", () => {
+  it("requests the owner-protected candidate endpoint", async () => {
+    fetchMock.mockResolvedValue(
+      fakeResponse({
+        body: JSON.stringify({
+          candidates: [{ user_id: 2, display_name: "Sam" }],
+        }),
+      }),
+    );
+
+    await expect(listPartitionMemberCandidates("legal docs")).resolves.toEqual({
+      candidates: [{ user_id: 2, display_name: "Sam" }],
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/partition/legal%20docs/users/candidates"),
+      expect.any(Object),
+    );
   });
 });

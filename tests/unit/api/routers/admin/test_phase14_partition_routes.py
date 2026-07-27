@@ -91,6 +91,20 @@ class FakeCreatePartitionService:
         self.created.append(kwargs)
 
 
+class FakeMemberCandidateService:
+    """Service double for the partition member candidate route."""
+
+    def __init__(self) -> None:
+        self.partitions: list[str] = []
+
+    async def list_member_candidates(self, partition: str) -> list[dict[str, Any]]:
+        self.partitions.append(partition)
+        return [
+            {"user_id": 2, "display_name": "Sam"},
+            {"user_id": 3, "display_name": "Sam"},
+        ]
+
+
 def _build_list_app(*, is_admin: bool) -> FastAPI:
     """App for the list route, with a regular user whose sole membership is ``all``."""
     app = FastAPI()
@@ -139,6 +153,24 @@ async def test_list_partitions_does_not_expand_all_for_non_admin(async_client_fa
         response = await client.get("/partition/")
     assert response.status_code == 200
     assert [p["partition"] for p in response.json()["partitions"]] == ["all"]
+
+
+@pytest.mark.asyncio
+async def test_list_partition_member_candidates_returns_stable_identities(async_client_factory):
+    service = FakeMemberCandidateService()
+    app = _build_app(service)
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/users/candidates")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "candidates": [
+            {"user_id": 2, "display_name": "Sam"},
+            {"user_id": 3, "display_name": "Sam"},
+        ]
+    }
+    assert service.partitions == ["legal"]
 
 
 @pytest.mark.asyncio

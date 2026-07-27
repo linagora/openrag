@@ -198,8 +198,21 @@ export interface PartitionMember {
   added_at: string | null;
 }
 
+export interface PartitionMemberCandidate {
+  user_id: number;
+  display_name: string | null;
+}
+
 export function listPartitionMembers(name: string): Promise<{ members: PartitionMember[] }> {
   return request<{ members: PartitionMember[] }>(`${P}/${enc(name)}/users`);
+}
+
+export function listPartitionMemberCandidates(
+  name: string,
+): Promise<{ candidates: PartitionMemberCandidate[] }> {
+  return request<{ candidates: PartitionMemberCandidate[] }>(
+    `${P}/${enc(name)}/users/candidates`,
+  );
 }
 
 export function addPartitionMember(name: string, userId: number, role: PartitionRole): Promise<void> {

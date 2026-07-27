@@ -61,6 +61,7 @@ logger = get_logger()
 # and the admin partition-list route would expand it to *every* partition — see
 # ``list_existant_partitions``. Matched case-insensitively.
 _RESERVED_PARTITION_NAMES = frozenset({"all"})
+_USER_PAGE_SIZE = 100
 
 # Columns where an explicit ``None`` in a PATCH is a real value (SQL NULL =
 # "reset to default"), not the omitted-field sentinel that the None-filter
@@ -675,6 +676,30 @@ class PartitionService:
     async def list_members(self, partition: str) -> list[dict]:
         await self._ensure_partition(partition)
         return await self._membership_repo.list_partition_members(partition)
+
+    async def list_member_candidates(self, partition: str) -> list[dict]:
+        """Return non-member user identities suitable for a membership picker."""
+        await self._ensure_partition(partition)
+        members = await self._membership_repo.list_partition_members(partition)
+        member_ids = {member["user_id"] for member in members}
+
+        candidates: list[dict] = []
+        offset = 0
+        while True:
+            users = await self._user_repo.list_users(offset=offset, limit=_USER_PAGE_SIZE)
+            candidates.extend(
+                {
+                    "user_id": user.id,
+                    "display_name": user.display_name,
+                }
+                for user in users
+                if user.id not in member_ids
+            )
+            if len(users) < _USER_PAGE_SIZE:
+                break
+            offset += _USER_PAGE_SIZE
+
+        return candidates
 
     async def add_member(self, partition: str, user_id: int, role: str) -> None:
         await self._ensure_partition(partition)

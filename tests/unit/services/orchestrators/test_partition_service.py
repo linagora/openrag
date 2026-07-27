@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from core.models.user import User
 from core.utils.exceptions import NotFoundError, PartitionNotFoundError, UserNotFoundError, ValidationError
 from services.orchestrators.partition_service import PartitionService
 
@@ -212,11 +213,15 @@ class FakeVectorStore:
 
 
 class FakeUserRepo:
-    def __init__(self, existing: set[int] | None = None):
+    def __init__(self, existing: set[int] | None = None, users: list[User] | None = None):
         self._existing = existing if existing is not None else set()
+        self._users = users or []
 
     async def user_exists(self, user_id: int) -> bool:
         return user_id in self._existing
+
+    async def list_users(self, offset: int = 0, limit: int = 50) -> list[User]:
+        return self._users[offset : offset + limit]
 
 
 def _svc(
@@ -828,6 +833,37 @@ async def test_get_file_chunks_rejects_negative_limit():
 async def test_list_members_missing_partition_404():
     with pytest.raises(PartitionNotFoundError):
         await _svc(prepo=FakePartitionRepo(set())).list_members("x")
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_excludes_existing_members():
+    users = [
+        User(id=1, display_name="Partition owner"),
+        User(id=2, display_name="Sam"),
+        User(id=3, display_name="Sam"),
+    ]
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}),
+        mrepo=FakeMembershipRepo({(1, "p"), (3, "p")}),
+        urepo=FakeUserRepo({1, 2, 3}, users),
+    )
+
+    assert await svc.list_member_candidates("p") == [
+        {"user_id": 2, "display_name": "Sam"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_reads_every_user_page():
+    users = [User(id=user_id, display_name=f"User {user_id}") for user_id in range(1, 102)]
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}),
+        urepo=FakeUserRepo(set(range(1, 102)), users),
+    )
+
+    candidates = await svc.list_member_candidates("p")
+
+    assert [candidate["user_id"] for candidate in candidates] == list(range(1, 102))
 
 
 @pytest.mark.asyncio

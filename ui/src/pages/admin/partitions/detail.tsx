@@ -42,6 +42,7 @@ import {
   updatePartition,
   listPartitions,
   listPartitionMembers,
+  listPartitionMemberCandidates,
   addPartitionMember,
   removePartitionMember,
   updatePartitionMemberRole,
@@ -51,6 +52,7 @@ import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 import { formatDate, intOr } from "@/lib/utils";
+import { MemberPicker } from "./member-picker";
 
 // --- General Tab ---
 
@@ -378,7 +380,7 @@ function PipelineConfigTab({ partition }: { partition: PartitionConfig }) {
 
 function UsersTab({ partitionName }: { partitionName: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [userId, setUserId] = useState("");
+  const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
   const [role, setRole] = useState("viewer");
   const queryClient = useQueryClient();
   const { canManageMembers } = usePermissions();
@@ -395,19 +397,56 @@ function UsersTab({ partitionName }: { partitionName: string }) {
   const callerRole = partitionsQuery.data?.partitions.find((p) => p.partition === partitionName)?.role;
   const canManage = canManageMembers(callerRole);
 
+  const candidatesQuery = useQuery({
+    queryKey: ["partition", partitionName, "member-candidates"],
+    queryFn: () => listPartitionMemberCandidates(partitionName),
+    enabled: dialogOpen && canManage,
+  });
+
   const addMutation = useMutation({
-    mutationFn: () => addPartitionMember(partitionName, Number(userId), role as PartitionRole),
-    onSuccess: () => {
-      toast.success("User added to partition");
+    mutationFn: async ({
+      userIds,
+      selectedRole,
+    }: {
+      userIds: number[];
+      selectedRole: PartitionRole;
+    }) => {
+      const addedUserIds: number[] = [];
+      const failedUserIds: number[] = [];
+      for (const userId of userIds) {
+        try {
+          await addPartitionMember(partitionName, userId, selectedRole);
+          addedUserIds.push(userId);
+        } catch {
+          failedUserIds.push(userId);
+        }
+      }
+      return { addedUserIds, failedUserIds };
+    },
+    onSuccess: ({ addedUserIds, failedUserIds }) => {
       queryClient.invalidateQueries({
         queryKey: ["partition", partitionName, "users"],
       });
+      queryClient.invalidateQueries({
+        queryKey: ["partition", partitionName, "member-candidates"],
+      });
+
+      if (failedUserIds.length > 0) {
+        setSelectedUserIds(failedUserIds);
+        toast.error(
+          addedUserIds.length > 0
+            ? `${addedUserIds.length} user${addedUserIds.length === 1 ? "" : "s"} added; ${failedUserIds.length} failed`
+            : "Failed to add the selected users",
+        );
+        return;
+      }
+
+      toast.success(
+        `${addedUserIds.length} user${addedUserIds.length === 1 ? "" : "s"} added to partition`,
+      );
       setDialogOpen(false);
-      setUserId("");
+      setSelectedUserIds([]);
       setRole("viewer");
-    },
-    onError: (error: Error) => {
-      toast.error(`Failed to add user: ${error.message}`);
     },
   });
 
@@ -436,12 +475,24 @@ function UsersTab({ partitionName }: { partitionName: string }) {
     },
   });
 
-  const handleAddUser = () => {
-    if (!userId.trim() || Number.isNaN(Number(userId))) {
-      toast.error("A numeric user ID is required");
+  const handleAddUsers = () => {
+    if (selectedUserIds.length === 0) {
+      toast.error("Select at least one user");
       return;
     }
-    addMutation.mutate();
+    addMutation.mutate({
+      userIds: selectedUserIds,
+      selectedRole: role as PartitionRole,
+    });
+  };
+
+  const handleDialogOpenChange = (open: boolean) => {
+    if (!open && addMutation.isPending) return;
+    setDialogOpen(open);
+    if (!open) {
+      setSelectedUserIds([]);
+      setRole("viewer");
+    }
   };
 
   return (
@@ -532,23 +583,22 @@ function UsersTab({ partitionName }: { partitionName: string }) {
           </p>
         )}
 
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <Dialog open={dialogOpen} onOpenChange={handleDialogOpenChange}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Add User to Partition</DialogTitle>
+              <DialogTitle>Add Users to Partition</DialogTitle>
               <DialogDescription>
-                Assign a user to this partition with a specific role.
+                Select users and assign the same partition role to each of them.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-4">
-              <div className="space-y-2">
-                <Label>User ID</Label>
-                <Input
-                  placeholder="Enter user ID..."
-                  value={userId}
-                  onChange={(e) => setUserId(e.target.value)}
-                />
-              </div>
+              <MemberPicker
+                candidates={candidatesQuery.data?.candidates ?? []}
+                isLoading={candidatesQuery.isLoading}
+                isError={candidatesQuery.isError}
+                selectedUserIds={selectedUserIds}
+                onSelectionChange={setSelectedUserIds}
+              />
               <div className="space-y-2">
                 <Label>Role</Label>
                 <Select value={role} onValueChange={setRole}>
@@ -568,11 +618,19 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                 type="button"
                 variant="outline"
                 onClick={() => setDialogOpen(false)}
+                disabled={addMutation.isPending}
               >
                 Cancel
               </Button>
-              <Button onClick={handleAddUser} disabled={addMutation.isPending}>
-                {addMutation.isPending ? "Adding..." : "Add User"}
+              <Button
+                onClick={handleAddUsers}
+                disabled={addMutation.isPending || selectedUserIds.length === 0}
+              >
+                {addMutation.isPending
+                  ? "Adding..."
+                  : selectedUserIds.length === 0
+                    ? "Add Users"
+                    : `Add ${selectedUserIds.length} User${selectedUserIds.length === 1 ? "" : "s"}`}
               </Button>
             </DialogFooter>
           </DialogContent>

@@ -405,6 +405,30 @@ async def list_partition_users(
     return JSONResponse(status_code=status.HTTP_200_OK, content={"members": members})
 
 
+@router.get(
+    "/{partition}/users/candidates",
+    description="""List users who can be added to a partition.
+
+**Parameters:**
+- `partition`: The partition name
+
+**Response:**
+Returns non-member users with their display name and stable user ID.
+
+**Permissions:**
+- Requires partition owner role
+""",
+)
+async def list_partition_user_candidates(
+    partition: str,
+    partition_owner=Depends(require_partition_owner),
+    service=Depends(get_partition_service),
+):
+    """List users who are not already members of the given partition."""
+    candidates = await service.list_member_candidates(partition=partition)
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"candidates": candidates})
+
+
 @router.post(
     "/{partition}/users",
     description="""Add a user to a partition with a specific role.
