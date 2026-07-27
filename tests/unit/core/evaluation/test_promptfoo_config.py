@@ -47,11 +47,14 @@ def test_answer_provider_posts_to_the_partition_scoped_model():
     assert body["stream"] is False
 
 
-def test_answer_transform_parses_the_extra_json_string():
-    """`extra` arrives as a JSON string, so sources need parsing before use."""
+def test_answer_transform_is_a_single_expression():
+    """promptfoo evaluates transformResponse as an expression — a statement or
+    an IIFE fails at runtime with a transform error, which manifests as every
+    answer scoring zero."""
     transform = build_answer_config(cases=CASES, **COMMON)["providers"][0]["config"]["transformResponse"]
-    assert "JSON.parse" in transform
-    assert "json.extra" in transform
+    assert transform == "json.choices[0].message.content"
+    assert "return" not in transform
+    assert ";" not in transform
 
 
 def test_answer_grades_against_the_expected_answer():

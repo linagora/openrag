@@ -238,3 +238,18 @@ def test_ground_truth_still_matches_a_sanitised_file_id_directly():
     retrieval, _, _ = summarize(cases=cases, retrieval_payload=[row], answer_payload=[])
 
     assert retrieval.hit_rate == 1.0
+
+
+def test_matching_survives_file_id_sanitisation_on_either_side():
+    """The indexer stores 'A_B.pdf' for a file named 'A B.pdf'. Whichever form
+    the metadata carries, and whichever the author wrote, must match — this is
+    what silently zeroed the ranking metrics on the first real run."""
+    cases = [EvalTestCase(query="q1", expected_answer="a", expected_file_ids=("A B.pdf",))]
+    for metadata in (
+        {"file_id": "A_B.pdf", "source": "A_B.pdf"},
+        {"file_id": "A_B.pdf", "source": "/data/A B.pdf"},
+        {"file_id": "A_B.pdf"},
+    ):
+        row = {"vars": {"query": "q1"}, "response": {"output": [{"content": "c", "metadata": metadata}]}}
+        retrieval, _, _ = summarize(cases=cases, retrieval_payload=[row], answer_payload=[])
+        assert retrieval.hit_rate == 1.0, metadata

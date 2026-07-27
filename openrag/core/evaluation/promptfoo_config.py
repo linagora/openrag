@@ -32,15 +32,11 @@ _QUERY_TEMPLATE = "{{ query | urlencode }}"
 #: Extract the ``documents`` array from the search response.
 _SEARCH_TRANSFORM = "json.documents || []"
 
-#: ``extra`` is a JSON *string* on the chat response (see the source-citation
-#: contract in CLAUDE.md), so it needs parsing before sources are reachable.
-_CHAT_TRANSFORM = """
-(() => {
-  let sources = [];
-  try { sources = JSON.parse(json.extra || '{}').sources || []; } catch (e) { sources = []; }
-  return { answer: json.choices?.[0]?.message?.content ?? '', sources };
-})()
-"""
+#: promptfoo evaluates ``transformResponse`` as a single JavaScript
+#: *expression* — statements are a syntax error, and an IIFE trips its
+#: evaluator — so this extracts the answer text and nothing more. The answer
+#: assertions grade that text; retrieved sources come from the retrieval pass.
+_CHAT_TRANSFORM = "json.choices[0].message.content"
 
 _RUBRIC = (
     "The response must answer the question using the retrieved documents. "
@@ -154,18 +150,11 @@ def build_answer_config(
                         "messages": [{"role": "user", "content": "{{query}}"}],
                         "stream": False,
                     },
-                    "transformResponse": _CHAT_TRANSFORM.strip(),
+                    "transformResponse": _CHAT_TRANSFORM,
                 },
             }
         ],
-        "defaultTest": {
-            "options": {
-                "provider": _grader(grader_model, grader_base_url, grader_api_key),
-                # Assertions grade the answer text; the sources stay reachable
-                # through the raw response for the per-case table.
-                "transform": "output.answer",
-            }
-        },
+        "defaultTest": {"options": {"provider": _grader(grader_model, grader_base_url, grader_api_key)}},
         "tests": _tests(
             cases,
             [

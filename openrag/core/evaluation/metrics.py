@@ -22,6 +22,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from core.evaluation.identity import sanitize_file_id
 from core.models.evaluation import (
     AnswerMetrics,
     EvalCaseResult,
@@ -142,12 +143,11 @@ def _retrieved_documents(output: Any) -> list[tuple[str, set[str]]]:
         metadata = document.get("metadata")
         if not isinstance(metadata, Mapping):
             continue
-        identifiers: set[str] = set()
         source_name = Path(str(metadata.get("source") or "")).name
         file_id = str(metadata.get("file_id") or "")
-        for value in (source_name, file_id):
-            if value:
-                identifiers.add(value)
+        # Compare on the sanitised form so a test set naming "A B.pdf" still
+        # matches the "A_B.pdf" the indexer had to store.
+        identifiers = {sanitize_file_id(value) for value in (source_name, file_id) if value}
         if identifiers:
             documents.append((source_name or file_id, identifiers))
     return documents
@@ -225,7 +225,7 @@ def summarize(
                 relevance_scores.append(relevance)
 
         if case.has_ground_truth_sources:
-            expected = set(case.expected_file_ids)
+            expected = {sanitize_file_id(name) for name in case.expected_file_ids}
             matched = [rank for rank, (_, identifiers) in enumerate(documents, start=1) if identifiers & expected]
             detail.hit = bool(matched)
             detail.reciprocal_rank = 1.0 / matched[0] if matched else 0.0
