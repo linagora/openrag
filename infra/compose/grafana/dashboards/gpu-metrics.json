@@ -13,7 +13,7 @@
       {
         "current": {},
         "datasource": { "type": "prometheus", "uid": "prometheus" },
-        "definition": "label_values(nvidia_gpu_duty_cycle, uuid)",
+        "definition": "label_values(nvidia_smi_utilization_gpu_ratio, uuid)",
         "hide": 0,
         "includeAll": true,
         "label": "GPU",
@@ -21,7 +21,7 @@
         "name": "gpu",
         "options": [],
         "query": {
-          "query": "label_values(nvidia_gpu_duty_cycle, uuid)",
+          "query": "label_values(nvidia_smi_utilization_gpu_ratio, uuid)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -74,8 +74,8 @@
       },
       "targets": [
         {
-          "expr": "nvidia_gpu_duty_cycle{uuid=~\"$gpu\"}",
-          "legendFormat": "GPU {{ name }} ({{ uuid }})",
+          "expr": "nvidia_smi_utilization_gpu_ratio{uuid=~\"$gpu\"} * 100",
+          "legendFormat": "GPU {{ uuid }}",
           "refId": "A"
         }
       ],
@@ -122,13 +122,13 @@
       },
       "targets": [
         {
-          "expr": "nvidia_gpu_memory_total_bytes{uuid=~\"$gpu\"}",
-          "legendFormat": "Total — {{ name }}",
+          "expr": "nvidia_smi_memory_total_bytes{uuid=~\"$gpu\"}",
+          "legendFormat": "Total — {{ uuid }}",
           "refId": "A"
         },
         {
-          "expr": "nvidia_gpu_memory_used_bytes{uuid=~\"$gpu\"}",
-          "legendFormat": "Used — {{ name }}",
+          "expr": "nvidia_smi_memory_used_bytes{uuid=~\"$gpu\"}",
+          "legendFormat": "Used — {{ uuid }}",
           "refId": "B"
         }
       ],
@@ -164,8 +164,8 @@
       },
       "targets": [
         {
-          "expr": "nvidia_gpu_duty_cycle{uuid=~\"$gpu\"}",
-          "legendFormat": "{{ name }}",
+          "expr": "nvidia_smi_utilization_gpu_ratio{uuid=~\"$gpu\"} * 100",
+          "legendFormat": "{{ uuid }}",
           "refId": "A"
         }
       ],
@@ -202,8 +202,8 @@
       },
       "targets": [
         {
-          "expr": "(nvidia_gpu_memory_used_bytes{uuid=~\"$gpu\"} / nvidia_gpu_memory_total_bytes{uuid=~\"$gpu\"}) * 100",
-          "legendFormat": "{{ name }}",
+          "expr": "(nvidia_smi_memory_used_bytes{uuid=~\"$gpu\"} / nvidia_smi_memory_total_bytes{uuid=~\"$gpu\"}) * 100",
+          "legendFormat": "{{ uuid }}",
           "refId": "A"
         }
       ],
@@ -251,8 +251,8 @@
       },
       "targets": [
         {
-          "expr": "nvidia_gpu_temperature_celsius{uuid=~\"$gpu\"}",
-          "legendFormat": "{{ name }} ({{ uuid }})",
+          "expr": "nvidia_smi_temperature_gpu{uuid=~\"$gpu\"}",
+          "legendFormat": "{{ uuid }}",
           "refId": "A"
         }
       ],
@@ -298,8 +298,8 @@
       },
       "targets": [
         {
-          "expr": "nvidia_gpu_power_draw_watts{uuid=~\"$gpu\"}",
-          "legendFormat": "{{ name }} ({{ uuid }})",
+          "expr": "nvidia_smi_power_draw_watts{uuid=~\"$gpu\"}",
+          "legendFormat": "{{ uuid }}",
           "refId": "A"
         }
       ],
@@ -310,7 +310,7 @@
     },
     {
       "id": 7,
-      "title": "GPU Fan Speed",
+      "title": "GPU Memory Controller Utilization (%)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -347,8 +347,8 @@
       },
       "targets": [
         {
-          "expr": "nvidia_gpu_fan_speed_percent{uuid=~\"$gpu\"}",
-          "legendFormat": "{{ name }} ({{ uuid }})",
+          "expr": "nvidia_smi_utilization_memory_ratio{uuid=~\"$gpu\"} * 100",
+          "legendFormat": "{{ uuid }}",
           "refId": "A"
         }
       ],

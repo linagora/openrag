@@ -713,3 +713,5 @@ Read only by the opt-in monitoring compose file (`infra/compose/monitoring.docke
 |----------|------|---------|-------------|
 | `GRAFANA_ADMIN_USER` | `str` | `admin` | Grafana admin username. |
 | `GRAFANA_ADMIN_PASSWORD` | `str` | _(required)_ | Grafana admin password — compose refuses to start the monitoring profile if unset. |
+| `GF_SERVER_ROOT_URL` | `str` | `http://localhost:3000` | Browser-facing Grafana root URL. Set this to the admin UI's `/grafana/` URL when using its proxy. |
+| `GF_SERVER_SERVE_FROM_SUB_PATH` | `bool` | `false` | Set to `true` when `GF_SERVER_ROOT_URL` includes the `/grafana/` subpath. |
