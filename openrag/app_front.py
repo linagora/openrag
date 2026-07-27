@@ -473,7 +473,7 @@ async def __fetch_page_content(chunk_url, headers=None):
 
 
 async def _format_sources(metadata_sources, only_txt=False, api_key=None):
-    if not metadata_sources:
+    if not isinstance(metadata_sources, list) or not metadata_sources:
         return [], []
 
     d = {}
@@ -490,12 +490,12 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
             title = title.strip() if isinstance(title, str) else ""
             url = url.strip() if isinstance(url, str) else ""
             snippet = snippet.strip() if isinstance(snippet, str) else ""
-            parsed_url = urlparse(url)
-            if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-                continue
             try:
+                parsed_url = urlparse(url)
+                if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+                    continue
                 markdown_url = quote(str(httpx.URL(url)), safe=_MARKDOWN_URL_SAFE_CHARS)
-            except httpx.InvalidURL:
+            except (ValueError, httpx.InvalidURL):
                 continue
 
             source_label = title or url
@@ -516,12 +516,11 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
             or not filename_value.strip()
             or not isinstance(file_url, str)
             or not file_url.strip()
-            or page is None
-            or not str(page).strip()
         ):
             continue
 
         filename = Path(filename_value.strip())
+        suffix = filename.suffix.lower()
         file_url = file_url.strip()
         file_url = file_url.replace(INTERNAL_BASE_URL, external_url)  # put the correct base url
         # Avoid leaking the credential in the URL (browser history, proxy logs,
@@ -533,8 +532,9 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
         # authenticate the fetch.
         if api_key and (AUTH_MODE != "oidc" or _current_openrag_auth_provider() == "credentials"):
             file_url = f"{file_url}?token={api_key}"
+        page_label = str(page).strip() if page is not None else ""
         source_name = f"{filename}" + (
-            f" (page: {page})" if filename.suffix in [".pdf", ".pptx", ".docx", ".doc"] else ""
+            f" (page: {page_label})" if suffix in [".pdf", ".pptx", ".docx", ".doc"] and page_label else ""
         )
 
         try:
@@ -547,7 +547,7 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
                     continue
                 elem = cl.Text(content=chunk_content, name=source_name, display="side")
             else:
-                match filename.suffix.lower():
+                match suffix:
                     case ".pdf":
                         elem = cl.Pdf(
                             name=source_name,

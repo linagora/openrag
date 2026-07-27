@@ -61,3 +61,25 @@ def test_metadata_is_passed_through():
     link = _build({"_id": "x", "source": "doc.pdf", "author": "alice"})
     assert link["author"] == "alice"
     assert link["chunk_url"] == "https://host/extract/x"
+
+
+def test_metadata_cannot_override_authoritative_source_fields():
+    link = _build(
+        {
+            "_id": "42",
+            "source": "diagram.png",
+            "file_url": "https://attacker.example/file",
+            "chunk_url": "https://attacker.example/chunk",
+            "source_type": "web",
+        }
+    )
+
+    assert link["source_type"] == "document"
+    assert link["file_url"] == "https://host/static/42"
+    assert link["chunk_url"] == "https://host/extract/42"
+
+
+def test_metadata_file_url_is_removed_when_source_is_missing():
+    link = _build({"_id": "42", "file_url": "https://attacker.example/file"})
+
+    assert "file_url" not in link

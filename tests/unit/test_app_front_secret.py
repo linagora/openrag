@@ -413,10 +413,15 @@ async def test_chainlit_cookie_auth_retries_handoff_after_stale_oidc_session(mon
     [
         None,
         [],
+        42,
+        "not-a-source-list",
+        {"filename": "notes.txt"},
         [{}],
         [None],
         [{"source_type": "web", "title": "", "url": "", "snippet": ""}],
+        [{"source_type": "web", "title": "Invalid URL", "url": "http://[invalid"}],
         [{"filename": "", "file_url": "", "page": ""}],
+        [{"filename": "document.pdf", "file_url": "https://openrag.example/static/source-id"}],
     ],
 )
 @pytest.mark.asyncio
@@ -429,6 +434,44 @@ async def test_chainlit_hides_sources_when_none_are_displayable(monkeypatch, sou
 
     assert elements == []
     assert source_names == []
+
+
+@pytest.mark.asyncio
+async def test_chainlit_keeps_page_less_non_pdf_sources(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_page_less_sources_test")
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    async def available_chunk(*_args, **_kwargs):
+        return "Page-less text content"
+
+    monkeypatch.setattr(module, "__fetch_page_content", available_chunk)
+
+    elements, source_names = await module._format_sources(
+        [
+            {
+                "filename": "diagram.png",
+                "file_url": "https://openrag.example/static/image-id",
+            },
+            {
+                "filename": "demo.mp4",
+                "file_url": "https://openrag.example/static/video-id",
+            },
+            {
+                "filename": "recording.mp3",
+                "file_url": "https://openrag.example/static/audio-id",
+            },
+            {
+                "filename": "notes.txt",
+                "file_url": "https://openrag.example/static/text-id",
+                "chunk_url": "https://openrag.example/chunks/text-id",
+            },
+        ]
+    )
+
+    assert source_names == [r"diagram\.png", r"demo\.mp4", r"recording\.mp3", r"notes\.txt"]
+    assert [element.name for element in elements] == ["diagram.png", "demo.mp4", "recording.mp3", "notes.txt"]
+    assert elements[-1].content == "Page-less text content"
 
 
 @pytest.mark.asyncio
