@@ -6,12 +6,21 @@ import SystemPage from "./system";
 
 const systemConfig = vi.hoisted(() => ({
   grafanaUrl: null as string | null,
+  metricsLoading: false,
+  refetchOnMount: undefined as unknown,
 }));
 
 vi.mock("@tanstack/react-query", () => ({
-  useQuery: ({ queryKey }: { queryKey: unknown[] }) => {
+  useQuery: ({
+    queryKey,
+    refetchOnMount,
+  }: {
+    queryKey: unknown[];
+    refetchOnMount?: unknown;
+  }) => {
     const key = queryKey[0];
     if (key === "system-config") {
+      systemConfig.refetchOnMount = refetchOnMount;
       return {
         data: { grafana_url: systemConfig.grafanaUrl },
         error: null,
@@ -40,7 +49,7 @@ vi.mock("@tanstack/react-query", () => ({
     if (key === "system-metrics") {
       return {
         data: "openrag_requests_total 1",
-        isLoading: false,
+        isLoading: systemConfig.metricsLoading,
       };
     }
     return {
@@ -60,6 +69,14 @@ vi.mock("@tanstack/react-query", () => ({
 describe("SystemPage Grafana action", () => {
   beforeEach(() => {
     systemConfig.grafanaUrl = null;
+    systemConfig.metricsLoading = false;
+    systemConfig.refetchOnMount = undefined;
+  });
+
+  it("refetches runtime configuration whenever the page mounts", () => {
+    render(<SystemPage />);
+
+    expect(systemConfig.refetchOnMount).toBe("always");
   });
 
   it("opens the runtime-configured dashboard from the Metrics tab", async () => {
@@ -78,6 +95,22 @@ describe("SystemPage Grafana action", () => {
     );
     expect(link.getAttribute("target")).toBe("_blank");
     expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
+  it("keeps the Grafana action visible while metrics are loading", async () => {
+    systemConfig.grafanaUrl =
+      "https://grafana.example/d/openrag-http/openrag-http-metrics";
+    systemConfig.metricsLoading = true;
+
+    render(<SystemPage />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "Metrics" }));
+
+    expect(
+      screen.getByRole("link", {
+        name: "Open metrics dashboard in Grafana (opens in a new tab)",
+      }),
+    ).not.toBeNull();
   });
 
   it("explains how to configure Grafana when the dashboard URL is missing", async () => {

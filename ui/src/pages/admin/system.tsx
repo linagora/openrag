@@ -40,6 +40,7 @@ export default function SystemPage() {
     queryKey: ["system-config"],
     queryFn: getConfig,
     staleTime: Infinity,
+    refetchOnMount: "always",
   });
   const runtimeGrafanaUrl =
     typeof config?.grafana_url === "string" ? config.grafana_url.trim() : "";
@@ -189,8 +190,6 @@ function MetricsTab({ grafanaUrl }: { grafanaUrl: string }) {
     refetchInterval: 10000,
   });
 
-  if (isLoading) return <Skeleton className="h-48" />;
-
   // Parse Prometheus text format into simple metric entries.
   const lines = (data || "").split("\n").filter((l) => l && !l.startsWith("#"));
   const parsed = lines.map((line) => {
@@ -239,7 +238,9 @@ function MetricsTab({ grafanaUrl }: { grafanaUrl: string }) {
         )}
       </CardHeader>
       <CardContent>
-        {parsed.length === 0 ? (
+        {isLoading ? (
+          <Skeleton className="h-48" />
+        ) : parsed.length === 0 ? (
           <p className="text-muted-foreground text-center py-4">No metrics available</p>
         ) : (
           <div className="overflow-auto max-h-[600px]">
