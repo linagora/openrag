@@ -144,6 +144,7 @@ TRUNCATE TABLE
     workspace_files,
     workspaces,
     partition_memberships,
+    prompts,
     files,
     partitions,
     users
