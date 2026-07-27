@@ -38,6 +38,7 @@ from core.models.preset import PartitionConfig
 from core.utils.conts import is_internal_metadata_key
 from core.utils.exceptions import (
     ConfigError,
+    ConflictError,
     NotFoundError,
     PartitionNotFoundError,
     UserNotFoundError,
@@ -62,6 +63,8 @@ logger = get_logger()
 # ``list_existant_partitions``. Matched case-insensitively.
 _RESERVED_PARTITION_NAMES = frozenset({"all"})
 _MAX_MEMBER_CANDIDATE_PAGE_SIZE = 100
+_MAX_POSTGRES_INTEGER = 2_147_483_647
+_MIN_MEMBER_CANDIDATE_SEARCH_LENGTH = 3
 
 # Columns where an explicit ``None`` in a PATCH is a real value (SQL NULL =
 # "reset to default"), not the omitted-field sentinel that the None-filter
@@ -681,40 +684,61 @@ class PartitionService:
         self,
         partition: str,
         *,
-        search: str | None = None,
-        offset: int = 0,
+        search: str | None,
+        cursor: int | None = None,
         limit: int = 25,
     ) -> dict:
-        """Return a bounded, searchable page for the membership picker."""
-        if offset < 0:
-            raise ValidationError("Offset must be non-negative.")
+        """Return matching non-members without exposing the full user directory."""
+        if cursor is not None and (cursor < 0 or cursor > _MAX_POSTGRES_INTEGER):
+            raise ValidationError("Cursor is outside the supported user ID range.")
         if limit < 1 or limit > _MAX_MEMBER_CANDIDATE_PAGE_SIZE:
             raise ValidationError(
                 f"Limit must be between 1 and {_MAX_MEMBER_CANDIDATE_PAGE_SIZE}.",
             )
 
         await self._ensure_partition(partition)
-        normalized_search = search.strip() if search and search.strip() else None
+        normalized_search = search.strip() if search else ""
+        if not normalized_search:
+            raise ValidationError("Search is required to find users.")
+
+        search_user_id: int | None = None
+        search_prefix: str | None = None
+        if normalized_search.isdecimal():
+            search_user_id = int(normalized_search)
+            if search_user_id > _MAX_POSTGRES_INTEGER:
+                raise ValidationError("User ID is outside the supported range.")
+        elif len(normalized_search) < _MIN_MEMBER_CANDIDATE_SEARCH_LENGTH:
+            raise ValidationError(
+                f"Enter at least {_MIN_MEMBER_CANDIDATE_SEARCH_LENGTH} characters or an exact user ID.",
+            )
+        else:
+            search_prefix = normalized_search
+
         rows = await self._membership_repo.list_partition_member_candidates(
             partition,
-            search=normalized_search,
-            offset=offset,
+            search_prefix=search_prefix,
+            search_user_id=search_user_id,
+            after_id=cursor,
             limit=limit + 1,
         )
         has_more = len(rows) > limit
         candidates = rows[:limit]
         return {
             "candidates": candidates,
-            "offset": offset,
             "limit": limit,
             "has_more": has_more,
-            "next_offset": offset + len(candidates) if has_more else None,
+            "next_cursor": candidates[-1]["user_id"] if has_more and candidates else None,
         }
 
     async def add_member(self, partition: str, user_id: int, role: str) -> None:
         await self._ensure_partition(partition)
         await self._ensure_user_exists(user_id)
-        await self._membership_repo.add_partition_member(partition, user_id, role)
+        created = await self._membership_repo.add_partition_member(partition, user_id, role)
+        if not created:
+            raise ConflictError(
+                f"User {user_id} is already a member of partition '{partition}'.",
+                code="PARTITION_MEMBER_EXISTS",
+            )
         logger.info(f"User_id {user_id} added to partition '{partition}'.")
 
     async def remove_member(self, partition: str, user_id: int) -> None:

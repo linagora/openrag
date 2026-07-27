@@ -1,6 +1,7 @@
 import { useMemo } from "react";
-import { Search } from "lucide-react";
+import { Search, X } from "lucide-react";
 
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -11,14 +12,18 @@ import type { PartitionMemberCandidate } from "@/lib/api/partitions";
 interface MemberPickerProps {
   candidates: PartitionMemberCandidate[];
   isLoading: boolean;
-  isError: boolean;
+  isInitialError: boolean;
+  isRefreshError: boolean;
+  isLoadMoreError: boolean;
   search: string;
+  searchReady: boolean;
   onSearchChange: (search: string) => void;
+  onRetry: () => void;
   hasMore: boolean;
   isLoadingMore: boolean;
   onLoadMore: () => void;
-  selectedUserIds: number[];
-  onSelectionChange: (userIds: number[]) => void;
+  selectedCandidates: PartitionMemberCandidate[];
+  onSelectionChange: (candidates: PartitionMemberCandidate[]) => void;
 }
 
 function candidateLabel(candidate: PartitionMemberCandidate): string {
@@ -28,25 +33,34 @@ function candidateLabel(candidate: PartitionMemberCandidate): string {
 export function MemberPicker({
   candidates,
   isLoading,
-  isError,
+  isInitialError,
+  isRefreshError,
+  isLoadMoreError,
   search,
+  searchReady,
   onSearchChange,
+  onRetry,
   hasMore,
   isLoadingMore,
   onLoadMore,
-  selectedUserIds,
+  selectedCandidates,
   onSelectionChange,
 }: MemberPickerProps) {
-  const selected = useMemo(() => new Set(selectedUserIds), [selectedUserIds]);
+  const selected = useMemo(
+    () => new Set(selectedCandidates.map((candidate) => candidate.user_id)),
+    [selectedCandidates],
+  );
 
-  const toggleCandidate = (userId: number, checked: boolean) => {
-    const next = new Set(selected);
+  const toggleCandidate = (candidate: PartitionMemberCandidate, checked: boolean) => {
     if (checked) {
-      next.add(userId);
+      onSelectionChange(
+        selected.has(candidate.user_id) ? selectedCandidates : [...selectedCandidates, candidate],
+      );
     } else {
-      next.delete(userId);
+      onSelectionChange(
+        selectedCandidates.filter((selectedCandidate) => selectedCandidate.user_id !== candidate.user_id),
+      );
     }
-    onSelectionChange([...next]);
   };
 
   return (
@@ -54,7 +68,7 @@ export function MemberPicker({
       <div className="flex items-center justify-between gap-3">
         <Label htmlFor="partition-member-search">Users</Label>
         <span className="text-xs text-muted-foreground" aria-live="polite">
-          {selectedUserIds.length} selected
+          {selectedCandidates.length} selected
         </span>
       </div>
       <div className="relative">
@@ -71,22 +85,71 @@ export function MemberPicker({
         />
       </div>
 
+      {selectedCandidates.length > 0 && (
+        <div
+          className="space-y-1.5 rounded-md border bg-muted/30 p-2"
+          role="region"
+          aria-label="Selected users"
+        >
+          <p className="text-xs font-medium text-muted-foreground">Selected users</p>
+          {selectedCandidates.map((candidate) => {
+            const label = candidateLabel(candidate);
+            return (
+              <div
+                key={candidate.user_id}
+                className="flex items-center justify-between gap-2 rounded bg-background px-2 py-1.5 text-sm"
+              >
+                <span className="min-w-0 truncate">
+                  {label} <span className="font-mono text-xs text-muted-foreground">#{candidate.user_id}</span>
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 shrink-0"
+                  onClick={() => toggleCandidate(candidate, false)}
+                  aria-label={`Remove ${label}, user ID ${candidate.user_id}`}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {isRefreshError && (
+        <Alert variant="destructive">
+          <AlertDescription className="flex-row items-center justify-between gap-3">
+            <span>Results could not be refreshed. The previous results remain available.</span>
+            <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+              Retry
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
       <div className="max-h-64 overflow-y-auto rounded-md border" role="group" aria-label="Available users">
-        {isLoading ? (
+        {!searchReady ? (
+          <p className="p-4 text-center text-sm text-muted-foreground">
+            Enter at least 3 characters or an exact user ID.
+          </p>
+        ) : isLoading ? (
           <div className="space-y-2 p-3">
             {Array.from({ length: 3 }).map((_, index) => (
               <Skeleton key={index} className="h-11 w-full" />
             ))}
           </div>
-        ) : isError ? (
-          <p className="p-4 text-center text-sm text-destructive">
-            Users could not be loaded. Close the dialog and try again.
-          </p>
+        ) : isInitialError ? (
+          <div className="space-y-2 p-4 text-center text-sm text-destructive">
+            <p>Users could not be loaded.</p>
+            <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+              Retry
+            </Button>
+          </div>
         ) : candidates.length === 0 ? (
           <p className="p-4 text-center text-sm text-muted-foreground">
-            {search.trim()
-              ? "No users match this search."
-              : "All users are already members of this partition."}
+            No available users match this search.
           </p>
         ) : (
           <>
@@ -103,7 +166,7 @@ export function MemberPicker({
                     <Checkbox
                       id={checkboxId}
                       checked={selected.has(candidate.user_id)}
-                      onCheckedChange={(checked) => toggleCandidate(candidate.user_id, checked === true)}
+                      onCheckedChange={(checked) => toggleCandidate(candidate, checked === true)}
                       aria-label={`Select ${label}, user ID ${candidate.user_id}`}
                     />
                     <span className="min-w-0 flex-1">
@@ -116,8 +179,13 @@ export function MemberPicker({
                 );
               })}
             </div>
-            {hasMore && (
+            {(hasMore || isLoadMoreError) && (
               <div className="border-t p-2">
+                {isLoadMoreError && (
+                  <p className="mb-2 text-center text-xs text-destructive">
+                    More users could not be loaded. You can retry without losing this page.
+                  </p>
+                )}
                 <Button
                   type="button"
                   variant="ghost"
@@ -126,7 +194,7 @@ export function MemberPicker({
                   onClick={onLoadMore}
                   disabled={isLoadingMore}
                 >
-                  {isLoadingMore ? "Loading..." : "Load more users"}
+                  {isLoadingMore ? "Loading..." : isLoadMoreError ? "Retry loading more" : "Load more users"}
                 </Button>
               </div>
             )}

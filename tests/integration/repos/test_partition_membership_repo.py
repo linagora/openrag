@@ -65,16 +65,16 @@ class TestPartitionMemberships:
         postgres_store: PostgresStore,
     ):
         member = await postgres_store.user_repo.create_user(
-            _user(display_name="Sam Lee", email="member@example.com"),
+            _user(display_name="Candidate Member", email="member@example.com"),
         )
         candidate = await postgres_store.user_repo.create_user(
-            _user(display_name="Sam Lee", email="candidate@example.com"),
+            _user(display_name="Candidate Sam", email="candidate@example.com"),
         )
         third = await postgres_store.user_repo.create_user(
-            _user(display_name="Taylor", email="taylor@example.com"),
+            _user(display_name="Candidate Taylor", email="taylor@example.com"),
         )
         fourth = await postgres_store.user_repo.create_user(
-            _user(display_name="Jordan", email="jordan@example.com"),
+            _user(display_name="Candidate Jordan", email="jordan@example.com"),
         )
         await postgres_store.partition_repo.create_partition("docs")
         await postgres_store.membership_repo.assign_partition(
@@ -83,28 +83,60 @@ class TestPartitionMemberships:
 
         matches = await postgres_store.membership_repo.list_partition_member_candidates(
             "docs",
-            search="SAM",
-            offset=0,
+            search_prefix="candidate s",
+            search_user_id=None,
+            after_id=None,
             limit=10,
         )
         assert matches == [
             {
                 "user_id": candidate.id,
-                "display_name": "Sam Lee",
+                "display_name": "Candidate Sam",
             }
         ]
 
         first_page = await postgres_store.membership_repo.list_partition_member_candidates(
             "docs",
-            search=None,
-            offset=0,
+            search_prefix="candidate",
+            search_user_id=None,
+            after_id=None,
             limit=2,
         )
         second_page = await postgres_store.membership_repo.list_partition_member_candidates(
             "docs",
-            search=str(fourth.id),
-            offset=0,
+            search_prefix="candidate",
+            search_user_id=None,
+            after_id=third.id,
             limit=2,
         )
         assert [row["user_id"] for row in first_page] == [candidate.id, third.id]
         assert [row["user_id"] for row in second_page] == [fourth.id]
+
+        exact_match = await postgres_store.membership_repo.list_partition_member_candidates(
+            "docs",
+            search_prefix=None,
+            search_user_id=fourth.id,
+            after_id=None,
+            limit=2,
+        )
+        assert [row["user_id"] for row in exact_match] == [fourth.id]
+
+    async def test_add_partition_member_conflict_preserves_existing_role(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        user = await postgres_store.user_repo.create_user(_user())
+        await postgres_store.partition_repo.create_partition("docs")
+        await postgres_store.membership_repo.assign_partition(
+            UserPartition(user_id=user.id, partition="docs", role=PartitionRole.VIEWER),
+        )
+
+        created = await postgres_store.membership_repo.add_partition_member(
+            "docs",
+            user.id,
+            "owner",
+        )
+
+        memberships = await postgres_store.membership_repo.list_user_partitions(user.id)
+        assert created is False
+        assert memberships[0].role == PartitionRole.VIEWER

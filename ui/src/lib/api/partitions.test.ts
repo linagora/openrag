@@ -69,10 +69,9 @@ describe("listPartitionMemberCandidates", () => {
       fakeResponse({
         body: JSON.stringify({
           candidates: [{ user_id: 2, display_name: "Sam" }],
-          offset: 20,
           limit: 10,
           has_more: true,
-          next_offset: 30,
+          next_cursor: 30,
         }),
       }),
     );
@@ -80,22 +79,21 @@ describe("listPartitionMemberCandidates", () => {
     await expect(
       listPartitionMemberCandidates("legal docs", {
         search: "Sam Lee",
-        offset: 20,
+        cursor: 20,
         limit: 10,
       }),
     ).resolves.toEqual({
       candidates: [{ user_id: 2, display_name: "Sam" }],
-      offset: 20,
       limit: 10,
       has_more: true,
-      next_offset: 30,
+      next_cursor: 30,
     });
     const requestedUrl = String(fetchMock.mock.calls[0][0]);
     expect(requestedUrl).toContain("/partition/legal%20docs/users/candidates?");
     expect(Array.from(new URLSearchParams(requestedUrl.split("?")[1]).entries())).toEqual(
       expect.arrayContaining([
         ["search", "Sam Lee"],
-        ["offset", "20"],
+        ["cursor", "20"],
         ["limit", "10"],
       ]),
     );

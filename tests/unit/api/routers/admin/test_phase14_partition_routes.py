@@ -101,15 +101,15 @@ class FakeMemberCandidateService:
         self,
         partition: str,
         *,
-        search: str | None,
-        offset: int,
+        search: str,
+        cursor: int | None,
         limit: int,
     ) -> dict[str, Any]:
         self.calls.append(
             {
                 "partition": partition,
                 "search": search,
-                "offset": offset,
+                "cursor": cursor,
                 "limit": limit,
             }
         )
@@ -118,10 +118,9 @@ class FakeMemberCandidateService:
                 {"user_id": 2, "display_name": "Sam"},
                 {"user_id": 3, "display_name": "Sam"},
             ],
-            "offset": offset,
             "limit": limit,
             "has_more": True,
-            "next_offset": offset + limit,
+            "next_cursor": 30,
         }
 
 
@@ -183,7 +182,7 @@ async def test_list_partition_member_candidates_returns_stable_identities(async_
     async with async_client_factory(app) as client:
         response = await client.get(
             "/partition/legal/users/candidates",
-            params={"search": "sam", "offset": 20, "limit": 10},
+            params={"search": "sam", "cursor": 20, "limit": 10},
         )
 
     assert response.status_code == 200
@@ -192,16 +191,15 @@ async def test_list_partition_member_candidates_returns_stable_identities(async_
             {"user_id": 2, "display_name": "Sam"},
             {"user_id": 3, "display_name": "Sam"},
         ],
-        "offset": 20,
         "limit": 10,
         "has_more": True,
-        "next_offset": 30,
+        "next_cursor": 30,
     }
     assert service.calls == [
         {
             "partition": "legal",
             "search": "sam",
-            "offset": 20,
+            "cursor": 20,
             "limit": 10,
         }
     ]
@@ -221,9 +219,24 @@ async def test_list_partition_member_candidates_rejects_non_owner(async_client_f
     app.dependency_overrides[require_partition_owner] = reject_non_owner
 
     async with async_client_factory(app) as client:
-        response = await client.get("/partition/legal/users/candidates")
+        response = await client.get(
+            "/partition/legal/users/candidates",
+            params={"search": "sam"},
+        )
 
     assert response.status_code == 403
+    assert service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_list_partition_member_candidates_requires_search(async_client_factory):
+    service = FakeMemberCandidateService()
+    app = _build_app(service)
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/users/candidates")
+
+    assert response.status_code == 422
     assert service.calls == []
 
 

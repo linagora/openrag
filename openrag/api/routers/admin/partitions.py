@@ -411,8 +411,8 @@ async def list_partition_users(
 
 **Parameters:**
 - `partition`: The partition name
-- `search`: Optional display name or user ID fragment
-- `offset`: Page offset
+- `search`: Display-name prefix (at least 3 characters) or exact user ID
+- `cursor`: Last user ID from the previous page
 - `limit`: Page size (maximum 100)
 
 **Response:**
@@ -424,8 +424,8 @@ Returns a bounded page of non-member users and continuation metadata.
 )
 async def list_partition_user_candidates(
     partition: str,
-    search: str | None = Query(default=None, max_length=200),
-    offset: int = Query(default=0, ge=0),
+    search: str = Query(..., max_length=200),
+    cursor: int | None = Query(default=None, ge=0, le=2_147_483_647),
     limit: int = Query(default=25, ge=1, le=100),
     partition_owner=Depends(require_partition_owner),
     service=Depends(get_partition_service),
@@ -434,7 +434,7 @@ async def list_partition_user_candidates(
     page = await service.list_member_candidates(
         partition=partition,
         search=search,
-        offset=offset,
+        cursor=cursor,
         limit=limit,
     )
     return JSONResponse(status_code=status.HTTP_200_OK, content=page)
@@ -459,6 +459,7 @@ async def list_partition_user_candidates(
 
 **Response:**
 Returns 201 Created on successful addition.
+Returns 409 Conflict if the user is already a member; use the role endpoint to change an existing member.
 """,
 )
 async def add_partition_user(

@@ -5,6 +5,7 @@ import { ArrowLeft, Save, UserPlus, Trash2, CheckCircle, XCircle, Loader2, Info 
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -43,16 +44,17 @@ import {
   listPartitions,
   listPartitionMembers,
   listPartitionMemberCandidates,
-  addPartitionMember,
   removePartitionMember,
   updatePartitionMemberRole,
 } from "@/lib/api/partitions";
-import type { PartitionConfig, PartitionRole } from "@/lib/api/partitions";
+import type { PartitionConfig, PartitionMemberCandidate, PartitionRole } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 import { formatDate, intOr } from "@/lib/utils";
 import { MemberPicker } from "./member-picker";
+import { addPartitionMembers } from "./member-batch";
+import type { MemberAddFailure } from "./member-batch";
 
 // --- General Tab ---
 
@@ -380,7 +382,8 @@ function PipelineConfigTab({ partition }: { partition: PartitionConfig }) {
 
 function UsersTab({ partitionName }: { partitionName: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
+  const [selectedCandidates, setSelectedCandidates] = useState<PartitionMemberCandidate[]>([]);
+  const [addFailures, setAddFailures] = useState<MemberAddFailure[]>([]);
   const [role, setRole] = useState("viewer");
   const [candidateSearch, setCandidateSearch] = useState("");
   const [debouncedCandidateSearch, setDebouncedCandidateSearch] = useState("");
@@ -406,42 +409,43 @@ function UsersTab({ partitionName }: { partitionName: string }) {
     return () => window.clearTimeout(timeout);
   }, [candidateSearch]);
 
+  const normalizedCandidateSearch = candidateSearch.trim();
+  const candidateSearchReady =
+    /^\d+$/.test(normalizedCandidateSearch) || normalizedCandidateSearch.length >= 3;
+
   const candidatesQuery = useInfiniteQuery({
     queryKey: ["partition", partitionName, "member-candidates", debouncedCandidateSearch],
     queryFn: ({ pageParam }) =>
       listPartitionMemberCandidates(partitionName, {
         search: debouncedCandidateSearch,
-        offset: pageParam,
+        cursor: pageParam ?? undefined,
         limit: 25,
       }),
-    initialPageParam: 0,
-    getNextPageParam: (lastPage) => lastPage.next_offset ?? undefined,
-    enabled: dialogOpen && canManage,
+    initialPageParam: null as number | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    enabled:
+      dialogOpen &&
+      canManage &&
+      (/^\d+$/.test(debouncedCandidateSearch) || debouncedCandidateSearch.length >= 3),
   });
   const candidates = candidatesQuery.data?.pages.flatMap((page) => page.candidates) ?? [];
-  const candidateSearchPending = candidateSearch.trim() !== debouncedCandidateSearch;
+  const candidateSearchPending =
+    candidateSearchReady && normalizedCandidateSearch !== debouncedCandidateSearch;
 
   const addMutation = useMutation({
     mutationFn: async ({
-      userIds,
+      candidates: selected,
       selectedRole,
     }: {
-      userIds: number[];
+      candidates: PartitionMemberCandidate[];
       selectedRole: PartitionRole;
-    }) => {
-      const addedUserIds: number[] = [];
-      const failedUserIds: number[] = [];
-      for (const userId of userIds) {
-        try {
-          await addPartitionMember(partitionName, userId, selectedRole);
-          addedUserIds.push(userId);
-        } catch {
-          failedUserIds.push(userId);
-        }
-      }
-      return { addedUserIds, failedUserIds };
-    },
-    onSuccess: ({ addedUserIds, failedUserIds }) => {
+    }) =>
+      addPartitionMembers({
+        partitionName,
+        candidates: selected,
+        role: selectedRole,
+      }),
+    onSuccess: ({ addedCandidates, failures }) => {
       queryClient.invalidateQueries({
         queryKey: ["partition", partitionName, "users"],
       });
@@ -449,21 +453,22 @@ function UsersTab({ partitionName }: { partitionName: string }) {
         queryKey: ["partition", partitionName, "member-candidates"],
       });
 
-      if (failedUserIds.length > 0) {
-        setSelectedUserIds(failedUserIds);
+      if (failures.length > 0) {
+        setSelectedCandidates(failures.map((failure) => failure.candidate));
+        setAddFailures(failures);
+        const firstFailure = failures[0];
         toast.error(
-          addedUserIds.length > 0
-            ? `${addedUserIds.length} user${addedUserIds.length === 1 ? "" : "s"} added; ${failedUserIds.length} failed`
-            : "Failed to add the selected users",
+          `${addedCandidates.length > 0 ? `${addedCandidates.length} added; ` : ""}${failures.length} failed: ${firstFailure.message}`,
         );
         return;
       }
 
       toast.success(
-        `${addedUserIds.length} user${addedUserIds.length === 1 ? "" : "s"} added to partition`,
+        `${addedCandidates.length} user${addedCandidates.length === 1 ? "" : "s"} added to partition`,
       );
       setDialogOpen(false);
-      setSelectedUserIds([]);
+      setSelectedCandidates([]);
+      setAddFailures([]);
       setRole("viewer");
       setCandidateSearch("");
       setDebouncedCandidateSearch("");
@@ -496,12 +501,13 @@ function UsersTab({ partitionName }: { partitionName: string }) {
   });
 
   const handleAddUsers = () => {
-    if (selectedUserIds.length === 0) {
+    if (selectedCandidates.length === 0) {
       toast.error("Select at least one user");
       return;
     }
+    setAddFailures([]);
     addMutation.mutate({
-      userIds: selectedUserIds,
+      candidates: selectedCandidates,
       selectedRole: role as PartitionRole,
     });
   };
@@ -510,7 +516,8 @@ function UsersTab({ partitionName }: { partitionName: string }) {
     if (!open && addMutation.isPending) return;
     setDialogOpen(open);
     if (!open) {
-      setSelectedUserIds([]);
+      setSelectedCandidates([]);
+      setAddFailures([]);
       setRole("viewer");
       setCandidateSearch("");
       setDebouncedCandidateSearch("");
@@ -617,20 +624,59 @@ function UsersTab({ partitionName }: { partitionName: string }) {
               <MemberPicker
                 candidates={candidates}
                 isLoading={candidatesQuery.isLoading || candidateSearchPending}
-                isError={candidatesQuery.isError && candidatesQuery.data === undefined}
+                isInitialError={candidatesQuery.isError && candidatesQuery.data === undefined}
+                isRefreshError={
+                  candidatesQuery.isRefetchError &&
+                  candidatesQuery.data !== undefined &&
+                  !candidatesQuery.isFetchNextPageError
+                }
+                isLoadMoreError={candidatesQuery.isFetchNextPageError}
                 search={candidateSearch}
-                onSearchChange={setCandidateSearch}
+                searchReady={candidateSearchReady}
+                onSearchChange={(search) => {
+                  setCandidateSearch(search);
+                  setAddFailures([]);
+                }}
+                onRetry={() => {
+                  void candidatesQuery.refetch();
+                }}
                 hasMore={Boolean(candidatesQuery.hasNextPage)}
                 isLoadingMore={candidatesQuery.isFetchingNextPage}
                 onLoadMore={() => {
                   void candidatesQuery.fetchNextPage();
                 }}
-                selectedUserIds={selectedUserIds}
-                onSelectionChange={setSelectedUserIds}
+                selectedCandidates={selectedCandidates}
+                onSelectionChange={(selection) => {
+                  setSelectedCandidates(selection);
+                  setAddFailures([]);
+                }}
               />
+              {addFailures.length > 0 && (
+                <Alert variant="destructive">
+                  <AlertTitle>Some users were not added</AlertTitle>
+                  <AlertDescription>
+                    <ul className="list-disc space-y-1 pl-4">
+                      {addFailures.map((failure) => (
+                        <li key={failure.candidate.user_id}>
+                          {failure.candidate.display_name?.trim() || "Unnamed user"} (user ID{" "}
+                          {failure.candidate.user_id}):
+                          {" "}
+                          {failure.message}
+                        </li>
+                      ))}
+                    </ul>
+                  </AlertDescription>
+                </Alert>
+              )}
               <div className="space-y-2">
                 <Label>Role</Label>
-                <Select value={role} onValueChange={setRole}>
+                <Select
+                  value={role}
+                  onValueChange={(value) => {
+                    setRole(value);
+                    setAddFailures([]);
+                  }}
+                >
                   <SelectTrigger className="w-full">
                     <SelectValue placeholder="Select a role" />
                   </SelectTrigger>
@@ -653,13 +699,13 @@ function UsersTab({ partitionName }: { partitionName: string }) {
               </Button>
               <Button
                 onClick={handleAddUsers}
-                disabled={addMutation.isPending || selectedUserIds.length === 0}
+                disabled={addMutation.isPending || selectedCandidates.length === 0}
               >
                 {addMutation.isPending
                   ? "Adding..."
-                  : selectedUserIds.length === 0
+                  : selectedCandidates.length === 0
                     ? "Add Users"
-                    : `Add ${selectedUserIds.length} User${selectedUserIds.length === 1 ? "" : "s"}`}
+                    : `Add ${selectedCandidates.length} User${selectedCandidates.length === 1 ? "" : "s"}`}
               </Button>
             </DialogFooter>
           </DialogContent>

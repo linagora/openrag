@@ -15,8 +15,9 @@ class _AsyncContext:
 
 
 class _FakeConn:
-    def __init__(self, partition_exists: bool):
+    def __init__(self, partition_exists: bool, membership_insert_result: str = "INSERT 0 1"):
         self.partition_exists = partition_exists
+        self.membership_insert_result = membership_insert_result
         self.executed: list[tuple[str, tuple]] = []
 
     def transaction(self):
@@ -29,12 +30,14 @@ class _FakeConn:
 
     async def execute(self, query: str, *params):
         self.executed.append((query, params))
+        if "INSERT INTO partition_memberships" in query:
+            return self.membership_insert_result
         return "INSERT 0 1"
 
 
 class _FakePool:
-    def __init__(self, partition_exists: bool):
-        self.conn = _FakeConn(partition_exists)
+    def __init__(self, partition_exists: bool, membership_insert_result: str = "INSERT 0 1"):
+        self.conn = _FakeConn(partition_exists, membership_insert_result)
 
     def acquire(self):
         return _AsyncContext(self.conn)
@@ -74,3 +77,16 @@ async def test_add_member_to_existing_partition_allows_any_role():
 
     assert await repo.add_partition_member("existing", 6, "editor") is True
     assert any("INSERT INTO partition_memberships" in query for query, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_add_member_conflict_does_not_overwrite_existing_role():
+    from services.persistence.partition_membership_repo import PgPartitionMembershipRepository
+
+    pool = _FakePool(partition_exists=True, membership_insert_result="INSERT 0 0")
+    repo = PgPartitionMembershipRepository(pool_getter=lambda: pool)
+
+    assert await repo.add_partition_member("existing", 6, "editor") is False
+    membership_query = next(query for query, _ in pool.conn.executed if "INSERT INTO partition_memberships" in query)
+    assert "DO NOTHING" in membership_query
+    assert "DO UPDATE" not in membership_query

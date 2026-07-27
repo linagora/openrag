@@ -205,15 +205,14 @@ export interface PartitionMemberCandidate {
 
 export interface PartitionMemberCandidatePage {
   candidates: PartitionMemberCandidate[];
-  offset: number;
   limit: number;
   has_more: boolean;
-  next_offset: number | null;
+  next_cursor: number | null;
 }
 
 interface ListPartitionMemberCandidatesOptions {
-  search?: string;
-  offset?: number;
+  search: string;
+  cursor?: number;
   limit?: number;
 }
 
@@ -223,16 +222,14 @@ export function listPartitionMembers(name: string): Promise<{ members: Partition
 
 export function listPartitionMemberCandidates(
   name: string,
-  options: ListPartitionMemberCandidatesOptions = {},
+  options: ListPartitionMemberCandidatesOptions,
 ): Promise<PartitionMemberCandidatePage> {
   const query = new URLSearchParams();
-  const search = options.search?.trim();
-  if (search) query.set("search", search);
-  if (options.offset !== undefined) query.set("offset", String(options.offset));
+  query.set("search", options.search.trim());
+  if (options.cursor !== undefined) query.set("cursor", String(options.cursor));
   if (options.limit !== undefined) query.set("limit", String(options.limit));
-  const suffix = query.toString();
   return request<PartitionMemberCandidatePage>(
-    `${P}/${enc(name)}/users/candidates${suffix ? `?${suffix}` : ""}`,
+    `${P}/${enc(name)}/users/candidates?${query.toString()}`,
   );
 }
 

@@ -40,7 +40,8 @@ class PartitionMembershipRepository(ABC):
         self,
         partition: str,
         *,
-        search: str | None,
-        offset: int,
+        search_prefix: str | None,
+        search_user_id: int | None,
+        after_id: int | None,
         limit: int,
     ) -> list[dict]: ...

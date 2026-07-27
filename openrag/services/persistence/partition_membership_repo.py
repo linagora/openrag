@@ -127,11 +127,16 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
         self,
         partition: str,
         *,
-        search: str | None,
-        offset: int,
+        search_prefix: str | None,
+        search_user_id: int | None,
+        after_id: int | None,
         limit: int,
     ) -> list[dict]:
-        """Return a bounded page of users who are not partition members."""
+        """Return matching users after the cursor who are not partition members."""
+        escaped_prefix = None
+        if search_prefix is not None:
+            escaped_prefix = search_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
         rows = await self.pool.fetch(
             """
             SELECT u.id AS user_id, u.display_name
@@ -143,17 +148,21 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
                   AND m.user_id = u.id
             )
               AND (
-                $2::text IS NULL
-                OR STRPOS(LOWER(COALESCE(u.display_name, '')), LOWER($2)) > 0
-                OR STRPOS(u.id::text, $2) > 0
+                ($2::integer IS NOT NULL AND u.id = $2)
+                OR (
+                    $3::text IS NOT NULL
+                    AND LOWER(u.display_name) LIKE LOWER($3) || '%' ESCAPE '\\'
+                )
               )
+              AND ($4::integer IS NULL OR u.id > $4)
             ORDER BY u.id
-            LIMIT $3 OFFSET $4
+            LIMIT $5
             """,
             partition,
-            search,
+            search_user_id,
+            escaped_prefix,
+            after_id,
             limit,
-            offset,
         )
         return [
             {
@@ -208,19 +217,19 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
                     """,
                     partition,
                 )
-                await conn.execute(
+                result = await conn.execute(
                     """
                     INSERT INTO partition_memberships
                         (partition_name, user_id, role, added_at)
                     VALUES ($1, $2, $3, NOW())
                     ON CONFLICT (partition_name, user_id)
-                      DO UPDATE SET role = EXCLUDED.role
+                      DO NOTHING
                     """,
                     partition,
                     user_id,
                     role,
                 )
-        return True
+        return result.endswith(" 1")
 
     async def remove_partition_member(self, partition: str, user_id: int) -> bool:
         """TODO(phase-9): remove."""
