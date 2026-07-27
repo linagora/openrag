@@ -1,10 +1,11 @@
 import json
 import os
 import secrets
+import string
 import time
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import chainlit as cl
 import httpx
@@ -42,10 +43,17 @@ OPENRAG_AUTH_HANDLE_METADATA_KEY = "openrag_auth_handle"
 OPENRAG_CHAT_PROFILES_METADATA_KEY = "openrag_chat_profiles"
 OPENRAG_SESSION_COOKIE_NAME = "openrag_session"
 _OPENRAG_TOKEN_STORE: dict[str, tuple[str, float]] = {}
+_MARKDOWN_ESCAPE_TABLE = str.maketrans({char: f"\\{char}" for char in string.punctuation})
+_MARKDOWN_URL_SAFE_CHARS = ":/?#[]@!$&'+,;=%"
 
 
 class MissingOpenRAGCredentialError(RuntimeError):
     pass
+
+
+def _escape_markdown_text(value: str) -> str:
+    """Render untrusted source metadata as literal Markdown text."""
+    return value.translate(_MARKDOWN_ESCAPE_TABLE)
 
 
 def get_user_language() -> str:
@@ -485,14 +493,18 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
             parsed_url = urlparse(url)
             if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
                 continue
+            try:
+                markdown_url = quote(str(httpx.URL(url)), safe=_MARKDOWN_URL_SAFE_CHARS)
+            except httpx.InvalidURL:
+                continue
 
             source_label = title or url
             source_name = source_label
             if source_name in d:
                 source_name = f"{source_name} ({i})"
-            content = f"**[{source_label}]({url})**"
+            content = f"**[{_escape_markdown_text(source_label)}]({markdown_url})**"
             if snippet:
-                content += f"\n\n{snippet}"
+                content += f"\n\n{_escape_markdown_text(snippet)}"
             d[source_name] = cl.Text(content=content, name=source_name, display="side")
             continue
 
@@ -557,13 +569,13 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
                         if not isinstance(chunk_content, str) or not chunk_content.strip():
                             continue
                         elem = cl.Text(content=chunk_content, name=source_name, display="side")
-        except (httpx.HTTPError, TypeError, ValueError):
+        except (httpx.HTTPError, TypeError, ValueError, AttributeError):
             logger.warning("Skipping an unavailable source", source_index=i)
             continue
 
         d[source_name] = elem
 
-    source_names = list(d.keys())
+    source_names = [_escape_markdown_text(name) for name in d]
     elements = list(d.values())
 
     return elements, source_names

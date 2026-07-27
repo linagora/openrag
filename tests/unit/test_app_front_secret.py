@@ -454,6 +454,35 @@ async def test_chainlit_keeps_valid_web_sources(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chainlit_escapes_untrusted_web_source_markdown(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_web_source_escaping_test")
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    title = "Reference ](https://spoof.test) **trusted**"
+    snippet = "Evidence [click here](https://spoof.test) or *ignore this*."
+    url = "https://example.test/reference_(draft)"
+    elements, source_names = await module._format_sources(
+        [
+            {
+                "source_type": "web",
+                "title": title,
+                "url": url,
+                "snippet": snippet,
+            }
+        ]
+    )
+
+    assert source_names == [r"Reference \]\(https\:\/\/spoof\.test\) \*\*trusted\*\*"]
+    assert elements[0].name == title
+    assert elements[0].content == (
+        r"**[Reference \]\(https\:\/\/spoof\.test\) \*\*trusted\*\*]"
+        "(https://example.test/reference_%28draft%29)**\n\n"
+        r"Evidence \[click here\]\(https\:\/\/spoof\.test\) or \*ignore this\*\."
+    )
+
+
+@pytest.mark.asyncio
 async def test_chainlit_skips_unavailable_text_sources(monkeypatch):
     module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_unavailable_source_test")
     monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
@@ -463,6 +492,46 @@ async def test_chainlit_skips_unavailable_text_sources(monkeypatch):
         raise httpx.ConnectError("source unavailable")
 
     monkeypatch.setattr(module, "__fetch_page_content", unavailable_chunk)
+
+    elements, source_names = await module._format_sources(
+        [
+            {
+                "filename": "notes.txt",
+                "file_url": "http://internal:8080/static/source-id",
+                "page": "1",
+                "chunk_url": "http://internal:8080/chunks/source-id",
+            }
+        ]
+    )
+
+    assert elements == []
+    assert source_names == []
+
+
+@pytest.mark.asyncio
+async def test_chainlit_skips_text_source_with_non_object_json(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_malformed_source_test")
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"page_content": "unexpected list response"}]
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", FakeAsyncClient)
 
     elements, source_names = await module._format_sources(
         [
