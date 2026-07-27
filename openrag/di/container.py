@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from core.ports.conversation_repo import ConversationRepository
     from core.ports.document_repo import DocumentRepository
     from core.ports.entity_repo import EntityRepository
+    from core.ports.evaluation_repo import EvaluationRepository
     from core.ports.idempotency_repo import IdempotencyRepository
     from core.ports.job_repo import JobRepository
     from core.ports.model_endpoint_repo import ModelEndpointRepository
@@ -359,6 +360,10 @@ class ServiceContainer:
     @property
     def preset_repo(self) -> PresetRepository:
         return self.catalog_store.preset_repo
+
+    @property
+    def evaluation_repo(self) -> EvaluationRepository:
+        return self.catalog_store.evaluation_repo
 
     # ------------------------------------------------------------------
     # Orchestrators (Phase 8)
