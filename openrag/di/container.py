@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from core.vector_stores import VectorStore
     from services.orchestrators.auth_service import AuthService
     from services.orchestrators.conversion_service import ConversionService
+    from services.orchestrators.evaluation_service import EvaluationService
     from services.orchestrators.indexing_service import IndexingService
     from services.orchestrators.job_service import JobService
     from services.orchestrators.mcp_service import MCPService
@@ -117,6 +118,7 @@ class ServiceContainer:
         self._partition_service: PartitionService | None = None
         self._model_endpoint_service: ModelEndpointService | None = None
         self._preset_service: PresetService | None = None
+        self._evaluation_service: EvaluationService | None = None
         self._workspace_service: WorkspaceService | None = None
         self._retrieval_service: RetrievalService | None = None
         self._query_service: QueryService | None = None
@@ -463,6 +465,25 @@ class ServiceContainer:
                 partition_service=self.partition_service,
             )
         return self._preset_service
+
+    @property
+    def evaluation_service(self) -> EvaluationService:
+        """EvaluationService — dataset storage and run dispatch."""
+        if self._evaluation_service is None:
+            from services.orchestrators.evaluation_service import EvaluationService
+            from services.workers.eval_dispatcher import from_ray_namespace
+
+            self._evaluation_service = EvaluationService(
+                repo=self.evaluation_repo,
+                # The adapter resolves its detached actor on first use, so
+                # building the service here does not spawn a worker.
+                runner=from_ray_namespace(),
+                user_service=self.user_service,
+                user_repo=self.user_repo,
+                partition_service=self.partition_service,
+                config=self._require_settings(),
+            )
+        return self._evaluation_service
 
     @property
     def workspace_service(self) -> WorkspaceService:
