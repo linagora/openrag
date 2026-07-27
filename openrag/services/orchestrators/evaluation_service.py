@@ -273,7 +273,10 @@ class EvaluationService:
         try:
             eval_user_id = await self._ensure_eval_user()
             token = (await self._user_service.regenerate_token(eval_user_id))["token"]
-            await self._partition_service.create_partition(partition, user_id=eval_user_id)
+            # ``__eval_*`` is rejected on the public creation path, so that a
+            # user cannot mint a partition the listings hide. A run owns the
+            # namespace and is the one caller allowed through.
+            await self._partition_service.create_partition(partition, user_id=eval_user_id, allow_reserved=True)
             await self._dispatch(run_id, partition, token, directory, cases)
         except Exception as exc:
             # The run row is the lock; leaving it active would block every

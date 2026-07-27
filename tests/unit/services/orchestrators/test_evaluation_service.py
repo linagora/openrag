@@ -82,9 +82,12 @@ class FakePartitionService:
     async def delete_partition(self, partition):
         self.deleted.append(partition)
 
-    async def create_partition(self, partition, user_id=None):
+    async def create_partition(self, partition, user_id=None, *, allow_reserved=False):
         if self._create_error:
             raise self._create_error
+        # The real service rejects the ``__eval_`` prefix without this; a fake
+        # that quietly accepted either way would hide a run that cannot start.
+        assert allow_reserved, "an eval run must claim its reserved partition explicitly"
         self.created.append(partition)
 
 
