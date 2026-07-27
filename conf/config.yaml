@@ -372,7 +372,7 @@ mcp:
 # --- Evaluation ---
 # Env: PROMPTFOO_BIN, EVAL_MAX_CORPUS_MB, EVAL_MAX_TESTSET_MB,
 #      EVAL_MAX_TESTSET_ROWS, EVAL_TOP_K, EVAL_TASK_TIMEOUT,
-#      EVAL_TASK_POLL_SECONDS, EVAL_HTTP_TIMEOUT, EVAL_PROMPTFOO_TIMEOUT
+#      EVAL_TASK_POLL_INTERVAL, EVAL_HTTP_TIMEOUT, EVAL_PROMPTFOO_TIMEOUT
 # The runner reaches the API via server.internal_url.
 evaluation:
   promptfoo_bin: promptfoo

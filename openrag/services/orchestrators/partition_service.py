@@ -288,6 +288,7 @@ class PartitionService:
         partition: str,
         user_id: int,
         *,
+        allow_reserved: bool = False,
         max_owned: int | None = None,
         description: str = "",
         embedder: str = "default",
@@ -306,11 +307,28 @@ class PartitionService:
         are validated *before* the row is written (so a bad preset name fails
         fast and atomically), the non-default config columns are persisted,
         and the in-memory partition cache is re-resolved.
+
+        ``allow_reserved`` is the internal escape hatch for callers that own a
+        reserved namespace — currently only an evaluation run creating its own
+        ``__eval_<run_id>``. It is never reachable from the HTTP surface, and
+        it does not unlock the ``all`` sentinel.
         """
         # Reserved-name check first so a name that normalises to a reserved
         # sentinel (e.g. "  all  ") returns the specific RESERVED_PARTITION_NAME
         # error rather than the generic identifier-allowlist rejection.
-        if partition.strip().lower() in _RESERVED_PARTITION_NAMES:
+        #
+        # The ``__eval_`` prefix is reserved for the same reason it is filtered
+        # out of the listings below: a user-created ``__eval_x`` would be a real
+        # partition that no listing, and therefore no admin audit and no
+        # ``partitions=all`` search, can see. Lowercased before the prefix test
+        # so ``__EVAL_x`` cannot be used to sit just outside the filter.
+        #
+        # ``allow_reserved`` covers the eval namespace only. ``all`` stays
+        # rejected for every caller: it collides with the cross-partition
+        # sentinel and would expand a listing to every partition, which no
+        # internal caller has a reason to want.
+        normalized = partition.strip().lower()
+        if normalized in _RESERVED_PARTITION_NAMES or (is_eval_partition(normalized) and not allow_reserved):
             raise ValidationError(
                 f"Partition name '{partition}' is reserved.",
                 status_code=400,

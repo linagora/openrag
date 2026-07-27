@@ -500,6 +500,50 @@ async def test_list_partitions_hides_throwaway_eval_partitions():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["__eval_mine", "__EVAL_mine", "  __eval_mine  "])
+async def test_create_partition_rejects_the_reserved_eval_prefix(name):
+    """Hiding a name from the listings without reserving it at creation hands
+    users an invisible partition: real, quota-consuming, and absent from every
+    admin listing and from ``partitions=all``."""
+    from core.utils.exceptions import ValidationError
+
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo)
+
+    with pytest.raises(ValidationError) as excinfo:
+        await svc.create_partition(name, user_id=1)
+
+    assert excinfo.value.code == "RESERVED_PARTITION_NAME"
+    assert repo.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_run_may_create_its_own_eval_partition():
+    """The escape hatch the evaluation service uses; not reachable over HTTP."""
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo)
+
+    await svc.create_partition("__eval_deadbeef", user_id=1, allow_reserved=True)
+
+    assert ("create_partition", ("__eval_deadbeef", 1, None)) in repo.calls
+
+
+@pytest.mark.asyncio
+async def test_allow_reserved_does_not_unlock_the_all_sentinel():
+    """``all`` collides with the cross-partition sentinel and would expand a
+    listing to every partition — worse than being hidden, and wanted by no
+    internal caller."""
+    from core.utils.exceptions import ValidationError
+
+    svc = _make_service(_FakePartitionRepo())
+
+    with pytest.raises(ValidationError) as excinfo:
+        await svc.create_partition("all", user_id=1, allow_reserved=True)
+
+    assert excinfo.value.code == "RESERVED_PARTITION_NAME"
+
+
+@pytest.mark.asyncio
 async def test_get_partition_config_missing_raises_404():
     from core.utils.exceptions import PartitionNotFoundError
 

@@ -107,8 +107,12 @@ def _default_internal_url() -> str:
     The port follows ``APP_iPORT``, the container-internal port uvicorn binds
     (``infra/scripts/entrypoint.sh``), so moving it does not silently leave
     workers calling 8080. ``OPENRAG_INTERNAL_URL`` overrides the whole URL.
+
+    ``or`` rather than a ``get`` default, to match the ``${APP_iPORT:-8080}``
+    in entrypoint.sh and docker-compose.yaml: a bare ``APP_iPORT=`` line in an
+    env file is empty, not absent, and would otherwise yield ``http://openrag:``.
     """
-    return f"http://openrag:{os.environ.get('APP_iPORT', '8080')}"
+    return f"http://openrag:{os.environ.get('APP_iPORT') or '8080'}"
 
 
 class ServerConfig(ConfigMixin):

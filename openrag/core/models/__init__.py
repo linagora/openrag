@@ -1,4 +1,9 @@
-"""Domain models — pure Pydantic, no infrastructure imports."""
+"""Domain models — plain Pydantic models or dataclasses, no infrastructure imports.
+
+Types that are validated at a boundary (parsed input, stored rows) are Pydantic;
+purely internal value objects may be dataclasses. Either way nothing here may
+import from ``services`` or ``api``.
+"""
 
 from .catalog import TERMINAL_TASK_STATES, DocumentRecord, DocumentStatus, IndexationJob, JobStatus
 from .chunk import Chunk, ChunkType

@@ -191,7 +191,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("EVAL_MAX_TESTSET_ROWS", "evaluation.max_testset_rows", int),
     ("EVAL_TOP_K", "evaluation.top_k", int),
     ("EVAL_TASK_TIMEOUT", "evaluation.task_timeout_seconds", float),
-    ("EVAL_TASK_POLL_SECONDS", "evaluation.task_poll_seconds", float),
+    ("EVAL_TASK_POLL_INTERVAL", "evaluation.task_poll_seconds", float),
     ("EVAL_HTTP_TIMEOUT", "evaluation.http_timeout_seconds", float),
     ("EVAL_PROMPTFOO_TIMEOUT", "evaluation.promptfoo_timeout_seconds", float),
 ]
