@@ -20,15 +20,12 @@ RUN apt-get update && apt-get install -y \
 RUN apt update && \
     apt install -y ffmpeg
 
-# Node + promptfoo back the admin evaluation page: the EvalRunner actor shells
-# out to `promptfoo eval`. Installed here as well as in ray.Dockerfile because
-# the compose deployment runs Ray inside this container — ray.Dockerfile only
-# covers deployments with a separate Ray cluster. Pinned rather than run through
-# `npx promptfoo@latest` so a run never depends on npm reachability, or on the
-# CLI changing under a deployment that was not rebuilt.
+# Node + promptfoo back the admin evaluation page, where EvalRunner shells out
+# to `promptfoo eval`. Also installed in ray.Dockerfile: Ray runs inside this
+# container unless the deployment uses a separate cluster. Pinned rather than
+# resolved at run time so a run never depends on npm reachability.
 ARG PROMPTFOO_VERSION=0.121.19
-# Debian's nodejs package is 20.19.x, below promptfoo's floor
-# (^20.20.0 || >=22.22.0), so Node comes from NodeSource instead.
+# Node comes from NodeSource: the distro package predates promptfoo's floor.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g promptfoo@${PROMPTFOO_VERSION} \

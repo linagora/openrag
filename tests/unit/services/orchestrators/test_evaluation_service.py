@@ -206,11 +206,10 @@ def _dataset_on_disk(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_second_start_is_refused_before_the_token_is_regenerated(tmp_path):
-    """The run row is the lock, so the 409 has to land *before* provisioning.
+    """The run row is the lock, so the 409 has to land before provisioning.
 
     Regenerating the shared eval user's token is what makes a lost race
-    destructive: it would revoke the credentials the in-flight run is still
-    indexing with.
+    destructive: it revokes the credentials the in-flight run is indexing with.
     """
     from core.utils.exceptions import ConflictError
 
@@ -236,7 +235,7 @@ async def test_a_second_start_is_refused_before_the_token_is_regenerated(tmp_pat
 
 @pytest.mark.asyncio
 async def test_a_failed_provision_releases_the_run_lock(tmp_path):
-    """A run left in an active status would block every later run forever."""
+    """A run left in an active status would block every later run."""
     _dataset_on_disk(tmp_path)
 
     repo = FakeRepo()

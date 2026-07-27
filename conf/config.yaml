@@ -365,7 +365,7 @@ mcp:
   max_download_bytes: 104857600  # 100 MiB
   max_download_bytes: 104857600  # 100 MiB
 
-# --- Evaluation (admin System page → Evaluation tab) ---
+# --- Evaluation ---
 # Env: OPENRAG_INTERNAL_URL, PROMPTFOO_BIN, EVAL_MAX_CORPUS_MB,
 #      EVAL_MAX_TESTSET_MB, EVAL_MAX_TESTSET_ROWS, EVAL_TOP_K,
 #      EVAL_TASK_TIMEOUT, EVAL_TASK_POLL_SECONDS, EVAL_HTTP_TIMEOUT,

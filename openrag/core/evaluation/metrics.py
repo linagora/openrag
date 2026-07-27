@@ -9,10 +9,9 @@ The ranking definitions (hit rate, MRR, recall) follow the write-up in
 ``tests/load/automatic-evaluation-pipeline/README.md`` so the numbers this
 page reports mean the same thing as the ones the offline pipeline produced.
 
-promptfoo's output envelope has shifted across releases, so
-:func:`extract_results` accepts either the ``{"results": {"results": [...]}}``
-v3 shape or a bare list, and every field read from a row is treated as
-optional.
+promptfoo's output envelope varies by release, so :func:`extract_results`
+accepts either the ``{"results": {"results": [...]}}`` shape or a bare list, and
+every field read from a row is treated as optional.
 """
 
 from __future__ import annotations
@@ -50,10 +49,8 @@ def _percentile(values: Sequence[float], fraction: float) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
-    # ceil, not round: the rank is ceil(fraction * n) by definition, and
-    # round() breaks ties to even, which picks the wrong element whenever
-    # fraction * n lands on an odd integer (p50 of two files would report the
-    # slower one).
+    # ceil, not round: the rank is ceil(fraction * n) by definition, and round()
+    # breaks ties to even, selecting the wrong element on an odd integer rank.
     rank = math.ceil(fraction * len(ordered))
     return float(ordered[min(max(rank, 1), len(ordered)) - 1])
 
@@ -133,11 +130,8 @@ def _index_by_query(rows: Iterable[Mapping[str, Any]]) -> dict[str, Mapping[str,
 def _retrieved_documents(output: Any) -> list[tuple[str, set[str]]]:
     """Rank-ordered ``(display_name, identifiers)`` from a ``/search`` response.
 
-    A test set names its ground truth by *filename*, but the indexer cannot use
-    a raw filename as a ``file_id`` — the API only accepts letters, digits and
-    ``._:-``, so anything with a space is sanitised on the way in. Matching
-    therefore accepts either form: the original name from ``metadata.source``
-    or the stored ``metadata.file_id``.
+    Matching accepts either identifier a document carries, ``metadata.source``
+    or ``metadata.file_id``, since a test set may name ground truth by either.
     """
     if not isinstance(output, list):
         return []
@@ -150,13 +144,12 @@ def _retrieved_documents(output: Any) -> list[tuple[str, set[str]]]:
             continue
         source_name = Path(str(metadata.get("source") or "")).name
         file_id = str(metadata.get("file_id") or "")
-        # Compare on the sanitised form so a test set naming "A B.pdf" still
-        # matches the "A_B.pdf" the indexer had to store.
+        # Compare on the sanitised form: a test set naming "A B.pdf" has to
+        # match the "A_B.pdf" the indexer stored.
         identifiers = {sanitize_file_id(value) for value in (source_name, file_id) if value}
         if identifiers:
-            # ``source`` is the server's storage path
-            # ("/app/data/1785151308957_c270_report.pdf"), so the file_id is the
-            # name worth showing a human.
+            # `source` is a server-side storage path, so `file_id` is the
+            # name worth displaying.
             documents.append((file_id or source_name, identifiers))
     return documents
 

@@ -25,8 +25,7 @@ from urllib.parse import quote
 
 import ray
 
-#: Terminal states of an indexing task — a protocol contract with
-#: ``services.workers.task_state``, not a setting.
+#: Terminal states of an indexing task (``services.workers.task_state``).
 _TERMINAL_TASK_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 
 #: Only the tail of promptfoo's stderr is kept for the failure message.
@@ -75,7 +74,7 @@ class EvalRunner:
         )
 
     async def is_busy(self) -> bool:
-        """Liveness probe; also what ``EvaluationService`` pings before dispatch."""
+        """Liveness probe, pinged before a run is dispatched."""
         return self._active_run_id is not None
 
     async def cancel(self, run_id: str) -> bool:
@@ -268,11 +267,8 @@ class EvalRunner:
         with tempfile.TemporaryDirectory(prefix="openrag-eval-") as workdir:
             root = Path(workdir)
             # promptfoo keeps a SQLite eval history under its config dir,
-            # defaulting to $HOME/.promptfoo. That path is not reliably writable
-            # by the container's non-root user, and the failure is silent: the
-            # migration fails and the CLI exits 1 with no output on either
-            # stream. A per-run directory sidesteps that and any contention
-            # between deployments sharing a home.
+            # defaulting to $HOME/.promptfoo. A per-run directory guarantees it
+            # is writable and never contended.
             config_dir = root / "promptfoo-home"
             config_dir.mkdir()
             for name, config in configs.items():
@@ -291,12 +287,11 @@ class EvalRunner:
             **os.environ,
             "PROMPTFOO_DISABLE_TELEMETRY": "1",
             "PROMPTFOO_DISABLE_UPDATE": "1",
-            # Results are already persisted on the run row; the local eval
-            # history database would just grow inside the container.
+            # Results are persisted on the run row; the local history would
+            # only grow unbounded.
             "PROMPTFOO_DISABLE_SHARING": "1",
             "PROMPTFOO_CONFIG_DIR": str(config_dir),
-            # WAL mode fails on some container filesystems; disabling it keeps
-            # that warning out of the failure output.
+            # WAL mode is unsupported on some filesystems.
             "PROMPTFOO_DISABLE_WAL_MODE": "true",
         }
         try:
@@ -334,8 +329,7 @@ class EvalRunner:
         # promptfoo exits non-zero when assertions fail, which is a result, not
         # an error — the output file is what decides.
         if not output_path.exists():
-            # Both streams: promptfoo reports config errors on stdout, and a
-            # failure to open its database produces nothing on either.
+            # Both streams: promptfoo reports config errors on stdout.
             detail = "\n".join(
                 part
                 for part in (

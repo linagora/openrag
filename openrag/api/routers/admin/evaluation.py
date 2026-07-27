@@ -77,9 +77,8 @@ async def create_dataset(
     The CSV is validated here, so a bad test set fails now rather than after a
     run has already indexed the corpus.
     """
-    # Hand the service the open streams rather than the bytes: Starlette has
-    # already spooled anything sizeable to disk, and reading them here would
-    # pull the whole corpus back into memory to no purpose.
+    # Pass the open streams, not the bytes: large uploads are already spooled
+    # to disk, and reading them here would pull the corpus into memory.
     dataset = await service.create_dataset(
         name=name,
         corpus=[(upload.filename or "unnamed", upload.file) for upload in corpus],

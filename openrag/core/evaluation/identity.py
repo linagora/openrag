@@ -1,10 +1,8 @@
-"""Filename ↔ ``file_id`` normalisation shared by the runner and the metrics.
+"""Filename to ``file_id`` normalisation, shared by the runner and the metrics.
 
-The indexing API accepts only ``[A-Za-z0-9._:-]`` in a ``file_id``, but corpus
-filenames routinely contain spaces and accents. The runner therefore uploads a
-sanitised id, while a test set names its ground truth by real filename — so
-both sides of the ranking comparison are normalised through the same function
-rather than hoping the stored metadata preserved the original name.
+The indexing API accepts only ``[A-Za-z0-9._:-]`` in a ``file_id``, while a test
+set names its ground truth by real filename. Both sides go through this function
+so the two still match.
 """
 
 from __future__ import annotations

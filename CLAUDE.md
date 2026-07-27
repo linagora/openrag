@@ -283,8 +283,8 @@ API → shell out to `promptfoo eval` twice → fold the outputs into metrics �
   limits and timeouts are env-overridable (`EVAL_*`, `OPENRAG_INTERNAL_URL`,
   `PROMPTFOO_BIN`). The reserved partition prefix, CSV column names and the `file_id`
   alphabet are deliberately *not* config — they are contracts with stored datasets.
-- Requires **Node 22** (Debian ships 20.19, below promptfoo's floor) + a pinned promptfoo in
-  **both** `infra/docker/api.Dockerfile` (compose runs Ray inside the API container) and
+- Requires **Node 22** (from NodeSource; distro packages predate promptfoo's floor) + a
+  pinned promptfoo in **both** `infra/docker/api.Dockerfile` (compose runs Ray inside the API container) and
   `infra/docker/ray.Dockerfile` (separate Ray cluster); the runner reaches the API via
   `OPENRAG_INTERNAL_URL`. Dataset files are read from disk by the runner, so a **separate**
   Ray cluster needs `<data_dir>` on shared storage.

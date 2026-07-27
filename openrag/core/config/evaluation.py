@@ -1,12 +1,11 @@
 """Configuration for the admin evaluation feature.
 
-Every operational limit a run depends on lives here rather than as a constant
-in the code that uses it, so an operator can retune a deployment — a slow
-grader, a large corpus, a long-running indexer — without a rebuild.
+Operational limits live here rather than as constants in the code that uses
+them, so a deployment can be retuned without a rebuild.
 
-Domain constants stay out of this file on purpose: the reserved partition
-prefix, the CSV column names and the ``file_id`` alphabet are contracts, not
-settings, and changing them would silently invalidate stored datasets.
+Domain contracts stay out of this file: the reserved partition prefix, the CSV
+column names and the ``file_id`` alphabet are not settings, and changing them
+would invalidate stored datasets.
 """
 
 from __future__ import annotations
@@ -17,13 +16,12 @@ from .base import ConfigMixin
 class EvaluationConfig(ConfigMixin):
     """Limits and timeouts for evaluation datasets and runs."""
 
-    #: Base URL the runner uses to reach the API. It drives OpenRAG through
-    #: HTTP rather than in-process calls, and runs in its own container, so it
-    #: addresses the API by service name rather than the admin's browser host.
+    #: Base URL the runner uses to reach the API. It drives OpenRAG over HTTP
+    #: from its own container, so this is an internal address, not the one a
+    #: browser uses.
     internal_url: str = "http://openrag:8080"
 
-    #: Executable the runner shells out to. Both images install a pinned
-    #: promptfoo on PATH.
+    #: Executable the runner shells out to; the images install it on PATH.
     promptfoo_bin: str = "promptfoo"
 
     #: Upload caps. A dataset is re-indexed on every run, so an oversized

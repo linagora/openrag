@@ -82,10 +82,8 @@ def upgrade() -> None:
                 name="ck_eval_run_status",
             ),
         )
-    # Guarantees at most one active run: starting one regenerates the shared
-    # eval user's token, so two concurrent runs would revoke each other's
-    # credentials mid-flight. Created separately from the table so a database
-    # bootstrapped by an earlier create_all() picks it up too.
+    # At most one active run. Created separately from the table so a database
+    # already bootstrapped by create_all() picks it up too.
     if not index_exists("eval_runs", "ux_eval_runs_single_active"):
         op.create_index(
             "ux_eval_runs_single_active",

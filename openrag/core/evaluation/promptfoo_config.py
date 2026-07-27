@@ -32,10 +32,9 @@ _QUERY_TEMPLATE = "{{ query | urlencode }}"
 #: Extract the ``documents`` array from the search response.
 _SEARCH_TRANSFORM = "json.documents || []"
 
-#: promptfoo evaluates ``transformResponse`` as a single JavaScript
-#: *expression* — statements are a syntax error, and an IIFE trips its
-#: evaluator — so this extracts the answer text and nothing more. The answer
-#: assertions grade that text; retrieved sources come from the retrieval pass.
+#: ``transformResponse`` must be a single JavaScript expression — statements
+#: and IIFEs are rejected — so this extracts the answer text and nothing more.
+#: Retrieved sources come from the retrieval pass instead.
 _CHAT_TRANSFORM = "json.choices[0].message.content"
 
 _RUBRIC = (
@@ -68,8 +67,8 @@ def _tests(cases: Sequence[EvalTestCase], asserts: list[dict[str, Any]]) -> list
     return [
         {
             "vars": {"query": case.query, "expected_answer": case.expected_answer},
-            # A fresh copy per test: a shared list would round-trip through
-            # yaml.safe_dump as an anchor plus aliases.
+            # A fresh copy per test: a shared list would serialise as a YAML
+            # anchor plus aliases.
             "assert": [dict(assertion) for assertion in asserts],
         }
         for case in cases

@@ -390,11 +390,9 @@ eval_runs = Table(
         "status IN ('QUEUED','INDEXING','EVALUATING','COMPLETED','FAILED','CANCELLED')",
         name="ck_eval_run_status",
     ),
-    # At most one run may be active at a time. Enforced here rather than by a
-    # read-then-insert in the service because starting a run regenerates the
-    # shared eval user's token: two runs racing past an application-level check
-    # would revoke each other's credentials mid-flight. Indexing on an
-    # always-true expression makes the partial index admit a single row.
+    # At most one active run: starting one regenerates the shared eval user's
+    # token, so concurrent runs would revoke each other's credentials. Indexing
+    # an always-true expression lets the partial index admit a single row.
     Index(
         "ux_eval_runs_single_active",
         text("(status IS NOT NULL)"),

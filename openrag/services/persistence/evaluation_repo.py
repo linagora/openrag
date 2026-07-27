@@ -102,7 +102,7 @@ class PgEvaluationRepository(EvaluationRepository):
                 run.created_by,
             )
         except asyncpg.UniqueViolationError as exc:
-            # ux_eval_runs_single_active — another run is already in flight.
+            # ux_eval_runs_single_active: a run is already in flight.
             raise ConflictError("An evaluation run is already in progress.") from exc
         return self._row_to_run(row)
 

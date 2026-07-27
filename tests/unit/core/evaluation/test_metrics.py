@@ -70,7 +70,7 @@ def test_percentiles_on_a_single_file_return_that_file():
 
 def test_p50_of_an_even_sample_takes_the_lower_middle():
     """Nearest-rank p50 is ceil(n/2); rounding half-to-even would report the
-    slower file for n = 2, 6, 10, ..."""
+    slower file for even n whose half is odd."""
     metrics = indexing_metrics([_sample("a.pdf", 1.0), _sample("b.pdf", 10.0)], wall_seconds=11.0)
     assert metrics.p50_seconds == 1.0
     assert metrics.p95_seconds == 10.0
@@ -230,8 +230,7 @@ def test_missing_rows_leave_the_case_unscored_rather_than_crashing():
 
 def test_ground_truth_matches_the_original_filename_when_the_file_id_was_sanitised():
     """The indexer rewrites 'A B.pdf' to 'A_B.pdf' because the API rejects
-    spaces in a file_id — a test set still names the real file, so matching
-    falls back to metadata.source."""
+    spaces in a file_id, while a test set names the real file."""
     cases = [EvalTestCase(query="q1", expected_answer="a", expected_file_ids=("A B.pdf",))]
     row = {
         "vars": {"query": "q1"},
@@ -258,9 +257,8 @@ def test_ground_truth_still_matches_a_sanitised_file_id_directly():
 
 
 def test_matching_survives_file_id_sanitisation_on_either_side():
-    """The indexer stores 'A_B.pdf' for a file named 'A B.pdf'. Whichever form
-    the metadata carries, and whichever the author wrote, must match — this is
-    what silently zeroed the ranking metrics on the first real run."""
+    """Whichever form the metadata carries, and whichever the author wrote,
+    must match: otherwise the ranking metrics silently read as zero."""
     cases = [EvalTestCase(query="q1", expected_answer="a", expected_file_ids=("A B.pdf",))]
     for metadata in (
         {"file_id": "A_B.pdf", "source": "A_B.pdf"},
@@ -273,8 +271,8 @@ def test_matching_survives_file_id_sanitisation_on_either_side():
 
 
 def test_retrieved_documents_are_named_by_file_id_not_the_storage_path():
-    """metadata.source is the server's temp path ('/app/data/17851..._x.pdf'),
-    which is meaningless in the per-question table."""
+    """metadata.source is a server-side storage path, which is meaningless in
+    the per-question table."""
     cases = [EvalTestCase(query="q1", expected_answer="a", expected_file_ids=("report.pdf",))]
     row = {
         "vars": {"query": "q1"},
@@ -284,7 +282,7 @@ def test_retrieved_documents_are_named_by_file_id_not_the_storage_path():
                     "content": "c",
                     "metadata": {
                         "file_id": "report.pdf",
-                        "source": "/app/data/1785151308957_c270_report.pdf",
+                        "source": "/data/1700000000000_ab12_report.pdf",
                     },
                 }
             ]

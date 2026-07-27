@@ -47,7 +47,7 @@ EVAL_USER_DISPLAY_NAME = "OpenRAG Evaluation"
 TESTSET_FILENAME = "testset.csv"
 CORPUS_DIRNAME = "corpus"
 
-#: Copy buffer, not a deployment concern.
+#: Block size for streaming an upload to disk.
 _COPY_CHUNK_BYTES = 1024 * 1024
 
 #: Bound on the pre-dispatch liveness check.
@@ -196,7 +196,7 @@ class EvaluationService:
     async def start_run(self, dataset_id: str, user_id: int | None) -> EvalRun:
         """Provision a run's partition and token, then dispatch it.
 
-        The run row is inserted *before* anything is provisioned: the partial
+        The run row is inserted before anything is provisioned: the partial
         unique index ``ux_eval_runs_single_active`` makes that insert the mutual
         exclusion between concurrent starts. A read-then-insert would let two
         racing requests both regenerate the shared eval user's token, the second
@@ -217,10 +217,9 @@ class EvaluationService:
             raise NotFoundError(f"Test set for dataset '{dataset_id}' is missing on disk")
         cases = parse_testset(testset_path.read_bytes(), max_rows=self._settings.max_testset_rows)
 
-        # Reach the runner *before* claiming the slot. The dispatch below is
-        # fire-and-forget, so an actor that dies in its constructor would
-        # otherwise leave the run sitting in QUEUED forever with no error, and
-        # a partition and token already created for nobody.
+        # Reach the runner before claiming the slot: dispatch is
+        # fire-and-forget, so an unreachable actor would otherwise strand the
+        # run in QUEUED with a partition and token provisioned for nobody.
         runner = self._runner()
         await self._ping_runner(runner)
 
@@ -241,8 +240,8 @@ class EvaluationService:
             await self._partition_service.create_partition(partition, user_id=eval_user_id)
             self._dispatch(runner, run_id, partition, token, directory, cases)
         except Exception as exc:
-            # The run row is the lock. Leaving it QUEUED after a failed
-            # provision would block every later run with no way to clear it.
+            # The run row is the lock; leaving it active would block every
+            # later run.
             logger.exception(f"Could not start evaluation run {run_id}: {exc}")
             await self._repo.update_run_status(
                 run_id,
@@ -364,8 +363,8 @@ class EvaluationService:
                 display_name=EVAL_USER_DISPLAY_NAME,
                 external_user_id=EVAL_USER_EXTERNAL_ID,
                 is_admin=False,
-                # A corpus is uploaded on every run; a quota would fail the
-                # second one for reasons that have nothing to do with the eval.
+                # A corpus is uploaded on every run, so a quota would fail the
+                # second one for reasons unrelated to the eval.
                 file_quota=-1,
             )
         )
