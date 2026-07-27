@@ -31,6 +31,9 @@ class UserRepository(ABC):
     async def get_user(self, user_id: int) -> User | None: ...
 
     @abstractmethod
+    async def get_users_by_ids(self, user_ids: list[int]) -> list[User]: ...
+
+    @abstractmethod
     async def get_user_by_email(self, email: str) -> User | None: ...
 
     @abstractmethod
