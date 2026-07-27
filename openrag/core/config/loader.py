@@ -86,6 +86,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("LOG_LEVEL", "verbose.level", str),
     # Server
     ("PREFERRED_URL_SCHEME", "server.preferred_url_scheme", str),
+    ("OPENRAG_INTERNAL_URL", "server.internal_url", str),
     # LLM Context
     ("MAX_LLM_CONTEXT_SIZE", "llm_context.max_llm_context_size", int),
     ("MAX_OUTPUT_TOKENS", "llm_context.max_output_tokens", int),
@@ -184,7 +185,6 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("OPENRAG_MCP_DOWNLOAD_TIMEOUT", "mcp.download_timeout", float),
     ("OPENRAG_MCP_MAX_DOWNLOAD_BYTES", "mcp.max_download_bytes", int),
     # Evaluation
-    ("OPENRAG_INTERNAL_URL", "evaluation.internal_url", str),
     ("PROMPTFOO_BIN", "evaluation.promptfoo_bin", str),
     ("EVAL_MAX_CORPUS_MB", "evaluation.max_corpus_mb", int),
     ("EVAL_MAX_TESTSET_MB", "evaluation.max_testset_mb", int),

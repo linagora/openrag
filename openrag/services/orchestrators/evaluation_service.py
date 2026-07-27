@@ -1,9 +1,13 @@
-"""EvaluationService — datasets on disk, runs dispatched to the Ray actor.
+"""EvaluationService — datasets on disk, runs dispatched to the worker layer.
 
 Setup and teardown of a run's *identity* live here rather than in the worker,
 because creating users and partitions is orchestration the API layer already
 owns. The worker receives a partition it may write to and a token it may use,
 and nothing else about the system.
+
+Dispatch goes through the :class:`~core.evaluation.runner.EvaluationRunner`
+port, so this orchestrator stays Ray-free; the Ray actor lives behind the
+adapter in ``services/workers/eval_dispatcher.py``.
 
 The bearer token handed to the worker belongs to a single long-lived service
 user (``__openrag_eval__``) whose token is **regenerated at the start of every
@@ -18,7 +22,7 @@ import asyncio
 import shutil
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from core.evaluation import parse_testset
 from core.models.evaluation import (
@@ -26,6 +30,7 @@ from core.models.evaluation import (
     EvalDataset,
     EvalRun,
     EvalRunStatus,
+    EvalTestCase,
     is_eval_partition,
 )
 from core.models.user import UserCreate
@@ -33,11 +38,15 @@ from core.utils.exceptions import ConflictError, NotFoundError, OpenRAGError, Va
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
     from typing import IO
 
     from core.config.root import Settings
+    from core.evaluation.runner import EvaluationRunner
     from core.ports.evaluation_repo import EvaluationRepository
+    from core.ports.user_repo import UserRepository
+    from services.orchestrators.partition_service import PartitionService
+    from services.orchestrators.user_service import UserService
 
 logger = get_logger()
 
@@ -50,9 +59,6 @@ CORPUS_DIRNAME = "corpus"
 
 #: Block size for streaming an upload to disk.
 _COPY_CHUNK_BYTES = 1024 * 1024
-
-#: Bound on the pre-dispatch liveness check.
-_RUNNER_PING_TIMEOUT_SECONDS = 60
 
 
 def eval_partition_name(run_id: str) -> str:
@@ -71,21 +77,21 @@ class EvaluationService:
 
     def __init__(
         self,
-        repo: EvaluationRepository,
-        user_service: Any,
-        user_repo: Any,
-        partition_service: Any,
-        config: Settings,
         *,
-        runner_factory: Callable[[], Any] | None = None,
+        repo: EvaluationRepository,
+        runner: EvaluationRunner,
+        user_service: UserService,
+        user_repo: UserRepository,
+        partition_service: PartitionService,
+        config: Settings,
     ) -> None:
         self._repo = repo
+        self._runner = runner
         self._user_service = user_service
         self._user_repo = user_repo
         self._partition_service = partition_service
         self._config = config
         self._settings = config.evaluation
-        self._runner_factory = runner_factory
         self._root = Path(config.paths.data_dir) / "eval"
 
     # ── datasets ─────────────────────────────────────────────────────
@@ -249,10 +255,9 @@ class EvaluationService:
         cases = parse_testset(testset_path.read_bytes(), max_rows=self._settings.max_testset_rows)
 
         # Reach the runner before claiming the slot: dispatch is
-        # fire-and-forget, so an unreachable actor would otherwise strand the
+        # fire-and-forget, so an unreachable worker would otherwise strand the
         # run in QUEUED with a partition and token provisioned for nobody.
-        runner = self._runner()
-        await self._ping_runner(runner)
+        await self._ping_runner()
 
         run_id = uuid.uuid4().hex
         partition = eval_partition_name(run_id)
@@ -269,7 +274,7 @@ class EvaluationService:
             eval_user_id = await self._ensure_eval_user()
             token = (await self._user_service.regenerate_token(eval_user_id))["token"]
             await self._partition_service.create_partition(partition, user_id=eval_user_id)
-            self._dispatch(runner, run_id, partition, token, directory, cases)
+            await self._dispatch(run_id, partition, token, directory, cases)
         except Exception as exc:
             # The run row is the lock; leaving it active would block every
             # later run.
@@ -285,25 +290,24 @@ class EvaluationService:
         logger.bind(run_id=run_id, dataset_id=dataset_id).info("Dispatched evaluation run")
         return run
 
-    def _dispatch(
+    async def _dispatch(
         self,
-        runner: Any,
         run_id: str,
         partition: str,
         token: str,
         directory: Path,
-        cases: Sequence[Any],
+        cases: Sequence[EvalTestCase],
     ) -> None:
         """Hand the run to the worker.
 
         Fire and forget: the worker owns the run from here and records its own
-        outcome, so the ObjectRef is deliberately dropped.
+        outcome.
         """
-        runner.run.remote(
+        await self._runner.dispatch(
             run_id=run_id,
             partition=partition,
             token=token,
-            api_base_url=self._settings.internal_url,
+            api_base_url=self._config.server.internal_url,
             corpus_dir=str(directory / CORPUS_DIRNAME),
             cases=[
                 {
@@ -327,16 +331,9 @@ class EvaluationService:
         if run.status.is_terminal:
             raise ConflictError(f"Evaluation run '{run_id}' has already finished.")
 
-        from services.workers.ray_utils import call_ray_actor_with_timeout
-
         owned = False
         try:
-            runner = self._runner()
-            owned = await call_ray_actor_with_timeout(
-                future=runner.cancel.remote(run_id),
-                timeout=_RUNNER_PING_TIMEOUT_SECONDS,
-                task_description=f"cancelling evaluation run {run_id}",
-            )
+            owned = await self._runner.cancel(run_id)
         except Exception as exc:  # noqa: BLE001 — an unreachable runner still has to be reaped
             logger.warning(f"Evaluation runner unreachable while cancelling {run_id}: {exc}")
 
@@ -358,37 +355,24 @@ class EvaluationService:
 
     # ── internals ────────────────────────────────────────────────────
 
-    async def _ping_runner(self, runner: Any) -> None:
-        """Fail fast when the runner actor cannot start.
+    async def _ping_runner(self) -> None:
+        """Fail fast when the runner cannot be reached.
 
         Raises:
-            OpenRAGError: The actor is unreachable — surfaced to the caller
+            OpenRAGError: The worker is unreachable — surfaced to the caller
                 instead of being discovered as a run that never leaves QUEUED.
         """
-        from services.workers.ray_utils import call_ray_actor_with_timeout
-
         try:
-            await call_ray_actor_with_timeout(
-                future=runner.is_busy.remote(),
-                timeout=_RUNNER_PING_TIMEOUT_SECONDS,
-                task_description="reaching the evaluation runner",
-            )
+            await self._runner.is_busy()
         except Exception as exc:
             logger.exception(f"Evaluation runner is unavailable: {exc}")
             raise EvaluationRunnerUnavailableError(f"The evaluation runner could not be reached: {exc}") from exc
 
-    def _runner(self) -> Any:
-        if self._runner_factory is not None:
-            return self._runner_factory()
-        from services.workers.eval_runner import build_eval_runner
-
-        return build_eval_runner()
-
     async def _ensure_eval_user(self) -> int:
         """Get-or-create the non-admin service user runs authenticate as."""
-        existing = await self._user_repo.get_user_by_external_id_dict(EVAL_USER_EXTERNAL_ID)
-        if existing:
-            return int(existing["id"])
+        existing = await self._user_repo.get_user_by_external_id(EVAL_USER_EXTERNAL_ID)
+        if existing is not None:
+            return int(existing.id)
         created = await self._user_service.create_user(
             UserCreate(
                 display_name=EVAL_USER_DISPLAY_NAME,

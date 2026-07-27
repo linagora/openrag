@@ -16,11 +16,6 @@ from .base import ConfigMixin
 class EvaluationConfig(ConfigMixin):
     """Limits and timeouts for evaluation datasets and runs."""
 
-    #: Base URL the runner uses to reach the API. It drives OpenRAG over HTTP
-    #: from its own container, so this is an internal address, not the one a
-    #: browser uses.
-    internal_url: str = "http://openrag:8080"
-
     #: Executable the runner shells out to; the images install it on PATH.
     promptfoo_bin: str = "promptfoo"
 

@@ -471,9 +471,13 @@ class ServiceContainer:
         """EvaluationService — dataset storage and run dispatch."""
         if self._evaluation_service is None:
             from services.orchestrators.evaluation_service import EvaluationService
+            from services.workers.eval_dispatcher import from_ray_namespace
 
             self._evaluation_service = EvaluationService(
                 repo=self.evaluation_repo,
+                # The adapter resolves its detached actor on first use, so
+                # building the service here does not spawn a worker.
+                runner=from_ray_namespace(),
                 user_service=self.user_service,
                 user_repo=self.user_repo,
                 partition_service=self.partition_service,

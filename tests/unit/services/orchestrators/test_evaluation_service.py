@@ -8,10 +8,8 @@ because no actor claimed it — which blocked every later run.
 
 from __future__ import annotations
 
-import sys
-import types
-
 import pytest
+from core.evaluation.runner import EvaluationRunner
 from core.models.evaluation import EvalDataset, EvalRun, EvalRunStatus
 from core.utils.exceptions import ConflictError
 from services.orchestrators.evaluation_service import (
@@ -20,18 +18,6 @@ from services.orchestrators.evaluation_service import (
 )
 
 DATASET_ID = "ds1"
-
-
-@pytest.fixture(autouse=True)
-def _stub_ray_utils(monkeypatch):
-    """Same stub the job-service tests use — ray itself is not needed here."""
-
-    async def _call_ray_actor_with_timeout(*, future, timeout, task_description):
-        return await future
-
-    ray_utils = types.ModuleType("services.workers.ray_utils")
-    ray_utils.call_ray_actor_with_timeout = _call_ray_actor_with_timeout
-    monkeypatch.setitem(sys.modules, "services.workers.ray_utils", ray_utils)
 
 
 class FakeRepo:
@@ -67,43 +53,24 @@ class FakeRepo:
             self.run.error = error
 
 
-class FakeRunnerHandle:
-    """Stands in for the Ray actor handle; `.remote()` returns an awaitable."""
+class FakeRunner(EvaluationRunner):
+    """In-memory ``EvaluationRunner`` — no Ray, no actor, no worker process."""
 
     def __init__(self, *, busy_error: Exception | None = None, owns: bool = True) -> None:
         self._busy_error = busy_error
         self._owns = owns
-        self.dispatched = False
+        self.dispatched: dict | None = None
 
-    class _Method:
-        def __init__(self, fn):
-            self._fn = fn
+    async def is_busy(self) -> bool:
+        if self._busy_error:
+            raise self._busy_error
+        return False
 
-        def remote(self, *args, **kwargs):
-            return self._fn(*args, **kwargs)
+    async def dispatch(self, **kwargs) -> None:
+        self.dispatched = kwargs
 
-    @property
-    def is_busy(self):
-        async def _call():
-            if self._busy_error:
-                raise self._busy_error
-            return False
-
-        return self._Method(lambda: _call())
-
-    @property
-    def cancel(self):
-        async def _call(_run_id):
-            return self._owns
-
-        return self._Method(_call)
-
-    @property
-    def run(self):
-        def _call(**_kwargs):
-            self.dispatched = True
-
-        return self._Method(_call)
+    async def cancel(self, run_id: str) -> bool:
+        return self._owns
 
 
 class FakePartitionService:
@@ -112,44 +79,57 @@ class FakePartitionService:
         self.created: list[str] = []
         self._create_error = create_error
 
+    async def delete_partition(self, partition):
+        self.deleted.append(partition)
+
     async def create_partition(self, partition, user_id=None):
         if self._create_error:
             raise self._create_error
         self.created.append(partition)
 
-    async def delete_partition(self, partition):
-        self.deleted.append(partition)
+
+class FakeUserRepo:
+    """Serves only what the ``UserRepository`` port declares."""
+
+    def __init__(self, user=None) -> None:
+        self.user = user
+
+    async def get_user_by_external_id(self, external_id):
+        return self.user
 
 
 class FakeUserService:
-    """Records token regeneration — the side effect the run lock protects."""
+    """Counts token regeneration — the side effect the run lock protects."""
 
     def __init__(self) -> None:
         self.regenerated = 0
 
     async def regenerate_token(self, user_id):
         self.regenerated += 1
-        return {"token": "or-fake"}
+        return {"token": "or-testtoken"}
 
 
-class FakeUserRepo:
-    async def get_user_by_external_id_dict(self, external_user_id):
-        return {"id": 7}
-
-
-def _service(repo, runner, partition_service=None, tmp_path=None, user_service=None):
+def _service(
+    repo,
+    runner,
+    partition_service=None,
+    tmp_path=None,
+    settings=None,
+    user_repo=None,
+    user_service=None,
+):
     from core.config.root import Settings
 
-    settings = Settings()
+    settings = settings or Settings()
     if tmp_path is not None:
         settings = settings.model_copy(update={"paths": settings.paths.model_copy(update={"data_dir": str(tmp_path)})})
     return EvaluationService(
         repo=repo,
+        runner=runner,
         user_service=user_service or FakeUserService(),
-        user_repo=FakeUserRepo(),
+        user_repo=user_repo if user_repo is not None else FakeUserRepo(),
         partition_service=partition_service or FakePartitionService(),
         config=settings,
-        runner_factory=lambda: runner,
     )
 
 
@@ -161,15 +141,47 @@ async def test_start_run_refuses_when_the_runner_cannot_be_reached(tmp_path):
     (dataset_dir / "testset.csv").write_text("question,expected_answer\nq,a\n", encoding="utf-8")
 
     repo = FakeRepo()
-    runner = FakeRunnerHandle(busy_error=RuntimeError("actor died in __init__"))
+    runner = FakeRunner(busy_error=RuntimeError("actor died in __init__"))
     service = _service(repo, runner, tmp_path=tmp_path)
 
     with pytest.raises(EvaluationRunnerUnavailableError):
         await service.start_run(DATASET_ID, user_id=1)
 
-    assert runner.dispatched is False
+    assert runner.dispatched is None
     # Nothing was provisioned and no run row was left behind.
     assert repo.run is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_the_configured_internal_url(tmp_path):
+    """The worker's API base URL comes from Settings, not from the environment."""
+    from core.config.root import Settings
+    from core.models.user import User
+
+    dataset_dir = tmp_path / "eval" / DATASET_ID
+    (dataset_dir / "corpus").mkdir(parents=True)
+    (dataset_dir / "testset.csv").write_text("question,expected_answer\nq,a\n", encoding="utf-8")
+
+    settings = Settings()
+    settings = settings.model_copy(
+        update={"server": settings.server.model_copy(update={"internal_url": "http://api.internal:9000"})}
+    )
+    runner = FakeRunner()
+    service = _service(
+        FakeRepo(),
+        runner,
+        tmp_path=tmp_path,
+        settings=settings,
+        # The eval service user already exists, so it is resolved through the
+        # port's ``get_user_by_external_id`` rather than being created.
+        user_repo=FakeUserRepo(User(id=7, external_user_id="__openrag_eval__")),
+    )
+
+    await service.start_run(DATASET_ID, user_id=1)
+
+    assert runner.dispatched is not None
+    assert runner.dispatched["api_base_url"] == "http://api.internal:9000"
+    assert runner.dispatched["cases"] == [{"query": "q", "expected_answer": "a", "expected_file_ids": []}]
 
 
 @pytest.mark.asyncio
@@ -178,7 +190,7 @@ async def test_cancel_reaps_a_run_no_runner_owns():
     run = EvalRun(id="r1", dataset_id=DATASET_ID, status=EvalRunStatus.QUEUED)
     repo = FakeRepo(run)
     partitions = FakePartitionService()
-    service = _service(repo, FakeRunnerHandle(owns=False), partition_service=partitions)
+    service = _service(repo, FakeRunner(owns=False), partition_service=partitions)
 
     result = await service.cancel_run("r1")
 
@@ -192,7 +204,7 @@ async def test_cancel_leaves_an_owned_run_for_the_worker_to_finalise():
     """The worker writes its own terminal status, including the metrics."""
     run = EvalRun(id="r1", dataset_id=DATASET_ID, status=EvalRunStatus.EVALUATING)
     repo = FakeRepo(run)
-    service = _service(repo, FakeRunnerHandle(owns=True))
+    service = _service(repo, FakeRunner(owns=True))
 
     await service.cancel_run("r1")
 
@@ -202,7 +214,7 @@ async def test_cancel_leaves_an_owned_run_for_the_worker_to_finalise():
 @pytest.mark.asyncio
 async def test_cancel_rejects_an_already_finished_run():
     run = EvalRun(id="r1", dataset_id=DATASET_ID, status=EvalRunStatus.COMPLETED)
-    service = _service(FakeRepo(run), FakeRunnerHandle())
+    service = _service(FakeRepo(run), FakeRunner())
 
     with pytest.raises(ConflictError):
         await service.cancel_run("r1")
@@ -230,7 +242,7 @@ async def test_a_second_start_is_refused_before_the_token_is_regenerated(tmp_pat
             raise ConflictError("An evaluation run is already in progress.")
 
     repo = BusyRepo()
-    runner = FakeRunnerHandle()
+    runner = FakeRunner()
     users = FakeUserService()
     partitions = FakePartitionService()
     service = _service(repo, runner, partition_service=partitions, tmp_path=tmp_path, user_service=users)
@@ -240,7 +252,7 @@ async def test_a_second_start_is_refused_before_the_token_is_regenerated(tmp_pat
 
     assert users.regenerated == 0, "the loser must not touch the in-flight run's token"
     assert partitions.created == []
-    assert runner.dispatched is False
+    assert runner.dispatched is None
 
 
 @pytest.mark.asyncio
@@ -248,15 +260,23 @@ async def test_a_failed_provision_releases_the_run_lock(tmp_path):
     """A run left in an active status would block every later run."""
     _dataset_on_disk(tmp_path)
 
+    from core.models.user import User
+
     repo = FakeRepo()
-    runner = FakeRunnerHandle()
+    runner = FakeRunner()
     partitions = FakePartitionService(create_error=RuntimeError("milvus unreachable"))
-    service = _service(repo, runner, partition_service=partitions, tmp_path=tmp_path)
+    service = _service(
+        repo,
+        runner,
+        partition_service=partitions,
+        tmp_path=tmp_path,
+        user_repo=FakeUserRepo(User(id=7, external_user_id="__openrag_eval__")),
+    )
 
     with pytest.raises(RuntimeError):
         await service.start_run(DATASET_ID, user_id=1)
 
-    assert runner.dispatched is False
+    assert runner.dispatched is None
     statuses = [status for _, status, _ in repo.status_updates]
     assert EvalRunStatus.FAILED in statuses, "the lock must be released"
     assert partitions.deleted, "the throwaway partition must not leak"
@@ -271,7 +291,7 @@ async def test_deleting_a_dataset_in_use_is_refused(tmp_path):
     _dataset_on_disk(tmp_path)
     run = EvalRun(id="run-1", dataset_id=DATASET_ID, status=EvalRunStatus.INDEXING)
     repo = FakeRepo(run=run)
-    service = _service(repo, FakeRunnerHandle(), tmp_path=tmp_path)
+    service = _service(repo, FakeRunner(), tmp_path=tmp_path)
 
     with pytest.raises(ConflictError):
         await service.delete_dataset(DATASET_ID)
@@ -286,7 +306,7 @@ async def test_deleting_a_dataset_an_idle_run_used_is_allowed(tmp_path):
     _dataset_on_disk(tmp_path)
     run = EvalRun(id="run-1", dataset_id=DATASET_ID, status=EvalRunStatus.COMPLETED)
     repo = FakeRepo(run=run)
-    service = _service(repo, FakeRunnerHandle(), tmp_path=tmp_path)
+    service = _service(repo, FakeRunner(), tmp_path=tmp_path)
 
     await service.delete_dataset(DATASET_ID)
 
@@ -301,7 +321,7 @@ async def test_an_oversized_test_set_is_rejected_without_buffering_it_all(tmp_pa
 
     from core.utils.exceptions import ValidationError
 
-    service = _service(FakeRepo(), FakeRunnerHandle(), tmp_path=tmp_path)
+    service = _service(FakeRepo(), FakeRunner(), tmp_path=tmp_path)
     cap = service._settings.max_testset_bytes
     oversized = io.BytesIO(b"x" * (cap + 5000))
 

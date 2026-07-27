@@ -250,6 +250,11 @@ On-demand benchmarking of indexing speed, retrieval quality and answer quality.
 throwaway partition `__eval_<run_id>` → upload and time each corpus file over the real HTTP
 API → shell out to `promptfoo eval` twice → fold the outputs into metrics → drop the partition.
 
+- **Layering**: `EvaluationService` never touches Ray. It dispatches through the
+  `EvaluationRunner` port (`openrag/core/evaluation/runner.py`), implemented by
+  `RayEvaluationRunner` (`openrag/services/workers/eval_dispatcher.py`) and injected by the
+  container — the same port/adapter shape as `IndexingDispatcher`. The adapter resolves its
+  detached actor on first use, so building the service does not spawn a worker.
 - **Datasets** are admin-uploaded: a corpus plus a CSV test set
   (`question,expected_answer,expected_file_ids`; the last column is optional and
   `;`-separated). Files live under `<data_dir>/eval/<dataset_id>/`. The corpus is
@@ -280,14 +285,15 @@ API → shell out to `promptfoo eval` twice → fold the outputs into metrics �
   A run orphaned by an actor restart is reaped by cancelling it, which writes the terminal
   status directly; a failed provision releases the row the same way.
 - **Config** (`openrag/core/config/evaluation.py`, `evaluation:` in `conf/config.yaml`):
-  limits and timeouts are env-overridable (`EVAL_*`, `OPENRAG_INTERNAL_URL`,
-  `PROMPTFOO_BIN`). The reserved partition prefix, CSV column names and the `file_id`
-  alphabet are deliberately *not* config — they are contracts with stored datasets.
+  limits and timeouts are env-overridable (`EVAL_*`, `PROMPTFOO_BIN`). The API base URL the
+  runner calls back on is `server.internal_url` (env: `OPENRAG_INTERNAL_URL`) — it is a
+  server property, not an eval one. The reserved partition prefix, CSV column names and the
+  `file_id` alphabet are deliberately *not* config — they are contracts with stored datasets.
 - Requires **Node 22** (from NodeSource; distro packages predate promptfoo's floor) + a
-  pinned promptfoo in **both** `infra/docker/api.Dockerfile` (compose runs Ray inside the API container) and
-  `infra/docker/ray.Dockerfile` (separate Ray cluster); the runner reaches the API via
-  `OPENRAG_INTERNAL_URL`. Dataset files are read from disk by the runner, so a **separate**
-  Ray cluster needs `<data_dir>` on shared storage.
+  pinned promptfoo in **both** `infra/docker/api.Dockerfile` (compose runs Ray inside the
+  API container) and `infra/docker/ray.Dockerfile` (separate Ray cluster). Dataset files are
+  read from disk by the runner, so a **separate** Ray cluster needs `<data_dir>` on shared
+  storage.
 
 ### File Quota System
 

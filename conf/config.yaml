@@ -122,9 +122,13 @@ verbose:
   level: INFO
 
 # --- Server ---
-# Env: PREFERRED_URL_SCHEME
+# Env: PREFERRED_URL_SCHEME, OPENRAG_INTERNAL_URL
 server:
   preferred_url_scheme: null
+  # How out-of-process workers (e.g. the evaluation runner) reach the API from
+  # inside the deployment. Change only if the API is not reachable under the
+  # compose service name.
+  internal_url: http://openrag:8080
 
 # --- LLM Context ---
 # Env: MAX_LLM_CONTEXT_SIZE, MAX_OUTPUT_TOKENS
@@ -365,12 +369,11 @@ mcp:
   max_download_bytes: 104857600  # 100 MiB
 
 # --- Evaluation ---
-# Env: OPENRAG_INTERNAL_URL, PROMPTFOO_BIN, EVAL_MAX_CORPUS_MB,
-#      EVAL_MAX_TESTSET_MB, EVAL_MAX_TESTSET_ROWS, EVAL_TOP_K,
-#      EVAL_TASK_TIMEOUT, EVAL_TASK_POLL_SECONDS, EVAL_HTTP_TIMEOUT,
-#      EVAL_PROMPTFOO_TIMEOUT
+# Env: PROMPTFOO_BIN, EVAL_MAX_CORPUS_MB, EVAL_MAX_TESTSET_MB,
+#      EVAL_MAX_TESTSET_ROWS, EVAL_TOP_K, EVAL_TASK_TIMEOUT,
+#      EVAL_TASK_POLL_SECONDS, EVAL_HTTP_TIMEOUT, EVAL_PROMPTFOO_TIMEOUT
+# The runner reaches the API via server.internal_url.
 evaluation:
-  internal_url: http://openrag:8080
   promptfoo_bin: promptfoo
   max_corpus_mb: 512
   max_testset_mb: 5

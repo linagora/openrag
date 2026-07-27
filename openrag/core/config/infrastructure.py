@@ -98,6 +98,11 @@ class PathsConfig(ConfigMixin):
 
 class ServerConfig(ConfigMixin):
     preferred_url_scheme: str | None = None
+    # Base URL under which the API reaches itself from inside the deployment.
+    # Used by out-of-process workers (e.g. the evaluation runner, which uploads
+    # a corpus and drives promptfoo over HTTP): they run in their own container
+    # and cannot reuse whatever host the admin's browser happened to use.
+    internal_url: str = "http://openrag:8080"
 
 
 # ---------------------------------------------------------------------------
