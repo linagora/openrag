@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
-import { Trash2, Eye, Plus, Copy, Search, X } from "lucide-react";
+import { Trash2, Eye, Plus, Copy, Search, X, AlertCircle, RefreshCw } from "lucide-react";
 import { listUsers, deleteUser, createUser, effectiveQuota } from "@/lib/api/users";
 import type { UserResponse, UserWithToken } from "@/lib/api/users";
 import { getConfig } from "@/lib/api/system";
@@ -16,6 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { copyToClipboard } from "@/lib/utils";
 import {
   Dialog,
@@ -48,7 +49,7 @@ export default function UserListPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [search, setSearch] = useState("");
 
-  const { data, isLoading } = useQuery({
+  const usersQuery = useQuery({
     queryKey: ["users"],
     queryFn: listUsers,
   });
@@ -58,7 +59,7 @@ export default function UserListPage() {
   const { data: config } = useQuery({ queryKey: ["system-config"], queryFn: getConfig });
   const globalDefault =
     (config?.rdb as { default_file_quota?: number } | undefined)?.default_file_quota ?? null;
-  const users = data?.users ?? EMPTY_USERS;
+  const users = usersQuery.data?.users ?? EMPTY_USERS;
   const normalizedSearch = search.trim().toLowerCase();
   const filteredUsers = useMemo(() => {
     if (!normalizedSearch) return users;
@@ -191,8 +192,33 @@ export default function UserListPage() {
         }
       />
 
-      {isLoading ? (
+      {usersQuery.isLoading ? (
         <Skeleton className="h-64" />
+      ) : usersQuery.isError ? (
+        <Alert variant="destructive">
+          <AlertCircle aria-hidden="true" />
+          <AlertTitle>Users could not be loaded</AlertTitle>
+          <AlertDescription>
+            <p>
+              {usersQuery.error instanceof Error
+                ? usersQuery.error.message
+                : "The user directory request failed."}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => usersQuery.refetch()}
+              disabled={usersQuery.isFetching}
+            >
+              <RefreshCw
+                className={usersQuery.isFetching ? "animate-spin" : ""}
+                aria-hidden="true"
+              />
+              Try again
+            </Button>
+          </AlertDescription>
+        </Alert>
       ) : (
         <div className="space-y-4">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -210,7 +236,7 @@ export default function UserListPage() {
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
                 placeholder="Search by name, email or external ID"
-                className="pl-9 pr-10"
+                className="pl-9 pr-10 [&::-webkit-search-cancel-button]:hidden"
               />
               {search && (
                 <Button

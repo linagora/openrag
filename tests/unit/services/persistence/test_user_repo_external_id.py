@@ -30,9 +30,13 @@ class _FakePool:
         self.last_query: str | None = None
         self.last_params: tuple = ()
         self._next_row: _FakeRow | None = None
+        self._rows: list[_FakeRow] = []
 
     def set_next_row(self, **fields):
         self._next_row = _FakeRow(fields)
+
+    def set_rows(self, *rows: _FakeRow):
+        self._rows = list(rows)
 
     async def fetchrow(self, query: str, *params):
         self.last_query = query
@@ -49,7 +53,7 @@ class _FakePool:
     async def fetch(self, query: str, *params):
         self.last_query = query
         self.last_params = params
-        return []
+        return self._rows
 
 
 def _make_user_with_ext(ext: str | None):
@@ -141,3 +145,27 @@ async def test_create_legacy_user_coerces_empty_external_id_to_none():
     )
     # Same column position (display_name, external_user_id, ...)
     assert pool.last_params[1] is None
+
+
+@pytest.mark.asyncio
+async def test_list_users_dict_includes_email():
+    from services.persistence.user_repo import PgUserRepository
+
+    pool = _FakePool()
+    pool.set_rows(
+        _FakeRow(
+            id=42,
+            display_name="Alice",
+            external_user_id="kc-alice",
+            email="alice@example.com",
+            is_admin=False,
+            file_quota=None,
+            file_count=0,
+            created_at=__import__("datetime").datetime(2026, 1, 1),
+        )
+    )
+    repo = PgUserRepository(pool_getter=lambda: pool)
+
+    users = await repo.list_users_dict()
+
+    assert users[0]["email"] == "alice@example.com"

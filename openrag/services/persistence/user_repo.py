@@ -332,6 +332,7 @@ class PgUserRepository(UserRepository):
                 "id": r["id"],
                 "display_name": r["display_name"],
                 "external_user_id": r["external_user_id"],
+                "email": r["email"],
                 "is_admin": r["is_admin"],
                 "file_quota": r["file_quota"],
                 "file_count": r["file_count"],

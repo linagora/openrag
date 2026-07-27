@@ -118,6 +118,12 @@ describe("UserListPage", () => {
     await userEvent.type(search, "zArA operator");
 
     expect(await screen.findByText("Zara Operator")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Clear user search" }));
+    await userEvent.type(search, "User #12");
+
+    expect(await screen.findByText("Zara Operator")).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe("1 of 11 users");
   });
 
   it("shows a clear no-result state and restores the list when search is cleared", async () => {
@@ -141,5 +147,19 @@ describe("UserListPage", () => {
 
     expect(await screen.findByText("No users have been created yet.")).toBeTruthy();
     expect(screen.getByRole("status").textContent).toBe("0 users");
+  });
+
+  it("shows a retryable error instead of reporting a failed request as an empty directory", async () => {
+    listUsersMock.mockRejectedValueOnce(new Error("User service unavailable"));
+
+    renderUsers();
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Users could not be loaded");
+    expect(screen.getByRole("alert").textContent).toContain("User service unavailable");
+    expect(screen.queryByText("No users have been created yet.")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText("Ada Lovelace")).toBeTruthy();
   });
 });
