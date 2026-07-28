@@ -30,7 +30,7 @@ npm run lint
 
 ## Environment
 
-All settings are build-time (Vite inlines `import.meta.env.*` — rebuild after changing).
+All `VITE_*` settings are build-time (Vite inlines `import.meta.env.*` — rebuild after changing).
 The UI discovers the auth mode (`token` / `oidc`) from the backend at runtime, not from a build var.
 
 | Var | Purpose |

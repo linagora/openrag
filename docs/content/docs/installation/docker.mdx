@@ -13,3 +13,52 @@ The OpenRAG docker image is available on [DockerHub](https://hub.docker.com/r/rc
 
 OpenRAG requires several services to run, which can be orchestrated using Docker Compose.
 
+## Grafana monitoring
+
+The optional monitoring stack provides ready-to-use dashboards for OpenRAG HTTP
+traffic, host resources, and NVIDIA GPUs. It is separate from the default stack
+so deployments that do not need monitoring keep the same footprint.
+
+Before starting it, set a strong `GRAFANA_ADMIN_PASSWORD` in `.env`. The
+`GRAFANA_ADMIN_USER` defaults to `admin`. Create the Prometheus token file from
+the same `AUTH_TOKEN` used by OpenRAG:
+
+```bash
+cd infra/compose
+set -a
+source .env
+set +a
+printf '%s' "$AUTH_TOKEN" | sudo tee prometheus/openrag_token >/dev/null
+sudo chown 65534:65534 prometheus/openrag_token
+sudo chmod 0400 prometheus/openrag_token
+```
+
+Start OpenRAG with the monitoring overlay:
+
+```bash
+export SHARED_ENV="$PWD/.env"
+docker compose --env-file .env \
+  -f docker-compose.yaml \
+  -f monitoring.docker-compose.yaml \
+  up -d
+```
+
+`GRAFANA_URL` controls where **System > Metrics** opens. It must be reachable
+from the user's browser. For direct local access, use:
+
+```dotenv
+GRAFANA_URL=http://localhost:3000/d/openrag-http/openrag-http-metrics
+```
+
+For remote deployments, expose Grafana through the Admin UI proxy and configure
+its subpath:
+
+```dotenv
+GRAFANA_URL=https://openrag.example.com/grafana/d/openrag-http/openrag-http-metrics
+GF_SERVER_ROOT_URL=https://openrag.example.com/grafana/
+GF_SERVER_SERVE_FROM_SUB_PATH=true
+```
+
+Grafana has its own login. Its admin password is initialized when the persistent
+Grafana volume is created; changing the environment variable later does not
+reset an existing password.

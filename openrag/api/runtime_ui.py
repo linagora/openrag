@@ -9,14 +9,20 @@ from urllib.parse import urlparse
 def get_grafana_url() -> str | None:
     """Return a safe Grafana destination configured for this deployment."""
     value = os.getenv("GRAFANA_URL", "").strip()
-    if not value:
+    if not value or "\\" in value:
         return None
 
     if value.startswith("/") and not value.startswith("//"):
         return value
 
-    parsed = urlparse(value)
-    if parsed.scheme in {"http", "https"} and parsed.netloc:
+    try:
+        parsed = urlparse(value)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except ValueError:
+        return None
+
+    if parsed.scheme in {"http", "https"} and hostname:
         return value
 
     return None
