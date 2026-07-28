@@ -96,6 +96,11 @@ htmlcov/
 docker-compose.override.yaml
 docker-compose.override.yml
 
+# Nginx Proxy Manager state (infra/compose/nginx.docker-compose.yaml) — sqlite
+# DB, proxy host configs, and Let's Encrypt certs/keys.
+nginx_data/
+letsencrypt/
+
 # Chainlit-generated locale files (only en-US and fr are curated/committed;
 # other locales are auto-written at runtime).
 i8n/*.json

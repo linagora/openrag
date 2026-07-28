@@ -712,3 +712,24 @@ Read only by the opt-in monitoring compose file (`infra/compose/monitoring.docke
 |----------|------|---------|-------------|
 | `GRAFANA_ADMIN_USER` | `str` | `admin` | Grafana admin username. |
 | `GRAFANA_ADMIN_PASSWORD` | `str` | _(required)_ | Grafana admin password — compose refuses to start the monitoring profile if unset. |
+
+#### Reverse proxy profile (opt-in)
+
+Read only by the opt-in nginx compose file (`infra/compose/nginx.docker-compose.yaml`), which adds a
+[Nginx Proxy Manager](https://nginxproxymanager.com/) front door — TLS termination and a proxy UI, with
+no nginx.conf hand-editing required. Bring it up alongside the base stack with:
+
+```bash
+docker compose -f docker-compose.yaml -f nginx.docker-compose.yaml up -d
+```
+
+See `infra/compose/nginx/proxy-host.conf.example` for the routing config to paste into the proxy host
+once it's created.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `NGINX_HTTP_PORT` | `int` | `80` | Host port for plain HTTP (redirects to HTTPS once a proxy host is configured). |
+| `NGINX_HTTPS_PORT` | `int` | `443` | Host port for HTTPS. |
+| `NGINX_ADMIN_PORT` | `int` | `81` | Host port for the NPM admin UI (manage proxy hosts and certs). Not loopback-restricted by default — lock it down or tunnel to it if it shouldn't be reachable from outside the host. |
+| `NGINX_DATA_VOLUME` | `str` | `../../nginx_data` | Where NPM's sqlite DB and generated proxy configs are stored. |
+| `NGINX_CERTS_VOLUME` | `str` | `../../letsencrypt` | Where NPM stores issued Let's Encrypt certs/keys. |

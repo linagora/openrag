@@ -1,0 +1,63 @@
+# Example "Custom Nginx Configuration" for a Nginx Proxy Manager proxy host
+# fronting the compose stack (see ../nginx.docker-compose.yaml).
+#
+# Usage: in the NPM admin UI, create a proxy host for your domain pointing at
+# `openrag:8080` (forward scheme http), enable "Websockets Support", then
+# paste this whole block into the proxy host's Advanced tab -> "Custom Nginx
+# Configuration". It replaces the default location entirely, so the forward
+# host/port set in the main tab is only used for TLS/cert issuance; every
+# actual route below is explicit.
+#
+# Land the bare origin on the admin UI SPA.
+location = / {
+    return 301 /app/;
+}
+
+# Admin UI (React SPA), served by the admin-ui container. The /app prefix
+# must NOT be stripped — the bundle is built with VITE_BASE_PATH=/app/ and
+# admin-ui's own nginx matches on `location /app/`.
+location /app {
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Scheme $scheme;
+    proxy_set_header X-Forwarded-Proto  $scheme;
+    proxy_set_header X-Forwarded-For    $proxy_add_x_forwarded_for;
+    proxy_set_header X-Real-IP          $remote_addr;
+
+    # Resolve at request time so nginx still starts if admin-ui is down,
+    # instead of failing at boot with "host not found in upstream".
+    set $admin_ui admin-ui;
+    proxy_pass http://$admin_ui:8080;
+
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $http_connection;
+    proxy_http_version 1.1;
+}
+
+# Everything else: the API, /auth, /v1, and the Chainlit UI at /chainlit.
+# Deliberately NOT routed through admin-ui's own proxy — it doesn't forward
+# the Upgrade/Connection headers, which would break Chainlit's socket.io
+# WebSocket transport (it'd fall back to endless long-polling instead).
+location / {
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Scheme $scheme;
+    proxy_set_header X-Forwarded-Proto  $scheme;
+    proxy_set_header X-Forwarded-For    $proxy_add_x_forwarded_for;
+    proxy_set_header X-Real-IP          $remote_addr;
+
+    set $openrag openrag;
+    proxy_pass http://$openrag:8080;
+
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $http_connection;
+    proxy_http_version 1.1;
+
+    # Chainlit's session cookie grows with the number of partitions/chat
+    # profiles a user can see (~90 bytes/partition, chunked across several
+    # Set-Cookie headers). Past a few dozen partitions this can exceed
+    # nginx's default response-header buffer, which fails closed as a
+    # generic 502 Bad Gateway on /chainlit/login rather than a readable
+    # error — bump the buffers well past what you expect to need.
+    proxy_buffer_size 32k;
+    proxy_buffers 4 32k;
+    proxy_busy_buffers_size 64k;
+}

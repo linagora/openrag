@@ -1,0 +1,47 @@
+# Opt-in TLS front door (Nginx Proxy Manager) for the compose stack.
+#
+# Not included by default — bring it up alongside the base stack with:
+#   docker compose -f docker-compose.yaml -f nginx.docker-compose.yaml up -d
+#
+# NPM terminates TLS on 80/443 and reverse-proxies to the other compose
+# services over the compose network (no host ports needed on them for this to
+# work). It ships its own admin UI (port 81) for managing proxy hosts and
+# Let's Encrypt certs — no nginx.conf hand-editing required. Typical routing
+# once you add a proxy host for your domain:
+#   /app  -> admin-ui:8080   (React SPA; keep the /app prefix, don't strip it —
+#                              the bundle is built with VITE_BASE_PATH=/app/)
+#   /     -> openrag:8080    (API, /auth, /v1, and the Chainlit UI at /chainlit)
+#
+# Route `/` directly to `openrag`, not through admin-ui's own catch-all proxy:
+# that container's nginx doesn't forward the Upgrade/Connection headers, so
+# Chainlit's socket.io WebSocket would fall back to endless long-polling.
+#
+# See infra/compose/nginx/proxy-host.conf.example for a ready-made "Custom
+# Nginx Configuration" snippet to paste into the proxy host's Advanced tab —
+# it already includes the two locations above and header buffer sizes large
+# enough for Chainlit's session cookie (undersized buffers here read as a
+# generic 502 Bad Gateway on /chainlit/login).
+#
+# First run: `docker compose ... up -d`, then reach the NPM admin UI at
+# http://<host>:${NGINX_ADMIN_PORT:-81} (default login admin@example.com /
+# changeme — NPM forces a password change on first login) and add a proxy
+# host for your domain.
+services:
+  nginx:
+    image: "jc21/nginx-proxy-manager:latest"
+    restart: unless-stopped
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+      # NPM's own admin UI. Not loopback-restricted by default like the other
+      # services' ports below — this compose file's whole point is to be the
+      # public entry point, so lock this one down yourself (or tunnel to it)
+      # if you don't want it reachable from outside the host.
+      - "${NGINX_ADMIN_PORT:-81}:81"
+    volumes:
+      # Paths are relative to THIS file (infra/compose/), matching the other
+      # host-path volumes in docker-compose.yaml. Holds NPM's sqlite DB, proxy
+      # host configs, and generated nginx confs — back this up like any other
+      # stateful volume.
+      - ${NGINX_DATA_VOLUME:-../../nginx_data}:/data
+      - ${NGINX_CERTS_VOLUME:-../../letsencrypt}:/etc/letsencrypt
