@@ -40,7 +40,6 @@ class OpenAIChatCompletionRequest(BaseModel):
     metadata: dict[str, Any] | None = Field(
         {
             "use_map_reduce": False,
-            "spoken_style_answer": False,
             "websearch": False,
             "llm_override": None,
         },

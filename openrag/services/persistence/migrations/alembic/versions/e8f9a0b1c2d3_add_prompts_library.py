@@ -5,9 +5,9 @@ Adds DB-backed prompt management:
 * ``prompts`` — the global prompt library (the menu of named prompts), with a
   partial-unique index enforcing at most one ``is_default`` row per prompt type.
 * ``partitions.generation_prompt_names`` — a JSONB map ``{prompt_type: name}``
-  naming the library prompt a partition uses for each generation prompt
-  (``sys_prompt``, ``spoken_style_answer``). Indexation/retrieval prompts are
-  named on their presets (JSONB config, no schema change).
+  naming the library prompt a partition uses for its final-answer prompt
+  (``sys_prompt``). Query-side and indexation prompts are named on their presets
+  (JSONB config, no schema change).
 
 Idempotent: every op is guarded by an inspector check so re-application against
 a database that already contains these objects (an older or partially-migrated
@@ -37,7 +37,7 @@ depends_on: str | Sequence[str] | None = None
 _PROMPT_TYPE_IN = (
     "prompt_type IN ("
     "'sys_prompt','query_contextualizer','chunk_contextualizer','image_captioning',"
-    "'hyde','multi_query','spoken_style_answer','topic_tagger')"
+    "'hyde','multi_query','topic_tagger')"
 )
 
 

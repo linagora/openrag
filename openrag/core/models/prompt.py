@@ -16,7 +16,6 @@ class PromptType(str, Enum):
     IMAGE_CAPTIONING = "image_captioning"
     HYDE = "hyde"
     MULTI_QUERY = "multi_query"
-    SPOKEN_STYLE_ANSWER = "spoken_style_answer"
     TOPIC_TAGGER = "topic_tagger"
 
 

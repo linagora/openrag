@@ -70,9 +70,9 @@ class UpdatePartitionRequest(BaseModel):
     @classmethod
     def validate_generation_prompt_names(cls, value: dict[str, str] | None, info: ValidationInfo) -> dict[str, str]:
         value = _reject_explicit_null(info.field_name, value)
-        # query_contextualizer is a query-side prompt selected on the retrieval
-        # preset, not a partition generation prompt (see RetrievalPipelineConfig).
-        allowed = {"sys_prompt", "spoken_style_answer"}
+        # Only the final-answer prompt is selected per partition. query_contextualizer
+        # is a query-side prompt on the retrieval preset (see RetrievalPipelineConfig).
+        allowed = {"sys_prompt"}
         bad = set(value) - allowed
         if bad:
             raise ValueError(f"generation_prompt_names keys must be one of {sorted(allowed)}; got {sorted(bad)}")

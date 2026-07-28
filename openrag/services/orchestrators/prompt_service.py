@@ -45,7 +45,6 @@ _TYPE_TO_CONFIG_KEY: dict[str, str] = {
     PromptType.IMAGE_CAPTIONING.value: "image_describer",
     PromptType.HYDE.value: "hyde",
     PromptType.MULTI_QUERY.value: "multi_query",
-    PromptType.SPOKEN_STYLE_ANSWER.value: "spoken_style_answer",
     PromptType.TOPIC_TAGGER.value: "topic_tagger",
 }
 

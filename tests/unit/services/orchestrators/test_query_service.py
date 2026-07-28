@@ -22,7 +22,7 @@ from core.utils.exceptions import WorkspaceNotFoundError
 from services.orchestrators.query_service import QueryService
 
 # Real prompt-template config (dir + key->filename mapping) so QueryService
-# can load its system / contextualizer / spoken-style templates from disk.
+# can load its system / contextualizer templates from disk.
 _PROMPT_CFG = load_config()
 
 

@@ -35,9 +35,9 @@ class PartitionRow(BaseModel):
     collection_name: str | None = None
     chat_history_depth: int = Field(default=4, ge=1)
     chat_llm: str | None = None
-    # {prompt_type: library_prompt_name} for generation prompts (sys_prompt,
-    # spoken_style_answer, query_contextualizer). Like chat_llm, generation
-    # config lives on the partition rather than a preset.
+    # {prompt_type: library_prompt_name} for the partition's final-answer prompt
+    # (sys_prompt). Like chat_llm, it lives on the partition rather than a preset;
+    # query-side prompts are named on the retrieval preset instead.
     generation_prompt_names: dict[str, str] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
