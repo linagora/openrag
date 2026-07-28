@@ -25,9 +25,18 @@ the same `AUTH_TOKEN` used by OpenRAG:
 
 ```bash
 cd infra/compose
-set -a
-source .env
-set +a
+compose_environment="$(docker compose --env-file .env config --environment)"
+AUTH_TOKEN="$(printf '%s\n' "$compose_environment" | sed -n 's/^AUTH_TOKEN=//p')"
+allow_no_auth="$(
+  printf '%s\n' "$compose_environment" |
+    sed -n 's/^ALLOW_NO_AUTH=//p' |
+    tr '[:upper:]' '[:lower:]' |
+    sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+)"
+if [ -z "$AUTH_TOKEN" ] && [ "$allow_no_auth" != "true" ]; then
+  echo "AUTH_TOKEN must be set unless ALLOW_NO_AUTH=true." >&2
+  exit 1
+fi
 printf '%s' "$AUTH_TOKEN" | sudo tee prometheus/openrag_token >/dev/null
 sudo chown 65534:65534 prometheus/openrag_token
 sudo chmod 0400 prometheus/openrag_token
