@@ -21,7 +21,6 @@ export type PromptType =
   | "image_captioning"
   | "hyde"
   | "multi_query"
-  | "spoken_style_answer"
   | "topic_tagger";
 
 export interface PromptResponse {

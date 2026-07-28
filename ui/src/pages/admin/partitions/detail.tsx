@@ -60,9 +60,9 @@ import {
 } from "./partition-member-identity";
 import { describePartitionMember } from "./partition-member";
 
-// Generation prompts are selected on the partition (keyed by prompt type). This
-// mirrors the "Generation" concern in the prompt library.
-const GENERATION_PROMPT_TYPES = PROMPT_GROUPS.find((g) => g.name === "Generation")!.types;
+// The answer prompt is selected on the partition (keyed by prompt type). Mirrors
+// the "Answer" concern in the prompt library.
+const GENERATION_PROMPT_TYPES = PROMPT_GROUPS.find((g) => g.name === "Answer")!.types;
 
 // --- General Tab ---
 
@@ -336,9 +336,9 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
           {isAdmin && (
             <div className="space-y-3">
               <div>
-                <Label>Generation Prompts</Label>
+                <Label>Answer Prompt</Label>
                 <p className="text-xs text-muted-foreground">
-                  Override the prompts used when answering in this partition. Leave as{" "}
+                  Override the prompt used to write answers in this partition. Leave as{" "}
                   <span className="font-medium">Use default</span> to inherit the library default. Manage the
                   prompt options in{" "}
                   <Link to="/prompts" className="underline underline-offset-2">Prompts</Link>.

@@ -66,9 +66,8 @@ export interface PartitionConfig {
   document_count: number;
   chat_history_depth: number;
   chat_llm: string | null;
-  // Generation prompts selected for this partition, keyed by prompt type
-  // (sys_prompt / spoken_style_answer / query_contextualizer). Absent keys fall
-  // back to the type's global default.
+  // The final-answer prompt selected for this partition, keyed by prompt type
+  // (sys_prompt). Absent = the type's global default.
   generation_prompt_names: Record<string, string>;
 }
 

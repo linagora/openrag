@@ -20,12 +20,9 @@ export interface PromptGroup {
 
 export const PROMPT_GROUPS: PromptGroup[] = [
   {
-    name: "Generation",
-    description: "Chat & answer prompts — selected per partition",
-    types: [
-      { value: "sys_prompt", label: "System prompt" },
-      { value: "spoken_style_answer", label: "Spoken-style answer" },
-    ],
+    name: "Answer",
+    description: "The final-answer prompt — selected per partition",
+    types: [{ value: "sys_prompt", label: "Final answer prompt" }],
   },
   {
     name: "Indexation",
@@ -69,10 +66,6 @@ export interface TemplateVariable {
 export const PROMPT_TYPE_VARIABLES: Record<string, TemplateVariable[]> = {
   sys_prompt: [
     { name: "context", description: "Retrieved document chunks injected by the pipeline", sample: "[Source 1] Employees are entitled to 20 days of paid vacation per year, accrued monthly." },
-    { name: "current_date", description: "Today's date, injected at request time", sample: "2026-07-27" },
-  ],
-  spoken_style_answer: [
-    { name: "context", description: "Retrieved document chunks injected by the pipeline", sample: "[Source 1] The office is open from 9am to 6pm on weekdays." },
     { name: "current_date", description: "Today's date, injected at request time", sample: "2026-07-27" },
   ],
   query_contextualizer: [
