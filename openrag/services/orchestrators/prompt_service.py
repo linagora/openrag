@@ -153,15 +153,40 @@ class PromptService:
         returns a string. ``names`` entries may be ``None``/empty (skipped) so
         callers can pass optional config values directly.
         """
-        for name in names or ():
-            if name:
-                prompt = await self._repo.get_by_name(prompt_type, name)
-                if prompt is not None:
-                    return prompt.content
+        candidates = [n for n in (names or ()) if n]
+        for name in candidates:
+            prompt = await self._repo.get_by_name(prompt_type, name)
+            if prompt is not None:
+                self._log_resolution(prompt_type, candidates, "named", name, prompt.content)
+                return prompt.content
         default = await self._repo.get_default(prompt_type)
         if default is not None:
+            self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
             return default.content
-        return self._disk_seed(prompt_type)
+        content = self._disk_seed(prompt_type)
+        self._log_resolution(prompt_type, candidates, "disk-seed", None, content)
+        return content
+
+    @staticmethod
+    def _log_resolution(
+        prompt_type: str, candidates: list[str], source: str, name: str | None, content: str
+    ) -> None:
+        """Emit one line per resolution so operators can confirm, in the logs,
+        exactly which library prompt each pipeline stage (indexation /
+        retrieval / chat) actually used, and preview its text.
+
+        ``source`` is how it resolved: ``named`` (a partition/preset selection),
+        ``default`` (the type's global default), or ``disk-seed`` (bundled
+        fallback). ``candidates`` are the names the caller offered, in order.
+        """
+        preview = " ".join(content.split())[:80]
+        logger.bind(
+            prompt_type=prompt_type,
+            candidates=candidates,
+            source=source,
+            resolved_name=name,
+            length=len(content),
+        ).info(f"prompt.resolve {prompt_type} <- {source}{f':{name}' if name else ''} | {preview!r}")
 
     # ------------------------------------------------------------------
     # Library CRUD
