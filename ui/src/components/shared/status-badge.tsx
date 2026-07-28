@@ -5,6 +5,7 @@ const statusStyles: Record<string, string> = {
   PROCESSING: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
   RUNNING: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
   INDEXING: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
+  EVALUATING: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
   // OpenRag indexing-task states (TaskStateManager)
   SERIALIZING: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
   CANCELLED: "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200",
