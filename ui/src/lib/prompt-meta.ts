@@ -20,7 +20,7 @@ export interface PromptGroup {
 
 export const PROMPT_GROUPS: PromptGroup[] = [
   {
-    name: "Answer",
+    name: "Final Answer",
     description: "The final-answer prompt — selected per partition",
     types: [{ value: "sys_prompt", label: "Final answer prompt" }],
   },

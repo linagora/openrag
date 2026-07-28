@@ -61,8 +61,8 @@ import {
 import { describePartitionMember } from "./partition-member";
 
 // The answer prompt is selected on the partition (keyed by prompt type). Mirrors
-// the "Answer" concern in the prompt library.
-const GENERATION_PROMPT_TYPES = PROMPT_GROUPS.find((g) => g.name === "Answer")!.types;
+// the "Final Answer" concern in the prompt library.
+const GENERATION_PROMPT_TYPES = PROMPT_GROUPS.find((g) => g.name === "Final Answer")!.types;
 
 // --- General Tab ---
 
@@ -251,7 +251,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               <p className="text-sm font-medium pt-1">{partition.document_count}</p>
             </div>
           </div>
-          <div className="pt-2 grid grid-cols-3 gap-6">
+          <div className="pt-2 grid grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label>Indexation Preset</Label>
               <Select value={indexationPreset} onValueChange={setIndexationPreset} disabled={!canEdit || !isAdmin}>
@@ -307,6 +307,31 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
                 </SelectContent>
               </Select>
             </div>
+            {GENERATION_PROMPT_TYPES.map((t) => {
+              const options = promptsByType(t.value);
+              return (
+                <div key={t.value} className="space-y-2">
+                  <Label>{t.label}</Label>
+                  <Select
+                    value={generationPrompts[t.value] ?? "__default__"}
+                    onValueChange={(v) => setGenerationPrompt(t.value, v === "__default__" ? "" : v)}
+                    disabled={!canEdit || !isAdmin}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">Use default</SelectItem>
+                      {options.map((p) => (
+                        <SelectItem key={p.id} value={p.name}>
+                          {p.name}{p.is_default ? " (default)" : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              );
+            })}
           </div>
           <div className="space-y-2">
             <Label className="flex items-center gap-1.5">
@@ -333,46 +358,6 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               disabled={!canEdit}
             />
           </div>
-          {isAdmin && (
-            <div className="space-y-3">
-              <div>
-                <Label>Answer Prompt</Label>
-                <p className="text-xs text-muted-foreground">
-                  Override the prompt used to write answers in this partition. Leave as{" "}
-                  <span className="font-medium">Use default</span> to inherit the library default. Manage the
-                  prompt options in{" "}
-                  <Link to="/prompts" className="underline underline-offset-2">Prompts</Link>.
-                </p>
-              </div>
-              <div className="grid grid-cols-3 gap-6">
-                {GENERATION_PROMPT_TYPES.map((t) => {
-                  const options = promptsByType(t.value);
-                  return (
-                    <div key={t.value} className="space-y-2">
-                      <Label className="text-muted-foreground">{t.label}</Label>
-                      <Select
-                        value={generationPrompts[t.value] ?? "__default__"}
-                        onValueChange={(v) => setGenerationPrompt(t.value, v === "__default__" ? "" : v)}
-                        disabled={!canEdit}
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__default__">Use default</SelectItem>
-                          {options.map((p) => (
-                            <SelectItem key={p.id} value={p.name}>
-                              {p.name}{p.is_default ? " (default)" : ""}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
           {canEdit && (
             <Button
               type="submit"
