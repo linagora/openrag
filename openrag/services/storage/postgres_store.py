@@ -31,6 +31,7 @@ from services.persistence.connection import ConnectionManager
 from services.persistence.conversation_repo import PgConversationRepository
 from services.persistence.document_repo import PgDocumentRepository
 from services.persistence.entity_repo import PgEntityRepository
+from services.persistence.evaluation_repo import PgEvaluationRepository
 from services.persistence.idempotency_repo import PgIdempotencyRepository
 from services.persistence.job_repo import PgJobRepository
 from services.persistence.model_endpoint_repo import PgModelEndpointRepository
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
     from core.ports.conversation_repo import ConversationRepository
     from core.ports.document_repo import DocumentRepository
     from core.ports.entity_repo import EntityRepository
+    from core.ports.evaluation_repo import EvaluationRepository
     from core.ports.idempotency_repo import IdempotencyRepository
     from core.ports.job_repo import JobRepository
     from core.ports.model_endpoint_repo import ModelEndpointRepository
@@ -96,6 +98,7 @@ class PostgresStore(CatalogStore):
         self._topic_tag_repo = PgTopicTagRepository(pool_getter)
         self._model_endpoint_repo = PgModelEndpointRepository(pool_getter)
         self._preset_repo = PgPresetRepository(pool_getter)
+        self._evaluation_repo = PgEvaluationRepository(pool_getter)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -213,6 +216,10 @@ class PostgresStore(CatalogStore):
     @property
     def preset_repo(self) -> PresetRepository:
         return self._preset_repo
+
+    @property
+    def evaluation_repo(self) -> EvaluationRepository:
+        return self._evaluation_repo
 
     # ------------------------------------------------------------------
     # Helpers
