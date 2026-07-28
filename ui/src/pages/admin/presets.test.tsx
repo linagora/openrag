@@ -19,6 +19,7 @@ vi.mock("@/lib/api/presets", async () => {
     getPresetOptions: vi.fn().mockResolvedValue({
       chunking_strategies: [],
       parsing_strategies: [],
+      table_reconstruction_modes: ["disabled", "automatic"],
       retrieval_types: [],
       reranker_providers: [],
     }),
@@ -66,6 +67,14 @@ function renderPage() {
 
 describe("PresetsPage usage badge", () => {
   beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
     listPresetsMock.mockReset();
     deletePresetMock.mockReset();
     vi.mocked(toast.error).mockClear();
@@ -116,5 +125,20 @@ describe("PresetsPage usage badge", () => {
         expect.stringContaining("used by 2 partition(s); reassign them before deleting"),
       ),
     );
+  });
+
+  it("exposes conservative cross-page table reconstruction in indexation presets", async () => {
+    listPresetsMock.mockResolvedValue([]);
+    const user = userEvent.setup();
+
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: /add preset/i }));
+    expect(
+      await screen.findByText("Cross-page table reconstruction"),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/Uncertain cases keep the parser output/i),
+    ).toBeTruthy();
   });
 });

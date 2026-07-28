@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { applyParsingStrategyChange, PARSING_STRATEGY_INHERIT } from "./preset-config";
+import {
+  applyParsingStrategyChange,
+  applyTableReconstructionMode,
+  getTableReconstructionMode,
+  PARSING_STRATEGY_INHERIT,
+} from "./preset-config";
 
 // Regression guard for the bug where the parsing Strategy dropdown displayed a
 // fabricated "marker" default that was never written to config unless the user
@@ -66,5 +71,30 @@ describe("applyParsingStrategyChange", () => {
     const input = { parsing_strategy: "marker" };
     applyParsingStrategyChange(input, PARSING_STRATEGY_INHERIT);
     expect(input).toEqual({ parsing_strategy: "marker" });
+  });
+});
+
+describe("table reconstruction config", () => {
+  it("shows missing configuration as disabled", () => {
+    expect(getTableReconstructionMode({})).toBe("disabled");
+  });
+
+  it("updates the nested mode without discarding backend thresholds", () => {
+    const input = {
+      parsing_strategy: "marker",
+      table_reconstruction: {
+        mode: "disabled",
+        same_table_min_confidence: 0.95,
+      },
+    };
+
+    expect(applyTableReconstructionMode(input, "automatic")).toEqual({
+      parsing_strategy: "marker",
+      table_reconstruction: {
+        mode: "automatic",
+        same_table_min_confidence: 0.95,
+      },
+    });
+    expect(getTableReconstructionMode(input)).toBe("disabled");
   });
 });

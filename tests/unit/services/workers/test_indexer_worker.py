@@ -406,7 +406,17 @@ async def test_process_file_stores_indexation_config_snapshot_on_new_file(tmp_pa
         task_state_manager=_fake_tsm(),
         document_repo=repo,
     )
-    indexation_config = {"parsing_strategy": "pymupdf", "enable_image_captioning": False}
+    indexation_config = {
+        "parsing_strategy": "pymupdf",
+        "enable_image_captioning": False,
+        "table_reconstruction": {
+            "mode": "automatic",
+            "same_table_min_confidence": 0.9,
+            "row_continuation_min_confidence": 0.9,
+            "cell_assignment_min_confidence": 0.9,
+            "algorithm_version": "adjacent-layout-v1",
+        },
+    }
 
     await worker.process_file(
         task_id="t-new",
@@ -571,7 +581,11 @@ async def test_process_file_stores_indexation_config_snapshot_on_replace(tmp_pat
         task_state_manager=_fake_tsm(),
         document_repo=repo,
     )
-    indexation_config = {"parsing_strategy": "marker", "enable_contextualization": True}
+    indexation_config = {
+        "parsing_strategy": "marker",
+        "enable_contextualization": True,
+        "table_reconstruction": {"mode": "automatic"},
+    }
 
     await worker.process_file(
         task_id="t-replace",

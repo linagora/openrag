@@ -123,7 +123,7 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v2"
+    assert opts["name"] == "IndexerPoolDispatcher-v3"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -159,9 +159,9 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v2-0",
-        "IndexerWorker-v2-1",
-        "IndexerWorker-v2-2",
+        "IndexerWorker-v3-0",
+        "IndexerWorker-v3-1",
+        "IndexerWorker-v3-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
@@ -1093,7 +1093,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v2",
+        "protocol_version": "v3",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
@@ -1104,7 +1104,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v2",
+        "protocol_version": "v3",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1121,7 +1121,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v2",
+        "protocol_version": "v3",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1136,7 +1136,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v2"
+    assert await pool.protocol_version() == "v3"
 
 
 @pytest.mark.asyncio

@@ -106,6 +106,7 @@ def _config_with_partition(partition: str = "tenant-a"):
                     embedder="embed-fast",
                     indexation=IndexationPipelineConfig(
                         parsing_strategy="pymupdf",
+                        table_reconstruction={"mode": "automatic"},
                         enable_image_captioning=False,
                         enable_contextualization=True,
                         contextualization_llm="llm-context",
@@ -416,6 +417,13 @@ async def test_add_file_dispatches_partition_indexation_config_and_embedder(tmp_
     assert sent["indexation_config"]["enable_image_captioning"] is False
     assert sent["indexation_config"]["enable_contextualization"] is True
     assert sent["indexation_config"]["contextualization_llm"] == "llm-context"
+    assert sent["indexation_config"]["table_reconstruction"] == {
+        "mode": "automatic",
+        "same_table_min_confidence": 0.9,
+        "row_continuation_min_confidence": 0.9,
+        "cell_assignment_min_confidence": 0.9,
+        "algorithm_version": "adjacent-layout-v1",
+    }
     assert sent["require_existing_partition"] is True
     assert sent["allow_legacy_require_existing_partition_retry"] is True
 

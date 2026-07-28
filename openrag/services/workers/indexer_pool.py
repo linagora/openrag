@@ -22,7 +22,7 @@ _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
 # partially compatible actor fleet left by the previous release.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v2"
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v3"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 
@@ -52,9 +52,11 @@ class IndexerWorkerActor:
         import services.inference.vllm_client  # noqa: F401
         from core.config import load_config
         from core.embeddings import embedder_registry
+        from core.indexing.table_normalizer import DeterministicTableNormalizer
         from core.utils.logging import get_logger
         from services.storage.milvus_store import MilvusVectorStore
         from services.storage.postgres_store import PostgresStore
+        from services.workers.layout import PyMuPDFTableEvidenceProvider
         from services.workers.parsers.parser_dispatcher import (
             build_caption_vlm,
             build_parser_dispatcher,
@@ -80,6 +82,7 @@ class IndexerWorkerActor:
         vlm_factory = _build_vlm_factory(cfg)
         contextualizer_factory = _build_contextualizer_factory(cfg)
         topic_tagger_factory = _build_topic_tagger_factory(cfg)
+        structure_normalizer = DeterministicTableNormalizer(PyMuPDFTableEvidenceProvider())
 
         embed_cfg = cfg.embedder
         embedder = embedder_registry.create(
@@ -108,6 +111,7 @@ class IndexerWorkerActor:
             vlm_factory=vlm_factory,
             contextualizer_factory=contextualizer_factory,
             topic_tagger_factory=topic_tagger_factory,
+            structure_normalizer=structure_normalizer,
             defer_replace_cleanup=True,
         )
         self._catalog_store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
@@ -634,7 +638,10 @@ def _build_pipeline_timeouts(cfg: Settings) -> Any:
     """
     from services.workers.pipeline_builder import PipelineTimeouts
 
-    return PipelineTimeouts(parse=cfg.loader.parse_timeout)
+    return PipelineTimeouts(
+        parse=cfg.loader.parse_timeout,
+        normalize_structure=cfg.loader.parse_timeout,
+    )
 
 
 def _build_embedder_factory(cfg: Settings) -> Any:

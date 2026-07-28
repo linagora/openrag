@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Literal
 
 from core.config.chunking import ChunkerConfig
+from core.config.table_reconstruction import TableReconstructionConfig
 from pydantic import BaseModel, ConfigDict, Field
 
 # PDF parsing backends a preset may explicitly select. ``None`` (the default)
@@ -28,6 +29,7 @@ class IndexationPipelineConfig(BaseModel):
     chunking: ChunkerConfig = Field(default_factory=ChunkerConfig)
     # None => inherit the global PDFLOADER (see PARSING_STRATEGIES above).
     parsing_strategy: Literal["pymupdf", "marker", "docling"] | None = None
+    table_reconstruction: TableReconstructionConfig = Field(default_factory=TableReconstructionConfig)
 
     # VLM / image captioning
     vlm: str | None = None  # endpoint name; None = use global default

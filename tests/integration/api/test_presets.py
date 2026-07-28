@@ -22,6 +22,7 @@ def _indexation_config(chunk_size: int) -> dict:
             "chunk_overlap_rate": 0.1,
         },
         "parsing_strategy": "pymupdf",
+        "table_reconstruction": {"mode": "automatic"},
         "enable_image_captioning": False,
         "enable_contextualization": False,
         "enable_metadata_extraction": False,
@@ -63,6 +64,7 @@ def test_preset_options_crud_and_rename(api_client):
         assert "single" in option_data["retrieval_types"]
         # Parsing strategies are derived from IndexationPipelineConfig's Literal.
         assert set(option_data["parsing_strategies"]) == {"pymupdf", "marker", "docling"}
+        assert option_data["table_reconstruction_modes"] == ["disabled", "automatic"]
 
         create_indexation = api_client.post(
             "/presets/",
@@ -80,6 +82,7 @@ def test_preset_options_crud_and_rename(api_client):
         )
         _assert_success(update_indexation, context="update indexation preset")
         assert update_indexation.json()["config"]["chunking"]["chunk_size"] == 96
+        assert update_indexation.json()["config"]["table_reconstruction"]["mode"] == "automatic"
 
         create_retrieval = api_client.post(
             "/presets/",

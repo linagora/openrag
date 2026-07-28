@@ -76,6 +76,19 @@ def test_recursive_splitter_empty_document_returns_empty():
     assert splitter.chunk(doc, partition="p1") == []
 
 
+def test_recursive_splitter_prefers_the_complete_normalized_block_view():
+    splitter = RecursiveSplitter(chunk_size=20, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text="raw parser output", page_number=1)],
+        normalized_text_blocks=[TextBlock(text="normalized logical row", page_number=1)],
+    )
+
+    chunks = splitter.chunk(doc, partition="p1")
+
+    assert [chunk.text for chunk in chunks] == ["normalized logical row"]
+
+
 def test_recursive_splitter_requires_length_function():
     import pytest
 
