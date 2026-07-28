@@ -149,6 +149,11 @@ def get_preset_service(request: Request = None) -> Any:
     return _get_optional_service(_require_initialized(request), "preset_service")
 
 
+def get_evaluation_service(request: Request = None) -> Any:
+    """Resolve the evaluation orchestrator from the active container."""
+    return _get_optional_service(_require_initialized(request), "evaluation_service")
+
+
 def get_config(request: Request = None):
     """Resolve application configuration from the active container."""
     return _require_initialized(request).config
@@ -159,6 +164,7 @@ __all__ = [
     "get_config",
     "get_container",
     "get_conversion_service",
+    "get_evaluation_service",
     "get_indexing_service",
     "get_job_service",
     "get_mcp_service",
