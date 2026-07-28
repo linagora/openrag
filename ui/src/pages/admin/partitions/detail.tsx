@@ -214,7 +214,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
         <CardTitle className="text-base">General Settings</CardTitle>
       </CardHeader>
       <CardContent>
-        <form onSubmit={handleSubmit} className="space-y-6 max-w-3xl">
+        <form onSubmit={handleSubmit} className="space-y-6 max-w-5xl">
           {!canEdit && (
             <p className="rounded-md border bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
               You have read-only access to this partition's settings. Only an owner can change them.
@@ -251,11 +251,11 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               <p className="text-sm font-medium pt-1">{partition.document_count}</p>
             </div>
           </div>
-          <div className="pt-2 grid grid-cols-4 gap-6">
+          <div className="pt-2 grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label>Indexation Preset</Label>
               <Select value={indexationPreset} onValueChange={setIndexationPreset} disabled={!canEdit || !isAdmin}>
-                <SelectTrigger>
+                <SelectTrigger className="w-full">
                   <SelectValue placeholder="Select preset" />
                 </SelectTrigger>
                 <SelectContent>
@@ -270,7 +270,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
             <div className="space-y-2">
               <Label>Retrieval Preset</Label>
               <Select value={retrievalPreset} onValueChange={setRetrievalPreset} disabled={!canEdit || !isAdmin}>
-                <SelectTrigger>
+                <SelectTrigger className="w-full">
                   <SelectValue placeholder="Select preset" />
                 </SelectTrigger>
                 <SelectContent>
@@ -294,7 +294,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
                 )}
               </Label>
               <Select value={chatLlm} onValueChange={handleChatLlmChange} disabled={!canEdit || !isAdmin}>
-                <SelectTrigger>
+                <SelectTrigger className="w-full">
                   <SelectValue placeholder="Select LLM" />
                 </SelectTrigger>
                 <SelectContent>
@@ -317,7 +317,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
                     onValueChange={(v) => setGenerationPrompt(t.value, v === "__default__" ? "" : v)}
                     disabled={!canEdit || !isAdmin}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger className="w-full">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
