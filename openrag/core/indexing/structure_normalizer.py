@@ -53,6 +53,8 @@ class PageLayoutEvidence:
 class TableLayoutEvidenceProvider(ABC):
     """Provide PDF geometry without deciding table or row relationships."""
 
+    provider_id = "layout"
+
     @abstractmethod
     async def collect(self, document: Document, page_numbers: set[int]) -> list[PageLayoutEvidence]:
         """Collect evidence for the requested one-based page numbers."""

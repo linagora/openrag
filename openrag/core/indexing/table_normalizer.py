@@ -6,6 +6,7 @@ import hashlib
 import html
 import re
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
@@ -30,6 +31,7 @@ from core.models.document import (
     TableRowData,
     TextBlock,
 )
+from core.prompts.vlm_prompt_builder import wrap_caption
 
 _MARKDOWN_SEPARATOR_RE = re.compile(r"^:?-{3,}:?$")
 _HEADING_RE = re.compile(r"(?m)^\s*#{1,6}\s+(.+?)\s*$")
@@ -79,17 +81,28 @@ class _MarkdownTable:
 
 @dataclass(slots=True)
 class _TableAlignment:
-    source_block_index: int
-    region_start: int
-    region_end: int
+    region: _AlignedRegion
     rows: list[list[tuple[SourceFragment | None, float]]]
+    column_names: tuple[str, ...] | None = None
 
 
 @dataclass(slots=True, frozen=True)
-class _ConsumedRegion:
+class _AlignedRegion:
     source_block_index: int
-    start: int
-    end: int
+    raw_start: int
+    raw_end: int
+    working_start: int
+    working_end: int
+    page_number: int
+    kind: str
+    source_ref: str | None = None
+    confidence: float = 1.0
+
+
+@dataclass(slots=True)
+class _RowAlignment:
+    cells: list[tuple[SourceFragment | None, float]]
+    regions: list[_AlignedRegion]
 
 
 @dataclass(slots=True)
@@ -178,7 +191,7 @@ class _MutableRow:
 class _NormalizedChain:
     rows: list[_MutableRow]
     identity_columns: tuple[int, ...]
-    consumed_regions: list[_ConsumedRegion]
+    consumed_regions: list[_AlignedRegion]
     decisions: list[PageBoundaryDecision]
     used_tables: set[tuple[int, int]]
     fallback_reasons: list[str]
@@ -306,25 +319,242 @@ def _markdown_tables(text: str) -> list[_MarkdownTable]:
     return tables
 
 
-def _row_similarity(evidence: LayoutRowEvidence, markdown: _MarkdownRow) -> float:
-    if len(evidence.cells) != len(markdown.cells):
-        return 0.0
-    scores: list[float] = []
-    for expected, actual in zip(evidence.cells, markdown.cells, strict=True):
-        if not expected.text.strip():
-            scores.append(
-                1.0 if not actual.text.strip() or _SYNTHETIC_COLUMN_RE.fullmatch(actual.text.strip()) else 0.0
+def _unique_exact_range(needle: str, haystack: str) -> tuple[int, int] | None:
+    if not needle:
+        return None
+    start = haystack.find(needle)
+    if start < 0 or haystack.find(needle, start + 1) >= 0:
+        return None
+    return start, start + len(needle)
+
+
+def _image_regions(
+    processed_document: ProcessedDocument,
+    page_number: int,
+) -> list[tuple[_AlignedRegion, str]]:
+    raw_blocks = processed_document.raw_text_blocks or []
+    regions: list[tuple[_AlignedRegion, str]] = []
+    for image in processed_document.images:
+        if image.page_number != page_number or not image.caption:
+            continue
+        markdown_ref = image.metadata.get("markdown_ref")
+        if not isinstance(markdown_ref, str) or not markdown_ref:
+            continue
+
+        raw_matches: list[tuple[int, int, int]] = []
+        for block_index, block in enumerate(raw_blocks):
+            if block.page_number != page_number:
+                continue
+            found = _unique_exact_range(markdown_ref, block.text)
+            if found is not None:
+                raw_matches.append((block_index, found[0], found[1]))
+        if len(raw_matches) != 1:
+            continue
+
+        block_index, raw_start, raw_end = raw_matches[0]
+        if block_index >= len(processed_document.text_blocks):
+            continue
+        working = processed_document.text_blocks[block_index].text
+        wrapped_caption = wrap_caption(image.caption)
+        working_range = _unique_exact_range(wrapped_caption, working)
+        if working_range is None:
+            working_range = _unique_exact_range(markdown_ref, working)
+        if working_range is None:
+            continue
+
+        source_ref = image.metadata.get("marker_key")
+        regions.append(
+            (
+                _AlignedRegion(
+                    source_block_index=block_index,
+                    raw_start=raw_start,
+                    raw_end=raw_end,
+                    working_start=working_range[0],
+                    working_end=working_range[1],
+                    page_number=page_number,
+                    kind="image_caption",
+                    source_ref=str(source_ref or markdown_ref),
+                ),
+                image.caption,
             )
-        else:
-            scores.append(_similarity(expected.text, actual.text))
-    return sum(scores) / len(scores) if scores else 0.0
+        )
+    return regions
+
+
+def _map_parser_region(
+    processed_document: ProcessedDocument,
+    image_regions: dict[int, list[tuple[_AlignedRegion, str]]],
+    block_index: int,
+    start: int,
+    end: int,
+) -> tuple[int, int] | None:
+    raw_blocks = processed_document.raw_text_blocks or []
+    if block_index >= len(raw_blocks) or block_index >= len(processed_document.text_blocks):
+        return None
+    raw_block = raw_blocks[block_index]
+    working_block = processed_document.text_blocks[block_index]
+    direct = _map_interval(raw_block.text, working_block.text, start, end)
+    if direct is not None:
+        return direct
+
+    replacements = sorted(
+        (
+            region
+            for region, _ in image_regions.get(raw_block.page_number or 0, [])
+            if region.source_block_index == block_index
+        ),
+        key=lambda region: region.raw_start,
+    )
+    if not replacements:
+        return None
+
+    cursor = 0
+    rebuilt: list[str] = []
+    for region in replacements:
+        if region.raw_start < cursor:
+            return None
+        rebuilt.append(raw_block.text[cursor : region.raw_start])
+        rebuilt.append(working_block.text[region.working_start : region.working_end])
+        cursor = region.raw_end
+    rebuilt.append(raw_block.text[cursor:])
+    if "".join(rebuilt) != working_block.text:
+        return None
+
+    def map_offset(offset: int) -> int | None:
+        delta = 0
+        for region in replacements:
+            if region.raw_start < offset < region.raw_end:
+                return None
+            if region.raw_end <= offset:
+                delta += (region.working_end - region.working_start) - (region.raw_end - region.raw_start)
+        return offset + delta
+
+    mapped_start = map_offset(start)
+    mapped_end = map_offset(end)
+    if mapped_start is None or mapped_end is None:
+        return None
+    return mapped_start, mapped_end
+
+
+def _evidence_overlap(expected: str, actual: str) -> float:
+    normalized_expected = _normalised_alnum(expected)
+    normalized_actual = _normalised_alnum(actual)
+    if not normalized_expected or not normalized_actual:
+        return 0.0
+    width = 5
+
+    def shingles(value: str) -> Counter[str]:
+        if len(value) <= width:
+            return Counter({value: 1})
+        return Counter(value[index : index + width] for index in range(len(value) - width + 1))
+
+    expected_shingles = shingles(normalized_expected)
+    actual_shingles = shingles(normalized_actual)
+    matched = sum((expected_shingles & actual_shingles).values())
+    return min(
+        matched / expected_shingles.total(),
+        matched / actual_shingles.total(),
+    )
+
+
+def _match_image_region(
+    expected: str,
+    page_number: int,
+    image_regions: dict[int, list[tuple[_AlignedRegion, str]]],
+    threshold: float,
+) -> _AlignedRegion | None:
+    # Short labels are too easy to associate with an unrelated page image.
+    if len(_normalised_alnum(expected)) < 80:
+        return None
+    candidates = [
+        (score, region)
+        for region, caption in image_regions.get(page_number, [])
+        if (score := _evidence_overlap(expected, caption)) >= threshold
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+    if len(candidates) > 1 and candidates[0][0] - candidates[1][0] < 0.05:
+        return None
+    score, region = candidates[0]
+    return _AlignedRegion(
+        source_block_index=region.source_block_index,
+        raw_start=region.raw_start,
+        raw_end=region.raw_end,
+        working_start=region.working_start,
+        working_end=region.working_end,
+        page_number=region.page_number,
+        kind=region.kind,
+        source_ref=region.source_ref,
+        confidence=score,
+    )
+
+
+def _layout_fragment(
+    cell: LayoutCellEvidence,
+    region: _AlignedRegion,
+    evidence_provider: str,
+) -> SourceFragment | None:
+    if cell.bbox is None:
+        return None
+    return SourceFragment(
+        source_block_index=region.source_block_index,
+        page_number=region.page_number,
+        char_start=region.raw_start,
+        char_end=region.raw_end,
+        source_kind="pdf_layout",
+        evidence_provider=evidence_provider,
+        source_ref=region.source_ref,
+        bbox=cell.bbox,
+        text_start=0,
+        text_end=max(1, len(_clean_cell_text(cell.text))),
+    )
+
+
+def _markdown_cell_alignment(
+    evidence_cell: LayoutCellEvidence,
+    markdown_cell: _MarkdownCell,
+    *,
+    page_number: int,
+    block_index: int,
+    processed_document: ProcessedDocument,
+    image_regions: dict[int, list[tuple[_AlignedRegion, str]]],
+    threshold: float,
+) -> tuple[float, _AlignedRegion | None]:
+    if not evidence_cell.text.strip():
+        confidence = (
+            1.0 if not markdown_cell.text.strip() or _SYNTHETIC_COLUMN_RE.fullmatch(markdown_cell.text.strip()) else 0.0
+        )
+        return confidence, None
+
+    confidence = _similarity(evidence_cell.text, markdown_cell.text)
+    if confidence >= threshold and markdown_cell.end > markdown_cell.start:
+        return confidence, None
+
+    image_region = _match_image_region(
+        evidence_cell.text,
+        page_number,
+        image_regions,
+        threshold,
+    )
+    if (
+        image_region is None
+        or image_region.source_block_index != block_index
+        or image_region.raw_start < markdown_cell.start
+        or image_region.raw_end > markdown_cell.end
+    ):
+        return confidence, None
+    return image_region.confidence, image_region
 
 
 def _align_table(
     table: LayoutTableEvidence,
-    raw_blocks: list[TextBlock],
+    processed_document: ProcessedDocument,
+    image_regions: dict[int, list[tuple[_AlignedRegion, str]]],
+    evidence_provider: str,
     threshold: float,
 ) -> _TableAlignment | None:
+    raw_blocks = processed_document.raw_text_blocks or []
     candidates: list[tuple[float, int, _MarkdownTable, list[_MarkdownRow]]] = []
     for block_index, block in enumerate(raw_blocks):
         if block.page_number != table.page_number:
@@ -338,7 +568,26 @@ def _align_table(
                 best_score = 0.0
                 best_index: int | None = None
                 for row_index in range(cursor, len(content_rows)):
-                    score = _row_similarity(evidence_row, content_rows[row_index])
+                    markdown_row = content_rows[row_index]
+                    if len(evidence_row.cells) != len(markdown_row.cells):
+                        continue
+                    cell_scores = [
+                        _markdown_cell_alignment(
+                            evidence_cell,
+                            markdown_cell,
+                            page_number=table.page_number,
+                            block_index=block_index,
+                            processed_document=processed_document,
+                            image_regions=image_regions,
+                            threshold=threshold,
+                        )[0]
+                        for evidence_cell, markdown_cell in zip(
+                            evidence_row.cells,
+                            markdown_row.cells,
+                            strict=True,
+                        )
+                    ]
+                    score = sum(cell_scores) / len(cell_scores) if cell_scores else 0.0
                     if score > best_score:
                         best_score = score
                         best_index = row_index
@@ -351,10 +600,50 @@ def _align_table(
                 candidates.append((sum(scores) / len(scores), block_index, markdown_table, matched))
 
     if not candidates:
-        return None
+        table_text = "\n".join(cell.text for row in table.rows for cell in row.cells if cell.text.strip())
+        image_region = _match_image_region(table_text, table.page_number, image_regions, threshold)
+        if image_region is None:
+            return None
+        return _TableAlignment(
+            region=image_region,
+            rows=[
+                [
+                    (None, 1.0)
+                    if not cell.text.strip()
+                    else (
+                        _layout_fragment(cell, image_region, evidence_provider),
+                        image_region.confidence,
+                    )
+                    for cell in row.cells
+                ]
+                for row in table.rows
+            ],
+        )
+
     score, block_index, markdown_table, matched_rows = max(candidates, key=lambda candidate: candidate[0])
     if score < threshold:
         return None
+    if block_index >= len(processed_document.text_blocks):
+        return None
+    mapped_table = _map_parser_region(
+        processed_document,
+        image_regions,
+        block_index,
+        markdown_table.start,
+        markdown_table.end,
+    )
+    if mapped_table is None:
+        return None
+    table_region = _AlignedRegion(
+        source_block_index=block_index,
+        raw_start=markdown_table.start,
+        raw_end=markdown_table.end,
+        working_start=mapped_table[0],
+        working_end=mapped_table[1],
+        page_number=table.page_number,
+        kind="markdown_table",
+        confidence=score,
+    )
 
     aligned_rows: list[list[tuple[SourceFragment | None, float]]] = []
     for evidence_row, markdown_row in zip(table.rows, matched_rows, strict=True):
@@ -363,7 +652,23 @@ def _align_table(
             if not evidence_cell.text.strip():
                 aligned_cells.append((None, 1.0))
                 continue
-            confidence = _similarity(evidence_cell.text, markdown_cell.text)
+            confidence, image_region = _markdown_cell_alignment(
+                evidence_cell,
+                markdown_cell,
+                page_number=table.page_number,
+                block_index=block_index,
+                processed_document=processed_document,
+                image_regions=image_regions,
+                threshold=threshold,
+            )
+            if image_region is not None:
+                aligned_cells.append(
+                    (
+                        _layout_fragment(evidence_cell, image_region, evidence_provider),
+                        image_region.confidence,
+                    )
+                )
+                continue
             if confidence < threshold or markdown_cell.end <= markdown_cell.start:
                 aligned_cells.append((None, confidence))
                 continue
@@ -383,11 +688,23 @@ def _align_table(
             )
         aligned_rows.append(aligned_cells)
 
+    column_names: list[str] = []
+    for column_index, (evidence_cell, markdown_cell, (fragment, confidence)) in enumerate(
+        zip(table.rows[0].cells, matched_rows[0].cells, aligned_rows[0], strict=True)
+    ):
+        parser_header_is_trusted = (
+            fragment is not None
+            and fragment.source_kind == "parser_text"
+            and confidence >= threshold
+            and bool(markdown_cell.text.strip())
+        )
+        source_text = markdown_cell.text if parser_header_is_trusted else evidence_cell.text
+        column_names.append(_concise_column_name(source_text, column_index))
+
     return _TableAlignment(
-        source_block_index=block_index,
-        region_start=markdown_table.start,
-        region_end=markdown_table.end,
+        region=table_region,
         rows=aligned_rows,
+        column_names=tuple(column_names),
     )
 
 
@@ -414,13 +731,20 @@ def _content_column(rows: tuple[LayoutRowEvidence, ...]) -> int:
     return max(range(column_count), key=lambda index: lengths[index])
 
 
+def _concise_column_name(text: str, column_index: int) -> str:
+    clean = _clean_cell_text(text)
+    lines = [line.strip() for line in clean.splitlines() if line.strip()]
+    concise = lines[0] if lines else ""
+    for continuation in lines[1:]:
+        candidate = f"{concise} {continuation}".strip()
+        if ":" in continuation or len(candidate) > 80:
+            break
+        concise = candidate
+    return concise or f"Column {column_index + 1}"
+
+
 def _column_names(header: LayoutRowEvidence) -> tuple[str, ...]:
-    names: list[str] = []
-    for cell in header.cells:
-        clean = _clean_cell_text(cell.text)
-        concise = next((line.strip() for line in clean.splitlines() if line.strip()), "")
-        names.append(concise or f"Column {cell.column_index + 1}")
-    return tuple(names)
+    return tuple(_concise_column_name(cell.text, cell.column_index) for cell in header.cells)
 
 
 def _table_geometry_confidence(
@@ -532,9 +856,15 @@ def _sparse_continuation(
 def _align_sparse_row(
     row: LayoutRowEvidence,
     page_number: int,
-    raw_blocks: list[TextBlock],
-) -> list[tuple[SourceFragment | None, float]] | None:
+    processed_document: ProcessedDocument,
+    image_regions: dict[int, list[tuple[_AlignedRegion, str]]],
+    evidence_provider: str,
+    threshold: float,
+) -> _RowAlignment | None:
+    raw_blocks = processed_document.raw_text_blocks or []
     aligned: list[tuple[SourceFragment | None, float]] = []
+    regions: list[_AlignedRegion] = []
+    direct_alignment_failed = False
     for cell in row.cells:
         if not cell.text:
             aligned.append((None, 1.0))
@@ -547,13 +877,27 @@ def _align_sparse_row(
             if found is not None:
                 matches.append((block_index, *found))
         if len(matches) != 1:
-            return None
+            direct_alignment_failed = True
+            break
         block_index, start, end, confidence = matches[0]
         source_text = raw_blocks[block_index].text
         while start > 0 and not source_text[start - 1].isalnum():
             start -= 1
         while end < len(source_text) and not source_text[end].isalnum():
             end += 1
+        if block_index >= len(processed_document.text_blocks):
+            direct_alignment_failed = True
+            break
+        mapped = _map_parser_region(
+            processed_document,
+            image_regions,
+            block_index,
+            start,
+            end,
+        )
+        if mapped is None:
+            direct_alignment_failed = True
+            break
         aligned.append(
             (
                 SourceFragment(
@@ -568,7 +912,42 @@ def _align_sparse_row(
                 confidence,
             )
         )
-    return aligned
+        regions.append(
+            _AlignedRegion(
+                source_block_index=block_index,
+                raw_start=start,
+                raw_end=end,
+                working_start=mapped[0],
+                working_end=mapped[1],
+                page_number=page_number,
+                kind="parser_text",
+                confidence=confidence,
+            )
+        )
+    if not direct_alignment_failed:
+        return _RowAlignment(cells=aligned, regions=regions)
+
+    expected = "\n".join(cell.text for cell in row.cells if cell.text.strip())
+    image_region = _match_image_region(
+        expected,
+        page_number,
+        image_regions,
+        threshold,
+    )
+    if image_region is None:
+        return None
+    return _RowAlignment(
+        cells=[
+            (None, 1.0)
+            if not cell.text.strip()
+            else (
+                _layout_fragment(cell, image_region, evidence_provider),
+                image_region.confidence,
+            )
+            for cell in row.cells
+        ],
+        regions=[image_region],
+    )
 
 
 def _section_path(text: str, before: int) -> list[str]:
@@ -638,6 +1017,20 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
         table_pages = {
             block.page_number for block in raw_blocks if block.page_number is not None and _markdown_tables(block.text)
         }
+        candidate_image_pages = {
+            image.page_number
+            for image in processed_document.images
+            if image.page_number is not None
+            and image.caption
+            and len(_normalised_alnum(image.caption)) >= 80
+            and image.metadata.get("markdown_ref")
+        }
+        image_regions = {
+            page_number: regions
+            for page_number in candidate_image_pages
+            if (regions := _image_regions(processed_document, page_number))
+        }
+        table_pages.update(image_regions)
         if not table_pages:
             return self._unchanged(processed_document, config, "no parser-level table candidates were found")
 
@@ -663,7 +1056,8 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                     table,
                     table_index,
                     pages,
-                    raw_blocks,
+                    processed_document,
+                    image_regions,
                     config,
                     processed_document.page_count,
                 )
@@ -676,7 +1070,7 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
             return self._unchanged(processed_document, config, "no page boundary passed all confidence gates")
 
         rows: list[tuple[_MutableRow, tuple[int, ...]]] = []
-        consumed: list[_ConsumedRegion] = []
+        consumed: list[_AlignedRegion] = []
         decisions: list[PageBoundaryDecision] = []
         fallback_reasons: list[str] = []
         for chain in chains:
@@ -684,6 +1078,9 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
             consumed.extend(chain.consumed_regions)
             decisions.extend(chain.decisions)
             fallback_reasons.extend(chain.fallback_reasons)
+
+        if not _regions_are_disjoint(consumed):
+            return self._unchanged(processed_document, config, "candidate table overlays overlap")
 
         normalized_blocks = _build_normalized_blocks(
             processed_document,
@@ -713,16 +1110,24 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
         anchor: LayoutTableEvidence,
         anchor_index: int,
         pages: dict[int, PageLayoutEvidence],
-        raw_blocks: list[TextBlock],
+        processed_document: ProcessedDocument,
+        image_regions: dict[int, list[tuple[_AlignedRegion, str]]],
         config: TableReconstructionConfig,
         page_count: int,
     ) -> _NormalizedChain | None:
+        raw_blocks = processed_document.raw_text_blocks or []
         if len(anchor.rows) < 2 or anchor.bbox[3] < 0.82:
             return None
         if not _looks_like_header(anchor.rows[0], anchor.rows[1]):
             return None
 
-        alignment = _align_table(anchor, raw_blocks, config.cell_assignment_min_confidence)
+        alignment = _align_table(
+            anchor,
+            processed_document,
+            image_regions,
+            self._evidence_provider.provider_id,
+            config.cell_assignment_min_confidence,
+        )
         if alignment is None:
             return None
         data_rows = anchor.rows[1:]
@@ -733,11 +1138,11 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
         ):
             return None
 
-        column_names = _column_names(anchor.rows[0])
+        column_names = alignment.column_names or _column_names(anchor.rows[0])
         content_column = _content_column(data_rows)
         identity_columns = tuple(index for index in range(len(column_names)) if index != content_column)
-        source_block = raw_blocks[alignment.source_block_index]
-        sections = _section_path(source_block.text, alignment.region_start)
+        source_block = raw_blocks[alignment.region.source_block_index]
+        sections = _section_path(source_block.text, alignment.region.raw_start)
         table_title = sections[-1] if sections else document.filename or None
         table_hash = hashlib.sha256(f"{document.id}\x1e{anchor.page_number}\x1e{column_names}".encode()).hexdigest()[
             :20
@@ -754,21 +1159,15 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                 evidence=row,
                 aligned=aligned,
                 page_number=anchor.page_number,
-                insertion_block_index=alignment.source_block_index,
-                insertion_offset=alignment.region_start,
+                insertion_block_index=alignment.region.source_block_index,
+                insertion_offset=alignment.region.raw_start,
             )
             for row, aligned in zip(data_rows, aligned_data, strict=True)
         ]
         if not rows:
             return None
 
-        consumed = [
-            _ConsumedRegion(
-                source_block_index=alignment.source_block_index,
-                start=alignment.region_start,
-                end=alignment.region_end,
-            )
-        ]
+        consumed = [alignment.region]
         decisions: list[PageBoundaryDecision] = []
         used_tables = {(anchor.page_number, anchor_index)}
         fallback_reasons: list[str] = []
@@ -819,7 +1218,9 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
 
                 next_alignment = _align_table(
                     next_table,
-                    raw_blocks,
+                    processed_document,
+                    image_regions,
+                    self._evidence_provider.provider_id,
                     config.cell_assignment_min_confidence,
                 )
                 if next_alignment is None or not _all_assignments_pass(
@@ -841,13 +1242,7 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                 open_row.merge(leading, next_alignment.rows[0], decision)
                 decisions.append(decision)
                 merged_boundaries += 1
-                consumed.append(
-                    _ConsumedRegion(
-                        source_block_index=next_alignment.source_block_index,
-                        start=next_alignment.region_start,
-                        end=next_alignment.region_end,
-                    )
-                )
+                consumed.append(next_alignment.region)
                 used_tables.add((next_page_number, next_index))
 
                 for row_index, row in enumerate(next_table.rows[1:], start=1):
@@ -864,8 +1259,8 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                         evidence=row,
                         aligned=aligned,
                         page_number=next_page_number,
-                        insertion_block_index=next_alignment.source_block_index,
-                        insertion_offset=next_alignment.region_start,
+                        insertion_block_index=next_alignment.region.source_block_index,
+                        insertion_offset=next_alignment.region.raw_start,
                     )
                     rows.append(new_row)
                     open_row = new_row
@@ -880,10 +1275,17 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
             sparse = _sparse_continuation(next_page, anchor.column_bounds, identity_columns)
             if sparse is None:
                 break
-            aligned_sparse = _align_sparse_row(sparse, next_page_number, raw_blocks)
+            aligned_sparse = _align_sparse_row(
+                sparse,
+                next_page_number,
+                processed_document,
+                image_regions,
+                self._evidence_provider.provider_id,
+                config.cell_assignment_min_confidence,
+            )
             if aligned_sparse is None or not _all_assignments_pass(
                 sparse,
-                aligned_sparse,
+                aligned_sparse.cells,
                 config.cell_assignment_min_confidence,
             ):
                 fallback_reasons.append(f"could not align sparse continuation on page {next_page_number}")
@@ -904,18 +1306,10 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                 decision="merged",
                 reason="content remains inside continuation columns at the next page boundary",
             )
-            open_row.merge(sparse, aligned_sparse, decision)
+            open_row.merge(sparse, aligned_sparse.cells, decision)
             decisions.append(decision)
             merged_boundaries += 1
-            for fragment, _ in aligned_sparse:
-                if fragment is not None:
-                    consumed.append(
-                        _ConsumedRegion(
-                            source_block_index=fragment.source_block_index,
-                            start=fragment.char_start,
-                            end=fragment.char_end,
-                        )
-                    )
+            consumed.extend(aligned_sparse.regions)
             current_page = next_page_number
             reaches_bottom = sparse.bbox[3] >= 0.82
 
@@ -966,7 +1360,6 @@ def _row_text(row: TableRowData) -> str:
         lines.append(f"Section: {' > '.join(row.section_path)}")
     if row.table_title:
         lines.append(f"Table: {row.table_title}")
-    lines.append(f"Row: {row.row_id}")
     lines.extend(f"{cell.column_name or f'Column {cell.column_index + 1}'}: {cell.text}" for cell in row.cells)
     return "\n".join(lines)
 
@@ -979,6 +1372,17 @@ def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
         else:
             merged[-1][1] = max(merged[-1][1], end)
     return [(start, end) for start, end in merged]
+
+
+def _regions_are_disjoint(regions: list[_AlignedRegion]) -> bool:
+    by_block: dict[int, list[_AlignedRegion]] = {}
+    for region in regions:
+        by_block.setdefault(region.source_block_index, []).append(region)
+    for block_regions in by_block.values():
+        ordered = sorted(block_regions, key=lambda region: (region.working_start, region.working_end))
+        if any(current.working_start < previous.working_end for previous, current in zip(ordered, ordered[1:])):
+            return False
+    return True
 
 
 def _map_interval(raw: str, working: str, start: int, end: int) -> tuple[int, int] | None:
@@ -994,13 +1398,13 @@ def _map_interval(raw: str, working: str, start: int, end: int) -> tuple[int, in
 def _build_normalized_blocks(
     processed_document: ProcessedDocument,
     rows: list[tuple[_MutableRow, tuple[int, ...]]],
-    consumed: list[_ConsumedRegion],
+    consumed: list[_AlignedRegion],
 ) -> list[TextBlock] | None:
     raw_blocks = processed_document.raw_text_blocks
     if raw_blocks is None:
         return None
 
-    consumed_by_block: dict[int, list[_ConsumedRegion]] = {}
+    consumed_by_block: dict[int, list[_AlignedRegion]] = {}
     for region in consumed:
         consumed_by_block.setdefault(region.source_block_index, []).append(region)
     rows_by_block: dict[int, list[tuple[_MutableRow, tuple[int, ...]]]] = {}
@@ -1020,10 +1424,21 @@ def _build_normalized_blocks(
 
         mapped_regions: list[tuple[int, int, int, int]] = []
         for region in regions:
-            mapped = _map_interval(raw_block.text, working_block.text, region.start, region.end)
-            if mapped is None:
+            if (
+                region.raw_end > len(raw_block.text)
+                or region.working_end > len(working_block.text)
+                or region.raw_start >= region.raw_end
+                or region.working_start >= region.working_end
+            ):
                 return None
-            mapped_regions.append((region.start, region.end, mapped[0], mapped[1]))
+            mapped_regions.append(
+                (
+                    region.raw_start,
+                    region.raw_end,
+                    region.working_start,
+                    region.working_end,
+                )
+            )
         merged_working = _merge_intervals([(start, end) for _, _, start, end in mapped_regions])
 
         insertions = sorted(rows_by_block.get(block_index, []), key=lambda item: item[0].insertion_offset)

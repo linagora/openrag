@@ -32,12 +32,22 @@ class DocumentType(str, Enum):
 
 
 class SourceFragment(BaseModel):
-    """A trace from normalized content back to one untouched parser block."""
+    """A trace from normalized content back to its original evidence.
+
+    ``parser_text`` fragments identify text copied from an untouched parser
+    block. ``pdf_layout`` fragments identify text recovered from PDF geometry;
+    their character range is a visual anchor in the parser block
+    (for example, Marker's original image placeholder), while ``bbox`` and
+    ``evidence_provider`` identify the canonical evidence.
+    """
 
     source_block_index: int = Field(ge=0)
     page_number: int = Field(ge=1)
     char_start: int = Field(ge=0)
     char_end: int = Field(gt=0)
+    source_kind: Literal["parser_text", "pdf_layout"] = "parser_text"
+    evidence_provider: str | None = None
+    source_ref: str | None = None
     bbox: tuple[float, float, float, float] | None = None
     text_start: int = Field(default=0, ge=0)
     text_end: int | None = Field(default=None, gt=0)
@@ -48,6 +58,11 @@ class SourceFragment(BaseModel):
             raise ValueError("char_end must be greater than char_start")
         if self.text_end is not None and self.text_end <= self.text_start:
             raise ValueError("text_end must be greater than text_start")
+        if self.source_kind == "pdf_layout":
+            if self.bbox is None:
+                raise ValueError("pdf_layout fragments require a bbox")
+            if not self.evidence_provider:
+                raise ValueError("pdf_layout fragments require an evidence_provider")
         return self
 
 

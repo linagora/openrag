@@ -130,6 +130,8 @@ def _collect_evidence(raw_bytes: bytes, page_numbers: tuple[int, ...]) -> list[P
 class PyMuPDFTableEvidenceProvider(TableLayoutEvidenceProvider):
     """Collect layout evidence from the original PDF on the shared executor."""
 
+    provider_id = "pymupdf"
+
     async def collect(self, document: Document, page_numbers: set[int]) -> list[PageLayoutEvidence]:
         if document.content_type is not DocumentType.PDF or not document.raw_bytes or not page_numbers:
             return []
