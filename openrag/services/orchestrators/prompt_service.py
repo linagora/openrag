@@ -15,6 +15,7 @@ user's prompt name ahead of the partition's without changing this signature.
 
 from __future__ import annotations
 
+import string
 from typing import TYPE_CHECKING
 
 from core.models.prompt import Prompt, PromptType
@@ -31,6 +32,56 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 _VALID_TYPES = frozenset(t.value for t in PromptType)
+
+# Prompt types whose content is a ``str.format`` template rendered on the hot
+# path, mapped to the exact placeholders the pipeline substitutes. Content saved
+# for these types MUST use only these ``{placeholders}`` (and escape any literal
+# brace as ``{{``/``}}``), or the per-request ``.format(...)`` would raise and
+# 500 the chat/retrieval path — globally if it's the type's default. Validated at
+# write time (create/update) so an invalid template can never be stored.
+#
+# Types NOT listed here (chunk_contextualizer, image_captioning, topic_tagger)
+# are sent to the LLM verbatim as a system message — never ``.format``-ed — so
+# they may contain any literal text, braces included, and need no validation.
+_PROMPT_FORMAT_FIELDS: dict[str, frozenset[str]] = {
+    PromptType.SYS_PROMPT.value: frozenset({"context", "current_date"}),
+    PromptType.QUERY_CONTEXTUALIZER.value: frozenset({"query_language", "current_date"}),
+    PromptType.HYDE.value: frozenset({"question"}),
+    PromptType.MULTI_QUERY.value: frozenset({"query", "k_queries"}),
+}
+
+
+def _validate_template(prompt_type: str, content: str) -> None:
+    """Reject a format-templated prompt whose ``{placeholders}`` are malformed or
+    unknown for its type. No-op for verbatim (non-formatted) prompt types.
+
+    Raises ``ValidationError`` (422) so the admin sees a precise message instead
+    of a later 500 on the chat path.
+    """
+    allowed = _PROMPT_FORMAT_FIELDS.get(prompt_type)
+    if allowed is None:
+        return
+    try:
+        # Formatter.parse yields (literal, field_name, format_spec, conversion);
+        # field_name is None for literal text and for escaped {{/}}. It raises
+        # ValueError on an unbalanced single brace.
+        fields = {fname for _, fname, _, _ in string.Formatter().parse(content) if fname is not None}
+    except ValueError as exc:
+        raise ValidationError(
+            f"Prompt template has malformed braces ({exc}). Escape a literal brace as '{{{{' or '}}}}'.",
+            status_code=422,
+            code="PROMPT_TEMPLATE_INVALID",
+        ) from exc
+    # Reduce "context.attr" / "context[0]" / "" (auto-numbering) to their root name.
+    roots = {f.split(".")[0].split("[")[0] for f in fields}
+    unknown = {r for r in roots if r not in allowed}
+    if unknown:
+        raise ValidationError(
+            f"Prompt template uses unknown placeholder(s) {sorted(unknown)} for type "
+            f"'{prompt_type}'. Allowed: {sorted(allowed)} (escape a literal brace as '{{{{'/'}}}}').",
+            status_code=422,
+            code="PROMPT_TEMPLATE_INVALID",
+        )
 
 # Canonical ``prompt_type`` (a ``PromptType`` value, and the DB key) → the
 # ``PromptsConfig`` attribute the on-disk template loader looks up. Identity for
@@ -118,6 +169,7 @@ class PromptService:
 
     async def create_prompt(self, *, prompt_type: str, name: str, content: str, is_default: bool = False) -> Prompt:
         self._validate_type(prompt_type)
+        _validate_template(prompt_type, content)
         if await self._repo.get_by_name(prompt_type, name) is not None:
             raise ValidationError(
                 f"A '{prompt_type}' prompt named '{name}' already exists.",
@@ -154,6 +206,10 @@ class PromptService:
         existing = await self._repo.get(prompt_id)
         if existing is None:
             raise NotFoundError(f"Prompt '{prompt_id}' not found.")
+
+        new_content = fields.get("content")
+        if new_content is not None:
+            _validate_template(existing.prompt_type, str(new_content))
 
         new_name = fields.get("name")
         if new_name is not None and new_name != existing.name:

@@ -3,7 +3,7 @@
 Uses an in-memory fake repository so the resolution precedence, seeding, and
 validation logic are tested without a database. Seeding runs against the *real*
 bundled templates, which also verifies the prompt_type → config-key map lines
-up with the on-disk filenames for all 8 types.
+up with the on-disk filenames for all managed types.
 """
 
 from __future__ import annotations
@@ -161,6 +161,41 @@ class TestCrud:
         b = await svc.create_prompt(prompt_type="sys_prompt", name="b", content="b")
         with pytest.raises(ValidationError):
             await svc.update_prompt(b.id, name="a")
+
+    async def test_create_accepts_valid_template_placeholders(self):
+        svc = _service()
+        # sys_prompt allows {context} and {current_date}; escaped braces are literal.
+        p = await svc.create_prompt(
+            prompt_type="sys_prompt", name="ok", content="Use {context} on {current_date}. Literal {{brace}}."
+        )
+        assert p.id
+
+    async def test_create_rejects_unknown_placeholder(self):
+        svc = _service()
+        with pytest.raises(ValidationError) as exc:
+            await svc.create_prompt(prompt_type="sys_prompt", name="bad", content="Answer about {topic}")
+        assert exc.value.status_code == 422
+
+    async def test_create_rejects_malformed_braces(self):
+        svc = _service()
+        # A stray single brace (e.g. a JSON/code example) would crash str.format at runtime.
+        with pytest.raises(ValidationError):
+            await svc.create_prompt(prompt_type="sys_prompt", name="bad", content='return {"a": 1}')
+
+    async def test_verbatim_type_allows_any_braces(self):
+        svc = _service()
+        # chunk_contextualizer is sent as-is (never str.format-ed), so literal braces are fine.
+        p = await svc.create_prompt(
+            prompt_type="chunk_contextualizer", name="ok", content='Emit JSON like {"topic": "x"} with {anything}'
+        )
+        assert p.id
+
+    async def test_update_rejects_bad_template(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        p = await svc.create_prompt(prompt_type="hyde", name="h", content="Hypothetical doc for {question}")
+        with pytest.raises(ValidationError):
+            await svc.update_prompt(p.id, content="now with {unknown_var}")
 
     async def test_update_promotes_default_via_set_default(self):
         repo = FakePromptRepo()
