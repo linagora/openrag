@@ -235,7 +235,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               disabled={!canEdit}
             />
           </div>
-          <div className="grid grid-cols-3 gap-6">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label className="text-muted-foreground">Dimension</Label>
               <p className="text-sm font-medium pt-1">{partition.dimension}</p>
@@ -353,6 +353,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               type="number"
               min={1}
               required
+              className="max-w-[8rem]"
               value={chatHistoryDepth}
               onChange={(e) => setChatHistoryDepth(e.target.value)}
               disabled={!canEdit}
