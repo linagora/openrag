@@ -83,9 +83,14 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
   const [indexationPreset, setIndexationPreset] = useState(partition.indexation_preset);
   const [retrievalPreset, setRetrievalPreset] = useState(partition.retrieval_preset);
   const [chatLlm, setChatLlm] = useState(partition.chat_llm ?? "__default__");
-  const [generationPrompts, setGenerationPrompts] = useState<Record<string, string>>(
-    partition.generation_prompt_names ?? {},
-  );
+  // Only carry the generation types this editor manages — a stale key (e.g. a
+  // pre-move query_contextualizer) would be rejected by the partition PATCH.
+  const [generationPrompts, setGenerationPrompts] = useState<Record<string, string>>(() => {
+    const allowed = new Set<string>(GENERATION_PROMPT_TYPES.map((t) => t.value));
+    return Object.fromEntries(
+      Object.entries(partition.generation_prompt_names ?? {}).filter(([k]) => allowed.has(k)),
+    );
+  });
   const [llmValidated, setLlmValidated] = useState<boolean | null>(
     partition.chat_llm ? null : true,
   );

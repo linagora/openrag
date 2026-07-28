@@ -25,7 +25,6 @@ export const PROMPT_GROUPS: PromptGroup[] = [
     types: [
       { value: "sys_prompt", label: "System prompt" },
       { value: "spoken_style_answer", label: "Spoken-style answer" },
-      { value: "query_contextualizer", label: "Query contextualizer" },
     ],
   },
   {
@@ -41,6 +40,7 @@ export const PROMPT_GROUPS: PromptGroup[] = [
     name: "Retrieval",
     description: "Query-transformation prompts — selected on the retrieval preset",
     types: [
+      { value: "query_contextualizer", label: "Query contextualizer" },
       { value: "hyde", label: "HyDE" },
       { value: "multi_query", label: "Multi-query" },
     ],

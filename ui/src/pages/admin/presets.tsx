@@ -679,6 +679,12 @@ function RetrievalPresetForm({
             </SelectContent>
           </Select>
         </div>
+        <PromptSelect
+          label="Query contextualizer prompt"
+          prompts={promptsByType("query_contextualizer")}
+          value={configGet(config, "query_contextualizer_prompt_name", "")}
+          onChange={(v) => set("query_contextualizer_prompt_name", v || null)}
+        />
         {pipelineType !== "single" && (
           <div className="space-y-1.5">
             <Label className="text-xs">Expansion LLM</Label>
