@@ -229,25 +229,24 @@ function PromptCard({
           {prompt.content.slice(0, 160) || "(empty)"}
         </p>
         <div className="text-[0.7rem] text-muted-foreground">Updated {formatDate(prompt.updated_at)}</div>
-        <div className="mt-3 flex items-center gap-1.5 border-t pt-3">
+        <div className="flex flex-wrap gap-2 pt-3">
+          {!prompt.is_default && (
+            <Button size="sm" variant="outline" onClick={onSetDefault}>
+              <Star className="mr-1 h-3 w-3" /> Set Default
+            </Button>
+          )}
           <Button size="sm" variant="outline" onClick={onEdit}>
             <Pencil className="mr-1 h-3 w-3" /> Edit
           </Button>
-          {!prompt.is_default && (
-            <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={onSetDefault}>
-              <Star className="mr-1 h-3 w-3" /> Set default
-            </Button>
-          )}
-          <div className="flex-1" />
           {prompt.is_default ? (
             <Button
               size="sm"
-              variant="ghost"
-              className="text-muted-foreground"
+              variant="outline"
+              className="text-destructive"
               disabled
               title="The default prompt can't be deleted. Promote another prompt to default first."
             >
-              <Trash2 className="h-3 w-3" />
+              <Trash2 className="mr-1 h-3 w-3" /> Delete
             </Button>
           ) : (
             <ConfirmDialog
@@ -259,8 +258,8 @@ function PromptCard({
               }
               onConfirm={onDelete}
             >
-              <Button size="sm" variant="ghost" className="text-destructive" title="Delete prompt">
-                <Trash2 className="h-3 w-3" />
+              <Button size="sm" variant="outline" className="text-destructive">
+                <Trash2 className="mr-1 h-3 w-3" /> Delete
               </Button>
             </ConfirmDialog>
           )}
