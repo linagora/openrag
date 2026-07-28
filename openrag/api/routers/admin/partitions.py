@@ -72,7 +72,7 @@ async def list_existant_partitions(
     # partitions_with_details. Gate the all-expansion on the caller actually being
     # an admin, so a (legacy) partition literally named ``all`` owned by a regular
     # user cannot leak every partition. New ``all`` partitions are already rejected
-    # at creation (_RESERVED_PARTITION_NAMES).
+    # at creation (``RESERVED_PARTITION_NAMES``, core.models.partition).
     is_admin = bool(request.state.user.get("is_admin"))
     summaries = await service.list_partition_summaries()
     if is_admin and len(partitions) == 1 and partitions[0]["partition"] == "all":

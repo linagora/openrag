@@ -34,7 +34,7 @@ import numpy as np
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
-from core.models.evaluation import is_eval_partition
+from core.models.partition import is_internal_partition, is_reserved_partition_name
 from core.models.preset import PartitionConfig
 from core.utils.conts import is_internal_metadata_key
 from core.utils.exceptions import (
@@ -56,12 +56,6 @@ if TYPE_CHECKING:
     from core.vector_stores import VectorStore
 
 logger = get_logger()
-
-# Names reserved as cross-partition sentinels (e.g. ``openrag-all`` /
-# ``?partitions=all``). A real partition named ``all`` collides with the sentinel
-# and the admin partition-list route would expand it to *every* partition — see
-# ``list_existant_partitions``. Matched case-insensitively.
-_RESERVED_PARTITION_NAMES = frozenset({"all"})
 
 # Columns where an explicit ``None`` in a PATCH is a real value (SQL NULL =
 # "reset to default"), not the omitted-field sentinel that the None-filter
@@ -244,7 +238,7 @@ class PartitionService:
 
     async def list_partitions(self) -> list[dict]:
         rows = await self._partition_repo.list_partitions()
-        return [row for row in rows if not is_eval_partition(str(row.get("partition", "")))]
+        return [row for row in rows if not is_internal_partition(str(row.get("partition", "")))]
 
     async def file_counts_by_partition(self) -> dict[str, int]:
         """Return a ``{partition: document_count}`` map for all partitions (one query)."""
@@ -264,9 +258,9 @@ class PartitionService:
         summaries: dict[str, dict] = {}
         for r in rows:
             name = r["partition"]
-            # Throwaway eval partitions are hidden here as well as in
+            # Internal partitions are hidden here as well as in
             # list_partitions: this is what GET /partition/ responds from.
-            if is_eval_partition(str(name)):
+            if is_internal_partition(str(name)):
                 continue
             created = r.get("created_at")
             summaries[name] = {
@@ -315,27 +309,9 @@ class PartitionService:
         """
         # Reserved-name check first so a name that normalises to a reserved
         # sentinel (e.g. "  all  ") returns the specific RESERVED_PARTITION_NAME
-        # error rather than the generic identifier-allowlist rejection.
-        #
-        # The ``__eval_`` prefix is reserved for the same reason it is filtered
-        # out of the listings below: a user-created ``__eval_x`` would be a
-        # real, quota-consuming partition that no listing — and therefore no
-        # admin audit — can see. Lowercased before the prefix test so
-        # ``__EVAL_x`` cannot be used to sit just outside the filter.
-        #
-        # The prefix is hidden from the listings and from the ``all`` fan-out
-        # in ``RetrievalService``; it is *not* hidden from a SUPER_ADMIN_MODE
-        # admin's raw ``GET /search?partitions=all``, where the wildcard is an
-        # intentionally unscoped Milvus query with no partition clause to
-        # narrow. Reserving the name is what keeps that surface honest: the
-        # only ``__eval_*`` rows that can exist are a live run's own.
-        #
-        # ``allow_reserved`` covers the eval namespace only. ``all`` stays
-        # rejected for every caller: it collides with the cross-partition
-        # sentinel and would expand a listing to every partition, which no
-        # internal caller has a reason to want.
-        normalized = partition.strip().lower()
-        if normalized in _RESERVED_PARTITION_NAMES or (is_eval_partition(normalized) and not allow_reserved):
+        # error rather than the generic identifier-allowlist rejection. What is
+        # reserved, and why, lives in ``core.models.partition``.
+        if is_reserved_partition_name(partition, allow_internal=allow_reserved):
             raise ValidationError(
                 f"Partition name '{partition}' is reserved.",
                 status_code=400,
