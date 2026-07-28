@@ -239,7 +239,17 @@ function PromptCard({
             </Button>
           )}
           <div className="flex-1" />
-          {!prompt.is_default && (
+          {prompt.is_default ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-muted-foreground"
+              disabled
+              title="The default prompt can't be deleted. Promote another prompt to default first."
+            >
+              <Trash2 className="h-3 w-3" />
+            </Button>
+          ) : (
             <ConfirmDialog
               title="Delete prompt?"
               description={
@@ -249,7 +259,7 @@ function PromptCard({
               }
               onConfirm={onDelete}
             >
-              <Button size="sm" variant="ghost" className="text-destructive">
+              <Button size="sm" variant="ghost" className="text-destructive" title="Delete prompt">
                 <Trash2 className="h-3 w-3" />
               </Button>
             </ConfirmDialog>
