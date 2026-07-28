@@ -489,6 +489,35 @@ async def test_generation_prompt_name_from_partition_reaches_resolver():
 
 
 @pytest.mark.asyncio
+async def test_query_contextualizer_name_from_retrieval_preset_reaches_resolver():
+    # query_contextualizer is selected on the partition's RETRIEVAL preset (not
+    # generation prompts). A single owning partition's preset name is passed to
+    # resolve_prompt; multi-partition passes None (global default).
+    class RecordingPromptService:
+        def __init__(self):
+            self.calls: list = []
+
+        async def resolve_prompt(self, prompt_type, names=None):
+            self.calls.append((prompt_type, tuple(names or ())))
+            return "CTX"
+
+    payload = json.dumps({"query_list": [{"query": "rewritten", "temporal_filters": None}]})
+    svc = _svc(llm=FakeLLM(chat_responses=[payload, payload]), mode="ChatBotRag")
+    rec = RecordingPromptService()
+    svc._prompt_service = rec
+    svc._config.partitions = {
+        "p": SimpleNamespace(retrieval=SimpleNamespace(query_contextualizer_prompt_name="myctx"))
+    }
+
+    await svc.generate_query([{"role": "user", "content": "q"}], partition=["p"])
+    assert ("query_contextualizer", ("myctx",)) in rec.calls
+
+    rec.calls.clear()
+    await svc.generate_query([{"role": "user", "content": "q"}], partition=["p", "q"])
+    assert ("query_contextualizer", (None,)) in rec.calls  # no single owning partition
+
+
+@pytest.mark.asyncio
 async def test_chat_with_valid_workspace_scopes_search_to_file_ids():
     scope = WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["fa", "fb"])
     retrieval = FakeRetrieval()

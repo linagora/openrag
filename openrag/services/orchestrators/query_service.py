@@ -311,6 +311,20 @@ class QueryService:
             return None
         return getattr(cfg, "generation_prompt_names", {}).get(prompt_type)
 
+    def _retrieval_prompt_name(self, field: str, partition: list[str] | None) -> str | None:
+        """The library prompt this request's partition names on its retrieval
+        preset (query-side prompts: query_contextualizer / hyde / multi_query).
+
+        Same single-owning-partition rule as generation prompts; multi-partition
+        and ``"all"`` resolve the global default.
+        """
+        if not partition or "all" in partition or len(partition) != 1:
+            return None
+        cfg = self._config.partitions.get(partition[0])
+        if cfg is None:
+            return None
+        return getattr(getattr(cfg, "retrieval", None), field, None)
+
     async def generate_query(
         self,
         messages: list[dict],
@@ -324,7 +338,8 @@ class QueryService:
 
         chat_history = "".join(f"{m['role']}: {m['content']}\n" for m in messages)
         contextualizer = await self._prompt_service.resolve_prompt(
-            "query_contextualizer", names=[self._generation_prompt_name("query_contextualizer", partition)]
+            "query_contextualizer",
+            names=[self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)],
         )
         prompt = contextualizer.format(
             query_language=detect_language(last_user),

@@ -29,11 +29,16 @@ class RetrievalPipelineConfig(BaseModel):
     include_ancestors: bool = True
     rrf_k: int = Field(default=60, gt=0, le=1000)  # Reciprocal Rank Fusion constant
 
-    # Prompt selection: name a library prompt for this preset's query-expansion
-    # strategies (None = the type's global default, then the disk seed).
-    # Resolved per request in RetrievalService.resolve_prompt.
+    # Prompt selection: name a library prompt for this preset's query-side
+    # prompts (None = the type's global default, then the disk seed). hyde /
+    # multi_query drive the query-expansion strategies (resolved per request in
+    # RetrievalService); query_contextualizer rewrites the user's query before
+    # retrieval (resolved in QueryService.generate_query). All three are
+    # query-side concerns, so they live on the retrieval preset rather than the
+    # partition's generation prompts.
     hyde_prompt_name: str | None = None
     multi_query_prompt_name: str | None = None
+    query_contextualizer_prompt_name: str | None = None
 
 
 __all__ = ["RetrievalPipelineConfig"]

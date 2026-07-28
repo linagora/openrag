@@ -68,6 +68,7 @@ class RetrievalService:
         searcher_factory: Callable[[str], RetrievalSearcher] | None = None,
         reranker_factory: Callable[[str], Reranker] | None = None,
         llm_factory: Callable[[str], LLM] | None = None,
+        prompt_service: Any | None = None,
     ) -> None:
         self._searcher = searcher
         self._config = config
@@ -76,6 +77,10 @@ class RetrievalService:
         self._searcher_factory = searcher_factory
         self._reranker_factory = reranker_factory
         self._llm_factory = llm_factory
+        # Resolves a preset's hyde/multi_query prompt by name (named -> default ->
+        # disk). Optional: when absent (e.g. unit tests, no DB), we fall back to
+        # the on-disk seed via load_template_by_key, preserving prior behaviour.
+        self._prompt_service = prompt_service
         self._pipeline = self._build_legacy_pipeline(reranker=reranker, llm=llm)
 
         logger.debug(
@@ -131,26 +136,36 @@ class RetrievalService:
         llm: LLM | None,
         k_queries: int,
         combine: bool,
+        template: str | None = None,
     ):
+        # ``template`` is the already-resolved query-expansion prompt for this
+        # strategy (resolved from the preset's *_prompt_name in _pipeline_for_partition).
         if rtype == "multiQuery":
             return MultiQueryRetriever(
                 llm=llm,
-                multi_query_template=load_template_by_key(
-                    self._config.paths.prompts_dir,
-                    self._config.prompts,
-                    "multi_query",
-                ),
+                multi_query_template=template,
                 k_queries=k_queries,
                 **common,
             )
         if rtype == "hyde":
             return HyDeRetriever(
                 llm=llm,
-                hyde_template=load_template_by_key(self._config.paths.prompts_dir, self._config.prompts, "hyde"),
+                hyde_template=template,
                 combine=combine,
                 **common,
             )
         return SingleRetriever(**common)
+
+    async def _resolve_query_template(self, prompt_type: str, name: str | None, disk_key: str) -> str:
+        """Resolve a query-side prompt (hyde / multi_query) to its text.
+
+        Prefers the library (named preset prompt -> type default) via
+        PromptService; falls back to the on-disk seed when no PromptService is
+        wired (unit tests / DB-less runs), so behaviour matches the pre-DB path.
+        """
+        if self._prompt_service is not None:
+            return await self._prompt_service.resolve_prompt(prompt_type, names=[name])
+        return load_template_by_key(self._config.paths.prompts_dir, self._config.prompts, disk_key)
 
     def _partition_configs(self) -> dict[str, Any]:
         return getattr(self._config, "partitions", {}) or {}
@@ -164,7 +179,7 @@ class RetrievalService:
     def _legacy_retriever_value(self, name: str, default: Any) -> Any:
         return getattr(self._config.retriever, name, default)
 
-    def _pipeline_for_partition(self, partition: str) -> tuple[RetrieverPipeline, int | None]:
+    async def _pipeline_for_partition(self, partition: str) -> tuple[RetrieverPipeline, int | None]:
         # Callers only ever pass a concrete partition name — the "all" sentinel is
         # expanded to concrete keys by _pipeline_groups_for_partitions before this
         # runs. With no per-partition configs at all, fall back to the legacy pipeline.
@@ -182,6 +197,16 @@ class RetrievalService:
         if rtype in {"multiQuery", "hyde"} and self._llm_factory is not None:
             llm = self._llm_factory(pipeline_cfg.llm or partition_cfg.chat_llm or "default")
 
+        # Only the expansion strategies need a prompt; type="single" (the common
+        # case) resolves nothing, so the DB is never touched on that path.
+        template = None
+        if rtype == "multiQuery":
+            template = await self._resolve_query_template(
+                "multi_query", pipeline_cfg.multi_query_prompt_name, "multi_query"
+            )
+        elif rtype == "hyde":
+            template = await self._resolve_query_template("hyde", pipeline_cfg.hyde_prompt_name, "hyde")
+
         reranker = None
         if pipeline_cfg.enable_reranker:
             if self._reranker_factory is not None:
@@ -191,6 +216,7 @@ class RetrievalService:
 
         retriever = self._build_retriever(
             rtype=rtype,
+            template=template,
             common={
                 "searcher": searcher,
                 "top_k": pipeline_cfg.top_k,
@@ -214,7 +240,7 @@ class RetrievalService:
         )
         return pipeline, pipeline_cfg.top_n
 
-    def _pipeline_groups_for_partitions(
+    async def _pipeline_groups_for_partitions(
         self, partitions: list[str]
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
         configs = self._partition_configs()
@@ -233,11 +259,11 @@ class RetrievalService:
             # Nothing to expand (no partitions exist yet) — keep the single
             # legacy pipeline; there is no per-partition config to honour.
             return [(["all"] if "all" in partitions else partitions, self._pipeline, None)]
-        return [
-            ([partition], pipeline, default_top_k)
-            for partition in partitions
-            for pipeline, default_top_k in [self._pipeline_for_partition(partition)]
-        ]
+        groups: list[tuple[list[str], RetrieverPipeline, int | None]] = []
+        for partition in partitions:
+            pipeline, default_top_k = await self._pipeline_for_partition(partition)
+            groups.append(([partition], pipeline, default_top_k))
+        return groups
 
     # ------------------------------------------------------------------
     # Raw semantic search (powers routers/search.py — was indexer.asearch)
@@ -326,6 +352,7 @@ class RetrievalService:
         filter_params: dict | None = None,
     ) -> list[Chunk]:
         """Single ``Query`` through retrieve → expand → rerank."""
+        groups = await self._pipeline_groups_for_partitions(partitions)
         ranked_lists = await self._gather_partition_groups(
             [
                 pipeline.retrieve_docs(
@@ -334,7 +361,7 @@ class RetrievalService:
                     top_k=top_k if top_k is not None else default_top_k,
                     filter_params=filter_params,
                 )
-                for partition_group, pipeline, default_top_k in self._pipeline_groups_for_partitions(partitions)
+                for partition_group, pipeline, default_top_k in groups
             ]
         )
         return ranked_lists[0] if len(ranked_lists) == 1 else self.fuse(ranked_lists, top_k=top_k)
@@ -348,6 +375,7 @@ class RetrievalService:
         filter_params: dict | None = None,
     ) -> list[Chunk]:
         """Every sub-query in parallel, fused with RRF."""
+        groups = await self._pipeline_groups_for_partitions(partitions)
         ranked_lists = await self._gather_partition_groups(
             [
                 pipeline.get_relevant_docs(
@@ -356,7 +384,7 @@ class RetrievalService:
                     top_k=top_k if top_k is not None else default_top_k,
                     filter_params=filter_params,
                 )
-                for partition_group, pipeline, default_top_k in self._pipeline_groups_for_partitions(partitions)
+                for partition_group, pipeline, default_top_k in groups
             ]
         )
         return ranked_lists[0] if len(ranked_lists) == 1 else self.fuse(ranked_lists, top_k=top_k)

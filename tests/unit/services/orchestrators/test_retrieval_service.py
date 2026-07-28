@@ -447,10 +447,62 @@ async def test_retrieve_small_fanout_stays_fully_parallel():
     assert state["max"] == 3, "all 3 partitions should run concurrently under the cap"
 
 
-def test_pipeline_for_partition_threads_rrf_k():
+@pytest.mark.asyncio
+async def test_pipeline_for_partition_threads_rrf_k():
     """A partition's rrf_k must reach its RetrieverPipeline (#707)."""
     cfg = _config()
     cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(rrf_k=42))}
     svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg)
-    pipeline, _ = svc._pipeline_for_partition("tenant-a")
+    pipeline, _ = await svc._pipeline_for_partition("tenant-a")
     assert pipeline.rrf_k == 42
+
+
+class _RecordingPromptService:
+    def __init__(self, resolved: str):
+        self._resolved = resolved
+        self.calls: list[tuple[str, tuple]] = []
+
+    async def resolve_prompt(self, prompt_type, names=None):
+        self.calls.append((prompt_type, tuple(names or ())))
+        return self._resolved
+
+
+@pytest.mark.asyncio
+async def test_hyde_template_resolved_from_preset_via_prompt_service():
+    """A hyde preset's hyde_prompt_name is resolved through PromptService and
+    threaded into the HyDeRetriever (the #13 retrieval-prompt seam)."""
+    cfg = _config()
+    cfg.partitions = {
+        "tenant-a": _partition(retrieval=RetrievalPipelineConfig(type="hyde", hyde_prompt_name="myhyde"))
+    }
+    rec = _RecordingPromptService("HYDE {question}")
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=object(), config=cfg, prompt_service=rec)
+    pipeline, _ = await svc._pipeline_for_partition("tenant-a")
+    assert pipeline.retriever.hyde_template == "HYDE {question}"
+    assert ("hyde", ("myhyde",)) in rec.calls
+
+
+@pytest.mark.asyncio
+async def test_multi_query_template_resolved_from_preset_via_prompt_service():
+    cfg = _config()
+    cfg.partitions = {
+        "tenant-a": _partition(
+            retrieval=RetrievalPipelineConfig(type="multiQuery", multi_query_prompt_name="mymq")
+        )
+    }
+    rec = _RecordingPromptService("MQ {query} {k_queries}")
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=object(), config=cfg, prompt_service=rec)
+    pipeline, _ = await svc._pipeline_for_partition("tenant-a")
+    assert pipeline.retriever.multi_query_template == "MQ {query} {k_queries}"
+    assert ("multi_query", ("mymq",)) in rec.calls
+
+
+@pytest.mark.asyncio
+async def test_single_strategy_resolves_no_prompt():
+    """type=single needs no expansion prompt — PromptService is never called."""
+    cfg = _config()
+    cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(type="single"))}
+    rec = _RecordingPromptService("unused")
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg, prompt_service=rec)
+    await svc._pipeline_for_partition("tenant-a")
+    assert rec.calls == []
