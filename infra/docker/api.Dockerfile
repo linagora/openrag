@@ -18,7 +18,21 @@ RUN apt-get update && apt-get install -y \
 
 # install ffmpeg
 RUN apt update && \
-    apt install -y ffmpeg 
+    apt install -y ffmpeg
+
+# Node + promptfoo back the admin evaluation page, where EvalRunner shells out
+# to `promptfoo eval`. Also installed in ray.Dockerfile: Ray runs inside this
+# container unless the deployment uses a separate cluster. Pinned rather than
+# resolved at run time so a run never depends on npm reachability.
+ARG PROMPTFOO_VERSION=0.121.19
+# Node comes from NodeSource: the distro package predates promptfoo's floor.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g promptfoo@${PROMPTFOO_VERSION} \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
+ENV PROMPTFOO_DISABLE_TELEMETRY=1 \
+    PROMPTFOO_DISABLE_UPDATE=1
 
 # Set environment variables for Hugging Face cache location
 ENV XDG_CACHE_HOME=${XDG_CACHE_HOME:-/app/model_weights}
