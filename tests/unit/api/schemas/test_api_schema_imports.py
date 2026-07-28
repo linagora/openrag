@@ -114,6 +114,64 @@ def test_chat_request_passes_through_extra_openai_params():
     assert dump["seed"] == 42
 
 
+def test_chat_message_passes_through_extra_openai_fields():
+    """An OpenAI message is more than role/content: `name` disambiguates speakers
+    and `tool_calls`/`tool_call_id` carry function calling. Dropping them here
+    silently truncated the history sent to the LLM
+    """
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": "user", "content": "hi", "name": "alice"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+                },
+            ]
+        }
+    )
+    messages = request.model_dump(exclude_none=True)["messages"]
+
+    assert messages[0]["name"] == "alice"
+    assert messages[1]["tool_calls"][0]["id"] == "c1"
+
+
+def test_sanitize_messages_keeps_tool_calls_reaching_it():
+    """_sanitize_messages leaves a content-free assistant turn alone when it
+    carries tool_calls — reachable only now that the schema forwards the field
+    """
+    from services.orchestrators.query_service import QueryService
+
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+                }
+            ]
+        }
+    )
+    sanitized = QueryService._sanitize_messages(request.model_dump(exclude_none=True)["messages"])
+
+    assert sanitized[0]["content"] == ""
+
+
+def test_completion_request_passes_through_extra_openai_params():
+    """Legacy /completions mirrors the chat request: undeclared vendor params are
+    forwarded, while the declared bounds on n/best_of still apply
+    """
+    request = OpenAICompletionRequest.model_validate({"prompt": "hi", "suffix": "!", "user": "alice"})
+    dump = request.model_dump(exclude_none=True)
+
+    assert dump["suffix"] == "!"
+    assert dump["user"] == "alice"
+    with pytest.raises(ValidationError):
+        OpenAICompletionRequest.model_validate({"prompt": "hi", "n": 9, "user": "alice"})
+
+
 def test_completion_request_omits_unset_nulls():
     """The /completions router dumps with exclude_none=True (matching chat), so
     optional params left unset are not sent as explicit null to strict providers

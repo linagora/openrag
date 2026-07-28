@@ -4,6 +4,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class OpenAIMessage(BaseModel):
+    # Allow to have extra openAI attributes, like  `tool_calls`,
+    # `function_call`, etc. Pydantic's default `extra="ignore"`
+    # drops them.
+    model_config = ConfigDict(extra="allow")
+
     role: Literal["user", "assistant", "system"]
     content: str
 
@@ -63,6 +68,9 @@ class OpenAIChatCompletionRequest(BaseModel):
 
 
 class OpenAICompletionRequest(BaseModel):
+    # Mirrors OpenAIChatCompletionRequest
+    model_config = ConfigDict(extra="allow")
+
     model: str | None = Field(None, description="model name")
     prompt: str
     # Bound n/best_of: each multiplies generation cost, so leaving them unbounded
