@@ -334,6 +334,12 @@ env:
     ENABLE_RAY_SERVE: "true"
     RAY_SERVE_NUM_REPLICAS: "4"
     RAY_SERVE_PORT: "80"
+    # How out-of-process workers reach the API. The built-in default is
+    # http://openrag:$APP_iPORT, which is the compose service name and does
+    # not resolve here — this chart's Service is <release>-openrag, and the
+    # RayCluster that runs those workers is a separate pod. Follows
+    # openrag.service.port, the same value that opens the container port.
+    OPENRAG_INTERNAL_URL: "http://{{ .Release.Name }}-openrag:{{ .Values.openrag.service.port }}"
 
     WITH_CHAINLIT_UI: "false"
     SAVE_UPLOADED_FILES: "false"
