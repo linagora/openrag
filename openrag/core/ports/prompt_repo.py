@@ -67,12 +67,13 @@ class PromptRepository(ABC):
 
     @abstractmethod
     async def reference_counts(self) -> dict[tuple[str, str], int]:
-        """``{(prompt_type, name): partitions_referencing}`` in one bulk pass.
+        """``{(prompt_type, name): partitions_resolving_to_it}`` in one bulk pass.
 
-        Counts the *partitions* that reference each prompt by name — directly for
-        generation prompts (``generation_prompt_names``), transitively for
-        indexation/retrieval prompts (partition -> its active preset ->
-        ``*_prompt_name`` config field). Feeds the admin "used by N partitions"
+        Counts *effective* resolution: every partition resolves each prompt type
+        to a named prompt (when its partition/preset config names an existing one)
+        or the type's global default. So a default reflects the partitions that
+        fall back to it, not just those that name it explicitly. Per type the
+        counts sum to the partition total. Feeds the admin "used by N partitions"
         annotation."""
         ...
 

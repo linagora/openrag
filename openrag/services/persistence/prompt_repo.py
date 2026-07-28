@@ -211,12 +211,22 @@ class PgPromptRepository(PromptRepository):
         return self._to_model(rec)
 
     async def reference_counts(self) -> dict[tuple[str, str], int]:
-        # The "used by" badge counts *partitions*, so every reference is resolved
-        # to a partition — directly for generation prompts, transitively (partition
-        # -> its active preset -> prompt name) for indexation/retrieval prompts.
-        counts: dict[tuple[str, str], int] = {}
-        # Generation prompts: named directly on the partition. The JSONB keys ARE
-        # prompt_type values.
+        # Effective resolution count: every partition resolves each prompt type to
+        # a named library prompt (when its partition/preset config names an
+        # existing one) or, failing that, to the type's global default. We count
+        # that resolution — so a default correctly shows the partitions that fall
+        # back to it, not just the (usually zero) partitions that name it
+        # explicitly. Per type the counts sum to the partition total.
+        total_partitions = await self.pool.fetchval("SELECT count(*)::int FROM partitions")
+
+        prompt_rows = await self.pool.fetch("SELECT prompt_type, name, is_default FROM prompts")
+        existing = {(r["prompt_type"], r["name"]) for r in prompt_rows}
+        default_name: dict[str, str] = {r["prompt_type"]: r["name"] for r in prompt_rows if r["is_default"]}
+
+        # Explicit overrides: partitions that name a prompt directly (generation
+        # prompts on the partition JSONB) or transitively (their active
+        # indexation/retrieval preset's *_prompt_name).
+        overrides: dict[tuple[str, str], int] = {}
         part_rows = await self.pool.fetch(
             """
             SELECT j.key AS prompt_type, j.value AS name, count(*)::int AS n
@@ -226,12 +236,9 @@ class PgPromptRepository(PromptRepository):
             """
         )
         for r in part_rows:
-            counts[(r["prompt_type"], r["name"])] = r["n"]
-        # Indexation/retrieval prompts: named on a *preset*, but counted per
-        # partition that selects that preset. Join each partition to the preset it
-        # uses (indexation_preset / retrieval_preset), then read the *_prompt_name
-        # fields off the preset config. count(DISTINCT partition) so a partition is
-        # counted once per prompt even if two of its presets happened to name it.
+            overrides[(r["prompt_type"], r["name"])] = overrides.get((r["prompt_type"], r["name"]), 0) + r["n"]
+        # count(DISTINCT partition) so a partition is counted once per prompt even
+        # if two of its presets happened to name it.
         preset_rows = await self.pool.fetch(
             """
             SELECT c.key AS field, c.value AS name, count(DISTINCT part.partition)::int AS n
@@ -248,7 +255,21 @@ class PgPromptRepository(PromptRepository):
             prompt_type = _PRESET_FIELD_TO_TYPE.get(r["field"])
             if prompt_type:
                 key = (prompt_type, r["name"])
-                counts[key] = counts.get(key, 0) + r["n"]
+                overrides[key] = overrides.get(key, 0) + r["n"]
+
+        # A valid override (names an existing prompt) credits that prompt; a
+        # dangling one falls through. Each type's default then absorbs every
+        # partition that didn't validly override it.
+        counts: dict[tuple[str, str], int] = {}
+        valid_overrides: dict[str, int] = {}
+        for (prompt_type, name), n in overrides.items():
+            if (prompt_type, name) in existing:
+                counts[(prompt_type, name)] = counts.get((prompt_type, name), 0) + n
+                valid_overrides[prompt_type] = valid_overrides.get(prompt_type, 0) + n
+        for prompt_type, d_name in default_name.items():
+            fallback = max(0, (total_partitions or 0) - valid_overrides.get(prompt_type, 0))
+            if fallback:
+                counts[(prompt_type, d_name)] = counts.get((prompt_type, d_name), 0) + fallback
         return counts
 
 

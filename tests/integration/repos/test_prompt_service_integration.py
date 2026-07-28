@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from core.config.infrastructure import PathsConfig, PromptsConfig
+from core.models.prompt import Prompt
 from services.orchestrators.prompt_service import PROMPT_TYPE_KEYS, PromptService
 from services.storage.postgres_store import PostgresStore
 
@@ -53,27 +54,43 @@ class TestSeedAndResolve:
         # First resolvable candidate wins (the per-user tier extension point).
         assert await svc.resolve_prompt("sys_prompt", names=["missing", "legal"]) == "LEGAL"
 
-    async def test_reference_counts_are_partition_centric(self, postgres_store: PostgresStore):
+    async def test_reference_counts_are_effective(self, postgres_store: PostgresStore):
         repo = postgres_store.prompt_repo
         partition_repo = postgres_store.partition_repo
-        # An indexation preset naming a prompt, plus one that no partition uses.
-        await postgres_store.preset_repo.upsert("legal", "indexation", {"contextualization_prompt_name": "ctx1"})
+
+        # Library: a default + a named alternative for two types.
+        await repo.create(Prompt(prompt_type="sys_prompt", name="d_sys", content="x", is_default=True))
+        await repo.create(Prompt(prompt_type="sys_prompt", name="legal", content="x"))
+        await repo.create(Prompt(prompt_type="chunk_contextualizer", name="d_ctx", content="x", is_default=True))
+        await repo.create(Prompt(prompt_type="chunk_contextualizer", name="ctx1", content="x"))
+
+        # An indexation preset naming ctx1, plus one naming a non-existent prompt.
+        await postgres_store.preset_repo.upsert("legalpreset", "indexation", {"contextualization_prompt_name": "ctx1"})
         await postgres_store.preset_repo.upsert("orphan", "indexation", {"contextualization_prompt_name": "ghost"})
-        # Two partitions select the "legal" preset; one of them also names a
-        # generation prompt directly.
+
+        # 3 partitions: rc1 overrides sys_prompt=legal and uses legalpreset; rc2
+        # uses legalpreset with no generation override; rc3 names a missing
+        # sys_prompt (dangling -> default) and keeps the default indexation preset.
         await partition_repo.create_partition("rc1")
         await partition_repo.update_partition(
-            "rc1", indexation_preset="legal", generation_prompt_names={"sys_prompt": "formal"}
+            "rc1", indexation_preset="legalpreset", generation_prompt_names={"sys_prompt": "legal"}
         )
         await partition_repo.create_partition("rc2")
-        await partition_repo.update_partition("rc2", indexation_preset="legal")
+        await partition_repo.update_partition("rc2", indexation_preset="legalpreset")
+        await partition_repo.create_partition("rc3")
+        await partition_repo.update_partition("rc3", generation_prompt_names={"sys_prompt": "missing"})
 
         counts = await repo.reference_counts()
 
-        # Generation prompt: the one partition that names it directly.
-        assert counts.get(("sys_prompt", "formal")) == 1
-        # Indexation prompt: counted per *partition* that selects the preset (2),
-        # not per preset (1).
+        # sys_prompt: rc1 -> legal; rc2 (no override) + rc3 (dangling) fall back to default.
+        assert counts.get(("sys_prompt", "legal")) == 1
+        assert counts.get(("sys_prompt", "d_sys")) == 2
+        # chunk_contextualizer: rc1 + rc2 -> ctx1 (via legalpreset); rc3 -> default.
         assert counts.get(("chunk_contextualizer", "ctx1")) == 2
-        # A preset naming a prompt but selected by no partition contributes nothing.
+        assert counts.get(("chunk_contextualizer", "d_ctx")) == 1
+        # The "orphan" preset names a non-existent prompt and is used by no
+        # partition — it contributes to nothing.
         assert counts.get(("chunk_contextualizer", "ghost")) is None
+        # Per type the effective counts sum to the partition total (3).
+        assert counts[("sys_prompt", "legal")] + counts[("sys_prompt", "d_sys")] == 3
+        assert counts[("chunk_contextualizer", "ctx1")] + counts[("chunk_contextualizer", "d_ctx")] == 3
