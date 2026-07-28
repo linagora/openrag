@@ -92,7 +92,7 @@ CONTEXT_ABLATION_CSV_PATH = REPORTS_DIR / "context_ablation.csv"
 
 
 def quick_validate_dataset_file(path: Path) -> tuple[bool, str, dict]:
-    """Lightweight golden-dataset check that mirrors benchmark._load_and_validate_dataset.
+    """Lightweight golden-dataset check that mirrors utils.load_and_validate_dataset.
 
     Returns (ok, message, stats). Stats: {n_total, n_answerable, n_unanswerable, n_with_chunks}.
     Heavy validation still runs inside benchmark.py at execution time.
@@ -179,8 +179,15 @@ def run_label(r: dict) -> str:
     version = cfg.get("version")
     partition = cfg.get("partition", "?")
     rid = cfg.get("run_id")
+    retriever_type = cfg.get("retriever_type")
+    # Optional free-text run tag (benchmark.py --tag); absent on untagged/legacy runs.
+    tag = r["summary"].get("tag")
     head = f"{version} · {partition}" if version else partition
     label = f"{r['ts']} — {head}"
+    if tag:
+        label += f" #{tag}"
+    if retriever_type:
+        label += f" ({retriever_type})"
     if rid:
         label += f" [{rid[:6]}]"
     return label
@@ -437,13 +444,17 @@ def render_breakdowns(summary: dict) -> None:
     breakdowns = summary.get("breakdowns") or {}
     by_type = {k: v for k, v in (breakdowns.get("by_question_type") or {}).items() if k != "unknown"}
     by_diff = {k: v for k, v in (breakdowns.get("by_difficulty") or {}).items() if k != "unknown"}
-    if not by_type and not by_diff:
+    by_fmt = {k: v for k, v in (breakdowns.get("by_file_format") or {}).items() if k != "unknown"}
+    by_ftype = {k: v for k, v in (breakdowns.get("by_file_type") or {}).items() if k != "unknown"}
+    by_cat = {k: v for k, v in (breakdowns.get("by_document_category") or {}).items() if k != "unknown"}
+    by_file = {k: v for k, v in (breakdowns.get("by_source_file") or {}).items() if k}
+    if not any((by_type, by_diff, by_fmt, by_ftype, by_cat, by_file)):
         return
 
-    st.subheader("Score breakdown by question type / difficulty")
+    st.subheader("Score breakdown")
     st.caption(
-        "Mean scores over answerable rows, grouped by the generator's typed-question metadata. "
-        "Completion / Precision are 1–10; Answer rel. / nDCG are 0–1 (see table)."
+        "Mean scores over answerable rows, grouped by question metadata and by source "
+        "document. Completion / Precision are 1–10; Answer rel. / nDCG are 0–1 (see table)."
     )
 
     metric_cols = {
@@ -460,7 +471,13 @@ def render_breakdowns(summary: dict) -> None:
         ordered = ["n"] + [c for c in metric_cols if c in df.columns]
         return df[[c for c in ordered if c in df.columns]].rename(columns=metric_cols)
 
-    for title, group in (("By question type", by_type), ("By difficulty", by_diff)):
+    for title, group in (
+        ("By question type", by_type),
+        ("By difficulty", by_diff),
+        ("By document category (content domain)", by_cat),
+        ("By file format", by_fmt),
+        ("By file type", by_ftype),
+    ):
         if not group:
             continue
         st.markdown(f"**{title}**")
@@ -491,6 +508,27 @@ def render_breakdowns(summary: dict) -> None:
                 )
                 st.altair_chart(chart)
 
+    # Per-document view: potentially hundreds of files, so a sorted, filterable
+    # table rather than a chart. Sorted worst-first — that's the actionable end.
+    if by_file:
+        st.markdown(f"**By source document** ({len(by_file)} documents)")
+        min_n = st.slider(
+            "Minimum questions per document",
+            min_value=1,
+            max_value=max(2, min(10, max(v.get("n", 1) for v in by_file.values()))),
+            value=1,
+            help="Filter out documents with too few questions to be meaningful.",
+            key="breakdown_min_n",
+        )
+        fdf = _table({k: v for k, v in by_file.items() if v.get("n", 0) >= min_n})
+        if fdf.empty:
+            st.info("No documents meet that threshold.")
+        else:
+            fdf = fdf.sort_values("Completion", ascending=True, na_position="last")
+            fdf.index.name = "document"
+            st.dataframe(fdf, use_container_width=True)
+            st.caption("Sorted worst-first by Completion — the documents to investigate.")
+
 
 def render_summary(summary: dict) -> None:
     cfg = summary.get("config", {})
@@ -513,7 +551,13 @@ def render_summary(summary: dict) -> None:
         f"Dataset: **{dataset_name}** ({cfg.get('dataset_size', '?')} entries)  ·  "
         f"Base URL: `{cfg.get('base_url', '?')}`  ·  "
         f"Label lang: **{cfg.get('label_language', '?')}**"
+        + (f"  ·  Retriever type: **{cfg['retriever_type']}**" if cfg.get("retriever_type") else "")
     )
+    if cfg.get("retriever_type"):
+        st.caption(
+            "⚠ Retriever type is a self-reported label (`--retriever-type`), not verified "
+            "against the target instance's actual `RETRIEVER_TYPE` at run time."
+        )
 
     retrieval = summary.get("retrieval", {})
     st.subheader("Retrieval")
@@ -558,6 +602,19 @@ def render_summary(summary: dict) -> None:
         st.bar_chart(dist_df)
 
     render_breakdowns(summary)
+
+    va = summary.get("value_answer") or {}
+    if va.get("n_applicable"):
+        st.subheader("Value-answer exact match")
+        st.caption(
+            "Strict numeric grounding for value-answer capabilities (table_lookup / "
+            "numerical_reasoning): fraction of rows whose golden number(s) appear in the "
+            f"response within rel_tol={va.get('rel_tol')}. Complements the LLM judge."
+        )
+        cols = st.columns(max(2, len(va.get("by_type", {})) + 1))
+        cols[0].metric("Overall", fmt(va.get("numeric_match_rate")), help=f"n={va.get('n_applicable', 0)} rows")
+        for i, (t, s) in enumerate(va.get("by_type", {}).items(), start=1):
+            cols[i].metric(t, fmt(s.get("numeric_match_rate")), help=f"n={s.get('n', 0)}")
 
     faith = summary.get("faithfulness", {})
     st.subheader("Faithfulness")
@@ -726,9 +783,176 @@ def render_artifacts(summary: dict, run_dir: Path = REPORTS_DIR) -> None:
             df = pd.read_csv(run_dir / cot_csv)
             st.dataframe(df, use_container_width=True)
 
+    retrieval_trace_jsonl = artifacts.get("retrieval_trace_jsonl")
+    if retrieval_trace_jsonl and (run_dir / retrieval_trace_jsonl).exists():
+        _render_retrieval_trace(run_dir / retrieval_trace_jsonl, summary.get("timestamp", ""))
+
     logprobs_jsonl = artifacts.get("logprobs_jsonl")
     if logprobs_jsonl and (run_dir / logprobs_jsonl).exists():
         _render_token_logprobs(run_dir / logprobs_jsonl, summary.get("timestamp", ""))
+
+
+def _render_retrieval_ranking(chunks: list[dict], missed_gold_ids: list[str]) -> None:
+    """Render one question's ranked chunk list, gold chunks tinted green — the
+    order/relevance view, as opposed to the aggregate hit-rate/nDCG numbers.
+    Mirrors _render_highlighted_tokens' tint-a-span approach for visual consistency."""
+    if not chunks:
+        st.caption("No chunks returned for this question.")
+    else:
+        parts: list[str] = []
+        for c in chunks:
+            is_gold = bool(c.get("is_gold"))
+            bg = "rgba(60, 170, 90, 0.22)" if is_gold else "transparent"
+            border = "1px solid rgba(60, 170, 90, 0.65)" if is_gold else "1px solid rgba(127,127,127,0.25)"
+            file_id = html.escape(str(c.get("file_id") or "—"))
+            chunk_id = html.escape(str(c.get("chunk_id") or "—"))
+            snippet = html.escape(str(c.get("snippet") or "")).replace("\n", " ")
+            badge = '  <b style="color:#3caa5a;">✓ GOLD</b>' if is_gold else ""
+            parts.append(
+                f'<div style="background-color:{bg}; border:{border}; border-radius:4px; '
+                f'padding:6px 10px; margin-bottom:6px;">'
+                f'<div style="font-family: ui-monospace, monospace; font-size: 0.82em; '
+                f'opacity:0.75;">#{c.get("rank")} · {file_id} · chunk {chunk_id}{badge}</div>'
+                f'<div style="margin-top:2px;">{snippet}</div>'
+                f"</div>"
+            )
+        st.markdown(
+            '<div style="max-height: 420px; overflow-y: auto;">' + "".join(parts) + "</div>",
+            unsafe_allow_html=True,
+        )
+
+    if missed_gold_ids:
+        ids = html.escape(", ".join(str(g) for g in missed_gold_ids))
+        st.markdown(
+            '<div style="background-color: rgba(220, 70, 70, 0.15); '
+            "border: 1px solid rgba(220, 70, 70, 0.5); border-radius:4px; "
+            f'padding:6px 10px; margin-top:6px;">⚠ Gold chunk(s) never retrieved '
+            f"in the fetched top-k: {ids}</div>",
+            unsafe_allow_html=True,
+        )
+
+
+@st.cache_data(show_spinner=False)
+def _load_retrieval_trace(path_str: str, mtime: float) -> list[dict]:
+    """Load the per-question retrieval-ranking JSONL. mtime is part of the cache key."""
+    rows: list[dict] = []
+    with open(path_str, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return rows
+
+
+def _render_by_n_gold(rows: list[dict]) -> None:
+    """Recall broken out by how many gold chunks the question needed.
+
+    Computed fresh from the trace rows (not the run's JSON summary) so it works
+    for any run that has a retrieval_trace_jsonl, including ones written before
+    this breakdown existed. A retriever that reliably finds "the one right
+    chunk" but never a second/third complementary one looks fine in the
+    aggregate any-hit-rate while full_recall silently collapses to 0 for every
+    n_gold >= 2 bucket — this table is what catches that.
+    """
+    scored = [r for r in rows if not r.get("fetch_failed")]
+    if not scored:
+        return
+    by_n: dict[int, list[dict]] = {}
+    for r in scored:
+        by_n.setdefault(r["n_gold"], []).append(r)
+
+    table = {
+        n: {
+            "count": len(group),
+            "any_hit_rate": sum(1.0 for r in group if r["n_gold_hit"] > 0) / len(group),
+            "full_recall_rate": sum(1.0 for r in group if r["n_gold_hit"] == r["n_gold"]) / len(group),
+            "avg_recall": sum(r["n_gold_hit"] / r["n_gold"] for r in group) / len(group),
+        }
+        for n, group in sorted(by_n.items())
+    }
+    if len(table) < 2:
+        return  # nothing to contrast if every question needed the same number of chunks
+
+    df = pd.DataFrame.from_dict(table, orient="index")
+    df.index.name = "gold chunks needed"
+    df = df.rename(columns={
+        "count": "n",
+        "any_hit_rate": "any-hit rate",
+        "full_recall_rate": "full-recall rate",
+        "avg_recall": "avg recall",
+    })
+    st.markdown("**Recall by gold-chunk count**")
+    st.caption("If full-recall rate drops toward 0 as gold-chunk count rises, the retriever is finding one relevant chunk but not covering multi-part answers.")
+    st.dataframe(df.style.format({"any-hit rate": "{:.2f}", "full-recall rate": "{:.2f}", "avg recall": "{:.2f}"}), use_container_width=True)
+
+
+def _render_retrieval_trace(path: Path, ts: str) -> None:
+    rows = _load_retrieval_trace(str(path), path.stat().st_mtime)
+    if not rows:
+        return
+    with st.expander("Retrieval ranking (raw retriever, via /search)", expanded=False):
+        st.caption(
+            "Bypasses LLM citation filtering — no LLM in the loop, nothing filtered "
+            "down to what the model chose to cite. Caveat: /search skips reranking "
+            "(plain hybrid vector+BM25 top-k), so if reranking is enabled this can "
+            "differ from the final order chat completions actually used."
+        )
+
+        _render_by_n_gold(rows)
+
+        def _status(r: dict) -> str:
+            if r.get("fetch_failed"):
+                return "⚠"
+            if r["n_gold_hit"] == 0:
+                return "✗"
+            if r["n_gold_hit"] < r["n_gold"]:
+                return "◐"
+            return "✓"
+
+        only_misses = st.checkbox(
+            "Only show questions with a missed or fetch-failed gold chunk",
+            value=False,
+            key=f"trace_misses_{ts}",
+        )
+        filtered = [
+            (i, r)
+            for i, r in enumerate(rows)
+            if not only_misses or r.get("fetch_failed") or r["n_gold_hit"] < r["n_gold"]
+        ]
+        if not filtered:
+            st.caption("No questions match the filter.")
+            return
+
+        def _label(i: int, r: dict) -> str:
+            q = r.get("question", "").replace("\n", " ").strip()
+            return f"{_status(r)} [{i}] {q[:80]}" + ("…" if len(q) > 80 else "")
+
+        options = {i: _label(i, r) for i, r in filtered}
+        selected_i = st.selectbox(
+            "Question",
+            list(options.keys()),
+            format_func=lambda i: options[i],
+            key=f"trace_q_{ts}",
+        )
+        row = rows[selected_i]
+
+        if row.get("fetch_failed"):
+            st.warning("The /search request for this question failed — no ranking was captured.")
+            return
+
+        cols = st.columns(3)
+        cols[0].metric("Gold chunks", row["n_gold"])
+        cols[1].metric("Found in top-k", row["n_gold_hit"])
+        cols[2].metric(
+            "First gold rank", row["first_gold_rank"] if row["first_gold_rank"] is not None else "—"
+        )
+
+        st.markdown("**Ranked retrieval order**")
+        _render_retrieval_ranking(row.get("retrieved", []), row.get("missed_gold_ids", []))
 
 
 def _render_highlighted_tokens(tokens: list[str], logprobs: list[float]) -> None:

@@ -7,11 +7,13 @@ import random
 import re
 import time
 from datetime import datetime
-from typing import Literal, TypedDict
+from typing import Literal
+from urllib.parse import quote
 
 import httpx
 import numpy as np
 import pandas as pd
+import utils
 from config import CONFIG
 from dotenv import load_dotenv
 from evaluation_prompts import (
@@ -19,6 +21,7 @@ from evaluation_prompts import (
     COMPLETION_JUDGE_PROMPT_COT,
     COMPLETION_JUDGE_PROMPT_COT_EN,
     COMPLETION_JUDGE_PROMPT_EN,
+    CONTEXT_RECALL_JUDGE_PROMPT_EN,
     CONTEXT_RELEVANCY_JUDGE_PROMPT_EN,
     FAITHFULNESS_JUDGE_PROMPT_EN,
     LABEL_JUDGE_PROMPT,
@@ -34,6 +37,7 @@ from judge_schemas import (
     CompletionEvaluationCoTResponse,
     CompletionEvaluationCoTResponseEN,
     CompletionEvaluationResponse,
+    ContextRecallEvaluationResponse,
     ContextRelevancyEvaluationResponse,
     FaithfulnessEvaluationResponse,
     PrecisionEvaluationCoTResponse,
@@ -42,7 +46,6 @@ from judge_schemas import (
     RefusalEvaluationResponse,
     ResponseLabelResponse,
 )
-from langchain_core.utils.json import parse_partial_json
 from langchain_openai import ChatOpenAI
 from loguru import logger
 from metrics import (
@@ -96,7 +99,7 @@ async def retrieve_response_and_docs_openrag(
 
             latency = time.perf_counter() - start
             response_llm = res.choices[0].message.content
-            sources = _extract_sources(res)
+            sources = utils.extract_sources(res)
             # Normalize chunk IDs to str so retrieval metrics still match if OpenRAG
             # ever serializes _id as a string (Milvus int64 IDs exceed JS safe-int
             # range, a common reason to stringify). Reference IDs are str-normalized
@@ -104,7 +107,7 @@ async def retrieve_response_and_docs_openrag(
             list_source_chunk_ids = [str(item["_id"]) for item in sources if "_id" in item]
             list_chunk_urls = [item.get("chunk_url") for item in sources]
 
-            mean_logprob, perplexity, tokens, token_logprobs = _extract_logprob_metrics(res)
+            mean_logprob, perplexity, tokens, token_logprobs = utils.extract_logprob_metrics(res)
 
             return (
                 response_llm,
@@ -138,48 +141,69 @@ async def retrieve_response_and_docs_openrag(
             return None, [], [], latency, float("nan"), float("nan"), [], []
 
 
-def _extract_sources(res) -> list[dict]:
-    """Pull the source list out of a ChatCompletion's non-standard ``extra`` field.
+async def fetch_ranked_chunks_openrag(
+    query: str, partition: str, _base_url: str, top_k: int, semaphore: asyncio.Semaphore
+) -> list[dict] | None:
+    """Fetch the hybrid-search ranked chunk list for a query via GET /search.
 
-    OpenRAG returns the cited sources as a JSON string in ``res.extra``
-    (``{"sources": [...]}``). This is not part of the OpenAI schema, so guard every
-    step: a missing attribute, a non-JSON payload, or an unexpected shape all degrade
-    to an empty list rather than raising and dropping the whole row."""
-    raw = getattr(res, "extra", None)
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw) if isinstance(raw, str) else raw
-        sources = parsed.get("sources", []) if isinstance(parsed, dict) else []
-    except (ValueError, TypeError) as e:
-        logger.debug(f"Could not parse sources from res.extra: {e}")
-        return []
-    return [s for s in sources if isinstance(s, dict)]
+    Unlike the chat-completion path (``retrieve_response_and_docs_openrag``), this
+    never goes through the LLM: no generation, no citation filtering. So it avoids
+    the conflation where chat-completion ``chunk_ids`` are a citation-filtered
+    subset of what was actually retrieved, and a chunk the retriever found but the
+    LLM didn't cite reads as a retrieval miss.
 
+    IMPORTANT caveat: /search is NOT the same pipeline chat completions use for
+    RAG context. Per RetrievalService.search()'s own docstring, it is "a single
+    searcher.search (no query generation / reranking / RRF — those belong to
+    QueryService)" — i.e. plain hybrid vector+BM25 top-k, no cross-encoder rerank
+    step. If config.reranker.enabled is True, chat completions see a *reranked*
+    order this trace does not reflect. It also always fetches surrounding/neighbor
+    chunks (with_surrounding_chunks=True, hardcoded, not exposed as a toggle) and
+    appends them after the real top-k hits with no re-truncation — which is why we
+    slice to top_k ourselves below rather than trusting the API's own top_k to cap
+    the response size. Treat this as "did the raw hybrid search even surface the
+    right candidates," not "the exact final ranking the model saw."
 
-def _extract_logprob_metrics(res) -> tuple[float, float, list[str], list[float]]:
-    """Pull per-token logprobs from a ChatCompletion.
+    Returns None on any failure (row is skipped in the trace, not a hard error).
+    """
+    async with semaphore:
+        url = f"{_base_url.rstrip('/')}/search/partition/{quote(partition, safe='')}"
+        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"} if AUTH_TOKEN else {}
+        # similarity_threshold=0: /search's own query-param default (0.75) is
+        # stricter than the RAG chat pipeline's default (config.retriever.
+        # similarity_threshold, 0.6) — left unset it would silently manufacture
+        # "missed" chunks that chat's own retrieval never actually excluded.
+        # Zero gets the true top-k ranked list; relevance is judged by gold-id
+        # membership, not by this endpoint's score cutoff.
+        params = {"text": query, "top_k": top_k, "similarity_threshold": 0.0}
+        try:
+            async with httpx.AsyncClient(timeout=CONFIG.benchmark.target.timeout) as client:
+                r = await client.get(url, headers=headers, params=params)
+                r.raise_for_status()
+                # /search appends surrounding/neighbor chunks after the real top-k
+                # hits and does not re-truncate — cap here so "top_k" stays honest
+                # and the trace isn't padded with unranked context filler.
+                docs = (r.json().get("documents", []) or [])[:top_k]
+        except Exception as e:
+            logger.debug(f"Error fetching raw retrieval ranking for query {query[:60]!r}: {e}")
+            return None
 
-    Returns (mean_logprob, perplexity, tokens, token_logprobs). The latter two are
-    parallel arrays in generation order, used downstream for per-question logprob
-    visualisations. Returns (nan, nan, [], []) if logprobs are absent."""
-    try:
-        token_lps = res.choices[0].logprobs.content
-    except AttributeError:
-        return float("nan"), float("nan"), [], []
-    if not token_lps:
-        return float("nan"), float("nan"), [], []
-    tokens: list[str] = []
-    lps: list[float] = []
-    for t in token_lps:
-        if t.logprob is None:
-            continue
-        tokens.append(t.token)
-        lps.append(t.logprob)
-    if not lps:
-        return float("nan"), float("nan"), [], []
-    mean_lp = sum(lps) / len(lps)
-    return mean_lp, math.exp(-mean_lp), tokens, lps
+        ranked = []
+        for rank, doc in enumerate(docs, start=1):
+            meta = doc.get("metadata") or {}
+            chunk_id = meta.get("_id")
+            if chunk_id is None:
+                continue
+            ranked.append(
+                {
+                    "rank": rank,
+                    "chunk_id": str(chunk_id),
+                    "file_id": meta.get("file_id"),
+                    "snippet": (doc.get("content") or "")[: CONFIG.benchmark.retrieval_trace_snippet_chars],
+                }
+            )
+        return ranked
+
 
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN")
 # Sentinel returned by judge functions when a judge call fails; rows carrying it
@@ -211,7 +235,7 @@ def _lenient_structured_judge(schema):
     before the ``include_raw`` fallback — so judge output with raw control
     characters (a known vLLM guided-decoding quirk) raises instead of landing in
     ``parsing_error``. With a dict schema the SDK skips validation, lenient
-    parsing/repair happens in ``_ainvoke_with_retry`` / ``_parse_judge_json``.
+    parsing/repair happens in ``_ainvoke_with_retry`` / ``utils.parse_judge_json``.
     """
     return ChatOpenAI(**llm_judge_settings).with_structured_output(
         {"name": schema.__name__, "schema": schema.model_json_schema()},
@@ -230,101 +254,7 @@ llm_refusal_judge = _lenient_structured_judge(RefusalEvaluationResponse)
 llm_label_judge = _lenient_structured_judge(ResponseLabelResponse)
 llm_answer_relevancy_judge = _lenient_structured_judge(AnswerRelevancyEvaluationResponse)
 llm_context_relevancy_judge = _lenient_structured_judge(ContextRelevancyEvaluationResponse)
-
-
-def _escape_json_string_control_chars(s: str) -> str:
-    out = []
-    in_string = False
-    escaped = False
-    for ch in s:
-        if escaped:
-            if ord(ch) < 0x20:
-                # Mangled escape like "\<newline>" — the backslash is already
-                # emitted, so complete it into a legal escape sequence.
-                if ch == "\n":
-                    out.append("n")
-                elif ch == "\r":
-                    out.append("r")
-                elif ch == "\t":
-                    out.append("t")
-                else:
-                    out.append(f"u{ord(ch):04x}")
-            else:
-                out.append(ch)
-            escaped = False
-            continue
-        if ch == "\\":
-            out.append(ch)
-            escaped = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            out.append(ch)
-            continue
-        if in_string and ord(ch) < 0x20:
-            if ch == "\n":
-                out.append("\\n")
-            elif ch == "\r":
-                out.append("\\r")
-            elif ch == "\t":
-                out.append("\\t")
-            else:
-                out.append(f"\\u{ord(ch):04x}")
-            continue
-        if not in_string and ord(ch) < 0x20:
-            continue
-        out.append(ch)
-    return "".join(out)
-
-
-def _drop_incomplete_tail(obj):
-    """Drop trailing dict items from list fields when they lack a key their peers
-    have — the signature of a max_tokens-truncated judge response (e.g. a final
-    statement emitted without its verdict)."""
-    if isinstance(obj, dict):
-        for key, val in obj.items():
-            if isinstance(val, list) and val and all(isinstance(x, dict) for x in val):
-                full_keys = max((set(x.keys()) for x in val), key=len)
-                while val and set(val[-1].keys()) < full_keys:
-                    val.pop()
-                obj[key] = val
-    return obj
-
-
-def _parse_judge_json(raw: str, schema):
-    """Parse possibly-dirty judge JSON into ``schema``.
-
-    Judge models frequently emit JSON that is illegal under strict parsers:
-    wrapped in markdown ``` fences, or with raw control characters (newlines,
-    tabs, \\u0000-\\u001F) inside string values. Pydantic's
-    ``model_validate_json`` has no lenient mode and rejects these outright, so
-    we parse with the stdlib ``json.loads(strict=False)`` (which *permits*
-    control characters inside strings) and validate the resulting object. Only
-    if that still fails do we fall back to the manual control-char escaper.
-    """
-    text = raw.strip()
-    # Strip ```json ... ``` (or bare ``` ... ```) fences if the model added them.
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z0-9]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text).strip()
-    try:
-        return schema.model_validate(json.loads(text, strict=False))
-    except (json.JSONDecodeError, ValueError):
-        pass
-    # Harder breakage (e.g. a stray backslash before a control char): repair
-    # escapes/control chars, then lenient-parse again.
-    repaired = _escape_json_string_control_chars(text)
-    try:
-        return schema.model_validate(json.loads(repaired, strict=False))
-    except (json.JSONDecodeError, ValueError):
-        # Truncated output (hit max_tokens): complete missing closers and parse.
-        obj = parse_partial_json(repaired)
-        try:
-            return schema.model_validate(obj)
-        except ValueError:
-            # Trailing list item truncated mid-object (e.g. a statement with no
-            # verdict yet) — drop incomplete tail items, then validate.
-            return schema.model_validate(_drop_incomplete_tail(obj))
+llm_context_recall_judge = _lenient_structured_judge(ContextRecallEvaluationResponse)
 
 
 async def _ainvoke_with_retry(judge, schema, messages, attempts: int = CONFIG.benchmark.judge.retry_attempts):
@@ -339,7 +269,7 @@ async def _ainvoke_with_retry(judge, schema, messages, attempts: int = CONFIG.be
                 # Dict-schema judges return a plain dict — validate it here.
                 return schema.model_validate(parsed)
             raw = result["raw"].content if result.get("raw") is not None else ""
-            return _parse_judge_json(raw, schema)
+            return utils.parse_judge_json(raw, schema)
         except LengthFinishReasonError as e:
             # Output hit max_tokens (often a guided-decoding whitespace loop
             # after the JSON itself) — salvage the truncated content rather
@@ -347,7 +277,7 @@ async def _ainvoke_with_retry(judge, schema, messages, attempts: int = CONFIG.be
             last_exc = e
             content = e.completion.choices[0].message.content or ""
             try:
-                return _parse_judge_json(content, schema)
+                return utils.parse_judge_json(content, schema)
             except (json.JSONDecodeError, ValueError) as salvage_exc:
                 last_exc = salvage_exc
                 if attempt < attempts - 1:
@@ -408,13 +338,6 @@ async def fetch_chunk_texts(
         return await asyncio.gather(*[_fetch(client, u) for u in chunk_urls])
 
 
-def _format_context(chunks: list[str]) -> str:
-    """Join non-empty chunks into numbered '[Source N]' blocks separated by '---'."""
-    return "\n\n---\n\n".join(
-        f"[Source {i + 1}]\n{c}" for i, c in enumerate(chunks) if c
-    )
-
-
 async def faithfulness_judgment_per_question(
     query: str,
     generated_answer: str,
@@ -427,7 +350,7 @@ async def faithfulness_judgment_per_question(
     if not generated_answer or not context_chunks:
         return float("nan"), 0, 0
 
-    context_text = _format_context(context_chunks)
+    context_text = utils.format_context(context_chunks)
     if not context_text:
         return float("nan"), 0, 0
 
@@ -507,7 +430,7 @@ async def context_relevancy_judgment_per_question(
     if not context_chunks:
         return float("nan"), 0, 0
 
-    context_text = _format_context(context_chunks)
+    context_text = utils.format_context(context_chunks)
     if not context_text:
         return float("nan"), 0, 0
 
@@ -529,6 +452,53 @@ async def context_relevancy_judgment_per_question(
             return relevant / total, relevant, total
         except Exception as e:
             logger.debug(f"Error evaluating context relevancy: {e}")
+            return float("nan"), 0, 0
+
+
+async def context_recall_judgment_per_question(
+    llm_answer: str,
+    context_chunks: list[str],
+    semaphore: asyncio.Semaphore,
+) -> tuple[float, int, int]:
+    """Reference-based context recall. Returns (score, n_supported, n_total).
+
+    Score = reference-answer claims supported by the retrieved context / total claims
+    in the reference answer, i.e. "how much of the gold answer did the retriever
+    actually surface?". This is the recall counterpart to context relevancy (which is
+    precision-flavoured), and unlike the ID-based nDCG/MRR family it needs no
+    ground-truth chunk IDs — so it still yields a retrieval signal on datasets whose
+    rows carry ``chunks: []``. Single LLM call over the joined context, matching the
+    faithfulness/context-relevancy judges.
+
+    Returns (nan, 0, 0) when there is no context, no reference, or the reference
+    carries no factual claims (e.g. a bare cross-reference like "see the annex") —
+    such rows are excluded from the mean rather than scored 0.
+    """
+    if not context_chunks or not llm_answer or not llm_answer.strip():
+        return float("nan"), 0, 0
+
+    context_text = utils.format_context(context_chunks)
+    if not context_text:
+        return float("nan"), 0, 0
+
+    user_msg = f"true_answer: {llm_answer}\n\ncontext:\n{context_text}\n"
+    async with semaphore:
+        try:
+            response = await _ainvoke_with_retry(
+                llm_context_recall_judge,
+                ContextRecallEvaluationResponse,
+                [
+                    {"role": "system", "content": CONTEXT_RECALL_JUDGE_PROMPT_EN},
+                    {"role": "user", "content": user_msg},
+                ],
+            )
+            total = len(response.claims)
+            if total == 0:
+                return float("nan"), 0, 0
+            supported = sum(1 for c in response.claims if c.verdict == "supported")
+            return supported / total, supported, total
+        except Exception as e:
+            logger.debug(f"Error evaluating context recall: {e}")
             return float("nan"), 0, 0
 
 
@@ -720,69 +690,6 @@ FAITHFULNESS_FRACTION = CONFIG.benchmark.faithfulness_fraction
 FAITHFULNESS_SEED = CONFIG.benchmark.faithfulness_seed
 
 
-class Element(TypedDict):
-    question: str
-    llm_answer: str
-    chunks: list[dict]
-
-
-def _load_and_validate_dataset(path: str) -> list[Element]:
-    """Load a (golden) dataset JSON file and validate its schema.
-
-    Required per-row: ``question`` (non-empty str), ``llm_answer`` (str).
-    Optional per-row: ``answerable`` (bool, default True), ``chunks`` (list of
-    objects each with an ``id`` field, default []).
-    Rows without ``chunks`` are still scored on generation/judges; retrieval
-    metrics are skipped for those rows.
-    """
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-
-    if not isinstance(data, list):
-        raise ValueError(f"Dataset {path!r} must be a JSON list of entries.")
-
-    normalized: list[Element] = []
-    n_with_chunks = 0
-    n_answerable = 0
-    n_unanswerable = 0
-    for i, row in enumerate(data):
-        if not isinstance(row, dict):
-            raise ValueError(f"Dataset entry #{i} is not an object.")
-        question = row.get("question")
-        if not isinstance(question, str) or not question.strip():
-            raise ValueError(f"Dataset entry #{i} is missing a non-empty 'question' string.")
-        llm_answer = row.get("llm_answer")
-        if not isinstance(llm_answer, str):
-            raise ValueError(f"Dataset entry #{i} is missing a 'llm_answer' string.")
-        answerable = bool(row.get("answerable", True))
-        chunks = row.get("chunks") or []
-        if not isinstance(chunks, list):
-            raise ValueError(f"Dataset entry #{i} 'chunks' must be a list.")
-        for j, c in enumerate(chunks):
-            if not isinstance(c, dict) or "id" not in c:
-                raise ValueError(
-                    f"Dataset entry #{i} chunk #{j} must be an object with an 'id' field."
-                )
-        if chunks:
-            n_with_chunks += 1
-        if answerable:
-            n_answerable += 1
-        else:
-            n_unanswerable += 1
-        normalized.append({**row, "answerable": answerable, "chunks": chunks})
-
-    logger.info(
-        f"Loaded {len(normalized)} entries from {path} "
-        f"(answerable={n_answerable}, unanswerable={n_unanswerable}, "
-        f"with_ground_truth_chunks={n_with_chunks})"
-    )
-    if n_with_chunks == 0:
-        logger.warning(
-            "No rows contain ground-truth chunks — retrieval metrics will be skipped."
-        )
-    return normalized
-
-
 def _score_breakdown(eval_results, by):
     """Mean answerable-row scores grouped by a metadata column.
 
@@ -804,6 +711,28 @@ def _score_breakdown(eval_results, by):
             "ndcg_mean": round(float(ndcg.mean()), 3) if not ndcg.empty else None,
         }
     return out
+
+
+def _score_breakdown_multi(eval_results, col, sep="|"):
+    """Breakdown for a multi-valued column (e.g. ``source_files``).
+
+    A question can draw on several documents, so its row is counted once per
+    distinct value — i.e. a document's score reflects every question touching it.
+    """
+    if col not in eval_results.columns or eval_results.empty:
+        return {}
+    df = eval_results.copy()
+    df[col] = df[col].fillna("").astype(str).str.split(sep)
+    df = df.explode(col)
+    df = df[df[col].astype(str).str.len() > 0]
+    return _score_breakdown(df, col)
+
+
+async def _judge_ainvoke(prompt: str) -> str:
+    """Async (prompt -> text) adapter over the judge LLM, for utils.resolve_*."""
+    out = await ChatOpenAI(**llm_judge_settings).ainvoke([{"role": "user", "content": prompt}])
+    return out.content
+
 
 
 async def run_single_query(
@@ -861,11 +790,13 @@ async def run_single_query(
     # Fetch retrieved chunk texts once; faithfulness + context relevancy share them.
     chunk_texts = await fetch_chunk_texts(chunk_urls, auth_token, sem)
 
-    refusal, answer_rel, faith, ctx_rel = await asyncio.gather(
+    # Context recall needs a reference answer; with none it self-reports (nan, 0, 0).
+    refusal, answer_rel, faith, ctx_rel, ctx_recall = await asyncio.gather(
         is_refusal(query, response, sem),
         answer_relevancy_judgment_per_question(query, response, sem),
         faithfulness_judgment_per_question(query, response, chunk_texts, sem),
         context_relevancy_judgment_per_question(query, chunk_texts, sem),
+        context_recall_judgment_per_question(reference_answer or "", chunk_texts, sem),
     )
 
     def _ratio(t):
@@ -880,6 +811,7 @@ async def run_single_query(
     result["answer_relevancy"] = _ratio(answer_rel)
     result["faithfulness"] = _ratio(faith)
     result["context_relevancy"] = _ratio(ctx_rel)
+    result["context_recall"] = _ratio(ctx_recall)
     result["chunk_texts"] = chunk_texts
 
     if reference_answer:
@@ -910,25 +842,18 @@ async def run_single_query(
     return result
 
 
-async def _preflight_openrag(base_url: str, timeout: float = 5.0) -> None:
-    """Fail fast if the OpenRAG server is unreachable, before running the full dataset.
+_TAG_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
-    Hits the auth-free ``/health_check`` endpoint with a short timeout. Any HTTP
-    response (even 404/401/500) means the server is *up* and only that matters here;
-    only a transport-level failure (connection refused, DNS, timeout) means it's
-    down. Raising here turns a slow, all-failed run into a ~1s clear error.
+
+def slugify_run_tag(tag: str | None) -> str:
+    """Normalise a free-text run tag into a filename-safe suffix.
+
+    Returns "" when there is no usable tag, so untagged runs keep their historical
+    ``<kind>_<timestamp>.<ext>`` filenames byte-for-byte.
     """
-    url = f"{base_url.rstrip('/')}/health_check"
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(url)
-        logger.info(f"Pre-flight: OpenRAG reachable at {base_url} (HTTP {resp.status_code}).")
-    except httpx.RequestError as e:
-        raise RuntimeError(
-            f"OpenRAG server at {base_url} is not reachable ({type(e).__name__}: {e}). "
-            "Start the instance (e.g. `docker compose up -d`) and retry — aborting now "
-            "instead of running the whole dataset against a down server."
-        ) from e
+    if not tag:
+        return ""
+    return _TAG_UNSAFE_RE.sub("-", str(tag).strip()).strip("-_")[:40]
 
 
 async def main(
@@ -941,15 +866,21 @@ async def main(
     version: str | None = None,
     git_commit: str | None = None,
     no_retrieval: bool = False,
+    retriever_type: str | None = CONFIG.benchmark.retriever_type,
+    tag: str | None = None,
 ):
     run_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    # Report artifacts are named off run_stem; summary["timestamp"] stays a bare
+    # run_ts so the dashboard's strptime parsing (and trend sorting) is unaffected.
+    run_tag = slugify_run_tag(tag)
+    run_stem = f"{run_ts}_{run_tag}" if run_tag else run_ts
     os.makedirs(output_dir, exist_ok=True)
 
     # Fail fast (~1s) if the target is down, rather than grinding through the whole
     # dataset of retrying connection errors before the all-failed guard below.
-    await _preflight_openrag(base_url)
+    await utils.preflight_openrag(base_url)
 
-    eval_dataset = _load_and_validate_dataset(dataset_path)
+    eval_dataset = utils.load_and_validate_dataset(dataset_path)
 
     list_response_answer_reference = eval_dataset if limit is None else eval_dataset[:limit]
 
@@ -972,7 +903,32 @@ async def main(
         for resp_ans_reference in list_response_answer_reference
     ]
 
-    openrag_answer_chunk_ids_l = await tqdm.gather(*tasks, desc="Fetching")
+    # Raw retriever ranking trace (bypasses the LLM/citation filtering — see
+    # fetch_ranked_chunks_openrag). Only fired for answerable rows that actually
+    # carry ground-truth chunks, and gated by the same flag as the ID-based
+    # retrieval metrics. Fired concurrently with the chat-completion calls above
+    # so it doesn't add serial latency to the run.
+    trace_indices = [
+        i
+        for i, r in enumerate(list_response_answer_reference)
+        if not no_retrieval and r.get("answerable", True) and r.get("chunks")
+    ]
+    trace_tasks = [
+        fetch_ranked_chunks_openrag(
+            query=list_response_answer_reference[i]["question"],
+            partition=partition,
+            _base_url=openrag_api_base_url,
+            top_k=CONFIG.benchmark.retrieval_trace_top_k,
+            semaphore=openrag_semaphore,
+        )
+        for i in trace_indices
+    ]
+
+    openrag_answer_chunk_ids_l, raw_ranked_l = await asyncio.gather(
+        tqdm.gather(*tasks, desc="Fetching"),
+        tqdm.gather(*trace_tasks, desc="Fetching raw retrieval ranking") if trace_tasks else asyncio.gather(),
+    )
+    raw_ranked_by_index = dict(zip(trace_indices, raw_ranked_l))
 
     # If not a single OpenRAG query returned a response, there is nothing to score —
     # almost always a systematic problem (wrong partition, bad AUTH_TOKEN, or the
@@ -1019,6 +975,15 @@ async def main(
     # NaN / 0 markers used for rows whose golden entry has no ground-truth chunks.
     ndcg_per_judged_row: list[float] = []
     n_chunks_per_judged_row: list[int] = []
+    # Full-recall (all gold chunks present, citation-filtered) per judged row —
+    # NaN for rows with no ground-truth chunks. Unlike the /search-based
+    # retrieval_trace above, this reflects the actual configured retriever.type
+    # (single/multiQuery/hyde), since it's derived from real chat-completion
+    # sources rather than the retriever-agnostic /search endpoint.
+    full_recall_per_judged_row: list[float] = []
+    # Per-question raw-retriever ranking traces (only rows with ground-truth
+    # chunks and a successful /search fetch get an entry here).
+    retrieval_traces: list[dict] = []
 
 
     for idx, ((openrag_response, openrag_chunk_ids, openrag_chunk_urls, latency, mean_lp, ppl, tokens, token_lps), input_reference) in enumerate(
@@ -1086,9 +1051,23 @@ async def main(
             )
             ndcg_per_judged_row.append(nDCG_score)
             n_chunks_per_judged_row.append(len(gt_chunks))
+            full_recall_per_judged_row.append(
+                1.0 if set(chunk_id_reference) <= set(openrag_chunk_ids) else 0.0
+            )
+
+            question_id = input_reference.get("id", f"idx-{idx}")
+            retrieval_traces.append(
+                utils.build_retrieval_trace(
+                    question_id=question_id,
+                    question=input_reference["question"],
+                    gold_ids=chunk_id_reference,
+                    ranked=raw_ranked_by_index.get(idx),
+                )
+            )
         else:
             ndcg_per_judged_row.append(float("nan"))
             n_chunks_per_judged_row.append(0)
+            full_recall_per_judged_row.append(float("nan"))
 
         gen_metrics = compute_generation_metrics(input_reference["llm_answer"], openrag_response)
         rouge1_list.append(gen_metrics["rouge1"])
@@ -1122,15 +1101,17 @@ async def main(
     ]
 
     # Faithfulness on a random sample only — it's the slowest judge. Context
-    # relevancy (reference-free retriever signal) reuses the same fetched chunk
-    # texts, so it rides on the same sample for free rather than re-fetching.
-    async def _faithfulness_for(question, answer, chunk_urls):
+    # relevancy (reference-free retriever signal) and context recall (reference-based
+    # retriever signal) reuse the same fetched chunk texts, so they ride on the same
+    # sample for free rather than re-fetching.
+    async def _faithfulness_for(question, answer, chunk_urls, reference_answer=""):
         chunk_texts = await fetch_chunk_texts(chunk_urls, auth_token, chunk_fetch_semaphore)
-        faith, ctx_rel = await asyncio.gather(
+        faith, ctx_rel, ctx_recall = await asyncio.gather(
             faithfulness_judgment_per_question(question, answer, chunk_texts, judge_semaphore),
             context_relevancy_judgment_per_question(question, chunk_texts, judge_semaphore),
+            context_recall_judgment_per_question(reference_answer, chunk_texts, judge_semaphore),
         )
-        return faith, ctx_rel
+        return faith, ctx_rel, ctx_recall
 
     rng_faith = random.Random(FAITHFULNESS_SEED)
     n_faith = max(1, int(len(judged_inputs) * FAITHFULNESS_FRACTION)) if judged_inputs else 0
@@ -1140,7 +1121,12 @@ async def main(
         else []
     )
     faithfulness_tasks = [
-        _faithfulness_for(judged_inputs[i]["question"], judged_responses[i], judged_chunk_urls[i])
+        _faithfulness_for(
+            judged_inputs[i]["question"],
+            judged_responses[i],
+            judged_chunk_urls[i],
+            judged_inputs[i]["llm_answer"],
+        )
         for i in faith_indices
     ]
 
@@ -1182,6 +1168,7 @@ async def main(
     # The faithfulness sample bundled (faithfulness, context_relevancy) tuples;
     # split them back out. Both are aligned 1:1 with faith_indices.
     context_relevancy_results = [r[1] for r in faithfulness_results]
+    context_recall_results = [r[2] for r in faithfulness_results]
     faithfulness_results = [r[0] for r in faithfulness_results]
 
     # ===== Aggregate every headline metric exactly once =====
@@ -1198,6 +1185,45 @@ async def main(
 
     has_retrieval = bool(hit_rates)
 
+    # Aggregate the raw-retriever ranking traces (fetched via /search, decoupled
+    # from LLM citation filtering — see fetch_ranked_chunks_openrag). Distinct from
+    # the `retrieval` block above, which is computed off the citation-filtered
+    # chat-completion sources and therefore conflates retrieval quality with
+    # whether the LLM chose to cite a chunk it was given.
+    trace_scored = [t for t in retrieval_traces if not t["fetch_failed"]]
+    trace_n_fetch_failed = len(retrieval_traces) - len(trace_scored)
+    trace_hit_ranks = [t["first_gold_rank"] for t in trace_scored if t["first_gold_rank"] is not None]
+    retrieval_trace_summary = {
+        "top_k": CONFIG.benchmark.retrieval_trace_top_k,
+        "n_scored": len(trace_scored),
+        "n_fetch_failed": trace_n_fetch_failed,
+        "any_hit_rate": _safe_mean([1.0 if t["n_gold_hit"] > 0 else 0.0 for t in trace_scored]),
+        "full_recall_rate": _safe_mean([1.0 if t["n_gold_hit"] == t["n_gold"] else 0.0 for t in trace_scored]),
+        "avg_recall_at_top_k": _safe_mean(
+            [t["n_gold_hit"] / t["n_gold"] for t in trace_scored if t["n_gold"] > 0]
+        ),
+        "avg_missed_gold_count": _safe_mean([len(t["missed_gold_ids"]) for t in trace_scored]),
+        "mean_first_gold_rank": _safe_mean(trace_hit_ranks),
+    }
+
+    # Broken out by how many gold chunks the question needed. Single-chunk vs.
+    # multi-chunk questions can have very different recall profiles — e.g. a
+    # retriever that reliably finds "the one right chunk" but never surfaces a
+    # second/third complementary one will look fine in aggregate hit-rate while
+    # full_recall_rate silently collapses to 0 for every n_gold >= 2 row.
+    by_n_gold: dict[int, dict] = {}
+    for t in trace_scored:
+        by_n_gold.setdefault(t["n_gold"], []).append(t)
+    retrieval_trace_summary["by_n_gold"] = {
+        str(n): {
+            "count": len(rows),
+            "any_hit_rate": _safe_mean([1.0 if r["n_gold_hit"] > 0 else 0.0 for r in rows]),
+            "full_recall_rate": _safe_mean([1.0 if r["n_gold_hit"] == r["n_gold"] else 0.0 for r in rows]),
+            "avg_recall_at_top_k": _safe_mean([r["n_gold_hit"] / r["n_gold"] for r in rows]),
+        }
+        for n, rows in sorted(by_n_gold.items())
+    }
+
     # Per-row typed metadata (gaps 4–5 schema) for score breakdowns + CSV slicing.
     # judged_inputs is aligned 1:1 with the score lists below. Falls back to
     # "unknown" for legacy (v1) datasets that have no metadata block.
@@ -1205,17 +1231,79 @@ async def main(
     row_question_types = [m.get("question_type", "unknown") for m in _row_meta]
     row_difficulties = [m.get("difficulty", "unknown") for m in _row_meta]
 
+    # Source-document facets (parsed from chunk text — works on existing datasets).
+    # row ids also make the per-question CSV joinable back to the dataset.
+    _facets = [utils.file_facets(ji) for ji in judged_inputs]
+    row_ids = [str(ji.get("id", "") or "") for ji in judged_inputs]
+    row_source_files = [f[0] for f in _facets]
+    row_file_formats = [f[1] for f in _facets]
+    row_file_types = [f[2] for f in _facets]
+
+    # Content-domain category. PREFERRED source is the dataset itself
+    # (metadata.source.document_category, written by generate_questions) — baked in at
+    # build time so every run over a dataset slices identically. Only legacy datasets
+    # lacking the field fall back to classifying here.
+    row_doc_categories = [
+        utils.slug((m.get("source") or {}).get("document_category") or "")
+        if (m.get("source") or {}).get("document_category")
+        else ""
+        for m in _row_meta
+    ]
+    if not any(row_doc_categories):
+        _doc_texts: dict[str, str] = {}
+        for ji in judged_inputs:
+            for c in ji.get("chunks") or []:
+                name = utils.filename_of(c)
+                if name and name not in _doc_texts:
+                    _doc_texts[name] = utils.chunk_body(c.get("text") or "")
+        if _doc_texts:
+            logger.info("Dataset has no document_category metadata — classifying here (legacy path).")
+        _doc_categories = await utils.resolve_document_categories(
+            _doc_texts,
+            utils.category_cache_path(partition),
+            _judge_ainvoke,
+            semaphore=judge_semaphore,
+            enabled=CONFIG.benchmark.classify_document_categories,
+            hints=CONFIG.benchmark.document_category_hints,
+            max_labels=CONFIG.benchmark.document_category_max_labels,
+            sample_docs=CONFIG.benchmark.document_category_sample_docs,
+            sample_chars=CONFIG.benchmark.document_category_sample_chars,
+            batch_size=CONFIG.benchmark.document_category_batch_size,
+        )
+        row_doc_categories = []
+        for files in row_source_files:
+            cats = sorted({_doc_categories.get(f, "unknown") for f in files.split("|") if f})
+            row_doc_categories.append(cats[0] if len(cats) == 1 else ("mixed" if cats else "unknown"))
+    row_doc_categories = [c or "unknown" for c in row_doc_categories]
+
+    # Strict numeric-grounding per row, only for value-answer types (NaN otherwise).
+    _value_types = tuple(CONFIG.benchmark.value_answer_types)
+    _rtol, _atol = CONFIG.benchmark.numeric_rel_tol, CONFIG.benchmark.numeric_abs_tol
+    numeric_match_per_row = [
+        utils.numeric_grounding(judged_inputs[i]["llm_answer"], judged_responses[i], _rtol, _atol)
+        if row_question_types[i] in _value_types
+        else float("nan")
+        for i in range(len(judged_inputs))
+    ]
+
     per_row = pd.DataFrame(
         {
+            "id": row_ids,
+            "source_files": row_source_files,
+            "file_format": row_file_formats,
+            "file_type": row_file_types,
+            "document_category": row_doc_categories,
             "completion_evaluation": [s[0] for s in llm_judge_scores],
             "precision_evaluation": [s[1] for s in llm_judge_scores],
             "answer_relevancy": [r[0] for r in answer_relevancy_results],
             "nDCG": ndcg_per_judged_row,
             "n_chunks": n_chunks_per_judged_row,
+            "full_recall": full_recall_per_judged_row,
             "mean_logprob": mean_logprobs,
             "perplexity": perplexities,
             "question_type": row_question_types,
             "difficulty": row_difficulties,
+            "numeric_match": numeric_match_per_row,
         }
     )
     eval_results = per_row[per_row["completion_evaluation"] != JUDGE_ERROR].copy()
@@ -1228,11 +1316,41 @@ async def main(
     score_breakdowns = {
         "by_question_type": _score_breakdown(eval_results, "question_type"),
         "by_difficulty": _score_breakdown(eval_results, "difficulty"),
+        # Source-document facets: which formats / parse categories / individual
+        # documents the RAG performs worst on.
+        "by_file_format": _score_breakdown(eval_results, "file_format"),
+        "by_file_type": _score_breakdown(eval_results, "file_type"),
+        "by_document_category": _score_breakdown(eval_results, "document_category"),
+        "by_source_file": _score_breakdown_multi(eval_results, "source_files"),
+    }
+
+    # Value-answer exact-value scoring: fraction of value-answer rows whose golden
+    # number(s) appear in the response. Empty (n_applicable=0) when the dataset has
+    # no value-answer rows — e.g. any distribution-profile dataset.
+    _va = eval_results[eval_results["question_type"].isin(_value_types)].dropna(subset=["numeric_match"])
+    value_answer_summary = {
+        "types": list(_value_types),
+        "rel_tol": _rtol,
+        "n_applicable": int(len(_va)),
+        "numeric_match_rate": round(float(_va["numeric_match"].mean()), 3) if len(_va) else None,
+        "by_type": {
+            str(t): {
+                "n": int(len(g)),
+                "numeric_match_rate": round(float(g["numeric_match"].mean()), 3),
+            }
+            for t, g in _va.groupby("question_type")
+        },
     }
 
     # Group only the rows that had ground-truth chunks; rows with NaN nDCG are excluded.
     ndcg_scored = eval_results.dropna(subset=["nDCG"])
     avg_ndcg_per_chunk = ndcg_scored.groupby("n_chunks")["nDCG"].mean().round(3).to_dict()
+    # Same grouping, but full-recall rate (all gold chunks present) instead of nDCG —
+    # unlike retrieval_trace.by_n_gold (from /search, retriever.type-agnostic), this
+    # is derived from actual chat-completion sources, so it moves when the deployed
+    # retriever.type (single/multiQuery/hyde) changes.
+    full_recall_scored = eval_results.dropna(subset=["full_recall"])
+    full_recall_by_chunk_count = full_recall_scored.groupby("n_chunks")["full_recall"].mean().round(3).to_dict()
 
     faith_scores = [r[0] for r in faithfulness_results if not math.isnan(r[0])]
     total_supported = sum(r[1] for r in faithfulness_results)
@@ -1246,6 +1364,12 @@ async def main(
     cr_scores = [r[0] for r in context_relevancy_results if not math.isnan(r[0])]
     cr_relevant = sum(r[1] for r in context_relevancy_results)
     cr_total = sum(r[2] for r in context_relevancy_results)
+
+    # Reference-based retriever recall: how much of the gold answer was surfaced.
+    # Needs no ground-truth chunk IDs, so it still reports on chunks:[] datasets.
+    crec_scores = [r[0] for r in context_recall_results if not math.isnan(r[0])]
+    crec_supported = sum(r[1] for r in context_recall_results)
+    crec_total = sum(r[2] for r in context_recall_results)
 
     # Pair each unanswerable refusal verdict with its retrieval metadata (dropping
     # rows where the judge errored). valid_unans keeps the bare verdicts for the
@@ -1297,6 +1421,7 @@ async def main(
             "ndcg_mean": float(ndcg_scored["nDCG"].mean()) if len(ndcg_scored) else None,
             "ndcg_std": float(ndcg_scored["nDCG"].std()) if len(ndcg_scored) else None,
             "ndcg_by_chunk_count": {str(k): float(v) for k, v in avg_ndcg_per_chunk.items()},
+            "full_recall_by_chunk_count": {str(k): float(v) for k, v in full_recall_by_chunk_count.items()},
         },
         "generation": {
             "rouge1": _safe_mean(rouge1_list),
@@ -1330,6 +1455,15 @@ async def main(
             "total_statements": int(cr_total),
             "micro_ratio": (cr_relevant / cr_total) if cr_total > 0 else None,
         },
+        "context_recall": {
+            "mean_per_question": _safe_mean(crec_scores),
+            "n_scored": len(crec_scores),
+            "sample_size": len(faith_indices),
+            "sample_fraction": FAITHFULNESS_FRACTION,
+            "supported_claims": int(crec_supported),
+            "total_claims": int(crec_total),
+            "micro_ratio": (crec_supported / crec_total) if crec_total > 0 else None,
+        },
         "refusal": {
             "unanswerable_total": unanswerable_total,
             "unanswerable_no_response": unanswerable_no_response,
@@ -1360,6 +1494,7 @@ async def main(
             "perplexity_mean": _safe_mean(valid_ppls),
             "perplexity_median": float(np.median(valid_ppls)) if valid_ppls else None,
         },
+        "retrieval_trace": retrieval_trace_summary,
     }
     # Short aliases for the render blocks below.
     R = metrics_summary["retrieval"]
@@ -1367,11 +1502,18 @@ async def main(
     Fa = metrics_summary["faithfulness"]
     Ar = metrics_summary["answer_relevancy"]
     Cr = metrics_summary["context_relevancy"]
+    Crec = metrics_summary["context_recall"]
     Rf = metrics_summary["refusal"]
     La = metrics_summary["latency"]
     Lp = metrics_summary["logprobs"]
+    Rt = metrics_summary["retrieval_trace"]
 
     # ===== Console digest (renders from metrics_summary) =====
+    print(
+        f"Retriever type (label only, not enforced): {retriever_type}"
+        if retriever_type
+        else "Retriever type: unrecorded (pass --retriever-type to label this run)"
+    )
     if has_retrieval:
         print(f"Average Hit Rate: {round(R['hit_rate'], 3)}")
         print(f"Average MRR: {round(R['mrr'], 3)}")
@@ -1387,6 +1529,24 @@ async def main(
     else:
         print("Retrieval metrics: n/a (no ground-truth chunks in dataset)")
 
+    print(f"\n--- Raw Retriever Ranking (via /search, top_k={Rt['top_k']}, bypasses LLM citation filtering) ---")
+    if Rt["n_scored"]:
+        print(f"Scored: {Rt['n_scored']}  (fetch failed: {Rt['n_fetch_failed']})")
+        print(f"Any-gold-hit rate:  {Rt['any_hit_rate']:.3f}  (>=1 gold chunk somewhere in top-{Rt['top_k']})")
+        print(f"Full-recall rate:   {Rt['full_recall_rate']:.3f}  (ALL gold chunks found in top-{Rt['top_k']})")
+        print(f"Avg recall@top_k:   {Rt['avg_recall_at_top_k']:.3f}")
+        print(f"Avg missed gold chunks/question: {Rt['avg_missed_gold_count']:.3f}")
+        if Rt["mean_first_gold_rank"] is not None:
+            print(f"Mean rank of first gold hit: {Rt['mean_first_gold_rank']:.2f}")
+        if Rt["by_n_gold"]:
+            print("By gold-chunk count (does recall collapse on multi-chunk questions?):")
+            for n, row in Rt["by_n_gold"].items():
+                print(
+                    f"  n_gold={n}: count={row['count']}  any_hit={row['any_hit_rate']:.3f}  "
+                    f"full_recall={row['full_recall_rate']:.3f}  avg_recall={row['avg_recall_at_top_k']:.3f}"
+                )
+    else:
+        print("n/a (no ground-truth chunks, or --no-retrieval)")
 
     print("\n--- Generation Metrics ---")
     print(f"ROUGE-1: {_fmt(G['rouge1'])}")
@@ -1400,6 +1560,8 @@ async def main(
         print(f"Average nDCG: {round(R['ndcg_mean'], 3)} +/- {R['ndcg_std']:.3f}")
     else:
         print("\nAverage nDCG: n/a (no ground-truth chunks scored)")
+    if len(full_recall_scored):
+        print(f"Full-recall rate per chunk count (citation-filtered, sensitive to retriever.type): {full_recall_by_chunk_count}")
 
     print(f"\n--- Faithfulness ({len(faith_indices)}/{len(judged_inputs)} sampled, {FAITHFULNESS_FRACTION:.0%}) ---")
     if faith_scores:
@@ -1430,6 +1592,16 @@ async def main(
         print(f"Micro context relevancy (statements): {cr_relevant}/{cr_total} = {Cr['micro_ratio']:.3f}")
     else:
         print("Micro context relevancy (statements): n/a (no statements extracted)")
+
+    print(f"\n--- Context Recall (reference-based, {len(faith_indices)}/{len(judged_inputs)} sampled, {FAITHFULNESS_FRACTION:.0%}) ---")
+    if crec_scores:
+        print(f"Mean per-question context recall: {Crec['mean_per_question']:.3f}  (n={Crec['n_scored']})")
+    else:
+        print("Mean per-question context recall: n/a (no reference claims / no context)")
+    if crec_total > 0:
+        print(f"Micro context recall (claims): {crec_supported}/{crec_total} = {Crec['micro_ratio']:.3f}")
+    else:
+        print("Micro context recall (claims): n/a (no claims extracted)")
 
     # --- Refusal / abstention slice ---
     print("\n--- Refusal / Abstention ---")
@@ -1497,7 +1669,7 @@ async def main(
             print(f"  (errors: {n_errors})")
 
         os.makedirs(output_dir, exist_ok=True)
-        labels_path = os.path.join(output_dir, f"response_labels_{run_ts}.csv")
+        labels_path = os.path.join(output_dir, f"response_labels_{run_stem}.csv")
         labels_dump = [
             {
                 "question": judged_inputs[i]["question"],
@@ -1516,6 +1688,15 @@ async def main(
         print("Response labels: no valid labels (all judge calls errored).")
 
     print("\n", "-" * 50, "\n")
+    if value_answer_summary["n_applicable"]:
+        print(f"\n--- Value-answer exact match (rel_tol={value_answer_summary['rel_tol']}) ---")
+        print(
+            f"Numeric grounding: {value_answer_summary['numeric_match_rate']} "
+            f"over {value_answer_summary['n_applicable']} value-answer rows"
+        )
+        for _t, _s in value_answer_summary["by_type"].items():
+            print(f"  {_t}: {_s['numeric_match_rate']} (n={_s['n']})")
+
     print(f"--- CoT Evaluation ({COT_AUDIT_FRACTION:.0%} random sample, seed={COT_AUDIT_SEED}) ---")
     print(f"Sample size: {len(audit_indices)} of {len(judged_inputs)} questions")
     valid_cot = [(i, cot) for i, cot in zip(audit_indices, cot_results) if cot[0] != JUDGE_ERROR]
@@ -1540,7 +1721,7 @@ async def main(
             for i, cot in valid_cot
         ]
         os.makedirs(output_dir, exist_ok=True)
-        audit_path = os.path.join(output_dir, f"cot_audit_{run_ts}.csv")
+        audit_path = os.path.join(output_dir, f"cot_audit_{run_stem}.csv")
         pd.DataFrame(audit_dump).to_csv(audit_path, index=False)
         print(f"CoT evaluation details written to {audit_path}")
     elif audit_indices:
@@ -1664,6 +1845,9 @@ async def main(
     # aggregate; the JSON family blocks below reference it directly.
     summary_dict = {
         "timestamp": run_ts,
+        # Free-text run label (None for untagged runs). Purely additive: readers
+        # that don't know about it are unaffected.
+        "tag": run_tag or None,
         "config": {
             # Version-comparison identity: which OpenRAG build produced these numbers.
             # Populated by orchestrator.py; None for plain (non-orchestrated) runs.
@@ -1671,6 +1855,9 @@ async def main(
             "version": version,
             "git_commit": git_commit,
             "no_retrieval": no_retrieval,
+            # Label only — see BenchmarkConfig.retriever_type. Not verified against
+            # the target instance's actual RETRIEVER_TYPE.
+            "retriever_type": retriever_type,
             "partition": partition,
             "base_url": openrag_api_base_url,
             "dataset_path": dataset_path,
@@ -1684,8 +1871,10 @@ async def main(
             "judge_base_url": _judge_base_url,
         },
         "retrieval": metrics_summary["retrieval"],
+        "retrieval_trace": metrics_summary["retrieval_trace"],
         "generation": metrics_summary["generation"],
         "breakdowns": score_breakdowns,
+        "value_answer": value_answer_summary,
         "judge_scores": {
             "completion_mean": float(eval_results["completion_evaluation"].mean()) if len(eval_results) else None,
             "precision_mean": float(eval_results["precision_evaluation"].mean()) if len(eval_results) else None,
@@ -1699,6 +1888,7 @@ async def main(
         "faithfulness": metrics_summary["faithfulness"],
         "answer_relevancy": metrics_summary["answer_relevancy"],
         "context_relevancy": metrics_summary["context_relevancy"],
+        "context_recall": metrics_summary["context_recall"],
         "refusal": metrics_summary["refusal"],
         "latency": metrics_summary["latency"],
         "logprobs": metrics_summary["logprobs"],
@@ -1717,18 +1907,65 @@ async def main(
         },
         "calibration": calib_summary,
         "artifacts": {
-            "per_question_csv": f"eval_{run_ts}.csv",
-            "labels_csv": f"response_labels_{run_ts}.csv" if label_results else None,
-            "cot_audit_csv": f"cot_audit_{run_ts}.csv" if any(c[0] != JUDGE_ERROR for c in cot_results) else None,
-            "logprobs_jsonl": f"logprobs_{run_ts}.jsonl" if any(token_sequences) else None,
-            "summary_txt": f"eval_{run_ts}.txt",
+            "per_question_csv": f"eval_{run_stem}.csv",
+            "labels_csv": f"response_labels_{run_stem}.csv" if label_results else None,
+            "cot_audit_csv": f"cot_audit_{run_stem}.csv" if any(c[0] != JUDGE_ERROR for c in cot_results) else None,
+            "logprobs_jsonl": f"logprobs_{run_stem}.jsonl" if any(token_sequences) else None,
+            "retrieval_trace_jsonl": f"retrieval_trace_{run_stem}.jsonl" if retrieval_traces else None,
+            "retrieval_trace_csv": f"retrieval_trace_{run_stem}.csv" if retrieval_traces else None,
+            "summary_txt": f"eval_{run_stem}.txt",
         },
     }
+
+    # Per-question raw-retriever ranking trace: one JSON object per line (full
+    # ranked list + gold/miss detail) plus a flattened long-format CSV (one row
+    # per retrieved rank) for quick spreadsheet inspection. Lets you open any
+    # question and see exactly how the retriever ranked it and which ground-truth
+    # chunks, if any, never showed up at all.
+    if retrieval_traces:
+        trace_jsonl_path = os.path.join(output_dir, f"retrieval_trace_{run_stem}.jsonl")
+        with open(trace_jsonl_path, "w", encoding="utf-8") as f:
+            for t in retrieval_traces:
+                f.write(json.dumps(t, ensure_ascii=False) + "\n")
+        print(f"Per-question retrieval ranking trace written to {trace_jsonl_path}")
+
+        trace_csv_rows = []
+        for t in retrieval_traces:
+            if t["fetch_failed"]:
+                trace_csv_rows.append(
+                    {
+                        "question_id": t["question_id"],
+                        "question": t["question"],
+                        "rank": None,
+                        "chunk_id": None,
+                        "file_id": None,
+                        "is_gold": None,
+                        "snippet": "FETCH_FAILED",
+                        "missed_gold_ids": ";".join(t["missed_gold_ids"]),
+                    }
+                )
+                continue
+            for r in t["retrieved"]:
+                trace_csv_rows.append(
+                    {
+                        "question_id": t["question_id"],
+                        "question": t["question"],
+                        "rank": r["rank"],
+                        "chunk_id": r["chunk_id"],
+                        "file_id": r["file_id"],
+                        "is_gold": r["is_gold"],
+                        "snippet": r["snippet"],
+                        "missed_gold_ids": ";".join(t["missed_gold_ids"]),
+                    }
+                )
+        trace_csv_path = os.path.join(output_dir, f"retrieval_trace_{run_stem}.csv")
+        pd.DataFrame(trace_csv_rows).to_csv(trace_csv_path, index=False)
+        print(f"Per-rank retrieval ranking trace written to {trace_csv_path}")
 
     # Per-question token-level logprob dump (one JSON object per line, aligned with
     # judged_inputs). Drives the dashboard's per-question logprob explorer.
     if any(token_sequences):
-        logprobs_path = os.path.join(output_dir, f"logprobs_{run_ts}.jsonl")
+        logprobs_path = os.path.join(output_dir, f"logprobs_{run_stem}.jsonl")
         with open(logprobs_path, "w", encoding="utf-8") as f:
             for i, inp in enumerate(judged_inputs):
                 tokens = token_sequences[i] if i < len(token_sequences) else []
@@ -1745,13 +1982,20 @@ async def main(
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         print(f"Per-question token logprobs written to {logprobs_path}")
 
-    json_path = os.path.join(output_dir, f"eval_{run_ts}.json")
+    json_path = os.path.join(output_dir, f"eval_{run_stem}.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(summary_dict, f, indent=2, ensure_ascii=False)
     print(f"\nStructured summary written to {json_path}")
 
+    by_n_gold_lines = [
+        f"  n_gold={n}: count={row['count']}  any_hit={row['any_hit_rate']:.3f}  "
+        f"full_recall={row['full_recall_rate']:.3f}  avg_recall={row['avg_recall_at_top_k']:.3f}"
+        for n, row in Rt["by_n_gold"].items()
+    ] if Rt["by_n_gold"] else []
+
     summary_lines = [
         "==== Evaluation Report ====",
+        f"Retriever type (label only, not enforced): {retriever_type}" if retriever_type else "Retriever type: unrecorded",
         f"Average Hit Rate: {round(R['hit_rate'], 3) if R['hit_rate'] is not None else 'n/a'}",
         f"Average MRR: {round(R['mrr'], 3) if R['mrr'] is not None else 'n/a'}",
         f"Average Recall: {round(R['recall'], 3) if R['recall'] is not None else 'n/a'}",
@@ -1765,6 +2009,18 @@ async def main(
         f"nDCG@10: {_fmt(R['ndcg_at_10'])}",
         f"Average nDCG per chunk count: {avg_ndcg_per_chunk}" if len(ndcg_scored) else "Average nDCG per chunk count: n/a",
         f"Average nDCG: {round(R['ndcg_mean'], 3)} +/- {R['ndcg_std']:.3f}" if len(ndcg_scored) else "Average nDCG: n/a",
+        f"Full-recall rate per chunk count (citation-filtered, sensitive to retriever.type): {full_recall_by_chunk_count}" if len(full_recall_scored) else "Full-recall rate per chunk count: n/a",
+        "",
+        f"--- Raw Retriever Ranking (via /search, top_k={Rt['top_k']}, bypasses LLM citation filtering) ---",
+        f"Scored: {Rt['n_scored']} (fetch failed: {Rt['n_fetch_failed']})" if Rt["n_scored"] else "n/a (no ground-truth chunks, or --no-retrieval)",
+        f"Any-gold-hit rate: {_fmt(Rt['any_hit_rate'])}" if Rt["n_scored"] else "Any-gold-hit rate: n/a",
+        f"Full-recall rate: {_fmt(Rt['full_recall_rate'])}" if Rt["n_scored"] else "Full-recall rate: n/a",
+        f"Avg recall@top_k: {_fmt(Rt['avg_recall_at_top_k'])}" if Rt["n_scored"] else "Avg recall@top_k: n/a",
+        f"Avg missed gold chunks/question: {_fmt(Rt['avg_missed_gold_count'])}" if Rt["n_scored"] else "Avg missed gold chunks/question: n/a",
+        f"Mean rank of first gold hit: {Rt['mean_first_gold_rank']:.2f}"
+        if Rt["n_scored"] and Rt["mean_first_gold_rank"] is not None
+        else "Mean rank of first gold hit: n/a",
+        *(["By gold-chunk count:"] + by_n_gold_lines if by_n_gold_lines else []),
         "",
         "--- Generation Metrics ---",
         f"ROUGE-1: {_fmt(G['rouge1'])}",
@@ -1772,6 +2028,20 @@ async def main(
         f"ROUGE-L: {_fmt(G['rougeL'])}",
         f"BLEU: {_fmt(G['bleu'])}",
         f"METEOR: {_fmt(G['meteor'])}",
+        *(
+            [
+                "",
+                f"--- Value-answer exact match (rel_tol={value_answer_summary['rel_tol']}) ---",
+                f"Numeric grounding: {value_answer_summary['numeric_match_rate']} "
+                f"over {value_answer_summary['n_applicable']} value-answer rows",
+            ]
+            + [
+                f"  {t}: {s['numeric_match_rate']} (n={s['n']})"
+                for t, s in value_answer_summary["by_type"].items()
+            ]
+            if value_answer_summary["n_applicable"]
+            else []
+        ),
         "",
         f"--- Faithfulness ({len(faith_indices)}/{len(judged_inputs)} sampled, {FAITHFULNESS_FRACTION:.0%}) ---",
         f"Mean per-question faithfulness: {Fa['mean_per_question']:.3f} (n={Fa['n_scored']})" if faith_scores else "Mean per-question faithfulness: n/a",
@@ -1784,6 +2054,10 @@ async def main(
         f"--- Context Relevancy (reference-free, {len(faith_indices)}/{len(judged_inputs)} sampled, {FAITHFULNESS_FRACTION:.0%}) ---",
         f"Mean per-question context relevancy: {Cr['mean_per_question']:.3f} (n={Cr['n_scored']})" if cr_scores else "Mean per-question context relevancy: n/a",
         f"Micro context relevancy (statements): {cr_relevant}/{cr_total} = {Cr['micro_ratio']:.3f}" if cr_total > 0 else "Micro context relevancy: n/a",
+        "",
+        f"--- Context Recall (reference-based, {len(faith_indices)}/{len(judged_inputs)} sampled, {FAITHFULNESS_FRACTION:.0%}) ---",
+        f"Mean per-question context recall: {Crec['mean_per_question']:.3f} (n={Crec['n_scored']})" if crec_scores else "Mean per-question context recall: n/a",
+        f"Micro context recall (claims): {crec_supported}/{crec_total} = {Crec['micro_ratio']:.3f}" if crec_total > 0 else "Micro context recall: n/a",
         "",
         "--- Refusal / Abstention ---",
         f"Unanswerable questions: {unanswerable_total}",
@@ -1815,12 +2089,12 @@ async def main(
         f"Average: {eval_results['precision_evaluation'].mean():.3f}",
     ]
 
-    txt_path = os.path.join(output_dir, f"eval_{run_ts}.txt")
+    txt_path = os.path.join(output_dir, f"eval_{run_stem}.txt")
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write("\n".join(summary_lines))
     print(f"\nSummary report written to {txt_path}")
 
-    csv_path = os.path.join(output_dir, f"eval_{run_ts}.csv")
+    csv_path = os.path.join(output_dir, f"eval_{run_stem}.csv")
     eval_results.to_csv(csv_path, index=False)
     print(f"Per-question scores written to {csv_path}")
 
@@ -1836,6 +2110,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output-dir", default=CONFIG.common.output_dir, help="Directory for report artifacts")
     parser.add_argument("--limit", type=int, default=CONFIG.benchmark.limit, help="Limit dataset to N entries (debug)")
+    parser.add_argument(
+        "--tag",
+        default=os.environ.get("EVAL_RUN_TAG"),
+        help=(
+            "Optional label appended to report filenames "
+            "(eval_<ts>_<tag>.csv) so special runs are easy to find. "
+            "Env fallback: EVAL_RUN_TAG. Omit for the historical timestamp-only names."
+        ),
+    )
     parser.add_argument("--run-id", default=None, help="Unique run identifier (set by orchestrator.py for version comparison)")
     parser.add_argument("--version", default=None, help="Git tag/branch/commit of the OpenRAG build under evaluation")
     parser.add_argument("--git-commit", default=None, help="Resolved git commit SHA of the OpenRAG build under evaluation")
@@ -1844,6 +2127,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip ID-based retrieval metrics even if the dataset has ground-truth chunks "
         "(generation + judges still run). Use when chunk IDs don't match the evaluated index.",
+    )
+    parser.add_argument(
+        "--retriever-type",
+        choices=["single", "multiQuery", "hyde"],
+        default=CONFIG.benchmark.retriever_type,
+        help="Which OpenRAG retriever.type the target instance is running (single/multiQuery/hyde). "
+        "LABEL ONLY for provenance in the report — this does NOT set RETRIEVER_TYPE on the target "
+        "or restart anything; you still have to configure and recreate the target instance yourself "
+        "for the run to actually exercise that strategy. Lets runs comparing strategies self-document "
+        "instead of relying on memory of which .env was live for which run.",
     )
     parser.add_argument(
         "--ablation",
@@ -1871,6 +2164,8 @@ if __name__ == "__main__":
             version=args.version,
             git_commit=args.git_commit,
             no_retrieval=args.no_retrieval,
+            retriever_type=args.retriever_type,
+            tag=args.tag,
         )
     )
 

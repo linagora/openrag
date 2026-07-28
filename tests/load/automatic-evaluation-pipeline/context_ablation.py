@@ -20,9 +20,10 @@ import os
 import random
 
 import pandas as pd
+import utils
 
 # Reuse the exact with-context retrieval path the benchmark uses.
-from benchmark import _load_and_validate_dataset, retrieve_response_and_docs_openrag
+from benchmark import retrieve_response_and_docs_openrag
 from config import CONFIG
 from dotenv import load_dotenv
 from loguru import logger
@@ -61,7 +62,7 @@ async def main(
     limit: int = CONFIG.ablation.limit,
 ):
     os.makedirs(output_dir, exist_ok=True)
-    dataset = _load_and_validate_dataset(dataset_path)
+    dataset = utils.load_and_validate_dataset(dataset_path)
 
     # 1. Filter the dataset first
     filtered_dataset = [r for r in dataset if r.get("answerable", True)]

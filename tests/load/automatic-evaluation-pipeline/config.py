@@ -63,10 +63,53 @@ class BenchmarkConfig:
     faithfulness_fraction: float = 0.5
     faithfulness_seed: int = 42
 
+    # Document-category (content domain) breakdown — "research_paper", "hr_policy",
+    # "support_documentation", "financial_filing", … The taxonomy is DISCOVERED from
+    # the corpus at runtime rather than hardcoded, so new domains appear on their own
+    # instead of being forced into a fixed enum. Unambiguous filename patterns
+    # (arXiv id, SEC filing code, chapter_N) are matched for free; the rest are
+    # classified in batches by the judge LLM (~8s one-time on a 156-doc corpus).
+    # Taxonomy + assignments are cached to `document_categories.json` next to the
+    # dataset: repeat runs cost nothing, and the file can be hand-edited to correct a
+    # label (or deleted to re-discover).
+    classify_document_categories: bool = True
+    # Optional steer for the discovery pass — examples only, NOT a closed list.
+    # Leave empty for a fully data-driven taxonomy.
+    document_category_hints: tuple[str, ...] = ()
+    document_category_max_labels: int = 12
+    document_category_sample_docs: int = 40
+    document_category_sample_chars: int = 1200
+    document_category_batch_size: int = 10
+
+    # Exact-value (numeric-grounding) scoring for capability-suite value-answer
+    # question types. Complements the LLM judge with a strict check that every
+    # number in the golden answer appears in the response (within tolerance). Inert
+    # for datasets whose rows aren't these types (e.g. the distribution profile).
+    value_answer_types: tuple[str, ...] = ("table_lookup", "numerical_reasoning")
+    numeric_rel_tol: float = 0.01
+    numeric_abs_tol: float = 1e-9
+
     # Debug: cap dataset to N entries (None = all)
     limit: int | None = None
     # Questions sampled for the ablation when run via `benchmark.py --ablation`
     ablation_limit: int = 5
+
+    # Raw retriever ranking trace: for every answerable row with ground-truth
+    # chunks, hits OpenRAG's /search endpoint directly (bypassing the LLM and
+    # its citation filtering) to record the retriever's actual ranked output.
+    # Written to retrieval_trace_<ts>.jsonl / .csv. Gated by the same
+    # --no-retrieval flag as the ID-based retrieval metrics.
+    retrieval_trace_top_k: int = 10
+    retrieval_trace_snippet_chars: int = 240
+
+    # Which OpenRAG retriever.type (single/multiQuery/hyde) the target instance is
+    # believed to be running. LABEL ONLY — the benchmark has no way to change or
+    # verify the deployed instance's actual config; setting this does not touch
+    # RETRIEVER_TYPE on the target. It exists so runs comparing strategies (e.g.
+    # single vs multiQuery) are self-documenting instead of relying on the
+    # operator to remember which .env was live for which run. None = unrecorded
+    # (legacy runs, or runs where the strategy wasn't tracked).
+    retriever_type: Literal["single", "multiQuery", "hyde"] | None = None
 
 
 @dataclass
@@ -154,11 +197,77 @@ class TypingConfig:
 
 
 @dataclass
+class ChunkFilterConfig:
+    """Drop low-information chunks before embedding/clustering/sampling.
+
+    Bibliographies, acknowledgements and copyright boilerplate yield metadata trivia
+    ("which authors wrote X?") that tests nothing about retrieval quality, and they
+    skew the clusters. Deterministic and cheap — no LLM call. See gap (6) in the
+    eval review.
+    """
+
+    enabled: bool = True
+    # Minimum body length (after stripping the [CONTEXT] preamble and markers).
+    min_chars: int = 200
+    # Boilerplate when >= this fraction of the body sits under a References /
+    # Acknowledgements / Conflict-of-Interest style heading.
+    boilerplate_fraction: float = 0.5
+    # Bibliography at this many citation-entry LINES ("[1] A. Cayley, ...").
+    # Line-shaped on purpose: bare "[1]" also occurs inside maths formulae.
+    min_citation_lines: int = 3
+
+
+@dataclass
+class CapabilitySuiteConfig:
+    """Second generation profile: a fixed-count *capability suite* (vs the default
+    cluster + type-distribution profile). Selected via ``question_gen.profile``.
+
+    Instead of "N per cluster from a type distribution", it generates a target
+    number of questions PER CAPABILITY, drawing from capability-appropriate chunks
+    (tables for table_lookup, number-rich for numerical_reasoning, distinct files
+    for cross_document_reasoning, many chunks for long_context_retrieval, …).
+    """
+
+    # Default target per capability (user-configurable, hence the name).
+    per_category: int = 50
+    # The 7 feasible capabilities. Remove one to skip it entirely.
+    enabled_categories: tuple[str, ...] = (
+        "table_lookup",
+        "multi_hop_retrieval",
+        "cross_document_reasoning",
+        "citation_grounding",
+        "unanswerable",
+        "long_context_retrieval",
+        "numerical_reasoning",
+    )
+    # Per-capability count overrides; anything not listed uses ``per_category``.
+    # e.g. {"table_lookup": 20, "unanswerable": 0} — 0 disables that one.
+    count_overrides: dict[str, int] = field(default_factory=dict)
+
+    # Loop-until-count controls: over-generate each round to absorb critic/gate
+    # rejections, and cap the number of rounds so a hard-to-fill capability
+    # (e.g. no table chunks) can't loop forever.
+    oversample: float = 1.4
+    max_rounds: int = 8
+
+    # long_context_retrieval sampling breadth (answer must span many chunks).
+    long_context_min_chunks: int = 5
+    long_context_max_chunks: int = 10
+    # Min numeric tokens for a chunk to qualify for numerical_reasoning.
+    numeric_min_tokens: int = 6
+
+
+@dataclass
 class QuestionGenConfig:
     # Dataset item schema version + generation-prompt version, stamped into
     # each item's metadata.generation block and the sidecar manifest.
     schema_version: str = "2.0"
-    prompt_version: str = "qgen-v2"
+    prompt_version: str = "qgen-v3"
+
+    # Generation profile: "distribution" (default — cluster + type distribution)
+    # or "capability_suite" (fixed count per capability). Kept side-by-side so a
+    # user can switch between them; neither overrides the other.
+    profile: Literal["distribution", "capability_suite"] = "distribution"
 
     # Generation-model sampling
     temperature: float = 0.2
@@ -187,9 +296,24 @@ class QuestionGenConfig:
     n_questions_per_cluster: int = 2
     n_unanswerable_per_cluster: int = 1
 
+    # Document content-domain classification, baked into each item's
+    # metadata.source.document_category at build time so every benchmark run over the
+    # dataset slices on identical labels. Taxonomy is DISCOVERED from the corpus at
+    # runtime (never hardcoded); unambiguous filenames are matched free, the rest are
+    # classified in batches and cached in .doc_categories/<partition>.json.
+    classify_document_categories: bool = True
+    # Optional steer for discovery — examples only, NOT a closed list.
+    document_category_hints: tuple[str, ...] = ()
+    document_category_max_labels: int = 12
+    document_category_sample_docs: int = 40
+    document_category_sample_chars: int = 1200
+    document_category_batch_size: int = 10
+
     clustering: ClusteringConfig = field(default_factory=ClusteringConfig)
     filtration: FiltrationConfig = field(default_factory=FiltrationConfig)
     typing: TypingConfig = field(default_factory=TypingConfig)
+    chunk_filter: ChunkFilterConfig = field(default_factory=ChunkFilterConfig)
+    capability_suite: CapabilitySuiteConfig = field(default_factory=CapabilitySuiteConfig)
 
 
 @dataclass

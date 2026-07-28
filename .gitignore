@@ -114,3 +114,8 @@ tests/load/automatic-evaluation-pipeline/dataset.manifest.json
 tests/load/automatic-evaluation-pipeline/golden_uploads/
 tests/load/automatic-evaluation-pipeline/pdf_files/
 tests/load/automatic-evaluation-pipeline/reports/
+# Named/variant datasets, backups, and one-off investigation artifacts (data, not code)
+tests/load/automatic-evaluation-pipeline/dataset_*.json
+tests/load/automatic-evaluation-pipeline/*.bak-*
+tests/load/automatic-evaluation-pipeline/*investigation*
+tests/load/automatic-evaluation-pipeline/*INVESTIGATION*

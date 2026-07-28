@@ -1,3 +1,5 @@
+name: openrag-hex-aditya
+
 include:
   - ${MILVUS_COMPOSE:-milvus/milvus.yaml}
   - ${CHAINLIT_DATALAYER_COMPOSE:-../../extern/dummy.yaml}

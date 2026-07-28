@@ -552,7 +552,12 @@ def main() -> int:
         # collision-proof regardless of what each version's compose declares.
         all_services = list_compose_services(versions_repo, compose_flags, cenv)
         override_path = run_dir / "ports-override.yaml"
-        write_ports_override(override_path, all_services, services)
+        # Only the API-serving service(s) should publish on the host; other requested
+        # services (reranker, vllm-gpu, …) are reached over the internal compose
+        # network only. Passing e.g. --service reranker alongside --service openrag
+        # must not make both claim the same host port.
+        api_services = [s for s in services if s in ("openrag", "openrag-cpu")]
+        write_ports_override(override_path, all_services, api_services)
         compose_flags += ["-f", str(override_path)]
         log(f"Publishing only the API port {app_port} (all other host ports stripped)")
 
@@ -646,6 +651,11 @@ def main() -> int:
             bench_cmd += ["--limit", str(args.limit)]
         if args.no_retrieval:
             bench_cmd += ["--no-retrieval"]
+        # Auto-label the run with whatever retriever.type this deploy was actually
+        # configured with via --env, so it's self-documenting in the eval JSON/
+        # dashboard rather than only living in run_config.json's env_overrides.
+        if overrides.get("RETRIEVER_TYPE") in ("single", "multiQuery", "hyde"):
+            bench_cmd += ["--retriever-type", overrides["RETRIEVER_TYPE"]]
         run(bench_cmd, cwd=REPO_DIR, env=seval)
 
         log(f"=== Run {run_id} complete -> {run_dir} ===")

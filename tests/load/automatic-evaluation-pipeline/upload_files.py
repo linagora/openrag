@@ -395,21 +395,23 @@ def run_score_analysis():
 
 
 # ================= MAIN =================
-def main(partition: str = PARTITION, max_files: int | None = None):
+def main(partition: str = PARTITION, max_files: int | None = None, dir_path: Path | str | None = None):
     check_api(BASE_URL)
 
-    if not DIR_PATH.is_dir():
-        logger.error(f"Directory not found: {DIR_PATH}")
+    dir_path = Path(dir_path).resolve() if dir_path else DIR_PATH
+
+    if not dir_path.is_dir():
+        logger.error(f"Directory not found: {dir_path}")
         return
 
     # Collect the corpus, optionally capping how many files are ingested. None or a
     # negative limit means "all files available"; 0 means none. Sorted so the same
     # subset is taken deterministically across runs.
-    all_files = sorted(p for p in DIR_PATH.glob("**/*") if p.is_file())
+    all_files = sorted(p for p in dir_path.glob("**/*") if p.is_file())
     selected = all_files if max_files is None or max_files < 0 else all_files[:max_files]
     capped = max_files is not None and 0 <= max_files < len(all_files)
     logger.info(
-        f"Uploading {len(selected)} of {len(all_files)} file(s) from {DIR_PATH}"
+        f"Uploading {len(selected)} of {len(all_files)} file(s) from {dir_path}"
         + (f" (capped at max_files={max_files})" if capped else " (all available)")
     )
 
@@ -472,5 +474,10 @@ if __name__ == "__main__":
         default=int(_env_max) if _env_max else None,
         help="Max number of files to ingest (default: all available; env UPLOAD_MAX_FILES).",
     )
+    parser.add_argument(
+        "--path",
+        default=None,
+        help=f"Directory to upload files from (default: {DIR_PATH}; env UPLOAD_DIR).",
+    )
     args = parser.parse_args()
-    main(partition=args.partition, max_files=args.max_files)
+    main(partition=args.partition, max_files=args.max_files, dir_path=args.path)

@@ -97,6 +97,24 @@ class ContextRelevancyEvaluationResponse(BaseModel):
     )
 
 
+class ContextRecallEvaluationResponse(BaseModel):
+    """Claims extracted from the REFERENCE answer, each judged supported/unsupported by the retrieved context.
+
+    The recall counterpart to ContextRelevancyEvaluationResponse: relevancy asks how
+    much of the retrieved context was useful (precision-flavoured), recall asks how
+    much of the reference answer the retriever actually surfaced.
+    """
+
+    claims: list[ClaimVerdict] = Field(
+        default_factory=list,
+        description=(
+            "At most 12 atomic claims from the reference answer with verdicts. "
+            "Empty if the reference carries no factual content."
+        ),
+        max_length=12,
+    )
+
+
 RESPONSE_LABELS = ("Fully Correct", "Incomplete", "Contradictory")
 
 

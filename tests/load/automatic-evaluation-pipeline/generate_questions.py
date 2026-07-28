@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import math
 import os
 import random
 import re
@@ -13,11 +14,13 @@ import hdbscan
 import httpx
 import numpy as np
 import umap.umap_ as umap
+import utils
 from config import CONFIG
 from dotenv import load_dotenv
 from evaluation_prompts import (
     ANSWER_TMPL_EN,
     ANSWERABLE_CRITIC_PROMPT_EN,
+    CAPABILITY_QUESTION_INSTRUCTIONS_EN,
     GENERIC_QUESTION_INSTRUCTION_EN,
     QUESTION_TMPL_EN,
     QUESTION_TYPE_INSTRUCTIONS_EN,
@@ -89,12 +92,90 @@ if CONFIG.question_gen.filtration.enabled:
 # the type is inherently multi-hop. Keys MUST match
 # QUESTION_TYPE_INSTRUCTIONS_EN / config.question_gen.typing.distribution.
 QUESTION_TYPE_SPEC = {
+    # --- distribution profile (default) ---
     "single_hop_specific": {"difficulty": "easy", "min_chunks": 1, "multi_hop": False},
     "multi_hop_specific": {"difficulty": "hard", "min_chunks": 2, "multi_hop": True},
     "reasoning": {"difficulty": "medium", "min_chunks": 1, "multi_hop": False},
     "comparative": {"difficulty": "medium", "min_chunks": 2, "multi_hop": True},
+    # --- capability-suite profile (also registered here so generate_qa can label
+    # them; chunk selection lives in the capability driver, not the distribution one,
+    # so these are inert for the distribution profile) ---
+    "table_lookup": {"difficulty": "medium", "min_chunks": 1, "multi_hop": False},
+    "multi_hop_retrieval": {"difficulty": "hard", "min_chunks": 2, "multi_hop": True},
+    "cross_document_reasoning": {"difficulty": "hard", "min_chunks": 2, "multi_hop": True},
+    "citation_grounding": {"difficulty": "medium", "min_chunks": 1, "multi_hop": False},
+    "long_context_retrieval": {"difficulty": "hard", "min_chunks": 3, "multi_hop": True},
+    "numerical_reasoning": {"difficulty": "medium", "min_chunks": 1, "multi_hop": False},
 }
 DEFAULT_QUESTION_TYPE = "single_hop_specific"
+
+# Merged instruction lookup used by generate_qa for BOTH profiles. Unknown keys
+# (e.g. "generic") fall back to GENERIC_QUESTION_INSTRUCTION_EN at the call site.
+QUESTION_TYPE_INSTRUCTIONS = {
+    **QUESTION_TYPE_INSTRUCTIONS_EN,
+    **CAPABILITY_QUESTION_INSTRUCTIONS_EN,
+}
+
+# --- Deterministic self-containment gate -------------------------------------
+# Whether a question points at its own source container is a MECHANICAL property,
+# and the LLM critic proved unreliable at it: on a real run it scored questions
+# reading "...the distribution in Document 2..." a perfect self_containment of 1.0
+# (40% of answerable questions leaked through). So decide this with a regex and let
+# it override the critic, rather than trusting the model to catch its own habit.
+CONTAINER_REFERENCE_PATTERN = re.compile(
+    r"\bdocuments?\s+\d+"
+    r"|\bthe\s+(?:provided\s+|given\s+|above\s+|following\s+)?documents?\b"
+    r"|\bthe\s+(?:provided\s+|given\s+|above\s+)?(?:context|passage|excerpt|snippet)s?\b"
+    r"|\bthe\s+text\s+(?:above|below|provided|given)\b"
+    r"|\baccording\s+to\s+the\s+(?:document|text|passage|context|excerpt)"
+    r"|\bin\s+the\s+(?:research\s+)?(?:paper|article|study)\b"
+    r"|\bin\s+the\s+(?:references?|acknowledge?ments?|bibliography)\b"
+    r"|\b(?:mentioned|shown|described|listed|stated)\s+in\s+the\s+(?:references?|acknowledge?ments?|bibliography)\b"
+    r"|\b(?:mentioned|shown|described|listed)\s+above\b",
+    re.IGNORECASE,
+)
+
+
+def _references_container(question: str) -> bool:
+    """True if the question refers to its source container instead of standing alone.
+
+    Such a question can't meaningfully be asked of a RAG system: there is no
+    "Document 2" at query time.
+    """
+    return bool(CONTAINER_REFERENCE_PATTERN.search(question))
+
+
+# --- Chunk-quality gate (runs before embedding/clustering) --------------------
+BOILERPLATE_HEADING_PATTERN = re.compile(
+    r"^#{0,6}\s*\**\s*(?:references?|bibliography|acknowledge?ments?|conflicts? of interests?"
+    r"|funding|author contributions?|declarations?|data availability|table of contents)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Bibliography ENTRY lines ("[1] A. Cayley, On the Conic..."), not bare "[n]" —
+# in a maths corpus "[1]" also appears inside formulae, and counting those would
+# drop legitimate content.
+CITATION_LINE_PATTERN = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:<span[^>]*>\s*</span>\s*)?\[\d+\]\s+[A-Z]", re.MULTILINE
+)
+COPYRIGHT_PATTERN = re.compile(
+    r"copyright\s*©|all rights reserved|licensed under|creative commons", re.IGNORECASE
+)
+
+
+def _chunk_quality_reason(text: str) -> str | None:
+    """Why this chunk is unfit for question generation, or None if it's usable."""
+    cfg = CONFIG.question_gen.chunk_filter
+    body = utils.chunk_body(text)
+    if len(body) < cfg.min_chars:
+        return "too_short"
+    if COPYRIGHT_PATTERN.search(body):
+        return "copyright_boilerplate"
+    if len(CITATION_LINE_PATTERN.findall(body)) >= cfg.min_citation_lines:
+        return "reference_list"
+    match = BOILERPLATE_HEADING_PATTERN.search(body)
+    if match and (len(body) - match.start()) / len(body) >= cfg.boilerplate_fraction:
+        return "boilerplate_section"
+    return None
 
 
 @dataclass
@@ -122,29 +203,14 @@ def _usage(message) -> tuple[int, int]:
 def _parse_critic_json(raw: str) -> dict | None:
     """Parse a critic response into a dict, tolerating fences / stray prose.
 
-    Mirrors the defensive judge-parsing in benchmark.py: strip markdown fences,
-    lenient-parse, then fall back to extracting the first {...} block. Returns
-    None when nothing parseable is found (caller treats that as 'cannot verify').
+    Thin wrapper over ``utils.loose_json`` (shared with benchmark.py's judge
+    parsing) that narrows the result to a dict. Returns None when nothing
+    parseable is found (caller treats that as 'cannot verify').
     """
     if not raw:
         return None
-    text = raw.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z0-9]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text).strip()
-    try:
-        obj = json.loads(text, strict=False)
-        return obj if isinstance(obj, dict) else None
-    except (json.JSONDecodeError, ValueError):
-        pass
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        try:
-            obj = json.loads(match.group(0), strict=False)
-            return obj if isinstance(obj, dict) else None
-        except (json.JSONDecodeError, ValueError):
-            return None
-    return None
+    obj = utils.loose_json(raw)
+    return obj if isinstance(obj, dict) else None
 
 
 def _answerable_passed(verdict: dict | None) -> bool:
@@ -181,13 +247,20 @@ def _unanswerable_passed(verdict: dict | None) -> bool:
         return True
 
 
-def _reasons(verdict: dict | None, passed: bool) -> list[str]:
+def _reasons(verdict: dict | None, passed: bool, container_ref: bool = False) -> list[str]:
     if passed:
         return []
+    reasons: list[str] = []
+    if container_ref:
+        # Deterministic gate; recorded separately because the critic often rates
+        # these self_contained=1.0 and would otherwise leave no trace of the reject.
+        reasons.append("references_source_container")
     if verdict is None:
-        return ["critic_unparseable"]
-    reasons = verdict.get("reasons") or []
-    return [str(r) for r in reasons] if isinstance(reasons, list) else [str(reasons)]
+        reasons.append("critic_unparseable")
+    else:
+        raw = verdict.get("reasons") or []
+        reasons.extend([str(r) for r in raw] if isinstance(raw, list) else [str(raw)])
+    return reasons
 
 
 def _build_source(chunks: list[dict], cluster_id, ctx: GenCtx) -> dict:
@@ -196,6 +269,10 @@ def _build_source(chunks: list[dict], cluster_id, ctx: GenCtx) -> dict:
         "cluster_id": cluster_id,
         "clustering_method": ctx.clustering_method,
         "source_file_ids": sorted({c["file_id"] for c in chunks}),
+        # Human-readable filenames alongside the opaque ids; document_category is
+        # filled in by _annotate_document_categories() once generation completes.
+        "source_filenames": sorted({utils.filename_of(c) for c in chunks if utils.filename_of(c)}),
+        "document_category": None,
         "source_chunk_ids": [c["id"] for c in chunks],
         "n_chunks_sampled": len(chunks),
     }
@@ -215,6 +292,16 @@ def _build_generation(qid: str, ctx: GenCtx, prompt_tok: int, comp_tok: int, t0:
         "token_usage": {"prompt": prompt_tok, "completion": comp_tok},
         "latency_ms": round((time.perf_counter() - t0) * 1000),
     }
+
+
+async def _classifier_ainvoke(prompt: str) -> str:
+    """Async (prompt -> text) adapter over the critic LLM, for utils.resolve_*.
+
+    Uses the critic (CRITIC_MODEL) rather than the generator: classification is a
+    judgement task, and the critic may point at a stronger model.
+    """
+    out = await critic_llm.ainvoke([{"role": "user", "content": prompt}])
+    return out.content
 
 
 def format_chunks(chunks: list[str]) -> str:
@@ -273,13 +360,11 @@ async def generate_qa(
     Rich metadata (id, source provenance, generation tracing, quality verdict,
     typed diversity) is attached under ``metadata``.
     """
+    # qtype is resolved by the CALLER (distribution driver honours typing.enabled and
+    # passes "generic" when off; capability driver passes the capability name). This
+    # keeps generate_qa a pure worker shared by both profiles.
     spec = QUESTION_TYPE_SPEC.get(qtype, QUESTION_TYPE_SPEC[DEFAULT_QUESTION_TYPE])
-    typing_on = CONFIG.question_gen.typing.enabled
-    type_instruction = (
-        QUESTION_TYPE_INSTRUCTIONS_EN.get(qtype, GENERIC_QUESTION_INSTRUCTION_EN)
-        if typing_on
-        else GENERIC_QUESTION_INSTRUCTION_EN
-    )
+    type_instruction = QUESTION_TYPE_INSTRUCTIONS.get(qtype, GENERIC_QUESTION_INSTRUCTION_EN)
     filt = CONFIG.question_gen.filtration
     max_attempts = (filt.max_quality_retries + 1) if filt.enabled else 1
 
@@ -290,6 +375,7 @@ async def generate_qa(
 
         llm_question = llm_answer = ""
         verdict: dict | None = None
+        container_ref = False
         attempt = 0
         for attempt in range(max_attempts):
             # 1) generate a question based on the chunks
@@ -317,16 +403,19 @@ async def generate_qa(
             prompt_tok += p
             comp_tok += c
 
-            # 3) critic / filtration
+            # 3) filtration: deterministic self-containment gate + LLM critic.
+            # The regex gate is authoritative for container references — the critic
+            # rubber-stamps them (it scored "...in Document 2" a perfect 1.0).
             if not filt.enabled:
                 break
+            container_ref = _references_container(llm_question)
             verdict, p, c = await _critic_answerable(chunks_str, llm_question, llm_answer)
             prompt_tok += p
             comp_tok += c
-            if _answerable_passed(verdict):
+            if not container_ref and _answerable_passed(verdict):
                 break
 
-        passed = _answerable_passed(verdict) if filt.enabled else True
+        passed = (not container_ref and _answerable_passed(verdict)) if filt.enabled else True
         n_hops = len(chunks) if spec["multi_hop"] else 1
         return {
             "id": qid,
@@ -336,22 +425,25 @@ async def generate_qa(
             "answerable": True,
             "metadata": {
                 "schema_version": CONFIG.question_gen.schema_version,
-                "question_type": qtype if typing_on else "generic",
+                "question_type": qtype,
                 "difficulty": spec["difficulty"],
                 "n_hops": n_hops,
-                "evolution": ["base", qtype] if typing_on else ["base"],
+                "evolution": ["base", qtype],
                 "language": ctx.language,
                 "persona": None,
                 "source": _build_source(chunks, cluster_id, ctx),
                 "quality": {
                     "answerability": (verdict or {}).get("answerability"),
+                    # The critic's (unreliable) score is kept for transparency; the
+                    # deterministic verdict below is what actually gates the item.
                     "self_containment": (verdict or {}).get("self_containment"),
+                    "references_container": container_ref,
                     "clarity": (verdict or {}).get("clarity"),
                     "faithfulness_verified": (verdict or {}).get("faithful"),
                     "unanswerable_verified": None,
                     "passed": passed,
                     "regen_attempts": attempt,
-                    "reject_reasons": _reasons(verdict, passed),
+                    "reject_reasons": _reasons(verdict, passed, container_ref),
                 },
                 "generation": _build_generation(qid, ctx, prompt_tok, comp_tok, t0),
             },
@@ -382,6 +474,7 @@ async def generate_unanswerable(
 
         llm_question = ""
         verdict: dict | None = None
+        container_ref = False
         attempt = 0
         for attempt in range(max_attempts):
             messages = [
@@ -396,13 +489,15 @@ async def generate_unanswerable(
 
             if not filt.enabled:
                 break
+            # Deterministic self-containment gate (see generate_qa) + LLM critic.
+            container_ref = _references_container(llm_question)
             verdict, p, c = await _critic_unanswerable(chunks_str, llm_question)
             prompt_tok += p
             comp_tok += c
-            if _unanswerable_passed(verdict):
+            if not container_ref and _unanswerable_passed(verdict):
                 break
 
-        passed = _unanswerable_passed(verdict) if filt.enabled else True
+        passed = (not container_ref and _unanswerable_passed(verdict)) if filt.enabled else True
         return {
             "id": qid,
             "question": llm_question,
@@ -422,6 +517,7 @@ async def generate_unanswerable(
                 "quality": {
                     "answerability": None,
                     "self_containment": (verdict or {}).get("self_containment"),
+                    "references_container": container_ref,
                     "clarity": (verdict or {}).get("clarity"),
                     "faithfulness_verified": None,
                     # NOTE: verifies the answer is absent from the *sampled* topic
@@ -432,7 +528,7 @@ async def generate_unanswerable(
                     "unanswerable_verified": (verdict or {}).get("unanswerable"),
                     "passed": passed,
                     "regen_attempts": attempt,
-                    "reject_reasons": _reasons(verdict, passed),
+                    "reject_reasons": _reasons(verdict, passed, container_ref),
                 },
                 "generation": _build_generation(qid, ctx, prompt_tok, comp_tok, t0),
             },
@@ -534,6 +630,150 @@ async def _run_safe(coro, qid: str):
         return None
 
 
+# ============================================================================
+# Capability-suite profile (second generation method). Fixed count per capability,
+# each drawing from capability-appropriate chunks. Reuses generate_qa /
+# generate_unanswerable (critic, self-containment gate, metadata) unchanged.
+# ============================================================================
+_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?[ :]*-{3,}[ :]*(\|[ :]*-{2,}[ :]*)+\|?\s*$", re.MULTILINE)
+_NUMERIC_TOKEN_RE = re.compile(r"(?<![A-Za-z])\d[\d.,]*")
+
+
+def _has_table(text: str) -> bool:
+    """True if the chunk body contains a markdown table (a separator row, or >=3
+    pipe-delimited rows)."""
+    body = utils.chunk_body(text)
+    if _TABLE_SEPARATOR_RE.search(body):
+        return True
+    return sum(1 for ln in body.splitlines() if ln.count("|") >= 2) >= 3
+
+
+def _numeric_token_count(text: str) -> int:
+    return len(_NUMERIC_TOKEN_RE.findall(utils.chunk_body(text)))
+
+
+def _sample_for_capability(category, rng, pools, cfg):
+    """Pick a chunk-set appropriate to ``category``, or None if the pool can't
+    supply it. ``pools`` = {all, table, numeric, by_file}."""
+    all_chunks, table, numeric, by_file = (
+        pools["all"], pools["table"], pools["numeric"], pools["by_file"],
+    )
+    if category == "table_lookup":
+        return [rng.choice(table)] if table else None
+    if category == "numerical_reasoning":
+        pool = numeric or all_chunks
+        n = min(rng.randint(1, 2), len(pool))
+        return rng.sample(pool, n) if pool else None
+    if category == "cross_document_reasoning":
+        # One chunk from each of >=2 distinct files.
+        if len(by_file) < 2:
+            return None
+        files = rng.sample(list(by_file), rng.randint(2, min(3, len(by_file))))
+        return [rng.choice(by_file[f]) for f in files]
+    if category == "multi_hop_retrieval":
+        if len(all_chunks) < 2:
+            return None
+        return rng.sample(all_chunks, rng.randint(2, min(3, len(all_chunks))))
+    if category == "long_context_retrieval":
+        lo, hi = cfg.long_context_min_chunks, cfg.long_context_max_chunks
+        if len(all_chunks) < lo:
+            return None
+        return rng.sample(all_chunks, rng.randint(lo, min(hi, len(all_chunks))))
+    # citation_grounding / unanswerable / fallback: 1–2 arbitrary content chunks.
+    n = min(rng.randint(1, 2), len(all_chunks))
+    return rng.sample(all_chunks, n) if all_chunks else None
+
+
+def _capability_pool_ok(category, pools, cfg) -> tuple[bool, str]:
+    """Whether ``category`` can be generated at all from the available chunks."""
+    if category == "table_lookup" and not pools["table"]:
+        return False, "no chunks containing tables"
+    if category == "cross_document_reasoning" and len(pools["by_file"]) < 2:
+        return False, "corpus has < 2 distinct files"
+    if category in ("multi_hop_retrieval",) and len(pools["all"]) < 2:
+        return False, "< 2 chunks available"
+    if category == "long_context_retrieval" and len(pools["all"]) < cfg.long_context_min_chunks:
+        return False, f"< {cfg.long_context_min_chunks} chunks available"
+    return True, ""
+
+
+async def generate_capability_suite(all_chunks: list[dict], semaphore, ctx: GenCtx):
+    """Generate a fixed number of questions per capability (loop-until-count).
+
+    Each round over-generates (``oversample``) to absorb critic / self-containment
+    rejections, keeping the first N that PASS. Reuses generate_qa /
+    generate_unanswerable, so every item gets the same quality gating and metadata.
+    """
+    cfg = CONFIG.question_gen.capability_suite
+    rng = random.Random(CONFIG.question_gen.seed)
+    pools = {
+        "all": all_chunks,
+        "table": [c for c in all_chunks if _has_table(c["text"])],
+        "numeric": [c for c in all_chunks if _numeric_token_count(c["text"]) >= cfg.numeric_min_tokens],
+        "by_file": {},
+    }
+    for c in all_chunks:
+        pools["by_file"].setdefault(c["file_id"], []).append(c)
+    logger.info(
+        f"Capability pools: {len(pools['all'])} chunks, {len(pools['table'])} with tables, "
+        f"{len(pools['numeric'])} number-rich, {len(pools['by_file'])} distinct files."
+    )
+
+    results: list[dict] = []
+    counter = 0
+    for category in cfg.enabled_categories:
+        target = cfg.count_overrides.get(category, cfg.per_category)
+        if target <= 0:
+            continue
+        ok, why = _capability_pool_ok(category, pools, cfg)
+        if not ok:
+            logger.warning(f"Capability '{category}': skipping (0/{target}) — {why}.")
+            continue
+
+        got = 0
+        for _round in range(cfg.max_rounds):
+            if got >= target:
+                break
+            need = target - got
+            n_tasks = max(1, math.ceil(need * cfg.oversample))
+            tasks = []
+            for _ in range(n_tasks):
+                sample = _sample_for_capability(category, rng, pools, cfg)
+                if sample is None:
+                    continue
+                counter += 1
+                qid = f"q-{ctx.partition}-cap-{counter:06d}"
+                if category == "unanswerable":
+                    coro = generate_unanswerable(
+                        sample, semaphore, qid=qid, cluster_id=None, ctx=ctx
+                    )
+                else:
+                    coro = generate_qa(
+                        sample, semaphore, qid=qid, cluster_id=None, qtype=category, ctx=ctx
+                    )
+                tasks.append(_run_safe(coro, qid))
+            if not tasks:
+                break
+            batch = await tqdm.gather(*tasks, desc=f"{category} ({got}/{target})")
+            for item in batch:
+                if got >= target:
+                    break
+                # Only PASSING items count toward the target (capability suite is
+                # target-driven; rejects are discarded rather than flagged/kept).
+                if item and item["metadata"]["quality"]["passed"]:
+                    results.append(item)
+                    got += 1
+
+        if got < target:
+            logger.warning(
+                f"Capability '{category}': {got}/{target} after {cfg.max_rounds} rounds "
+                "(raise capability_suite.max_rounds/oversample, or the pool is too small)."
+            )
+        else:
+            logger.info(f"Capability '{category}': {got}/{target} generated.")
+    return results
+
+
 async def generate_questions_from_clusters(
     clusters: dict,
     semaphore: asyncio.Semaphore,
@@ -558,16 +798,32 @@ async def generate_questions_from_clusters(
     counter = 0
     for cluster_label, chunks in clusters.items():
         for _ in range(n_questions_per_cluster):
-            qtype = _pick_type(type_rng) if typing_on else DEFAULT_QUESTION_TYPE
-            min_chunks = QUESTION_TYPE_SPEC.get(qtype, {}).get("min_chunks", 1)
+            # typing off -> "generic": generate_qa maps it to the generic instruction
+            # and (via fallback) the single-hop spec, matching the pre-decoupling path.
+            qtype = _pick_type(type_rng) if typing_on else "generic"
+            spec = QUESTION_TYPE_SPEC.get(qtype, QUESTION_TYPE_SPEC[DEFAULT_QUESTION_TYPE])
+            min_chunks = spec["min_chunks"]
             # Multi-hop/comparative types need ≥2 chunks; if the cluster is too
             # small, fall back to single-hop rather than failing the sample.
             if len(chunks) < min_chunks:
                 qtype = DEFAULT_QUESTION_TYPE
+                spec = QUESTION_TYPE_SPEC[DEFAULT_QUESTION_TYPE]
                 min_chunks = 1
-            hi = min(n_max, len(chunks))
-            lo = min(max(n_min, min_chunks), hi)
-            n = chunk_rng.randint(lo, hi)
+            if spec["multi_hop"]:
+                hi = min(n_max, len(chunks))
+                lo = min(max(n_min, min_chunks), hi)
+                n = chunk_rng.randint(lo, hi)
+            else:
+                # single_hop_specific / reasoning are generated with an explicit
+                # "answerable from a SINGLE document alone" instruction (see
+                # QUESTION_TYPE_INSTRUCTIONS_EN) — sampling extra chunks here would
+                # attach them as "gold" ground truth the question never actually
+                # needs. The answerable critic only checks answerability against
+                # the union of sampled chunks, not that each one is individually
+                # necessary, so it can't catch this after the fact. Keep n at
+                # exactly min_chunks (1) so ground truth matches what the LLM was
+                # actually asked to do.
+                n = min_chunks
             sampled_chunks = chunk_rng.sample(chunks, n)
             qid = f"q-{ctx.partition}-{counter:06d}"
             counter += 1
@@ -605,6 +861,42 @@ async def generate_questions_from_clusters(
     return questions_and_answers
 
 
+async def _annotate_document_categories(questions: list[dict], all_chunks: list[dict], ctx: GenCtx):
+    """Fill metadata.source.document_category on every generated item.
+
+    Baked into the dataset at build time (rather than recomputed per benchmark run)
+    so each dataset carries stable labels: every eval over it — including the
+    orchestrator's multi-version comparisons — slices on identical categories.
+    """
+    qg = CONFIG.question_gen
+    used = {n for q in questions for n in (q["metadata"]["source"].get("source_filenames") or [])}
+    if not used:
+        return
+    texts = {}
+    for c in all_chunks:
+        name = utils.filename_of(c)
+        if name in used and name not in texts:
+            texts[name] = utils.chunk_body(c["text"])
+    categories = await utils.resolve_document_categories(
+        texts,
+        utils.category_cache_path(ctx.partition),
+        _classifier_ainvoke,
+        enabled=qg.classify_document_categories,
+        hints=qg.document_category_hints,
+        max_labels=qg.document_category_max_labels,
+        sample_docs=qg.document_category_sample_docs,
+        sample_chars=qg.document_category_sample_chars,
+        batch_size=qg.document_category_batch_size,
+    )
+    for q in questions:
+        cats = sorted(
+            {categories.get(n, "unknown") for n in (q["metadata"]["source"].get("source_filenames") or [])}
+        )
+        q["metadata"]["source"]["document_category"] = (
+            cats[0] if len(cats) == 1 else ("mixed" if cats else "unknown")
+        )
+
+
 def _write_manifest(output_path: str, ctx: GenCtx, questions: list[dict], counts: dict):
     """Write run-level provenance to a sidecar manifest next to the dataset.
 
@@ -628,6 +920,7 @@ def _write_manifest(output_path: str, ctx: GenCtx, questions: list[dict], counts
         "critic_base_url": CRITIC_BASE_URL,
         "critic_is_generator": CRITIC_MODEL == MODEL and CRITIC_BASE_URL == BASE_URL,
         "language": ctx.language,
+        "profile": qg.profile,
         "clustering": {"method": ctx.clustering_method, **asdict(qg.clustering)},
         "generation_params": {
             "temperature": qg.temperature,
@@ -639,6 +932,8 @@ def _write_manifest(output_path: str, ctx: GenCtx, questions: list[dict], counts
         },
         "filtration": asdict(qg.filtration),
         "typing": asdict(qg.typing),
+        "chunk_filter": asdict(qg.chunk_filter),
+        "capability_suite": asdict(qg.capability_suite),
         "counts": counts,
     }
     with open(manifest_path, "w", encoding="utf-8") as f:
@@ -754,52 +1049,34 @@ async def main(
         ),
     )
 
-    # Parse the string-encoded vectors into a compact float32 matrix. CPU-bound, so
-    # run it off the event loop (keeps a host loop responsive if this is embedded).
-    embeddings = await asyncio.to_thread(_build_embeddings, chunk_embeddings)
-
-    # Free the raw JSON response (~1.7GB on large partitions) and the string-encoded
-    # vectors now that the compact float32 array exists — neither is referenced again,
-    # so this keeps them from sitting resident through clustering + generation.
-    del all_chunks_list, chunk_embeddings
-
-    N = len(embeddings)
-    clustering_method = CONFIG.question_gen.clustering.method
-
-    # UMAP reduction + clustering are heavy synchronous CPU work; offload to a worker
-    # thread so they never block the event loop (NumPy/sklearn/UMAP release the GIL).
-    labels = await asyncio.to_thread(_reduce_and_cluster, embeddings, clustering_method)
-
-    clusters = {}
-    for idx, label in enumerate(labels):
-        if label == -1:
-            continue  # -1 == noise
-        clusters.setdefault(int(label), []).append(
-            {
-                "id": ids[idx],
-                "text": chunk_contents[idx],
-                "file_id": file_ids[idx],
-            }
+    # Drop low-information chunks (bibliographies, acknowledgements, boilerplate)
+    # BEFORE embedding: they yield metadata trivia instead of questions that test
+    # retrieval, and they'd otherwise skew UMAP/clustering too.
+    n_chunks_total = len(ids)
+    filter_reasons: dict[str, int] = {}
+    if CONFIG.question_gen.chunk_filter.enabled:
+        keep = []
+        for i, text in enumerate(chunk_contents):
+            reason = _chunk_quality_reason(text)
+            if reason:
+                filter_reasons[reason] = filter_reasons.get(reason, 0) + 1
+            else:
+                keep.append(i)
+        if not keep:
+            raise RuntimeError(
+                f"Chunk filter dropped all {n_chunks_total} chunks ({filter_reasons}) — "
+                "nothing to generate from; loosen question_gen.chunk_filter."
+            )
+        ids = [ids[i] for i in keep]
+        chunk_contents = [chunk_contents[i] for i in keep]
+        chunk_embeddings = [chunk_embeddings[i] for i in keep]
+        file_ids = [file_ids[i] for i in keep]
+        logger.info(
+            f"Chunk filter: kept {len(keep)}/{n_chunks_total} chunks "
+            f"(dropped {n_chunks_total - len(keep)}: {filter_reasons or 'none'})"
         )
 
-    # Safety net: if every point was labelled noise (HDBSCAN/DBSCAN can do this on
-    # small or sparse partitions), fall back to a single cluster of all chunks so
-    # generation still has input instead of writing an empty dataset.
-    if not clusters:
-        logger.warning(
-            "Clustering produced no clusters (all points were noise); "
-            "falling back to a single cluster of all chunks."
-        )
-        clusters = {
-            0: [
-                {"id": ids[i], "text": chunk_contents[i], "file_id": file_ids[i]}
-                for i in range(N)
-            ]
-        }
-
-    for label, items in clusters.items():
-        logger.info(f"Cluster {label}: {[item['id'] for item in items]}")
-
+    # ---- language-dependent instructions + run context (used by both profiles) ----
     # The only language-dependent pieces are two instruction strings, injected into
     # the shared generators. (System prompts are English regardless.)
     if CONFIG.question_gen.language == "fr":
@@ -814,27 +1091,76 @@ async def main(
             "Now generate a topic-adjacent question whose answer is NOT in the provided chunks. Maximum 30 words."
         )
 
+    profile = CONFIG.question_gen.profile
+    clustering_method = CONFIG.question_gen.clustering.method
     ctx = GenCtx(
         partition=partition,
-        clustering_method=clustering_method,
+        clustering_method=clustering_method if profile == "distribution" else "none",
         run_id="gen-" + datetime.now(UTC).strftime("%Y%m%d-%H%M%S"),
         language=CONFIG.question_gen.language,
         answer_instruction=answer_instruction,
         unanswerable_instruction=unanswerable_instruction,
     )
-
     # One shared semaphore, created inside the running loop (not at import time),
-    # caps concurrent generator-LLM calls across answerable + unanswerable tasks.
+    # caps concurrent generator-LLM calls across every task.
     gen_semaphore = asyncio.Semaphore(CONFIG.question_gen.gen_concurrency)
-    questions = await generate_questions_from_clusters(
-        clusters,
-        semaphore=gen_semaphore,
-        ctx=ctx,
-        n_min=CONFIG.question_gen.n_min,
-        n_max=CONFIG.question_gen.n_max,
-        n_questions_per_cluster=n_questions_per_cluster,
-        n_unanswerable_per_cluster=n_unanswerable_per_cluster,
-    )
+
+    if profile == "capability_suite":
+        # Capabilities select chunks by content (tables, numbers, distinct files),
+        # not by topic — so clustering/embedding is skipped entirely here.
+        all_chunks = [
+            {"id": ids[i], "text": chunk_contents[i], "file_id": file_ids[i]}
+            for i in range(len(ids))
+        ]
+        del all_chunks_list, chunk_embeddings  # free the ~1.7GB raw response + vectors
+        logger.info(
+            f"Profile 'capability_suite': generating over {len(all_chunks)} chunks "
+            "(clustering skipped)."
+        )
+        questions = await generate_capability_suite(all_chunks, gen_semaphore, ctx)
+    else:
+        # Distribution profile: embed -> UMAP + cluster -> per-cluster generation.
+        # Both steps are heavy synchronous CPU work; offload to a worker thread so
+        # they never block the event loop (NumPy/sklearn/UMAP release the GIL).
+        embeddings = await asyncio.to_thread(_build_embeddings, chunk_embeddings)
+        del all_chunks_list, chunk_embeddings  # free the ~1.7GB raw response + vectors
+        N = len(embeddings)
+        labels = await asyncio.to_thread(_reduce_and_cluster, embeddings, clustering_method)
+
+        clusters = {}
+        for idx, label in enumerate(labels):
+            if label == -1:
+                continue  # -1 == noise
+            clusters.setdefault(int(label), []).append(
+                {"id": ids[idx], "text": chunk_contents[idx], "file_id": file_ids[idx]}
+            )
+
+        # Safety net: all-noise -> single cluster of everything, so generation still
+        # has input instead of writing an empty dataset.
+        if not clusters:
+            logger.warning(
+                "Clustering produced no clusters (all points were noise); "
+                "falling back to a single cluster of all chunks."
+            )
+            clusters = {
+                0: [
+                    {"id": ids[i], "text": chunk_contents[i], "file_id": file_ids[i]}
+                    for i in range(N)
+                ]
+            }
+
+        for label, items in clusters.items():
+            logger.info(f"Cluster {label}: {[item['id'] for item in items]}")
+
+        questions = await generate_questions_from_clusters(
+            clusters,
+            semaphore=gen_semaphore,
+            ctx=ctx,
+            n_min=CONFIG.question_gen.n_min,
+            n_max=CONFIG.question_gen.n_max,
+            n_questions_per_cluster=n_questions_per_cluster,
+            n_unanswerable_per_cluster=n_unanswerable_per_cluster,
+        )
 
     # Drop items whose generation hard-failed after retries (see _run_safe); these
     # are distinct from the critic/filtration rejections handled just below (which
@@ -861,11 +1187,22 @@ async def main(
             "(metadata.quality.passed=False); set filtration.drop_failed=True to exclude them."
         )
 
+    # Stamp the content-domain category onto every item (cache > filename rule > LLM).
+    await _annotate_document_categories(
+        questions,
+        [{"id": ids[i], "text": chunk_contents[i], "file_id": file_ids[i]} for i in range(len(ids))],
+        ctx,
+    )
+
     n_unanswerable = sum(1 for q in questions if not q.get("answerable", True))
     n_answerable = len(questions) - n_unanswerable
+    by_type: dict[str, int] = {}
+    for q in questions:
+        t = q["metadata"]["question_type"]
+        by_type[t] = by_type.get(t, 0) + 1
     logger.info(
         f"Questions generated time: ({time.time() - pause}) seconds — "
-        f"{n_answerable} answerable, {n_unanswerable} unanswerable"
+        f"{n_answerable} answerable, {n_unanswerable} unanswerable | by type: {by_type}"
     )
 
     output_path = output or CONFIG.common.dataset_path
@@ -881,8 +1218,12 @@ async def main(
             "total": len(questions),
             "answerable": n_answerable,
             "unanswerable": n_unanswerable,
+            "by_question_type": by_type,
             "failed_critic": n_failed,
             "generation_errors": n_gen_errors,
+            "chunks_total": n_chunks_total,
+            "chunks_kept": len(ids),
+            "chunks_dropped_by_reason": filter_reasons,
         },
     )
 
@@ -921,12 +1262,28 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable typed-question diversity; use the generic question prompt (overrides config).",
     )
+    parser.add_argument(
+        "--profile",
+        choices=["distribution", "capability_suite"],
+        default=CONFIG.question_gen.profile,
+        help="Generation profile: 'distribution' (cluster + type mix, default) or "
+        "'capability_suite' (fixed count per capability). Overrides config.",
+    )
+    parser.add_argument(
+        "--per-category",
+        type=int,
+        default=None,
+        help="capability_suite only: questions per capability (default from config, 50).",
+    )
     args = parser.parse_args()
 
     if args.no_filtration:
         CONFIG.question_gen.filtration.enabled = False
     if args.no_typing:
         CONFIG.question_gen.typing.enabled = False
+    CONFIG.question_gen.profile = args.profile
+    if args.per_category is not None:
+        CONFIG.question_gen.capability_suite.per_category = args.per_category
 
     try:
         asyncio.run(

@@ -103,6 +103,24 @@ STRICT FORMAT RULES:
 - No prose, no preamble. Structured output only."""
 
 
+CONTEXT_RECALL_JUDGE_PROMPT_EN = """Judge whether the retrieved context covers true_answer. This judges the RETRIEVER's recall, not the generated answer: there is no generated_answer to consider.
+
+Extract the atomic factual claims found in true_answer (one fact each, max 15 words). Then decide, for each claim, whether it can be attributed to context.
+
+Per-claim verdict:
+- "supported": the claim is stated in, or directly inferable from, context
+- "unsupported": the claim is absent from context
+
+Judge ONLY against context. Do not use outside knowledge: a claim you know to be true but which is missing from context is "unsupported".
+
+If true_answer carries no factual content (e.g. it is only a cross-reference such as "see the annex"), return an empty list.
+
+STRICT FORMAT RULES:
+- Each "claim" is a single line of plain text.
+- FORBIDDEN inside a claim: newline, tab, carriage return, double quotes, or any control character.
+- No prose, no preamble. Structured output only."""
+
+
 COMPLETION_JUDGE_PROMPT = """Notez l'exhaustivité de generated_answer face à true_answer.
 
 Score 1-10 : 1 = points clés majoritairement absents ; 10 = tous les points clés couverts.
@@ -213,6 +231,15 @@ REFUSAL_REFERENCE_EN = (
 QUESTION_TMPL_EN = """You are a question generation assistant.
 I will provide you with one or more paragraphs.
 Your task is to generate a unique and relevant question reflecting the key information in the paragraph(s).
+
+CRITICAL — the question MUST stand entirely on its own:
+- NEVER refer to the source container. Forbidden: "Document 1", "the document(s)", "the context", "the passage", "the excerpt", "the text above", "in the paper", "in the study", "the references", "the acknowledgments".
+- A reader who has never seen the source must be able to understand and answer it.
+- Ask about the subject matter itself — the facts, entities, quantities and ideas — never about where it is written.
+- Do NOT ask about author lists, citations, acknowledgements or affiliations. Those are metadata, not content.
+
+Bad:  "What does Document 2 say about the variance of the distribution?"
+Good: "What is the variance of the symmetric inverted triangular distribution?"
 """
 
 ANSWER_TMPL_EN = """You are an expert in answering questions based on given documents.
@@ -268,6 +295,51 @@ QUESTION_TYPE_INSTRUCTIONS_EN = {
 
 
 # ---------------------------------------------------------------------------
+# Capability-suite instructions (second generation profile). One per answerable
+# capability; appended to QUESTION_TMPL_EN just like QUESTION_TYPE_INSTRUCTIONS_EN
+# (so they inherit its self-containment rules). "unanswerable" reuses
+# UNANSWERABLE_QUESTION_TMPL_EN and is not listed here.
+# ---------------------------------------------------------------------------
+CAPABILITY_QUESTION_INSTRUCTIONS_EN = {
+    "table_lookup": (
+        "The documents contain a TABLE. Now create ONE question whose answer is a specific value "
+        "that must be read from that table (a cell identified by its row and column labels — e.g. the "
+        "value of metric X for method/year/category Y). Name the row and column entities explicitly; do "
+        "NOT say 'the table' or 'the document'. The answer must be a single concrete value. Max 30 words."
+    ),
+    "multi_hop_retrieval": (
+        "Now create ONE question that can be answered ONLY by combining information from at least TWO "
+        "different documents above (multi-hop). Answering it must require connecting facts across "
+        "documents, not a single lookup. Do NOT mention the documents. Max 40 words."
+    ),
+    "cross_document_reasoning": (
+        "The documents come from DIFFERENT sources. Now create ONE question that requires reasoning "
+        "ACROSS these separate sources — relating, contrasting, or synthesising a fact from one with a "
+        "fact from another — such that no single source answers it alone. Do NOT mention the documents "
+        "or sources. Max 40 words."
+    ),
+    "citation_grounding": (
+        "Now create ONE question whose answer is a specific factual CLAIM asserted in the documents (a "
+        "finding, result, definition, quantity, or stated relationship) — the kind of statement that "
+        "should be grounded in and attributable to its source. Do NOT ask about authors, citations, "
+        "references, acknowledgements, or affiliations — ask about the substantive claim itself. Max 35 words."
+    ),
+    "long_context_retrieval": (
+        "Now create ONE question whose COMPLETE answer requires gathering and combining details spread "
+        "across MANY of the documents above — not just one or two. It should reward retrieving broad "
+        "context (an enumeration, a summary of several related points, or an aggregate). Do NOT mention "
+        "the documents. Max 40 words."
+    ),
+    "numerical_reasoning": (
+        "Now create ONE question that requires NUMERICAL reasoning or computation over quantities stated "
+        "in the documents — a difference, ratio, sum, percentage, rate, or comparison of magnitudes — "
+        "NOT a direct value lookup. The answer must be derivable by calculating from numbers present in "
+        "the documents. Do NOT mention the documents. Max 40 words."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # Filtration critic prompts (gaps 1–3). A critic LLM scores each generated item;
 # items below threshold are regenerated. The critic returns a strict JSON object
 # (parsed defensively, mirroring benchmark.py's judge parsing).
@@ -301,6 +373,7 @@ Given one or more paragraphs (the "context"), your task is to generate ONE quest
 - Asks for SPECIFIC, concrete information (date, number, proper noun, comparison, precise technical definition) that is NOT present in the context
 - Has a real factual answer in the world, but one that cannot be derived from ANY of the provided paragraphs
 - Is neither yes/no nor vague
+- Stands entirely on its own: NEVER mention "the context", "the document(s)", "Document 1", "the passage", "the text" or "the paper" — ask about the subject matter itself, so a reader who has never seen the source understands it
 
 The goal is to test whether the RAG system abstains (expected behavior) or hallucinates (failure) when the information is missing.
 

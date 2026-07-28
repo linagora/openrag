@@ -51,27 +51,32 @@ httpx loguru python-dotenv tqdm openai langchain-openai pydantic
 pandas numpy scikit-learn
 umap-learn hdbscan
 nltk rouge-score
-streamlit
+streamlit altair
 pypdf python-docx python-pptx
 ```
+
+(`altair` is used by `dashboard.py` for its charts — the dashboard won't start without it.)
 
 (NLTK corpora `punkt`, `punkt_tab`, `wordnet`, `omw-1.4` are auto-downloaded on first use by `metrics.py`.)
 
 ### `.env`
 
-`generate_questions.py`, `benchmark.py`, and `context_ablation.py` read these from `.env`:
+The scripts read these from `.env`:
 
-| Var | Purpose |
-|-----|---------|
-| `BASE_URL` | Base URL of the **judge / generator** LLM (OpenAI-compatible endpoint) |
-| `API_KEY` | API key for that endpoint |
-| `MODEL` | Model name on that endpoint |
-| `AUTH_TOKEN` | Bearer token for OpenRAG (used for chunk-fetch in faithfulness scoring; defaults to `sk-1234`) |
-| `SCORE_BASE_URL` | (optional) Base URL of the SCORE corpus-analysis API |
-| `SCORE_TOKEN` | (optional) Bearer token for SCORE |
-| `GOLDEN_DATASET` | (optional) Path to a golden dataset, picked up by `run_all.sh` and as the fallback for `benchmark.py --dataset` |
+| Var | Read by | Purpose |
+|-----|---------|---------|
+| `BASE_URL` | generate, benchmark, ablation | Base URL of the **judge / generator** LLM (OpenAI-compatible endpoint) |
+| `API_KEY` | generate, benchmark, ablation | API key for that endpoint |
+| `MODEL` | generate, benchmark, ablation | Model name on that endpoint |
+| `API_BASE_URL` | all scripts | Base URL of the **OpenRAG instance under test** — the default for `--base-url`. CLI `--base-url` overrides it. |
+| `AUTH_TOKEN` | all scripts | Bearer token for OpenRAG (chat, search, chunk-fetch). `upload_files.py` falls back to `sk-1234` if unset; the others send it as-is. |
+| `JUDGE_MODEL` / `JUDGE_BASE_URL` / `JUDGE_API_KEY` | benchmark | (optional) Point the judge at a **separate** endpoint. Each falls back to `MODEL` / `BASE_URL` / `API_KEY`. |
+| `CRITIC_MODEL` / `CRITIC_BASE_URL` / `CRITIC_API_KEY` | generate | (optional) Point the generation quality-critic at a **separate** endpoint. Each falls back to `MODEL` / `BASE_URL` / `API_KEY`. |
+| `SCORE_BASE_URL` / `SCORE_TOKEN` / `SCORE_API` | upload | (optional) SCORE corpus-analysis API base URL / bearer token / endpoint path. Only `upload_files.py` uses these. |
+| `EVAL_RUN_TAG` | benchmark | (optional) Fallback for `--tag`: label appended to report filenames (`eval_<ts>_<tag>.*`). |
+| `GOLDEN_DATASET` | benchmark, ablation | (optional) Path to a golden dataset, picked up by `run_all.sh` and as the fallback for `--dataset`. |
 
-Everything else — partition, paths, sampling params, concurrency, timeouts — lives in `config.py` (see below). The OpenRAG endpoint is passed via CLI flags. Only URLs, API keys, and tokens come from `.env`.
+Everything else — partition, paths, sampling params, concurrency, timeouts — lives in `config.py` (see below). Only URLs, API keys, tokens, and a couple of `config.py` defaults come from `.env`. A few `config.py` values also honour an env override: `PARTITION` (→ `common.partition`), `UPLOAD_DIR` (→ `upload.dir_path`), and `UPLOAD_MAX_FILES` (→ `upload_files.py --max-files`).
 
 ### Configuration (`config.py`)
 
@@ -80,12 +85,12 @@ All tunable behaviour lives in `config.py` as a single `CONFIG` object built fro
 | Section | Used by | Key knobs |
 |---------|---------|-----------|
 | `common` | all scripts | `partition`, `dataset_path`, `output_dir` |
-| `benchmark` | `benchmark.py` | target/judge sampling, concurrency, `label_language`, `cot_audit_fraction`, `faithfulness_fraction`, `limit`, `ablation_limit` |
+| `benchmark` | `benchmark.py` | target/judge sampling, concurrency, `label_language`, `cot_audit_fraction`, `faithfulness_fraction`, `limit`, `ablation_limit`, `retrieval_trace_top_k`, `retrieval_trace_snippet_chars`, `classify_document_categories` (+ `document_category_*`), value-answer numeric grounding (`value_answer_types`, `numeric_rel_tol`, `numeric_abs_tol`), `retriever_type` (provenance label) |
 | `ablation` | `context_ablation.py` | `temperature`, `timeout`, `limit`, concurrency, `csv_name` |
-| `question_gen` | `generate_questions.py` | gen sampling, question mix, `language` (en/fr), `schema_version` / `prompt_version`, `clustering` (method + UMAP / KMeans / DBSCAN params), `filtration` (critic thresholds + retries), `typing` (question-type distribution) |
+| `question_gen` | `generate_questions.py` | `profile` (`distribution` \| `capability_suite`), gen sampling, question mix, `language` (en/fr), `schema_version` / `prompt_version`, `clustering` (method + UMAP / KMeans / DBSCAN params), `filtration` (critic thresholds + retries), `typing` (question-type distribution), `chunk_filter` (drop boilerplate/bibliography chunks), `capability_suite` (per-capability counts), `classify_document_categories` (+ `document_category_*`) |
 | `upload` | `upload_files.py` | `dir_path`, retries, timeouts, SCORE poll interval / timeout |
 
-Every script accepts `--partition` to override `common.partition` for a single run. `benchmark.py` and `context_ablation.py` additionally take `--base-url`, `--dataset`, `--output-dir`, and `--limit`. `benchmark.py` also takes `--no-retrieval` (skip ID-based retrieval metrics) and `--ablation` / `--ablation-limit` (run the context-contribution ablation inline after the benchmark; see §5). `orchestrator.py` is driven entirely by CLI flags (below), reading only `common.partition` / `common.dataset_path` as defaults.
+Every script accepts `--partition` to override `common.partition` for a single run. `benchmark.py` and `context_ablation.py` additionally take `--base-url`, `--dataset`, `--output-dir`, and `--limit`. `benchmark.py` also takes `--no-retrieval` (skip ID-based retrieval metrics *and* the raw retriever ranking trace), `--ablation` / `--ablation-limit` (run the context-contribution ablation inline after the benchmark; see §5), `--tag` (label appended to report filenames), and `--retriever-type` (provenance label only — see §6). `orchestrator.py` is driven entirely by CLI flags (below), reading only `common.partition` / `common.dataset_path` as defaults.
 
 ---
 
@@ -101,7 +106,7 @@ python upload_files.py [--partition *your_partition*]
 
 This uploads each file under a content-hash file id (so re-runs are idempotent) and, if a `SCORE_TOKEN` is set, also kicks off an asynchronous SCORE analysis + audit and writes the latest available corpus score to `reports/score.csv`.
 
-> The partition defaults to `common.partition` in `config.py` and can be overridden with `--partition`. The source directory (`upload.dir_path`) is also in `config.py`; the OpenRAG base URL comes from the `API_BASE_URL` env var.
+> The partition defaults to `common.partition` in `config.py` and can be overridden with `--partition`. The source directory (`upload.dir_path`) is also in `config.py` and can be overridden with `--path` (env `UPLOAD_DIR`); cap ingestion with `--max-files N` (env `UPLOAD_MAX_FILES`). The OpenRAG base URL comes from the `API_BASE_URL` env var.
 
 ### 2. Generate a Q/A dataset
 
@@ -109,7 +114,7 @@ This uploads each file under a content-hash file id (so re-runs are idempotent) 
 python generate_questions.py [--partition *your_partition*]
 ```
 
-Pulls every chunk from the chosen partition via `/partition/{p}/chunks`, reduces the embeddings with UMAP, clusters with HDBSCAN (KMeans / DBSCAN also available — set `question_gen.clustering.method` in `config.py`), then samples chunks per cluster and asks the LLM to produce:
+This is the default **`distribution`** profile. Pulls every chunk from the chosen partition via `/partition/{p}/chunks`, drops low-information chunks (bibliographies, acknowledgements, copyright boilerplate — deterministic, no LLM, via `question_gen.chunk_filter`), reduces the embeddings with UMAP, clusters with HDBSCAN (KMeans / DBSCAN also available — set `question_gen.clustering.method` in `config.py`), then samples chunks per cluster and asks the LLM to produce:
 
 - a **question** answerable from those chunks, plus a reference **answer**, **or**
 - an **unanswerable** topic-adjacent question (no chunks attached, ground-truth answer is a refusal string) — used to measure abstention vs. hallucination.
@@ -121,7 +126,13 @@ Two shaping passes run on top of raw generation (both under `question_gen` in `c
 
 Per-cluster volume (`n_questions_per_cluster`, `n_unanswerable_per_cluster`), the sampled-chunk range (`n_min` / `n_max`), and the question language (`language`, `en` / `fr`) are all under `question_gen` in `config.py`.
 
-**Outputs:** `dataset.json` (schema `2.0` — each entry carries an `id`, `question`, `llm_answer`, `answerable`, `chunks`, and a rich `metadata` block; see [Dataset format](#dataset-format)) plus a sidecar `dataset.manifest.json` recording the generation config snapshot (model, clustering, generation params, filtration, typing) and final `counts` (`total` / `answerable` / `unanswerable` / `failed_critic` / `generation_errors`). Each item's `metadata.generation.run_id` joins back to the manifest.
+**Capability-suite profile (`--profile capability_suite`).** Instead of "N per cluster from a type distribution", this second profile generates a target number of questions **per capability**, each drawn from capability-appropriate chunks: `table_lookup`, `multi_hop_retrieval`, `cross_document_reasoning`, `citation_grounding`, `unanswerable`, `long_context_retrieval`, `numerical_reasoning`. It loops (over-generating to absorb critic rejections, capped at `capability_suite.max_rounds`) until each capability hits its count. Set the count with `--per-category N` (or `capability_suite.per_category` / `count_overrides` in `config.py`; set a capability's count to 0 to skip it). The two profiles live side by side — neither overrides the other.
+
+**Document-category classification.** When `question_gen.classify_document_categories` is on (default), a content-domain taxonomy (`research_paper`, `hr_policy`, `financial_filing`, …) is **discovered from the corpus** at generation time (unambiguous filenames matched for free, the rest classified in batches by the critic LLM and cached to `.doc_categories/<partition>.json`), and each item's `metadata.source.document_category` is baked in so every later benchmark slices on identical labels.
+
+**CLI overrides** (all optional, defaults from `config.py`): `--profile`, `--per-category`, `--n-questions-per-cluster`, `--n-unanswerable-per-cluster`, `--output <path>`, `--no-filtration` (disable the critic gate), `--no-typing` (disable typed diversity).
+
+**Outputs:** `dataset.json` (schema `2.0` — each entry carries an `id`, `question`, `llm_answer`, `answerable`, `chunks`, and a rich `metadata` block; see [Dataset format](#dataset-format)) plus a sidecar `dataset.manifest.json` recording the generation config snapshot (model, clustering, generation params, filtration, typing) and final `counts` (`total`, `answerable`, `unanswerable`, `by_question_type`, `failed_critic`, `generation_errors`, `chunks_total`, `chunks_kept`, `chunks_dropped_by_reason`). Each item's `metadata.generation.run_id` joins back to the manifest.
 
 ### 3. Benchmark
 
@@ -141,17 +152,22 @@ For each question, the benchmark:
 
 1. Calls OpenRAG's `/v1/chat/completions` and captures the answer, the retrieved chunk ids, per-token logprobs, and end-to-end latency.
 2. Computes **retrieval** metrics against the dataset's ground-truth chunk ids (when present, and unless `--no-retrieval`): hit@5, MRR, precision@k, recall@k, nDCG@k, MAP, R-precision.
-3. Computes **generation** overlap metrics against the reference answer: ROUGE-1/2/L, BLEU-4, METEOR.
-4. Runs the **LLM-as-judge** suite (concurrently, with shared semaphores):
+   > These are computed off `chat/completions`' returned sources, which OpenRAG has already **filtered down to what the LLM cited** (see `filter_sources_by_citations` in the main project). That conflates two different failure modes: the retriever missing a chunk vs. the retriever finding it but the LLM not citing it. For a ranking signal that isolates the retriever, see the **raw retriever ranking trace** below.
+3. Also queries OpenRAG's `GET /search/partition/{partition}` directly for every answerable row with ground-truth chunks (`benchmark.retrieval_trace_top_k` in `config.py`, default top 10) — this never touches the LLM, so it's the retriever's actual ranked output, unfiltered. Writes a per-question **retrieval trace** (`retrieval_trace_<ts>.jsonl` / `.csv`) recording the full ranked chunk list, which rank (if any) each gold chunk landed at, and which gold chunks never showed up at all — open it to eyeball rankings or spot documents the retriever silently ignored. Also reports aggregate any-hit-rate / full-recall-rate / avg-missed-gold-count. Skipped whenever `--no-retrieval` is passed.
+4. Computes **generation** overlap metrics against the reference answer: ROUGE-1/2/L, BLEU-4, METEOR.
+5. Runs the **LLM-as-judge** suite (concurrently, with shared semaphores):
    - **Completion** (1–10): how much of the reference answer is covered.
    - **Precision** (1–10): how factually aligned the response is.
    - **Answer relevancy** (reference-free): is the answer on-topic for the question.
    - **Context relevancy** (reference-free): are the retrieved chunks relevant to the question — scores the *retriever*, not the answer.
+   - **Context recall** (reference-based): what fraction of the *reference answer's* claims are supported by the retrieved chunks — the recall counterpart to context relevancy (does the retriever surface everything the answer needs). Shares the `benchmark.faithfulness_fraction` sample.
    - **Refusal** verdict on every answerable row (false-refusal rate) and on every unanswerable row (abstention rate).
    - **Faithfulness** (claim-level support against the actually-retrieved chunks). Sampled — `benchmark.faithfulness_fraction` in `config.py` (default 50 %).
    - **Response label** (`Fully Correct` / `Incomplete` / `Contradictory`) per row — `benchmark.label_language` (`config.py`) controls FR vs EN judge prompt.
    - **CoT audit** — a chain-of-thought re-judging of a random sample (`benchmark.cot_audit_fraction`, default 10 %) to spot-check the cheap judges.
-5. Cross-tabs the label judge vs. the score judges, and correlates per-row perplexity against both scores (Pearson + Spearman) — a sanity check that confident answers actually score higher.
+6. Cross-tabs the label judge vs. the score judges, and correlates per-row perplexity against both scores (Pearson + Spearman) — a sanity check that confident answers actually score higher.
+
+The summary also **slices scores by facet** — question type, difficulty, file format/type, `document_category`, and per source file — to surface where the RAG is weakest. For value-answer question types (`benchmark.value_answer_types`, default `table_lookup` / `numerical_reasoning`), a strict **numeric-grounding** check complements the LLM judge: it verifies every number in the golden answer appears in the response within `numeric_rel_tol` / `numeric_abs_tol`, and reports the per-type match rate (inert for datasets without those types, e.g. any distribution-profile dataset).
 
 Output (per run, timestamped in `reports/`): a JSON summary the dashboard reads, a TXT digest, and per-question CSVs (per-row scores, response labels with reasoning, CoT audit details).
 
@@ -216,9 +232,10 @@ Key flags:
 | `--deploy-env` | `.env` for the deployed instance (sets `SHARED_ENV`; `AUTH_TOKEN` is recovered from it so the eval scripts authenticate against the instance) |
 | `--config` | A Hydra `config.yaml` (or conf dir) copied into the build context before building |
 | `--env KEY=VALUE` | Config override for the deployed instance (repeatable; captured in `run_config.json`) |
-| `--generate-questions` | Self-contained mode: generate the dataset from *this* run's indexed chunks so chunk ids match (retrieval metrics non-zero); ignores `--dataset` |
+| `--generate-questions` | Self-contained mode: generate the dataset from *this* run's indexed chunks so chunk ids match (retrieval metrics non-zero); ignores `--dataset`. Volume via `--n-questions-per-cluster` / `--n-unanswerable-per-cluster` |
 | `--no-retrieval` | Forwarded to `benchmark.py` — skip ID-based retrieval metrics |
 | `--service` | Compose service(s) to build/start (default `openrag`; use `openrag-cpu` for a CPU deploy) |
+| `--auth-token` | Explicit OpenRAG bearer token for the eval scripts (overrides the one recovered from `--deploy-env`) |
 
 > Storage note: the stack persists via **bind mounts**, so `docker compose down -v` does *not* reclaim it — the orchestrator points those mounts at `runs/<uuid>/` and `rm -rf`s them itself. Shared HuggingFace / vLLM model-weight caches are left untouched.
 
@@ -270,20 +287,24 @@ streamlit run dashboard.py
     "chunks": [ /* ... */ ],
     "metadata": {
         "schema_version": "2.0",
-        "question_type": "multi_hop_specific",   // from the typing distribution
+        "question_type": "multi_hop_specific",   // from the typing distribution (or capability)
         "difficulty": "hard", "n_hops": 2,
+        "evolution": ["base", "multi_hop_specific"],
         "language": "en", "persona": null,
         "source": { "partition": "test3", "cluster_id": 47, "clustering_method": "hdbscan",
-                    "source_file_ids": [...], "source_chunk_ids": [...], "n_chunks_sampled": 2 },
-        "quality": { "answerability": 0.8, "self_containment": 1.0, "clarity": 1.0,
-                     "faithfulness_verified": true, "passed": true, "regen_attempts": 0, "reject_reasons": [] },
-        "generation": { "generator_model": "...", "prompt_version": "qgen-v2", "seed": 42,
-                        "run_id": "gen-20260701-132215", "token_usage": {...}, "latency_ms": 13462 }
+                    "source_file_ids": [...], "source_filenames": [...], "document_category": "research_paper",
+                    "source_chunk_ids": [...], "n_chunks_sampled": 2 },
+        "quality": { "answerability": 0.8, "self_containment": 1.0, "references_container": false,
+                     "clarity": 1.0, "faithfulness_verified": true, "unanswerable_verified": null,
+                     "passed": true, "regen_attempts": 0, "reject_reasons": [] },
+        "generation": { "generator_model": "...", "prompt_version": "qgen-v3", "temperature": 0.2, "seed": 42,
+                        "created_at": "2026-07-01T13:22:15Z", "run_id": "gen-20260701-132215",
+                        "trace_id": "gen-20260701-132215:q-test3-000000", "token_usage": {...}, "latency_ms": 13462 }
     }
 }
 ```
 
-`metadata.generation.run_id` joins the entry back to `dataset.manifest.json`.
+`metadata.generation.run_id` joins the entry back to `dataset.manifest.json`. Unanswerable rows carry the same block (with `question_type: "unanswerable"`, `quality.unanswerable_verified` set) plus a top-level `topic_chunks` list — the chunk ids the topic-adjacent question was seeded from, so the benchmark can check whether the retriever surfaced the seed topic even though the answer is absent.
 
 ---
 
@@ -332,6 +353,20 @@ The dominant ranking-quality metric in the literature: rewards both **retrieving
 
 The pipeline reports `nDCG@5`, `nDCG@10`, and a full-list `nDCG` broken down by ground-truth chunk count.
 
+#### Raw retriever ranking trace
+
+Hit Rate/MRR/Recall/Precision/MAP/nDCG above are all computed off the chat-completion response's cited sources — a subset of what the retriever actually returned, filtered down to whatever the LLM chose to cite in its `[Sources: ...]` tag. A gold chunk that the retriever found but the LLM didn't cite counts as a miss in every one of those metrics, indistinguishable from the retriever never finding it at all.
+
+To isolate pure retriever behaviour, the benchmark separately calls `GET /search/partition/{partition}` for every answerable, ground-truth-bearing question — no LLM in the loop and nothing citation-filtered. This produces:
+
+> **Caveat:** `/search` is *not* the same pipeline chat completions use. Per `RetrievalService.search()`'s own docstring it's "a single `searcher.search` (no query generation / reranking / RRF — those belong to `QueryService`)" — plain hybrid vector+BM25 top-k, no cross-encoder rerank step. If `config.reranker.enabled` is `true`, chat completions see a *reranked* order this trace doesn't reflect. Read it as "did the raw hybrid search even surface the right candidates," not "the exact final ranking the model saw." It also always pulls in surrounding/neighbor chunks after the real top-k hits (`with_surrounding_chunks=True`, hardcoded) — the benchmark slices back to `top_k` client-side so the count stays honest.
+
+- **`retrieval_trace_<ts>.jsonl`** — one record per question: the full ranked chunk list (id, file_id, snippet, `is_gold`), `missed_gold_ids` (gold chunks absent from the entire fetched top-k), and `first_gold_rank`. Open one question at a time to see exactly how it was ranked.
+- **`retrieval_trace_<ts>.csv`** — the same data flattened to one row per retrieved rank, for quick spreadsheet/pivot-table inspection.
+- Aggregate stats in the JSON/TXT/console summaries: any-hit rate, full-recall rate, avg recall@top_k, avg missed-gold-chunk count, mean rank of the first gold hit.
+
+Configured via `benchmark.retrieval_trace_top_k` (default 10) and `benchmark.retrieval_trace_snippet_chars` (default 240) in `config.py`. Skipped whenever `--no-retrieval` is passed (same flag that disables the citation-based metrics above).
+
 ### Generation (n-gram overlap vs reference)
 
 ROUGE-1, ROUGE-2, ROUGE-L (F1), BLEU-4 (with smoothing), and METEOR. Useful as a cheap regression signal — not as an absolute quality score (a good answer that rewords the reference can score low).
@@ -343,7 +378,8 @@ ROUGE-1, ROUGE-2, ROUGE-L (F1), BLEU-4 (with smoothing), and METEOR. Useful as a
 | **Completion** | int 1–10 | Coverage of key points from `llm_answer`. |
 | **Precision** | int 1–10 | Factual alignment with `llm_answer`. |
 | **Answer relevancy** | fraction 0–1 | Reference-free: is the answer on-topic for the question (judged against the query, not `llm_answer`). |
-| **Context relevancy** | fraction 0–1 | Reference-free: are the retrieved chunks relevant to the question — scores the **retriever**, not the answer. |
+| **Context relevancy** | fraction 0–1 | Reference-free: are the retrieved chunks relevant to the question — scores the **retriever**, not the answer (precision-flavoured). |
+| **Context recall** | per-claim verdicts | Decomposes the **reference answer** into ≤12 atomic claims and marks each supported/unsupported by the retrieved chunks — the recall counterpart to context relevancy. Sampled at `benchmark.faithfulness_fraction`. |
 | **CoT Completion / Precision** | reasoning + int 1–10 | Slower; sampled at `benchmark.cot_audit_fraction` to spot-check the cheap judges. |
 | **Faithfulness** | per-claim verdicts | Decomposes the answer into ≤6 atomic claims and marks each `supported` / `unsupported` against the actually-retrieved chunks. Sampled at `benchmark.faithfulness_fraction`. |
 | **Refusal** | `refusal` / `non_refusal` | Run on every row. Yields **false-refusal rate** on answerable rows and **abstention rate** on unanswerable rows. |
@@ -375,6 +411,8 @@ Each `python benchmark.py` writes to `--output-dir` (default `./reports/`):
 | `response_labels_<ts>.csv` | Per-question label + label reasoning + cheap judge scores. |
 | `cot_audit_<ts>.csv` | The CoT sample — both cheap and CoT scores side by side, with reasoning. |
 | `logprobs_<ts>.jsonl` | Per-question token strings + per-token logprobs — powers the dashboard's confidence-shaded token view. |
+| `retrieval_trace_<ts>.jsonl` | Per-question raw retriever ranking (via `/search`, no LLM/citation filtering): full ranked chunk list, gold/miss flags, `missed_gold_ids`, `first_gold_rank`. |
+| `retrieval_trace_<ts>.csv` | Same data flattened to one row per retrieved rank, for spreadsheet inspection. |
 
 `upload_files.py` additionally writes `reports/score.csv` (latest SCORE corpus score + queued job ids). `context_ablation.py` writes `reports/context_ablation.csv`.
 
@@ -386,3 +424,4 @@ Each `python benchmark.py` writes to `--output-dir` (default `./reports/`):
 | `container_logs.txt` | `docker compose logs` captured before teardown. |
 | `ports-override.yaml` | The generated compose override that pinned this run's host port(s). |
 | `dataset.json` / `dataset.manifest.json` | Only in `--generate-questions` mode — the dataset generated from this run's own index, plus its manifest. |
+| `error.txt` | Only on failure — the exception string from a crashed run, written before teardown so the dashboard/user can see why it failed. |
