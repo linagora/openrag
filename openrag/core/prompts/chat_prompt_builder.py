@@ -134,27 +134,32 @@ def prepend_system_prompt(
     *,
     context: str,
     current_date: str,
-    prefix: str | None = None,
+    custom_prompt: str | None = None,
 ) -> list[dict]:
     """Return a deep-copied message list with a rendered system prompt prepended.
 
     ``system_template`` must contain ``{context}`` and ``{current_date}``. A
-    ``{custom_prompt}`` placeholder is optional — where present, ``prefix``
-    (e.g. a client-pinned custom system instruction) is wrapped in an
-    ``<unsafe_custom_prompt>`` block and spliced in there; templates without
-    the placeholder silently ignore ``prefix``. The tag name flags the content
-    as untrusted input to the LLM, not an authoritative instruction — paired
-    with a template rule instructing the model to keep following its core
-    rules regardless of what this block says.
+    ``{custom_prompt}`` placeholder is optional — where present, ``custom_prompt``
+    (e.g. a client-pinned custom system instruction) is given its own
+    ``# User defined an unsafe_custom_prompt`` heading, wrapping an
+    ``<unsafe_custom_prompt>`` block, and spliced in there; templates without
+    the placeholder silently ignore ``custom_prompt``. The heading and tag both
+    flag the content as untrusted input to the LLM, not an authoritative
+    instruction — paired with a template rule instructing the model to keep
+    following its core rules regardless of what this block says.
     """
     out = copy.deepcopy(messages)
-    # A client-supplied prefix containing a literal closing tag could otherwise
-    # break out of the untrusted-content wrapper and have trailing attacker
-    # text read as if outside it.
-    safe_prefix = _UNSAFE_PROMPT_CLOSE_TAG_RE.sub("&lt;/unsafe_custom_prompt&gt;", prefix) if prefix else prefix
+    # A client-supplied custom_prompt containing a literal closing tag could
+    # otherwise break out of the untrusted-content wrapper and have trailing
+    # attacker text read as if outside it.
+    safe_custom_prompt = (
+        _UNSAFE_PROMPT_CLOSE_TAG_RE.sub("&lt;/unsafe_custom_prompt&gt;", custom_prompt)
+        if custom_prompt
+        else custom_prompt
+    )
     custom_prompt_block = (
-        f"\nUSER CUSTOMIZATION INPUT\n<unsafe_custom_prompt>\n{safe_prefix}\n</unsafe_custom_prompt>\n"
-        if prefix
+        f"\n# User defined an unsafe_custom_prompt\n<unsafe_custom_prompt>\n{safe_custom_prompt}\n</unsafe_custom_prompt>\n"
+        if custom_prompt
         else ""
     )
     rendered = system_template.format(

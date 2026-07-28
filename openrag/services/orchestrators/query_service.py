@@ -465,7 +465,7 @@ class QueryService:
             tmpl,
             context=context,
             current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
-            prefix=custom_prompt,
+            custom_prompt=custom_prompt,
         )
         payload["messages"] = new_messages
         return payload, docs, web_results

@@ -538,7 +538,7 @@ async def test_chat_custom_system_prompt_prepended_to_rag_context():
     assert len(system_messages) == 1
     content = system_messages[0]["content"]
     assert not content.startswith("CUSTOM")  # spliced after the intro paragraph, not prepended
-    assert content.index("CUSTOM") < content.index("# Context")
+    assert content.index("# Context") < content.index("CUSTOM") < content.index("Rules")
 
 
 @pytest.mark.asyncio
@@ -566,7 +566,7 @@ async def test_chat_custom_system_prompt_survives_history_truncation():
     assert len(system_messages) == 1
     content = system_messages[0]["content"]
     assert not content.startswith("CUSTOM")
-    assert content.index("CUSTOM") < content.index("# Context")
+    assert content.index("# Context") < content.index("CUSTOM") < content.index("Rules")
 
 
 @pytest.mark.asyncio
