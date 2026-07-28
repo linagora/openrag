@@ -53,6 +53,9 @@ class _FakePartitionRepo:
     async def list_partition_rows(self) -> list[dict]:
         return list(self._store.values())
 
+    async def list_partitions(self) -> list[dict]:
+        return list(self._store.values())
+
     async def update_partition(self, name: str, **fields) -> dict | None:
         self.calls.append(("update_partition", (name,)))
         row = self._store.get(name)
@@ -472,6 +475,72 @@ async def test_list_partition_summaries_has_counts_and_no_pipelines():
     # lightweight: stored columns only, pipelines are resolved on detail
     assert "indexation_pipeline" not in summaries["p1"]
     assert "retrieval_pipeline" not in summaries["p1"]
+
+
+@pytest.mark.asyncio
+async def test_list_partition_summaries_hides_throwaway_eval_partitions():
+    """GET /partition/ responds from here, so an orphaned __eval_<run_id> would
+    otherwise surface as a user-facing collection."""
+    repo = _FakePartitionRepo(rows=[_full_row("p1"), _full_row("__eval_deadbeef")])
+    svc = _make_service(repo)
+
+    summaries = await svc.list_partition_summaries()
+
+    assert set(summaries) == {"p1"}
+
+
+@pytest.mark.asyncio
+async def test_list_partitions_hides_throwaway_eval_partitions():
+    repo = _FakePartitionRepo(rows=[_full_row("p1"), _full_row("__eval_deadbeef")])
+    svc = _make_service(repo)
+
+    names = [row["partition"] for row in await svc.list_partitions()]
+
+    assert names == ["p1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["__eval_mine", "__EVAL_mine", "  __eval_mine  "])
+async def test_create_partition_rejects_the_reserved_eval_prefix(name):
+    """Hiding a name from the listings without reserving it at creation hands
+    users an invisible partition: real, quota-consuming, and absent from every
+    admin listing and from ``partitions=all``."""
+    from core.utils.exceptions import ValidationError
+
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo)
+
+    with pytest.raises(ValidationError) as excinfo:
+        await svc.create_partition(name, user_id=1)
+
+    assert excinfo.value.code == "RESERVED_PARTITION_NAME"
+    assert repo.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_run_may_create_its_own_eval_partition():
+    """The escape hatch the evaluation service uses; not reachable over HTTP."""
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo)
+
+    await svc.create_partition("__eval_deadbeef", user_id=1, allow_reserved=True)
+
+    assert ("create_partition", ("__eval_deadbeef", 1, None)) in repo.calls
+
+
+@pytest.mark.asyncio
+async def test_allow_reserved_does_not_unlock_the_all_sentinel():
+    """``all`` collides with the cross-partition sentinel and would expand a
+    listing to every partition — worse than being hidden, and wanted by no
+    internal caller."""
+    from core.utils.exceptions import ValidationError
+
+    svc = _make_service(_FakePartitionRepo())
+
+    with pytest.raises(ValidationError) as excinfo:
+        await svc.create_partition("all", user_id=1, allow_reserved=True)
+
+    assert excinfo.value.code == "RESERVED_PARTITION_NAME"
 
 
 @pytest.mark.asyncio

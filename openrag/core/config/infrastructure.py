@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pydantic import Field
@@ -96,8 +97,27 @@ class PathsConfig(ConfigMixin):
 # ---------------------------------------------------------------------------
 
 
+def _default_internal_url() -> str:
+    """Base URL under which the API reaches itself from inside the deployment.
+
+    Used by out-of-process workers (e.g. the evaluation runner, which uploads a
+    corpus and drives promptfoo over HTTP): they run in their own container and
+    cannot reuse whatever host the admin's browser happened to use.
+
+    The port follows ``APP_iPORT``, the container-internal port uvicorn binds
+    (``infra/scripts/entrypoint.sh``), so moving it does not silently leave
+    workers calling 8080. ``OPENRAG_INTERNAL_URL`` overrides the whole URL.
+
+    ``or`` rather than a ``get`` default, to match the ``${APP_iPORT:-8080}``
+    in entrypoint.sh and docker-compose.yaml: a bare ``APP_iPORT=`` line in an
+    env file is empty, not absent, and would otherwise yield ``http://openrag:``.
+    """
+    return f"http://openrag:{os.environ.get('APP_iPORT') or '8080'}"
+
+
 class ServerConfig(ConfigMixin):
     preferred_url_scheme: str | None = None
+    internal_url: str = Field(default_factory=_default_internal_url)
 
 
 # ---------------------------------------------------------------------------

@@ -8,10 +8,9 @@ from typing import Any
 
 import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
+from core.config.root import Settings
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
-
-from openrag.core.config.root import Settings
 
 # The indexer reloads the DB-backed model-endpoint registry at most once per
 # this window (and on a miss), bounding both staleness and DB load regardless
@@ -28,14 +27,6 @@ _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PR
 
 def _indexer_worker_actor_name(index: int) -> str:
     return f"IndexerWorker-{_INDEXER_ACTOR_PROTOCOL_VERSION}-{index}"
-
-
-def _catalog_rdb_config(settings: Settings) -> Any:
-    if settings.rdb.database is not None:
-        return settings.rdb
-    return settings.rdb.model_copy(
-        update={"database": f"partitions_for_collection_{settings.vectordb.collection_name}"}
-    )
 
 
 @ray.remote
@@ -110,7 +101,7 @@ class IndexerWorkerActor:
             topic_tagger_factory=topic_tagger_factory,
             defer_replace_cleanup=True,
         )
-        self._catalog_store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
+        self._catalog_store = PostgresStore(cfg.resolved_rdb(), run_migrations=False)
         self._catalog_initialized = False
         self._catalog_init_lock = asyncio.Lock()
         # Model-endpoint registry hydration. Unlike the API process, the indexer
@@ -444,7 +435,7 @@ class IndexerPool:
                     from services.storage.postgres_store import PostgresStore
 
                     cfg = load_config()
-                    store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
+                    store = PostgresStore(cfg.resolved_rdb(), run_migrations=False)
                     await store.initialize()
                     self._claim_store = store
         return self._claim_store.document_repo

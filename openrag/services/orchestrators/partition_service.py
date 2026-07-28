@@ -34,6 +34,7 @@ import numpy as np
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
+from core.models.partition import is_internal_partition, is_reserved_partition_name
 from core.models.preset import PartitionConfig
 from core.utils.conts import is_internal_metadata_key
 from core.utils.exceptions import (
@@ -55,12 +56,6 @@ if TYPE_CHECKING:
     from core.vector_stores import VectorStore
 
 logger = get_logger()
-
-# Names reserved as cross-partition sentinels (e.g. ``openrag-all`` /
-# ``?partitions=all``). A real partition named ``all`` collides with the sentinel
-# and the admin partition-list route would expand it to *every* partition — see
-# ``list_existant_partitions``. Matched case-insensitively.
-_RESERVED_PARTITION_NAMES = frozenset({"all"})
 
 # Columns where an explicit ``None`` in a PATCH is a real value (SQL NULL =
 # "reset to default"), not the omitted-field sentinel that the None-filter
@@ -242,7 +237,8 @@ class PartitionService:
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
 
     async def list_partitions(self) -> list[dict]:
-        return await self._partition_repo.list_partitions()
+        rows = await self._partition_repo.list_partitions()
+        return [row for row in rows if not is_internal_partition(str(row.get("partition", "")))]
 
     async def file_counts_by_partition(self) -> dict[str, int]:
         """Return a ``{partition: document_count}`` map for all partitions (one query)."""
@@ -262,6 +258,10 @@ class PartitionService:
         summaries: dict[str, dict] = {}
         for r in rows:
             name = r["partition"]
+            # Internal partitions are hidden here as well as in
+            # list_partitions: this is what GET /partition/ responds from.
+            if is_internal_partition(str(name)):
+                continue
             created = r.get("created_at")
             summaries[name] = {
                 "partition": name,
@@ -282,6 +282,7 @@ class PartitionService:
         partition: str,
         user_id: int,
         *,
+        allow_reserved: bool = False,
         max_owned: int | None = None,
         description: str = "",
         embedder: str = "default",
@@ -300,11 +301,17 @@ class PartitionService:
         are validated *before* the row is written (so a bad preset name fails
         fast and atomically), the non-default config columns are persisted,
         and the in-memory partition cache is re-resolved.
+
+        ``allow_reserved`` is the internal escape hatch for callers that own a
+        reserved namespace — currently only an evaluation run creating its own
+        ``__eval_<run_id>``. It is never reachable from the HTTP surface, and
+        it does not unlock the ``all`` sentinel.
         """
         # Reserved-name check first so a name that normalises to a reserved
         # sentinel (e.g. "  all  ") returns the specific RESERVED_PARTITION_NAME
-        # error rather than the generic identifier-allowlist rejection.
-        if partition.strip().lower() in _RESERVED_PARTITION_NAMES:
+        # error rather than the generic identifier-allowlist rejection. What is
+        # reserved, and why, lives in ``core.models.partition``.
+        if is_reserved_partition_name(partition, allow_internal=allow_reserved):
             raise ValidationError(
                 f"Partition name '{partition}' is reserved.",
                 status_code=400,

@@ -3,45 +3,22 @@ from __future__ import annotations
 from core.config.infrastructure import RDBConfig, VectorDBConfig
 from core.config.root import Settings
 
-
-def test_rdb_config_for_migrations_derives_database_from_collection() -> None:
-    from services.persistence.migrations.run import _rdb_config_for_migrations
-
-    settings = Settings(
-        rdb=RDBConfig(password="x", database=None),
-        vectordb=VectorDBConfig(collection_name="managed"),
-    )
-
-    rdb = _rdb_config_for_migrations(settings)
-
-    assert rdb.database == "partitions_for_collection_managed"
+# The derivation itself is covered by tests/unit/core/config/test_resolved_rdb.py.
+# What this file pins is that the standalone entrypoint goes *through* it: run
+# against a different database than the API opens, and the migrations silently
+# upgrade an empty one.
 
 
-def test_rdb_config_for_migrations_preserves_explicit_database() -> None:
-    from services.persistence.migrations.run import _rdb_config_for_migrations
-
-    settings = Settings(
-        rdb=RDBConfig(password="x", database="openrag_catalog"),
-        vectordb=VectorDBConfig(collection_name="managed"),
-    )
-
-    rdb = _rdb_config_for_migrations(settings)
-
-    assert rdb.database == "openrag_catalog"
-
-
-def test_migration_entrypoint_runs_alembic_without_initializing_pool(monkeypatch) -> None:
+def _connection_manager_arg(monkeypatch, settings: Settings) -> RDBConfig:
+    """Drive ``main()`` with a stub manager, returning the RDBConfig it was handed."""
     import services.persistence.migrations.run as migration_run
 
+    received: list[RDBConfig] = []
     calls: list[str] = []
-    settings = Settings(
-        rdb=RDBConfig(password="x", database="openrag_catalog"),
-        vectordb=VectorDBConfig(collection_name="managed"),
-    )
 
     class FakeConnectionManager:
         def __init__(self, rdb):
-            assert rdb.database == "openrag_catalog"
+            received.append(rdb)
 
         async def initialize(self):  # pragma: no cover - should never be called
             raise AssertionError("migration entrypoint must not open the application pool")
@@ -54,3 +31,24 @@ def test_migration_entrypoint_runs_alembic_without_initializing_pool(monkeypatch
 
     assert migration_run.main() == 0
     assert calls == ["run_migrations"]
+    return received[0]
+
+
+def _settings(database: str | None) -> Settings:
+    return Settings(
+        rdb=RDBConfig(password="x", database=database),
+        vectordb=VectorDBConfig(collection_name="managed"),
+    )
+
+
+def test_migration_entrypoint_derives_database_from_collection(monkeypatch) -> None:
+    assert _connection_manager_arg(monkeypatch, _settings(None)).database == "partitions_for_collection_managed"
+
+
+def test_migration_entrypoint_preserves_explicit_database(monkeypatch) -> None:
+    assert _connection_manager_arg(monkeypatch, _settings("openrag_catalog")).database == "openrag_catalog"
+
+
+def test_migration_entrypoint_runs_alembic_without_initializing_pool(monkeypatch) -> None:
+    """The stub's ``initialize`` raises, so reaching it fails the test."""
+    _connection_manager_arg(monkeypatch, _settings("openrag_catalog"))

@@ -1033,10 +1033,17 @@ async def _settle_pool_release_tasks(pool: object, *futures: asyncio.Future[obje
 async def test_claim_repo_preserves_configured_catalog_database(monkeypatch: pytest.MonkeyPatch) -> None:
     import core.config
     import services.storage.postgres_store as postgres_store
+    from core.config.infrastructure import RDBConfig, VectorDBConfig
+    from core.config.root import Settings
 
     pool = _bare_pool([_FakeWorker()])
-    rdb = SimpleNamespace(database="custom_catalog")
-    cfg = SimpleNamespace(rdb=rdb, vectordb=SimpleNamespace(collection_name="ignored_collection"))
+    # A real Settings, so this exercises resolved_rdb() rather than a stub of
+    # it: an explicit database must survive, not be replaced by the name
+    # derived from the collection.
+    cfg = Settings(
+        rdb=RDBConfig(password="x", database="custom_catalog"),
+        vectordb=VectorDBConfig(collection_name="ignored_collection"),
+    )
     repo = object()
     calls = []
 
@@ -1052,7 +1059,8 @@ async def test_claim_repo_preserves_configured_catalog_database(monkeypatch: pyt
     monkeypatch.setattr(postgres_store, "PostgresStore", Store)
 
     assert await pool._claim_document_repo() is repo
-    assert calls == [(rdb, False), "initialized"]
+    assert calls == [(cfg.rdb, False), "initialized"]
+    assert calls[0][0].database == "custom_catalog"
 
 
 def test_pool_requires_positive_pool_size() -> None:
@@ -1278,11 +1286,10 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     topic_tagger_factory = object()
     vlm_factory = object()
 
-    class RDBConfig:
-        database = "custom_catalog"
-
-        def model_copy(self, *, update):
-            return SimpleNamespace(**update)
+    # The actor asks Settings for an already-resolved RDBConfig rather than
+    # deriving the catalog database name itself; the derivation's own cases are
+    # covered by tests/unit/core/config/test_resolved_rdb.py.
+    catalog_rdb = SimpleNamespace(database="custom_catalog")
 
     cfg = SimpleNamespace(
         embedder=SimpleNamespace(
@@ -1296,7 +1303,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
         ),
         loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
-        rdb=RDBConfig(),
+        resolved_rdb=lambda: catalog_rdb,
     )
 
     class Store:
@@ -1346,7 +1353,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     assert captured["contextualizer_factory"] is contextualizer_factory
     assert captured["topic_tagger_factory"] is topic_tagger_factory
     assert captured["vlm_factory"] is vlm_factory
-    assert captured["catalog_config"] is cfg.rdb
+    assert captured["catalog_config"] is catalog_rdb
     assert captured["catalog_config"].database == "custom_catalog"
     assert captured["catalog_run_migrations"] is False
 
@@ -1366,12 +1373,6 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
 
     captured = {}
 
-    class RDBConfig:
-        database = None
-
-        def model_copy(self, *, update):
-            return SimpleNamespace(**update)
-
     cfg = SimpleNamespace(
         embedder=SimpleNamespace(
             base_url="http://embedder/v1",
@@ -1384,7 +1385,9 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
         ),
         loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
-        rdb=RDBConfig(),
+        # Only here so the actor's constructor can build its catalog store;
+        # this test is about the caption prompt.
+        resolved_rdb=lambda: SimpleNamespace(database="partitions_for_collection_vdb_test"),
     )
 
     class Store:

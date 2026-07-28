@@ -55,6 +55,8 @@ This guide explains how to deploy the **OpenRAG** stack on a Kubernetes cluster 
 
 - Ensure your GPU nodes have the correct NVIDIA drivers and `nvidia` `RuntimeClass` configured.
 
+- `OPENRAG_INTERNAL_URL` is set for you, to `http://<release>-openrag:<openrag.service.port>`. Out-of-process workers — the evaluation runner, which drives its corpus upload and promptfoo over HTTP — run in the RayCluster pod and use it to reach the API. The built-in default is the compose service name and does not resolve here. Override it only if you front the API with a different in-cluster Service.
+
 ## Managed PostgreSQL
 
 The chart can run against a database that is provisioned outside OpenRAG, which is the recommended setup on OpenShift or cloud-managed PostgreSQL.

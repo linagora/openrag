@@ -572,6 +572,7 @@ The following environment variables configure the FastAPI server and control acc
 | `DEFAULT_FILE_QUOTA` | `int` | `-1` | Default per-user file quota. `<0` disables quotas globally; `>=0` sets the default limit when a user has no explicit quota. |
 | `PREFERRED_URL_SCHEME` | `string` | `null` | URL scheme (`http` or `https`) used when generating URLs in API responses (e.g., `task_status_url`). When running behind a reverse proxy that terminates SSL, set this to `https` to ensure generated URLs use the correct scheme. If unset, the scheme from the incoming request is used. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
+| `OPENRAG_INTERNAL_URL` | `string` | `http://openrag:$APP_iPORT` | Overrides `server.internal_url`: the base URL out-of-process workers use to reach the API from inside the deployment. Used by the evaluation runner, which uploads the corpus and drives promptfoo over HTTP from the Ray container. The default already follows `APP_iPORT`, the container-internal port uvicorn binds; set this when the API is reachable under a different host than the compose service name. The bundled [Helm chart](/openrag/documentation/kubernetes/) sets it for you, to `http://<release>-openrag:<openrag.service.port>`. |
 | `UVICORN_FORWARDED_ALLOW_IPS` | `string` | `127.0.0.1` | Comma-separated CIDRs/IPs (or `*`) whose `X-Forwarded-*` headers uvicorn trusts. **Required when OpenRAG runs behind a reverse proxy that lives outside loopback** (typical docker-compose / k8s — including the bundled admin-ui proxy). Otherwise `X-Forwarded-Proto` is dropped and OIDC cookies ship with `Secure=False` even over HTTPS, and `X-Forwarded-For` is dropped so per-user rate limits collapse onto the proxy's single IP. **Set this to your proxy's subnet, not `*`** — see the proxy-trust caution under [Rate Limiting](#rate-limiting) for why `*` can be spoofed. |
 | `MAX_UPLOAD_SIZE_MB` | `int` | `1024` | Maximum accepted upload size, in MB. `0` or a negative value means unlimited. |
 | `MAX_PARTITIONS_PER_USER` | `int` | `100` | Maximum number of partitions a non-admin user may own. `-1` disables the cap (unlimited). Admin users always bypass it. |
@@ -672,6 +673,24 @@ OpenRAG ships a standalone [Model Context Protocol](https://modelcontextprotocol
 | `OPENRAG_MCP_SIMILARITY_THRESHOLD` | `float` | `0.8` | Minimum similarity score for a chunk to be returned by the search tool. |
 | `OPENRAG_MCP_DOWNLOAD_TIMEOUT` | `float` | `30.0` | Timeout (seconds) for the server-side `index_url` fetch (SSRF/DoS hardening). |
 | `OPENRAG_MCP_MAX_DOWNLOAD_BYTES` | `int` | `104857600` | Maximum bytes downloaded by an `index_url` fetch. Default is 100 MiB. |
+
+### Evaluation
+
+On-demand benchmarking from the admin **System → Evaluation** tab. A run indexes a stored corpus into a throwaway partition, replays the test set through [promptfoo](https://promptfoo.dev/), and reports indexing, retrieval and answer metrics.
+
+These are operational limits — every value is validated as strictly positive at config load, so a typo fails at startup rather than at run time. The reserved partition prefix, the test-set CSV column names and the `file_id` alphabet are deliberately *not* configurable: they are contracts with datasets already on disk. The base URL the runner calls back on is [`OPENRAG_INTERNAL_URL`](#fastapi--access-control), a server setting rather than an evaluation one.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `PROMPTFOO_BIN` | `string` | `promptfoo` | Executable the evaluation runner shells out to. The API and Ray images both install a pinned promptfoo on `PATH`; set this only for a custom location. |
+| `EVAL_MAX_CORPUS_MB` | `int` | `512` | Maximum total size of one dataset's corpus upload, in MB. Enforced while streaming to disk, so an inflated `Content-Length` cannot get past it. A dataset is re-indexed on every run, so an oversized corpus costs far more than the upload itself. Also bounded by the global [`MAX_UPLOAD_SIZE_MB`](#fastapi--access-control) — raise both to go past 1024. |
+| `EVAL_MAX_TESTSET_MB` | `int` | `5` | Maximum size of the test-set CSV upload, in MB. |
+| `EVAL_MAX_TESTSET_ROWS` | `int` | `500` | Maximum number of questions in a test set. Each row costs one retrieval call plus one LLM-graded generation per run. |
+| `EVAL_TOP_K` | `int` | `5` | Chunks retrieved per question when measuring retrieval quality. Raising it makes hit rate and recall more forgiving, so compare runs only at a fixed value. |
+| `EVAL_TASK_TIMEOUT` | `float` | `1800` | Seconds to wait for one corpus file's indexing task before the run gives up on it. Raise it for slow parsers (large scanned PDFs through Marker). |
+| `EVAL_TASK_POLL_INTERVAL` | `float` | `1.0` | Seconds between polls of a file's indexing task status. |
+| `EVAL_HTTP_TIMEOUT` | `float` | `300` | Per-request timeout for the runner's own HTTP calls to the API. |
+| `EVAL_PROMPTFOO_TIMEOUT` | `float` | `3600` | Seconds allowed for one `promptfoo eval` invocation. Every row is graded by an LLM, so raise it for a slow grader or a large test set. |
 
 ### Advanced & Legacy Variables
 
