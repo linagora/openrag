@@ -44,7 +44,15 @@ def _redact(text: str) -> str:
 
 
 def _clip(text: str, limit: int) -> str:
-    return text if len(text) <= limit else f"{text[:limit]}…"
+    """Truncate to at most *limit* characters, ellipsis included.
+
+    The ellipsis counts against the budget rather than being appended past it,
+    so every cap here is the real ceiling on the emitted length — otherwise each
+    clipped span silently ran one character over its limit.
+    """
+    if limit <= 0:
+        return ""
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
 def _preview(text: str) -> str:

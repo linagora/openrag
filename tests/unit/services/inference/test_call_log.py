@@ -13,6 +13,7 @@ from services.inference._call_log import (
     MAX_META_CHARS,
     MAX_PARTS,
     PREVIEW_CHARS,
+    _clip,
     _describe,
     _render_content,
     log_llm_call,
@@ -47,7 +48,8 @@ def test_long_content_is_truncated_to_the_preview_budget():
     # never hides how much context was actually sent.
     assert rendered.startswith("user[5000]: ")
     assert rendered.endswith("…")
-    assert len(rendered) < PREVIEW_CHARS + 60
+    # The preview itself is capped at exactly PREVIEW_CHARS, ellipsis included.
+    assert len(rendered.split(": ", 1)[1]) == PREVIEW_CHARS
 
 
 def test_newlines_are_flattened_so_one_call_stays_one_line():
@@ -155,8 +157,11 @@ def test_a_long_conversation_cannot_produce_an_unbounded_line():
     by the detail cap plus the fixed caller/model prefix."""
     messages = [{"role": "user", "content": f"message {i} " + "x" * 500} for i in range(200)]
     line = _capture_detail(messages).rstrip("\n")
-    prefix_budget = 2 * MAX_META_CHARS + 40
-    assert len(line) <= MAX_DETAIL_CHARS + prefix_budget
+    prefix = line.index(" | ") + len(" | ")
+    # The detail is capped at exactly MAX_DETAIL_CHARS (ellipsis included), and
+    # the prefix it sits behind is itself bounded by the identifier caps.
+    assert len(line) - prefix == MAX_DETAIL_CHARS
+    assert prefix <= 2 * MAX_META_CHARS + 40
     assert line.endswith("…")
 
 
@@ -192,3 +197,12 @@ def _capture_detail(messages: list) -> str:
     finally:
         logger.remove(sink_id)
     return "".join(records)
+
+
+def test_clip_counts_the_ellipsis_against_the_budget():
+    """A cap has to be the real ceiling: appending the ellipsis past the limit
+    made every clipped span one character longer than its stated bound."""
+    assert len(_clip("x" * 100, 10)) == 10
+    assert _clip("x" * 100, 10).endswith("…")
+    assert _clip("short", 10) == "short"
+    assert _clip("anything", 0) == ""
