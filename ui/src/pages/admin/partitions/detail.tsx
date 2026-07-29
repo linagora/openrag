@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Save, UserPlus, Trash2, CheckCircle, XCircle, Loader2, Info } from "lucide-react";
@@ -52,7 +52,13 @@ import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
 import { listPrompts } from "@/lib/api/prompts";
 import type { PromptResponse } from "@/lib/api/prompts";
-import { PROMPT_GROUPS } from "@/lib/prompt-meta";
+import {
+  PROMPT_DEFAULT_OPTION,
+  PROMPT_GROUPS,
+  promptOptionToName,
+  promptOptionValue,
+  promptSelectValue,
+} from "@/lib/prompt-meta";
 import { usePermissions } from "@/lib/permissions";
 import { formatDate, intOr } from "@/lib/utils";
 import { MemberPicker } from "./member-picker";
@@ -90,12 +96,14 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
   const [chatLlm, setChatLlm] = useState(partition.chat_llm ?? "__default__");
   // Only carry the generation types this editor manages — a stale key (e.g. a
   // pre-move query_contextualizer) would be rejected by the partition PATCH.
-  const [generationPrompts, setGenerationPrompts] = useState<Record<string, string>>(() => {
+  const initialGenerationPrompts = useMemo(() => {
     const allowed = new Set<string>(GENERATION_PROMPT_TYPES.map((t) => t.value));
     return Object.fromEntries(
       Object.entries(partition.generation_prompt_names ?? {}).filter(([k]) => allowed.has(k)),
     );
-  });
+  }, [partition.generation_prompt_names]);
+  const [generationPrompts, setGenerationPrompts] =
+    useState<Record<string, string>>(initialGenerationPrompts);
   const [llmValidated, setLlmValidated] = useState<boolean | null>(
     partition.chat_llm ? null : true,
   );
@@ -128,6 +136,11 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
   });
   const promptsByType = (type: string): PromptResponse[] =>
     (promptsData ?? []).filter((p) => p.prompt_type === type);
+
+  // Compared against what the partition was loaded with, so an untouched
+  // mapping is omitted from the PATCH entirely.
+  const generationPromptsChanged =
+    JSON.stringify(generationPrompts) !== JSON.stringify(initialGenerationPrompts);
 
   const setGenerationPrompt = (type: string, name: string) => {
     setGenerationPrompts((prev) => {
@@ -187,7 +200,12 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
         indexation_preset: indexationPreset,
         retrieval_preset: retrievalPreset,
         chat_llm: chatLlm === "__default__" ? null : chatLlm,
-        generation_prompt_names: generationPrompts,
+        // Only sent when this editor actually changed it. The backend validates
+        // every name in the mapping, so resubmitting an untouched-but-stale
+        // reference (its prompt since renamed or deleted) would 422 the whole
+        // PATCH and block unrelated edits like the description — and a non-admin
+        // owner, for whom this picker is disabled, could never clear it.
+        ...(generationPromptsChanged ? { generation_prompt_names: generationPrompts } : {}),
       }),
     onSuccess: () => {
       toast.success("Partition updated");
@@ -318,17 +336,17 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
                 <div key={t.value} className="space-y-2">
                   <Label>{t.label}</Label>
                   <Select
-                    value={generationPrompts[t.value] ?? "__default__"}
-                    onValueChange={(v) => setGenerationPrompt(t.value, v === "__default__" ? "" : v)}
+                    value={promptSelectValue(generationPrompts[t.value])}
+                    onValueChange={(v) => setGenerationPrompt(t.value, promptOptionToName(v))}
                     disabled={!canEdit || !isAdmin}
                   >
                     <SelectTrigger className="w-full">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="__default__">Use default</SelectItem>
+                      <SelectItem value={PROMPT_DEFAULT_OPTION}>Use default</SelectItem>
                       {options.map((p) => (
-                        <SelectItem key={p.id} value={p.name}>
+                        <SelectItem key={p.id} value={promptOptionValue(p.name)}>
                           {p.name}{p.is_default ? " (default)" : ""}
                         </SelectItem>
                       ))}

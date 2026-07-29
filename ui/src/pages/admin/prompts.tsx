@@ -63,16 +63,25 @@ export default function PromptsPage() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<PromptResponse | null>(null);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["prompts-library"],
     queryFn: () => listPrompts({ limit: 500 }),
   });
   const prompts = data ?? [];
+  // An API or database failure must never render as "there are no prompts":
+  // that reads as a successful empty library and invites an admin to recreate
+  // prompts that already exist. Cached data stays visible across a failed
+  // refetch, with the banner explaining that what's shown may be stale.
+  const loadFailed = isError && data === undefined;
 
   const setDefaultMut = useMutation({
     mutationFn: (id: string) => setPromptDefault(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["prompts-library"] });
+      // The preset editors read their picker options from their own query, so
+      // a promotion here must refresh them too or they keep showing the old
+      // default badge.
+      queryClient.invalidateQueries({ queryKey: ["prompts-for-presets"] });
       toast.success("Default prompt updated");
     },
     onError: (e) => toast.error(e.message),
@@ -82,6 +91,7 @@ export default function PromptsPage() {
     mutationFn: (id: string) => deletePrompt(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["prompts-library"] });
+      queryClient.invalidateQueries({ queryKey: ["prompts-for-presets"] });
       toast.success("Prompt deleted");
     },
     onError: (e) => toast.error(e.message),
@@ -128,12 +138,24 @@ export default function PromptsPage() {
             </button>
           ))}
         </div>
-        {!isLoading && (
+        {!isLoading && !loadFailed && (
           <span className="text-xs text-muted-foreground">
             {prompts.length} prompt{prompts.length === 1 ? "" : "s"} · {customCount} custom
           </span>
         )}
       </div>
+
+      {isError && (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm">
+          <span>
+            {loadFailed ? "Could not load the prompt library." : "Could not refresh the prompt library; showing the last known data."}{" "}
+            <span className="text-muted-foreground">{(error as Error)?.message}</span>
+          </span>
+          <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
+            {isFetching ? "Retrying…" : "Retry"}
+          </Button>
+        </div>
+      )}
 
       {isLoading ? (
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
@@ -141,7 +163,7 @@ export default function PromptsPage() {
             <Skeleton key={i} className="h-40" />
           ))}
         </div>
-      ) : (
+      ) : loadFailed ? null : (
         <div className="space-y-8">
           {visibleGroups.map((group) => {
             const groupTypes = new Set(group.types.map((t) => t.value));
@@ -325,6 +347,16 @@ function PromptEditorSheet({
     onError: (e) => toast.error(e.message),
   });
 
+  const loading = createMut.isPending || updateMut.isPending;
+  const effectiveType = editing?.prompt_type ?? promptType;
+  const templateCheck = validatePlaceholders(content, effectiveType);
+  // Presets and partitions reference a prompt by *name*, so a rename silently
+  // orphans every selection pointing at the old one — they fall back to the
+  // global default. Warn before that happens instead of letting the drawer's
+  // "changes apply everywhere" promise quietly become false.
+  const isRename = !!editing && name.trim() !== editing.name;
+  const renameBreaksRefs = isRename && (editing?.used_by ?? 0) > 0;
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) {
@@ -335,15 +367,32 @@ function PromptEditorSheet({
       toast.error("Content is required");
       return;
     }
+    // Mirror the API's template rules here so a malformed template is caught
+    // before the request instead of coming back as a 422.
+    if (templateCheck.malformed) {
+      toast.error(templateCheck.error ?? "The template has unbalanced braces.");
+      return;
+    }
+    if (templateCheck.unknown.length > 0) {
+      toast.error(`Unknown variable(s): ${templateCheck.unknown.map((v) => `{${v}}`).join(", ")}`);
+      return;
+    }
+    if (
+      renameBreaksRefs &&
+      !window.confirm(
+        `"${editing?.name}" is selected by ${editing?.used_by} partition(s). ` +
+          `Renaming it to "${name.trim()}" drops those selections — they fall back to the ` +
+          `default ${promptTypeLabel(effectiveType).toLowerCase()}. Rename anyway?`,
+      )
+    ) {
+      return;
+    }
     if (editing) {
       updateMut.mutate({ id: editing.id, name, content });
     } else {
       createMut.mutate({ prompt_type: promptType, name, content });
     }
   };
-
-  const loading = createMut.isPending || updateMut.isPending;
-  const effectiveType = editing?.prompt_type ?? promptType;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -364,6 +413,11 @@ function PromptEditorSheet({
                 onChange={(e) => setName(e.target.value)}
                 required
               />
+              {renameBreaksRefs && (
+                <p className="text-xs text-amber-600 dark:text-amber-500">
+                  Selected by {editing?.used_by} partition(s) — renaming drops those selections.
+                </p>
+              )}
             </div>
             <div className="space-y-1.5">
               <Label>Type</Label>

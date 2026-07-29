@@ -84,24 +84,87 @@ export const PROMPT_TYPE_VARIABLES: Record<string, TemplateVariable[]> = {
   ],
 };
 
-const PLACEHOLDER_REGEX = /\{(\w+)\}/g;
-
-export function extractPlaceholders(content: string): string[] {
-  const matches: string[] = [];
-  let m: RegExpExecArray | null;
-  PLACEHOLDER_REGEX.lastIndex = 0;
-  while ((m = PLACEHOLDER_REGEX.exec(content)) !== null) {
-    if (!matches.includes(m[1])) matches.push(m[1]);
-  }
-  return matches;
+export interface TemplateScan {
+  /** Root field names, reduced the way the backend reduces them. */
+  fields: string[];
+  /** True when Python's parser would raise — i.e. the API would return 422. */
+  malformed: boolean;
+  error?: string;
 }
 
+/** Scan a template the way Python's ``string.Formatter().parse`` does.
+ *
+ *  The backend validates with the real thing, so approximating it with a
+ *  `/\{(\w+)\}/` regex let templates through that were rejected only on save:
+ *  `{{` / `}}` are literal braces, a lone brace is an error, and a field may
+ *  carry a conversion (`!r`), a format spec (`:>10`) or attribute/index access
+ *  (`a.b`, `a[0]`) — all of which reduce to the root name.
+ */
+export function scanTemplate(content: string): TemplateScan {
+  const fields: string[] = [];
+  let i = 0;
+  while (i < content.length) {
+    const ch = content[i];
+    if (ch === "{") {
+      if (content[i + 1] === "{") {
+        i += 2;
+        continue;
+      }
+      const end = content.indexOf("}", i + 1);
+      if (end === -1) {
+        return { fields, malformed: true, error: "Single '{' encountered in format string" };
+      }
+      const root = content
+        .slice(i + 1, end)
+        .split("!")[0]
+        .split(":")[0]
+        .split(".")[0]
+        .split("[")[0]
+        .trim();
+      if (!fields.includes(root)) fields.push(root);
+      i = end + 1;
+      continue;
+    }
+    if (ch === "}") {
+      if (content[i + 1] === "}") {
+        i += 2;
+        continue;
+      }
+      return { fields, malformed: true, error: "Single '}' encountered in format string" };
+    }
+    i += 1;
+  }
+  return { fields, malformed: false };
+}
+
+export function extractPlaceholders(content: string): string[] {
+  return scanTemplate(content).fields;
+}
+
+/** Types the backend renders with `str.format` and therefore validates.
+ *
+ *  Mirrors `_PROMPT_FORMAT_FIELDS` in `prompt_service.py`. It cannot be derived
+ *  from `PROMPT_TYPE_VARIABLES`, because a type there may legitimately have an
+ *  empty variable list; the others are sent to the model verbatim, so braces in
+ *  them are ordinary characters and must not be validated at all.
+ */
+const FORMATTED_PROMPT_TYPES = new Set([
+  "sys_prompt",
+  "query_contextualizer",
+  "hyde",
+  "multi_query",
+]);
+
 export function validatePlaceholders(content: string, promptType: string) {
-  const used = extractPlaceholders(content);
   const known = new Set((PROMPT_TYPE_VARIABLES[promptType] ?? []).map((v) => v.name));
+  if (!FORMATTED_PROMPT_TYPES.has(promptType)) {
+    return { used: [], unknown: [], missing: [], malformed: false, error: undefined };
+  }
+  const scan = scanTemplate(content);
+  const used = scan.fields;
   const unknown = used.filter((v) => !known.has(v));
   const missing = [...known].filter((v) => !used.includes(v));
-  return { used, unknown, missing };
+  return { used, unknown, missing, malformed: scan.malformed, error: scan.error };
 }
 
 export interface PreviewSegment {
@@ -138,4 +201,30 @@ export function renderPreview(content: string, promptType: string): PreviewSegme
     segments.push({ value: content.slice(lastIndex), isVariable: false });
   }
   return segments;
+}
+
+/* ---------- Prompt picker option values ---------- */
+
+/** Sentinel for the "use the type's global default" choice.
+ *
+ *  Prompt names are free text, so any bare sentinel is a name a prompt could
+ *  legitimately have — a prompt actually called `__default__` would then be
+ *  impossible to select. Real options are therefore namespaced with a prefix
+ *  and the sentinel is the only unprefixed value, which makes a collision
+ *  structurally impossible rather than merely unlikely.
+ */
+export const PROMPT_DEFAULT_OPTION = "__use_default__";
+const PROMPT_OPTION_PREFIX = "name:";
+
+export function promptOptionValue(name: string): string {
+  return `${PROMPT_OPTION_PREFIX}${name}`;
+}
+
+export function promptOptionToName(value: string): string {
+  return value.startsWith(PROMPT_OPTION_PREFIX) ? value.slice(PROMPT_OPTION_PREFIX.length) : "";
+}
+
+/** The Select value for a stored prompt name ("" / unset → the default). */
+export function promptSelectValue(name: string | undefined | null): string {
+  return name ? promptOptionValue(name) : PROMPT_DEFAULT_OPTION;
 }

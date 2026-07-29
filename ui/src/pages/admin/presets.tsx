@@ -40,6 +40,12 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatDate, intOr, numOr } from "@/lib/utils";
 import {
+  PROMPT_DEFAULT_OPTION,
+  promptOptionToName,
+  promptOptionValue,
+  promptSelectValue,
+} from "@/lib/prompt-meta";
+import {
   type Config,
   configGet,
   configSet,
@@ -579,16 +585,16 @@ function FeatureToggle({
                 <PromptViewButton prompts={prompts} selectedName={promptValue || ""} />
               </div>
               <Select
-                value={promptValue || "__default__"}
-                onValueChange={(v) => onPromptChange(v === "__default__" ? "" : v)}
+                value={promptSelectValue(promptValue)}
+                onValueChange={(v) => onPromptChange(promptOptionToName(v))}
               >
                 <SelectTrigger size="sm">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__default__">Use default</SelectItem>
+                  <SelectItem value={PROMPT_DEFAULT_OPTION}>Use default</SelectItem>
                   {prompts.map((p) => (
-                    <SelectItem key={p.id} value={p.name}>
+                    <SelectItem key={p.id} value={promptOptionValue(p.name)}>
                       {p.name}{p.is_default ? " (default)" : ""}
                     </SelectItem>
                   ))}
@@ -622,16 +628,16 @@ function PromptSelect({
         {prompts.length > 0 && <PromptViewButton prompts={prompts} selectedName={value} />}
       </div>
       <Select
-        value={value || "__default__"}
-        onValueChange={(v) => onChange(v === "__default__" ? "" : v)}
+        value={promptSelectValue(value)}
+        onValueChange={(v) => onChange(promptOptionToName(v))}
       >
         <SelectTrigger size="sm">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="__default__">Use default</SelectItem>
+          <SelectItem value={PROMPT_DEFAULT_OPTION}>Use default</SelectItem>
           {prompts.map((p) => (
-            <SelectItem key={p.id} value={p.name}>
+            <SelectItem key={p.id} value={promptOptionValue(p.name)}>
               {p.name}{p.is_default ? " (default)" : ""}
             </SelectItem>
           ))}
