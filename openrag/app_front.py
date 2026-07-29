@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import secrets
 import string
 import time
@@ -48,6 +49,8 @@ _MARKDOWN_URL_SAFE_CHARS = ":/?#[]@!$&'+,;=%"
 # Chainlit inserts source names into Markdown link labels. Strip only characters
 # that can break or restyle that label so ordinary filenames stay recognizable.
 _MARKDOWN_UNSAFE_SOURCE_NAME_CHARS = str.maketrans(dict.fromkeys("[]*`\\>", " "))
+_MARKDOWN_UNDERSCORE_EMPHASIS = re.compile(r"(?<!\w)(?P<delimiter>_+)(?P<label>\S(?:.*?\S)?)(?P=delimiter)(?!\w)")
+_MARKDOWN_STRIKETHROUGH = re.compile(r"~{2,}")
 
 
 class MissingOpenRAGCredentialError(RuntimeError):
@@ -61,6 +64,8 @@ def _escape_markdown_text(value: str) -> str:
 
 def _safe_source_name(value: str, existing: dict) -> str:
     """Build a Markdown-inert name that Chainlit can match to its element."""
+    value = _MARKDOWN_UNDERSCORE_EMPHASIS.sub(r"\g<label>", value)
+    value = _MARKDOWN_STRIKETHROUGH.sub(" ", value)
     base = " ".join(value.translate(_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS).split()) or "source"
     candidate = base
     suffix = 2

@@ -577,6 +577,22 @@ def test_chainlit_preserves_safe_source_name_punctuation(monkeypatch, source_nam
 
 
 @pytest.mark.parametrize(
+    ("source_name", "expected"),
+    [
+        ("_x_", "x"),
+        ("_trusted_", "trusted"),
+        ("__trusted__", "trusted"),
+        ("foo _trusted_ bar", "foo trusted bar"),
+        ("~~irrelevant~~", "irrelevant"),
+    ],
+)
+def test_chainlit_neutralizes_active_source_name_markdown(monkeypatch, source_name, expected):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_source_name_markdown_test")
+
+    assert module._safe_source_name(source_name, {}) == expected
+
+
+@pytest.mark.parametrize(
     "hostile_name",
     [
         "x](https://evil.test)",
