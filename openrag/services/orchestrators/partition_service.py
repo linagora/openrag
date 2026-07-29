@@ -38,6 +38,7 @@ from core.models.preset import PartitionConfig
 from core.utils.conts import is_internal_metadata_key
 from core.utils.exceptions import (
     ConfigError,
+    ConflictError,
     NotFoundError,
     PartitionNotFoundError,
     UserNotFoundError,
@@ -61,6 +62,9 @@ logger = get_logger()
 # and the admin partition-list route would expand it to *every* partition — see
 # ``list_existant_partitions``. Matched case-insensitively.
 _RESERVED_PARTITION_NAMES = frozenset({"all"})
+_MAX_MEMBER_CANDIDATE_PAGE_SIZE = 100
+_MAX_POSTGRES_INTEGER = 2_147_483_647
+_MIN_MEMBER_CANDIDATE_SEARCH_LENGTH = 3
 
 # Columns where an explicit ``None`` in a PATCH is a real value (SQL NULL =
 # "reset to default"), not the omitted-field sentinel that the None-filter
@@ -677,6 +681,58 @@ class PartitionService:
         await self._ensure_partition(partition)
         return await self._membership_repo.list_partition_members(partition)
 
+    async def list_member_candidates(
+        self,
+        partition: str,
+        *,
+        search: str | None,
+        cursor: int | None = None,
+        limit: int = 25,
+    ) -> dict:
+        """Return matching non-members without exposing the full user directory."""
+        if cursor is not None and (cursor < 0 or cursor > _MAX_POSTGRES_INTEGER):
+            raise ValidationError("Cursor is outside the supported user ID range.")
+        if limit < 1 or limit > _MAX_MEMBER_CANDIDATE_PAGE_SIZE:
+            raise ValidationError(
+                f"Limit must be between 1 and {_MAX_MEMBER_CANDIDATE_PAGE_SIZE}.",
+            )
+
+        await self._ensure_partition(partition)
+        normalized_search = search.strip() if search else ""
+        if not normalized_search:
+            raise ValidationError("Search is required to find users.")
+
+        search_user_id: int | None = None
+        search_prefix: str | None = None
+        if normalized_search.isascii() and normalized_search.isdecimal():
+            numeric_search = int(normalized_search)
+            if numeric_search <= _MAX_POSTGRES_INTEGER:
+                search_user_id = numeric_search
+            if len(normalized_search) >= _MIN_MEMBER_CANDIDATE_SEARCH_LENGTH:
+                search_prefix = normalized_search
+        elif len(normalized_search) < _MIN_MEMBER_CANDIDATE_SEARCH_LENGTH:
+            raise ValidationError(
+                f"Enter at least {_MIN_MEMBER_CANDIDATE_SEARCH_LENGTH} characters or an exact user ID.",
+            )
+        else:
+            search_prefix = normalized_search
+
+        rows = await self._membership_repo.list_partition_member_candidates(
+            partition,
+            search_prefix=search_prefix,
+            search_user_id=search_user_id,
+            after_id=cursor,
+            limit=limit + 1,
+        )
+        has_more = len(rows) > limit
+        candidates = rows[:limit]
+        return {
+            "candidates": candidates,
+            "limit": limit,
+            "has_more": has_more,
+            "next_cursor": candidates[-1]["user_id"] if has_more and candidates else None,
+        }
+
     async def list_members_with_identities(self, partition: str) -> list[dict]:
         """Enrich the admin-facing member list with one bulk user lookup."""
         members = await self.list_members(partition)
@@ -692,7 +748,15 @@ class PartitionService:
     async def add_member(self, partition: str, user_id: int, role: str) -> None:
         await self._ensure_partition(partition)
         await self._ensure_user_exists(user_id)
-        await self._membership_repo.add_partition_member(partition, user_id, role)
+        created = await self._membership_repo.add_partition_member(partition, user_id, role)
+        if not created:
+            raise ConflictError(
+                (
+                    f"User {user_id} is already a member of partition '{partition}'. "
+                    f"Use PATCH /partition/{partition}/users/{user_id} to change their role."
+                ),
+                code="PARTITION_MEMBER_EXISTS",
+            )
         logger.info(f"User_id {user_id} added to partition '{partition}'.")
 
     async def remove_member(self, partition: str, user_id: int) -> None:
