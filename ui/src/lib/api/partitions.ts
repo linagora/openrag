@@ -200,8 +200,40 @@ export interface PartitionMember {
   added_at: string | null;
 }
 
+export interface PartitionMemberCandidate {
+  user_id: number;
+  display_name: string | null;
+  email: string | null;
+}
+
+export interface PartitionMemberCandidatePage {
+  candidates: PartitionMemberCandidate[];
+  limit: number;
+  has_more: boolean;
+  next_cursor: number | null;
+}
+
+interface ListPartitionMemberCandidatesOptions {
+  search: string;
+  cursor?: number;
+  limit?: number;
+}
+
 export function listPartitionMembers(name: string): Promise<{ members: PartitionMember[] }> {
   return request<{ members: PartitionMember[] }>(`${P}/${enc(name)}/users`);
+}
+
+export function listPartitionMemberCandidates(
+  name: string,
+  options: ListPartitionMemberCandidatesOptions,
+): Promise<PartitionMemberCandidatePage> {
+  const query = new URLSearchParams();
+  query.set("search", options.search.trim());
+  if (options.cursor !== undefined) query.set("cursor", String(options.cursor));
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  return request<PartitionMemberCandidatePage>(
+    `${P}/${enc(name)}/users/candidates?${query.toString()}`,
+  );
 }
 
 export function addPartitionMember(name: string, userId: number, role: PartitionRole): Promise<void> {
