@@ -11,9 +11,50 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
-  build-and-push-image:
+  # GA images build for release tags (vX.Y.Z), never for RC tags (build_rc.yml
+  # owns those). This job also enforces "the tag is on main": we can't use
+  # github.event.base_ref for that — it is empty for a tag pushed to a
+  # branch-protected main (which only receives PR-merge commits, not client
+  # pushes), so the old base_ref guard silently skipped every release build.
+  # Instead we verify reachability from origin/main explicitly and fail loud.
+  verify-tag:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc.')
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Tag name and SHA are passed as env data, never interpolated into the
+      # script body: ${{ }} expands before the shell runs, and git permits
+      # ; $ ` " | & in ref names — so a crafted tag could otherwise execute
+      # arbitrary code in this privileged publishing workflow.
+      - name: Verify this is an exact GA release tag on main
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          TAG_SHA: ${{ github.sha }}
+        run: |
+          # The job-level `if` only filters well-formed `-rc.` tags (owned by
+          # build_rc.yml). Anything else reaching here must be an exact GA tag:
+          # a near-miss like `v1.2.3-rc1` matches neither workflow's intent and
+          # would otherwise publish a prerelease as GA and move `latest`.
+          if ! printf '%s' "$TAG_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::$TAG_NAME is not an exact GA release tag (vMAJOR.MINOR.PATCH) — refusing to publish GA images."
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if git merge-base --is-ancestor "$TAG_SHA" FETCH_HEAD; then
+            echo "OK: $TAG_NAME ($TAG_SHA) is an exact GA tag on main"
+          else
+            echo "::error::$TAG_NAME is not on main — refusing to publish GA images."
+            exit 1
+          fi
+
+  build-and-push-image:
+    needs: verify-tag
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -68,8 +109,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-and-push-image-ray:
+    needs: verify-tag
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write
@@ -116,8 +157,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-and-push-image-admin-ui:
+    needs: verify-tag
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && github.event.base_ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write
