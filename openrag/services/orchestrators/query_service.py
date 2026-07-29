@@ -607,7 +607,7 @@ class QueryService:
         chunk["choices"][0]["message"]["content"] = clean
         extra = {"sources": filter_sources_by_citations(sources, citations)}
         if metadata.get("attachments"):
-            # Indicate which attachments were actually leveraged to generate the answer.
+            # Indicate which attachments were actually searched to generate the answer.
             extra["attachments"] = attachments
         chunk["extra"] = json.dumps(extra)
         return chunk
