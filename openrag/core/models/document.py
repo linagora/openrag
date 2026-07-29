@@ -85,6 +85,12 @@ class TableCellData(BaseModel):
     text: str = ""
     source_fragments: list[SourceFragment] = Field(default_factory=list)
     assignment_confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    column_span: int = Field(default=1, ge=1)
+    row_span: int = Field(default=1, ge=1)
+    inherited: bool = False
+    inherited_from: tuple[int, int] | None = None
+    explicit_empty: bool = False
+    covered_by: tuple[int, int] | None = None
 
 
 class TableRowData(BaseModel):
@@ -95,8 +101,10 @@ class TableRowData(BaseModel):
     algorithm_version: str
     table_title: str | None = None
     section_path: list[str] = Field(default_factory=list)
+    scope_fragments: list[SourceFragment] = Field(default_factory=list)
     cells: list[TableCellData] = Field(default_factory=list)
     identity_columns: list[int] = Field(default_factory=list)
+    row_index: int = Field(default=1, ge=1)
     page_start: int = Field(ge=1)
     page_end: int = Field(ge=1)
     boundary_decisions: list[PageBoundaryDecision] = Field(default_factory=list)
@@ -106,6 +114,26 @@ class TableRowData(BaseModel):
         if self.page_end < self.page_start:
             raise ValueError("page_end must be greater than or equal to page_start")
         return self
+
+
+class TableLegendEntry(BaseModel):
+    """One abbreviation definition extracted from a table header."""
+
+    abbreviation: str
+    meaning: str
+    source_fragments: list[SourceFragment] = Field(default_factory=list)
+
+
+class TableLegendData(BaseModel):
+    """A table legend kept separate from its data rows."""
+
+    table_id: str
+    algorithm_version: str
+    table_title: str | None = None
+    section_path: list[str] = Field(default_factory=list)
+    scope_fragments: list[SourceFragment] = Field(default_factory=list)
+    entries: list[TableLegendEntry] = Field(default_factory=list)
+    page_number: int = Field(ge=1)
 
 
 class NormalizationReport(BaseModel):
@@ -127,6 +155,7 @@ class TextBlock(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_fragments: list[SourceFragment] = Field(default_factory=list)
     table_row: TableRowData | None = None
+    table_legend: TableLegendData | None = None
 
 
 class ImageBlock(BaseModel):

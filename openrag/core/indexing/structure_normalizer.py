@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Literal
 
 from core.config.table_reconstruction import TableReconstructionConfig
 from core.models.document import Document, ProcessedDocument
@@ -25,6 +26,10 @@ class LayoutCellEvidence:
     column_index: int
     text: str
     bbox: NormalizedBBox | None
+    slot_state: Literal["value", "explicit_empty", "covered", "unknown"] = "value"
+    column_span: int = 1
+    row_span: int = 1
+    covered_by: tuple[int, int] | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -54,6 +59,15 @@ class TableLayoutEvidenceProvider(ABC):
     """Provide PDF geometry without deciding table or row relationships."""
 
     provider_id = "layout"
+
+    async def discover(self, document: Document) -> set[int]:
+        """Return one-based pages that may contain tables.
+
+        Providers that cannot discover candidates cheaply may keep the empty
+        default and continue serving explicitly requested pages through
+        :meth:`collect`.
+        """
+        return set()
 
     @abstractmethod
     async def collect(self, document: Document, page_numbers: set[int]) -> list[PageLayoutEvidence]:

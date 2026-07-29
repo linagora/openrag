@@ -24,7 +24,7 @@ from core.chunking.markdown_utils import (
     split_md_elements,
 )
 from core.chunking.registry import chunking_registry
-from core.chunking.table_rows import chunk_table_row
+from core.chunking.table_rows import chunk_table_legend, chunk_table_row
 from core.models.chunk import Chunk, ChunkType
 from core.models.document import ProcessedDocument, TextBlock
 from core.utils.text import sanitize_text
@@ -133,7 +133,11 @@ class BaseChunker(ChunkingStrategy):
         """Split a processed document into ``Chunk`` objects."""
         metadata = self._chunk_metadata_base(document, partition)
         blocks = document.effective_text_blocks()
-        if any(block.block_type == "table_row" and block.table_row is not None for block in blocks):
+        if any(
+            (block.block_type == "table_row" and block.table_row is not None)
+            or (block.block_type == "table_legend" and block.table_legend is not None)
+            for block in blocks
+        ):
             md_chunks = self._get_block_aware_chunks(blocks, metadata)
         else:
             content = self._content_from_blocks(blocks)
@@ -218,6 +222,23 @@ class BaseChunker(ChunkingStrategy):
             ordinary.clear()
 
         for block in blocks:
+            if block.block_type == "table_legend" and block.table_legend is not None:
+                flush_ordinary()
+                chunks.extend(
+                    {
+                        **metadata,
+                        **legend_chunk.metadata,
+                        "page_content": legend_chunk.text,
+                        "page": legend_chunk.page_number,
+                        "chunk_type": "table",
+                    }
+                    for legend_chunk in chunk_table_legend(
+                        block.table_legend,
+                        chunk_size=self.chunk_size,
+                        length_function=self.length_function,
+                    )
+                )
+                continue
             if block.block_type != "table_row" or block.table_row is None:
                 ordinary.append(block)
                 continue

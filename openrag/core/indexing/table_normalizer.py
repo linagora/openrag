@@ -20,6 +20,7 @@ from core.indexing.structure_normalizer import (
     PageLayoutEvidence,
     TableLayoutEvidenceProvider,
 )
+from core.indexing.table_text import render_table_legend, render_table_row
 from core.models.document import (
     Document,
     DocumentType,
@@ -28,27 +29,39 @@ from core.models.document import (
     ProcessedDocument,
     SourceFragment,
     TableCellData,
+    TableLegendData,
+    TableLegendEntry,
     TableRowData,
     TextBlock,
 )
 from core.prompts.vlm_prompt_builder import wrap_caption
 
 _MARKDOWN_SEPARATOR_RE = re.compile(r"^:?-{3,}:?$")
-_HEADING_RE = re.compile(r"(?m)^\s*#{1,6}\s+(.+?)\s*$")
+_HEADING_RE = re.compile(r"(?m)^\s*(?P<marks>#{1,6})\s+(?P<text>.+?)\s*$")
 _SYNTHETIC_COLUMN_RE = re.compile(r"^col(?:umn)?\s*\d+$", re.IGNORECASE)
+_ABBREVIATION_RE = re.compile(r"^([A-Z][A-Z0-9.-]{1,11})\s*[:=]\s*(.+)$")
+_TABLE_TITLE_RE = re.compile(r"^(?:table(?:au)?\b|annexe\b|appendix\b)", re.IGNORECASE)
 _HEADER_TERMS = {
+    "area",
     "category",
     "catégorie",
+    "city",
     "description",
     "document",
     "documents",
+    "id",
     "intitulé",
     "libellé",
     "name",
+    "number",
+    "owner",
+    "permit",
     "pièce",
     "pièces",
     "reference",
     "référence",
+    "region",
+    "status",
     "title",
     "titre",
     "type",
@@ -84,6 +97,7 @@ class _TableAlignment:
     region: _AlignedRegion
     rows: list[list[tuple[SourceFragment | None, float]]]
     column_names: tuple[str, ...] | None = None
+    parser_header: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -112,6 +126,12 @@ class _MutableCell:
     parts: list[str] = field(default_factory=list)
     source_fragments: list[SourceFragment] = field(default_factory=list)
     assignment_confidence: float = 1.0
+    column_span: int = 1
+    row_span: int = 1
+    inherited: bool = False
+    inherited_from: tuple[int, int] | None = None
+    explicit_empty: bool = False
+    covered_by: tuple[int, int] | None = None
 
     def append(self, text: str, fragments: list[SourceFragment], confidence: float) -> None:
         clean = _clean_cell_text(text)
@@ -142,6 +162,12 @@ class _MutableCell:
             text=self.text,
             source_fragments=self.source_fragments,
             assignment_confidence=self.assignment_confidence,
+            column_span=self.column_span,
+            row_span=self.row_span,
+            inherited=self.inherited,
+            inherited_from=self.inherited_from,
+            explicit_empty=self.explicit_empty,
+            covered_by=self.covered_by,
         )
 
 
@@ -151,11 +177,13 @@ class _MutableRow:
     algorithm_version: str
     table_title: str | None
     section_path: list[str]
+    scope_fragments: list[SourceFragment]
     cells: list[_MutableCell]
     page_start: int
     page_end: int
     insertion_block_index: int
     insertion_offset: int
+    row_index: int
     boundary_decisions: list[PageBoundaryDecision] = field(default_factory=list)
 
     def merge(
@@ -172,15 +200,22 @@ class _MutableRow:
 
     def freeze(self, identity_columns: tuple[int, ...]) -> TableRowData:
         identity = "\x1f".join(self.cells[index].text for index in identity_columns)
-        row_hash = hashlib.sha256(f"{self.table_id}\x1e{identity}\x1e{self.page_start}".encode()).hexdigest()[:20]
+        row_hash = hashlib.sha256(
+            (
+                f"{self.table_id}\x1e{identity}\x1e{self.page_start}\x1e"
+                f"{self.row_index}\x1e{self.insertion_block_index}\x1e{self.insertion_offset}"
+            ).encode()
+        ).hexdigest()[:20]
         return TableRowData(
             table_id=self.table_id,
             row_id=f"row-{row_hash}",
             algorithm_version=self.algorithm_version,
             table_title=self.table_title,
             section_path=self.section_path,
+            scope_fragments=self.scope_fragments,
             cells=[cell.freeze() for cell in self.cells],
             identity_columns=list(identity_columns),
+            row_index=self.row_index,
             page_start=self.page_start,
             page_end=self.page_end,
             boundary_decisions=self.boundary_decisions,
@@ -195,6 +230,22 @@ class _NormalizedChain:
     decisions: list[PageBoundaryDecision]
     used_tables: set[tuple[int, int]]
     fallback_reasons: list[str]
+    legends: list[_LegendInsertion] = field(default_factory=list)
+
+
+@dataclass(slots=True, frozen=True)
+class _LegendInsertion:
+    legend: TableLegendData
+    insertion_block_index: int
+    insertion_offset: int
+
+
+@dataclass(slots=True, frozen=True)
+class _ScopeContext:
+    section_path: tuple[str, ...]
+    table_title: str | None
+    source_fragments: tuple[SourceFragment, ...]
+    title_fragment: SourceFragment | None = None
 
 
 def _clean_cell_text(text: str) -> str:
@@ -317,6 +368,54 @@ def _markdown_tables(text: str) -> list[_MarkdownTable]:
     if current and any(candidate.separator for candidate in current):
         tables.append(_MarkdownTable(tuple(current), current[0].start, current[-1].end))
     return tables
+
+
+def _reliable_parser_header(row: _MarkdownRow) -> bool:
+    """Reject synthetic continuation rows that only satisfy Markdown syntax."""
+    real_labels = [
+        cell.text.strip()
+        for cell in row.cells
+        if cell.text.strip()
+        and not _SYNTHETIC_COLUMN_RE.fullmatch(cell.text.strip())
+        and len(_normalised_alnum(cell.text)) <= 80
+    ]
+    return len(real_labels) >= max(2, (len(row.cells) + 1) // 2) and not any(
+        re.search(r"\d", label) for label in real_labels
+    )
+
+
+def _parser_header_row(table: _MarkdownTable) -> _MarkdownRow | None:
+    for row, next_row in zip(table.rows, table.rows[1:], strict=False):
+        if not row.separator and next_row.separator and _reliable_parser_header(row):
+            return row
+    return None
+
+
+def _unmatched_parser_rows_are_redundant(
+    *,
+    block_text: str,
+    table: _MarkdownTable,
+    content_rows: list[_MarkdownRow],
+    matched_rows: list[_MarkdownRow],
+) -> bool:
+    unmatched = list(content_rows)
+    for matched in matched_rows:
+        for index, candidate in enumerate(unmatched):
+            if candidate is matched:
+                unmatched.pop(index)
+                break
+
+    outside = f"{block_text[: table.start]}\n{block_text[table.end :]}"
+    for row in unmatched:
+        text = " ".join(cell.text for cell in row.cells)
+        if len(_normalised_alnum(text)) < 40:
+            return False
+        duplicated = _find_normalised_range(text, outside) is not None or any(
+            _similarity(text, paragraph) >= 0.90 for paragraph in re.split(r"\n{2,}", outside) if paragraph.strip()
+        )
+        if not duplicated:
+            return False
+    return True
 
 
 def _unique_exact_range(needle: str, haystack: str) -> tuple[int, int] | None:
@@ -527,7 +626,11 @@ def _markdown_cell_alignment(
         )
         return confidence, None
 
-    confidence = _similarity(evidence_cell.text, markdown_cell.text)
+    # Table normalization is allowed to repair spacing and punctuation, but it
+    # must never replace parser-only content with a merely similar layout
+    # value. Require complete alphanumeric agreement for parser text. Image
+    # captions remain a separately evidenced replacement path below.
+    confidence = 1.0 if _normalised_alnum(evidence_cell.text) == _normalised_alnum(markdown_cell.text) else 0.0
     if confidence >= threshold and markdown_cell.end > markdown_cell.start:
         return confidence, None
 
@@ -547,6 +650,129 @@ def _markdown_cell_alignment(
     return image_region.confidence, image_region
 
 
+def _align_plain_table(
+    table: LayoutTableEvidence,
+    processed_document: ProcessedDocument,
+    image_regions: dict[int, list[tuple[_AlignedRegion, str]]],
+) -> _TableAlignment | None:
+    """Align a layout table to parser text that contains no Markdown grid.
+
+    This path is deliberately strict: every non-empty layout cell must occur
+    in order, and the complete consumed parser range must contain exactly
+    those cell values after alphanumeric normalization.
+    """
+    raw_blocks = processed_document.raw_text_blocks or []
+    values = [cell.text for row in table.rows for cell in row.cells if cell.text.strip()]
+    normalized_values = [_normalised_alnum(value) for value in values]
+    if not values or any(not value for value in normalized_values):
+        return None
+    normalized_table = "".join(normalized_values)
+
+    candidates: list[tuple[int, int, int, list[tuple[int, int]]]] = []
+    for block_index, block in enumerate(raw_blocks):
+        if block.page_number != table.page_number:
+            continue
+        markdown_ranges = [(candidate.start, candidate.end) for candidate in _markdown_tables(block.text)]
+        segment_starts = [0, *(end for _, end in markdown_ranges)]
+        segment_ends = [*(start for start, _ in markdown_ranges), len(block.text)]
+        for segment_start, segment_end in zip(
+            segment_starts,
+            segment_ends,
+            strict=True,
+        ):
+            segment = block.text[segment_start:segment_end]
+            normalized_block, offsets = _normalised_alnum_with_offsets(segment)
+            starts: list[int] = []
+            cursor = 0
+            while True:
+                found = normalized_block.find(normalized_table, cursor)
+                if found < 0:
+                    break
+                starts.append(found)
+                cursor = found + 1
+                if len(starts) > 1:
+                    break
+            if len(starts) != 1:
+                continue
+            normalized_ranges: list[tuple[int, int]] = []
+            cursor = starts[0]
+            for value in normalized_values:
+                normalized_ranges.append((cursor, cursor + len(value)))
+                cursor += len(value)
+            char_ranges = [
+                (
+                    segment_start + offsets[start],
+                    segment_start + offsets[end - 1] + 1,
+                )
+                for start, end in normalized_ranges
+            ]
+            raw_start = char_ranges[0][0]
+            raw_end = char_ranges[-1][1]
+            mapped = _map_parser_region(
+                processed_document,
+                image_regions,
+                block_index,
+                raw_start,
+                raw_end,
+            )
+            if mapped is not None:
+                candidates.append((block_index, raw_start, raw_end, char_ranges))
+
+    if len(candidates) != 1:
+        return None
+    block_index, raw_start, raw_end, char_ranges = candidates[0]
+    mapped = _map_parser_region(
+        processed_document,
+        image_regions,
+        block_index,
+        raw_start,
+        raw_end,
+    )
+    if mapped is None:
+        return None
+
+    range_cursor = 0
+    aligned_rows: list[list[tuple[SourceFragment | None, float]]] = []
+    for row in table.rows:
+        aligned_cells: list[tuple[SourceFragment | None, float]] = []
+        for cell in row.cells:
+            if not cell.text.strip():
+                aligned_cells.append((None, 1.0))
+                continue
+            start, end = char_ranges[range_cursor]
+            range_cursor += 1
+            aligned_cells.append(
+                (
+                    SourceFragment(
+                        source_block_index=block_index,
+                        page_number=table.page_number,
+                        char_start=start,
+                        char_end=end,
+                        source_kind="parser_text",
+                        bbox=cell.bbox,
+                        text_start=0,
+                        text_end=max(1, len(_clean_cell_text(cell.text))),
+                    ),
+                    1.0,
+                )
+            )
+        aligned_rows.append(aligned_cells)
+
+    return _TableAlignment(
+        region=_AlignedRegion(
+            source_block_index=block_index,
+            raw_start=raw_start,
+            raw_end=raw_end,
+            working_start=mapped[0],
+            working_end=mapped[1],
+            page_number=table.page_number,
+            kind="plain_table",
+        ),
+        rows=aligned_rows,
+        column_names=_column_names(table.rows[0]),
+    )
+
+
 def _align_table(
     table: LayoutTableEvidence,
     processed_document: ProcessedDocument,
@@ -555,12 +781,14 @@ def _align_table(
     threshold: float,
 ) -> _TableAlignment | None:
     raw_blocks = processed_document.raw_text_blocks or []
-    candidates: list[tuple[float, int, _MarkdownTable, list[_MarkdownRow]]] = []
+    candidates: list[tuple[float, int, _MarkdownTable, list[_MarkdownRow], bool]] = []
     for block_index, block in enumerate(raw_blocks):
         if block.page_number != table.page_number:
             continue
-        for markdown_table in _markdown_tables(block.text):
+        markdown_tables = _markdown_tables(block.text)
+        for markdown_table in markdown_tables:
             content_rows = [row for row in markdown_table.rows if not row.separator]
+            parser_header_row = _parser_header_row(markdown_table)
             matched: list[_MarkdownRow] = []
             cursor = 0
             scores: list[float] = []
@@ -587,6 +815,8 @@ def _align_table(
                             strict=True,
                         )
                     ]
+                    if any(cell_score < threshold for cell_score in cell_scores):
+                        continue
                     score = sum(cell_scores) / len(cell_scores) if cell_scores else 0.0
                     if score > best_score:
                         best_score = score
@@ -596,14 +826,31 @@ def _align_table(
                 matched.append(content_rows[best_index])
                 scores.append(best_score)
                 cursor = best_index + 1
-            if len(matched) == len(table.rows):
-                candidates.append((sum(scores) / len(scores), block_index, markdown_table, matched))
+            if len(matched) == len(table.rows) and _unmatched_parser_rows_are_redundant(
+                block_text=block.text,
+                table=markdown_table,
+                content_rows=content_rows,
+                matched_rows=matched,
+            ):
+                candidates.append(
+                    (
+                        sum(scores) / len(scores),
+                        block_index,
+                        markdown_table,
+                        matched,
+                        bool(matched and matched[0] is parser_header_row),
+                    )
+                )
 
     if not candidates:
         table_text = "\n".join(cell.text for row in table.rows for cell in row.cells if cell.text.strip())
         image_region = _match_image_region(table_text, table.page_number, image_regions, threshold)
         if image_region is None:
-            return None
+            return _align_plain_table(
+                table,
+                processed_document,
+                image_regions,
+            )
         return _TableAlignment(
             region=image_region,
             rows=[
@@ -620,7 +867,10 @@ def _align_table(
             ],
         )
 
-    score, block_index, markdown_table, matched_rows = max(candidates, key=lambda candidate: candidate[0])
+    score, block_index, markdown_table, matched_rows, parser_header = max(
+        candidates,
+        key=lambda candidate: candidate[0],
+    )
     if score < threshold:
         return None
     if block_index >= len(processed_document.text_blocks):
@@ -650,7 +900,16 @@ def _align_table(
         aligned_cells: list[tuple[SourceFragment | None, float]] = []
         for evidence_cell, markdown_cell in zip(evidence_row.cells, markdown_row.cells, strict=True):
             if not evidence_cell.text.strip():
-                aligned_cells.append((None, 1.0))
+                confidence, _ = _markdown_cell_alignment(
+                    evidence_cell,
+                    markdown_cell,
+                    page_number=table.page_number,
+                    block_index=block_index,
+                    processed_document=processed_document,
+                    image_regions=image_regions,
+                    threshold=threshold,
+                )
+                aligned_cells.append((None, confidence))
                 continue
             confidence, image_region = _markdown_cell_alignment(
                 evidence_cell,
@@ -672,6 +931,9 @@ def _align_table(
             if confidence < threshold or markdown_cell.end <= markdown_cell.start:
                 aligned_cells.append((None, confidence))
                 continue
+            uses_layout_text = evidence_cell.bbox is not None and _clean_cell_text(
+                evidence_cell.text
+            ) != _clean_cell_text(markdown_cell.text)
             aligned_cells.append(
                 (
                     SourceFragment(
@@ -679,6 +941,8 @@ def _align_table(
                         page_number=table.page_number,
                         char_start=markdown_cell.start,
                         char_end=markdown_cell.end,
+                        source_kind=("pdf_layout" if uses_layout_text else "parser_text"),
+                        evidence_provider=(evidence_provider if uses_layout_text else None),
                         bbox=evidence_cell.bbox,
                         text_start=0,
                         text_end=max(1, len(_clean_cell_text(evidence_cell.text))),
@@ -689,37 +953,50 @@ def _align_table(
         aligned_rows.append(aligned_cells)
 
     column_names: list[str] = []
-    for column_index, (evidence_cell, markdown_cell, (fragment, confidence)) in enumerate(
-        zip(table.rows[0].cells, matched_rows[0].cells, aligned_rows[0], strict=True)
-    ):
-        parser_header_is_trusted = (
-            fragment is not None
-            and fragment.source_kind == "parser_text"
-            and confidence >= threshold
-            and bool(markdown_cell.text.strip())
-        )
-        source_text = markdown_cell.text if parser_header_is_trusted else evidence_cell.text
-        column_names.append(_concise_column_name(source_text, column_index))
+    for column_index, evidence_cell in enumerate(table.rows[0].cells):
+        # Layout words preserve the visual boundary between a concise header and
+        # any legend printed beneath it. Parser Markdown may collapse those
+        # lines into one key even when its alphanumeric content still aligns.
+        column_names.append(_concise_column_name(evidence_cell.text, column_index))
 
     return _TableAlignment(
         region=table_region,
         rows=aligned_rows,
         column_names=tuple(column_names),
+        parser_header=parser_header,
     )
 
 
-def _looks_like_header(row: LayoutRowEvidence, following: LayoutRowEvidence | None) -> bool:
+def _looks_like_header(
+    row: LayoutRowEvidence,
+    following_row: LayoutRowEvidence | None = None,
+) -> bool:
     nonempty = sum(bool(cell.text.strip()) for cell in row.cells)
     if nonempty < max(2, (len(row.cells) + 1) // 2):
         return False
-    text = " ".join(cell.text for cell in row.cells).casefold()
-    if any(term in text for term in _HEADER_TERMS):
+    matched_labels = sum(
+        bool(set(re.findall(r"\w+", cell.text.casefold())) & _HEADER_TERMS) and len(_normalised_alnum(cell.text)) <= 200
+        for cell in row.cells
+    )
+    if matched_labels >= 2:
         return True
-    if following is None or not row.cells or not following.cells:
+
+    # Generic column labels such as ``aa | bb | cc`` have no semantic header
+    # vocabulary. Treat them as a header only when the next row supplies a
+    # strong data-type contrast. This preserves the first row of headerless
+    # tables such as ``22 | Paris | Active``.
+    if following_row is None or len(row.cells) != len(following_row.cells):
         return False
-    first = row.cells[0].text.strip()
-    next_first = following.cells[0].text.strip()
-    return not first and bool(next_first)
+    labels = [_clean_cell_text(cell.text) for cell in row.cells]
+    if not all(
+        label and len(label) <= 40 and re.fullmatch(r"[\wÀ-ÖØ-öø-ÿ .()/+-]+", label) and not re.search(r"\d", label)
+        for label in labels
+    ):
+        return False
+    return any(
+        bool(re.search(r"\d", following.text)) and not bool(re.search(r"\d", header.text))
+        for header, following in zip(row.cells, following_row.cells, strict=True)
+    )
 
 
 def _content_column(rows: tuple[LayoutRowEvidence, ...]) -> int:
@@ -745,6 +1022,109 @@ def _concise_column_name(text: str, column_index: int) -> str:
 
 def _column_names(header: LayoutRowEvidence) -> tuple[str, ...]:
     return tuple(_concise_column_name(cell.text, cell.column_index) for cell in header.cells)
+
+
+def _is_repeated_header(
+    row: LayoutRowEvidence,
+    column_names: tuple[str, ...],
+) -> bool:
+    """Recognize only complete, exact repetitions of the established header."""
+    if len(row.cells) != len(column_names):
+        return False
+    return all(
+        bool(_normalised_alnum(column_name))
+        and _normalised_alnum(_concise_column_name(cell.text, cell.column_index)) == _normalised_alnum(column_name)
+        for cell, column_name in zip(row.cells, column_names, strict=True)
+    )
+
+
+def _legend_entries(
+    header: LayoutRowEvidence,
+    aligned_header: list[tuple[SourceFragment | None, float]],
+) -> list[TableLegendEntry]:
+    entries: list[TableLegendEntry] = []
+    seen: set[str] = set()
+    for cell, (fragment, _) in zip(header.cells, aligned_header, strict=True):
+        lines = [line.strip() for line in _clean_cell_text(cell.text).splitlines() if line.strip()]
+        current_abbreviation: str | None = None
+        current_meaning: list[str] = []
+
+        def flush() -> None:
+            nonlocal current_abbreviation, current_meaning
+            if current_abbreviation is None:
+                return
+            meaning = " ".join(current_meaning).strip()
+            if meaning and current_abbreviation not in seen:
+                fragments = [fragment.model_copy(deep=True)] if fragment is not None else []
+                entries.append(
+                    TableLegendEntry(
+                        abbreviation=current_abbreviation,
+                        meaning=meaning,
+                        source_fragments=fragments,
+                    )
+                )
+                seen.add(current_abbreviation)
+            current_abbreviation = None
+            current_meaning = []
+
+        for line in lines:
+            match = _ABBREVIATION_RE.fullmatch(line)
+            if match is not None:
+                flush()
+                current_abbreviation = match.group(1)
+                current_meaning = [match.group(2)]
+            elif current_abbreviation is not None:
+                current_meaning.append(line)
+        flush()
+    return entries
+
+
+def _spans_are_unambiguous(table: LayoutTableEvidence, *, header_rows: int) -> bool:
+    if any(cell.slot_state == "unknown" for row in table.rows for cell in row.cells):
+        return False
+    return not any(
+        cell.column_span > 1 or cell.row_span > 1 or cell.slot_state == "covered"
+        for row in table.rows[:header_rows]
+        for cell in row.cells
+    )
+
+
+def _apply_merged_cell_inheritance(
+    rows: list[_MutableRow],
+    evidence_rows: tuple[LayoutRowEvidence, ...],
+    *,
+    evidence_row_offset: int,
+) -> bool:
+    """Resolve page-local covered slots without guessing across boundaries."""
+    for logical_index, (row, evidence) in enumerate(zip(rows, evidence_rows, strict=True)):
+        for cell_evidence, target in zip(evidence.cells, row.cells, strict=True):
+            if cell_evidence.slot_state != "covered":
+                continue
+            if cell_evidence.covered_by is None:
+                return False
+            anchor_evidence_row, anchor_column = cell_evidence.covered_by
+            anchor_logical_index = anchor_evidence_row - evidence_row_offset
+            if anchor_logical_index == logical_index:
+                target.covered_by = (row.row_index, anchor_column)
+                continue
+            if not 0 <= anchor_logical_index < logical_index:
+                return False
+            anchor = rows[anchor_logical_index].cells[anchor_column]
+            if not anchor.text or anchor.row_span <= logical_index - anchor_logical_index:
+                return False
+            target.parts = list(anchor.parts)
+            target.source_fragments = [fragment.model_copy(deep=True) for fragment in anchor.source_fragments]
+            target.assignment_confidence = anchor.assignment_confidence
+            target.column_span = anchor.column_span
+            target.row_span = 1
+            target.inherited = True
+            target.inherited_from = (
+                rows[anchor_logical_index].row_index,
+                anchor_column,
+            )
+            target.explicit_empty = False
+            target.covered_by = None
+    return True
 
 
 def _table_geometry_confidence(
@@ -779,6 +1159,52 @@ def _page_starts_with_heading(raw_blocks: list[TextBlock], page_number: int) -> 
         if first_content:
             return bool(re.match(r"^#{1,6}\s+", first_content))
     return False
+
+
+def _has_parser_content_before_table(
+    raw_blocks: list[TextBlock],
+    page_number: int,
+) -> bool:
+    preceding_content = False
+    for block in raw_blocks:
+        if block.page_number != page_number:
+            continue
+        tables = _markdown_tables(block.text)
+        if tables:
+            return preceding_content or bool(block.text[: tables[0].start].strip())
+        preceding_content = preceding_content or bool(block.text.strip())
+    return False
+
+
+def _page_edge_confidences(
+    previous_bottom: float,
+    next_top: float,
+) -> tuple[float, float]:
+    """Score how strongly the two regions touch their respective page edges."""
+    bottom = 0.90 + 0.10 * min(1.0, max(0.0, (previous_bottom - 0.82) / 0.18))
+    top = 0.90 + 0.10 * min(1.0, max(0.0, (0.15 - next_top) / 0.15))
+    return bottom, top
+
+
+def _has_content_before_regions(
+    raw_blocks: list[TextBlock],
+    regions: list[_AlignedRegion],
+) -> bool:
+    """Reject continuation evidence preceded by unaccounted page content."""
+    if not regions:
+        return True
+    first = min(
+        regions,
+        key=lambda region: (region.source_block_index, region.raw_start),
+    )
+    for block_index, block in enumerate(raw_blocks):
+        if block.page_number != first.page_number:
+            continue
+        if block_index < first.source_block_index and block.text.strip():
+            return True
+        if block_index == first.source_block_index:
+            return bool(block.text[: first.raw_start].strip())
+    return True
 
 
 def _words_to_text(words: list[LayoutWord]) -> str:
@@ -950,8 +1376,111 @@ def _align_sparse_row(
     )
 
 
-def _section_path(text: str, before: int) -> list[str]:
-    return [_clean_cell_text(match.group(1)).strip("* ") for match in _HEADING_RE.finditer(text[:before])]
+def _scope_fragment(
+    *,
+    block: TextBlock,
+    block_index: int,
+    start: int,
+    end: int,
+    fallback_page: int,
+    text: str,
+) -> SourceFragment:
+    return SourceFragment(
+        source_block_index=block_index,
+        page_number=block.page_number or fallback_page,
+        char_start=start,
+        char_end=end,
+        text_start=0,
+        text_end=max(1, len(text)),
+    )
+
+
+def _scope_context(
+    raw_blocks: list[TextBlock],
+    *,
+    anchor_block_index: int,
+    anchor_offset: int,
+    fallback_page: int,
+) -> _ScopeContext:
+    """Resolve heading ancestry and a separately evidenced table caption."""
+    headings: list[tuple[int, str, SourceFragment]] = []
+    title_candidate: tuple[str, SourceFragment, int, int] | None = None
+    last_heading_end = 0
+
+    for block_index, block in enumerate(raw_blocks[: anchor_block_index + 1]):
+        limit = anchor_offset if block_index == anchor_block_index else len(block.text)
+        for match in _HEADING_RE.finditer(block.text[:limit]):
+            level = len(match.group("marks"))
+            raw_text = match.group("text")
+            clean = _clean_cell_text(raw_text).strip("*_ ")
+            if not clean:
+                continue
+            while headings and headings[-1][0] >= level:
+                headings.pop()
+            fragment = _scope_fragment(
+                block=block,
+                block_index=block_index,
+                start=match.start("text"),
+                end=match.end("text"),
+                fallback_page=fallback_page,
+                text=clean,
+            )
+            if _TABLE_TITLE_RE.match(clean):
+                title_candidate = (clean, fragment, block_index, match.end())
+            else:
+                headings.append((level, clean, fragment))
+                title_candidate = None
+            if block_index == anchor_block_index:
+                last_heading_end = match.end()
+
+    anchor_block = raw_blocks[anchor_block_index]
+    cursor = last_heading_end
+    for line in anchor_block.text[last_heading_end:anchor_offset].splitlines(keepends=True):
+        raw_line = line.rstrip("\r\n")
+        stripped = raw_line.strip()
+        clean = _clean_cell_text(stripped).strip("*_ ")
+        if clean and len(clean) <= 120 and _TABLE_TITLE_RE.match(clean):
+            leading = len(raw_line) - len(raw_line.lstrip())
+            start = cursor + leading
+            title_candidate = (
+                clean,
+                _scope_fragment(
+                    block=anchor_block,
+                    block_index=anchor_block_index,
+                    start=start,
+                    end=start + len(stripped),
+                    fallback_page=fallback_page,
+                    text=clean,
+                ),
+                anchor_block_index,
+                cursor + len(line),
+            )
+        cursor += len(line)
+
+    title: tuple[str, SourceFragment] | None = None
+    if title_candidate is not None:
+        clean, fragment, block_index, end = title_candidate
+        intervening = [raw_blocks[block_index].text[end:]]
+        intervening.extend(block.text for block in raw_blocks[block_index + 1 : anchor_block_index])
+        if block_index != anchor_block_index:
+            intervening.append(anchor_block.text[:anchor_offset])
+        else:
+            intervening[0] = anchor_block.text[end:anchor_offset]
+        # Introductory prose between a caption and its first table is common.
+        # The caption stops applying once another Markdown table has appeared,
+        # preventing a later untitled table from inheriting a stale name.
+        if not _markdown_tables("\n".join(intervening)):
+            title = (clean, fragment)
+
+    fragments = [fragment for _, _, fragment in headings]
+    if title is not None:
+        fragments.append(title[1])
+    return _ScopeContext(
+        section_path=tuple(text for _, text, _ in headings),
+        table_title=title[0] if title is not None else None,
+        source_fragments=tuple(fragments),
+        title_fragment=title[1] if title is not None else None,
+    )
 
 
 def _row_from_evidence(
@@ -960,16 +1489,25 @@ def _row_from_evidence(
     algorithm_version: str,
     table_title: str | None,
     section_path: list[str],
+    scope_fragments: list[SourceFragment],
     column_names: tuple[str, ...],
     evidence: LayoutRowEvidence,
     aligned: list[tuple[SourceFragment | None, float]],
     page_number: int,
     insertion_block_index: int,
     insertion_offset: int,
+    row_index: int,
 ) -> _MutableRow:
     cells: list[_MutableCell] = []
     for name, cell_evidence, (fragment, confidence) in zip(column_names, evidence.cells, aligned, strict=True):
-        cell = _MutableCell(column_index=cell_evidence.column_index, column_name=name)
+        cell = _MutableCell(
+            column_index=cell_evidence.column_index,
+            column_name=name,
+            column_span=cell_evidence.column_span,
+            row_span=cell_evidence.row_span,
+            explicit_empty=cell_evidence.slot_state == "explicit_empty",
+            covered_by=cell_evidence.covered_by,
+        )
         cell.append(cell_evidence.text, [fragment] if fragment is not None else [], confidence)
         cells.append(cell)
     return _MutableRow(
@@ -977,11 +1515,13 @@ def _row_from_evidence(
         algorithm_version=algorithm_version,
         table_title=table_title,
         section_path=section_path,
+        scope_fragments=scope_fragments,
         cells=cells,
         page_start=page_number,
         page_end=page_number,
         insertion_block_index=insertion_block_index,
         insertion_offset=insertion_offset,
+        row_index=row_index,
     )
 
 
@@ -991,7 +1531,7 @@ def _all_assignments_pass(
     threshold: float,
 ) -> bool:
     return all(
-        not cell.text.strip() or (fragment is not None and confidence >= threshold)
+        confidence >= threshold and (not cell.text.strip() or fragment is not None)
         for cell, (fragment, confidence) in zip(row.cells, aligned, strict=True)
     )
 
@@ -1017,6 +1557,11 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
         table_pages = {
             block.page_number for block in raw_blocks if block.page_number is not None and _markdown_tables(block.text)
         }
+        table_pages.update(
+            page
+            for page in await self._evidence_provider.discover(document)
+            if 1 <= page <= processed_document.page_count
+        )
         candidate_image_pages = {
             image.page_number
             for image in processed_document.images
@@ -1045,6 +1590,8 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
 
         chains: list[_NormalizedChain] = []
         used_tables: set[tuple[int, int]] = set()
+        claimed_captions: set[tuple[int, int, int]] = set()
+        preserved_candidates: list[str] = []
         for page_number in sorted(pages):
             page = pages[page_number]
             for table_index, table in enumerate(page.tables):
@@ -1060,24 +1607,30 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                     image_regions,
                     config,
                     processed_document.page_count,
+                    claimed_captions,
                 )
                 if chain is None:
+                    preserved_candidates.append(
+                        f"preserved table candidate {page_number}:{table_index} because a confidence or alignment gate failed"
+                    )
                     continue
                 chains.append(chain)
                 used_tables.update(chain.used_tables)
 
         if not chains:
-            return self._unchanged(processed_document, config, "no page boundary passed all confidence gates")
+            return self._unchanged(processed_document, config, "no table candidate passed all confidence gates")
 
         rows: list[tuple[_MutableRow, tuple[int, ...]]] = []
+        legends: list[_LegendInsertion] = []
         consumed: list[_AlignedRegion] = []
         decisions: list[PageBoundaryDecision] = []
-        fallback_reasons: list[str] = []
+        fallback_reasons: list[str] = list(preserved_candidates)
         for chain in chains:
             rows.extend((row, chain.identity_columns) for row in chain.rows)
             consumed.extend(chain.consumed_regions)
             decisions.extend(chain.decisions)
             fallback_reasons.extend(chain.fallback_reasons)
+            legends.extend(chain.legends)
 
         if not _regions_are_disjoint(consumed):
             return self._unchanged(processed_document, config, "candidate table overlays overlap")
@@ -1085,6 +1638,7 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
         normalized_blocks = _build_normalized_blocks(
             processed_document,
             rows,
+            legends,
             consumed,
         )
         if normalized_blocks is None:
@@ -1114,11 +1668,10 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
         image_regions: dict[int, list[tuple[_AlignedRegion, str]]],
         config: TableReconstructionConfig,
         page_count: int,
+        claimed_captions: set[tuple[int, int, int]],
     ) -> _NormalizedChain | None:
         raw_blocks = processed_document.raw_text_blocks or []
-        if len(anchor.rows) < 2 or anchor.bbox[3] < 0.82:
-            return None
-        if not _looks_like_header(anchor.rows[0], anchor.rows[1]):
+        if not anchor.rows:
             return None
 
         alignment = _align_table(
@@ -1130,23 +1683,76 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
         )
         if alignment is None:
             return None
-        data_rows = anchor.rows[1:]
-        aligned_data = alignment.rows[1:]
+        has_header = alignment.parser_header or (
+            len(anchor.rows) >= 2
+            and _looks_like_header(
+                anchor.rows[0],
+                anchor.rows[1],
+            )
+        )
+        if not has_header:
+            first_nonempty = sum(bool(cell.text.strip()) for cell in anchor.rows[0].cells)
+            if first_nonempty < max(2, (len(anchor.rows[0].cells) + 1) // 2):
+                # A sparse leading row at the top of a page is likely a
+                # continuation, not a safe headerless table anchor.
+                return None
+        header_rows = 1 if has_header else 0
+        if not _spans_are_unambiguous(anchor, header_rows=header_rows):
+            return None
+        data_rows = anchor.rows[header_rows:]
+        aligned_data = alignment.rows[header_rows:]
+        if not data_rows:
+            return None
         if any(
             not _all_assignments_pass(row, aligned, config.cell_assignment_min_confidence)
             for row, aligned in zip(data_rows, aligned_data, strict=True)
         ):
             return None
 
-        column_names = alignment.column_names or _column_names(anchor.rows[0])
+        column_names = (
+            (alignment.column_names or _column_names(anchor.rows[0]))
+            if has_header
+            else tuple(f"Column {index + 1}" for index in range(len(anchor.rows[0].cells)))
+        )
         content_column = _content_column(data_rows)
         identity_columns = tuple(index for index in range(len(column_names)) if index != content_column)
-        source_block = raw_blocks[alignment.region.source_block_index]
-        sections = _section_path(source_block.text, alignment.region.raw_start)
-        table_title = sections[-1] if sections else document.filename or None
-        table_hash = hashlib.sha256(f"{document.id}\x1e{anchor.page_number}\x1e{column_names}".encode()).hexdigest()[
-            :20
-        ]
+        scope = _scope_context(
+            raw_blocks,
+            anchor_block_index=alignment.region.source_block_index,
+            anchor_offset=alignment.region.raw_start,
+            fallback_page=anchor.page_number,
+        )
+        sections = list(scope.section_path)
+        table_title = scope.table_title
+        scope_fragments = [fragment.model_copy(deep=True) for fragment in scope.source_fragments]
+        caption_key = (
+            (
+                scope.title_fragment.source_block_index,
+                scope.title_fragment.char_start,
+                scope.title_fragment.char_end,
+            )
+            if scope.title_fragment is not None
+            else None
+        )
+        if caption_key is not None and caption_key in claimed_captions:
+            table_title = None
+            scope_fragments = [
+                fragment
+                for fragment in scope_fragments
+                if (
+                    fragment.source_block_index,
+                    fragment.char_start,
+                    fragment.char_end,
+                )
+                != caption_key
+            ]
+        table_hash = hashlib.sha256(
+            (
+                f"{document.id}\x1e{anchor.page_number}\x1e"
+                f"{alignment.region.source_block_index}\x1e{alignment.region.raw_start}\x1e"
+                f"{anchor.bbox}\x1e{column_names}"
+            ).encode()
+        ).hexdigest()[:20]
         table_id = f"table-{table_hash}"
 
         rows = [
@@ -1155,17 +1761,48 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                 algorithm_version=config.algorithm_version,
                 table_title=table_title,
                 section_path=sections,
+                scope_fragments=scope_fragments,
                 column_names=column_names,
                 evidence=row,
                 aligned=aligned,
                 page_number=anchor.page_number,
                 insertion_block_index=alignment.region.source_block_index,
                 insertion_offset=alignment.region.raw_start,
+                row_index=row_index,
             )
-            for row, aligned in zip(data_rows, aligned_data, strict=True)
+            for row_index, (row, aligned) in enumerate(
+                zip(data_rows, aligned_data, strict=True),
+                start=1,
+            )
         ]
         if not rows:
             return None
+        if not _apply_merged_cell_inheritance(
+            rows,
+            data_rows,
+            evidence_row_offset=header_rows,
+        ):
+            return None
+
+        legends: list[_LegendInsertion] = []
+        if has_header:
+            legend_entries = _legend_entries(anchor.rows[0], alignment.rows[0])
+            if legend_entries:
+                legends.append(
+                    _LegendInsertion(
+                        legend=TableLegendData(
+                            table_id=table_id,
+                            algorithm_version=config.algorithm_version,
+                            table_title=table_title,
+                            section_path=sections,
+                            scope_fragments=[fragment.model_copy(deep=True) for fragment in scope_fragments],
+                            entries=legend_entries,
+                            page_number=anchor.page_number,
+                        ),
+                        insertion_block_index=alignment.region.source_block_index,
+                        insertion_offset=alignment.region.raw_start,
+                    )
+                )
 
         consumed = [alignment.region]
         decisions: list[PageBoundaryDecision] = []
@@ -1174,7 +1811,7 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
         open_row = rows[-1]
         current_page = anchor.page_number
         reaches_bottom = anchor.bbox[3] >= 0.82
-        merged_boundaries = 0
+        previous_bottom = anchor.bbox[3]
 
         while reaches_bottom:
             next_page_number = current_page + 1
@@ -1190,19 +1827,43 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                 fallback_reasons.append(f"preserved incompatible page boundary {current_page}->{next_page_number}")
                 break
 
+            if _page_starts_with_heading(raw_blocks, next_page_number):
+                fallback_reasons.append(f"preserved section boundary on page {next_page_number}")
+                break
+
             compatible = self._compatible_top_table(anchor, next_page)
             if compatible is not None:
-                next_index, next_table, same_table_confidence = compatible
-                leading = next_table.rows[0]
+                if _has_parser_content_before_table(raw_blocks, next_page_number):
+                    fallback_reasons.append(f"preserved content before a table on page {next_page_number}")
+                    break
+                next_index, next_table, geometry_confidence = compatible
+                repeated_header = bool(next_table.rows) and _is_repeated_header(
+                    next_table.rows[0],
+                    column_names,
+                )
+                data_start = 1 if repeated_header else 0
+                if len(next_table.rows) <= data_start:
+                    fallback_reasons.append(f"preserved a repeated header without data on page {next_page_number}")
+                    break
+                if not _spans_are_unambiguous(next_table, header_rows=data_start):
+                    fallback_reasons.append(f"preserved ambiguous merged cells on page {next_page_number}")
+                    return None
+                leading = next_table.rows[data_start]
                 identity_empty = all(not leading.cells[index].text.strip() for index in identity_columns)
                 content_present = any(
                     cell.text.strip() for cell in leading.cells if cell.column_index not in identity_columns
                 )
-                row_confidence = 0.99 if identity_empty and content_present else 0.0
-                if (
-                    same_table_confidence < config.same_table_min_confidence
-                    or row_confidence < config.row_continuation_min_confidence
-                ):
+                bottom_confidence, top_confidence = _page_edge_confidences(
+                    previous_bottom,
+                    next_table.bbox[1],
+                )
+                same_table_confidence = min(
+                    geometry_confidence,
+                    bottom_confidence,
+                    top_confidence,
+                )
+                row_confidence = top_confidence if identity_empty and content_present else 0.0
+                if not identity_empty or not content_present:
                     decisions.append(
                         PageBoundaryDecision(
                             previous_page=current_page,
@@ -1213,7 +1874,7 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                             reason="the leading row does not safely continue the open row",
                         )
                     )
-                    fallback_reasons.append(f"preserved boundary {current_page}->{next_page_number}")
+                    fallback_reasons.append(f"preserved distinct table boundary {current_page}->{next_page_number}")
                     break
 
                 next_alignment = _align_table(
@@ -1223,13 +1884,41 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                     self._evidence_provider.provider_id,
                     config.cell_assignment_min_confidence,
                 )
-                if next_alignment is None or not _all_assignments_pass(
+                if next_alignment is None:
+                    fallback_reasons.append(f"preserved an unaligned table on page {next_page_number}")
+                    return None
+                if not _all_assignments_pass(
                     leading,
-                    next_alignment.rows[0] if next_alignment else [],
+                    next_alignment.rows[data_start],
                     config.cell_assignment_min_confidence,
                 ):
                     fallback_reasons.append(f"could not align table cells on page {next_page_number}")
+                    return None
+                if _has_content_before_regions(
+                    raw_blocks,
+                    [next_alignment.region],
+                ):
+                    fallback_reasons.append(f"preserved unaccounted content before a table on page {next_page_number}")
                     break
+                aligned_leading = next_alignment.rows[data_start]
+                assignment_confidence = min(
+                    (
+                        confidence
+                        for cell, (_, confidence) in zip(
+                            leading.cells,
+                            aligned_leading,
+                            strict=True,
+                        )
+                        if cell.text.strip()
+                    ),
+                    default=0.0,
+                )
+                row_confidence = min(row_confidence, assignment_confidence)
+                if (
+                    same_table_confidence < config.same_table_min_confidence
+                    or row_confidence < config.row_continuation_min_confidence
+                ):
+                    return None
 
                 decision = PageBoundaryDecision(
                     previous_page=current_page,
@@ -1239,14 +1928,18 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                     decision="merged",
                     reason="compatible columns and empty identity cells continue the open row",
                 )
-                open_row.merge(leading, next_alignment.rows[0], decision)
+                open_row.merge(leading, aligned_leading, decision)
                 decisions.append(decision)
-                merged_boundaries += 1
                 consumed.append(next_alignment.region)
                 used_tables.add((next_page_number, next_index))
 
-                for row_index, row in enumerate(next_table.rows[1:], start=1):
-                    aligned = next_alignment.rows[row_index]
+                next_rows: list[_MutableRow] = []
+                following_start = data_start + 1
+                for evidence_index, row in enumerate(
+                    next_table.rows[following_start:],
+                    start=following_start,
+                ):
+                    aligned = next_alignment.rows[evidence_index]
                     if not _all_assignments_pass(row, aligned, config.cell_assignment_min_confidence):
                         fallback_reasons.append(f"preserved an unaligned row on page {next_page_number}")
                         return None
@@ -1255,23 +1948,32 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                         algorithm_version=config.algorithm_version,
                         table_title=table_title,
                         section_path=sections,
+                        scope_fragments=[fragment.model_copy(deep=True) for fragment in scope_fragments],
                         column_names=column_names,
                         evidence=row,
                         aligned=aligned,
                         page_number=next_page_number,
                         insertion_block_index=next_alignment.region.source_block_index,
                         insertion_offset=next_alignment.region.raw_start,
+                        row_index=len(rows) + len(next_rows) + 1,
                     )
-                    rows.append(new_row)
-                    open_row = new_row
+                    next_rows.append(new_row)
+                if not _apply_merged_cell_inheritance(
+                    next_rows,
+                    next_table.rows[following_start:],
+                    evidence_row_offset=following_start,
+                ):
+                    fallback_reasons.append(f"preserved ambiguous merged-cell inheritance on page {next_page_number}")
+                    return None
+                rows.extend(next_rows)
+                if next_rows:
+                    open_row = next_rows[-1]
 
                 current_page = next_page_number
                 reaches_bottom = next_table.bbox[3] >= 0.82
+                previous_bottom = next_table.bbox[3]
                 continue
 
-            if _page_starts_with_heading(raw_blocks, next_page_number):
-                fallback_reasons.append(f"preserved section boundary on page {next_page_number}")
-                break
             sparse = _sparse_continuation(next_page, anchor.column_bounds, identity_columns)
             if sparse is None:
                 break
@@ -1289,15 +1991,36 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
                 config.cell_assignment_min_confidence,
             ):
                 fallback_reasons.append(f"could not align sparse continuation on page {next_page_number}")
+                return None
+            if _has_content_before_regions(raw_blocks, aligned_sparse.regions):
+                fallback_reasons.append(
+                    f"preserved unaccounted content before a continuation on page {next_page_number}"
+                )
                 break
 
-            same_table_confidence = 0.97
-            row_confidence = 0.98
+            bottom_confidence, top_confidence = _page_edge_confidences(
+                previous_bottom,
+                sparse.bbox[1],
+            )
+            assignment_confidence = min(
+                (
+                    confidence
+                    for cell, (_, confidence) in zip(
+                        sparse.cells,
+                        aligned_sparse.cells,
+                        strict=True,
+                    )
+                    if cell.text.strip()
+                ),
+                default=0.0,
+            )
+            same_table_confidence = min(bottom_confidence, top_confidence)
+            row_confidence = min(top_confidence, assignment_confidence)
             if (
                 same_table_confidence < config.same_table_min_confidence
                 or row_confidence < config.row_continuation_min_confidence
             ):
-                break
+                return None
             decision = PageBoundaryDecision(
                 previous_page=current_page,
                 next_page=next_page_number,
@@ -1308,21 +2031,23 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
             )
             open_row.merge(sparse, aligned_sparse.cells, decision)
             decisions.append(decision)
-            merged_boundaries += 1
             consumed.extend(aligned_sparse.regions)
             current_page = next_page_number
             reaches_bottom = sparse.bbox[3] >= 0.82
+            previous_bottom = sparse.bbox[3]
 
-        if merged_boundaries == 0:
-            return None
-        return _NormalizedChain(
+        chain = _NormalizedChain(
             rows=rows,
             identity_columns=identity_columns,
             consumed_regions=consumed,
             decisions=decisions,
             used_tables=used_tables,
             fallback_reasons=fallback_reasons,
+            legends=legends,
         )
+        if caption_key is not None:
+            claimed_captions.add(caption_key)
+        return chain
 
     @staticmethod
     def _compatible_top_table(
@@ -1355,13 +2080,11 @@ class DeterministicTableNormalizer(DocumentStructureNormalizer):
 
 
 def _row_text(row: TableRowData) -> str:
-    lines: list[str] = []
-    if row.section_path:
-        lines.append(f"Section: {' > '.join(row.section_path)}")
-    if row.table_title:
-        lines.append(f"Table: {row.table_title}")
-    lines.extend(f"{cell.column_name or f'Column {cell.column_index + 1}'}: {cell.text}" for cell in row.cells)
-    return "\n".join(lines)
+    return render_table_row(row)
+
+
+def _legend_text(legend: TableLegendData) -> str:
+    return render_table_legend(legend)
 
 
 def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -1398,6 +2121,7 @@ def _map_interval(raw: str, working: str, start: int, end: int) -> tuple[int, in
 def _build_normalized_blocks(
     processed_document: ProcessedDocument,
     rows: list[tuple[_MutableRow, tuple[int, ...]]],
+    legends: list[_LegendInsertion],
     consumed: list[_AlignedRegion],
 ) -> list[TextBlock] | None:
     raw_blocks = processed_document.raw_text_blocks
@@ -1410,6 +2134,9 @@ def _build_normalized_blocks(
     rows_by_block: dict[int, list[tuple[_MutableRow, tuple[int, ...]]]] = {}
     for row in rows:
         rows_by_block.setdefault(row[0].insertion_block_index, []).append(row)
+    legends_by_block: dict[int, list[_LegendInsertion]] = {}
+    for legend in legends:
+        legends_by_block.setdefault(legend.insertion_block_index, []).append(legend)
 
     normalized: list[TextBlock] = []
     for block_index, working_block in enumerate(processed_document.text_blocks):
@@ -1442,7 +2169,12 @@ def _build_normalized_blocks(
         merged_working = _merge_intervals([(start, end) for _, _, start, end in mapped_regions])
 
         insertions = sorted(rows_by_block.get(block_index, []), key=lambda item: item[0].insertion_offset)
+        legend_insertions = sorted(
+            legends_by_block.get(block_index, []),
+            key=lambda item: item.insertion_offset,
+        )
         inserted: set[int] = set()
+        inserted_legends: set[int] = set()
         cursor = 0
         for working_start, working_end in merged_working:
             residual = working_block.text[cursor:working_start].strip()
@@ -1453,6 +2185,7 @@ def _build_normalized_blocks(
                             "text": residual,
                             "source_fragments": [],
                             "table_row": None,
+                            "table_legend": None,
                         }
                     )
                 )
@@ -1462,11 +2195,36 @@ def _build_normalized_blocks(
                 if mapped_start <= working_end and mapped_end >= working_start
             ]
             raw_limit = max((end for _, end in raw_ranges), default=len(raw_block.text))
+            for insertion_index, insertion in enumerate(legend_insertions):
+                if insertion_index in inserted_legends or insertion.insertion_offset > raw_limit:
+                    continue
+                legend = insertion.legend
+                fragments = [
+                    *legend.scope_fragments,
+                    *(fragment for entry in legend.entries for fragment in entry.source_fragments),
+                ]
+                normalized.append(
+                    TextBlock(
+                        text=_legend_text(legend),
+                        page_number=legend.page_number,
+                        block_type="table_legend",
+                        metadata={
+                            "table_id": legend.table_id,
+                            "table_content_kind": "legend",
+                        },
+                        source_fragments=fragments,
+                        table_legend=legend,
+                    )
+                )
+                inserted_legends.add(insertion_index)
             for insertion_index, (mutable_row, identity_columns) in enumerate(insertions):
                 if insertion_index in inserted or mutable_row.insertion_offset > raw_limit:
                     continue
                 row = mutable_row.freeze(identity_columns)
-                fragments = [fragment for cell in row.cells for fragment in cell.source_fragments]
+                fragments = [
+                    *row.scope_fragments,
+                    *(fragment for cell in row.cells for fragment in cell.source_fragments),
+                ]
                 normalized.append(
                     TextBlock(
                         text=_row_text(row),
@@ -1475,6 +2233,7 @@ def _build_normalized_blocks(
                         metadata={
                             "table_id": row.table_id,
                             "row_id": row.row_id,
+                            "row_index": row.row_index,
                             "page_end": row.page_end,
                         },
                         source_fragments=fragments,
@@ -1492,20 +2251,50 @@ def _build_normalized_blocks(
                         "text": residual,
                         "source_fragments": [],
                         "table_row": None,
+                        "table_legend": None,
                     }
+                )
+            )
+        for insertion_index, insertion in enumerate(legend_insertions):
+            if insertion_index in inserted_legends:
+                continue
+            legend = insertion.legend
+            fragments = [
+                *legend.scope_fragments,
+                *(fragment for entry in legend.entries for fragment in entry.source_fragments),
+            ]
+            normalized.append(
+                TextBlock(
+                    text=_legend_text(legend),
+                    page_number=legend.page_number,
+                    block_type="table_legend",
+                    metadata={
+                        "table_id": legend.table_id,
+                        "table_content_kind": "legend",
+                    },
+                    source_fragments=fragments,
+                    table_legend=legend,
                 )
             )
         for insertion_index, (mutable_row, identity_columns) in enumerate(insertions):
             if insertion_index in inserted:
                 continue
             row = mutable_row.freeze(identity_columns)
-            fragments = [fragment for cell in row.cells for fragment in cell.source_fragments]
+            fragments = [
+                *row.scope_fragments,
+                *(fragment for cell in row.cells for fragment in cell.source_fragments),
+            ]
             normalized.append(
                 TextBlock(
                     text=_row_text(row),
                     page_number=row.page_start,
                     block_type="table_row",
-                    metadata={"table_id": row.table_id, "row_id": row.row_id, "page_end": row.page_end},
+                    metadata={
+                        "table_id": row.table_id,
+                        "row_id": row.row_id,
+                        "row_index": row.row_index,
+                        "page_end": row.page_end,
+                    },
                     source_fragments=fragments,
                     table_row=row,
                 )

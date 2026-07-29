@@ -456,6 +456,39 @@ class TestChunkToEntity:
         assert "_id" not in entity
 
 
+@pytest.mark.asyncio
+async def test_upsert_preserves_table_text_and_metadata_at_insert_boundary(
+    store: MilvusVectorStore,
+) -> None:
+    text = (
+        "In table “Table A”, the first row (row 1) has the value “22” in column “aa”, "
+        "the value “Paris” in column “bb”, and the value “Active” in column “cc”."
+    )
+    metadata = {
+        "table_id": "table-a",
+        "row_id": "row-a-1",
+        "row_index": 1,
+        "table_title": "Table A",
+        "table_content_kind": "row",
+        "table_text_serialization_version": "natural-language-v1",
+    }
+    chunk = _make_chunk(
+        text=text,
+        chunk_type=ChunkType.TABLE,
+        metadata=metadata,
+    )
+    store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+    assert await store.upsert([chunk]) == 1
+
+    insert_call = store._async_client.insert.await_args
+    assert insert_call.kwargs["collection_name"] == "test_collection"
+    [entity] = insert_call.kwargs["data"]
+    assert entity["text"] == text
+    assert entity["chunk_type"] == "table"
+    assert {key: entity[key] for key in metadata} == metadata
+
+
 # ---------------------------------------------------------------------------
 # Surface-level ABC-vs-bound-collection enforcement
 # ---------------------------------------------------------------------------

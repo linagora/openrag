@@ -22,13 +22,22 @@ from contextlib import AbstractAsyncContextManager, nullcontext
 from tqdm.asyncio import tqdm
 
 from ..llm import LLM
-from ..models.chunk import Chunk
+from ..models.chunk import Chunk, ChunkType
 from ..prompts.contextualization_builder import build_messages, wrap_chunk_with_context
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_BATCH_SIZE = 4
+_STRUCTURED_TABLE_CONTENT_KINDS = frozenset({"row", "legend"})
+
+
+def _is_structured_table_chunk(chunk: Chunk) -> bool:
+    """Return whether a chunk contains deterministic structured-table text."""
+    return (
+        chunk.chunk_type == ChunkType.TABLE
+        and chunk.metadata.get("table_content_kind") in _STRUCTURED_TABLE_CONTENT_KINDS
+    )
 
 
 class ChunkContextualizer:
@@ -88,10 +97,12 @@ class ChunkContextualizer:
     ) -> list[Chunk]:
         """Return new chunks with context prepended to ``text``.
 
-        Each returned chunk preserves the input's id, metadata, and other
-        fields; ``text`` is rewritten to the formatted (context + content)
-        string used for embedding, ``context`` holds the generated context,
-        and ``content`` holds the original chunk text.
+        Ordinary chunks preserve the input's id, metadata, and other fields;
+        ``text`` is rewritten to the formatted (context + content) string used
+        for embedding, ``context`` holds the generated context, and ``content``
+        holds the original chunk text. Structured table rows and legends are
+        returned unchanged so LLM-generated context cannot mix their distinct
+        retrieval semantics.
 
         Falls back to returning the input chunks unchanged on any
         unrecoverable error.
@@ -102,11 +113,13 @@ class ChunkContextualizer:
 
         try:
             first_chunks = chunks[:2]
-            contexts: list[str] = []
+            eligible_indices = [index for index, chunk in enumerate(chunks) if not _is_structured_table_chunk(chunk)]
+            contexts: list[str | None] = [None] * len(chunks)
             # Schedule one batch at a time so prompt strings + coroutine
             # objects don't all sit in memory upfront on large documents.
-            for start in range(0, len(chunks), self._batch_size):
-                end = min(start + self._batch_size, len(chunks))
+            for start in range(0, len(eligible_indices), self._batch_size):
+                end = min(start + self._batch_size, len(eligible_indices))
+                batch_indices = eligible_indices[start:end]
                 batch = [
                     self._generate_context(
                         first_chunks=first_chunks,
@@ -115,17 +128,19 @@ class ChunkContextualizer:
                         filename=filename,
                         lang=lang,
                     )
-                    for i in range(start, end)
+                    for i in batch_indices
                 ]
-                contexts.extend(
-                    await tqdm.gather(
-                        *batch,
-                        desc=f"Contextualizing chunks of *{filename}* [{start + 1}-{end}/{len(chunks)}]",
-                    )
+                generated = await tqdm.gather(
+                    *batch,
+                    desc=(f"Contextualizing chunks of *{filename}* [{start + 1}-{end}/{len(eligible_indices)}]"),
                 )
+                for index, context in zip(batch_indices, generated, strict=True):
+                    contexts[index] = context
 
             return [
-                chunk.model_copy(
+                chunk
+                if context is None
+                else chunk.model_copy(
                     update={
                         "text": wrap_chunk_with_context(
                             content=chunk.text,
