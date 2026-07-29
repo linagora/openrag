@@ -1,6 +1,6 @@
 import type { PromptType } from "@/lib/api/prompts";
 
-// Shared metadata for the 8 managed prompt types: their human labels, how they
+// Shared metadata for the managed prompt types: their human labels, how they
 // group by concern, and the `{variables}` each template understands. Consumed by
 // the Prompt Library page and by the preset/partition editors that select a
 // prompt by name.
