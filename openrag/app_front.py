@@ -45,6 +45,7 @@ OPENRAG_SESSION_COOKIE_NAME = "openrag_session"
 _OPENRAG_TOKEN_STORE: dict[str, tuple[str, float]] = {}
 _MARKDOWN_ESCAPE_TABLE = str.maketrans({char: f"\\{char}" for char in string.punctuation})
 _MARKDOWN_URL_SAFE_CHARS = ":/?#[]@!$&'+,;=%"
+_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS = str.maketrans(dict.fromkeys("[]()*_`~#>|\\", " "))
 
 
 class MissingOpenRAGCredentialError(RuntimeError):
@@ -54,6 +55,17 @@ class MissingOpenRAGCredentialError(RuntimeError):
 def _escape_markdown_text(value: str) -> str:
     """Render untrusted source metadata as literal Markdown text."""
     return value.translate(_MARKDOWN_ESCAPE_TABLE)
+
+
+def _safe_source_name(value: str, existing: dict) -> str:
+    """Build a Markdown-inert name that Chainlit can match to its element."""
+    base = " ".join(value.translate(_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS).split()) or "source"
+    candidate = base
+    suffix = 2
+    while candidate in existing:
+        candidate = f"{base} {suffix}"
+        suffix += 1
+    return candidate
 
 
 def get_user_language() -> str:
@@ -499,9 +511,7 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
                 continue
 
             source_label = title or url
-            source_name = source_label
-            if source_name in d:
-                source_name = f"{source_name} ({i})"
+            source_name = _safe_source_name(source_label, d)
             content = f"**[{_escape_markdown_text(source_label)}]({markdown_url})**"
             if snippet:
                 content += f"\n\n{_escape_markdown_text(snippet)}"
@@ -533,9 +543,10 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
         if api_key and (AUTH_MODE != "oidc" or _current_openrag_auth_provider() == "credentials"):
             file_url = f"{file_url}?token={api_key}"
         page_label = str(page).strip() if page is not None else ""
-        source_name = f"{filename}" + (
+        source_label = f"{filename}" + (
             f" (page: {page_label})" if suffix in [".pdf", ".pptx", ".docx", ".doc"] and page_label else ""
         )
+        source_name = _safe_source_name(source_label, d)
 
         try:
             if only_txt:
@@ -552,7 +563,7 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
                         elem = cl.Pdf(
                             name=source_name,
                             url=file_url,
-                            page=int(page),
+                            page=int(page) if page_label else None,
                             display="side",
                         )
                     case suffix if suffix in [".png", ".jpg", ".jpeg"]:
@@ -569,13 +580,13 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
                         if not isinstance(chunk_content, str) or not chunk_content.strip():
                             continue
                         elem = cl.Text(content=chunk_content, name=source_name, display="side")
-        except (httpx.HTTPError, TypeError, ValueError, AttributeError):
+        except (httpx.HTTPError, httpx.InvalidURL, TypeError, ValueError, AttributeError):
             logger.warning("Skipping an unavailable source", source_index=i)
             continue
 
         d[source_name] = elem
 
-    source_names = [_escape_markdown_text(name) for name in d]
+    source_names = list(d)
     elements = list(d.values())
 
     return elements, source_names

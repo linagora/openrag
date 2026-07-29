@@ -421,7 +421,6 @@ async def test_chainlit_cookie_auth_retries_handoff_after_stale_oidc_session(mon
         [{"source_type": "web", "title": "", "url": "", "snippet": ""}],
         [{"source_type": "web", "title": "Invalid URL", "url": "http://[invalid"}],
         [{"filename": "", "file_url": "", "page": ""}],
-        [{"filename": "document.pdf", "file_url": "https://openrag.example/static/source-id"}],
     ],
 )
 @pytest.mark.asyncio
@@ -469,9 +468,30 @@ async def test_chainlit_keeps_page_less_non_pdf_sources(monkeypatch):
         ]
     )
 
-    assert source_names == [r"diagram\.png", r"demo\.mp4", r"recording\.mp3", r"notes\.txt"]
+    assert source_names == ["diagram.png", "demo.mp4", "recording.mp3", "notes.txt"]
     assert [element.name for element in elements] == ["diagram.png", "demo.mp4", "recording.mp3", "notes.txt"]
+    assert source_names == [element.name for element in elements]
     assert elements[-1].content == "Page-less text content"
+
+
+@pytest.mark.asyncio
+async def test_chainlit_keeps_page_less_pdf_sources(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_page_less_pdf_test")
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    elements, source_names = await module._format_sources(
+        [
+            {
+                "filename": "report_[draft].pdf",
+                "file_url": "https://openrag.example/static/pdf-id",
+            }
+        ]
+    )
+
+    assert source_names == ["report draft .pdf"]
+    assert source_names == [element.name for element in elements]
+    assert elements[0].page is None
 
 
 @pytest.mark.asyncio
@@ -516,8 +536,8 @@ async def test_chainlit_escapes_untrusted_web_source_markdown(monkeypatch):
         ]
     )
 
-    assert source_names == [r"Reference \]\(https\:\/\/spoof\.test\) \*\*trusted\*\*"]
-    assert elements[0].name == title
+    assert source_names == ["Reference https://spoof.test trusted"]
+    assert elements[0].name == source_names[0]
     assert elements[0].content == (
         r"**[Reference \]\(https\:\/\/spoof\.test\) \*\*trusted\*\*]"
         "(https://example.test/reference_%28draft%29)**\n\n"
@@ -526,13 +546,37 @@ async def test_chainlit_escapes_untrusted_web_source_markdown(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_chainlit_skips_unavailable_text_sources(monkeypatch):
+async def test_chainlit_keeps_source_names_unique_after_sanitizing(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_source_name_collision_test")
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    elements, source_names = await module._format_sources(
+        [
+            {"source_type": "web", "title": "Reference [draft]", "url": "https://example.test/one"},
+            {"source_type": "web", "title": "Reference (draft)", "url": "https://example.test/two"},
+        ]
+    )
+
+    assert source_names == ["Reference draft", "Reference draft 2"]
+    assert source_names == [element.name for element in elements]
+
+
+@pytest.mark.parametrize(
+    "source_error",
+    [
+        pytest.param(httpx.ConnectError("source unavailable"), id="connection-error"),
+        pytest.param(httpx.InvalidURL("invalid source URL"), id="invalid-url"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_chainlit_skips_unavailable_text_sources(monkeypatch, source_error):
     module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_unavailable_source_test")
     monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
     _stub_chainlit_elements(module)
 
     async def unavailable_chunk(*_args, **_kwargs):
-        raise httpx.ConnectError("source unavailable")
+        raise source_error
 
     monkeypatch.setattr(module, "__fetch_page_content", unavailable_chunk)
 
