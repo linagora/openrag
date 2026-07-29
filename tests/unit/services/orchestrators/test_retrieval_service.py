@@ -472,9 +472,7 @@ async def test_hyde_template_resolved_from_preset_via_prompt_service():
     """A hyde preset's hyde_prompt_name is resolved through PromptService and
     threaded into the HyDeRetriever (the #13 retrieval-prompt seam)."""
     cfg = _config()
-    cfg.partitions = {
-        "tenant-a": _partition(retrieval=RetrievalPipelineConfig(type="hyde", hyde_prompt_name="myhyde"))
-    }
+    cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(type="hyde", hyde_prompt_name="myhyde"))}
     rec = _RecordingPromptService("HYDE {question}")
     svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=object(), config=cfg, prompt_service=rec)
     pipeline, _ = await svc._pipeline_for_partition("tenant-a")
@@ -486,9 +484,7 @@ async def test_hyde_template_resolved_from_preset_via_prompt_service():
 async def test_multi_query_template_resolved_from_preset_via_prompt_service():
     cfg = _config()
     cfg.partitions = {
-        "tenant-a": _partition(
-            retrieval=RetrievalPipelineConfig(type="multiQuery", multi_query_prompt_name="mymq")
-        )
+        "tenant-a": _partition(retrieval=RetrievalPipelineConfig(type="multiQuery", multi_query_prompt_name="mymq"))
     }
     rec = _RecordingPromptService("MQ {query} {k_queries}")
     svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=object(), config=cfg, prompt_service=rec)

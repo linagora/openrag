@@ -505,9 +505,7 @@ async def test_query_contextualizer_name_from_retrieval_preset_reaches_resolver(
     svc = _svc(llm=FakeLLM(chat_responses=[payload, payload]), mode="ChatBotRag")
     rec = RecordingPromptService()
     svc._prompt_service = rec
-    svc._config.partitions = {
-        "p": SimpleNamespace(retrieval=SimpleNamespace(query_contextualizer_prompt_name="myctx"))
-    }
+    svc._config.partitions = {"p": SimpleNamespace(retrieval=SimpleNamespace(query_contextualizer_prompt_name="myctx"))}
 
     await svc.generate_query([{"role": "user", "content": "q"}], partition=["p"])
     assert ("query_contextualizer", ("myctx",)) in rec.calls

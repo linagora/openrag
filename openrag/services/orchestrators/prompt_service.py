@@ -83,6 +83,7 @@ def _validate_template(prompt_type: str, content: str) -> None:
             code="PROMPT_TEMPLATE_INVALID",
         )
 
+
 # Canonical ``prompt_type`` (a ``PromptType`` value, and the DB key) → the
 # ``PromptsConfig`` attribute the on-disk template loader looks up. Identity for
 # every type except image captioning, whose config attribute is historically
@@ -168,9 +169,7 @@ class PromptService:
         return content
 
     @staticmethod
-    def _log_resolution(
-        prompt_type: str, candidates: list[str], source: str, name: str | None, content: str
-    ) -> None:
+    def _log_resolution(prompt_type: str, candidates: list[str], source: str, name: str | None, content: str) -> None:
         """Emit one line per resolution so operators can confirm, in the logs,
         exactly which library prompt each pipeline stage (indexation /
         retrieval / chat) actually used, and preview its text.
