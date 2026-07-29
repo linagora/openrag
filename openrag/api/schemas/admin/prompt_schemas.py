@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 
-# The 8 managed prompt types (mirrors core.models.prompt.PromptType). Declaring
+# The managed prompt types (mirrors core.models.prompt.PromptType). Declaring
 # them as a Literal makes FastAPI reject unknown types at the transport edge
 # (422) and renders the enum in the OpenAPI schema.
 PromptTypeName = Literal[

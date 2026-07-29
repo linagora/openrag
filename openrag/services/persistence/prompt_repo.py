@@ -11,13 +11,11 @@ and the default branch of :meth:`create`).
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
+import asyncpg
 from core.models.prompt import Prompt
 from core.ports.prompt_repo import PromptRepository
-
-if TYPE_CHECKING:
-    import asyncpg
+from core.utils.exceptions import ValidationError
 
 # Only these columns are editable in place. ``is_default`` is excluded on
 # purpose: a bare ``UPDATE ... SET is_default = true`` cannot clear the previous
@@ -30,8 +28,31 @@ _ALLOWED_UPDATE_FIELDS = frozenset({"name", "content"})
 _COLS = ("id", "prompt_type", "name", "content", "is_default", "created_at", "updated_at")
 _SELECT_COLS = ", ".join(_COLS)
 
+
 # Indexation/retrieval preset config field -> the prompt_type it names. Partition
 # generation_prompt_names keys ARE prompt_type values, so they need no mapping.
+def _as_conflict(exc: asyncpg.UniqueViolationError, prompt_type: str) -> ValidationError:
+    """Translate a unique-index violation into the 409 the service intends.
+
+    The service checks for a name clash before writing, but that check and the
+    write are not one atomic step: two concurrent admins creating (or renaming
+    to) the same name both pass it, and the loser hits the index. Without this
+    the loser gets a 500 from the generic exception handler instead of the same
+    409 the sequential path returns. Mirrors PgPartitionRepository.create.
+    """
+    if exc.constraint_name == "uix_prompts_default_per_type":
+        return ValidationError(
+            f"Another '{prompt_type}' prompt was made the default concurrently; retry.",
+            status_code=409,
+            code="PROMPT_DEFAULT_CONFLICT",
+        )
+    return ValidationError(
+        f"A '{prompt_type}' prompt with that name already exists.",
+        status_code=409,
+        code="PROMPT_EXISTS",
+    )
+
+
 _PRESET_FIELD_TO_TYPE = {
     "contextualization_prompt_name": "chunk_contextualizer",
     "image_captioning_prompt_name": "image_captioning",
@@ -81,18 +102,21 @@ class PgPromptRepository(PromptRepository):
                         "WHERE prompt_type = $1 AND is_default = true",
                         prompt.prompt_type,
                     )
-                rec = await conn.fetchrow(
-                    f"""
-                    INSERT INTO prompts (id, prompt_type, name, content, is_default)
-                    VALUES ($1, $2, $3, $4, $5)
-                    RETURNING {_SELECT_COLS}
-                    """,
-                    prompt.id,
-                    prompt.prompt_type,
-                    prompt.name,
-                    prompt.content,
-                    prompt.is_default,
-                )
+                try:
+                    rec = await conn.fetchrow(
+                        f"""
+                        INSERT INTO prompts (id, prompt_type, name, content, is_default)
+                        VALUES ($1, $2, $3, $4, $5)
+                        RETURNING {_SELECT_COLS}
+                        """,
+                        prompt.id,
+                        prompt.prompt_type,
+                        prompt.name,
+                        prompt.content,
+                        prompt.is_default,
+                    )
+                except asyncpg.UniqueViolationError as exc:
+                    raise _as_conflict(exc, prompt.prompt_type) from exc
         return self._to_model(rec)
 
     async def get(self, prompt_id: str) -> Prompt | None:
@@ -144,10 +168,15 @@ class PgPromptRepository(PromptRepository):
             params.append(val)
             sets.append(f"{col} = ${len(params)}")
 
-        rec = await self.pool.fetchrow(
-            f"UPDATE prompts SET {', '.join(sets)}, updated_at = now() WHERE id = $1 RETURNING {_SELECT_COLS}",
-            *params,
-        )
+        try:
+            rec = await self.pool.fetchrow(
+                f"UPDATE prompts SET {', '.join(sets)}, updated_at = now() WHERE id = $1 RETURNING {_SELECT_COLS}",
+                *params,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            # A rename racing another rename/create onto the same name.
+            existing = await self.get(prompt_id)
+            raise _as_conflict(exc, existing.prompt_type if existing else "") from exc
         return self._to_model(rec) if rec else None
 
     async def delete(self, prompt_id: str) -> bool:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 from core.models.prompt import Prompt
+from core.utils.exceptions import ValidationError
 from services.storage.postgres_store import PostgresStore
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
@@ -121,3 +122,22 @@ class TestDefaultPerType:
         # Two defaults coexist because they are different types.
         assert (await repo.get_default("sys_prompt")).id == sysp.id
         assert (await repo.get_default("hyde")).id == hyde.id
+
+    async def test_duplicate_name_raises_409_not_500(self, postgres_store: PostgresStore):
+        """The service's pre-check is not atomic: a concurrent create can still
+        reach the unique index. The repo must translate that into the same 409
+        the sequential path returns, not let a UniqueViolationError become a 500.
+        """
+        repo = postgres_store.prompt_repo
+        await repo.create(_prompt(name="clash"))
+        with pytest.raises(ValidationError) as err:
+            await repo.create(_prompt(name="clash"))
+        assert err.value.status_code == 409
+
+    async def test_rename_onto_an_existing_name_raises_409(self, postgres_store: PostgresStore):
+        repo = postgres_store.prompt_repo
+        await repo.create(_prompt(name="taken"))
+        other = await repo.create(_prompt(name="free"))
+        with pytest.raises(ValidationError) as err:
+            await repo.update(other.id, name="taken")
+        assert err.value.status_code == 409
