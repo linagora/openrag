@@ -489,7 +489,7 @@ async def test_chainlit_keeps_page_less_pdf_sources(monkeypatch):
         ]
     )
 
-    assert source_names == ["report draft .pdf"]
+    assert source_names == ["report_ draft .pdf"]
     assert source_names == [element.name for element in elements]
     assert elements[0].page is None
 
@@ -536,7 +536,7 @@ async def test_chainlit_escapes_untrusted_web_source_markdown(monkeypatch):
         ]
     )
 
-    assert source_names == ["Reference https://spoof.test trusted"]
+    assert source_names == ["Reference (https://spoof.test) trusted"]
     assert elements[0].name == source_names[0]
     assert elements[0].content == (
         r"**[Reference \]\(https\:\/\/spoof\.test\) \*\*trusted\*\*]"
@@ -554,12 +554,46 @@ async def test_chainlit_keeps_source_names_unique_after_sanitizing(monkeypatch):
     elements, source_names = await module._format_sources(
         [
             {"source_type": "web", "title": "Reference [draft]", "url": "https://example.test/one"},
-            {"source_type": "web", "title": "Reference (draft)", "url": "https://example.test/two"},
+            {"source_type": "web", "title": "Reference *draft*", "url": "https://example.test/two"},
         ]
     )
 
     assert source_names == ["Reference draft", "Reference draft 2"]
     assert source_names == [element.name for element in elements]
+
+
+@pytest.mark.parametrize(
+    ("source_name", "expected"),
+    [
+        ("rapport_annuel_2026.pdf", "rapport_annuel_2026.pdf"),
+        ("report.pdf (page: 3)", "report.pdf (page: 3)"),
+        ("C++_style_guide.pdf", "C++_style_guide.pdf"),
+    ],
+)
+def test_chainlit_preserves_safe_source_name_punctuation(monkeypatch, source_name, expected):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_source_name_punctuation_test")
+
+    assert module._safe_source_name(source_name, {}) == expected
+
+
+@pytest.mark.parametrize(
+    "hostile_name",
+    [
+        "x](https://evil.test)",
+        "nested[a](b)c",
+        "trailing\\",
+        "**bold**",
+        "back`tick`",
+        ">quote",
+    ],
+)
+def test_chainlit_source_name_cannot_break_markdown_link(monkeypatch, hostile_name):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_source_name_safety_test")
+
+    safe_name = module._safe_source_name(hostile_name, {})
+
+    assert not set(safe_name) & set("[]*`\\>")
+    assert safe_name.strip() == safe_name
 
 
 @pytest.mark.parametrize(

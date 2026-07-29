@@ -45,7 +45,9 @@ OPENRAG_SESSION_COOKIE_NAME = "openrag_session"
 _OPENRAG_TOKEN_STORE: dict[str, tuple[str, float]] = {}
 _MARKDOWN_ESCAPE_TABLE = str.maketrans({char: f"\\{char}" for char in string.punctuation})
 _MARKDOWN_URL_SAFE_CHARS = ":/?#[]@!$&'+,;=%"
-_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS = str.maketrans(dict.fromkeys("[]()*_`~#>|\\", " "))
+# Chainlit inserts source names into Markdown link labels. Strip only characters
+# that can break or restyle that label so ordinary filenames stay recognizable.
+_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS = str.maketrans(dict.fromkeys("[]*`\\>", " "))
 
 
 class MissingOpenRAGCredentialError(RuntimeError):
