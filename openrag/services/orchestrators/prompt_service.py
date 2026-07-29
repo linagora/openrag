@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from core.models.prompt import Prompt, PromptType
 from core.prompts.template_loader import load_template_by_key
-from core.utils.exceptions import NotFoundError, ValidationError
+from core.utils.exceptions import ConfigError, NotFoundError, ValidationError
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -127,6 +127,16 @@ class PromptService:
             except (FileNotFoundError, ValueError) as exc:
                 logger.warning(f"No disk template to seed prompt type '{prompt_type}': {exc}")
                 continue
+            try:
+                # Seeding writes straight to the repo, so it would otherwise be
+                # the one path that stores content the CRUD API would reject. A
+                # bundled template with a bad placeholder must not become a
+                # type's global default: every request falling back to it would
+                # raise inside .format() at the point of use.
+                _validate_template(prompt_type, content)
+            except ValidationError as exc:
+                logger.warning(f"Bundled template for '{prompt_type}' is not a valid template; not seeding: {exc}")
+                continue
             await self._repo.create(
                 Prompt(
                     prompt_type=prompt_type,
@@ -150,9 +160,18 @@ class PromptService:
         """Resolve the effective prompt text for ``prompt_type``.
 
         Tries each candidate ``name`` in order (a preset- or partition-named
-        library prompt), then the global default, then the on-disk seed. Always
-        returns a string. ``names`` entries may be ``None``/empty (skipped) so
-        callers can pass optional config values directly.
+        library prompt), then the global default, then the on-disk seed.
+        ``names`` entries may be ``None``/empty (skipped) so callers can pass
+        optional config values directly.
+
+        Returns a string in every reachable case: boot seeds a default per type
+        and deleting a type's default is refused, so reaching the disk seed is
+        already an anomaly. If even that is unreadable there is no prompt to
+        return, and inventing one would silently degrade generation — so this
+        raises a typed :class:`ConfigError` naming the type instead of letting a
+        bare ``FileNotFoundError`` surface as an opaque 500. Callers that must
+        never fail (the ingest path) catch it and fall back to their own
+        disk-loaded prompt.
         """
         candidates = [n for n in (names or ()) if n]
         for name in candidates:
@@ -164,7 +183,14 @@ class PromptService:
         if default is not None:
             self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
             return default.content
-        content = self._disk_seed(prompt_type)
+        try:
+            content = self._disk_seed(prompt_type)
+        except (FileNotFoundError, ValueError, KeyError) as exc:
+            raise ConfigError(
+                f"No prompt available for type '{prompt_type}': no library default and "
+                f"no readable bundled template ({exc}).",
+                code="PROMPT_UNAVAILABLE",
+            ) from exc
         self._log_resolution(prompt_type, candidates, "disk-seed", None, content)
         return content
 

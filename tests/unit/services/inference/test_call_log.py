@@ -8,7 +8,15 @@ from contextlib import contextmanager
 
 from core.utils.logging import get_logger
 from loguru import logger
-from services.inference._call_log import PREVIEW_CHARS, _describe, _render_content, log_llm_call
+from services.inference._call_log import (
+    MAX_DETAIL_CHARS,
+    MAX_META_CHARS,
+    MAX_PARTS,
+    PREVIEW_CHARS,
+    _describe,
+    _render_content,
+    log_llm_call,
+)
 
 
 @contextmanager
@@ -63,7 +71,14 @@ def test_unknown_content_shapes_do_not_raise():
 
 
 class _Exploding(str):
-    """A payload that fails loudly if its preview is ever built."""
+    """A payload that fails loudly if its preview is ever built.
+
+    ``split`` is what ``_preview`` touches first, so overriding it catches eager
+    rendering at the earliest point; ``__len__`` covers the size field.
+    """
+
+    def split(self, *args, **kwargs):
+        raise AssertionError("preview built while DEBUG was disabled")
 
     def __len__(self):
         raise AssertionError("preview built while DEBUG was disabled")
@@ -125,3 +140,55 @@ def test_previews_are_not_built_when_no_sink_is_at_debug():
             messages=[{"role": "system", "content": _Exploding("x")}],
         )
     assert records == []
+
+
+def test_email_addresses_are_pseudonymized():
+    """Prompts carry user questions and retrieved context; the diagnostic value
+    is the prompt shape, never the personal data inside it."""
+    rendered = _describe({"role": "user", "content": "forward it to alice.smith@example.com please"})
+    assert "alice.smith@example.com" not in rendered
+    assert "<email>" in rendered
+
+
+def test_a_long_conversation_cannot_produce_an_unbounded_line():
+    """200 messages of 500 chars is ~100KB of payload; the record stays bounded
+    by the detail cap plus the fixed caller/model prefix."""
+    messages = [{"role": "user", "content": f"message {i} " + "x" * 500} for i in range(200)]
+    line = _capture_detail(messages).rstrip("\n")
+    prefix_budget = 2 * MAX_META_CHARS + 40
+    assert len(line) <= MAX_DETAIL_CHARS + prefix_budget
+    assert line.endswith("…")
+
+
+def test_many_multimodal_parts_are_capped():
+    content = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}} for _ in range(50)]
+    rendered = _render_content(content)
+    assert "more parts" in rendered
+    assert rendered.count("<image_url>") <= MAX_PARTS
+
+
+def test_a_newline_in_a_client_supplied_model_cannot_forge_log_lines():
+    """`model` comes from metadata.llm_override, so it is caller-controlled."""
+    records: list[str] = []
+    sink_id = logger.add(records.append, level="DEBUG", format="{message}")
+    try:
+        log_llm_call(
+            caller="VLLMClient.chat",
+            model="evil\nINFO | forged line: everything is fine",
+            endpoint="http://e",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    finally:
+        logger.remove(sink_id)
+    # The whole record must remain a single line.
+    assert "\n" not in "".join(records).rstrip("\n")
+
+
+def _capture_detail(messages: list) -> str:
+    records: list[str] = []
+    sink_id = logger.add(records.append, level="DEBUG", format="{message}")
+    try:
+        log_llm_call(caller="c", model="m", endpoint="e", messages=messages)
+    finally:
+        logger.remove(sink_id)
+    return "".join(records)
