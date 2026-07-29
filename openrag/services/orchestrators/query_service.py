@@ -414,8 +414,11 @@ class QueryService:
             partition = [scope.partition]
             filter_params = {"file_id": scope.file_ids}
         elif attachment_ids and partition:
-            # No security check on the ids: file_id is ANDed with the
-            # server-fixed partition, so a foreign id can never match.
+            # The ids need no ownership check of their own: file_id is ANDed with
+            # the server-fixed partition, so a foreign id can never match. The one
+            # exception is the "all" wildcard, whose lookup is deliberately
+            # unscoped — safe only because "all" reaches this layer solely for a
+            # SUPER_ADMIN_MODE admin (see _existing_file_ids).
             indexed_attachment_ids = await self._existing_file_ids(attachment_ids, partition)
             filter_params = {"file_id": indexed_attachment_ids}
 
