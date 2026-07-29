@@ -68,7 +68,7 @@ describe("listPartitionMemberCandidates", () => {
     fetchMock.mockResolvedValue(
       fakeResponse({
         body: JSON.stringify({
-          candidates: [{ user_id: 2, display_name: "Sam" }],
+          candidates: [{ user_id: 2, display_name: "Sam", email: "sam@example.com" }],
           limit: 10,
           has_more: true,
           next_cursor: 30,
@@ -83,7 +83,7 @@ describe("listPartitionMemberCandidates", () => {
         limit: 10,
       }),
     ).resolves.toEqual({
-      candidates: [{ user_id: 2, display_name: "Sam" }],
+      candidates: [{ user_id: 2, display_name: "Sam", email: "sam@example.com" }],
       limit: 10,
       has_more: true,
       next_cursor: 30,

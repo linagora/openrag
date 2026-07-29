@@ -988,6 +988,17 @@ async def test_list_member_candidates_uses_exact_numeric_id():
 
 
 @pytest.mark.asyncio
+async def test_list_member_candidates_treats_non_ascii_digits_as_a_name_prefix():
+    mrepo = FakeMembershipRepo()
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo)
+
+    await svc.list_member_candidates("p", search="١٢٣")
+
+    assert mrepo.candidate_calls[0]["search_user_id"] is None
+    assert mrepo.candidate_calls[0]["search_prefix"] == "١٢٣"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("search", "cursor"),
     [
@@ -1078,6 +1089,7 @@ async def test_add_member_rejects_existing_membership_without_changing_role():
         await svc.add_member("p", 9, "editor")
 
     assert error.value.code == "PARTITION_MEMBER_EXISTS"
+    assert "PATCH /partition/p/users/9" in error.value.message
 
 
 @pytest.mark.asyncio

@@ -115,8 +115,8 @@ class FakeMemberCandidateService:
         )
         return {
             "candidates": [
-                {"user_id": 2, "display_name": "Sam"},
-                {"user_id": 3, "display_name": "Sam"},
+                {"user_id": 2, "display_name": "Sam", "email": "sam.2@example.com"},
+                {"user_id": 3, "display_name": "Sam", "email": "sam.3@example.com"},
             ],
             "limit": limit,
             "has_more": True,
@@ -188,8 +188,8 @@ async def test_list_partition_member_candidates_returns_stable_identities(async_
     assert response.status_code == 200
     assert response.json() == {
         "candidates": [
-            {"user_id": 2, "display_name": "Sam"},
-            {"user_id": 3, "display_name": "Sam"},
+            {"user_id": 2, "display_name": "Sam", "email": "sam.2@example.com"},
+            {"user_id": 3, "display_name": "Sam", "email": "sam.3@example.com"},
         ],
         "limit": 10,
         "has_more": True,

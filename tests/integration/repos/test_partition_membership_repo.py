@@ -92,6 +92,7 @@ class TestPartitionMemberships:
             {
                 "user_id": candidate.id,
                 "display_name": "Candidate Sam",
+                "email": "candidate@example.com",
             }
         ]
 

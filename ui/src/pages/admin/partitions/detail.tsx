@@ -53,7 +53,7 @@ import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } 
 import { usePermissions } from "@/lib/permissions";
 import { formatDate, intOr } from "@/lib/utils";
 import { MemberPicker } from "./member-picker";
-import { candidateLabel } from "./member-candidate";
+import { candidateLabel, candidateSecondaryLabel } from "./member-candidate";
 import { addPartitionMembers } from "./member-batch";
 import type { MemberAddFailure } from "./member-batch";
 import {
@@ -672,7 +672,7 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                     <ul className="list-disc space-y-1 pl-4">
                       {addFailures.map((failure) => (
                         <li key={failure.candidate.user_id}>
-                          {candidateLabel(failure.candidate)} (user ID {failure.candidate.user_id}):
+                          {candidateLabel(failure.candidate)} ({candidateSecondaryLabel(failure.candidate)}):
                           {" "}
                           {failure.message}
                         </li>

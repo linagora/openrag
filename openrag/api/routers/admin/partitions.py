@@ -418,7 +418,8 @@ async def list_partition_users(
 - `limit`: Page size (maximum 100)
 
 **Response:**
-Returns a bounded page of non-member users and continuation metadata.
+Returns a bounded page of non-member users with their display name and email,
+plus continuation metadata.
 
 **Permissions:**
 - Requires partition owner role

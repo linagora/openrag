@@ -704,7 +704,7 @@ class PartitionService:
 
         search_user_id: int | None = None
         search_prefix: str | None = None
-        if normalized_search.isdecimal():
+        if normalized_search.isascii() and normalized_search.isdecimal():
             search_user_id = int(normalized_search)
             if search_user_id > _MAX_POSTGRES_INTEGER:
                 raise ValidationError("User ID is outside the supported range.")
@@ -749,7 +749,10 @@ class PartitionService:
         created = await self._membership_repo.add_partition_member(partition, user_id, role)
         if not created:
             raise ConflictError(
-                f"User {user_id} is already a member of partition '{partition}'.",
+                (
+                    f"User {user_id} is already a member of partition '{partition}'. "
+                    f"Use PATCH /partition/{partition}/users/{user_id} to change their role."
+                ),
                 code="PARTITION_MEMBER_EXISTS",
             )
         logger.info(f"User_id {user_id} added to partition '{partition}'.")

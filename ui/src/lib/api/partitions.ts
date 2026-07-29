@@ -203,6 +203,7 @@ export interface PartitionMember {
 export interface PartitionMemberCandidate {
   user_id: number;
   display_name: string | null;
+  email: string | null;
 }
 
 export interface PartitionMemberCandidatePage {

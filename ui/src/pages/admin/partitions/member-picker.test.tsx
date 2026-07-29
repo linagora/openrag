@@ -6,9 +6,9 @@ import { MemberPicker } from "./member-picker";
 import type { PartitionMemberCandidate } from "@/lib/api/partitions";
 
 const candidates = [
-  { user_id: 2, display_name: "Sam Lee" },
-  { user_id: 3, display_name: "Sam Lee" },
-  { user_id: 4, display_name: null },
+  { user_id: 2, display_name: "Sam Lee", email: "sam.lee@example.com" },
+  { user_id: 3, display_name: "Sam Lee", email: "sam.lee@linagora.com" },
+  { user_id: 4, display_name: null, email: null },
 ];
 
 function renderPicker(
@@ -35,13 +35,14 @@ function renderPicker(
 }
 
 describe("MemberPicker", () => {
-  it("shows stable IDs so duplicate names remain distinguishable", () => {
+  it("shows email addresses so duplicate names remain distinguishable", () => {
     renderPicker();
 
     expect(screen.getAllByText("Sam Lee")).toHaveLength(2);
-    expect(screen.getByText("User ID 2")).not.toBeNull();
-    expect(screen.getByText("User ID 3")).not.toBeNull();
+    expect(screen.getByText("sam.lee@example.com")).not.toBeNull();
+    expect(screen.getByText("sam.lee@linagora.com")).not.toBeNull();
     expect(screen.getByText("Unnamed user")).not.toBeNull();
+    expect(screen.getByText("User ID 4")).not.toBeNull();
   });
 
   it("forwards search changes to the server-backed query", async () => {
@@ -60,7 +61,7 @@ describe("MemberPicker", () => {
     const user = userEvent.setup();
     renderPicker({ selectedCandidates: [candidates[0]], onSelectionChange });
 
-    await user.click(screen.getByRole("checkbox", { name: /select sam lee, user id 3/i }));
+    await user.click(screen.getByRole("checkbox", { name: /select sam lee, sam.lee@linagora.com/i }));
 
     expect(onSelectionChange).toHaveBeenCalledWith([candidates[0], candidates[1]]);
   });
@@ -79,6 +80,7 @@ describe("MemberPicker", () => {
     const selected: PartitionMemberCandidate = {
       user_id: 9,
       display_name: "Alex Morgan",
+      email: "alex@example.com",
     };
     const onSelectionChange = vi.fn();
     const user = userEvent.setup();
@@ -90,7 +92,7 @@ describe("MemberPicker", () => {
 
     expect(screen.getByRole("region", { name: "Selected users" })).not.toBeNull();
     expect(screen.getByText("Alex Morgan")).not.toBeNull();
-    await user.click(screen.getByRole("button", { name: /remove alex morgan, user id 9/i }));
+    await user.click(screen.getByRole("button", { name: /remove alex morgan, alex@example.com/i }));
 
     expect(onSelectionChange).toHaveBeenCalledWith([]);
   });

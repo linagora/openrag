@@ -139,7 +139,7 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
 
         rows = await self.pool.fetch(
             """
-            SELECT u.id AS user_id, u.display_name
+            SELECT u.id AS user_id, u.display_name, u.email
             FROM users u
             WHERE NOT EXISTS (
                 SELECT 1
@@ -168,6 +168,7 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
             {
                 "user_id": row["user_id"],
                 "display_name": row["display_name"],
+                "email": row["email"],
             }
             for row in rows
         ]
@@ -217,19 +218,20 @@ class PgPartitionMembershipRepository(PartitionMembershipRepository):
                     """,
                     partition,
                 )
-                result = await conn.execute(
+                created = await conn.fetchval(
                     """
                     INSERT INTO partition_memberships
                         (partition_name, user_id, role, added_at)
                     VALUES ($1, $2, $3, NOW())
                     ON CONFLICT (partition_name, user_id)
                       DO NOTHING
+                    RETURNING 1
                     """,
                     partition,
                     user_id,
                     role,
                 )
-        return result.endswith(" 1")
+        return created is not None
 
     async def remove_partition_member(self, partition: str, user_id: int) -> bool:
         """TODO(phase-9): remove."""

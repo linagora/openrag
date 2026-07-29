@@ -4,9 +4,9 @@ import { ApiError } from "@/lib/api/client";
 import { addPartitionMembers } from "./member-batch";
 
 const candidates = [
-  { user_id: 2, display_name: "Sam Lee" },
-  { user_id: 3, display_name: "Alex Morgan" },
-  { user_id: 4, display_name: null },
+  { user_id: 2, display_name: "Sam Lee", email: "sam@example.com" },
+  { user_id: 3, display_name: "Alex Morgan", email: "alex@example.com" },
+  { user_id: 4, display_name: null, email: null },
 ];
 
 describe("addPartitionMembers", () => {
@@ -28,12 +28,10 @@ describe("addPartitionMembers", () => {
       {
         candidate: candidates[1],
         message: "User is already a member",
-        attempted: true,
       },
       {
         candidate: candidates[2],
         message: "Account is inactive",
-        attempted: true,
       },
     ]);
   });
@@ -55,11 +53,10 @@ describe("addPartitionMembers", () => {
     expect(result.failures[0]).toMatchObject({
       candidate: candidates[0],
       message: "Partition owner role required",
-      attempted: true,
     });
     expect(result.failures[1]).toMatchObject({
       candidate: candidates[1],
-      attempted: false,
+      message: "Not attempted because permission to manage members was lost.",
     });
   });
 });

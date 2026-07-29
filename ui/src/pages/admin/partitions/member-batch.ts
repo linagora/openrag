@@ -5,7 +5,6 @@ import { ApiError } from "@/lib/api/client";
 export interface MemberAddFailure {
   candidate: PartitionMemberCandidate;
   message: string;
-  attempted: boolean;
 }
 
 interface AddPartitionMembersOptions {
@@ -33,14 +32,13 @@ export async function addPartitionMembers({
       addedCandidates.push(candidate);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
-      failures.push({ candidate, message, attempted: true });
+      failures.push({ candidate, message });
 
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
         for (const remainingCandidate of candidates.slice(index + 1)) {
           failures.push({
             candidate: remainingCandidate,
             message: "Not attempted because permission to manage members was lost.",
-            attempted: false,
           });
         }
         break;

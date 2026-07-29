@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { PartitionMemberCandidate } from "@/lib/api/partitions";
-import { candidateLabel } from "./member-candidate";
+import { candidateLabel, candidateSecondaryLabel } from "./member-candidate";
 
 interface MemberPickerProps {
   candidates: PartitionMemberCandidate[];
@@ -91,13 +91,14 @@ export function MemberPicker({
           <p className="text-xs font-medium text-muted-foreground">Selected users</p>
           {selectedCandidates.map((candidate) => {
             const label = candidateLabel(candidate);
+            const secondaryLabel = candidateSecondaryLabel(candidate);
             return (
               <div
                 key={candidate.user_id}
                 className="flex items-center justify-between gap-2 rounded bg-background px-2 py-1.5 text-sm"
               >
                 <span className="min-w-0 truncate">
-                  {label} <span className="font-mono text-xs text-muted-foreground">#{candidate.user_id}</span>
+                  {label} <span className="text-xs text-muted-foreground">({secondaryLabel})</span>
                 </span>
                 <Button
                   type="button"
@@ -105,7 +106,7 @@ export function MemberPicker({
                   size="icon"
                   className="h-6 w-6 shrink-0"
                   onClick={() => toggleCandidate(candidate, false)}
-                  aria-label={`Remove ${label}, user ID ${candidate.user_id}`}
+                  aria-label={`Remove ${label}, ${secondaryLabel}`}
                 >
                   <X className="h-3.5 w-3.5" />
                 </Button>
@@ -153,6 +154,7 @@ export function MemberPicker({
             <div className="divide-y">
               {candidates.map((candidate) => {
                 const label = candidateLabel(candidate);
+                const secondaryLabel = candidateSecondaryLabel(candidate);
                 const checkboxId = `partition-member-${candidate.user_id}`;
                 return (
                   <label
@@ -164,13 +166,11 @@ export function MemberPicker({
                       id={checkboxId}
                       checked={selected.has(candidate.user_id)}
                       onCheckedChange={(checked) => toggleCandidate(candidate, checked === true)}
-                      aria-label={`Select ${label}, user ID ${candidate.user_id}`}
+                      aria-label={`Select ${label}, ${secondaryLabel}`}
                     />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium">{label}</span>
-                      <span className="block font-mono text-xs text-muted-foreground">
-                        User ID {candidate.user_id}
-                      </span>
+                      <span className="block truncate text-xs text-muted-foreground">{secondaryLabel}</span>
                     </span>
                   </label>
                 );
