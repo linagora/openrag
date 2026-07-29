@@ -208,6 +208,12 @@ export interface PreviewSegment {
  *  Shares `tokenizeTemplate` with validation so what an author sees here matches
  *  what the model receives — a separate regex used to leave escaped braces
  *  doubled and skip formatted fields entirely.
+ *
+ *  A field's conversion (`!r`) and format spec (`:>12`) are recognised but
+ *  deliberately NOT emulated: the substituted value is the illustrative sample,
+ *  not the runtime one, so reimplementing Python's format mini-language in
+ *  TypeScript would add a second thing to keep in sync for no gain. The preview
+ *  shows where a value lands, not its exact padding or quoting.
  */
 export function renderPreview(content: string, promptType: string): PreviewSegment[] {
   // Verbatim types are never `.format`-ed at runtime, so they preview as-is.

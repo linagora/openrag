@@ -104,9 +104,13 @@ describe("renderPreview", () => {
     expect(flat('emit {{"a": 1}} verbatim')).toBe('emit {"a": 1} verbatim');
   });
 
-  it("substitutes a field carrying a format spec or conversion", () => {
-    expect(flat("Today is {current_date:>12}.")).toContain("2026-07-27");
-    expect(flat("Today is {current_date!r}.")).toContain("2026-07-27");
+  it("substitutes a modified field without emulating the format mini-language", () => {
+    // Python would pad to width 12 and `!r` would add quotes. The preview shows
+    // the illustrative sample where the value lands, and deliberately does not
+    // reimplement the format spec — asserted exactly so the choice is pinned
+    // rather than left ambiguous by a substring match.
+    expect(flat("Today is {current_date:>12}.")).toBe("Today is 2026-07-27.");
+    expect(flat("Today is {current_date!r}.")).toBe("Today is 2026-07-27.");
   });
 
   it("leaves an unknown field visible rather than dropping it", () => {
