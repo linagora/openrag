@@ -29,6 +29,7 @@ from sqlalchemy import (
     String,
     Table,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -286,6 +287,12 @@ users = Table(
     Column("created_at", DateTime, default=datetime.now, nullable=False),
     Column("file_quota", Integer, nullable=True, default=None),
     Column("file_count", Integer, nullable=False, default=0),
+)
+
+Index(
+    "ix_users_lower_display_name_pattern",
+    func.lower(users.c.display_name).label("display_name_lower"),
+    postgresql_ops={"display_name_lower": "text_pattern_ops"},
 )
 
 

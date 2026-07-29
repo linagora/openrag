@@ -7,7 +7,13 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from core.utils.exceptions import NotFoundError, PartitionNotFoundError, UserNotFoundError, ValidationError
+from core.utils.exceptions import (
+    ConflictError,
+    NotFoundError,
+    PartitionNotFoundError,
+    UserNotFoundError,
+    ValidationError,
+)
 from services.orchestrators.partition_service import PartitionService
 
 
@@ -129,12 +135,17 @@ class FakeMembershipRepo:
         self,
         members: set[tuple[int, str]] | None = None,
         owned: dict[int, int] | None = None,
+        candidate_rows: list[dict] | None = None,
+        add_result: bool = True,
     ):
         self._members = members or set()
         self._owned = owned or {}  # user_id -> number of partitions owned
+        self._candidate_rows = candidate_rows or []
+        self._add_result = add_result
         self.added: list[tuple[str, int, str]] = []
         self.removed: list[tuple[str, int]] = []
         self.role_updates: list[tuple[str, int, str]] = []
+        self.candidate_calls: list[dict] = []
 
     async def list_user_partitions(self, user_id: int):
         from core.models.user import PartitionRole, UserPartition
@@ -150,9 +161,39 @@ class FakeMembershipRepo:
     async def list_partition_members(self, partition: str) -> list[dict]:
         return [{"user_id": u, "role": "viewer"} for (u, p) in self._members if p == partition]
 
+    async def list_partition_member_candidates(
+        self,
+        partition: str,
+        *,
+        search_prefix: str | None,
+        search_user_id: int | None,
+        after_id: int | None,
+        limit: int,
+    ) -> list[dict]:
+        self.candidate_calls.append(
+            {
+                "partition": partition,
+                "search_prefix": search_prefix,
+                "search_user_id": search_user_id,
+                "after_id": after_id,
+                "limit": limit,
+            }
+        )
+        rows = [
+            row
+            for row in self._candidate_rows
+            if (row["user_id"], partition) not in self._members
+            and (
+                row["user_id"] == search_user_id
+                or (search_prefix is not None and (row["display_name"] or "").lower().startswith(search_prefix.lower()))
+            )
+            and (after_id is None or row["user_id"] > after_id)
+        ]
+        return rows[:limit]
+
     async def add_partition_member(self, partition: str, user_id: int, role: str) -> bool:
         self.added.append((partition, user_id, role))
-        return True
+        return self._add_result
 
     async def remove_partition_member(self, partition: str, user_id: int) -> bool:
         self.removed.append((partition, user_id))
@@ -860,6 +901,141 @@ async def test_list_members_missing_partition_404():
 
 
 @pytest.mark.asyncio
+async def test_list_member_candidates_excludes_existing_members():
+    candidate_rows = [
+        {"user_id": 1, "display_name": "Partition owner"},
+        {"user_id": 2, "display_name": "Sam"},
+        {"user_id": 3, "display_name": "Sam"},
+    ]
+    mrepo = FakeMembershipRepo(
+        {(1, "p"), (3, "p")},
+        candidate_rows=candidate_rows,
+    )
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}),
+        mrepo=mrepo,
+    )
+
+    assert await svc.list_member_candidates("p", search="  sam  ") == {
+        "candidates": [{"user_id": 2, "display_name": "Sam"}],
+        "limit": 25,
+        "has_more": False,
+        "next_cursor": None,
+    }
+    assert mrepo.candidate_calls == [
+        {
+            "partition": "p",
+            "search_prefix": "sam",
+            "search_user_id": None,
+            "after_id": None,
+            "limit": 26,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_returns_bounded_page_with_continuation():
+    candidate_rows = [{"user_id": user_id, "display_name": f"User {user_id}"} for user_id in range(1, 102)]
+    mrepo = FakeMembershipRepo(candidate_rows=candidate_rows)
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}),
+        mrepo=mrepo,
+    )
+
+    page = await svc.list_member_candidates("p", search="User", cursor=10, limit=20)
+
+    assert [candidate["user_id"] for candidate in page["candidates"]] == list(range(11, 31))
+    assert page == {
+        "candidates": candidate_rows[10:30],
+        "limit": 20,
+        "has_more": True,
+        "next_cursor": 30,
+    }
+    assert mrepo.candidate_calls == [
+        {
+            "partition": "p",
+            "search_prefix": "User",
+            "search_user_id": None,
+            "after_id": 10,
+            "limit": 21,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("search", [None, "", "  ", "sa"])
+async def test_list_member_candidates_requires_a_targeted_search(search):
+    svc = _svc(prepo=FakePartitionRepo({"p"}))
+
+    with pytest.raises(ValidationError):
+        await svc.list_member_candidates("p", search=search)
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_searches_numeric_id_and_name_prefix():
+    candidate = {"user_id": 42, "display_name": "Unrelated name"}
+    mrepo = FakeMembershipRepo(candidate_rows=[candidate])
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo)
+
+    assert await svc.list_member_candidates("p", search="0042") == {
+        "candidates": [candidate],
+        "limit": 25,
+        "has_more": False,
+        "next_cursor": None,
+    }
+    assert mrepo.candidate_calls[0]["search_user_id"] == 42
+    assert mrepo.candidate_calls[0]["search_prefix"] == "0042"
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_keeps_short_numeric_search_id_only():
+    mrepo = FakeMembershipRepo()
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo)
+
+    await svc.list_member_candidates("p", search="42")
+
+    assert mrepo.candidate_calls[0]["search_user_id"] == 42
+    assert mrepo.candidate_calls[0]["search_prefix"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_uses_name_prefix_for_numeric_values_outside_id_range():
+    mrepo = FakeMembershipRepo()
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo)
+
+    await svc.list_member_candidates("p", search="2147483648")
+
+    assert mrepo.candidate_calls[0]["search_user_id"] is None
+    assert mrepo.candidate_calls[0]["search_prefix"] == "2147483648"
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_treats_non_ascii_digits_as_a_name_prefix():
+    mrepo = FakeMembershipRepo()
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo)
+
+    await svc.list_member_candidates("p", search="١٢٣")
+
+    assert mrepo.candidate_calls[0]["search_user_id"] is None
+    assert mrepo.candidate_calls[0]["search_prefix"] == "١٢٣"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("search", "cursor"),
+    [
+        ("User", 2_147_483_648),
+        ("User", -1),
+    ],
+)
+async def test_list_member_candidates_rejects_ids_outside_postgres_range(search, cursor):
+    svc = _svc(prepo=FakePartitionRepo({"p"}))
+
+    with pytest.raises(ValidationError):
+        await svc.list_member_candidates("p", search=search, cursor=cursor)
+
+
+@pytest.mark.asyncio
 async def test_list_members_does_not_lookup_user_identities():
     mrepo = FakeMembershipRepo(members={(9, "p")})
     urepo = FakeUserRepo({9})
@@ -919,6 +1095,22 @@ async def test_add_member_checks_partition_and_user():
     )
     await svc.add_member("p", 9, "editor")
     assert mrepo.added == [("p", 9, "editor")]
+
+
+@pytest.mark.asyncio
+async def test_add_member_rejects_existing_membership_without_changing_role():
+    mrepo = FakeMembershipRepo(add_result=False)
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}),
+        mrepo=mrepo,
+        urepo=FakeUserRepo({9}),
+    )
+
+    with pytest.raises(ConflictError) as error:
+        await svc.add_member("p", 9, "editor")
+
+    assert error.value.code == "PARTITION_MEMBER_EXISTS"
+    assert "PATCH /partition/p/users/9" in error.value.message
 
 
 @pytest.mark.asyncio

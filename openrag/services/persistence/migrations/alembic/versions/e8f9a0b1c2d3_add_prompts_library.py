@@ -15,7 +15,7 @@ deployment) is a safe no-op — matching the guarded style of the other
 migrations in this tree.
 
 Revision ID: e8f9a0b1c2d3
-Revises: d4e5f6a7b8c9
+Revises: e5f6a7b8c9d0
 Create Date: 2026-07-24
 
 """
@@ -29,7 +29,12 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "e8f9a0b1c2d3"
-down_revision: str | Sequence[str] | None = "d4e5f6a7b8c9"
+# Chained after e5f6a7b8c9d0 rather than its original parent d4e5f6a7b8c9:
+# that revision landed on develop while this branch was open and took the same
+# parent, and two siblings would leave the tree with multiple heads — which
+# aborts ``alembic upgrade head`` at boot and takes the whole app down, not just
+# this feature.
+down_revision: str | Sequence[str] | None = "e5f6a7b8c9d0"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
