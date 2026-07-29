@@ -10,12 +10,7 @@ import pytest
 @pytest.fixture
 def migration(monkeypatch):
     alembic_dir = (
-        Path(__file__).resolve().parents[4]
-        / "openrag"
-        / "services"
-        / "persistence"
-        / "migrations"
-        / "alembic"
+        Path(__file__).resolve().parents[4] / "openrag" / "services" / "persistence" / "migrations" / "alembic"
     )
     monkeypatch.syspath_prepend(str(alembic_dir))
     return importlib.import_module(
