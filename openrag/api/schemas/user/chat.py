@@ -9,8 +9,10 @@ class OpenAIMessage(BaseModel):
     # drops them.
     model_config = ConfigDict(extra="allow")
 
-    role: Literal["user", "assistant", "system"]
-    content: str
+    role: Literal["user", "assistant", "system", "tool", "developer"]
+
+    # content can be None when using `tool_calls`
+    content: str | None = None
 
 
 class OpenAIChatCompletionRequest(BaseModel):
