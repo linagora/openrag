@@ -91,6 +91,29 @@ def test_debug_sink_sees_the_prompt_that_goes_on_the_wire():
     assert "user[26]: What are the office hours?" in line
 
 
+def test_payload_is_not_duplicated_into_the_record_extras():
+    """Regression: a ``detail=`` kwarg lands in ``record["extra"]``, and the
+    terminal formatter appends every extra — printing the whole payload twice
+    on every line. The preview must reach the message only.
+    """
+    seen: list = []
+    sink_id = logger.add(lambda m: seen.append(m.record), level="DEBUG", format="{message}")
+    try:
+        log_llm_call(
+            caller="VLLMClient.chat",
+            model="m",
+            endpoint="http://e",
+            messages=[{"role": "system", "content": "UNIQUEMARKER pirate instructions"}],
+        )
+    finally:
+        logger.remove(sink_id)
+
+    extras = seen[0]["extra"]
+    assert set(extras) == {"caller", "model", "endpoint", "stream"}
+    assert not any("UNIQUEMARKER" in str(v) for v in extras.values())
+    assert "UNIQUEMARKER" in seen[0]["message"]
+
+
 def test_previews_are_not_built_when_no_sink_is_at_debug():
     """Lazy evaluation: an INFO-only sink must pay nothing for the previews."""
     records: list[str] = []

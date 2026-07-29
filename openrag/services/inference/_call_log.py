@@ -81,7 +81,11 @@ def log_llm_call(
         text = prompt or ""
         return f"prompt[{len(text)}]: {_preview(text)}"
 
+    # The lazy preview is passed positionally on purpose: loguru copies **kwargs
+    # into ``record["extra"]``, and the terminal formatter appends every extra —
+    # so a ``detail=`` kwarg would print the whole payload a second time on each
+    # line. Positional args are formatted into the message only.
     logger.bind(caller=caller, model=model, endpoint=endpoint, stream=stream).opt(lazy=True).debug(
-        f"llm.call {caller} model={model} stream={stream} | " + "{detail}",
-        detail=_detail,
+        f"llm.call {caller} model={model} stream={stream} | " + "{}",
+        _detail,
     )

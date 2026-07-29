@@ -177,15 +177,24 @@ class PromptService:
         ``source`` is how it resolved: ``named`` (a partition/preset selection),
         ``default`` (the type's global default), or ``disk-seed`` (bundled
         fallback). ``candidates`` are the names the caller offered, in order.
+
+        DEBUG, not INFO: this fires on every chat request and every indexing
+        job, and it carries prompt text. It pairs with the ``llm.call`` line
+        from the inference clients, which sits at the same level — turn on
+        ``LOG_LEVEL=DEBUG`` to see which prompt a stage picked *and* what
+        actually went to the model. The preview is built lazily so an INFO
+        deployment pays nothing for it.
         """
-        preview = " ".join(content.split())[:80]
         logger.bind(
             prompt_type=prompt_type,
             candidates=candidates,
             source=source,
             resolved_name=name,
             length=len(content),
-        ).info(f"prompt.resolve {prompt_type} <- {source}{f':{name}' if name else ''} | {preview!r}")
+        ).opt(lazy=True).debug(
+            f"prompt.resolve {prompt_type} <- {source}{f':{name}' if name else ''} | " + "{}",
+            lambda: repr(" ".join(content.split())[:80]),
+        )
 
     # ------------------------------------------------------------------
     # Library CRUD
