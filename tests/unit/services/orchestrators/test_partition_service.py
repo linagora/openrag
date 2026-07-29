@@ -972,7 +972,7 @@ async def test_list_member_candidates_requires_a_targeted_search(search):
 
 
 @pytest.mark.asyncio
-async def test_list_member_candidates_uses_exact_numeric_id():
+async def test_list_member_candidates_searches_numeric_id_and_name_prefix():
     candidate = {"user_id": 42, "display_name": "Unrelated name"}
     mrepo = FakeMembershipRepo(candidate_rows=[candidate])
     svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo)
@@ -984,7 +984,29 @@ async def test_list_member_candidates_uses_exact_numeric_id():
         "next_cursor": None,
     }
     assert mrepo.candidate_calls[0]["search_user_id"] == 42
+    assert mrepo.candidate_calls[0]["search_prefix"] == "0042"
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_keeps_short_numeric_search_id_only():
+    mrepo = FakeMembershipRepo()
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo)
+
+    await svc.list_member_candidates("p", search="42")
+
+    assert mrepo.candidate_calls[0]["search_user_id"] == 42
     assert mrepo.candidate_calls[0]["search_prefix"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_member_candidates_uses_name_prefix_for_numeric_values_outside_id_range():
+    mrepo = FakeMembershipRepo()
+    svc = _svc(prepo=FakePartitionRepo({"p"}), mrepo=mrepo)
+
+    await svc.list_member_candidates("p", search="2147483648")
+
+    assert mrepo.candidate_calls[0]["search_user_id"] is None
+    assert mrepo.candidate_calls[0]["search_prefix"] == "2147483648"
 
 
 @pytest.mark.asyncio
@@ -1002,7 +1024,6 @@ async def test_list_member_candidates_treats_non_ascii_digits_as_a_name_prefix()
 @pytest.mark.parametrize(
     ("search", "cursor"),
     [
-        ("2147483648", None),
         ("User", 2_147_483_648),
         ("User", -1),
     ],

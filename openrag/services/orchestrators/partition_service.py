@@ -705,9 +705,11 @@ class PartitionService:
         search_user_id: int | None = None
         search_prefix: str | None = None
         if normalized_search.isascii() and normalized_search.isdecimal():
-            search_user_id = int(normalized_search)
-            if search_user_id > _MAX_POSTGRES_INTEGER:
-                raise ValidationError("User ID is outside the supported range.")
+            numeric_search = int(normalized_search)
+            if numeric_search <= _MAX_POSTGRES_INTEGER:
+                search_user_id = numeric_search
+            if len(normalized_search) >= _MIN_MEMBER_CANDIDATE_SEARCH_LENGTH:
+                search_prefix = normalized_search
         elif len(normalized_search) < _MIN_MEMBER_CANDIDATE_SEARCH_LENGTH:
             raise ValidationError(
                 f"Enter at least {_MIN_MEMBER_CANDIDATE_SEARCH_LENGTH} characters or an exact user ID.",
