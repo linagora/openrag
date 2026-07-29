@@ -483,7 +483,10 @@ class QueryService:
         return payload, docs, web_results, indexed_attachment_ids
 
     async def _existing_file_ids(self, file_ids: list[str], partitions: list[str]) -> list[str]:
-        """Order-preserving subset of ``file_ids`` indexed in ``partitions``.
+        """Order-preserving, deduplicated subset of ``file_ids`` indexed in ``partitions``.
+
+        ``file_ids`` is client-supplied, so repeats are dropped rather than
+        echoed back into the filter and into ``extra.attachments``.
 
         ``"all"`` (``SUPER_ADMIN_MODE`` wildcard) takes an unscoped lookup instead
         of a per-partition one.
