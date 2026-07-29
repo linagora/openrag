@@ -92,49 +92,77 @@ export interface TemplateScan {
   error?: string;
 }
 
-/** Scan a template the way Python's ``string.Formatter().parse`` does.
+type TemplateToken =
+  | { kind: "literal"; text: string }
+  | { kind: "field"; root: string; raw: string };
+
+interface TokenizeResult {
+  tokens: TemplateToken[];
+  malformed: boolean;
+  error?: string;
+}
+
+/** Tokenize a template the way Python's ``string.Formatter().parse`` does.
  *
- *  The backend validates with the real thing, so approximating it with a
- *  `/\{(\w+)\}/` regex let templates through that were rejected only on save:
- *  `{{` / `}}` are literal braces, a lone brace is an error, and a field may
- *  carry a conversion (`!r`), a format spec (`:>10`) or attribute/index access
- *  (`a.b`, `a[0]`) — all of which reduce to the root name.
+ *  Single source of grammar for both validation and the preview, so the two can
+ *  never disagree about what a template means: `{{`/`}}` are literal braces, a
+ *  lone brace is an error, and a field may carry a conversion (`!r`), a format
+ *  spec (`:>10`) or attribute/index access (`a.b`, `a[0]`), all of which reduce
+ *  to the root name the backend validates against.
  */
-export function scanTemplate(content: string): TemplateScan {
-  const fields: string[] = [];
+function tokenizeTemplate(content: string): TokenizeResult {
+  const tokens: TemplateToken[] = [];
+  let literal = "";
   let i = 0;
+  const flush = () => {
+    if (literal) {
+      tokens.push({ kind: "literal", text: literal });
+      literal = "";
+    }
+  };
   while (i < content.length) {
     const ch = content[i];
     if (ch === "{") {
       if (content[i + 1] === "{") {
+        literal += "{";
         i += 2;
         continue;
       }
       const end = content.indexOf("}", i + 1);
       if (end === -1) {
-        return { fields, malformed: true, error: "Single '{' encountered in format string" };
+        flush();
+        return { tokens, malformed: true, error: "Single '{' encountered in format string" };
       }
-      const root = content
-        .slice(i + 1, end)
-        .split("!")[0]
-        .split(":")[0]
-        .split(".")[0]
-        .split("[")[0]
-        .trim();
-      if (!fields.includes(root)) fields.push(root);
+      const raw = content.slice(i + 1, end);
+      const root = raw.split("!")[0].split(":")[0].split(".")[0].split("[")[0].trim();
+      flush();
+      tokens.push({ kind: "field", root, raw });
       i = end + 1;
       continue;
     }
     if (ch === "}") {
       if (content[i + 1] === "}") {
+        literal += "}";
         i += 2;
         continue;
       }
-      return { fields, malformed: true, error: "Single '}' encountered in format string" };
+      flush();
+      return { tokens, malformed: true, error: "Single '}' encountered in format string" };
     }
+    literal += ch;
     i += 1;
   }
-  return { fields, malformed: false };
+  flush();
+  return { tokens, malformed: false };
+}
+
+export function scanTemplate(content: string): TemplateScan {
+  const { tokens, malformed, error } = tokenizeTemplate(content);
+  const fields: string[] = [];
+  for (const token of tokens) {
+    if (token.kind === "field" && !fields.includes(token.root)) fields.push(token.root);
+  }
+  return { fields, malformed, error };
 }
 
 export function extractPlaceholders(content: string): string[] {
@@ -173,34 +201,30 @@ export interface PreviewSegment {
   varName?: string;
 }
 
-/** Substitute each known `{var}` with its sample value, tracking which spans
- *  were substituted so the preview can highlight them. */
+/** Render the template the way the pipeline will: substitute each known
+ *  `{var}` with its sample value, unescape `{{`/`}}`, and track which spans were
+ *  substituted so the preview can highlight them.
+ *
+ *  Shares `tokenizeTemplate` with validation so what an author sees here matches
+ *  what the model receives — a separate regex used to leave escaped braces
+ *  doubled and skip formatted fields entirely.
+ */
 export function renderPreview(content: string, promptType: string): PreviewSegment[] {
+  // Verbatim types are never `.format`-ed at runtime, so they preview as-is.
+  if (!FORMATTED_PROMPT_TYPES.has(promptType)) {
+    return content ? [{ value: content, isVariable: false }] : [];
+  }
   const vars = PROMPT_TYPE_VARIABLES[promptType] ?? [];
   const varMap = Object.fromEntries(vars.map((v) => [v.name, v.sample]));
+  const { tokens } = tokenizeTemplate(content);
 
-  const segments: PreviewSegment[] = [];
-  let lastIndex = 0;
-  let m: RegExpExecArray | null;
-  const regex = /\{(\w+)\}/g;
-
-  while ((m = regex.exec(content)) !== null) {
-    if (m.index > lastIndex) {
-      segments.push({ value: content.slice(lastIndex, m.index), isVariable: false });
-    }
-    const varName = m[1];
-    const sample = varMap[varName];
-    if (sample !== undefined) {
-      segments.push({ value: sample, isVariable: true, varName });
-    } else {
-      segments.push({ value: m[0], isVariable: false });
-    }
-    lastIndex = m.index + m[0].length;
-  }
-  if (lastIndex < content.length) {
-    segments.push({ value: content.slice(lastIndex), isVariable: false });
-  }
-  return segments;
+  return tokens.map((token) => {
+    if (token.kind === "literal") return { value: token.text, isVariable: false };
+    const sample = varMap[token.root];
+    return sample !== undefined
+      ? { value: sample, isVariable: true, varName: token.root }
+      : { value: `{${token.raw}}`, isVariable: false };
+  });
 }
 
 /* ---------- Prompt picker option values ---------- */

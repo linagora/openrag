@@ -4,6 +4,7 @@ import {
   promptOptionToName,
   promptOptionValue,
   promptSelectValue,
+  renderPreview,
   scanTemplate,
   validatePlaceholders,
 } from "./prompt-meta";
@@ -81,5 +82,39 @@ describe("prompt picker option values", () => {
       expect(value).not.toBe(PROMPT_DEFAULT_OPTION);
       expect(promptOptionToName(value)).toBe(name);
     }
+  });
+});
+
+// The preview must agree with what the pipeline actually renders — it shares
+// the tokenizer with validation so the two can't drift apart.
+describe("renderPreview", () => {
+  const flat = (content: string, type = "sys_prompt") =>
+    renderPreview(content, type)
+      .map((s) => s.value)
+      .join("");
+
+  it("substitutes a known variable with its sample", () => {
+    const segments = renderPreview("Today is {current_date}.", "sys_prompt");
+    const substituted = segments.find((s) => s.isVariable);
+    expect(substituted?.varName).toBe("current_date");
+    expect(flat("Today is {current_date}.")).toContain("2026-07-27");
+  });
+
+  it("unescapes doubled braces the way str.format does", () => {
+    expect(flat('emit {{"a": 1}} verbatim')).toBe('emit {"a": 1} verbatim');
+  });
+
+  it("substitutes a field carrying a format spec or conversion", () => {
+    expect(flat("Today is {current_date:>12}.")).toContain("2026-07-27");
+    expect(flat("Today is {current_date!r}.")).toContain("2026-07-27");
+  });
+
+  it("leaves an unknown field visible rather than dropping it", () => {
+    expect(flat("About {topic}")).toBe("About {topic}");
+  });
+
+  it("previews a verbatim prompt type unchanged", () => {
+    const raw = 'Return {"json": true} exactly';
+    expect(flat(raw, "chunk_contextualizer")).toBe(raw);
   });
 });
