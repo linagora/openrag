@@ -592,6 +592,13 @@ def test_chainlit_neutralizes_active_source_name_markdown(monkeypatch, source_na
     assert module._safe_source_name(source_name, {}) == expected
 
 
+def test_chainlit_handles_long_source_name_delimiter_runs(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_source_name_long_run_test")
+    source_name = "_" * 10_000
+
+    assert module._safe_source_name(source_name, {}) == source_name
+
+
 @pytest.mark.parametrize(
     "hostile_name",
     [

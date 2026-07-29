@@ -1,9 +1,9 @@
 import json
 import os
-import re
 import secrets
 import string
 import time
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -49,8 +49,6 @@ _MARKDOWN_URL_SAFE_CHARS = ":/?#[]@!$&'+,;=%"
 # Chainlit inserts source names into Markdown link labels. Strip only characters
 # that can break or restyle that label so ordinary filenames stay recognizable.
 _MARKDOWN_UNSAFE_SOURCE_NAME_CHARS = str.maketrans(dict.fromkeys("[]*`\\>", " "))
-_MARKDOWN_UNDERSCORE_EMPHASIS = re.compile(r"(?<!\w)(?P<delimiter>_+)(?P<label>\S(?:.*?\S)?)(?P=delimiter)(?!\w)")
-_MARKDOWN_STRIKETHROUGH = re.compile(r"~{2,}")
 
 
 class MissingOpenRAGCredentialError(RuntimeError):
@@ -62,10 +60,62 @@ def _escape_markdown_text(value: str) -> str:
     return value.translate(_MARKDOWN_ESCAPE_TABLE)
 
 
+def _neutralize_source_name_delimiters(value: str) -> str:
+    """Remove active Markdown delimiters while preserving safe filename punctuation."""
+    characters = list(value)
+    underscore_openers: list[tuple[int, int]] = []
+    index = 0
+
+    while index < len(value):
+        if value[index] != "_":
+            index += 1
+            continue
+
+        end = index + 1
+        while end < len(value) and value[end] == "_":
+            end += 1
+
+        previous = value[index - 1] if index else None
+        following = value[end] if end < len(value) else None
+        previous_whitespace = previous is None or previous.isspace()
+        following_whitespace = following is None or following.isspace()
+        previous_punctuation = previous is not None and unicodedata.category(previous)[0] in {"P", "S"}
+        following_punctuation = following is not None and unicodedata.category(following)[0] in {"P", "S"}
+        left_flanking = not following_whitespace and (
+            not following_punctuation or previous_whitespace or previous_punctuation
+        )
+        right_flanking = not previous_whitespace and (
+            not previous_punctuation or following_whitespace or following_punctuation
+        )
+        can_open = left_flanking and (not right_flanking or previous_punctuation)
+        can_close = right_flanking and (not left_flanking or following_punctuation)
+
+        if can_close and underscore_openers:
+            opener_start, opener_end = underscore_openers.pop()
+            characters[opener_start:opener_end] = " " * (opener_end - opener_start)
+            characters[index:end] = " " * (end - index)
+        elif can_open:
+            underscore_openers.append((index, end))
+        index = end
+
+    index = 0
+    while index < len(value):
+        if value[index] != "~":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(value) and value[end] == "~":
+            end += 1
+        if end - index >= 2:
+            characters[index:end] = " " * (end - index)
+        index = end
+
+    return "".join(characters)
+
+
 def _safe_source_name(value: str, existing: dict) -> str:
     """Build a Markdown-inert name that Chainlit can match to its element."""
-    value = _MARKDOWN_UNDERSCORE_EMPHASIS.sub(r"\g<label>", value)
-    value = _MARKDOWN_STRIKETHROUGH.sub(" ", value)
+    value = _neutralize_source_name_delimiters(value)
     base = " ".join(value.translate(_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS).split()) or "source"
     candidate = base
     suffix = 2
