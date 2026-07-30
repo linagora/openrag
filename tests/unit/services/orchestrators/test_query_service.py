@@ -22,7 +22,7 @@ from core.utils.exceptions import WorkspaceNotFoundError
 from services.orchestrators.query_service import QueryService
 
 # Real prompt-template config (dir + key->filename mapping) so QueryService
-# can load its system / contextualizer templates from disk.
+# can load its system / contextualizer / spoken-style templates from disk.
 _PROMPT_CFG = load_config()
 
 
@@ -486,6 +486,44 @@ async def test_generation_prompt_name_from_partition_reaches_resolver():
     rec.calls.clear()
     await svc._prepare_chat(["p", "q"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
     assert ("sys_prompt", (None,)) in rec.calls  # no single owning partition
+
+
+@pytest.mark.asyncio
+async def test_spoken_style_metadata_swaps_the_answer_prompt():
+    """`metadata.spoken_style_answer` is a public API flag (and a Chainlit
+    command) that swaps the answer prompt for a voice-friendly one. Nothing
+    asserted this, so the whole feature could be — and briefly was — deleted
+    with the suite still green.
+    """
+
+    class RecordingPromptService:
+        def __init__(self):
+            self.calls: list = []
+
+        async def resolve_prompt(self, prompt_type, names=None):
+            self.calls.append((prompt_type, tuple(names or ())))
+            return "SPOKEN::{context}"
+
+    svc = _svc(retrieval=FakeRetrieval())
+    rec = RecordingPromptService()
+    svc._prompt_service = rec
+    svc._config.partitions = {
+        "p": SimpleNamespace(generation_prompt_names={"spoken_style_answer": "voice"}, chat_history_depth=4)
+    }
+
+    await svc._prepare_chat(
+        ["p"],
+        {"messages": [{"role": "user", "content": "q"}], "metadata": {"spoken_style_answer": True}},
+    )
+    # The spoken-style type is resolved, and the partition may name its own.
+    assert ("spoken_style_answer", ("voice",)) in rec.calls
+    assert not any(call[0] == "sys_prompt" for call in rec.calls)
+
+    # Without the flag the ordinary answer prompt is used.
+    rec.calls.clear()
+    await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    assert any(call[0] == "sys_prompt" for call in rec.calls)
+    assert not any(call[0] == "spoken_style_answer" for call in rec.calls)
 
 
 @pytest.mark.asyncio

@@ -219,6 +219,12 @@
                 "description": "Analyse approfondie via le mécanisme RAG DeepSearch (Map & Reduce).\nPlus lent, mais plus précis pour les requêtes complexes.\nÀ utiliser dans une nouvelle conversation, car il consomme davantage de tokens."
             },
             {
+                "id": "SpokenStyleAnswer",
+                "icon": "audio-lines",
+                "description": "Génère une réponse dans un style oral, adaptée aux assistants vocaux.\nConcise, claire et factuelle.",
+                "persistent": true
+            },
+            {
                 "id": "WebSearch",
                 "icon": "globe",
                 "description": "Enrichit la recherche documentaire avec des résultats web en temps réel.\nCombine vos documents et le web pour des réponses plus complètes."
