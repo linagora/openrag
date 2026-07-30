@@ -426,6 +426,33 @@ async def test_chat_conversational_request_skips_partition_retrieval():
     assert retrieval.retrieve_multi_calls == []
     assert out["choices"][0]["message"]["content"] == "I can help you search and summarize documents."
     assert json.loads(out["extra"])["sources"] == []
+    answer_messages = llm.chat_calls[1][0]
+    assert answer_messages[0]["role"] == "system"
+    assert "OpenRAG" in answer_messages[0]["content"]
+    assert "LINAGORA" in answer_messages[0]["content"]
+    assert "document-grounded RAG system" in answer_messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_chat_conversational_request_keeps_spoken_style_prompt():
+    query_json = json.dumps({"requires_retrieval": False, "query_list": []})
+    llm = FakeLLM(chat_responses=[query_json, "I'm OpenRAG, built by LINAGORA."])
+    svc = _svc(mode="ChatBotRag", llm=llm)
+
+    await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "Who are you?"}],
+            "metadata": {"spoken_style_answer": True},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+
+    answer_system_prompt = llm.chat_calls[1][0][0]["content"]
+    assert "OpenRAG" in answer_system_prompt
+    assert "LINAGORA" in answer_system_prompt
+    assert "short (1-2 sentences)" in answer_system_prompt
 
 
 @pytest.mark.asyncio
@@ -712,10 +739,17 @@ def test_json_slice_extracts_object():
 
 
 def test_dedupe_web_preserves_first_seen():
-    a = SimpleNamespace(url="u1")
-    b = SimpleNamespace(url="u1")
-    c = SimpleNamespace(url="u2")
+    a = SimpleNamespace(url="https://example.test/one")
+    b = SimpleNamespace(url="https://example.test/one")
+    c = SimpleNamespace(url="https://example.test/two")
     assert qs._dedupe_web([[a, b], [c]]) == [a, c]
+
+
+def test_dedupe_web_drops_invalid_urls_before_source_numbering():
+    invalid = SimpleNamespace(url="javascript:alert(1)")
+    valid = SimpleNamespace(url="https://example.test/evidence")
+
+    assert qs._dedupe_web([[invalid, valid]]) == [valid]
 
 
 def test_sampling_strips_transport_keys():

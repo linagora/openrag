@@ -49,6 +49,7 @@ from core.prompts import (
     format_context,
     format_web_context,
     load_template_by_key,
+    prepend_system_prompt,
 )
 from core.utils.exceptions import WorkspaceNotFoundError
 from core.utils.logging import get_logger
@@ -59,6 +60,7 @@ from core.utils.source_filtering import (
 )
 from core.utils.text import get_num_tokens
 from services.inference.runtime import detect_language, get_llm_semaphore
+from services.websearch.base import normalize_web_url
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -88,9 +90,10 @@ From this document, identify and comprehensively summarize the information usefu
 {query}"""
 
 _QUERY_JSON_HINT = (
-    "\n\nRespond ONLY with a JSON object of the form "
+    "\n\nRespond ONLY with one of these JSON forms: "
+    '{"requires_retrieval": false, "query_list": []} when retrieval is not needed, or '
     '{"requires_retrieval": true, '
-    '"query_list": [{"query": "<search query>", "temporal_filters": null}]}.'
+    '"query_list": [{"query": "<search query>", "temporal_filters": null}]} when it is.'
 )
 
 
@@ -416,7 +419,13 @@ class QueryService:
         force_retrieval = use_websearch or use_map_reduce
         if not queries.query_list:
             if not queries.requires_retrieval and not force_retrieval:
-                payload["messages"] = copy.deepcopy(messages)
+                tmpl = self._spoken_style_answer_prompt if spoken_style else self._sys_prompt_tmplt
+                payload["messages"] = prepend_system_prompt(
+                    messages,
+                    tmpl,
+                    context="",
+                    current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
+                )
                 return payload, [], []
             queries = SearchQueries(query_list=[Query(query=messages[-1]["content"])])
 
@@ -682,8 +691,10 @@ def _dedupe_web(web_lists: list[list]) -> list:
     seen: set[str] = set()
     out: list = []
     for r in (r for lst in web_lists for r in lst):
-        if r.url not in seen:
-            seen.add(r.url)
+        url = normalize_web_url(r.url)
+        if url is not None and url not in seen:
+            r.url = url
+            seen.add(url)
             out.append(r)
     return out
 

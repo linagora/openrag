@@ -23,6 +23,7 @@ from core.auth.chainlit import (
 from core.utils.logging import get_logger, mask_email
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+from services.websearch.base import normalize_web_url
 
 load_dotenv()
 logger = get_logger()
@@ -554,18 +555,13 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
 
         if s.get("source_type") == "web":
             title = s.get("title", "")
-            url = s.get("url", "")
             snippet = s.get("snippet", "")
             title = title.strip() if isinstance(title, str) else ""
-            url = url.strip() if isinstance(url, str) else ""
             snippet = snippet.strip() if isinstance(snippet, str) else ""
-            try:
-                parsed_url = urlparse(url)
-                if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-                    continue
-                markdown_url = quote(str(httpx.URL(url)), safe=_MARKDOWN_URL_SAFE_CHARS)
-            except (ValueError, httpx.InvalidURL):
+            url = normalize_web_url(s.get("url"))
+            if url is None:
                 continue
+            markdown_url = quote(url, safe=_MARKDOWN_URL_SAFE_CHARS)
 
             source_label = title or url
             source_name = _safe_source_name(source_label, d)
