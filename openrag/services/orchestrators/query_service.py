@@ -448,12 +448,13 @@ class QueryService:
         if use_map_reduce and docs:
             docs = await self._map_reduce(" ".join(q.query for q in queries.query_list), docs)
 
-        web_formatted, web_tokens = "", 0
+        web_formatted, web_source_numbers, web_tokens = "", [], 0
+        web_start_index = 1
         if web_results:
-            web_formatted, _, web_tokens = format_web_context(
+            web_formatted, web_source_numbers, web_tokens = format_web_context(
                 web_results,
                 length_function=get_num_tokens(),
-                start_index=1,
+                start_index=web_start_index,
                 max_tokens=self._web.max_tokens,
             )
         context, included = format_context(
@@ -465,15 +466,17 @@ class QueryService:
 
         if web_results:
             if docs:
-                web_formatted, _, _ = format_web_context(
+                web_start_index = len(docs) + 1
+                web_formatted, web_source_numbers, _ = format_web_context(
                     web_results,
                     length_function=get_num_tokens(),
-                    start_index=len(docs) + 1,
+                    start_index=web_start_index,
                     max_tokens=self._web.max_tokens,
                 )
             else:
                 context = ""
             context = f"{context}{SOURCE_SEPARATOR}{web_formatted}" if context else web_formatted
+            web_results = [web_results[number - web_start_index] for number in web_source_numbers]
 
         new_messages = copy.deepcopy(messages)
         tmpl = self._spoken_style_answer_prompt if spoken_style else self._sys_prompt_tmplt
@@ -599,7 +602,10 @@ class QueryService:
         chunk = await llm.chat(payload["messages"], **_sampling(payload))
         chunk["model"] = model_name
         content = chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-        clean, citations = extract_and_strip_sources_block(content)
+        clean, citations = extract_and_strip_sources_block(
+            content,
+            include_inline_markers=bool(sources),
+        )
         chunk["choices"][0]["message"]["content"] = clean
         chunk["extra"] = json.dumps(
             {
@@ -656,7 +662,10 @@ class QueryService:
 
         resp = await llm.generate(payload["prompt"], **_sampling(payload, key="prompt"))
         text = resp.get("choices", [{}])[0].get("text", "") or ""
-        clean, citations = extract_and_strip_sources_block(text)
+        clean, citations = extract_and_strip_sources_block(
+            text,
+            include_inline_markers=bool(sources),
+        )
         resp["choices"][0]["text"] = clean
         resp["extra"] = json.dumps(
             {

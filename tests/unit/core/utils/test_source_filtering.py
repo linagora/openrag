@@ -452,6 +452,18 @@ class TestStreamWithSourceFiltering:
         assert _parse_finish_sources(result) == self.SOURCES
 
     @pytest.mark.asyncio
+    async def test_literal_source_marker_is_preserved_without_sources(self):
+        lines = [
+            _make_chunk("The literal notation [Sour"),
+            _make_chunk("ce 1] identifies the first source."),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), [], "test-model"))
+        assert _collect_content(result) == "The literal notation [Source 1] identifies the first source."
+        assert _parse_finish_sources(result) == []
+
+    @pytest.mark.asyncio
     async def test_inline_prose_tag_preserved_in_stream(self):
         """Meta-discussion: a [Sources: 1, 3] inside a sentence must NOT be stripped."""
         lines = [

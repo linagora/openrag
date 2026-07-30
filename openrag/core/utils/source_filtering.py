@@ -35,24 +35,32 @@ def _sanitize_log_preview(text: str, max_length: int = 150) -> str:
     return preview
 
 
-def _strip_sources_tags(text: str) -> tuple[str, set[int], bool]:
+def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tuple[str, set[int], bool]:
     """Strip source tags and return citations found."""
     cited: set[int] = set()
-    for pattern in (_SOURCES_NUMS_RE, _INLINE_SOURCE_NUMS_RE, _UNCLOSED_SOURCE_NUMS_RE):
+    patterns = [_SOURCES_NUMS_RE]
+    if include_inline_markers:
+        patterns.extend((_INLINE_SOURCE_NUMS_RE, _UNCLOSED_SOURCE_NUMS_RE))
+    for pattern in patterns:
         for match in pattern.finditer(text):
             cited.update(int(n.strip()) for n in match.group(1).split(",") if n.strip().isdigit())
     saw_none = bool(_SOURCES_NONE_RE.search(text))
     cleaned = _SOURCES_NUMS_RE.sub("", text)
     cleaned = _SOURCES_NONE_RE.sub("", cleaned)
-    cleaned = _INLINE_SOURCE_NUMS_RE.sub("", cleaned)
-    cleaned = _UNCLOSED_SOURCE_NUMS_RE.sub("", cleaned)
-    cleaned = _DANGLING_SOURCE_RE.sub("", cleaned)
+    if include_inline_markers:
+        cleaned = _INLINE_SOURCE_NUMS_RE.sub("", cleaned)
+        cleaned = _UNCLOSED_SOURCE_NUMS_RE.sub("", cleaned)
+        cleaned = _DANGLING_SOURCE_RE.sub("", cleaned)
     return cleaned, cited, saw_none
 
 
-def extract_and_strip_sources_block(text: str) -> tuple[str, set[int] | None]:
+def extract_and_strip_sources_block(
+    text: str,
+    *,
+    include_inline_markers: bool = True,
+) -> tuple[str, set[int] | None]:
     """Strip source tags and return merged citations."""
-    cleaned, citations, saw_none = _strip_sources_tags(text)
+    cleaned, citations, saw_none = _strip_sources_tags(text, include_inline_markers=include_inline_markers)
 
     if not citations and not saw_none:
         if cleaned != text:
@@ -121,6 +129,7 @@ async def stream_with_source_filtering(
     """
     if buffer_size is None:
         buffer_size = max(_MIN_STREAM_LOOKAHEAD, _min_sources_tag_buffer_size(len(sources)))
+    include_inline_markers = bool(sources)
     pending = ""
     emitted_len = 0
     chunk_template = None
@@ -177,7 +186,10 @@ async def stream_with_source_filtering(
                 if len(pending) <= buffer_size:
                     continue
 
-                cleaned, _, _ = _strip_sources_tags(pending)
+                cleaned, _, _ = _strip_sources_tags(
+                    pending,
+                    include_inline_markers=include_inline_markers,
+                )
                 safe_end = max(0, len(cleaned) - buffer_size)
                 if safe_end > emitted_len:
                     out = {
@@ -238,7 +250,10 @@ async def stream_with_source_filtering(
         logger.warning("Upstream stream raised before any content; surfacing error", error=str(stream_error))
         raise stream_error
 
-    final_clean, citations = extract_and_strip_sources_block(pending)
+    final_clean, citations = extract_and_strip_sources_block(
+        pending,
+        include_inline_markers=include_inline_markers,
+    )
     final_clean = final_clean.rstrip()
 
     filtered = filter_sources_by_citations(sources, citations, allow_uncited=allow_uncited_sources)

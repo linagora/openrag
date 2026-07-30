@@ -396,6 +396,22 @@ async def test_chat_direct_mode_skips_retrieval():
 
 
 @pytest.mark.asyncio
+async def test_chat_direct_mode_preserves_literal_source_marker():
+    answer = "The literal notation [Source 1] identifies the first source."
+    svc = _svc(llm=FakeLLM(chat_responses=[answer]))
+
+    out = await svc.chat(
+        partitions=None,
+        payload={"messages": [{"role": "user", "content": "Explain [Source 1]"}], "metadata": {}},
+        prepare_sources=lambda d, w: [],
+        model_name="m1",
+    )
+
+    assert out["choices"][0]["message"]["content"] == answer
+    assert json.loads(out["extra"])["sources"] == []
+
+
+@pytest.mark.asyncio
 async def test_chat_with_partition_retrieves_and_filters_sources():
     svc = _svc(llm=FakeLLM(chat_responses=["answer [Sources: 1]"]))
     sources = [{"source_type": "document", "n": 1}, {"source_type": "document", "n": 2}]
@@ -562,6 +578,42 @@ async def test_chat_structured_output_keeps_retrieved_sources_without_citation_m
     )
 
     assert json.loads(out["extra"])["sources"] == sources
+
+
+@pytest.mark.asyncio
+async def test_structured_websearch_returns_only_sources_included_in_context():
+    first = SimpleNamespace(
+        url="https://example.test/included",
+        title="Included",
+        content="short evidence",
+        snippet="",
+    )
+    excluded = SimpleNamespace(
+        url="https://example.test/excluded",
+        title="Excluded",
+        content="long evidence that does not fit",
+        snippet="",
+    )
+    web = FakeWeb(results=[first, excluded])
+    web.max_tokens = qs.get_num_tokens()("[Source 1]\nIncluded\nshort evidence")
+    svc = _svc(
+        llm=FakeLLM(chat_responses=['{"answer": "structured"}']),
+        retrieval=FakeRetrieval(chunks=[]),
+        web=web,
+    )
+
+    out = await svc.chat(
+        partitions=None,
+        payload={
+            "messages": [{"role": "user", "content": "Question"}],
+            "metadata": {"websearch": True},
+            "response_format": {"type": "json_object"},
+        },
+        prepare_sources=lambda _docs, results: [{"url": result.url} for result in results],
+        model_name="m",
+    )
+
+    assert json.loads(out["extra"])["sources"] == [{"url": "https://example.test/included"}]
 
 
 @pytest.mark.asyncio
