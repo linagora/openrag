@@ -1196,3 +1196,43 @@ def test_sanitize_system_message_preserved():
         {"role": "assistant", "content": "hi"},
     ]
     assert QueryService._sanitize_messages(msgs) == msgs
+
+
+@pytest.mark.asyncio
+async def test_conversational_reply_resolves_its_prompt_from_the_library():
+    """The no-retrieval path (a greeting / capability question) came from #807
+    and read an __init__-time snapshot this branch removes. Git auto-merged that
+    reference without flagging a conflict, so nothing but this test proves the
+    conversational reply resolves through PromptService at all.
+    """
+
+    class RecordingPromptService:
+        def __init__(self):
+            self.calls: list = []
+
+        async def resolve_prompt(self, prompt_type, names=None):
+            self.calls.append((prompt_type, tuple(names or ())))
+            # Each type is rendered with its own placeholders, so the stub has
+            # to answer in kind rather than with one shared string.
+            if prompt_type == "query_contextualizer":
+                return "CTX {query_language} {current_date}"
+            return "CONVERSATIONAL {context} {current_date}"
+
+    payload = json.dumps({"requires_retrieval": False, "query_list": []})
+    svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
+    rec = RecordingPromptService()
+    svc._prompt_service = rec
+    svc._config.partitions = {
+        "p": SimpleNamespace(generation_prompt_names={"sys_prompt": "chatty"}, chat_history_depth=4)
+    }
+
+    out, docs, web, _ = await svc._prepare_chat(
+        ["p"], {"messages": [{"role": "user", "content": "hello!"}], "metadata": {}}
+    )
+
+    # Resolved from the library, honouring the partition's selection, and no
+    # retrieval happened.
+    assert ("sys_prompt", ("chatty",)) in rec.calls
+    assert docs == [] and web == []
+    assert out["messages"][0]["role"] == "system"
+    assert "CONVERSATIONAL" in out["messages"][0]["content"]
