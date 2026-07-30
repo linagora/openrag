@@ -60,6 +60,14 @@ def test_secret_template_fails_on_required_or_placeholder_secrets() -> None:
 
 
 def test_chart_workloads_apply_restricted_security_contexts() -> None:
+    """Shared `security` values block (Pod Security Standards "restricted"
+    baseline) merged into each workload's own podSecurityContext/
+    containerSecurityContext via the openrag-stack.mergeSecurityContext
+    helper — a component only sets the runAsUser/runAsGroup/fsGroup specific
+    to its own Dockerfile (see values.yaml's comments, e.g. openrag's
+    OpenShift arbitrary-UID pattern) and can override automountServiceAccountToken
+    / containerSecurityContext too, but none currently need to.
+    """
     values = _values()
     security = values["security"]
     raycluster = _template("raycluster.yaml")
@@ -71,12 +79,21 @@ def test_chart_workloads_apply_restricted_security_contexts() -> None:
     assert security["containerSecurityContext"]["capabilities"]["drop"] == ["ALL"]
     assert values["vllm"]["servingEngineSpec"]["containerSecurityContext"]["runAsNonRoot"] is True
 
+    # Simulate the template helper's `merge (deepCopy component) default` —
+    # component keys (e.g. runAsUser) win, the rest is inherited from `security`.
+    for component in ("openrag", "adminUi", "reranker", "ray"):
+        block = values[component]
+        effective_pod_ctx = {**security["podSecurityContext"], **block.get("podSecurityContext", {})}
+        assert effective_pod_ctx["runAsNonRoot"] is True, component
+        assert effective_pod_ctx["seccompProfile"]["type"] == "RuntimeDefault", component
+        assert "runAsUser" in effective_pod_ctx, component
+
     templates = _all_templates()
     assert templates.count("automountServiceAccountToken:") >= 5
     assert templates.count(".Values.security.podSecurityContext") >= 5
     assert templates.count(".Values.security.containerSecurityContext") >= 7
     assert "ghcr.io/linagora/openrag:dev-latest" not in raycluster
-    assert "image: {{ $.Values.ray.image.repository }}:{{ $.Values.ray.image.tag }}" in raycluster
+    assert "{{ .Values.ray.image.repository }}:{{ .Values.ray.image.tag }}" in raycluster
 
 
 def test_ray_dashboard_defaults_to_loopback_in_helm_cluster() -> None:
@@ -89,14 +106,22 @@ def test_ray_dashboard_defaults_to_loopback_in_helm_cluster() -> None:
 
 
 def test_ingress_is_not_exposed_by_default_and_supports_tls() -> None:
+    """No standalone templates/ingress.yaml here — openrag.yaml and
+    raycluster.yaml each render their own optional Ingress (adminUi.ingress
+    just toggles a path onto openrag's), gated by their own `required` host
+    guard so an enabled Ingress can never render with a blank/wildcard host.
+    """
     values = _values()
-    template = _template("ingress.yaml")
+    openrag_template = _template("openrag.yaml")
+    raycluster_template = _template("raycluster.yaml")
 
-    assert values["ingress"]["enabled"] is False
-    assert values["ingress"]["host"] == ""
-    assert values["ingress"]["tls"]["enabled"] is False
+    assert values["openrag"]["ingress"]["enabled"] is False
+    assert values["openrag"]["ingress"]["host"] == ""
+    assert values["adminUi"]["ingress"]["enabled"] is False
+    assert values["ray"]["ingress"]["enabled"] is False
+    assert values["ray"]["ingress"]["host"] == ""
 
-    assert "required" in template
-    assert "ingress.host" in template
-    assert "tls:" in template
-    assert "secretName:" in template
+    for template in (openrag_template, raycluster_template):
+        assert "required" in template
+        assert "ingress.host must be set" in template
+        assert "tls:" in template

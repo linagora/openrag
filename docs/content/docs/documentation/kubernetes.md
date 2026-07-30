@@ -21,7 +21,7 @@ This guide explains how to deploy the **OpenRAG** stack on a Kubernetes cluster 
 
    - Copy or create a new `values.yaml` at the root of your repo.
    - You can see the full example file inside the chart:
-     [values.yaml](https://github.com/linagora/openrag/blob/dev/charts/openrag-stack/values.yaml)
+     [values.yaml](https://github.com/linagora/openrag/blob/dev/infra/charts/openrag-stack/values.yaml)
    - Customize the values you need (e.g., image tags, resources, ingress host, storage class, environment variables, secrets).
 
 2. **Set environment and secrets**:
@@ -36,15 +36,40 @@ This guide explains how to deploy the **OpenRAG** stack on a Kubernetes cluster 
    helm upgrade\
       --install openrag oci://ghcr.io/linagora/openrag-stack\
       -f ./values.yaml\
-      --version 0.1.0
+      --version 0.6.0
    ```
 
    - `openrag` is the Helm release name.
    - `oci://ghcr.io/linagora/openrag-stack` is the remote chart location.
    - `-f ./values.yaml` specifies your custom configuration.
-   - `--version 0.1.0` ensures you deploy a specific chart version.
+   - `--version 0.6.0` ensures you deploy a specific chart version — check `Chart.yaml` for the current version before installing.
 
 ---
+
+## Upgrading to chart 0.6.0
+
+Chart 0.6.0 renames the PVCs, ConfigMap and Secret from fixed `rag-*` names to
+`{{ fullname }}-*`, so they follow the release instead of colliding between two
+installs in one namespace. With the default `fullnameOverride: "openrag"`:
+
+| Before | After |
+|---|---|
+| `rag-model-weights`, `rag-data`, `rag-logs`, `rag-venv` | `openrag-model-weights`, `openrag-data`, `openrag-logs`, `openrag-venv` |
+| `rag-env` | `openrag-env` |
+| `rag-env-secrets` | `openrag-env-secrets` |
+
+The old PVCs carry `helm.sh/resource-policy: keep`, so **the upgrade does not
+delete them — but it does not mount them either**. It provisions new, empty ones
+under the new names, and the release comes up as if it had no indexed data. Pick
+one before upgrading:
+
+- **Keep the existing volumes.** Set `fullnameOverride: "rag"`, which reproduces
+  the old names exactly. Also set `postgresql.fullnameOverride`,
+  `milvus.fullnameOverride` and `vllm.hfTokenSecretName` to match (they are kept
+  in sync by hand — `values.yaml` explains why, and `NOTES.txt` warns on an
+  HF_TOKEN secret-name mismatch).
+- **Migrate to the new names.** Copy the data across (e.g. a Job mounting both
+  PVCs), then delete the old ones once the release is healthy.
 
 ## Notes
 
