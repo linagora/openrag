@@ -410,6 +410,21 @@ async def test_chat_with_partition_retrieves_and_filters_sources():
 
 
 @pytest.mark.asyncio
+async def test_chat_recovers_context_markers_as_citations():
+    svc = _svc(llm=FakeLLM(chat_responses=["First claim [Source 2]. Second claim [Source 1][Source 2]."]))
+    sources = [{"source_type": "document", "n": 1}, {"source_type": "document", "n": 2}]
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        prepare_sources=lambda d, w: sources,
+        model_name="m",
+    )
+
+    assert out["choices"][0]["message"]["content"] == "First claim. Second claim."
+    assert json.loads(out["extra"])["sources"] == sources
+
+
+@pytest.mark.asyncio
 async def test_chat_conversational_request_skips_partition_retrieval():
     query_json = json.dumps({"requires_retrieval": False, "query_list": []})
     llm = FakeLLM(chat_responses=[query_json, "I can help you search and summarize documents."])

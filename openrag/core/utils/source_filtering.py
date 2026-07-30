@@ -17,6 +17,15 @@ _SOURCES_NONE_RE = re.compile(
     re.IGNORECASE,
 )
 _SOURCES_NUMS_RE = re.compile(r"\n?[ \t]*\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?[.\s]*?(?=\n|$)", re.IGNORECASE)
+_INLINE_SOURCE_NUMS_RE = re.compile(
+    r"[ \t]*\[\s*Sources?\s+(\d+(?:\s*,\s*\d+)*)\s*\]",
+    re.IGNORECASE,
+)
+_UNCLOSED_SOURCE_NUMS_RE = re.compile(
+    r"[ \t]*\[\s*Sources?\s+(\d+(?:\s*,\s*\d+)*)\s*(?=\n|$)",
+    re.IGNORECASE,
+)
+_DANGLING_SOURCE_RE = re.compile(r"[ \t]*\[\s*Sources?\s*(?=\n|$)", re.IGNORECASE)
 
 
 def _sanitize_log_preview(text: str, max_length: int = 150) -> str:
@@ -27,21 +36,28 @@ def _sanitize_log_preview(text: str, max_length: int = 150) -> str:
 
 
 def _strip_sources_tags(text: str) -> tuple[str, set[int], bool]:
-    """Strip line-terminal source tags and return citations found."""
+    """Strip source tags and return citations found."""
     cited: set[int] = set()
-    for match in _SOURCES_NUMS_RE.finditer(text):
-        cited.update(int(n.strip()) for n in match.group(1).split(",") if n.strip().isdigit())
+    for pattern in (_SOURCES_NUMS_RE, _INLINE_SOURCE_NUMS_RE, _UNCLOSED_SOURCE_NUMS_RE):
+        for match in pattern.finditer(text):
+            cited.update(int(n.strip()) for n in match.group(1).split(",") if n.strip().isdigit())
     saw_none = bool(_SOURCES_NONE_RE.search(text))
     cleaned = _SOURCES_NUMS_RE.sub("", text)
     cleaned = _SOURCES_NONE_RE.sub("", cleaned)
+    cleaned = _INLINE_SOURCE_NUMS_RE.sub("", cleaned)
+    cleaned = _UNCLOSED_SOURCE_NUMS_RE.sub("", cleaned)
+    cleaned = _DANGLING_SOURCE_RE.sub("", cleaned)
     return cleaned, cited, saw_none
 
 
 def extract_and_strip_sources_block(text: str) -> tuple[str, set[int] | None]:
-    """Strip line-terminal source tags and return merged citations."""
+    """Strip source tags and return merged citations."""
     cleaned, citations, saw_none = _strip_sources_tags(text)
 
     if not citations and not saw_none:
+        if cleaned != text:
+            logger.debug("Removed incomplete source marker from LLM response")
+            return cleaned.rstrip(), None
         tail = text[-150:] if len(text) > 150 else text
         logger.debug("No [Sources: ...] tag found in LLM response", tail=repr(_sanitize_log_preview(tail)))
         return text, None
@@ -90,7 +106,7 @@ async def stream_with_source_filtering(
     *,
     allow_uncited_sources: bool = False,
 ):
-    """Process an LLM SSE stream, stripping line-terminal source tags.
+    """Process an LLM SSE stream, stripping source tags.
 
     The terminal flush (tail content + ``extra.sources``) runs exactly once
     after the loop on *every* termination path — a clean ``data: [DONE]``, the

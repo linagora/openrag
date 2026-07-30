@@ -135,6 +135,24 @@ class TestExtractAndStripSourcesBlock:
         assert clean == text
         assert citations is None
 
+    def test_context_source_markers_are_recovered_and_stripped(self):
+        text = "The footprint fell by 28% [Source 7].\nThe partners include Flexis [Source 8][Source 9]."
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == "The footprint fell by 28%.\nThe partners include Flexis."
+        assert citations == {7, 8, 9}
+
+    def test_unclosed_numbered_source_marker_is_recovered(self):
+        text = "The target is 2040 [Source 2"
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == "The target is 2040"
+        assert citations == {2}
+
+    def test_dangling_source_marker_is_removed_without_a_citation(self):
+        text = "Logistics emissions fell by 30% [Source"
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == "Logistics emissions fell by 30%"
+        assert citations is None
+
 
 class TestFilterSourcesByCitations:
     def test_basic_filtering(self):
@@ -420,6 +438,18 @@ class TestStreamWithSourceFiltering:
         assert "Claim one about Claude Code." in content
         assert "Claim two about APEX." in content
         assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
+
+    @pytest.mark.asyncio
+    async def test_context_source_markers_are_stripped_and_rendered_as_sources(self):
+        lines = [
+            _make_chunk("First claim [Sour"),
+            _make_chunk("ce 1]. Second claim [Source 2][Source 3]."),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert _collect_content(result) == "First claim. Second claim."
+        assert _parse_finish_sources(result) == self.SOURCES
 
     @pytest.mark.asyncio
     async def test_inline_prose_tag_preserved_in_stream(self):
