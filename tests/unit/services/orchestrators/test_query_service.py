@@ -83,8 +83,10 @@ class FakeWeb:
 
     def __init__(self, results=None):
         self._results = results or []
+        self.calls: list[str] = []
 
     async def search(self, query):
+        self.calls.append(query)
         return list(self._results)
 
 
@@ -346,6 +348,16 @@ async def test_generate_query_chatbotrag_parses_json():
     svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
     sq = await svc.generate_query([{"role": "user", "content": "hi"}])
     assert sq.query_list[0].query == "rewritten"
+    assert sq.requires_retrieval is True
+
+
+@pytest.mark.asyncio
+async def test_generate_query_chatbotrag_can_skip_retrieval():
+    payload = json.dumps({"requires_retrieval": False, "query_list": []})
+    svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
+    sq = await svc.generate_query([{"role": "user", "content": "How can you help me?"}])
+    assert sq.requires_retrieval is False
+    assert sq.query_list == []
 
 
 @pytest.mark.asyncio
@@ -395,6 +407,139 @@ async def test_chat_with_partition_retrieves_and_filters_sources():
     )
     filtered = json.loads(out["extra"])["sources"]
     assert filtered == [{"source_type": "document", "n": 1}]  # only cited source 1
+
+
+@pytest.mark.asyncio
+async def test_chat_conversational_request_skips_partition_retrieval():
+    query_json = json.dumps({"requires_retrieval": False, "query_list": []})
+    llm = FakeLLM(chat_responses=[query_json, "I can help you search and summarize documents."])
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "How can you help me?"}], "metadata": {}},
+        prepare_sources=lambda d, w: [{"source_type": "document"}],
+        model_name="m",
+    )
+
+    assert retrieval.retrieve_multi_calls == []
+    assert out["choices"][0]["message"]["content"] == "I can help you search and summarize documents."
+    assert json.loads(out["extra"])["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_chat_mixed_request_still_retrieves_documents():
+    query_json = json.dumps(
+        {
+            "requires_retrieval": True,
+            "query_list": [{"query": "Product A revenue in Q1", "temporal_filters": None}],
+        }
+    )
+    llm = FakeLLM(chat_responses=[query_json, "Revenue was 10 million. [Sources: 1]"])
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "Hello, what was Product A revenue in Q1?"}]},
+        prepare_sources=lambda d, w: [{"source_type": "document", "filename": "report.pdf"}],
+        model_name="m",
+    )
+
+    assert len(retrieval.retrieve_multi_calls) == 1
+    assert json.loads(out["extra"])["sources"] == [{"source_type": "document", "filename": "report.pdf"}]
+
+
+@pytest.mark.asyncio
+async def test_chat_inconsistent_classifier_result_prefers_supplied_query():
+    query_json = json.dumps(
+        {
+            "requires_retrieval": False,
+            "query_list": [{"query": "Product A revenue", "temporal_filters": None}],
+        }
+    )
+    llm = FakeLLM(chat_responses=[query_json, "Revenue was 10 million. [Sources: 1]"])
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "What was Product A revenue?"}]},
+        prepare_sources=lambda d, w: [{"source_type": "document"}],
+        model_name="m",
+    )
+
+    assert len(retrieval.retrieve_multi_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_without_citation_does_not_attribute_retrieved_sources():
+    svc = _svc(llm=FakeLLM(chat_responses=["A general answer with no citation marker."]))
+    sources = [{"source_type": "document", "filename": "unrelated.pdf"}]
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "How can you help me?"}], "metadata": {}},
+        prepare_sources=lambda d, w: sources,
+        model_name="m",
+    )
+
+    assert json.loads(out["extra"])["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_chat_invalid_citation_does_not_fallback_to_unrelated_sources():
+    svc = _svc(llm=FakeLLM(chat_responses=["Answer. [Sources: 99]"]))
+    sources = [{"source_type": "document", "filename": "unrelated.pdf"}]
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "Question"}], "metadata": {}},
+        prepare_sources=lambda d, w: sources,
+        model_name="m",
+    )
+
+    assert json.loads(out["extra"])["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_chat_structured_output_keeps_retrieved_sources_without_citation_marker():
+    svc = _svc(llm=FakeLLM(chat_responses=['{"answer": "structured"}']))
+    sources = [{"source_type": "document", "filename": "report.pdf"}]
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "Question"}],
+            "metadata": {},
+            "response_format": {"type": "json_object"},
+        },
+        prepare_sources=lambda d, w: sources,
+        model_name="m",
+    )
+
+    assert json.loads(out["extra"])["sources"] == sources
+
+
+@pytest.mark.asyncio
+async def test_explicit_websearch_forces_retrieval_for_conversational_classifier_result():
+    query_json = json.dumps({"requires_retrieval": False, "query_list": []})
+    llm = FakeLLM(chat_responses=[query_json])
+    retrieval = FakeRetrieval(chunks=[])
+    web = FakeWeb()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval, web=web)
+
+    await svc._prepare_chat(
+        ["p"],
+        {
+            "messages": [{"role": "user", "content": "What is happening today?"}],
+            "metadata": {"websearch": True},
+        },
+    )
+
+    assert len(retrieval.retrieve_multi_calls) == 1
+    assert web.calls == ["What is happening today?"]
 
 
 @pytest.mark.asyncio

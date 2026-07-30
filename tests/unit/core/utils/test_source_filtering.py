@@ -142,9 +142,14 @@ class TestFilterSourcesByCitations:
         result = filter_sources_by_citations(sources, {1, 3, 5})
         assert result == ["a", "c", "e"]
 
-    def test_none_citations_returns_all(self):
+    def test_none_citations_returns_empty(self):
         sources = ["a", "b", "c"]
         result = filter_sources_by_citations(sources, None)
+        assert result == []
+
+    def test_none_citations_can_be_allowed_for_structured_output(self):
+        sources = ["a", "b", "c"]
+        result = filter_sources_by_citations(sources, None, allow_uncited=True)
         assert result == ["a", "b", "c"]
 
     def test_empty_citations_returns_empty(self):
@@ -152,10 +157,10 @@ class TestFilterSourcesByCitations:
         result = filter_sources_by_citations(sources, set())
         assert result == []
 
-    def test_out_of_range_citations_fallback(self):
+    def test_out_of_range_citations_returns_empty(self):
         sources = ["a", "b", "c"]
         result = filter_sources_by_citations(sources, {99})
-        assert result == ["a", "b", "c"]
+        assert result == []
 
     def test_partial_out_of_range(self):
         sources = ["a", "b", "c"]
@@ -370,8 +375,8 @@ class TestStreamWithSourceFiltering:
         assert _parse_finish_sources(result) == []
 
     @pytest.mark.asyncio
-    async def test_case3_llm_no_tag_fallback_all(self):
-        """Case 3: LLM omits tag entirely → fallback to all sources."""
+    async def test_case3_llm_no_tag_returns_no_sources(self):
+        """Case 3: LLM omits tag entirely → no source is attributed."""
         lines = [
             _make_chunk("Answer without any sources tag."),
             _make_finish(),
@@ -379,6 +384,23 @@ class TestStreamWithSourceFiltering:
         ]
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "Answer without any sources tag."
+        assert _parse_finish_sources(result) == []
+
+    @pytest.mark.asyncio
+    async def test_no_tag_keeps_sources_when_uncited_output_is_allowed(self):
+        lines = [
+            _make_chunk('{"answer": "structured"}'),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(
+            stream_with_source_filtering(
+                _fake_stream(lines),
+                self.SOURCES,
+                "test-model",
+                allow_uncited_sources=True,
+            )
+        )
         assert _parse_finish_sources(result) == self.SOURCES
 
     @pytest.mark.asyncio
@@ -411,8 +433,8 @@ class TestStreamWithSourceFiltering:
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         content = _collect_content(result)
         assert content == "Use the format [Sources: 1, 3] at the very end of your response."
-        # No line-terminal tag → fallback to all sources
-        assert _parse_finish_sources(result) == self.SOURCES
+        # No line-terminal tag means no source was actually cited.
+        assert _parse_finish_sources(result) == []
 
     @pytest.mark.asyncio
     async def test_mid_response_tag_stripped_plus_trailing_tag(self):

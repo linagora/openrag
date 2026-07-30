@@ -55,14 +55,18 @@ def extract_and_strip_sources_block(text: str) -> tuple[str, set[int] | None]:
     return cleaned, set()
 
 
-def filter_sources_by_citations(sources: list, citations: set[int] | None) -> list:
+def filter_sources_by_citations(
+    sources: list,
+    citations: set[int] | None,
+    *,
+    allow_uncited: bool = False,
+) -> list:
     """Keep only sources whose 1-based index was cited."""
     if citations is None:
-        return sources
+        return sources if allow_uncited else []
     if not citations:
         return []
-    filtered = [source for i, source in enumerate(sources, start=1) if i in citations]
-    return filtered if filtered else sources
+    return [source for i, source in enumerate(sources, start=1) if i in citations]
 
 
 def _min_sources_tag_buffer_size(n_sources: int) -> int:
@@ -83,6 +87,8 @@ async def stream_with_source_filtering(
     sources: list,
     model_name: str,
     buffer_size: int | None = None,
+    *,
+    allow_uncited_sources: bool = False,
 ):
     """Process an LLM SSE stream, stripping line-terminal source tags.
 
@@ -219,7 +225,7 @@ async def stream_with_source_filtering(
     final_clean, citations = extract_and_strip_sources_block(pending)
     final_clean = final_clean.rstrip()
 
-    filtered = filter_sources_by_citations(sources, citations)
+    filtered = filter_sources_by_citations(sources, citations, allow_uncited=allow_uncited_sources)
     extra_payload = {"sources": filtered}
     if not saw_done:
         extra_payload["truncated"] = True

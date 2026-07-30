@@ -89,7 +89,8 @@ From this document, identify and comprehensively summarize the information usefu
 
 _QUERY_JSON_HINT = (
     "\n\nRespond ONLY with a JSON object of the form "
-    '{"query_list": [{"query": "<search query>", "temporal_filters": null}]}.'
+    '{"requires_retrieval": true, '
+    '"query_list": [{"query": "<search query>", "temporal_filters": null}]}.'
 )
 
 
@@ -412,6 +413,13 @@ class QueryService:
             partition = [scope.partition]
             filter_params = {"file_id": scope.file_ids}
 
+        force_retrieval = use_websearch or use_map_reduce
+        if not queries.query_list:
+            if not queries.requires_retrieval and not force_retrieval:
+                payload["messages"] = copy.deepcopy(messages)
+                return payload, [], []
+            queries = SearchQueries(query_list=[Query(query=messages[-1]["content"])])
+
         web_results: list = []
         if partition is not None and use_websearch:
             chunks, web_lists = await self._gather_rag_and_web(queries, partition, top_k, filter_params)
@@ -488,6 +496,10 @@ class QueryService:
     async def _prepare_completions(self, partition: list[str], payload: dict, llm: LLM | None = None):
         prompt = payload["prompt"]
         queries = await self.generate_query([{"role": "user", "content": prompt}], llm=llm)
+        if not queries.query_list:
+            if not queries.requires_retrieval:
+                return payload, []
+            queries = SearchQueries(query_list=[Query(query=prompt)])
         chunks = await self._retrieval.retrieve_multi(partitions=partition, search_queries=queries)
         docs = [c.to_langchain() for c in chunks]
         context, included = format_context(
@@ -580,7 +592,15 @@ class QueryService:
         content = chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
         clean, citations = extract_and_strip_sources_block(content)
         chunk["choices"][0]["message"]["content"] = clean
-        chunk["extra"] = json.dumps({"sources": filter_sources_by_citations(sources, citations)})
+        chunk["extra"] = json.dumps(
+            {
+                "sources": filter_sources_by_citations(
+                    sources,
+                    citations,
+                    allow_uncited=_allows_uncited_sources(payload),
+                )
+            }
+        )
         return chunk
 
     async def chat_stream(
@@ -602,7 +622,12 @@ class QueryService:
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
         llm_stream = llm.stream_chat(payload["messages"], **_sampling(payload))
-        async for sse_line in stream_with_source_filtering(llm_stream, sources, model_name):
+        async for sse_line in stream_with_source_filtering(
+            llm_stream,
+            sources,
+            model_name,
+            allow_uncited_sources=_allows_uncited_sources(payload),
+        ):
             yield sse_line
 
     async def complete(
@@ -624,7 +649,15 @@ class QueryService:
         text = resp.get("choices", [{}])[0].get("text", "") or ""
         clean, citations = extract_and_strip_sources_block(text)
         resp["choices"][0]["text"] = clean
-        resp["extra"] = json.dumps({"sources": filter_sources_by_citations(sources, citations)})
+        resp["extra"] = json.dumps(
+            {
+                "sources": filter_sources_by_citations(
+                    sources,
+                    citations,
+                    allow_uncited=_allows_uncited_sources(payload),
+                )
+            }
+        )
         return resp
 
 
@@ -664,6 +697,12 @@ def _sampling(payload: dict, key: str = "messages") -> dict:
     """
     drop = {key, "stream", "model"}
     return {k: v for k, v in payload.items() if k not in drop}
+
+
+def _allows_uncited_sources(payload: dict) -> bool:
+    """Structured output cannot carry the plain-text citation marker."""
+    response_format = payload.get("response_format")
+    return isinstance(response_format, dict) and response_format.get("type") in {"json_object", "json_schema"}
 
 
 __all__ = ["QueryService", "RAGMODE"]
