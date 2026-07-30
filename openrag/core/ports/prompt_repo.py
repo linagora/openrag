@@ -50,7 +50,7 @@ class PromptRepository(ABC):
     async def delete(self, prompt_id: str) -> bool: ...
 
     # ------------------------------------------------------------------
-    # Global default (one per type)
+    # Selection by name
     # ------------------------------------------------------------------
 
     @abstractmethod
@@ -62,7 +62,7 @@ class PromptRepository(ABC):
         ...
 
     # ------------------------------------------------------------------
-    # Global default (one per type)
+    # Usage counts and the global default (one per type)
     # ------------------------------------------------------------------
 
     @abstractmethod

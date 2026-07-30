@@ -251,8 +251,16 @@ class IndexerWorkerActor:
         swallowed and the stage falls back to its own disk-loaded prompt rather
         than failing the file.
         """
+        # Fall back to the model's own default for an absent key, not to False:
+        # enable_image_captioning defaults to True, so a sparse config (one that
+        # simply omits the flag) still captions during ingest. A bare .get() read
+        # that as disabled, skipped resolution, and left captioning silently on
+        # the disk seed — ignoring both the preset's *_prompt_name and the type's
+        # library default, with nothing surfacing the divergence.
         enabled = [
-            (pt, name_field, key) for flag, pt, name_field, key in self._INGEST_PROMPTS if indexation_config.get(flag)
+            (pt, name_field, key)
+            for flag, pt, name_field, key in self._INGEST_PROMPTS
+            if indexation_config.get(flag, _ingest_flag_default(flag))
         ]
         if not enabled:
             return {}
@@ -1014,3 +1022,15 @@ def _global_vlm_endpoint_config(cfg: Any) -> Any | None:
 
 
 __all__ = ["IndexerPool", "IndexerWorkerActor", "build_indexer_pool"]
+
+
+def _ingest_flag_default(flag: str) -> bool:
+    """The IndexationPipelineConfig default for an enrichment flag.
+
+    Read from the model so the two cannot drift: the defaults differ per stage
+    (captioning is on, contextualization and topic tagging are off).
+    """
+    from core.config.indexation_pipeline import IndexationPipelineConfig
+
+    field = IndexationPipelineConfig.model_fields.get(flag)
+    return bool(field.default) if field is not None else False

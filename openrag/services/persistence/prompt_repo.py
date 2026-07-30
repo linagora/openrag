@@ -29,8 +29,6 @@ _COLS = ("id", "prompt_type", "name", "content", "is_default", "created_at", "up
 _SELECT_COLS = ", ".join(_COLS)
 
 
-# Indexation/retrieval preset config field -> the prompt_type it names. Partition
-# generation_prompt_names keys ARE prompt_type values, so they need no mapping.
 def _as_conflict(exc: asyncpg.UniqueViolationError, prompt_type: str) -> ValidationError:
     """Translate a unique-index violation into the 409 the service intends.
 
@@ -53,6 +51,8 @@ def _as_conflict(exc: asyncpg.UniqueViolationError, prompt_type: str) -> Validat
     )
 
 
+# Indexation/retrieval preset config field -> the prompt_type it names. Partition
+# generation_prompt_names keys ARE prompt_type values, so they need no mapping.
 _PRESET_FIELD_TO_TYPE = {
     "contextualization_prompt_name": "chunk_contextualizer",
     "image_captioning_prompt_name": "image_captioning",

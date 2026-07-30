@@ -65,6 +65,7 @@ def _config(rtype: str = "single", reranker_enabled: bool = False) -> SimpleName
         ),
         reranker=SimpleNamespace(enabled=reranker_enabled, top_k=5),
         partitions={},
+        models=SimpleNamespace(reranker={}),
     )
 
 
@@ -247,6 +248,68 @@ async def test_retrieve_uses_partition_retrieval_config_and_named_reranker():
     assert call["partition"] == ["tenant-a"]
     assert call["top_k"] == 3
     assert call["similarity_threshold"] == 0.77
+
+
+@pytest.mark.asyncio
+async def test_retrieve_falls_back_to_default_reranker_when_preset_stale():
+    """A partition's ``reranker`` preset can go stale (renamed/deleted after
+    assignment — this field has no create/PATCH-time validation, unlike
+    ``chat_llm``). The stale name must fall back to the catalog default
+    instead of raising."""
+    s = FakeSearcher()
+    s.search_result = [_chunk("a")]
+    default_reranker = FakeReranker()
+    reranker_calls: list[str] = []
+
+    def factory(name: str):
+        reranker_calls.append(name)
+        if name == "default":
+            return default_reranker
+        raise KeyError(name)
+
+    cfg = _config()
+    cfg.partitions = {
+        "tenant-a": _partition(retrieval=RetrievalPipelineConfig(enable_reranker=True, reranker="stale-ranker"))
+    }
+
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        reranker_factory=factory,
+    )
+
+    out = await svc.retrieve(partitions=["tenant-a"], query=Query(query="hello"))
+
+    assert [c.id for c in out] == ["a"]
+    assert reranker_calls == ["stale-ranker", "default"]
+    assert default_reranker.calls[0]["query"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_falls_back_to_legacy_reranker_when_no_catalog_default():
+    """No ``is_default`` reranker endpoint registered yet — fall back to the
+    static reranker built at startup instead of raising."""
+    s = FakeSearcher()
+    s.search_result = [_chunk("a")]
+    legacy_reranker = FakeReranker()
+
+    cfg = _config()
+    cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(enable_reranker=True))}
+
+    svc = RetrievalService(
+        searcher=s,
+        reranker=legacy_reranker,
+        llm=None,
+        config=cfg,
+        reranker_factory=lambda name: (_ for _ in ()).throw(KeyError(name)),
+    )
+
+    out = await svc.retrieve(partitions=["tenant-a"], query=Query(query="hello"))
+
+    assert [c.id for c in out] == ["a"]
+    assert legacy_reranker.calls[0]["query"] == "hello"
 
 
 @pytest.mark.asyncio

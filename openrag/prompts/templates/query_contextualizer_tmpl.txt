@@ -1,17 +1,18 @@
 Produce a JSON object listing sub-queries derived from the user's last message.
 
 Output shape (return this JSON object, nothing else):
-{{"query_list": [ {{"query": "<rewritten search string>", "temporal_filters": <list of predicates | null>}} ]}}
+{{"requires_retrieval": <true|false>, "query_list": [ {{"query": "<rewritten search string>", "temporal_filters": <list of predicates | null>}} ]}}
 
 Current date: {current_date}
 Language for `query` field: {query_language}
 Timestamps: UTC (`+00:00`). Week starts Monday.
 
 # Rewrite rules (`query` field)
+- Set `requires_retrieval: false` and return an empty `query_list` when the entire last user message is only a greeting, thanks, casual conversation, or a question about the assistant's general capabilities.
+- Set `requires_retrieval: true` for any request that asks for factual or document-backed information. A greeting combined with a factual question still requires retrieval.
 - Rewrite the last `user:` line as one standalone descriptive sentence.
 - Use earlier turns only to resolve pronouns or add context directly relevant to the query; do not inject unrelated history.
 - For independent questions: minimal changes (grammar, missing keywords).
-- Greetings / thanks: copy verbatim, `temporal_filters: null`.
 - Do not answer. Only reformulate.
 
 # Sub-queries — when to split
@@ -46,19 +47,25 @@ For exclusions, split into two sub-queries covering each remaining range. Never 
 # Examples (Current date = Wednesday, April 15, 2026)
 
 User: "Summary of meeting notes uploaded in the past month"
-{{"query_list":[{{"query":"Summary of meeting notes uploaded in the past month","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-03-15T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-16T00:00:00+00:00"}}]}}]}}
+{{"requires_retrieval":true,"query_list":[{{"query":"Summary of meeting notes uploaded in the past month","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-03-15T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-16T00:00:00+00:00"}}]}}]}}
 
 User: "Sales figures for Product A and Product B"
-{{"query_list":[{{"query":"Sales figures for Product A","temporal_filters":null}},{{"query":"Sales figures for Product B","temporal_filters":null}}]}}
+{{"requires_retrieval":true,"query_list":[{{"query":"Sales figures for Product A","temporal_filters":null}},{{"query":"Sales figures for Product B","temporal_filters":null}}]}}
 
 User: "Documents from last year except March"
-{{"query_list":[{{"query":"Documents from January or February 2025","temporal_filters":[{{"field":"created_at","operator":">=","value":"2025-01-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2025-03-01T00:00:00+00:00"}}]}},{{"query":"Documents from April to December 2025","temporal_filters":[{{"field":"created_at","operator":">=","value":"2025-04-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-01-01T00:00:00+00:00"}}]}}]}}
+{{"requires_retrieval":true,"query_list":[{{"query":"Documents from January or February 2025","temporal_filters":[{{"field":"created_at","operator":">=","value":"2025-01-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2025-03-01T00:00:00+00:00"}}]}},{{"query":"Documents from April to December 2025","temporal_filters":[{{"field":"created_at","operator":">=","value":"2025-04-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-01-01T00:00:00+00:00"}}]}}]}}
 
 User: "Q3 2024 reporting template"
-{{"query_list":[{{"query":"Q3 2024 reporting template","temporal_filters":null}}]}}
+{{"requires_retrieval":true,"query_list":[{{"query":"Q3 2024 reporting template","temporal_filters":null}}]}}
 
 User: "Evolution of the Department of Justice budget between 2020 and 2022"
-{{"query_list":[{{"query":"Department of Justice budget in 2020","temporal_filters":null}},{{"query":"Department of Justice budget in 2021","temporal_filters":null}},{{"query":"Department of Justice budget in 2022","temporal_filters":null}}]}}
+{{"requires_retrieval":true,"query_list":[{{"query":"Department of Justice budget in 2020","temporal_filters":null}},{{"query":"Department of Justice budget in 2021","temporal_filters":null}},{{"query":"Department of Justice budget in 2022","temporal_filters":null}}]}}
 
 User: "Latest safety bulletins"
-{{"query_list":[{{"query":"Latest safety bulletins","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-01-15T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-16T00:00:00+00:00"}}]}}]}}
+{{"requires_retrieval":true,"query_list":[{{"query":"Latest safety bulletins","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-01-15T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-16T00:00:00+00:00"}}]}}]}}
+
+User: "How can you help me?"
+{{"requires_retrieval":false,"query_list":[]}}
+
+User: "Hello, what was Product A revenue in Q1?"
+{{"requires_retrieval":true,"query_list":[{{"query":"Product A revenue in Q1","temporal_filters":null}}]}}

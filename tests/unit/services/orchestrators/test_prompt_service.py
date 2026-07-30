@@ -13,7 +13,8 @@ from types import SimpleNamespace
 import pytest
 from core.config.infrastructure import PathsConfig, PromptsConfig
 from core.models.prompt import Prompt, PromptType
-from core.utils.exceptions import NotFoundError, ValidationError
+from core.utils.exceptions import ConfigError, NotFoundError, ValidationError
+from loguru import logger
 from services.orchestrators.prompt_service import PROMPT_TYPE_KEYS, PromptService
 
 
@@ -265,3 +266,118 @@ class TestCrud:
         assert [row["prompt_type"] for row in listed] == ["hyde"]
         assert listed[0]["used_by"] == 3
         assert p.id == listed[0]["id"]
+
+
+class TestLoggingIsBraceSafe:
+    def test_a_brace_in_a_prompt_name_does_not_raise(self):
+        """Prompt names are free text. Interpolating one into the log format
+        string made a brace a format field, so a partition pointed at a prompt
+        named `my{tmpl}` raised KeyError on *every* request that resolved it.
+        """
+        from services.orchestrators.prompt_service import PromptService
+
+        records: list[str] = []
+        sink_id = logger.add(records.append, level="DEBUG", format="{message}")
+        try:
+            PromptService._log_resolution("sys_prompt", ["my{tmpl}"], "named", "my{tmpl}", "body {with} braces")
+        finally:
+            logger.remove(sink_id)
+        assert "my{tmpl}" in "".join(records)
+
+
+class TestResolveSurvivesRepositoryFailure:
+    async def test_a_repo_error_degrades_to_the_disk_seed(self):
+        """Resolution moved onto the request path, so chat and search now depend
+        on Postgres per request where they used to read prompts once at boot. A
+        transient pool error must degrade to the bundled template, not 500.
+        """
+
+        class ExplodingRepo(FakePromptRepo):
+            async def get_by_name(self, prompt_type, name):
+                raise RuntimeError("connection pool exhausted")
+
+            async def get_default(self, prompt_type):
+                raise RuntimeError("connection pool exhausted")
+
+        svc = _service(ExplodingRepo())
+        content = await svc.resolve_prompt("sys_prompt", names=["whatever"])
+        assert "{context}" in content  # the bundled sys_prompt template
+
+
+class TestSeedingSurvivesAConcurrentReplica:
+    async def test_a_lost_seed_race_does_not_fail_boot(self):
+        """Losing the race is a no-op, but the unique violation maps to a
+        ValidationError that _initialize_step re-raises — so an unhandled one
+        turns a concurrent boot into a crash-loop instead of a skipped insert.
+        """
+
+        class RacingRepo(FakePromptRepo):
+            async def create(self, prompt):
+                raise ValidationError("already exists", status_code=409, code="PROMPT_EXISTS")
+
+        await _service(RacingRepo()).seed_defaults()  # must not raise
+
+
+class TestUnavailablePromptRaisesTheTypedError:
+    async def test_missing_default_and_missing_template_raises_configerror(self, tmp_path):
+        """Exercises the raise itself. ConfigError hard-coded its own code, so
+        passing code= collided with the forwarded kwargs and the statement threw
+        TypeError instead — the typed error could never be constructed.
+        """
+        # Point the loader at an empty directory — no bundled template, and the
+        # fake repo has no default, which is the only path reaching the raise.
+        svc = _service()
+        svc._config = SimpleNamespace(
+            paths=PathsConfig(prompts_dir=tmp_path),
+            prompts=PromptsConfig(),
+        )
+
+        with pytest.raises(ConfigError) as exc:
+            await svc.resolve_prompt("hyde")
+
+        assert exc.value.code == "PROMPT_UNAVAILABLE"
+        assert exc.value.status_code == 500
+        assert "hyde" in str(exc.value)
+
+
+class TestErrorPathsAreExercised:
+    """Every raise in the service reached at least once.
+
+    These paths were reasoned about rather than run, which is how a raise that
+    itself threw TypeError survived review — coverage over the error branches is
+    the check that catches that class of defect.
+    """
+
+    async def test_malformed_braces_raise_at_write_time(self):
+        svc = _service()
+        with pytest.raises(ValidationError) as exc:
+            await svc.create_prompt(prompt_type="hyde", name="bad", content="unbalanced {question")
+        assert exc.value.status_code == 422
+        assert "brace" in str(exc.value).lower()
+
+    @pytest.mark.parametrize("op", ["get", "update", "set_default", "delete"])
+    async def test_unknown_id_raises_not_found(self, op):
+        svc = _service()
+        with pytest.raises(NotFoundError):
+            if op == "get":
+                await svc.get_prompt("nope")
+            elif op == "update":
+                await svc.update_prompt("nope", name="x")
+            elif op == "set_default":
+                await svc.set_default("nope")
+            else:
+                await svc.delete_prompt("nope")
+
+    async def test_deleting_a_types_default_is_refused(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        p = await svc.create_prompt(prompt_type="hyde", name="d", content="{question}", is_default=True)
+        with pytest.raises(ValidationError):
+            await svc.delete_prompt(p.id)
+
+    async def test_seeding_skips_a_type_whose_template_is_missing(self, tmp_path):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        svc._config = SimpleNamespace(paths=PathsConfig(prompts_dir=tmp_path), prompts=PromptsConfig())
+        await svc.seed_defaults()  # warns per type, never raises
+        assert repo.prompts == {}
