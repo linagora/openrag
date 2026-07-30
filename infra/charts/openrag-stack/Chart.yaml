@@ -3,8 +3,8 @@ name: openrag-stack
 description: A Helm chart for Kubernetes
 type: application
 
-version: 0.6.0
-appVersion: "2.0.1"
+version: 0.6.1
+appVersion: "2.1.0"
 
 maintainers:
   - name: linagora
