@@ -49,6 +49,7 @@ from core.prompts import (
     format_context,
     format_web_context,
     load_template_by_key,
+    prepend_system_prompt,
 )
 from core.utils.exceptions import WorkspaceNotFoundError
 from core.utils.logging import get_logger
@@ -58,6 +59,7 @@ from core.utils.source_filtering import (
     stream_with_source_filtering,
 )
 from core.utils.text import get_num_tokens
+from core.utils.web_url import normalize_web_url
 from services.inference.runtime import detect_language, get_llm_semaphore
 
 if TYPE_CHECKING:
@@ -88,8 +90,10 @@ From this document, identify and comprehensively summarize the information usefu
 {query}"""
 
 _QUERY_JSON_HINT = (
-    "\n\nRespond ONLY with a JSON object of the form "
-    '{"query_list": [{"query": "<search query>", "temporal_filters": null}]}.'
+    "\n\nRespond ONLY with one of these JSON forms: "
+    '{"requires_retrieval": false, "query_list": []} when retrieval is not needed, or '
+    '{"requires_retrieval": true, '
+    '"query_list": [{"query": "<search query>", "temporal_filters": null}]} when it is.'
 )
 
 
@@ -412,6 +416,19 @@ class QueryService:
             partition = [scope.partition]
             filter_params = {"file_id": scope.file_ids}
 
+        force_retrieval = use_websearch or use_map_reduce
+        if not queries.query_list:
+            if not queries.requires_retrieval and not force_retrieval:
+                tmpl = self._spoken_style_answer_prompt if spoken_style else self._sys_prompt_tmplt
+                payload["messages"] = prepend_system_prompt(
+                    messages,
+                    tmpl,
+                    context="",
+                    current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
+                )
+                return payload, [], [], True
+            queries = SearchQueries(query_list=[Query(query=messages[-1]["content"])])
+
         web_results: list = []
         if partition is not None and use_websearch:
             chunks, web_lists = await self._gather_rag_and_web(queries, partition, top_k, filter_params)
@@ -425,18 +442,19 @@ class QueryService:
             chunks = []
 
         if not chunks and not web_results and partition is None:
-            return payload, [], []
+            return payload, [], [], False
 
         docs = [c.to_langchain() for c in chunks]
         if use_map_reduce and docs:
             docs = await self._map_reduce(" ".join(q.query for q in queries.query_list), docs)
 
-        web_formatted, web_tokens = "", 0
+        web_formatted, web_source_numbers, web_tokens = "", [], 0
+        web_start_index = 1
         if web_results:
-            web_formatted, _, web_tokens = format_web_context(
+            web_formatted, web_source_numbers, web_tokens = format_web_context(
                 web_results,
                 length_function=get_num_tokens(),
-                start_index=1,
+                start_index=web_start_index,
                 max_tokens=self._web.max_tokens,
             )
         context, included = format_context(
@@ -448,15 +466,17 @@ class QueryService:
 
         if web_results:
             if docs:
-                web_formatted, _, _ = format_web_context(
+                web_start_index = len(docs) + 1
+                web_formatted, web_source_numbers, _ = format_web_context(
                     web_results,
                     length_function=get_num_tokens(),
-                    start_index=len(docs) + 1,
+                    start_index=web_start_index,
                     max_tokens=self._web.max_tokens,
                 )
             else:
                 context = ""
             context = f"{context}{SOURCE_SEPARATOR}{web_formatted}" if context else web_formatted
+            web_results = [web_results[number - web_start_index] for number in web_source_numbers]
 
         new_messages = copy.deepcopy(messages)
         tmpl = self._spoken_style_answer_prompt if spoken_style else self._sys_prompt_tmplt
@@ -470,7 +490,7 @@ class QueryService:
             },
         )
         payload["messages"] = new_messages
-        return payload, docs, web_results
+        return payload, docs, web_results, True
 
     async def _gather_rag_and_web(self, queries, partition, top_k, filter_params):
         # Fuse the doc branch through retrieve_multi so a partition's rrf_k drives
@@ -488,20 +508,30 @@ class QueryService:
     async def _prepare_completions(self, partition: list[str], payload: dict, llm: LLM | None = None):
         prompt = payload["prompt"]
         queries = await self.generate_query([{"role": "user", "content": prompt}], llm=llm)
-        chunks = await self._retrieval.retrieve_multi(partitions=partition, search_queries=queries)
-        docs = [c.to_langchain() for c in chunks]
-        context, included = format_context(
-            [doc.page_content for doc in docs],
-            max_context_tokens=self._max_context_tokens,
-            length_function=get_num_tokens(),
-        )
-        docs = [docs[i] for i in included]
-        if docs:
-            payload["prompt"] = (
-                f"Given the content\n{context}\nComplete the following prompt: {prompt}\n"
-                "At the very end of your response, on a new line, list which source numbers "
-                "you used: [Sources: 1, 3]"
+        if not queries.query_list:
+            if not queries.requires_retrieval:
+                docs, context = [], ""
+            else:
+                queries = SearchQueries(query_list=[Query(query=prompt)])
+        if queries.query_list:
+            chunks = await self._retrieval.retrieve_multi(partitions=partition, search_queries=queries)
+            docs = [c.to_langchain() for c in chunks]
+            context, included = format_context(
+                [doc.page_content for doc in docs],
+                max_context_tokens=self._max_context_tokens,
+                length_function=get_num_tokens(),
             )
+            docs = [docs[i] for i in included]
+
+        metadata = payload.get("metadata") or {}
+        tmpl = (
+            self._spoken_style_answer_prompt if metadata.get("spoken_style_answer", False) else self._sys_prompt_tmplt
+        )
+        instructions = tmpl.format(
+            context=context,
+            current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
+        )
+        payload["prompt"] = f"{instructions}\n\n# User request\n{prompt}"
         return payload, docs
 
     # ------------------------------------------------------------------
@@ -568,19 +598,35 @@ class QueryService:
         """Non-streaming chat completion → finalized OpenAI dict."""
         metadata = payload.get("metadata") or {}
         llm = self._resolve_llm(partitions)
+        citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results = [], []
         else:
-            payload, docs, web_results = await self._prepare_chat(partitions, payload, llm)
+            payload, docs, web_results, citation_protocol_active = await self._prepare_chat(partitions, payload, llm)
         sources = prepare_sources(docs, web_results)
+        structured_output = _allows_uncited_sources(payload)
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
         chunk = await llm.chat(payload["messages"], **_sampling(payload))
         chunk["model"] = model_name
         content = chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-        clean, citations = extract_and_strip_sources_block(content)
+        if citation_protocol_active and not structured_output:
+            clean, citations = extract_and_strip_sources_block(
+                content,
+                include_inline_markers=bool(sources),
+            )
+        else:
+            clean, citations = content, None
         chunk["choices"][0]["message"]["content"] = clean
-        chunk["extra"] = json.dumps({"sources": filter_sources_by_citations(sources, citations)})
+        chunk["extra"] = json.dumps(
+            {
+                "sources": filter_sources_by_citations(
+                    sources,
+                    citations,
+                    allow_uncited=structured_output,
+                )
+            }
+        )
         return chunk
 
     async def chat_stream(
@@ -594,15 +640,23 @@ class QueryService:
         """Streaming chat completion → SSE strings with filtered sources."""
         metadata = payload.get("metadata") or {}
         llm = self._resolve_llm(partitions)
+        citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results = [], []
         else:
-            payload, docs, web_results = await self._prepare_chat(partitions, payload, llm)
+            payload, docs, web_results, citation_protocol_active = await self._prepare_chat(partitions, payload, llm)
         sources = prepare_sources(docs, web_results)
+        structured_output = _allows_uncited_sources(payload)
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
         llm_stream = llm.stream_chat(payload["messages"], **_sampling(payload))
-        async for sse_line in stream_with_source_filtering(llm_stream, sources, model_name):
+        async for sse_line in stream_with_source_filtering(
+            llm_stream,
+            sources,
+            model_name,
+            allow_uncited_sources=structured_output,
+            citation_protocol_active=citation_protocol_active and not structured_output,
+        ):
             yield sse_line
 
     async def complete(
@@ -614,17 +668,33 @@ class QueryService:
     ) -> dict:
         """Non-streaming text completion → finalized OpenAI dict."""
         llm = self._resolve_llm(partitions)
+        citation_protocol_active = partitions is not None
         if partitions is None:
             docs = []
         else:
             payload, docs = await self._prepare_completions(partitions, payload, llm)
         sources = prepare_sources(docs, [])
+        structured_output = _allows_uncited_sources(payload)
 
         resp = await llm.generate(payload["prompt"], **_sampling(payload, key="prompt"))
         text = resp.get("choices", [{}])[0].get("text", "") or ""
-        clean, citations = extract_and_strip_sources_block(text)
+        if citation_protocol_active and not structured_output:
+            clean, citations = extract_and_strip_sources_block(
+                text,
+                include_inline_markers=bool(sources),
+            )
+        else:
+            clean, citations = text, None
         resp["choices"][0]["text"] = clean
-        resp["extra"] = json.dumps({"sources": filter_sources_by_citations(sources, citations)})
+        resp["extra"] = json.dumps(
+            {
+                "sources": filter_sources_by_citations(
+                    sources,
+                    citations,
+                    allow_uncited=structured_output,
+                )
+            }
+        )
         return resp
 
 
@@ -649,8 +719,10 @@ def _dedupe_web(web_lists: list[list]) -> list:
     seen: set[str] = set()
     out: list = []
     for r in (r for lst in web_lists for r in lst):
-        if r.url not in seen:
-            seen.add(r.url)
+        url = normalize_web_url(r.url)
+        if url is not None and url not in seen:
+            r.url = url
+            seen.add(url)
             out.append(r)
     return out
 
@@ -664,6 +736,12 @@ def _sampling(payload: dict, key: str = "messages") -> dict:
     """
     drop = {key, "stream", "model"}
     return {k: v for k, v in payload.items() if k not in drop}
+
+
+def _allows_uncited_sources(payload: dict) -> bool:
+    """Structured output cannot carry the plain-text citation marker."""
+    response_format = payload.get("response_format")
+    return isinstance(response_format, dict) and response_format.get("type") in {"json_object", "json_schema"}
 
 
 __all__ = ["QueryService", "RAGMODE"]
