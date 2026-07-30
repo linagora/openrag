@@ -584,6 +584,12 @@ def test_chainlit_preserves_safe_source_name_punctuation(monkeypatch, source_nam
         ("__trusted__", "trusted"),
         ("foo _trusted_ bar", "foo trusted bar"),
         ("~~irrelevant~~", "irrelevant"),
+        ("# Trusted source", "Trusted source"),
+        ("1. Official result", "Official result"),
+        ("- Search result", "Search result"),
+        ("+ Search result", "Search result"),
+        ("# 1. Official result", "Official result"),
+        ("___", "source"),
     ],
 )
 def test_chainlit_neutralizes_active_source_name_markdown(monkeypatch, source_name, expected):
@@ -592,11 +598,18 @@ def test_chainlit_neutralizes_active_source_name_markdown(monkeypatch, source_na
     assert module._safe_source_name(source_name, {}) == expected
 
 
+@pytest.mark.parametrize("source_name", ["#report.pdf", "1.report.pdf"])
+def test_chainlit_preserves_non_block_source_name_prefixes(monkeypatch, source_name):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_source_name_prefix_test")
+
+    assert module._safe_source_name(source_name, {}) == source_name
+
+
 def test_chainlit_handles_long_source_name_delimiter_runs(monkeypatch):
     module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_source_name_long_run_test")
     source_name = "_" * 10_000
 
-    assert module._safe_source_name(source_name, {}) == source_name
+    assert module._safe_source_name(source_name, {}) == "source"
 
 
 @pytest.mark.parametrize(

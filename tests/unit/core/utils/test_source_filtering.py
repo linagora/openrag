@@ -422,6 +422,45 @@ class TestStreamWithSourceFiltering:
         assert _parse_finish_sources(result) == self.SOURCES
 
     @pytest.mark.asyncio
+    async def test_structured_output_preserves_source_like_json_values(self):
+        structured = '{"answer":"Use [Source 1]","literal_format":"[Sources: 1]"}'
+        lines = [
+            _make_chunk(structured),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(
+            stream_with_source_filtering(
+                _fake_stream(lines),
+                self.SOURCES,
+                "test-model",
+                allow_uncited_sources=True,
+                citation_protocol_active=False,
+            )
+        )
+        assert _collect_content(result) == structured
+        assert _parse_finish_sources(result) == self.SOURCES
+
+    @pytest.mark.asyncio
+    async def test_direct_output_preserves_terminal_source_marker(self):
+        answer = "The requested literal notation is:\n[Sources: 1]"
+        lines = [
+            _make_chunk(answer),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(
+            stream_with_source_filtering(
+                _fake_stream(lines),
+                [],
+                "test-model",
+                citation_protocol_active=False,
+            )
+        )
+        assert _collect_content(result) == answer
+        assert _parse_finish_sources(result) == []
+
+    @pytest.mark.asyncio
     async def test_multiple_inline_tags_stripped_from_stream(self):
         """Bullet-leak: LLM emits [Sources: X] per bullet. All inline tags must be stripped."""
         lines = [

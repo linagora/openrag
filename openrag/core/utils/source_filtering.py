@@ -113,8 +113,9 @@ async def stream_with_source_filtering(
     buffer_size: int | None = None,
     *,
     allow_uncited_sources: bool = False,
+    citation_protocol_active: bool = True,
 ):
-    """Process an LLM SSE stream, stripping source tags.
+    """Process an LLM SSE stream and, when active, strip source tags.
 
     The terminal flush (tail content + ``extra.sources``) runs exactly once
     after the loop on *every* termination path — a clean ``data: [DONE]``, the
@@ -129,7 +130,7 @@ async def stream_with_source_filtering(
     """
     if buffer_size is None:
         buffer_size = max(_MIN_STREAM_LOOKAHEAD, _min_sources_tag_buffer_size(len(sources)))
-    include_inline_markers = bool(sources)
+    include_inline_markers = citation_protocol_active and bool(sources)
     pending = ""
     emitted_len = 0
     chunk_template = None
@@ -186,10 +187,13 @@ async def stream_with_source_filtering(
                 if len(pending) <= buffer_size:
                     continue
 
-                cleaned, _, _ = _strip_sources_tags(
-                    pending,
-                    include_inline_markers=include_inline_markers,
-                )
+                if citation_protocol_active:
+                    cleaned, _, _ = _strip_sources_tags(
+                        pending,
+                        include_inline_markers=include_inline_markers,
+                    )
+                else:
+                    cleaned = pending
                 safe_end = max(0, len(cleaned) - buffer_size)
                 if safe_end > emitted_len:
                     out = {
@@ -250,11 +254,14 @@ async def stream_with_source_filtering(
         logger.warning("Upstream stream raised before any content; surfacing error", error=str(stream_error))
         raise stream_error
 
-    final_clean, citations = extract_and_strip_sources_block(
-        pending,
-        include_inline_markers=include_inline_markers,
-    )
-    final_clean = final_clean.rstrip()
+    if citation_protocol_active:
+        final_clean, citations = extract_and_strip_sources_block(
+            pending,
+            include_inline_markers=include_inline_markers,
+        )
+        final_clean = final_clean.rstrip()
+    else:
+        final_clean, citations = pending, None
 
     filtered = filter_sources_by_citations(sources, citations, allow_uncited=allow_uncited_sources)
     extra_payload = {"sources": filtered}

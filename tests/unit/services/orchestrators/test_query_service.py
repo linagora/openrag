@@ -42,6 +42,7 @@ class FakeLLM:
         self._gen_text = gen_text
         self._stream_lines = stream_lines or ['data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', "data: [DONE]\n\n"]
         self.chat_calls: list = []
+        self.generate_calls: list = []
 
     async def chat(self, messages, **kwargs):
         self.chat_calls.append((messages, kwargs))
@@ -52,6 +53,7 @@ class FakeLLM:
         return {"choices": [{"message": {"content": content}}]}
 
     async def generate(self, prompt, **kwargs):
+        self.generate_calls.append((prompt, kwargs))
         return {"choices": [{"text": self._gen_text}]}
 
     async def stream_chat(self, messages, **kwargs):
@@ -391,8 +393,8 @@ async def test_chat_direct_mode_skips_retrieval():
     )
     assert called["n"] == 0  # no retrieval in direct mode
     assert out["model"] == "m1"
-    assert out["choices"][0]["message"]["content"] == "hello"  # sources tag stripped
-    assert json.loads(out["extra"])["sources"] == []  # [Sources: none] → no sources
+    assert out["choices"][0]["message"]["content"] == "hello [Sources: none]"
+    assert json.loads(out["extra"])["sources"] == []
 
 
 @pytest.mark.asyncio
@@ -403,6 +405,22 @@ async def test_chat_direct_mode_preserves_literal_source_marker():
     out = await svc.chat(
         partitions=None,
         payload={"messages": [{"role": "user", "content": "Explain [Source 1]"}], "metadata": {}},
+        prepare_sources=lambda d, w: [],
+        model_name="m1",
+    )
+
+    assert out["choices"][0]["message"]["content"] == answer
+    assert json.loads(out["extra"])["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_chat_direct_mode_preserves_literal_terminal_sources_marker():
+    answer = "The requested literal notation is:\n[Sources: 1]"
+    svc = _svc(llm=FakeLLM(chat_responses=[answer]))
+
+    out = await svc.chat(
+        partitions=None,
+        payload={"messages": [{"role": "user", "content": "Repeat [Sources: 1]"}], "metadata": {}},
         prepare_sources=lambda d, w: [],
         model_name="m1",
     )
@@ -563,7 +581,8 @@ async def test_chat_invalid_citation_does_not_fallback_to_unrelated_sources():
 
 @pytest.mark.asyncio
 async def test_chat_structured_output_keeps_retrieved_sources_without_citation_marker():
-    svc = _svc(llm=FakeLLM(chat_responses=['{"answer": "structured"}']))
+    structured_answer = '{"answer": "Use [Source 1]", "literal_format": "[Sources: 1]"}'
+    svc = _svc(llm=FakeLLM(chat_responses=[structured_answer]))
     sources = [{"source_type": "document", "filename": "report.pdf"}]
 
     out = await svc.chat(
@@ -577,7 +596,57 @@ async def test_chat_structured_output_keeps_retrieved_sources_without_citation_m
         model_name="m",
     )
 
+    assert out["choices"][0]["message"]["content"] == structured_answer
     assert json.loads(out["extra"])["sources"] == sources
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_structured_output_preserves_source_like_json_values():
+    structured_answer = '{"answer":"Use [Source 1]","literal_format":"[Sources: 1]"}'
+    stream_lines = [
+        "data: "
+        + json.dumps(
+            {
+                "choices": [
+                    {
+                        "delta": {"content": structured_answer},
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        )
+        + "\n\n",
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+        "data: [DONE]\n\n",
+    ]
+    svc = _svc(llm=FakeLLM(stream_lines=stream_lines))
+    sources = [{"source_type": "document", "filename": "report.pdf"}]
+
+    lines = [
+        line
+        async for line in svc.chat_stream(
+            partitions=["p"],
+            payload={
+                "messages": [{"role": "user", "content": "Question"}],
+                "metadata": {},
+                "response_format": {"type": "json_object"},
+            },
+            prepare_sources=lambda d, w: sources,
+            model_name="m",
+        )
+    ]
+    chunks = [
+        json.loads(line[len("data: ") :])
+        for line in lines
+        if line.startswith("data: ") and line.strip() != "data: [DONE]"
+    ]
+    content = "".join(
+        choice.get("delta", {}).get("content", "") for chunk in chunks for choice in chunk.get("choices", [])
+    )
+    extra = next(json.loads(chunk["extra"]) for chunk in reversed(chunks) if chunk.get("extra") not in (None, "{}"))
+
+    assert content == structured_answer
+    assert extra["sources"] == sources
 
 
 @pytest.mark.asyncio
@@ -645,7 +714,7 @@ async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
     retrieval = FakeRetrieval()
     web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
     svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
-    _payload, _docs, web = await svc._prepare_chat(
+    _payload, _docs, web, _citation_protocol_active = await svc._prepare_chat(
         ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"websearch": True}}
     )
     assert len(retrieval.retrieve_multi_calls) == 1  # doc branch fused via the rrf_k-aware retrieve_multi
@@ -752,15 +821,57 @@ async def test_chat_without_workspace_unaffected():
 
 
 @pytest.mark.asyncio
-async def test_complete_strips_and_filters():
-    svc = _svc(llm=FakeLLM(gen_text="text body [Sources: none]"))
+async def test_complete_direct_mode_preserves_literal_source_marker():
+    answer = "text body\n[Sources: none]"
+    svc = _svc(llm=FakeLLM(gen_text=answer))
     out = await svc.complete(
         partitions=None,
         payload={"prompt": "do x"},
         prepare_sources=lambda d, w: [{"x": 1}],
     )
-    assert out["choices"][0]["text"] == "text body"
+    assert out["choices"][0]["text"] == answer
     assert json.loads(out["extra"])["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_complete_conversational_request_uses_openrag_prompt_without_retrieval():
+    query_json = json.dumps({"requires_retrieval": False, "query_list": []})
+    llm = FakeLLM(chat_responses=[query_json], gen_text="I am OpenRAG.\n[Sources: none]")
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    out = await svc.complete(
+        partitions=["p"],
+        payload={"prompt": "Who are you?"},
+        prepare_sources=lambda d, w: [],
+    )
+
+    assert retrieval.retrieve_multi_calls == []
+    assert out["choices"][0]["text"] == "I am OpenRAG."
+    answer_prompt = llm.generate_calls[0][0]
+    assert "OpenRAG" in answer_prompt
+    assert "LINAGORA" in answer_prompt
+    assert "document-grounded RAG system" in answer_prompt
+    assert "Who are you?" in answer_prompt
+
+
+@pytest.mark.asyncio
+async def test_complete_partition_request_keeps_context_and_filters_citations():
+    llm = FakeLLM(gen_text="The answer is grounded.\n[Sources: 1]")
+    svc = _svc(llm=llm)
+    sources = [{"source_type": "document", "filename": "report.pdf"}]
+
+    out = await svc.complete(
+        partitions=["p"],
+        payload={"prompt": "What does the report say?"},
+        prepare_sources=lambda d, w: sources,
+    )
+
+    assert out["choices"][0]["text"] == "The answer is grounded."
+    assert json.loads(out["extra"])["sources"] == sources
+    answer_prompt = llm.generate_calls[0][0]
+    assert "ctx" in answer_prompt
+    assert "What does the report say?" in answer_prompt
 
 
 @pytest.mark.asyncio
