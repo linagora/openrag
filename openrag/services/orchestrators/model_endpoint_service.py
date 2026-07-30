@@ -114,11 +114,13 @@ class ModelEndpointService:
         model_endpoint_repo: ModelEndpointRepository,
         config: Settings,
         partition_service: Any = None,
+        preset_service: Any = None,
         client_caches: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._repo = model_endpoint_repo
         self._config = config
         self._partition_service = partition_service
+        self._preset_service = preset_service
         self._client_caches: dict[str, dict[str, Any]] = client_caches or {}
 
     # ------------------------------------------------------------------
@@ -396,6 +398,29 @@ class ModelEndpointService:
         Pass ``new_name=`` to rename. After any change the in-memory config is
         reloaded and the stale cached client instance is evicted so the next
         request builds a fresh client against the updated config.
+
+        A rename also cascades to every stored reference — ``partitions.embedder``
+        / ``partitions.chat_llm`` and endpoint-name fields embedded in
+        ``pipeline_presets.config`` — inside the repo's own rename transaction
+        (see ``PgModelEndpointRepository.rename``, #770). Those writes are
+        invisible until the referencing services reload their in-memory caches,
+        which is why a rename also refreshes presets then partitions here —
+        the same order ``PresetService.update_preset`` uses, since partition
+        resolution reads the presets dict.
+
+        Both reload calls ``await``, so a concurrent request can run between
+        them — and the DB rename has *already* committed by that point. Without
+        ``_alias_renamed_name``, a request landing in that window could resolve
+        a partition/preset that the cascade already repointed at ``new_name``
+        against a registry that (until the final ``load_all()`` below) still
+        only knows ``name`` — a bare ``KeyError``. The alias makes both ``name``
+        and ``new_name`` resolve immediately, built from the row this call just
+        wrote — not whatever the in-memory bucket held before it — so a rename
+        combined with a field change (e.g. a new ``endpoint``) aliases the
+        *updated* config, not a stale pre-update one. That also covers a reload
+        call above raising: the registry stays queryable under both names,
+        correctly, instead of the update's failure leaving it stuck on a stale
+        config until process restart.
         """
         existing = await self._repo.get(name, model_type)
         if existing is None:
@@ -423,6 +448,21 @@ class ModelEndpointService:
             await self._repo.rename(name, model_type, new_name)
             effective_name = new_name
             renamed_from = name
+            self._alias_renamed_name(model_type, name, new_name, updated or existing)
+            # A cached *client instance* under either name would otherwise survive
+            # this alias — the factory checks its cache before consulting the
+            # config registry, so a stale pre-rename/pre-update client would keep
+            # serving until the eviction at the end of this method, which a
+            # reload call below raising would skip entirely. The config alias
+            # above is already fresh, so evicting now is safe: anything rebuilt
+            # from either name resolves through the up-to-date config, not stale
+            # cached state.
+            self._invalidate_client_cache(model_type, name)
+            self._invalidate_client_cache(model_type, new_name)
+            if self._preset_service is not None:
+                await self._preset_service.load_all()
+            if self._partition_service is not None:
+                await self._partition_service.load_partitions()
 
         if promote_to_default:
             # Clears any prior default and sets this row in one transaction, then
@@ -539,6 +579,39 @@ class ModelEndpointService:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _alias_renamed_name(self, model_type: str, old_name: str, new_name: str, row: ModelEndpointRow) -> None:
+        """Make both ``old_name`` and ``new_name`` resolve to *row* before any reload runs.
+
+        Runs synchronously right after the rename ``await`` returns — no
+        further ``await`` happens before this executes, so no concurrent
+        request can observe the DB already renamed while the registry still
+        only answers to ``old_name``.
+
+        Built from ``row`` — the just-written DB state — rather than copying
+        whatever the in-memory bucket currently holds under ``old_name``: a
+        rename can land in the same call as a field update (e.g. a new
+        ``endpoint`` URL), applied to the DB *before* this runs, so the stale
+        in-memory entry would alias both names to the pre-update config. If a
+        reload below then raises, that staleness would never get corrected
+        by the final ``load_all()`` this call never reaches — the registry
+        would keep serving the old endpoint under the new (DB-authoritative)
+        name until process restart. The next full ``load_all()`` (below, or
+        from any later CRUD call) rebuilds the bucket straight from DB and
+        drops the ``old_name`` entry on its own.
+        """
+        bucket: dict[str, Any] | None = getattr(self._config.models, model_type, None)
+        if bucket is None:
+            return
+        cfg = ModelEndpointConfig(
+            endpoint=row.endpoint,
+            model_name=row.model_name,
+            batch_size=row.batch_size,
+            timeout=row.timeout,
+            extra=row.extra,
+        )
+        bucket[old_name] = cfg
+        bucket[new_name] = cfg
 
     def _invalidate_client_cache(self, model_type: str, name: str) -> None:
         """Evict ``name`` from the component-factory cache for ``model_type``."""
