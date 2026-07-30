@@ -324,12 +324,17 @@ function EndpointDialog({
   const [vendor, setVendor] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
 
-  // Checked client-side too because the resulting 422 has no readable message —
-  // FastAPI's validation `detail` is a list, and ApiError only unwraps string detail.
+  // The backend trims `name` before validating it (and before persisting it),
+  // so validate — and submit — the same trimmed value here, not the raw
+  // input; otherwise e.g. " gpt-4.1 " would be accepted by the backend but
+  // blocked by this form. Checked client-side too because the resulting 422
+  // has no readable message — FastAPI's validation `detail` is a list, and
+  // ApiError only unwraps string detail.
+  const trimmedName = name.trim();
   const nameError =
-    name !== "" && name.length > NAME_MAX_LENGTH
+    trimmedName !== "" && trimmedName.length > NAME_MAX_LENGTH
       ? `Name must be at most ${NAME_MAX_LENGTH} characters.`
-      : name !== "" && !NAME_PATTERN.test(name)
+      : trimmedName !== "" && !NAME_PATTERN.test(trimmedName)
         ? "Name must start/end with a letter or digit, and contain only letters, digits, '.', '_', or '-' — it's used in the endpoint's URL path."
         : null;
 
@@ -615,13 +620,13 @@ function EndpointDialog({
         timeout: numOr(timeout, 30),
         extra,
       };
-      if (name !== editing.name) {
-        updateData.name = name;
+      if (trimmedName !== editing.name) {
+        updateData.name = trimmedName;
       }
       onUpdate(editing.model_type, editing.name, updateData);
     } else {
       onCreate({
-        name,
+        name: trimmedName,
         model_type: activeTab as ModelType,
         endpoint,
         model_name: modelName || undefined,
