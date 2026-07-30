@@ -66,6 +66,9 @@ export interface PartitionConfig {
   document_count: number;
   chat_history_depth: number;
   chat_llm: string | null;
+  // The final-answer prompt selected for this partition, keyed by prompt type
+  // (sys_prompt). Absent = the type's global default.
+  generation_prompt_names: Record<string, string>;
 }
 
 export interface UpdatePartitionRequest {
@@ -75,6 +78,7 @@ export interface UpdatePartitionRequest {
   retrieval_preset?: string;
   chat_history_depth?: number;
   chat_llm?: string | null;
+  generation_prompt_names?: Record<string, string>;
   /** Accepted for compat but never sent (server has no such column). */
   collection_name?: string;
 }
@@ -90,6 +94,7 @@ const _PATCH_FIELDS = [
   "retrieval_preset",
   "chat_history_depth",
   "chat_llm",
+  "generation_prompt_names",
 ] as const;
 
 function _toRow(r: Record<string, unknown>): PartitionResponse {

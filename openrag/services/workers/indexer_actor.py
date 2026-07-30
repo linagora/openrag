@@ -66,6 +66,7 @@ class IndexerWorker:
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
         require_existing_partition: bool = False,
+        resolved_prompts: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
@@ -92,6 +93,11 @@ class IndexerWorker:
                 "indexation_config": indexation_config,
                 "embedder_name": embedder_name,
             }
+            # DB-resolved enrichment prompts (contextualizer/topic-tagger/caption)
+            # for this partition; each stage prefers its row value over the
+            # process-wide disk default. Absent keys leave the disk fallback.
+            if resolved_prompts:
+                row.update(resolved_prompts)
             row = await self._pipeline.run(row)
             indexed_at = row.get("indexed_at")
 

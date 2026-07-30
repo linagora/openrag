@@ -102,8 +102,10 @@ class PartitionService:
         task_state_manager: Any = None,
         task_state_manager_factory: Callable[[], Any] | None = None,
         task_cancel_timeout: float = 60.0,
+        prompt_repo: Any = None,
     ) -> None:
         self._partition_repo = partition_repo
+        self._prompt_repo = prompt_repo
         self._membership_repo = membership_repo
         self._document_repo = document_repo
         self._vector_store = vector_store
@@ -439,6 +441,8 @@ class PartitionService:
             # QueryService falls back to the default LLM for those at runtime.
             if updates.get("chat_llm"):
                 self._validate_chat_llm_ref(updates["chat_llm"])
+            if updates.get("generation_prompt_names"):
+                await self._validate_generation_prompt_names(updates["generation_prompt_names"])
 
         result = await self._partition_repo.update_partition(partition, **updates)
 
@@ -493,6 +497,22 @@ class PartitionService:
                 code="MODEL_ENDPOINT_NOT_FOUND",
             )
 
+    async def _validate_generation_prompt_names(self, mapping: dict[str, str]) -> None:
+        """Assignment-time check: each named generation prompt must exist.
+
+        Mirrors ``_validate_chat_llm_ref`` — guards assignment only; a stored
+        name can go stale later (the prompt may be deleted), which the resolver
+        tolerates by falling back to the global default at request time.
+        """
+        if self._prompt_repo is None:
+            return
+        for prompt_type, name in mapping.items():
+            if await self._prompt_repo.get_by_name(prompt_type, name) is None:
+                raise ValidationError(
+                    f"No '{prompt_type}' prompt named '{name}' exists.",
+                    code="PROMPT_NOT_FOUND",
+                )
+
     def _partition_detail(self, row: dict, cfg: PartitionConfig) -> dict:
         """Shape a resolved row into the ``PartitionDetailResponse`` payload."""
         return {
@@ -507,6 +527,7 @@ class PartitionService:
             "created_at": row.get("created_at"),
             "chat_history_depth": row.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
             "chat_llm": row.get("chat_llm"),
+            "generation_prompt_names": row.get("generation_prompt_names") or {},
         }
 
     # ------------------------------------------------------------------
@@ -544,6 +565,7 @@ class PartitionService:
             # QueryService._resolve_chat_history_depth actually reads at chat time.
             chat_history_depth=row.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
             chat_llm=row.get("chat_llm"),
+            generation_prompt_names=row.get("generation_prompt_names") or {},
         )
 
     async def load_partitions(self) -> None:

@@ -33,6 +33,7 @@ from core.utils.logging import get_logger
 from core.vlm import VLM, vlm_registry
 from tqdm.asyncio import tqdm
 
+from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
 from ._retry import with_retry
 
@@ -200,6 +201,7 @@ class VLLMClient(LLM):
         base_url, model, headers = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
         payload = {**self._defaults, **kwargs, "model": model, "prompt": prompt}
+        log_llm_call(caller="VLLMClient.generate", model=model, endpoint=base_url, prompt=prompt)
         try:
             resp = await self._client.post(f"{base_url}/completions", json=payload, headers=headers)
             resp.raise_for_status()
@@ -220,6 +222,7 @@ class VLLMClient(LLM):
         base_url, model, headers = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
         payload = {**self._chat_payload_kwargs(kwargs), "model": model, "messages": messages, "stream": False}
+        log_llm_call(caller="VLLMClient.chat", model=model, endpoint=base_url, messages=messages)
         try:
             resp = await self._client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
             resp.raise_for_status()
@@ -238,6 +241,7 @@ class VLLMClient(LLM):
         base_url, model, headers = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
         payload = {**self._chat_payload_kwargs(kwargs), "model": model, "messages": messages, "stream": True}
+        log_llm_call(caller="VLLMClient.stream_chat", model=model, endpoint=base_url, messages=messages, stream=True)
         try:
             async with self._client.stream(
                 "POST", f"{base_url}/chat/completions", json=payload, headers=headers
@@ -506,6 +510,7 @@ class VLLMVision(VLLMClient, VLM):
             "messages": messages,
             "max_tokens": self._max_tokens,
         }
+        log_llm_call(caller="VLLMVision.caption_image", model=self._model, endpoint=self._endpoint, messages=messages)
         try:
             resp = await self._client.post(
                 f"{self._endpoint}/chat/completions",

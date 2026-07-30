@@ -59,9 +59,10 @@ class ChunkContextualizer:
         current_chunk: Chunk,
         filename: str,
         lang: str,
+        system_prompt: str,
     ) -> str:
         messages = build_messages(
-            system_prompt=self._system_prompt,
+            system_prompt=system_prompt,
             filename=filename,
             first_chunks_text=[c.text for c in first_chunks],
             prev_chunks_text=[c.text for c in prev_chunks],
@@ -85,6 +86,7 @@ class ChunkContextualizer:
         *,
         filename: str = "",
         lang: str = "en",
+        system_prompt: str | None = None,
     ) -> list[Chunk]:
         """Return new chunks with context prepended to ``text``.
 
@@ -100,6 +102,10 @@ class ChunkContextualizer:
         if not chunks:
             return []
 
+        # A per-call override (the DB-resolved prompt for this file's partition)
+        # wins over the instance default baked in at construction.
+        effective_prompt = system_prompt or self._system_prompt
+
         try:
             first_chunks = chunks[:2]
             contexts: list[str] = []
@@ -114,6 +120,7 @@ class ChunkContextualizer:
                         current_chunk=chunks[i],
                         filename=filename,
                         lang=lang,
+                        system_prompt=effective_prompt,
                     )
                     for i in range(start, end)
                 ]

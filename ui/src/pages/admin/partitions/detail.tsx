@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Save, UserPlus, Trash2, CheckCircle, XCircle, Loader2, Info } from "lucide-react";
@@ -50,6 +50,15 @@ import {
 import type { PartitionConfig, PartitionMemberCandidate, PartitionRole } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
+import { listAllPrompts } from "@/lib/api/prompts";
+import type { PromptResponse } from "@/lib/api/prompts";
+import {
+  PROMPT_DEFAULT_OPTION,
+  PROMPT_GROUPS,
+  promptOptionToName,
+  promptOptionValue,
+  promptSelectValue,
+} from "@/lib/prompt-meta";
 import { usePermissions } from "@/lib/permissions";
 import { formatDate, intOr } from "@/lib/utils";
 import { MemberPicker } from "./member-picker";
@@ -61,6 +70,10 @@ import {
   PartitionMemberIdentity,
 } from "./partition-member-identity";
 import { describePartitionMember } from "./partition-member";
+
+// The answer prompt is selected on the partition (keyed by prompt type). Mirrors
+// the "Final Answer" concern in the prompt library.
+const GENERATION_PROMPT_TYPES = PROMPT_GROUPS.find((g) => g.name === "Final Answer")!.types;
 
 // --- General Tab ---
 
@@ -81,6 +94,16 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
   const [indexationPreset, setIndexationPreset] = useState(partition.indexation_preset);
   const [retrievalPreset, setRetrievalPreset] = useState(partition.retrieval_preset);
   const [chatLlm, setChatLlm] = useState(partition.chat_llm ?? "__default__");
+  // Only carry the generation types this editor manages — a stale key (e.g. a
+  // pre-move query_contextualizer) would be rejected by the partition PATCH.
+  const initialGenerationPrompts = useMemo(() => {
+    const allowed = new Set<string>(GENERATION_PROMPT_TYPES.map((t) => t.value));
+    return Object.fromEntries(
+      Object.entries(partition.generation_prompt_names ?? {}).filter(([k]) => allowed.has(k)),
+    );
+  }, [partition.generation_prompt_names]);
+  const [generationPrompts, setGenerationPrompts] =
+    useState<Record<string, string>>(initialGenerationPrompts);
   const [llmValidated, setLlmValidated] = useState<boolean | null>(
     partition.chat_llm ? null : true,
   );
@@ -105,6 +128,28 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
     queryFn: () => listModelEndpoints("embedder"),
     enabled: isAdmin,
   });
+
+  const { data: promptsData } = useQuery({
+    queryKey: ["prompts-library"],
+    queryFn: () => listAllPrompts(),
+    enabled: isAdmin,
+  });
+  const promptsByType = (type: string): PromptResponse[] =>
+    (promptsData ?? []).filter((p) => p.prompt_type === type);
+
+  // Compared against what the partition was loaded with, so an untouched
+  // mapping is omitted from the PATCH entirely.
+  const generationPromptsChanged =
+    JSON.stringify(generationPrompts) !== JSON.stringify(initialGenerationPrompts);
+
+  const setGenerationPrompt = (type: string, name: string) => {
+    setGenerationPrompts((prev) => {
+      const next = { ...prev };
+      if (name) next[type] = name;
+      else delete next[type];
+      return next;
+    });
+  };
 
   const validateLlm = useCallback(
     async (name: string) => {
@@ -155,6 +200,12 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
         indexation_preset: indexationPreset,
         retrieval_preset: retrievalPreset,
         chat_llm: chatLlm === "__default__" ? null : chatLlm,
+        // Only sent when this editor actually changed it. The backend validates
+        // every name in the mapping, so resubmitting an untouched-but-stale
+        // reference (its prompt since renamed or deleted) would 422 the whole
+        // PATCH and block unrelated edits like the description — and a non-admin
+        // owner, for whom this picker is disabled, could never clear it.
+        ...(generationPromptsChanged ? { generation_prompt_names: generationPrompts } : {}),
       }),
     onSuccess: () => {
       toast.success("Partition updated");
@@ -186,7 +237,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
         <CardTitle className="text-base">General Settings</CardTitle>
       </CardHeader>
       <CardContent>
-        <form onSubmit={handleSubmit} className="space-y-6 max-w-3xl">
+        <form onSubmit={handleSubmit} className="space-y-6 max-w-5xl">
           {!canEdit && (
             <p className="rounded-md border bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
               You have read-only access to this partition's settings. Only an owner can change them.
@@ -207,7 +258,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               disabled={!canEdit}
             />
           </div>
-          <div className="grid grid-cols-3 gap-6">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label className="text-muted-foreground">Dimension</Label>
               <p className="text-sm font-medium pt-1">{partition.dimension}</p>
@@ -223,11 +274,11 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               <p className="text-sm font-medium pt-1">{partition.document_count}</p>
             </div>
           </div>
-          <div className="pt-2 grid grid-cols-3 gap-6">
+          <div className="pt-2 grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label>Indexation Preset</Label>
               <Select value={indexationPreset} onValueChange={setIndexationPreset} disabled={!canEdit || !isAdmin}>
-                <SelectTrigger>
+                <SelectTrigger className="w-full">
                   <SelectValue placeholder="Select preset" />
                 </SelectTrigger>
                 <SelectContent>
@@ -242,7 +293,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
             <div className="space-y-2">
               <Label>Retrieval Preset</Label>
               <Select value={retrievalPreset} onValueChange={setRetrievalPreset} disabled={!canEdit || !isAdmin}>
-                <SelectTrigger>
+                <SelectTrigger className="w-full">
                   <SelectValue placeholder="Select preset" />
                 </SelectTrigger>
                 <SelectContent>
@@ -266,7 +317,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
                 )}
               </Label>
               <Select value={chatLlm} onValueChange={handleChatLlmChange} disabled={!canEdit || !isAdmin}>
-                <SelectTrigger>
+                <SelectTrigger className="w-full">
                   <SelectValue placeholder="Select LLM" />
                 </SelectTrigger>
                 <SelectContent>
@@ -279,6 +330,31 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
                 </SelectContent>
               </Select>
             </div>
+            {GENERATION_PROMPT_TYPES.map((t) => {
+              const options = promptsByType(t.value);
+              return (
+                <div key={t.value} className="space-y-2">
+                  <Label>{t.label}</Label>
+                  <Select
+                    value={promptSelectValue(generationPrompts[t.value])}
+                    onValueChange={(v) => setGenerationPrompt(t.value, promptOptionToName(v))}
+                    disabled={!canEdit || !isAdmin}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={PROMPT_DEFAULT_OPTION}>Use default</SelectItem>
+                      {options.map((p) => (
+                        <SelectItem key={p.id} value={promptOptionValue(p.name)}>
+                          {p.name}{p.is_default ? " (default)" : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              );
+            })}
           </div>
           <div className="space-y-2">
             <Label className="flex items-center gap-1.5">
@@ -300,6 +376,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               type="number"
               min={1}
               required
+              className="max-w-[8rem]"
               value={chatHistoryDepth}
               onChange={(e) => setChatHistoryDepth(e.target.value)}
               disabled={!canEdit}

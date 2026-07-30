@@ -42,9 +42,12 @@ class IndexationPipelineConfig(BaseModel):
     enable_metadata_extraction: bool = True
     metadata_extraction_llm: str | None = None
 
-    # Prompt name overrides (None = use active prompt for the partition)
-    vlm_caption_prompt_name: str | None = None
+    # Prompt selection: name a library prompt for this preset's enrichment
+    # stages (None = fall back to the type's global default, then the disk seed).
+    # Resolved per file in the indexer via PromptService.resolve_prompt.
     contextualization_prompt_name: str | None = None
+    image_captioning_prompt_name: str | None = None
+    topic_tagging_prompt_name: str | None = None
 
     # Entity extraction
     enable_entity_extraction: bool = True
