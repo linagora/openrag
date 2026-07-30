@@ -29,6 +29,22 @@ def test_postgres_migration_job_sets_uv_cache_dir() -> None:
     assert "name: UV_CACHE_DIR" in template
 
 
+def test_postgres_migration_job_reuses_the_openrag_service_account() -> None:
+    """The Job runs the OpenRAG image under the same pinned UID as its
+    Deployment, so it needs the same ServiceAccount to reach the same SCC.
+
+    Without this the Job silently falls back to the namespace's `default` SA.
+    On OpenShift that means `restricted-v2` (MustRunAsRange), which rejects the
+    requested runAsUser as outside the namespace's assigned range — and since
+    this is a pre-install/pre-upgrade hook, the failure aborts the release.
+    """
+    template = MIGRATION_JOB_TEMPLATE.read_text(encoding="utf-8")
+
+    assert "{{- with .Values.openrag.serviceAccountName }}" in template
+    # tpl(), so a value like "{{ .Release.Name }}-openrag" resolves.
+    assert "serviceAccountName: {{ tpl . $ }}" in template
+
+
 def test_postgres_migration_job_omits_flags_the_runner_ignores() -> None:
     """The migration runner never reads these, so they must not be set here.
 
