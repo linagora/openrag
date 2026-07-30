@@ -168,14 +168,25 @@ class PromptService:
             except ValidationError as exc:
                 logger.warning(f"Bundled template for '{prompt_type}' is not a valid template; not seeding: {exc}")
                 continue
-            await self._repo.create(
-                Prompt(
-                    prompt_type=prompt_type,
-                    name=f"default_{prompt_type}",
-                    content=content,
-                    is_default=True,
+            try:
+                await self._repo.create(
+                    Prompt(
+                        prompt_type=prompt_type,
+                        name=f"default_{prompt_type}",
+                        content=content,
+                        is_default=True,
+                    )
                 )
-            )
+            except ValidationError:
+                # Another replica seeded this type between the check at the top
+                # of the loop and this insert, and hit the unique index. Losing
+                # that race is a no-op, not a failure — but the 409 mapping makes
+                # it a ValidationError, which _initialize_step re-raises and
+                # ServiceContainer.initialize turns into a failed boot. Left
+                # unhandled, N replicas starting against an empty database
+                # crash-loop until one wins.
+                logger.info(f"Default prompt for '{prompt_type}' was seeded concurrently; skipping.")
+                continue
             logger.info(f"Seeded default prompt for '{prompt_type}'.")
 
     def _disk_seed(self, prompt_type: str) -> str:

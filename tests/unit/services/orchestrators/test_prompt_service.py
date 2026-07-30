@@ -302,3 +302,17 @@ class TestResolveSurvivesRepositoryFailure:
         svc = _service(ExplodingRepo())
         content = await svc.resolve_prompt("sys_prompt", names=["whatever"])
         assert "{context}" in content  # the bundled sys_prompt template
+
+
+class TestSeedingSurvivesAConcurrentReplica:
+    async def test_a_lost_seed_race_does_not_fail_boot(self):
+        """Losing the race is a no-op, but the unique violation maps to a
+        ValidationError that _initialize_step re-raises — so an unhandled one
+        turns a concurrent boot into a crash-loop instead of a skipped insert.
+        """
+
+        class RacingRepo(FakePromptRepo):
+            async def create(self, prompt):
+                raise ValidationError("already exists", status_code=409, code="PROMPT_EXISTS")
+
+        await _service(RacingRepo()).seed_defaults()  # must not raise
