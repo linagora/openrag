@@ -180,10 +180,13 @@ class _UpdateFakeConn:
     ``preset_exists`` models whether the referenced preset row is still present
     when the guard's follow-up SELECT runs (False simulates a concurrent
     delete_preset committing while this UPDATE was blocked on its SHARE lock).
+    ``model_endpoint_exists`` is the same, for a ``chat_llm`` reference racing
+    a concurrent ``PgModelEndpointRepository.rename``.
     """
 
-    def __init__(self, *, preset_exists: bool = True):
+    def __init__(self, *, preset_exists: bool = True, model_endpoint_exists: bool = True):
         self.preset_exists = preset_exists
+        self.model_endpoint_exists = model_endpoint_exists
         self.operations: list[tuple[str, tuple]] = []
         self.transactions = 0
 
@@ -209,6 +212,8 @@ class _UpdateFakeConn:
         self.operations.append((query, params))
         if "FROM pipeline_presets" in query:
             return 1 if self.preset_exists else None
+        if "FROM model_endpoints" in query:
+            return 1 if self.model_endpoint_exists else None
         return None
 
     # conn interface
@@ -267,3 +272,76 @@ async def test_update_partition_without_preset_change_skips_the_guard():
     assert result["description"] == "notes"
     assert conn.transactions == 0
     assert not any("FROM pipeline_presets" in q for q, _ in conn.operations)
+
+
+# ── update_partition chat_llm-assignment race guard ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_update_partition_rolls_back_when_chat_llm_endpoint_renamed_concurrently():
+    """A concurrent PgModelEndpointRepository.rename() moving 'old-name' away
+    while this UPDATE was blocked on the LOCK it also takes must not let the
+    partition silently keep pointing at the now-nonexistent name."""
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _UpdateFakeConn(model_endpoint_exists=False)
+    repo = PgPartitionRepository(pool_getter=lambda: conn)
+
+    with pytest.raises(ValidationError) as exc:
+        await repo.update_partition("p1", chat_llm="old-name")
+
+    assert exc.value.code == "MODEL_ENDPOINT_NOT_FOUND"
+    # The write and the existence check share one transaction, and the write
+    # (partitions) happens before the check (model_endpoints) — the same lock
+    # order PgModelEndpointRepository.rename uses, keeping the two deadlock-free.
+    assert conn.transactions == 1
+    queries = [q for q, _ in conn.operations]
+    update_i = next(i for i, q in enumerate(queries) if "UPDATE partitions" in q)
+    check_i = next(i for i, q in enumerate(queries) if "FROM model_endpoints" in q)
+    assert update_i < check_i
+
+
+@pytest.mark.asyncio
+async def test_update_partition_commits_when_chat_llm_endpoint_exists():
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _UpdateFakeConn(model_endpoint_exists=True)
+    repo = PgPartitionRepository(pool_getter=lambda: conn)
+
+    result = await repo.update_partition("p1", chat_llm="gpt-4.1")
+
+    assert result["chat_llm"] == "gpt-4.1"
+    assert conn.transactions == 1
+    assert any("FROM model_endpoints" in q for q, _ in conn.operations)
+
+
+@pytest.mark.asyncio
+async def test_update_partition_clearing_chat_llm_skips_the_guard():
+    """chat_llm=None clears the (nullable) column — it names no endpoint to
+    validate, so this must take the fast, non-transactional path."""
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _UpdateFakeConn(model_endpoint_exists=False)
+    repo = PgPartitionRepository(pool_getter=lambda: conn)
+
+    result = await repo.update_partition("p1", chat_llm=None)
+
+    assert result["chat_llm"] is None
+    assert conn.transactions == 0
+    assert not any("FROM model_endpoints" in q for q, _ in conn.operations)
+
+
+@pytest.mark.asyncio
+async def test_update_partition_embedder_change_skips_the_guard():
+    """embedder carries no assignment-time validation today, so assigning it
+    alone must not pay for a transaction or a model_endpoints lookup."""
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _UpdateFakeConn(model_endpoint_exists=False)
+    repo = PgPartitionRepository(pool_getter=lambda: conn)
+
+    result = await repo.update_partition("p1", embedder="some-embedder")
+
+    assert result["embedder"] == "some-embedder"
+    assert conn.transactions == 0
+    assert not any("FROM model_endpoints" in q for q, _ in conn.operations)

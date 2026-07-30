@@ -35,6 +35,16 @@ _PRESET_COLUMN_TYPES = {
     "indexation_preset": "indexation",
     "retrieval_preset": "retrieval",
 }
+# Partition columns that reference a model_endpoints row, mapped to the
+# model_type they point at. Only `chat_llm` is assignment-validated today
+# (PartitionService._validate_chat_llm_ref checks the in-memory catalog);
+# `embedder` carries no such check, so it is deliberately not listed here.
+# Assigning chat_llm must be guarded against a concurrent rename the same way
+# a preset assignment is guarded against a concurrent preset delete — see
+# update_partition and PgModelEndpointRepository.rename.
+_MODEL_ENDPOINT_COLUMN_TYPES = {
+    "chat_llm": "llm",
+}
 _PARTITION_UPDATE_COLUMNS = frozenset(
     {
         "description",
@@ -54,6 +64,19 @@ logger = get_logger()
 
 def _partition_updates(fields: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in fields.items() if key in _PARTITION_UPDATE_COLUMNS}
+
+
+def _endpoint_refs(updates: dict[str, object]) -> dict[str, str]:
+    """Model-endpoint-referencing columns in *updates*, mapped to their model_type.
+
+    A ``None`` value clears the (nullable) column rather than pointing it at a
+    name, so it needs no existence check.
+    """
+    return {
+        col: model_type
+        for col, model_type in _MODEL_ENDPOINT_COLUMN_TYPES.items()
+        if col in updates and updates[col] is not None
+    }
 
 
 class _PartitionOperationGuard:
@@ -282,24 +305,35 @@ class PgPartitionRepository(PartitionRepository):
         """Update a partition's config columns.
 
         When the update assigns a preset column (``indexation_preset`` /
-        ``retrieval_preset``), the write and a DB-authoritative existence check
-        run in one transaction that touches ``partitions`` before
-        ``pipeline_presets`` — the same lock order :meth:`PgPresetRepository.delete`
-        uses (it ``LOCK``s ``partitions`` ``IN SHARE MODE``, then ``DELETE``s the
-        preset). That makes an assign and a concurrent delete of the same preset
+        ``retrieval_preset``) or ``chat_llm``, the write and a DB-authoritative
+        existence check run in one transaction that touches ``partitions``
+        before ``pipeline_presets`` / ``model_endpoints`` — the same lock order
+        :meth:`PgPresetRepository.delete` and :meth:`PgModelEndpointRepository.
+        rename` use (both ``LOCK`` ``partitions`` ``IN SHARE MODE`` first). That
+        makes an assign and a concurrent delete/rename of the same reference
         serialize without deadlocking, so a partition can never end up pointing
-        at a preset that no longer exists:
+        at a preset or model endpoint that no longer exists under that name:
 
-        * if this UPDATE commits first, the delete's ``COUNT`` sees the reference
-          and refuses with 409;
-        * if the delete commits first, this UPDATE blocks on its ``SHARE`` lock,
-          then the follow-up ``SELECT`` sees the vanished preset and the
-          transaction rolls the write back (raising ``PRESET_NOT_FOUND``).
+        * if this UPDATE commits first, the delete/rename's own guard against
+          ``partitions`` (a ``COUNT`` for presets, the ``SHARE`` lock itself for
+          renames) sees the reference and blocks or refuses accordingly;
+        * if the delete/rename commits first, this UPDATE blocks on its
+          ``SHARE``-conflicting write, then the follow-up ``SELECT`` sees the
+          vanished name and the transaction rolls the write back (raising
+          ``PRESET_NOT_FOUND`` / ``MODEL_ENDPOINT_NOT_FOUND``) — instead of
+          silently writing back a name a concurrent rename already moved on
+          from, which is what a validate-in-memory-then-blind-UPDATE sequence
+          could otherwise do.
+
+        ``embedder`` carries no such check — it has no assignment-time
+        validation at all today (see ``_MODEL_ENDPOINT_COLUMN_TYPES``), so
+        there is nothing here for a concurrent rename to race against.
         """
         updates = _partition_updates(fields)
         if updates:
             preset_refs = {col: _PRESET_COLUMN_TYPES[col] for col in updates if col in _PRESET_COLUMN_TYPES}
-            if preset_refs:
+            endpoint_refs = _endpoint_refs(updates)
+            if preset_refs or endpoint_refs:
                 async with self.pool.acquire() as conn:
                     return await self._update_partition_on_conn(conn, name, **fields)
         return await self._update_partition_on_conn(self.pool, name, **fields)
@@ -323,13 +357,14 @@ class PgPartitionRepository(PartitionRepository):
         sql = f"UPDATE partitions SET {', '.join(sets)}, updated_at = now() WHERE partition = $1 RETURNING *"
 
         preset_refs = {col: _PRESET_COLUMN_TYPES[col] for col in updates if col in _PRESET_COLUMN_TYPES}
-        if not preset_refs:
+        endpoint_refs = _endpoint_refs(updates)
+        if not preset_refs and not endpoint_refs:
             row = await conn.fetchrow(sql, *params)
             return self._row_to_full_dict(row) if row else None
 
         transaction = getattr(conn, "transaction", None)
         if transaction is None:
-            raise TypeError("preset-reference updates require a connection transaction")
+            raise TypeError("preset/model-endpoint reference updates require a connection transaction")
         async with transaction():
             row = await conn.fetchrow(sql, *params)
             if row is None:
@@ -344,6 +379,17 @@ class PgPartitionRepository(PartitionRepository):
                     raise ValidationError(
                         f"{preset_type.capitalize()} preset '{updates[col]}' does not exist.",
                         code="PRESET_NOT_FOUND",
+                    )
+            for col, model_type in endpoint_refs.items():
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM model_endpoints WHERE name = $1 AND model_type = $2",
+                    updates[col],
+                    model_type,
+                )
+                if not exists:
+                    raise ValidationError(
+                        f"{model_type.upper()} endpoint '{updates[col]}' referenced by {col} not found.",
+                        code="MODEL_ENDPOINT_NOT_FOUND",
                     )
             return self._row_to_full_dict(row)
 
