@@ -383,8 +383,10 @@ async def get_partition_config(
 **Response:**
 Returns list of partition members with:
 - `user_id`: User identifier
+- `display_name`: Human-readable name, when available
+- `email`: Account email, when available
 - `role`: User's role (owner, editor, or viewer)
-- Additional user details
+- `added_at`: Membership creation time
 
 **Permissions:**
 - Requires partition owner role
@@ -401,8 +403,44 @@ async def list_partition_users(
     service=Depends(get_partition_service),
 ):
     """List all users who are members of the given partition."""
-    members = await service.list_members(partition=partition)
+    members = await service.list_members_with_identities(partition=partition)
     return JSONResponse(status_code=status.HTTP_200_OK, content={"members": members})
+
+
+@router.get(
+    "/{partition}/users/candidates",
+    description="""List users who can be added to a partition.
+
+**Parameters:**
+- `partition`: The partition name
+- `search`: Display-name prefix (at least 3 characters) or exact user ID
+- `cursor`: Last user ID from the previous page
+- `limit`: Page size (maximum 100)
+
+**Response:**
+Returns a bounded page of non-member users with their display name and email,
+plus continuation metadata.
+
+**Permissions:**
+- Requires partition owner role
+""",
+)
+async def list_partition_user_candidates(
+    partition: str,
+    search: str = Query(..., max_length=200),
+    cursor: int | None = Query(default=None, ge=0, le=2_147_483_647),
+    limit: int = Query(default=25, ge=1, le=100),
+    partition_owner=Depends(require_partition_owner),
+    service=Depends(get_partition_service),
+):
+    """List a searchable page of users who are not partition members."""
+    page = await service.list_member_candidates(
+        partition=partition,
+        search=search,
+        cursor=cursor,
+        limit=limit,
+    )
+    return JSONResponse(status_code=status.HTTP_200_OK, content=page)
 
 
 @router.post(
@@ -424,6 +462,7 @@ async def list_partition_users(
 
 **Response:**
 Returns 201 Created on successful addition.
+Returns 409 Conflict if the user is already a member; use the role endpoint to change an existing member.
 """,
 )
 async def add_partition_user(

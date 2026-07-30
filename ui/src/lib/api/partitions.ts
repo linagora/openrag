@@ -8,7 +8,7 @@ import { request } from "./client";
 //   POST   /partition/{p}                   create (name in path, NO body; caller becomes owner) → 201
 //   PATCH  /partition/{p}                   update config → PartitionDetailResponse
 //   DELETE /partition/{p}                   delete → 204
-//   GET    /partition/{p}/users             members → { members: [{ user_id, role, added_at }] }
+//   GET    /partition/{p}/users             members → { members: [{ user_id, display_name, email, role, added_at }] }
 //   POST   /partition/{p}/users             add member   (multipart: user_id, role)
 //   PATCH  /partition/{p}/users/{user_id}   change role  (multipart: role)
 //   DELETE /partition/{p}/users/{user_id}   remove member
@@ -194,12 +194,46 @@ export function listPartitionFiles(name: string, limit?: number): Promise<{ file
 
 export interface PartitionMember {
   user_id: number;
+  display_name: string | null;
+  email: string | null;
   role: PartitionRole;
   added_at: string | null;
 }
 
+export interface PartitionMemberCandidate {
+  user_id: number;
+  display_name: string | null;
+  email: string | null;
+}
+
+export interface PartitionMemberCandidatePage {
+  candidates: PartitionMemberCandidate[];
+  limit: number;
+  has_more: boolean;
+  next_cursor: number | null;
+}
+
+interface ListPartitionMemberCandidatesOptions {
+  search: string;
+  cursor?: number;
+  limit?: number;
+}
+
 export function listPartitionMembers(name: string): Promise<{ members: PartitionMember[] }> {
   return request<{ members: PartitionMember[] }>(`${P}/${enc(name)}/users`);
+}
+
+export function listPartitionMemberCandidates(
+  name: string,
+  options: ListPartitionMemberCandidatesOptions,
+): Promise<PartitionMemberCandidatePage> {
+  const query = new URLSearchParams();
+  query.set("search", options.search.trim());
+  if (options.cursor !== undefined) query.set("cursor", String(options.cursor));
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  return request<PartitionMemberCandidatePage>(
+    `${P}/${enc(name)}/users/candidates?${query.toString()}`,
+  );
 }
 
 export function addPartitionMember(name: string, userId: number, role: PartitionRole): Promise<void> {

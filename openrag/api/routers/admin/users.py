@@ -38,6 +38,7 @@ Returns list of all users with:
 - `id`: User identifier
 - `display_name`: User's display name
 - `external_user_id`: External ID (if set)
+- `email`: Account email (if set)
 - `is_admin`: Admin status
 - `created_at`: Account creation timestamp
 
@@ -141,6 +142,7 @@ Returns user details including:
 - `id`: User identifier
 - `display_name`: User's display name
 - `external_user_id`: External ID (if set)
+- `email`: Account email (if set)
 - `is_admin`: Admin status
 - `created_at`: Account creation timestamp
 

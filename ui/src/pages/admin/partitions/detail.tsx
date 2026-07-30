@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Save, UserPlus, Trash2, CheckCircle, XCircle, Loader2, Info } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -42,15 +43,24 @@ import {
   updatePartition,
   listPartitions,
   listPartitionMembers,
-  addPartitionMember,
+  listPartitionMemberCandidates,
   removePartitionMember,
   updatePartitionMemberRole,
 } from "@/lib/api/partitions";
-import type { PartitionConfig, PartitionRole } from "@/lib/api/partitions";
+import type { PartitionConfig, PartitionMemberCandidate, PartitionRole } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 import { formatDate, intOr } from "@/lib/utils";
+import { MemberPicker } from "./member-picker";
+import { candidateLabel, candidateSecondaryLabel } from "./member-candidate";
+import { addPartitionMembers } from "./member-batch";
+import type { MemberAddFailure } from "./member-batch";
+import {
+  PartitionMemberEmail,
+  PartitionMemberIdentity,
+} from "./partition-member-identity";
+import { describePartitionMember } from "./partition-member";
 
 // --- General Tab ---
 
@@ -378,8 +388,11 @@ function PipelineConfigTab({ partition }: { partition: PartitionConfig }) {
 
 function UsersTab({ partitionName }: { partitionName: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [userId, setUserId] = useState("");
+  const [selectedCandidates, setSelectedCandidates] = useState<PartitionMemberCandidate[]>([]);
+  const [addFailures, setAddFailures] = useState<MemberAddFailure[]>([]);
   const [role, setRole] = useState("viewer");
+  const [candidateSearch, setCandidateSearch] = useState("");
+  const [debouncedCandidateSearch, setDebouncedCandidateSearch] = useState("");
   const queryClient = useQueryClient();
   const { canManageMembers } = usePermissions();
 
@@ -395,19 +408,79 @@ function UsersTab({ partitionName }: { partitionName: string }) {
   const callerRole = partitionsQuery.data?.partitions.find((p) => p.partition === partitionName)?.role;
   const canManage = canManageMembers(callerRole);
 
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      setDebouncedCandidateSearch(candidateSearch.trim());
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [candidateSearch]);
+
+  const normalizedCandidateSearch = candidateSearch.trim();
+  const candidateSearchReady =
+    /^\d+$/.test(normalizedCandidateSearch) || normalizedCandidateSearch.length >= 3;
+
+  const candidatesQuery = useInfiniteQuery({
+    queryKey: ["partition", partitionName, "member-candidates", debouncedCandidateSearch],
+    queryFn: ({ pageParam }) =>
+      listPartitionMemberCandidates(partitionName, {
+        search: debouncedCandidateSearch,
+        cursor: pageParam ?? undefined,
+        limit: 25,
+      }),
+    initialPageParam: null as number | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    enabled:
+      dialogOpen &&
+      canManage &&
+      (/^\d+$/.test(debouncedCandidateSearch) || debouncedCandidateSearch.length >= 3),
+  });
+  const candidates = candidatesQuery.data?.pages.flatMap((page) => page.candidates) ?? [];
+  const candidateSearchPending =
+    candidateSearchReady && normalizedCandidateSearch !== debouncedCandidateSearch;
+
   const addMutation = useMutation({
-    mutationFn: () => addPartitionMember(partitionName, Number(userId), role as PartitionRole),
-    onSuccess: () => {
-      toast.success("User added to partition");
+    mutationFn: async ({
+      candidates: selected,
+      selectedRole,
+    }: {
+      candidates: PartitionMemberCandidate[];
+      selectedRole: PartitionRole;
+    }) =>
+      addPartitionMembers({
+        partitionName,
+        candidates: selected,
+        role: selectedRole,
+      }),
+    onError: (error: Error) => {
+      toast.error(`Failed to add users: ${error.message}`);
+    },
+    onSuccess: ({ addedCandidates, failures }) => {
       queryClient.invalidateQueries({
         queryKey: ["partition", partitionName, "users"],
       });
+      queryClient.invalidateQueries({
+        queryKey: ["partition", partitionName, "member-candidates"],
+      });
+
+      if (failures.length > 0) {
+        setSelectedCandidates(failures.map((failure) => failure.candidate));
+        setAddFailures(failures);
+        const firstFailure = failures[0];
+        toast.error(
+          `${addedCandidates.length > 0 ? `${addedCandidates.length} added; ` : ""}${failures.length} failed: ${firstFailure.message}`,
+        );
+        return;
+      }
+
+      toast.success(
+        `${addedCandidates.length} user${addedCandidates.length === 1 ? "" : "s"} added to partition`,
+      );
       setDialogOpen(false);
-      setUserId("");
+      setSelectedCandidates([]);
+      setAddFailures([]);
       setRole("viewer");
-    },
-    onError: (error: Error) => {
-      toast.error(`Failed to add user: ${error.message}`);
+      setCandidateSearch("");
+      setDebouncedCandidateSearch("");
     },
   });
 
@@ -436,12 +509,28 @@ function UsersTab({ partitionName }: { partitionName: string }) {
     },
   });
 
-  const handleAddUser = () => {
-    if (!userId.trim() || Number.isNaN(Number(userId))) {
-      toast.error("A numeric user ID is required");
+  const handleAddUsers = () => {
+    if (selectedCandidates.length === 0) {
+      toast.error("Select at least one user");
       return;
     }
-    addMutation.mutate();
+    setAddFailures([]);
+    addMutation.mutate({
+      candidates: selectedCandidates,
+      selectedRole: role as PartitionRole,
+    });
+  };
+
+  const handleDialogOpenChange = (open: boolean) => {
+    if (!open && addMutation.isPending) return;
+    setDialogOpen(open);
+    if (!open) {
+      setSelectedCandidates([]);
+      setAddFailures([]);
+      setRole("viewer");
+      setCandidateSearch("");
+      setDebouncedCandidateSearch("");
+    }
   };
 
   return (
@@ -463,11 +552,12 @@ function UsersTab({ partitionName }: { partitionName: string }) {
             ))}
           </div>
         ) : usersQuery.data && usersQuery.data.members.length > 0 ? (
-          <div className="rounded-md border">
+          <div className="overflow-x-auto rounded-md border">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>User ID</TableHead>
+                  <TableHead>User</TableHead>
+                  <TableHead>Email</TableHead>
                   <TableHead>Role</TableHead>
                   <TableHead>Added</TableHead>
                   {canManage && <TableHead>Actions</TableHead>}
@@ -476,8 +566,11 @@ function UsersTab({ partitionName }: { partitionName: string }) {
               <TableBody>
                 {usersQuery.data.members.map((user) => (
                   <TableRow key={user.user_id}>
-                    <TableCell className="font-mono text-sm">
-                      {user.user_id}
+                    <TableCell className="text-sm">
+                      <PartitionMemberIdentity member={user} />
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      <PartitionMemberEmail member={user} />
                     </TableCell>
                     <TableCell>
                       {canManage ? (
@@ -508,13 +601,14 @@ function UsersTab({ partitionName }: { partitionName: string }) {
                       <TableCell>
                         <ConfirmDialog
                           title="Remove User"
-                          description={`Remove user "${user.user_id}" from this partition? They will lose access to partition data.`}
+                          description={`Remove ${describePartitionMember(user)} from this partition? They will lose access to partition data.`}
                           onConfirm={() => removeMutation.mutate(user.user_id)}
                         >
                           <Button
                             variant="ghost"
                             size="sm"
                             disabled={removeMutation.isPending}
+                            aria-label={`Remove ${describePartitionMember(user)} from partition`}
                           >
                             <Trash2 className="h-3 w-3 text-destructive" />
                           </Button>
@@ -532,26 +626,70 @@ function UsersTab({ partitionName }: { partitionName: string }) {
           </p>
         )}
 
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <Dialog open={dialogOpen} onOpenChange={handleDialogOpenChange}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Add User to Partition</DialogTitle>
+              <DialogTitle>Add Users to Partition</DialogTitle>
               <DialogDescription>
-                Assign a user to this partition with a specific role.
+                Select users and assign the same partition role to each of them.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-4">
-              <div className="space-y-2">
-                <Label>User ID</Label>
-                <Input
-                  placeholder="Enter user ID..."
-                  value={userId}
-                  onChange={(e) => setUserId(e.target.value)}
-                />
-              </div>
+              <MemberPicker
+                candidates={candidates}
+                isLoading={candidatesQuery.isLoading || candidateSearchPending}
+                isInitialError={candidatesQuery.isError && candidatesQuery.data === undefined}
+                isRefreshError={
+                  candidatesQuery.isRefetchError &&
+                  candidatesQuery.data !== undefined &&
+                  !candidatesQuery.isFetchNextPageError
+                }
+                isLoadMoreError={candidatesQuery.isFetchNextPageError}
+                search={candidateSearch}
+                searchReady={candidateSearchReady}
+                onSearchChange={(search) => {
+                  setCandidateSearch(search);
+                  setAddFailures([]);
+                }}
+                onRetry={() => {
+                  void candidatesQuery.refetch();
+                }}
+                hasMore={Boolean(candidatesQuery.hasNextPage)}
+                isLoadingMore={candidatesQuery.isFetchingNextPage}
+                onLoadMore={() => {
+                  void candidatesQuery.fetchNextPage();
+                }}
+                selectedCandidates={selectedCandidates}
+                onSelectionChange={(selection) => {
+                  setSelectedCandidates(selection);
+                  setAddFailures([]);
+                }}
+              />
+              {addFailures.length > 0 && (
+                <Alert variant="destructive">
+                  <AlertTitle>Some users were not added</AlertTitle>
+                  <AlertDescription>
+                    <ul className="list-disc space-y-1 pl-4">
+                      {addFailures.map((failure) => (
+                        <li key={failure.candidate.user_id}>
+                          {candidateLabel(failure.candidate)} ({candidateSecondaryLabel(failure.candidate)}):
+                          {" "}
+                          {failure.message}
+                        </li>
+                      ))}
+                    </ul>
+                  </AlertDescription>
+                </Alert>
+              )}
               <div className="space-y-2">
                 <Label>Role</Label>
-                <Select value={role} onValueChange={setRole}>
+                <Select
+                  value={role}
+                  onValueChange={(value) => {
+                    setRole(value);
+                    setAddFailures([]);
+                  }}
+                >
                   <SelectTrigger className="w-full">
                     <SelectValue placeholder="Select a role" />
                   </SelectTrigger>
@@ -567,12 +705,20 @@ function UsersTab({ partitionName }: { partitionName: string }) {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setDialogOpen(false)}
+                onClick={() => handleDialogOpenChange(false)}
+                disabled={addMutation.isPending}
               >
                 Cancel
               </Button>
-              <Button onClick={handleAddUser} disabled={addMutation.isPending}>
-                {addMutation.isPending ? "Adding..." : "Add User"}
+              <Button
+                onClick={handleAddUsers}
+                disabled={addMutation.isPending || selectedCandidates.length === 0}
+              >
+                {addMutation.isPending
+                  ? "Adding..."
+                  : selectedCandidates.length === 0
+                    ? "Add Users"
+                    : `Add ${selectedCandidates.length} User${selectedCandidates.length === 1 ? "" : "s"}`}
               </Button>
             </DialogFooter>
           </DialogContent>

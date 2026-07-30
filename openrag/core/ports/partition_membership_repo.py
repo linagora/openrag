@@ -34,3 +34,14 @@ class PartitionMembershipRepository(ABC):
 
     @abstractmethod
     async def count_partition_users(self, partition: str) -> int: ...
+
+    @abstractmethod
+    async def list_partition_member_candidates(
+        self,
+        partition: str,
+        *,
+        search_prefix: str | None,
+        search_user_id: int | None,
+        after_id: int | None,
+        limit: int,
+    ) -> list[dict]: ...
