@@ -46,6 +46,31 @@ This guide explains how to deploy the **OpenRAG** stack on a Kubernetes cluster 
 
 ---
 
+## Upgrading to chart 0.6.0
+
+Chart 0.6.0 renames the PVCs, ConfigMap and Secret from fixed `rag-*` names to
+`{{ fullname }}-*`, so they follow the release instead of colliding between two
+installs in one namespace. With the default `fullnameOverride: "openrag"`:
+
+| Before | After |
+|---|---|
+| `rag-model-weights`, `rag-data`, `rag-logs`, `rag-venv` | `openrag-model-weights`, `openrag-data`, `openrag-logs`, `openrag-venv` |
+| `rag-env` | `openrag-env` |
+| `rag-env-secrets` | `openrag-env-secrets` |
+
+The old PVCs carry `helm.sh/resource-policy: keep`, so **the upgrade does not
+delete them — but it does not mount them either**. It provisions new, empty ones
+under the new names, and the release comes up as if it had no indexed data. Pick
+one before upgrading:
+
+- **Keep the existing volumes.** Set `fullnameOverride: "rag"`, which reproduces
+  the old names exactly. Also set `postgresql.fullnameOverride`,
+  `milvus.fullnameOverride` and `vllm.hfTokenSecretName` to match (they are kept
+  in sync by hand — `values.yaml` explains why, and `NOTES.txt` warns on an
+  HF_TOKEN secret-name mismatch).
+- **Migrate to the new names.** Copy the data across (e.g. a Job mounting both
+  PVCs), then delete the old ones once the release is healthy.
+
 ## Notes
 
 - If using a public IP instead of a hostname, you can leave `ingress.host` empty in your `values.yaml`.  
