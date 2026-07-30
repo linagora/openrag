@@ -179,6 +179,71 @@ class RetrievalService:
     def _legacy_retriever_value(self, name: str, default: Any) -> Any:
         return getattr(self._config.retriever, name, default)
 
+    def _resolve_reranker(self, reranker_name: str | None, partition: str) -> Reranker | None:
+        """Effective reranker for one partition's retrieval pipeline.
+
+        Resolution order — mirrors ``QueryService._resolve_llm``:
+
+        1. The partition's configured ``reranker`` preset, resolved fresh via
+           the model-endpoint catalog factory so a rename/promotion of that
+           endpoint takes effect immediately.
+        2. The **catalog default** endpoint (``is_default=True``) when the
+           partition sets no preset, or its preset name has gone stale (the
+           endpoint was renamed/deleted after assignment — unlike
+           ``chat_llm``, this field has no create/PATCH-time validation, so a
+           stale name reaching here is expected, not a bug).
+        3. The static reranker built at startup from ``settings.reranker``,
+           only when no factory is wired (unit tests) or the catalog has no
+           default reranker endpoint yet.
+
+        The resolved endpoint name is always logged (at debug), including for
+        the default, so "which reranker ran?" is answerable from the logs.
+        """
+        if self._reranker_factory is None:
+            return self._legacy_reranker
+        if reranker_name:
+            try:
+                reranker = self._reranker_factory(reranker_name)
+            except KeyError:
+                logger.bind(reranker=reranker_name, partition=partition).warning(
+                    "Partition reranker preset not found in the model-endpoint catalog — "
+                    "falling back to the default reranker"
+                )
+            else:
+                logger.bind(reranker=reranker_name, partition=partition).debug(
+                    "Reranking with the partition's reranker preset"
+                )
+                return reranker
+        try:
+            reranker = self._reranker_factory("default")
+        except KeyError:
+            pass
+        else:
+            logger.bind(reranker=self._default_reranker_name(), partition=partition).debug(
+                "Reranking with the default reranker preset"
+            )
+            return reranker
+        logger.bind(partition=partition).debug(
+            "Reranking with the static default reranker (no catalog default endpoint)"
+        )
+        return self._legacy_reranker
+
+    def _default_reranker_name(self) -> str:
+        """Real endpoint name behind the catalog reranker ``"default"`` alias, for logging.
+
+        Same identity-lookup trick as ``QueryService._default_llm_name``: the
+        ``"default"`` alias config object is the *same* object as its real-named
+        entry, so the name is recovered by identity. Returns ``"default"`` when
+        it can't be resolved (e.g. the alias isn't populated yet).
+        """
+        rerankers = self._config.models.reranker
+        default_cfg = rerankers.get("default")
+        if default_cfg is not None:
+            for name, cfg in rerankers.items():
+                if name != "default" and cfg is default_cfg:
+                    return name
+        return "default"
+
     async def _pipeline_for_partition(self, partition: str) -> tuple[RetrieverPipeline, int | None]:
         # Callers only ever pass a concrete partition name — the "all" sentinel is
         # expanded to concrete keys by _pipeline_groups_for_partitions before this
@@ -207,12 +272,7 @@ class RetrievalService:
         elif rtype == "hyde":
             template = await self._resolve_query_template("hyde", pipeline_cfg.hyde_prompt_name, "hyde")
 
-        reranker = None
-        if pipeline_cfg.enable_reranker:
-            if self._reranker_factory is not None:
-                reranker = self._reranker_factory(pipeline_cfg.reranker or "default")
-            else:
-                reranker = self._legacy_reranker
+        reranker = self._resolve_reranker(pipeline_cfg.reranker, partition) if pipeline_cfg.enable_reranker else None
 
         retriever = self._build_retriever(
             rtype=rtype,

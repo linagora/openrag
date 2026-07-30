@@ -103,6 +103,10 @@ class SearchQueries(BaseModel):
     """Collection of sub-queries produced by query decomposition."""
 
     query_list: list[Query] = Field(..., description="Search sub-queries to retrieve relevant documents.")
+    requires_retrieval: bool = Field(
+        default=True,
+        description="Whether the user's request needs document retrieval.",
+    )
 
     def __str__(self) -> str:
         return " --- ".join(str(q) for q in self.query_list)
