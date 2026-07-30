@@ -432,6 +432,7 @@ class QueryService:
 
         metadata = payload.get("metadata") or {}
         use_map_reduce = metadata.get("use_map_reduce", False)
+        spoken_style = metadata.get("spoken_style_answer", False)
         use_websearch = metadata.get("websearch", False)
         workspace = metadata.get("workspace")
 
@@ -496,8 +497,9 @@ class QueryService:
             context = f"{context}{SOURCE_SEPARATOR}{web_formatted}" if context else web_formatted
 
         new_messages = copy.deepcopy(messages)
+        prompt_type = "spoken_style_answer" if spoken_style else "sys_prompt"
         tmpl = await self._prompt_service.resolve_prompt(
-            "sys_prompt", names=[self._generation_prompt_name("sys_prompt", partition)]
+            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
         )
         new_messages.insert(
             0,

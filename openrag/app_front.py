@@ -544,6 +544,7 @@ async def on_message(message: cl.Message):
         "frequency_penalty": 0.4,
         "metadata": {
             "use_map_reduce": message.command == "DeepSearch",
+            "spoken_style_answer": message.command == "SpokenStyleAnswer",
             "websearch": message.command == "WebSearch",
         },
     }

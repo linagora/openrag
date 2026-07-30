@@ -83,12 +83,12 @@ def _service(repo: FakePromptRepo | None = None) -> PromptService:
 
 
 class TestSeeding:
-    async def test_seeds_all_types_from_disk(self):
+    async def test_seeds_all_eight_types_from_disk(self):
         repo = FakePromptRepo()
         await _service(repo).seed_defaults()
         seeded_types = {p.prompt_type for p in repo.prompts.values()}
         assert seeded_types == set(PROMPT_TYPE_KEYS)
-        assert len(PROMPT_TYPE_KEYS) == 7
+        assert len(PROMPT_TYPE_KEYS) == 8
         for p in repo.prompts.values():
             assert p.is_default is True
             assert p.content.strip()
@@ -101,7 +101,7 @@ class TestSeeding:
         sysp.content = "OPERATOR EDIT"
         await svc.seed_defaults()
         assert (await repo.get_default("sys_prompt")).content == "OPERATOR EDIT"
-        assert len(repo.prompts) == 7
+        assert len(repo.prompts) == 8
 
     async def test_type_set_matches_enum(self):
         assert set(PROMPT_TYPE_KEYS) == {t.value for t in PromptType}

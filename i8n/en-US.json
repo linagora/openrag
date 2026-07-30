@@ -219,6 +219,12 @@
                 "description": "This uses a custom DeepSearch RAG mechanism (Map & Reduce) to handle complex queries.\nSlower but gives accurate answers.\nUse in an empty context as it consumes more tokens."
             },
             {
+                "id": "SpokenStyleAnswer",
+                "icon": "audio-lines",
+                "description": "Get a conversational text answer suitable for voice assistants.\nThe answer is concise, clear, and factual.",
+                "persistent": true
+            },
+            {
                 "id": "WebSearch",
                 "icon": "globe",
                 "description": "Augment the RAG context with live web search results.\nCombines document and web sources for more comprehensive answers."

@@ -119,6 +119,7 @@ class PromptsConfig(ConfigMixin):
     query_contextualizer: str = "query_contextualizer_tmpl.txt"
     chunk_contextualizer: str = "chunk_contextualizer_tmpl.txt"
     image_describer: str = "image_captioning_tmpl.txt"
+    spoken_style_answer: str = "spoken_style_answer_tmpl.txt"
     hyde: str = "hyde.txt"
     multi_query: str = "multi_query_pmpt_tmpl.txt"
     topic_tagger: str = "topic_tagger_tmpl.txt"

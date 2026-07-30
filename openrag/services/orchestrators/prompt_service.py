@@ -45,6 +45,10 @@ _VALID_TYPES = frozenset(t.value for t in PromptType)
 # they may contain any literal text, braces included, and need no validation.
 _PROMPT_FORMAT_FIELDS: dict[str, frozenset[str]] = {
     PromptType.SYS_PROMPT.value: frozenset({"context", "current_date"}),
+    # Rendered by the same call site as sys_prompt (the answer prompt swapped in
+    # when a request sets metadata.spoken_style_answer), so it takes the same
+    # placeholders and must be validated identically.
+    PromptType.SPOKEN_STYLE_ANSWER.value: frozenset({"context", "current_date"}),
     PromptType.QUERY_CONTEXTUALIZER.value: frozenset({"query_language", "current_date"}),
     PromptType.HYDE.value: frozenset({"question"}),
     PromptType.MULTI_QUERY.value: frozenset({"query", "k_queries"}),
@@ -123,6 +127,7 @@ _TYPE_TO_CONFIG_KEY: dict[str, str] = {
     PromptType.IMAGE_CAPTIONING.value: "image_describer",
     PromptType.HYDE.value: "hyde",
     PromptType.MULTI_QUERY.value: "multi_query",
+    PromptType.SPOKEN_STYLE_ANSWER.value: "spoken_style_answer",
     PromptType.TOPIC_TAGGER.value: "topic_tagger",
 }
 

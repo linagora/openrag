@@ -17,6 +17,7 @@ PromptTypeName = Literal[
     "image_captioning",
     "hyde",
     "multi_query",
+    "spoken_style_answer",
     "topic_tagger",
 ]
 
