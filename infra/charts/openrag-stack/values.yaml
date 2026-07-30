@@ -390,22 +390,14 @@ adminUi:
     type: ClusterIP
     port: 8080
     targetPort: 8080
-  # Routing note: this chart exposes admin-ui and openrag/ray-serve as two
-  # separate optional Ingress resources (this block and openrag.ingress),
-  # rather than a single combined Ingress — mirrors the docker-compose
-  # front-door (infra/compose/nginx/openrag-admin.conf) but leaves path
-  # precedence and SSE/X-Forwarded-Proto handling to the ingress controller.
-  # For a single-vhost deployment, set the same `host` on both Ingress blocks:
-  # the controller must then route this more specific "/app" prefix ahead of
-  # openrag.ingress's "/" catch-all (nginx-ingress does this automatically by
-  # merging same-host Ingress resources and sorting by path specificity —
-  # verify equivalent behavior before relying on it with another controller,
-  # e.g. OpenShift HAProxy Routes or a Gateway API implementation).
-  # There is no automatic "/" -> "/app/" redirect in this mode (unlike the
-  # compose front-door) — users must browse to /app/ directly.
-  # Off by default. This flag only adds the /app/ path to openrag.ingress's
-  # single Ingress resource (see templates/openrag.yaml) — it has no effect
-  # unless openrag.ingress.enabled=true too.
+  # Routing note: admin-ui and openrag/ray-serve share a single optional
+  # Ingress resource (templates/openrag.yaml) — there is no separate Ingress
+  # for admin-ui. Off by default; this flag only adds the more specific
+  # "/app/" path onto openrag.ingress's Ingress ahead of its "/" catch-all,
+  # and has no effect unless openrag.ingress.enabled=true too.
+  # openrag.ingress.host/className/annotations/tls apply to both paths —
+  # there is no automatic "/" -> "/app/" redirect (unlike the compose
+  # front-door), so users must browse to /app/ directly.
   ingress:
     enabled: false
   resources: {}
