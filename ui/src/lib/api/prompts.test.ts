@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
+  listAllPrompts,
   listPrompts,
   getPrompt,
   createPrompt,
@@ -99,5 +100,39 @@ describe("CRUD verbs and paths", () => {
     fetchMock.mockResolvedValue(fakeResponse({ body: "{}" }));
     await getPrompt("a b/c");
     expect(lastCall().url).toBe("/prompts/a%20b%2Fc");
+  });
+});
+
+// A single capped request hid prompts past the cap and reported a partial count
+// as the total, leaving them unmanageable in the library and unselectable in
+// every picker.
+describe("listAllPrompts", () => {
+  const page = (n: number, from: number) =>
+    JSON.stringify(Array.from({ length: n }, (_, i) => ({ id: `p${from + i}`, name: `p${from + i}` })));
+
+  it("follows pagination until a short page", async () => {
+    fetchMock
+      .mockResolvedValueOnce(fakeResponse({ body: page(200, 0) }))
+      .mockResolvedValueOnce(fakeResponse({ body: page(200, 200) }))
+      .mockResolvedValueOnce(fakeResponse({ body: page(37, 400) }));
+
+    const all = await listAllPrompts();
+
+    expect(all).toHaveLength(437);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[1][0]).toContain("offset=200");
+    expect(fetchMock.mock.calls[2][0]).toContain("offset=400");
+  });
+
+  it("stops after one request when the first page is short", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse({ body: page(7, 0) }));
+    expect(await listAllPrompts()).toHaveLength(7);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns an empty library without looping", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse({ body: "[]" }));
+    expect(await listAllPrompts()).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

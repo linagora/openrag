@@ -104,11 +104,10 @@ describe("renderPreview", () => {
     expect(flat('emit {{"a": 1}} verbatim')).toBe('emit {"a": 1} verbatim');
   });
 
-  it("substitutes a modified field without emulating the format mini-language", () => {
-    // Python would pad to width 12 and `!r` would add quotes. The preview shows
-    // the illustrative sample where the value lands, and deliberately does not
-    // reimplement the format spec — asserted exactly so the choice is pinned
-    // rather than left ambiguous by a substring match.
+  it("still previews a modified field, though such a template cannot be saved", () => {
+    // Modifiers are rejected at validation (see below), so this only governs
+    // what the editor shows while the author is mid-edit: the sample lands
+    // where the value would, with no attempt to emulate padding or `!r`.
     expect(flat("Today is {current_date:>12}.")).toBe("Today is 2026-07-27.");
     expect(flat("Today is {current_date!r}.")).toBe("Today is 2026-07-27.");
   });
@@ -120,5 +119,30 @@ describe("renderPreview", () => {
   it("previews a verbatim prompt type unchanged", () => {
     const raw = 'Return {"json": true} exactly';
     expect(flat(raw, "chunk_contextualizer")).toBe(raw);
+  });
+});
+
+
+// Reducing an expression to its root name made unrenderable templates look
+// valid: `{context!x}` raises ValueError and `{context.missing}` raises
+// AttributeError when the pipeline formats the prompt. As a type's default that
+// breaks every request, so only plain placeholders are accepted — mirroring
+// `_validate_template` on the API.
+describe("validatePlaceholders rejects non-plain placeholders", () => {
+  it.each([
+    "{context!x} on {current_date}",
+    "{context.missing} on {current_date}",
+    "{context[0]} on {current_date}",
+    "{context:>10} on {current_date}",
+  ])("rejects %s", (content) => {
+    const v = validatePlaceholders(content, "sys_prompt");
+    expect(v.malformed).toBe(true);
+    expect(v.error).toMatch(/not supported/);
+  });
+
+  it("still accepts the plain form", () => {
+    const v = validatePlaceholders("Use {context} on {current_date}", "sys_prompt");
+    expect(v.malformed).toBe(false);
+    expect(v.unknown).toEqual([]);
   });
 });

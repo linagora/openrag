@@ -13,7 +13,7 @@ import {
   Users,
 } from "lucide-react";
 import {
-  listPrompts,
+  listAllPrompts,
   createPrompt,
   updatePrompt,
   deletePrompt,
@@ -65,7 +65,7 @@ export default function PromptsPage() {
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["prompts-library"],
-    queryFn: () => listPrompts({ limit: 500 }),
+    queryFn: () => listAllPrompts(),
   });
   const prompts = data ?? [];
   // An API or database failure must never render as "there are no prompts":

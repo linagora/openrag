@@ -10,7 +10,7 @@ import {
   getPresetOptions,
 } from "@/lib/api/presets";
 import type { PresetResponse, PresetType } from "@/lib/api/presets";
-import { listPrompts } from "@/lib/api/prompts";
+import { listAllPrompts } from "@/lib/api/prompts";
 import type { PromptResponse } from "@/lib/api/prompts";
 import { listModelEndpoints, pickDefaultEndpoint } from "@/lib/api/models";
 import { PageHeader } from "@/components/shared/page-header";
@@ -522,23 +522,20 @@ function FeatureToggle({
 }) {
   const handleToggle = (on: boolean) => {
     onToggle(on);
-    if (on) {
-      // Auto-select when only one option available
-      if (models.length === 1 && !modelValue) onModelChange(models[0]);
-      if (prompts?.length === 1 && onPromptChange && !promptValue) onPromptChange(prompts[0].name);
-    }
+    // Auto-select the sole model, but never the sole prompt: an empty prompt
+    // value is a real choice ("use the type's global default"), and after
+    // seeding a type usually has exactly one prompt — the default itself.
+    // Auto-selecting it would pin that *name* into the preset just by opening
+    // and saving, so promoting a different global default later would silently
+    // stop affecting this preset. Models have no such fallback, so they keep it.
+    if (on && models.length === 1 && !modelValue) onModelChange(models[0]);
   };
 
-  // Auto-select if toggled on and model/prompt list resolves to single item later
+  // Same for a list that resolves to a single item after the query settles.
   useEffect(() => {
     if (!enabled) return;
     if (models.length === 1 && !modelValue) onModelChange(models[0]);
   }, [enabled, models, modelValue, onModelChange]);
-
-  useEffect(() => {
-    if (!enabled || !prompts || !onPromptChange) return;
-    if (prompts.length === 1 && !promptValue) onPromptChange(prompts[0].name);
-  }, [enabled, prompts, promptValue, onPromptChange]);
 
   return (
     <div className="space-y-2">
@@ -928,7 +925,7 @@ function PresetDialog({
 
   const { data: promptData } = useQuery({
     queryKey: ["prompts-for-presets"],
-    queryFn: () => listPrompts({ limit: 500 }),
+    queryFn: () => listAllPrompts(),
     enabled: open,
   });
   const allPrompts = promptData ?? [];

@@ -67,6 +67,26 @@ export function listPrompts(params?: {
   return request<PromptResponse[]>(`${BASE}/${qs ? `?${qs}` : ""}`);
 }
 
+/** Page size used when walking the whole library. The API caps `limit` at 500. */
+const PAGE_SIZE = 200;
+
+/** Fetch every library prompt, following offset pagination to the end.
+ *
+ *  The management page and every prompt picker need the complete library: a
+ *  single capped request would silently hide prompts past the cap and report a
+ *  partial count as if it were the total, leaving those prompts unmanageable
+ *  and unselectable.
+ */
+export async function listAllPrompts(params?: { prompt_type?: PromptType }): Promise<PromptResponse[]> {
+  const all: PromptResponse[] = [];
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const page = await listPrompts({ ...params, offset, limit: PAGE_SIZE });
+    all.push(...page);
+    // A short page means the end; a full page means there may be more.
+    if (page.length < PAGE_SIZE) return all;
+  }
+}
+
 export function getPrompt(id: string) {
   return request<PromptResponse>(`${BASE}/${enc(id)}`);
 }

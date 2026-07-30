@@ -50,7 +50,7 @@ import {
 import type { PartitionConfig, PartitionMemberCandidate, PartitionRole } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
-import { listPrompts } from "@/lib/api/prompts";
+import { listAllPrompts } from "@/lib/api/prompts";
 import type { PromptResponse } from "@/lib/api/prompts";
 import {
   PROMPT_DEFAULT_OPTION,
@@ -131,7 +131,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
 
   const { data: promptsData } = useQuery({
     queryKey: ["prompts-library"],
-    queryFn: () => listPrompts({ limit: 500 }),
+    queryFn: () => listAllPrompts(),
     enabled: isAdmin,
   });
   const promptsByType = (type: string): PromptResponse[] =>

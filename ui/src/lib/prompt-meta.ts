@@ -87,6 +87,9 @@ export const PROMPT_TYPE_VARIABLES: Record<string, TemplateVariable[]> = {
 export interface TemplateScan {
   /** Root field names, reduced the way the backend reduces them. */
   fields: string[];
+  /** Raw expressions carrying a conversion/format spec/attribute access, which
+   *  the API rejects as not-plain placeholders. */
+  modified: string[];
   /** True when Python's parser would raise — i.e. the API would return 422. */
   malformed: boolean;
   error?: string;
@@ -94,7 +97,7 @@ export interface TemplateScan {
 
 type TemplateToken =
   | { kind: "literal"; text: string }
-  | { kind: "field"; root: string; raw: string };
+  | { kind: "field"; root: string; raw: string; hasModifier: boolean };
 
 interface TokenizeResult {
   tokens: TemplateToken[];
@@ -135,8 +138,13 @@ function tokenizeTemplate(content: string): TokenizeResult {
       }
       const raw = content.slice(i + 1, end);
       const root = raw.split("!")[0].split(":")[0].split(".")[0].split("[")[0].trim();
+      // A conversion, format spec or attribute/index access is not a plain
+      // placeholder. The API rejects those because reducing them to a root name
+      // hides templates `.format()` cannot render (`{context!x}` raises
+      // ValueError, `{context.missing}` raises AttributeError).
+      const hasModifier = raw !== root;
       flush();
-      tokens.push({ kind: "field", root, raw });
+      tokens.push({ kind: "field", root, raw, hasModifier });
       i = end + 1;
       continue;
     }
@@ -159,10 +167,13 @@ function tokenizeTemplate(content: string): TokenizeResult {
 export function scanTemplate(content: string): TemplateScan {
   const { tokens, malformed, error } = tokenizeTemplate(content);
   const fields: string[] = [];
+  const modified: string[] = [];
   for (const token of tokens) {
-    if (token.kind === "field" && !fields.includes(token.root)) fields.push(token.root);
+    if (token.kind !== "field") continue;
+    if (!fields.includes(token.root)) fields.push(token.root);
+    if (token.hasModifier && !modified.includes(token.raw)) modified.push(token.raw);
   }
-  return { fields, malformed, error };
+  return { fields, modified, malformed, error };
 }
 
 export function extractPlaceholders(content: string): string[] {
@@ -192,6 +203,17 @@ export function validatePlaceholders(content: string, promptType: string) {
   const used = scan.fields;
   const unknown = used.filter((v) => !known.has(v));
   const missing = [...known].filter((v) => !used.includes(v));
+  if (!scan.malformed && scan.modified.length > 0) {
+    return {
+      used,
+      unknown,
+      missing,
+      malformed: true,
+      error:
+        `Placeholder {${scan.modified[0]}} uses a conversion, format spec or attribute access, ` +
+        `which is not supported. Use a plain placeholder.`,
+    };
+  }
   return { used, unknown, missing, malformed: scan.malformed, error: scan.error };
 }
 
