@@ -72,6 +72,14 @@ type RevealedApiKey = {
 
 const normalizeEndpointUrl = (value: string) => value.trim().replace(/\/+$/, "");
 
+// Mirrors the backend's `_NAME_PATTERN` allowlist (api/schemas/admin/model_endpoint_schemas.py):
+// `name` is a single path segment in every single-endpoint route. An allowlist, not a
+// denylist — `/` splits across path segments, and `.`/`..` are RFC 3986 dot-segments that
+// browsers normalize out of the URL before the request is even sent — so anchoring both
+// ends on alphanumeric rules out all of that (and any leading/trailing separator) at once.
+const NAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+const NAME_MAX_LENGTH = 128;
+
 // Placeholder shown when a per-endpoint budget is left blank. The real
 // fallback (the MAX_LLM_CONTEXT_SIZE / MAX_OUTPUT_TOKENS env vars — see
 // core/config/endpoints.py:LLMContextConfig) is environment-configurable, so
@@ -315,6 +323,15 @@ function EndpointDialog({
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [vendor, setVendor] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
+
+  // Checked client-side too because the resulting 422 has no readable message —
+  // FastAPI's validation `detail` is a list, and ApiError only unwraps string detail.
+  const nameError =
+    name !== "" && name.length > NAME_MAX_LENGTH
+      ? `Name must be at most ${NAME_MAX_LENGTH} characters.`
+      : name !== "" && !NAME_PATTERN.test(name)
+        ? "Name must start/end with a letter or digit, and contain only letters, digits, '.', '_', or '-' — it's used in the endpoint's URL path."
+        : null;
 
   const modelType = (editing ? editing.model_type : activeTab) as ModelType;
   // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
@@ -572,6 +589,10 @@ function EndpointDialog({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (nameError) {
+      toast.error(nameError);
+      return;
+    }
     let extra: Record<string, unknown> = {};
     try {
       extra = mergeModelEndpointApiKeyExtra(JSON.parse(extraJson), apiKey, {
@@ -633,6 +654,7 @@ function EndpointDialog({
               onChange={(e) => setName(e.target.value)}
               required
             />
+            {nameError && <p className="text-xs text-destructive">{nameError}</p>}
           </div>
           <div className="space-y-2">
             <Label>Endpoint URL</Label>
@@ -800,7 +822,7 @@ function EndpointDialog({
             </Button>
             <Button
               type="submit"
-              disabled={loading || validated !== true}
+              disabled={loading || validated !== true || Boolean(nameError)}
             >
               {loading ? "Saving..." : editing ? "Update" : "Create"}
             </Button>
