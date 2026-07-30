@@ -182,6 +182,38 @@ class TestCrud:
         with pytest.raises(ValidationError):
             await svc.create_prompt(prompt_type="sys_prompt", name="bad", content='return {"a": 1}')
 
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "{context!x} on {current_date}",  # ValueError: unknown conversion
+            "{context.missing} on {current_date}",  # AttributeError at render time
+            "{context[0]} on {current_date}",  # renders, but not a supported form
+            "{context:>10} on {current_date}",  # format spec
+        ],
+    )
+    async def test_create_rejects_placeholders_str_format_cannot_render(self, content):
+        """A field reduced to its root name looked valid while `.format()` still
+        raised — and as a type's global default that fails every request that
+        falls back to it. Only plain placeholders are accepted.
+        """
+        svc = _service()
+        with pytest.raises(ValidationError) as exc:
+            await svc.create_prompt(prompt_type="sys_prompt", name="bad", content=content)
+        assert exc.value.status_code == 422
+
+    async def test_bundled_templates_all_pass_validation(self):
+        """Guards the stricter rule against the seed path: a bundled template that
+        failed validation would be skipped at boot, leaving the type with no
+        default at all.
+        """
+        from core.prompts.template_loader import load_template_by_key
+        from services.orchestrators.prompt_service import _TYPE_TO_CONFIG_KEY, _validate_template
+
+        svc = _service()
+        for prompt_type, config_key in _TYPE_TO_CONFIG_KEY.items():
+            content = load_template_by_key(svc._config.paths.prompts_dir, svc._config.prompts, config_key)
+            _validate_template(prompt_type, content)
+
     async def test_verbatim_type_allows_any_braces(self):
         svc = _service()
         # chunk_contextualizer is sent as-is (never str.format-ed), so literal braces are fine.

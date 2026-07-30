@@ -55,6 +55,16 @@ def _validate_template(prompt_type: str, content: str) -> None:
     """Reject a format-templated prompt whose ``{placeholders}`` are malformed or
     unknown for its type. No-op for verbatim (non-formatted) prompt types.
 
+    Only a *plain* placeholder is accepted — the field must be exactly one of the
+    type's known names, with no conversion (``!r``), format spec (``:>10``), or
+    attribute/index access (``ctx.attr``, ``ctx[0]``). Reducing such an
+    expression to its root name would let templates through that this check
+    calls valid and ``.format()`` then rejects: ``{context!x}`` raises
+    ``ValueError`` and ``{context.missing}`` raises ``AttributeError`` at render
+    time. As a type's global default, either would fail every request that falls
+    back to it — exactly what validating at write time exists to prevent. These
+    prompts are prose with a few injected values, so nothing legitimate is lost.
+
     Raises ``ValidationError`` (422) so the admin sees a precise message instead
     of a later 500 on the chat path.
     """
@@ -65,16 +75,32 @@ def _validate_template(prompt_type: str, content: str) -> None:
         # Formatter.parse yields (literal, field_name, format_spec, conversion);
         # field_name is None for literal text and for escaped {{/}}. It raises
         # ValueError on an unbalanced single brace.
-        fields = {fname for _, fname, _, _ in string.Formatter().parse(content) if fname is not None}
+        parsed = [(f, spec, conv) for _, f, spec, conv in string.Formatter().parse(content) if f is not None]
     except ValueError as exc:
         raise ValidationError(
             f"Prompt template has malformed braces ({exc}). Escape a literal brace as '{{{{' or '}}}}'.",
             status_code=422,
             code="PROMPT_TEMPLATE_INVALID",
         ) from exc
-    # Reduce "context.attr" / "context[0]" / "" (auto-numbering) to their root name.
-    roots = {f.split(".")[0].split("[")[0] for f in fields}
-    unknown = {r for r in roots if r not in allowed}
+
+    for field, spec, conversion in parsed:
+        if conversion or spec:
+            raise ValidationError(
+                f"Prompt template placeholder '{{{field}}}' uses a conversion or format spec, "
+                "which is not supported. Use a plain placeholder such as "
+                f"'{{{field.split('!')[0].split(':')[0].split('.')[0].split('[')[0]}}}'.",
+                status_code=422,
+                code="PROMPT_TEMPLATE_INVALID",
+            )
+        if "." in field or "[" in field:
+            raise ValidationError(
+                f"Prompt template placeholder '{{{field}}}' uses attribute or index access, "
+                "which is not supported. Use a plain placeholder.",
+                status_code=422,
+                code="PROMPT_TEMPLATE_INVALID",
+            )
+
+    unknown = {field for field, _, _ in parsed if field not in allowed}
     if unknown:
         raise ValidationError(
             f"Prompt template uses unknown placeholder(s) {sorted(unknown)} for type "
