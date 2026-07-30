@@ -56,6 +56,8 @@ import { formatDate } from "@/lib/utils";
 
 // Filter chips: "all" plus one per concern group.
 const CONCERN_FILTERS = ["all", ...PROMPT_GROUPS.map((g) => g.name)] as const;
+/** Types this page manages — everything grouped under a concern. */
+const MANAGED_PROMPT_TYPES = new Set(PROMPT_TYPES.map((t) => t.value as string));
 
 export default function PromptsPage() {
   const queryClient = useQueryClient();
@@ -107,7 +109,12 @@ export default function PromptsPage() {
   };
 
   const visibleGroups = PROMPT_GROUPS.filter((g) => concern === "all" || g.name === concern);
-  const customCount = prompts.filter((p) => !p.is_default).length;
+  // The API can return types this page deliberately doesn't surface yet (today:
+  // spoken_style_answer, driven by a chat metadata flag rather than by anything
+  // configurable here). Only the grouped types render, so count those too —
+  // otherwise the header advertises more prompts than there are cards.
+  const managed = prompts.filter((p) => MANAGED_PROMPT_TYPES.has(p.prompt_type));
+  const customCount = managed.filter((p) => !p.is_default).length;
 
   return (
     <div>
@@ -140,7 +147,7 @@ export default function PromptsPage() {
         </div>
         {!isLoading && !loadFailed && (
           <span className="text-xs text-muted-foreground">
-            {prompts.length} prompt{prompts.length === 1 ? "" : "s"} · {customCount} custom
+            {managed.length} prompt{managed.length === 1 ? "" : "s"} · {customCount} custom
           </span>
         )}
       </div>
