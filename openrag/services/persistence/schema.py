@@ -92,6 +92,62 @@ pipeline_presets = Table(
 )
 
 
+# The 8 canonical prompt types — kept in sync with core.models.prompt.PromptType.
+# Used by the CHECK constraint on the prompts table so a junk type can never be
+# stored. (Mirrors the ck_model_endpoint_type / ck_pipeline_preset_type pattern.)
+_PROMPT_TYPE_VALUES = (
+    "sys_prompt",
+    "query_contextualizer",
+    "chunk_contextualizer",
+    "image_captioning",
+    "hyde",
+    "multi_query",
+    "spoken_style_answer",
+    "topic_tagger",
+)
+_PROMPT_TYPE_IN = "prompt_type IN (" + ",".join(f"'{v}'" for v in _PROMPT_TYPE_VALUES) + ")"
+
+
+prompts = Table(
+    "prompts",
+    metadata,
+    # String (not native UUID) so the column round-trips 1:1 with the
+    # ``Prompt.id: str`` domain model without asyncpg UUID<->str coercion.
+    Column("id", String, primary_key=True),
+    Column("prompt_type", String, nullable=False),
+    Column("name", String, server_default=text("''"), nullable=False),
+    Column("content", String, nullable=False),
+    Column("is_default", Boolean, server_default="false", nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False,
+    ),
+    CheckConstraint(_PROMPT_TYPE_IN, name="ck_prompt_type"),
+    Index("ix_prompts_type", "prompt_type"),
+    # Name is the selection key: presets and partitions reference a prompt by
+    # (type, name), so it must be unique per type for get_by_name to be
+    # deterministic.
+    Index("uix_prompts_type_name", "prompt_type", "name", unique=True),
+    # At most one global default per type — the DB-level guardrail behind
+    # PromptService.set_default's clear-then-set (same shape as the model
+    # endpoint default invariant, enforced there in application code).
+    Index(
+        "uix_prompts_default_per_type",
+        "prompt_type",
+        unique=True,
+        postgresql_where=text("is_default = true"),
+    ),
+)
+
+
 partitions = Table(
     "partitions",
     metadata,
@@ -106,6 +162,15 @@ partitions = Table(
     Column("collection_name", String, nullable=True),
     Column("chat_history_depth", Integer, server_default="0", nullable=False),
     Column("chat_llm", String, nullable=True),
+    # {prompt_type: library_prompt_name} for generation prompts (sys_prompt,
+    # spoken_style_answer). Like chat_llm, generation config lives on the
+    # partition; indexation/retrieval prompts are named on their presets instead.
+    Column(
+        "generation_prompt_names",
+        JSONB,
+        server_default=text("'{}'::jsonb"),
+        nullable=False,
+    ),
     Column(
         "updated_at",
         DateTime(timezone=True),
@@ -342,6 +407,7 @@ __all__ = [
     "metadata",
     "model_endpoints",
     "pipeline_presets",
+    "prompts",
     "topic_tags",
     "partitions",
     "files",

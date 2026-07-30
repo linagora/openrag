@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from services.orchestrators.model_endpoint_service import ModelEndpointService
     from services.orchestrators.partition_service import PartitionService
     from services.orchestrators.preset_service import PresetService
+    from services.orchestrators.prompt_service import PromptService
     from services.orchestrators.query_service import QueryService
     from services.orchestrators.retrieval_service import RetrievalService
     from services.orchestrators.user_service import UserService
@@ -116,6 +117,7 @@ class ServiceContainer:
         self._partition_service: PartitionService | None = None
         self._model_endpoint_service: ModelEndpointService | None = None
         self._preset_service: PresetService | None = None
+        self._prompt_service: PromptService | None = None
         self._workspace_service: WorkspaceService | None = None
         self._retrieval_service: RetrievalService | None = None
         self._query_service: QueryService | None = None
@@ -210,6 +212,10 @@ class ServiceContainer:
             await self._initialize_step("loading model endpoints", self.model_endpoint_service.load_all)
             await self._initialize_step("seeding pipeline presets", self.preset_service.seed_defaults)
             await self._initialize_step("loading pipeline presets", self.preset_service.load_all)
+            # Prompts resolve request-time from the DB (no in-memory cache to
+            # load), so seeding the library from the bundled templates is the
+            # only startup step.
+            await self._initialize_step("seeding prompts", self.prompt_service.seed_defaults)
             await self._initialize_step("ensuring default partition", self.partition_service.seed_default_partition)
             await self._initialize_step("loading partition configs", self.partition_service.load_partitions)
         self._initialized = True
@@ -424,6 +430,7 @@ class ServiceContainer:
                 collection=settings.vectordb.collection_name,
                 config=settings,
                 task_state_manager_factory=get_task_state_manager,
+                prompt_repo=self.prompt_repo,
             )
         return self._partition_service
 
@@ -459,6 +466,18 @@ class ServiceContainer:
                 partition_service=self.partition_service,
             )
         return self._preset_service
+
+    @property
+    def prompt_service(self) -> PromptService:
+        """PromptService — DB-backed prompt library and per-partition overrides."""
+        if self._prompt_service is None:
+            from services.orchestrators.prompt_service import PromptService
+
+            self._prompt_service = PromptService(
+                prompt_repo=self.prompt_repo,
+                config=self._require_settings(),
+            )
+        return self._prompt_service
 
     @property
     def workspace_service(self) -> WorkspaceService:
@@ -535,6 +554,7 @@ class ServiceContainer:
                 searcher_factory=searcher_factory,
                 reranker_factory=self.reranker_factory,
                 llm_factory=self.llm_factory,
+                prompt_service=self.prompt_service,
             )
         return self._retrieval_service
 
@@ -569,6 +589,7 @@ class ServiceContainer:
                 config=settings,
                 web_search_service=WebSearchFactory.create_service(settings),
                 workspace_service=self.workspace_service,
+                prompt_service=self.prompt_service,
                 llm_factory=self.llm_factory,
             )
         return self._query_service

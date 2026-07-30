@@ -26,6 +26,23 @@ from services.orchestrators.query_service import QueryService
 _PROMPT_CFG = load_config()
 
 
+class _EmptyPromptRepo:
+    """No DB rows → PromptService.resolve_prompt falls back to the disk seed,
+    preserving the pre-DB behaviour these tests assert."""
+
+    async def get_by_name(self, prompt_type, name):
+        return None
+
+    async def get_default(self, prompt_type):
+        return None
+
+
+def _disk_prompt_service():
+    from services.orchestrators.prompt_service import PromptService
+
+    return PromptService(prompt_repo=_EmptyPromptRepo(), config=_PROMPT_CFG)
+
+
 @pytest.fixture(autouse=True)
 def _patch_infra(monkeypatch):
     @asynccontextmanager
@@ -123,6 +140,7 @@ def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=No
         config=_config(mode),
         web_search_service=web or FakeWeb(),
         workspace_service=workspace or FakeWorkspace(),
+        prompt_service=_disk_prompt_service(),
         llm_factory=llm_factory,
     )
 
@@ -186,6 +204,7 @@ def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
         config=config,
         web_search_service=FakeWeb(),
         workspace_service=FakeWorkspace(),
+        prompt_service=_disk_prompt_service(),
     )
     assert svc._default_chat_history_depth == 4
     assert svc._resolve_chat_history_depth(None) == 4
@@ -723,6 +742,126 @@ async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
 
 
 @pytest.mark.asyncio
+async def test_answer_system_prompt_comes_from_prompt_service():
+    # Revert-proves the query seam: the payload's system message is built from
+    # prompt_service.resolve_prompt("sys_prompt", ...), resolved request-time —
+    # not a startup snapshot. Reverting query_service to load_template_by_key at
+    # __init__ makes the marker disappear.
+    class MarkerPromptService:
+        def __init__(self):
+            self.seen: list = []
+
+        async def resolve_prompt(self, prompt_type, names=None):
+            self.seen.append(prompt_type)
+            return "MARKER-SYS::{context}"
+
+    svc = _svc(retrieval=FakeRetrieval())  # SimpleRag → no contextualizer call
+    marker = MarkerPromptService()
+    svc._prompt_service = marker
+
+    payload, _docs, _web, _citation_protocol_active = await svc._prepare_chat(
+        ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}}
+    )
+
+    assert payload["messages"][0]["role"] == "system"
+    assert payload["messages"][0]["content"].startswith("MARKER-SYS::")
+    assert "sys_prompt" in marker.seen
+
+
+@pytest.mark.asyncio
+async def test_generation_prompt_name_from_partition_reaches_resolver():
+    # Revert-proves #12: a single owning partition's generation_prompt_names is
+    # passed to resolve_prompt as the candidate name. Multi-partition / "all"
+    # pass None (global default).
+    class RecordingPromptService:
+        def __init__(self):
+            self.calls: list = []
+
+        async def resolve_prompt(self, prompt_type, names=None):
+            self.calls.append((prompt_type, tuple(names or ())))
+            return "SYS::{context}"
+
+    svc = _svc(retrieval=FakeRetrieval())
+    rec = RecordingPromptService()
+    svc._prompt_service = rec
+    svc._config.partitions = {
+        "p": SimpleNamespace(generation_prompt_names={"sys_prompt": "legal"}, chat_history_depth=4)
+    }
+
+    await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    assert ("sys_prompt", ("legal",)) in rec.calls
+
+    rec.calls.clear()
+    await svc._prepare_chat(["p", "q"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    assert ("sys_prompt", (None,)) in rec.calls  # no single owning partition
+
+
+@pytest.mark.asyncio
+async def test_spoken_style_metadata_swaps_the_answer_prompt():
+    """`metadata.spoken_style_answer` is a public API flag (and a Chainlit
+    command) that swaps the answer prompt for a voice-friendly one. Nothing
+    asserted this, so the whole feature could be — and briefly was — deleted
+    with the suite still green.
+    """
+
+    class RecordingPromptService:
+        def __init__(self):
+            self.calls: list = []
+
+        async def resolve_prompt(self, prompt_type, names=None):
+            self.calls.append((prompt_type, tuple(names or ())))
+            return "SPOKEN::{context}"
+
+    svc = _svc(retrieval=FakeRetrieval())
+    rec = RecordingPromptService()
+    svc._prompt_service = rec
+    svc._config.partitions = {
+        "p": SimpleNamespace(generation_prompt_names={"spoken_style_answer": "voice"}, chat_history_depth=4)
+    }
+
+    await svc._prepare_chat(
+        ["p"],
+        {"messages": [{"role": "user", "content": "q"}], "metadata": {"spoken_style_answer": True}},
+    )
+    # The spoken-style type is resolved, and the partition may name its own.
+    assert ("spoken_style_answer", ("voice",)) in rec.calls
+    assert not any(call[0] == "sys_prompt" for call in rec.calls)
+
+    # Without the flag the ordinary answer prompt is used.
+    rec.calls.clear()
+    await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    assert any(call[0] == "sys_prompt" for call in rec.calls)
+    assert not any(call[0] == "spoken_style_answer" for call in rec.calls)
+
+
+@pytest.mark.asyncio
+async def test_query_contextualizer_name_from_retrieval_preset_reaches_resolver():
+    # query_contextualizer is selected on the partition's RETRIEVAL preset (not
+    # generation prompts). A single owning partition's preset name is passed to
+    # resolve_prompt; multi-partition passes None (global default).
+    class RecordingPromptService:
+        def __init__(self):
+            self.calls: list = []
+
+        async def resolve_prompt(self, prompt_type, names=None):
+            self.calls.append((prompt_type, tuple(names or ())))
+            return "CTX"
+
+    payload = json.dumps({"query_list": [{"query": "rewritten", "temporal_filters": None}]})
+    svc = _svc(llm=FakeLLM(chat_responses=[payload, payload]), mode="ChatBotRag")
+    rec = RecordingPromptService()
+    svc._prompt_service = rec
+    svc._config.partitions = {"p": SimpleNamespace(retrieval=SimpleNamespace(query_contextualizer_prompt_name="myctx"))}
+
+    await svc.generate_query([{"role": "user", "content": "q"}], partition=["p"])
+    assert ("query_contextualizer", ("myctx",)) in rec.calls
+
+    rec.calls.clear()
+    await svc.generate_query([{"role": "user", "content": "q"}], partition=["p", "q"])
+    assert ("query_contextualizer", (None,)) in rec.calls  # no single owning partition
+
+
+@pytest.mark.asyncio
 async def test_chat_with_valid_workspace_scopes_search_to_file_ids():
     scope = WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["fa", "fb"])
     retrieval = FakeRetrieval()
@@ -1057,3 +1196,43 @@ def test_sanitize_system_message_preserved():
         {"role": "assistant", "content": "hi"},
     ]
     assert QueryService._sanitize_messages(msgs) == msgs
+
+
+@pytest.mark.asyncio
+async def test_conversational_reply_resolves_its_prompt_from_the_library():
+    """The no-retrieval path (a greeting / capability question) came from #807
+    and read an __init__-time snapshot this branch removes. Git auto-merged that
+    reference without flagging a conflict, so nothing but this test proves the
+    conversational reply resolves through PromptService at all.
+    """
+
+    class RecordingPromptService:
+        def __init__(self):
+            self.calls: list = []
+
+        async def resolve_prompt(self, prompt_type, names=None):
+            self.calls.append((prompt_type, tuple(names or ())))
+            # Each type is rendered with its own placeholders, so the stub has
+            # to answer in kind rather than with one shared string.
+            if prompt_type == "query_contextualizer":
+                return "CTX {query_language} {current_date}"
+            return "CONVERSATIONAL {context} {current_date}"
+
+    payload = json.dumps({"requires_retrieval": False, "query_list": []})
+    svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
+    rec = RecordingPromptService()
+    svc._prompt_service = rec
+    svc._config.partitions = {
+        "p": SimpleNamespace(generation_prompt_names={"sys_prompt": "chatty"}, chat_history_depth=4)
+    }
+
+    out, docs, web, _ = await svc._prepare_chat(
+        ["p"], {"messages": [{"role": "user", "content": "hello!"}], "metadata": {}}
+    )
+
+    # Resolved from the library, honouring the partition's selection, and no
+    # retrieval happened.
+    assert ("sys_prompt", ("chatty",)) in rec.calls
+    assert docs == [] and web == []
+    assert out["messages"][0]["role"] == "system"
+    assert "CONVERSATIONAL" in out["messages"][0]["content"]

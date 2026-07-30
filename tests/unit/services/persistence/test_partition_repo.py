@@ -167,6 +167,7 @@ def _full_partition_row(**overrides):
         "collection_name": None,
         "chat_history_depth": 0,
         "chat_llm": None,
+        "generation_prompt_names": {},
         "created_at": datetime(2026, 1, 1, tzinfo=UTC),
         "updated_at": datetime(2026, 1, 1, tzinfo=UTC),
     }

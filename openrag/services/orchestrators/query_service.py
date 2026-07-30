@@ -48,7 +48,6 @@ from core.prompts import (
     SOURCE_SEPARATOR,
     format_context,
     format_web_context,
-    load_template_by_key,
     prepend_system_prompt,
 )
 from core.utils.exceptions import WorkspaceNotFoundError
@@ -65,6 +64,7 @@ from services.inference.runtime import detect_language, get_llm_semaphore
 if TYPE_CHECKING:
     from core.config.root import Settings
     from core.llm.llm import LLM
+    from services.orchestrators.prompt_service import PromptService
     from services.orchestrators.retrieval_service import RetrievalService
     from services.orchestrators.workspace_service import WorkspaceService
 
@@ -117,6 +117,7 @@ class QueryService:
         config: Settings,
         web_search_service: Any | None,
         workspace_service: WorkspaceService,
+        prompt_service: PromptService,
         llm_factory: Callable[[str], LLM] | None = None,
     ) -> None:
         self._retrieval = retrieval_service
@@ -124,6 +125,9 @@ class QueryService:
         self._llm_factory = llm_factory
         self._web = web_search_service
         self._workspace = workspace_service
+        # Prompts resolve request-time (override → default → disk seed) so an
+        # admin's edit takes effect on the next chat without a restart.
+        self._prompt_service = prompt_service
 
         # Keep a live reference so per-partition config (resolved into
         # ``config.partitions`` and refreshed on every preset change) can be
@@ -145,11 +149,6 @@ class QueryService:
         self._mr_initial = mr.initial_batch_size
         self._mr_expansion = mr.expansion_batch_size
         self._mr_max = mr.max_total_documents
-
-        prompts_dir, mapping = config.paths.prompts_dir, config.prompts
-        self._query_contextualizer_prompt = load_template_by_key(prompts_dir, mapping, "query_contextualizer")
-        self._spoken_style_answer_prompt = load_template_by_key(prompts_dir, mapping, "spoken_style_answer")
-        self._sys_prompt_tmplt = load_template_by_key(prompts_dir, mapping, "sys_prompt")
 
     def _resolve_chat_history_depth(self, partition: list[str] | None) -> int:
         """Effective chat-history depth for this request.
@@ -300,14 +299,53 @@ class QueryService:
     # Query generation (was RagPipeline.generate_query — no LangChain)
     # ------------------------------------------------------------------
 
-    async def generate_query(self, messages: list[dict], llm: LLM | None = None) -> SearchQueries:
+    def _generation_prompt_name(self, prompt_type: str, partition: list[str] | None) -> str | None:
+        """The library prompt this request's partition names for a generation type.
+
+        Honoured only for a single owning partition (same rule as chat_llm /
+        chat_history_depth); multi-partition and the ``"all"`` sentinel resolve
+        the global default. Returned as the sole candidate name for
+        ``PromptService.resolve_prompt`` — a future per-user tier prepends ahead
+        of it.
+        """
+        if not partition or "all" in partition or len(partition) != 1:
+            return None
+        cfg = self._config.partitions.get(partition[0])
+        if cfg is None:
+            return None
+        return getattr(cfg, "generation_prompt_names", {}).get(prompt_type)
+
+    def _retrieval_prompt_name(self, field: str, partition: list[str] | None) -> str | None:
+        """The library prompt this request's partition names on its retrieval
+        preset (query-side prompts: query_contextualizer / hyde / multi_query).
+
+        Same single-owning-partition rule as generation prompts; multi-partition
+        and ``"all"`` resolve the global default.
+        """
+        if not partition or "all" in partition or len(partition) != 1:
+            return None
+        cfg = self._config.partitions.get(partition[0])
+        if cfg is None:
+            return None
+        return getattr(getattr(cfg, "retrieval", None), field, None)
+
+    async def generate_query(
+        self,
+        messages: list[dict],
+        llm: LLM | None = None,
+        partition: list[str] | None = None,
+    ) -> SearchQueries:
         llm = llm or self._llm
         last_user = messages[-1]["content"]
         if RAGMODE(self._rag_mode) is RAGMODE.SIMPLERAG:
             return SearchQueries(query_list=[Query(query=last_user)])
 
         chat_history = "".join(f"{m['role']}: {m['content']}\n" for m in messages)
-        prompt = self._query_contextualizer_prompt.format(
+        contextualizer = await self._prompt_service.resolve_prompt(
+            "query_contextualizer",
+            names=[self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)],
+        )
+        prompt = contextualizer.format(
             query_language=detect_language(last_user),
             current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
         )
@@ -394,7 +432,7 @@ class QueryService:
 
     async def _prepare_chat(self, partition: list[str] | None, payload: dict, llm: LLM | None = None):
         messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
-        queries = await self.generate_query(messages, llm=llm)
+        queries = await self.generate_query(messages, llm=llm, partition=partition)
 
         metadata = payload.get("metadata") or {}
         use_map_reduce = metadata.get("use_map_reduce", False)
@@ -419,7 +457,14 @@ class QueryService:
         force_retrieval = use_websearch or use_map_reduce
         if not queries.query_list:
             if not queries.requires_retrieval and not force_retrieval:
-                tmpl = self._spoken_style_answer_prompt if spoken_style else self._sys_prompt_tmplt
+                # Resolved per request from the library (named -> default ->
+                # bundled), replacing the __init__-time disk snapshots this
+                # branch removes. The conversational path therefore honours the
+                # partition's selected answer prompt too.
+                prompt_type = "spoken_style_answer" if spoken_style else "sys_prompt"
+                tmpl = await self._prompt_service.resolve_prompt(
+                    prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
+                )
                 payload["messages"] = prepend_system_prompt(
                     messages,
                     tmpl,
@@ -479,7 +524,10 @@ class QueryService:
             web_results = [web_results[number - web_start_index] for number in web_source_numbers]
 
         new_messages = copy.deepcopy(messages)
-        tmpl = self._spoken_style_answer_prompt if spoken_style else self._sys_prompt_tmplt
+        prompt_type = "spoken_style_answer" if spoken_style else "sys_prompt"
+        tmpl = await self._prompt_service.resolve_prompt(
+            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
+        )
         new_messages.insert(
             0,
             {
@@ -507,7 +555,9 @@ class QueryService:
 
     async def _prepare_completions(self, partition: list[str], payload: dict, llm: LLM | None = None):
         prompt = payload["prompt"]
-        queries = await self.generate_query([{"role": "user", "content": prompt}], llm=llm)
+        # partition= is ours: the retrieval preset's query_contextualizer is
+        # resolved per partition. The skip below is from #807.
+        queries = await self.generate_query([{"role": "user", "content": prompt}], llm=llm, partition=partition)
         if not queries.query_list:
             if not queries.requires_retrieval:
                 docs, context = [], ""
@@ -524,8 +574,9 @@ class QueryService:
             docs = [docs[i] for i in included]
 
         metadata = payload.get("metadata") or {}
-        tmpl = (
-            self._spoken_style_answer_prompt if metadata.get("spoken_style_answer", False) else self._sys_prompt_tmplt
+        prompt_type = "spoken_style_answer" if metadata.get("spoken_style_answer", False) else "sys_prompt"
+        tmpl = await self._prompt_service.resolve_prompt(
+            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
         )
         instructions = tmpl.format(
             context=context,

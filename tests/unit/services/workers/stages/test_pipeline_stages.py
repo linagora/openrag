@@ -48,9 +48,13 @@ class FakeContextualizer(ChunkContextualizer):
         self.chunks = chunks
         self.error = error
         self.calls: list[tuple[list[Chunk], str, str]] = []
+        self.system_prompts: list[str | None] = []
 
-    async def contextualize(self, chunks, *, filename: str = "", lang: str = "en") -> list[Chunk]:
+    async def contextualize(
+        self, chunks, *, filename: str = "", lang: str = "en", system_prompt: str | None = None
+    ) -> list[Chunk]:
         self.calls.append((list(chunks), filename, lang))
+        self.system_prompts.append(system_prompt)
         if self.error is not None:
             raise self.error
         return self.chunks
