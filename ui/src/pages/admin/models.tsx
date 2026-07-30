@@ -218,7 +218,7 @@ export default function ModelsPage() {
                             </CardTitle>
                             <div className="flex items-center gap-1.5 shrink-0">
                               {isDefault && (
-                                <Badge variant="secondary" className="text-xs">Default</Badge>
+                                <Badge className="shrink-0 bg-green-600 text-xs hover:bg-green-700">Default</Badge>
                               )}
                             </div>
                           </div>
