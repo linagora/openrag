@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from core.config.infrastructure import PathsConfig, PromptsConfig
 from core.models.prompt import Prompt, PromptType
-from core.utils.exceptions import NotFoundError, ValidationError
+from core.utils.exceptions import ConfigError, NotFoundError, ValidationError
 from loguru import logger
 from services.orchestrators.prompt_service import PROMPT_TYPE_KEYS, PromptService
 
@@ -316,3 +316,68 @@ class TestSeedingSurvivesAConcurrentReplica:
                 raise ValidationError("already exists", status_code=409, code="PROMPT_EXISTS")
 
         await _service(RacingRepo()).seed_defaults()  # must not raise
+
+
+class TestUnavailablePromptRaisesTheTypedError:
+    async def test_missing_default_and_missing_template_raises_configerror(self, tmp_path):
+        """Exercises the raise itself. ConfigError hard-coded its own code, so
+        passing code= collided with the forwarded kwargs and the statement threw
+        TypeError instead — the typed error could never be constructed.
+        """
+        # Point the loader at an empty directory — no bundled template, and the
+        # fake repo has no default, which is the only path reaching the raise.
+        svc = _service()
+        svc._config = SimpleNamespace(
+            paths=PathsConfig(prompts_dir=tmp_path),
+            prompts=PromptsConfig(),
+        )
+
+        with pytest.raises(ConfigError) as exc:
+            await svc.resolve_prompt("hyde")
+
+        assert exc.value.code == "PROMPT_UNAVAILABLE"
+        assert exc.value.status_code == 500
+        assert "hyde" in str(exc.value)
+
+
+class TestErrorPathsAreExercised:
+    """Every raise in the service reached at least once.
+
+    These paths were reasoned about rather than run, which is how a raise that
+    itself threw TypeError survived review — coverage over the error branches is
+    the check that catches that class of defect.
+    """
+
+    async def test_malformed_braces_raise_at_write_time(self):
+        svc = _service()
+        with pytest.raises(ValidationError) as exc:
+            await svc.create_prompt(prompt_type="hyde", name="bad", content="unbalanced {question")
+        assert exc.value.status_code == 422
+        assert "brace" in str(exc.value).lower()
+
+    @pytest.mark.parametrize("op", ["get", "update", "set_default", "delete"])
+    async def test_unknown_id_raises_not_found(self, op):
+        svc = _service()
+        with pytest.raises(NotFoundError):
+            if op == "get":
+                await svc.get_prompt("nope")
+            elif op == "update":
+                await svc.update_prompt("nope", name="x")
+            elif op == "set_default":
+                await svc.set_default("nope")
+            else:
+                await svc.delete_prompt("nope")
+
+    async def test_deleting_a_types_default_is_refused(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        p = await svc.create_prompt(prompt_type="hyde", name="d", content="{question}", is_default=True)
+        with pytest.raises(ValidationError):
+            await svc.delete_prompt(p.id)
+
+    async def test_seeding_skips_a_type_whose_template_is_missing(self, tmp_path):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        svc._config = SimpleNamespace(paths=PathsConfig(prompts_dir=tmp_path), prompts=PromptsConfig())
+        await svc.seed_defaults()  # warns per type, never raises
+        assert repo.prompts == {}
