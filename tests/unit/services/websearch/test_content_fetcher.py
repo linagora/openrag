@@ -4,7 +4,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from services.websearch.base import WebResult, normalize_web_url
+from services.websearch.base import WebResult
 from services.websearch.content_fetcher import ContentFetcher, _is_safe_url
 
 
@@ -15,30 +15,6 @@ def fetcher():
 
 def _make_result(url="https://example.com", snippet="short snippet"):
     return WebResult(title="Test", url=url, snippet=snippet)
-
-
-# ---------------------------------------------------------------------------
-# normalize_web_url — shared prompt/source validation
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        None,
-        42,
-        "",
-        "javascript:alert(1)",
-        "https://",
-        "http://[::1",
-    ],
-)
-def test_normalize_web_url_rejects_unrenderable_values(value):
-    assert normalize_web_url(value) is None
-
-
-def test_normalize_web_url_returns_canonical_http_url():
-    assert normalize_web_url("  https://example.com/a path  ") == "https://example.com/a%20path"
 
 
 # ---------------------------------------------------------------------------

@@ -33,10 +33,10 @@ from core.models.preset import resolve_partition_chat_llm
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens, sanitize_text
+from core.utils.web_url import normalize_web_url
 from di.providers import get_config, get_partition_service, get_query_service
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from services.websearch.base import normalize_web_url
 
 logger = get_logger()
 router = APIRouter()

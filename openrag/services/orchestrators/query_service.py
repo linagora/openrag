@@ -59,8 +59,8 @@ from core.utils.source_filtering import (
     stream_with_source_filtering,
 )
 from core.utils.text import get_num_tokens
+from core.utils.web_url import normalize_web_url
 from services.inference.runtime import detect_language, get_llm_semaphore
-from services.websearch.base import normalize_web_url
 
 if TYPE_CHECKING:
     from core.config.root import Settings

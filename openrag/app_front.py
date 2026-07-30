@@ -21,9 +21,9 @@ from core.auth.chainlit import (
     CHAINLIT_TOKEN_COOKIE_PATH,
 )
 from core.utils.logging import get_logger, mask_email
+from core.utils.web_url import normalize_web_url
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from services.websearch.base import normalize_web_url
 
 load_dotenv()
 logger = get_logger()
