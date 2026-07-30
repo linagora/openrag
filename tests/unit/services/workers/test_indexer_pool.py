@@ -1448,6 +1448,15 @@ class _RecordingWorker:
         return {"stored_count": 1, "stage": "stored"}
 
 
+def _AsyncReturn(value):
+    """A stub coroutine function returning *value* for any arguments."""
+
+    async def _call(*_a, **_k):
+        return value
+
+    return _call
+
+
 def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     """Bare IndexerWorkerActor with only the attributes process_file touches."""
     from services.workers.indexer_pool import IndexerWorkerActor
@@ -1467,6 +1476,12 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
+    # These build the actor with __new__, so __init__ never runs. Captioning is
+    # enabled by default, so ingest now resolves its prompt even for a config
+    # that omits the flag — stub the service these tests don't exercise.
+    actor._prompt_service = SimpleNamespace(
+        resolve_prompt=_AsyncReturn("prompt"),
+    )
     return actor
 
 

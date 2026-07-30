@@ -206,3 +206,25 @@ def test_clip_counts_the_ellipsis_against_the_budget():
     assert _clip("x" * 100, 10).endswith("…")
     assert _clip("short", 10) == "short"
     assert _clip("anything", 0) == ""
+
+
+def test_a_brace_in_the_client_supplied_model_does_not_raise():
+    """`model` comes from metadata.llm_override, and this is called outside the
+    client's try/except — interpolating it into the format string made a brace
+    a format field, so `gpt{x}` raised KeyError straight out of the request.
+    """
+    records: list[str] = []
+    sink_id = logger.add(records.append, level="DEBUG", format="{message}")
+    try:
+        log_llm_call(
+            caller="VLLMClient.chat",
+            model="gpt{x}",
+            endpoint="http://e{y}",
+            messages=[{"role": "user", "content": "brace {in} content too"}],
+        )
+    finally:
+        logger.remove(sink_id)
+
+    line = "".join(records)
+    assert "gpt{x}" in line
+    assert "brace {in} content too" in line

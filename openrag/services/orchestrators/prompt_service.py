@@ -195,6 +195,15 @@ class PromptService:
         ``names`` entries may be ``None``/empty (skipped) so callers can pass
         optional config values directly.
 
+        Resolution happens per request, which put a Postgres round-trip on the
+        chat and search paths that did not exist before — prompts used to be read
+        from disk once at construction. A transient repository failure must
+        therefore not become a 500: lookups are treated as best-effort here and a
+        failure degrades to the bundled disk template, logged once. Errors are
+        swallowed at this single choke point rather than at each of the callers,
+        so chat, query expansion, retrieval and indexing all get the same
+        guarantee.
+
         Returns a string in every reachable case: boot seeds a default per type
         and deleting a type's default is refused, so reaching the disk seed is
         already an anomaly. If even that is unreadable there is no prompt to
@@ -205,15 +214,18 @@ class PromptService:
         disk-loaded prompt.
         """
         candidates = [n for n in (names or ()) if n]
-        for name in candidates:
-            prompt = await self._repo.get_by_name(prompt_type, name)
-            if prompt is not None:
-                self._log_resolution(prompt_type, candidates, "named", name, prompt.content)
-                return prompt.content
-        default = await self._repo.get_default(prompt_type)
-        if default is not None:
-            self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
-            return default.content
+        try:
+            for name in candidates:
+                prompt = await self._repo.get_by_name(prompt_type, name)
+                if prompt is not None:
+                    self._log_resolution(prompt_type, candidates, "named", name, prompt.content)
+                    return prompt.content
+            default = await self._repo.get_default(prompt_type)
+            if default is not None:
+                self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
+                return default.content
+        except Exception as exc:  # noqa: BLE001 - a DB blip must not fail the request
+            logger.warning(f"Prompt lookup failed for '{prompt_type}'; falling back to the bundled template: {exc}")
         try:
             content = self._disk_seed(prompt_type)
         except (FileNotFoundError, ValueError, KeyError) as exc:
@@ -242,16 +254,23 @@ class PromptService:
         actually went to the model. The preview is built lazily so an INFO
         deployment pays nothing for it.
         """
+
+        def _line() -> str:
+            preview = repr(" ".join(content.split())[:80])
+            return f"prompt.resolve {prompt_type} <- {source}{f':{name}' if name else ''} | {preview}"
+
+        # Single literal placeholder, everything built inside the lazy callable:
+        # loguru runs ``message.format(...)``, so interpolating ``name`` into the
+        # format string made a brace in it a format field. Prompt names are free
+        # text, so a partition pointed at a prompt named ``my{tmpl}`` raised
+        # KeyError on *every* request that resolved it.
         logger.bind(
             prompt_type=prompt_type,
             candidates=candidates,
             source=source,
             resolved_name=name,
             length=len(content),
-        ).opt(lazy=True).debug(
-            f"prompt.resolve {prompt_type} <- {source}{f':{name}' if name else ''} | " + "{}",
-            lambda: repr(" ".join(content.split())[:80]),
-        )
+        ).opt(lazy=True).debug("{}", _line)
 
     # ------------------------------------------------------------------
     # Library CRUD

@@ -904,3 +904,16 @@ async def test_reindex_with_zero_new_chunks_keeps_old_chunks():
     assert row["stored_count"] == 0
     assert vs.deleted == []
     assert "delete" not in vs.events
+
+
+def test_ingest_flag_defaults_come_from_the_model_not_from_absence():
+    """A sparse indexation config that omits enable_image_captioning still
+    captions during ingest (the model default is True). Reading the flag with a
+    bare .get() treated that as disabled and skipped prompt resolution, leaving
+    captioning silently on the disk seed while the preset named another prompt.
+    """
+    from services.workers.indexer_pool import _ingest_flag_default
+
+    assert _ingest_flag_default("enable_image_captioning") is True
+    assert _ingest_flag_default("enable_contextualization") is False
+    assert _ingest_flag_default("enable_topic_tagging") is False

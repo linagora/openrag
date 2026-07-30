@@ -133,11 +133,20 @@ def log_llm_call(
         text = prompt or ""
         return _clip(f"prompt[{len(text)}]: {_preview(text)}", MAX_DETAIL_CHARS)
 
-    # The lazy preview is passed positionally on purpose: loguru copies **kwargs
-    # into ``record["extra"]``, and the terminal formatter appends every extra —
-    # so a ``detail=`` kwarg would print the whole payload a second time on each
-    # line. Positional args are formatted into the message only.
+    def _line() -> str:
+        return f"llm.call {safe_caller} model={safe_model} stream={stream} | {_detail()}"
+
+    # The message is a single literal placeholder and everything else is built
+    # inside the lazy callable. loguru runs ``message.format(*args)``, so an
+    # identifier interpolated into the format string itself would have its
+    # braces parsed as format fields — and ``model`` is client-controlled via
+    # ``metadata.llm_override``, so a request naming a model ``gpt{x}`` raised
+    # ``KeyError`` out of the call path. The substituted value is never
+    # rescanned, so a brace anywhere in the rendered line is now inert.
+    #
+    # Passed positionally, not as a kwarg: loguru copies **kwargs into
+    # ``record["extra"]`` and the terminal formatter appends every extra, which
+    # would print the whole payload a second time on each line.
     logger.bind(caller=safe_caller, model=safe_model, endpoint=safe_endpoint, stream=stream).opt(lazy=True).debug(
-        f"llm.call {safe_caller} model={safe_model} stream={stream} | " + "{}",
-        _detail,
+        "{}", _line
     )

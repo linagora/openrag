@@ -14,6 +14,7 @@ import pytest
 from core.config.infrastructure import PathsConfig, PromptsConfig
 from core.models.prompt import Prompt, PromptType
 from core.utils.exceptions import NotFoundError, ValidationError
+from loguru import logger
 from services.orchestrators.prompt_service import PROMPT_TYPE_KEYS, PromptService
 
 
@@ -265,3 +266,39 @@ class TestCrud:
         assert [row["prompt_type"] for row in listed] == ["hyde"]
         assert listed[0]["used_by"] == 3
         assert p.id == listed[0]["id"]
+
+
+class TestLoggingIsBraceSafe:
+    def test_a_brace_in_a_prompt_name_does_not_raise(self):
+        """Prompt names are free text. Interpolating one into the log format
+        string made a brace a format field, so a partition pointed at a prompt
+        named `my{tmpl}` raised KeyError on *every* request that resolved it.
+        """
+        from services.orchestrators.prompt_service import PromptService
+
+        records: list[str] = []
+        sink_id = logger.add(records.append, level="DEBUG", format="{message}")
+        try:
+            PromptService._log_resolution("sys_prompt", ["my{tmpl}"], "named", "my{tmpl}", "body {with} braces")
+        finally:
+            logger.remove(sink_id)
+        assert "my{tmpl}" in "".join(records)
+
+
+class TestResolveSurvivesRepositoryFailure:
+    async def test_a_repo_error_degrades_to_the_disk_seed(self):
+        """Resolution moved onto the request path, so chat and search now depend
+        on Postgres per request where they used to read prompts once at boot. A
+        transient pool error must degrade to the bundled template, not 500.
+        """
+
+        class ExplodingRepo(FakePromptRepo):
+            async def get_by_name(self, prompt_type, name):
+                raise RuntimeError("connection pool exhausted")
+
+            async def get_default(self, prompt_type):
+                raise RuntimeError("connection pool exhausted")
+
+        svc = _service(ExplodingRepo())
+        content = await svc.resolve_prompt("sys_prompt", names=["whatever"])
+        assert "{context}" in content  # the bundled sys_prompt template
