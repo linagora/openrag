@@ -13,7 +13,25 @@ Set the version once, and define the digest helper every step below uses:
 
 ```bash
 export VER=v2.1.0   # the tag you just pushed
-dg() { docker buildx imagetools inspect --raw "$1" 2>/dev/null | sha256sum | awk '{print "sha256:"$1}'; }
+
+# Resolve a tag's manifest digest. Returns non-zero and prints nothing when the
+# tag does not exist — do NOT pipe inspect straight into sha256sum: on a failed
+# lookup it hashes empty input and returns
+# sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855,
+# a real-looking digest. Steps 2-4 would then report a missing image as present,
+# and two missing tags would compare equal and pass.
+dg() {
+  local raw
+  raw=$(docker buildx imagetools inspect --raw "$1" 2>/dev/null) || return 1
+  [ -n "$raw" ] || return 1
+  printf '%s' "$raw" | sha256sum | awk '{print "sha256:"$1}'
+}
+```
+
+Check the helper itself before trusting it — this must print `MISSING`:
+
+```bash
+dg ghcr.io/linagora/openrag:v0.0.0-does-not-exist || echo MISSING
 ```
 
 > **Why `--raw | sha256sum` and not `--format '{{.Manifest.Digest}}'`:** buildx
@@ -61,9 +79,18 @@ gh run view "$RUN_ID" --json jobs \
 **FAIL** on any `skipped` — that is the v2.0.1 bug recurring. A hard gate:
 
 ```bash
-gh run view "$RUN_ID" --json jobs --jq '[.jobs[] | select(.conclusion != "success")] | length'
-# must print 0
+bad=$(gh run view "$RUN_ID" --json jobs \
+        --jq '[.jobs[] | select(.conclusion != "success")] | length') || exit 1
+if [ "$bad" -ne 0 ]; then
+  echo "FAIL: $bad job(s) did not conclude success — do not continue" >&2
+  exit 1
+fi
+echo "OK: every job concluded success"
 ```
+
+Written as a gate, not a print: a command that only reports the count still
+exits 0 when the count is non-zero, so a release could continue straight past a
+skipped build job — the very thing this step exists to stop.
 
 If `verify-tag` failed loudly, the tag is not an ancestor of `origin/main` —
 fix the tag placement, do not rerun.
@@ -110,7 +137,13 @@ back-filled from a different build.
 for pair in "ghcr.io/linagora/openrag linagoraai/openrag" \
             "ghcr.io/linagora/openrag-admin-ui linagoraai/openrag-admin-ui"; do
   set -- $pair; a=$(dg "$1:$VER"); b=$(dg "$2:$VER")
-  [ "$a" = "$b" ] && echo "OK    $1 == $2" || echo "MISMATCH $1=$a $2=$b"
+  # The -n guards matter: without them two MISSING tags are both empty, compare
+  # equal, and print OK.
+  if [ -n "$a" ] && [ -n "$b" ] && [ "$a" = "$b" ]; then
+    echo "OK    $1 == $2"
+  else
+    echo "MISMATCH $1=${a:-MISSING} $2=${b:-MISSING}"
+  fi
 done
 ```
 
@@ -120,12 +153,21 @@ done
 
 Steps 2–4 read metadata. This proves the bytes are actually fetchable.
 
+`RepoDigests` entries are `repo@sha256:…`, while `dg` returns a bare
+`sha256:…` — strip the repository prefix before comparing, or the two can never
+match literally.
+
 ```bash
 docker pull "linagoraai/openrag:$VER"
-docker image inspect "linagoraai/openrag:$VER" --format '{{index .RepoDigests 0}}'
+pulled=$(docker image inspect "linagoraai/openrag:$VER" \
+           --format '{{index .RepoDigests 0}}' | cut -d@ -f2)
+registry=$(dg "linagoraai/openrag:$VER") || { echo "FAIL: tag not in registry" >&2; exit 1; }
+[ "$pulled" = "$registry" ] \
+  && echo "OK: pulled digest matches the registry ($pulled)" \
+  || { echo "FAIL: pulled=$pulled registry=$registry" >&2; exit 1; }
 ```
 
-**PASS**: the printed digest equals the Docker Hub digest from step 2.
+**PASS**: `OK`.
 
 ## 6. The image contains the released code
 
@@ -166,14 +208,53 @@ The chart and compose pins are part of the release surface; shipping them
 pointing at the previous version is a silent regression for anyone deploying
 from the tag.
 
+Compare against `$VER` exactly. A filter that merely matches something
+version-shaped is satisfied by a stale pin left at the previous release — which
+is the regression this step is meant to catch.
+
 ```bash
-git show "$VER:infra/charts/openrag-stack/Chart.yaml" | grep -E '^(version|appVersion)'
-git show "$VER:infra/charts/openrag-stack/values.yaml" | grep -nE 'tag: "v[0-9]' 
-git show "$VER:infra/compose/docker-compose.yaml" | grep -nE 'image: linagoraai/'
+fail=0
+# appVersion must be $VER without its leading v
+want_app=${VER#v}
+got_app=$(git show "$VER:infra/charts/openrag-stack/Chart.yaml" \
+            | awk -F'"' '/^appVersion:/{print $2}')
+[ "$got_app" = "$want_app" ] \
+  && echo "OK    appVersion=$got_app" \
+  || { echo "FAIL  appVersion=$got_app want=$want_app"; fail=1; }
+
+# Each OpenRag image in the chart, checked by repository. Do NOT just count
+# version-shaped tags: values.yaml also pins third-party images (vllm, milvus,
+# infinity) whose versions have nothing to do with this release.
+# An empty result means the values layout changed and this check no longer finds
+# the pin — that is a FAIL, not a pass.
+for repo in 'linagora/openrag-ray' 'linagoraai/openrag-admin-ui' 'linagoraai/openrag'; do
+  got=$(git show "$VER:infra/charts/openrag-stack/values.yaml" \
+          | grep -A4 "repository: \"$repo\"$" \
+          | awk -F'"' '/^[[:space:]]*tag:/{print $2; exit}')
+  [ "$got" = "$VER" ] \
+    && echo "OK    $repo -> $got" \
+    || { echo "FAIL  $repo -> ${got:-NOT FOUND} (want $VER)"; fail=1; }
+done
+
+# compose pins (2 expected: openrag, openrag-admin-ui)
+cpins=$(git show "$VER:infra/compose/docker-compose.yaml" \
+          | grep -cE "image: linagoraai/openrag(-admin-ui)?:$VER$")
+[ "$cpins" -eq 2 ] \
+  && echo "OK    2 compose pins at $VER" \
+  || { echo "FAIL  $cpins compose pins at $VER (expected 2)"; fail=1; }
+
+[ "$fail" -eq 0 ] && echo "step 8 PASS" || { echo "step 8 FAIL" >&2; exit 1; }
 ```
 
-**PASS**: every OpenRag image pin reads `$VER`, `appVersion` matches, chart
-`version` was bumped.
+Chart `version` is bumped independently of `appVersion` (it tracks chart
+changes, not the app release), so check it by eye against the previous release
+rather than against `$VER`:
+
+```bash
+git show "$VER:infra/charts/openrag-stack/Chart.yaml" | grep -E '^version:'
+```
+
+**PASS**: `step 8 PASS`, and chart `version` moved.
 
 ---
 
