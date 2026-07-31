@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -15,12 +16,43 @@ ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm"]
 # ``extra`` — validated here so a typo can't persist a nonsensical value.
 _LLM_TOKEN_EXTRA_KEYS = (LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY)
 
+# Allowlist, not a denylist: `name` is a single path segment in every
+# single-endpoint route (see `_normalize_name`), and enumerating unsafe values
+# one at a time as they're discovered — first `/` (#768), then the RFC 3986
+# dot-segments `.`/`..` — never closes the class. Anchoring both ends on
+# alphanumeric rules out `/`, `.`, `..`, and any leading/trailing separator by
+# construction, while `.`/`_`/`-` stay available in the middle for realistic
+# names like `gpt-4.1` or `jina_v3`.
+_NAME_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+_NAME_MAX_LENGTH = 128
+
 
 def _normalize_name(value: str) -> str:
-    """Trim a user-facing registry name and reject blank values."""
+    """Trim a user-facing registry name and reject any value unsafe as a URL path segment.
+
+    ``name`` is embedded as a single path segment in every single-endpoint route
+    (``GET/PUT/DELETE /model-endpoints/{model_type}/{name}``, ``.../set-default``,
+    ``.../reveal-api-key``, ``.../validate``). A value outside ``_NAME_PATTERN``
+    — a ``/`` (splits across path segments), the exact values ``.``/``..``
+    (RFC 3986 dot-segments: browsers and HTTP clients normalize these out of
+    the URL before the request is even sent, resolving to the collection route
+    or dropping the ``model_type`` segment entirely), or anything else that
+    doesn't start/end alphanumeric — would leave the row visible in the list
+    endpoint but permanently unreachable by get/update/delete/set-default,
+    surfacing as a spurious "not found". Percent-encoding never helps: ASGI
+    servers decode ``%2F``/dot-segment escapes before Starlette's router sees
+    the path.
+    """
     value = value.strip()
     if not value:
         raise ValueError("name must be non-empty")
+    if len(value) > _NAME_MAX_LENGTH:
+        raise ValueError(f"name must be at most {_NAME_MAX_LENGTH} characters")
+    if not _NAME_PATTERN.fullmatch(value):
+        raise ValueError(
+            "name must start and end with a letter or digit, and contain only "
+            "letters, digits, '.', '_', or '-' (it is used as a URL path segment)"
+        )
     return value
 
 

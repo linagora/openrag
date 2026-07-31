@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createPartition } from "./partitions";
+import { createPartition, listPartitionMemberCandidates } from "./partitions";
 
 // Minimal Response-like object covering what `request` reads (mirrors client.test.ts).
 function fakeResponse({ status = 200, body = "" }: { status?: number; body?: string } = {}): Response {
@@ -60,5 +60,42 @@ describe("createPartition", () => {
     await createPartition({ name: "p", embedder: "good" });
 
     expect(fetchMock.mock.calls.map(methodOf)).not.toContain("DELETE");
+  });
+});
+
+describe("listPartitionMemberCandidates", () => {
+  it("requests the owner-protected candidate endpoint", async () => {
+    fetchMock.mockResolvedValue(
+      fakeResponse({
+        body: JSON.stringify({
+          candidates: [{ user_id: 2, display_name: "Sam", email: "sam@example.com" }],
+          limit: 10,
+          has_more: true,
+          next_cursor: 30,
+        }),
+      }),
+    );
+
+    await expect(
+      listPartitionMemberCandidates("legal docs", {
+        search: "Sam Lee",
+        cursor: 20,
+        limit: 10,
+      }),
+    ).resolves.toEqual({
+      candidates: [{ user_id: 2, display_name: "Sam", email: "sam@example.com" }],
+      limit: 10,
+      has_more: true,
+      next_cursor: 30,
+    });
+    const requestedUrl = String(fetchMock.mock.calls[0][0]);
+    expect(requestedUrl).toContain("/partition/legal%20docs/users/candidates?");
+    expect(Array.from(new URLSearchParams(requestedUrl.split("?")[1]).entries())).toEqual(
+      expect.arrayContaining([
+        ["search", "Sam Lee"],
+        ["cursor", "20"],
+        ["limit", "10"],
+      ]),
+    );
   });
 });

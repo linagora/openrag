@@ -62,6 +62,24 @@ class UpdatePartitionRequest(BaseModel):
     retrieval_preset: str | None = None
     chat_history_depth: int | None = Field(default=None, ge=1)
     chat_llm: str | None = None
+    # {prompt_type: library_prompt_name} for this partition's generation prompts.
+    # Keys are restricted to the generation types; ``{}`` clears all overrides.
+    generation_prompt_names: dict[str, str] | None = None
+
+    @field_validator("generation_prompt_names")
+    @classmethod
+    def validate_generation_prompt_names(cls, value: dict[str, str] | None, info: ValidationInfo) -> dict[str, str]:
+        value = _reject_explicit_null(info.field_name, value)
+        # query_contextualizer is a query-side prompt selected on the retrieval
+        # preset, not a partition generation prompt (see RetrievalPipelineConfig).
+        allowed = {"sys_prompt", "spoken_style_answer"}
+        bad = set(value) - allowed
+        if bad:
+            raise ValueError(f"generation_prompt_names keys must be one of {sorted(allowed)}; got {sorted(bad)}")
+        for k, v in value.items():
+            if not isinstance(v, str) or not v.strip():
+                raise ValueError(f"generation_prompt_names['{k}'] must be a non-empty prompt name")
+        return value
 
     @field_validator("embedder", "indexation_preset", "retrieval_preset")
     @classmethod
@@ -113,6 +131,7 @@ class PartitionDetailResponse(BaseModel):
     document_count: int = 0
     chat_history_depth: int = 4
     chat_llm: str | None = None
+    generation_prompt_names: dict[str, str] = Field(default_factory=dict)
 
 
 __all__ = [

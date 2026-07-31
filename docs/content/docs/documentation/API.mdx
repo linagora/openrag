@@ -383,9 +383,12 @@ Manage who can access a partition and with which role — all **owner** only.
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/partition/{partition}/users` | GET | List members → `{ "members": [...] }` |
-| `/partition/{partition}/users` | POST | Add a member — form fields `user_id` (int), `role` (default `viewer`) → `201` |
+| `/partition/{partition}/users/candidates` | GET | Search non-members by display-name prefix or exact user ID → paginated identities |
+| `/partition/{partition}/users` | POST | Add a new member → `201`; returns `409` if already present |
 | `/partition/{partition}/users/{user_id}` | PATCH | Update a member's role — form field `role` → `200` |
 | `/partition/{partition}/users/{user_id}` | DELETE | Remove a member → `204` |
+
+`POST` no longer updates an existing member's role. Use the `PATCH` endpoint when changing a role.
 
 #### Document Relationships
 
@@ -507,6 +510,73 @@ PUT    /presets/{preset_type}/{name}
 DELETE /presets/{preset_type}/{name}
 ```
 `PUT` accepts a partial body (`name` to rename and/or `config`; at least one required) and returns the updated preset. `DELETE` returns `204 No Content`.
+
+---
+
+### 📝 Prompt Library
+
+Every prompt the pipeline sends to a model is a stored, editable row rather than a bundled file. On first boot each type is seeded from its bundled template as that type's **default**; an admin can add named variants and select one per preset or per partition.
+
+All routes are prefixed with **`/prompts`** and require the **admin** role. `prompt_type` is one of `sys_prompt` | `spoken_style_answer` | `query_contextualizer` | `chunk_contextualizer` | `image_captioning` | `hyde` | `multi_query` | `topic_tagger`.
+
+**Resolution order** for a given type: the name selected for the request → the type's global default → the bundled template. A selection naming a prompt that no longer exists falls back to the default rather than failing.
+
+**Where a prompt is selected** — each setting lives with the thing it configures:
+
+| Prompt type | Selected on |
+|---|---|
+| `sys_prompt`, `spoken_style_answer` | partition — `generation_prompt_names` |
+| `query_contextualizer`, `hyde`, `multi_query` | retrieval preset — `*_prompt_name` |
+| `chunk_contextualizer`, `image_captioning`, `topic_tagger` | indexation preset — `*_prompt_name` |
+
+#### Create a prompt
+```http
+POST /prompts/
+```
+**Body:** `prompt_type`, `name`, `content`, `is_default` (default `false`). Returns `201 Created`, or `409` if that `(prompt_type, name)` already exists.
+
+Types rendered as templates (`sys_prompt`, `spoken_style_answer`, `query_contextualizer`, `hyde`, `multi_query`) accept only their own **plain** `{placeholders}` — no conversion (`!r`), format spec (`:>10`) or attribute access — and a violation returns `422` at write time rather than failing later at render. Escape a literal brace as `{{` / `}}`. The remaining types are sent to the model verbatim, so any text is valid.
+
+```bash frame="none"
+curl -X POST http://localhost:8080/prompts/ \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt_type": "sys_prompt",
+    "name": "legal-assistant",
+    "content": "Answer strictly from the context.\n{context}\nToday is {current_date}."
+  }'
+```
+
+#### List / Get / Update / Delete
+```http
+GET    /prompts/                 # ?prompt_type= to filter, ?offset= &limit= to page (limit ≤ 500)
+GET    /prompts/{prompt_id}
+PATCH  /prompts/{prompt_id}      # any of name, content, is_default
+DELETE /prompts/{prompt_id}      # 204 No Content; refused for a type's current default
+```
+List entries carry `used_by` — the number of partitions that resolve to that prompt, counting those that fall back to it as the default.
+
+#### Promote to default for its type
+```http
+PUT /prompts/{prompt_id}/default
+```
+Clears the previous default for that type and promotes this one, atomically.
+
+#### Selecting a prompt for a partition
+```http
+PATCH /partition/{partition}
+```
+Send `generation_prompt_names`, a map of `{prompt_type: name}` restricted to `sys_prompt` and `spoken_style_answer`. Each name must exist, or the request returns `422`. Send `{}` to clear the selection and fall back to the defaults.
+
+```bash frame="none"
+curl -X PATCH http://localhost:8080/partition/my-partition \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"generation_prompt_names": {"sys_prompt": "legal-assistant"}}'
+```
+
+Preset-scoped prompts are selected the same way, by putting the `*_prompt_name` field in the preset's `config` (see [Pipeline Presets](#-pipeline-presets)).
 
 ---
 

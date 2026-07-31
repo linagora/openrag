@@ -23,8 +23,13 @@ async def topic_tag_stage(
 
         filename = str(row.get("filename") or "")
         language = str(row.get("language") or row.get("lang") or "en")
+        # DB-resolved per-partition prompt for this file, if any; otherwise the
+        # tagger falls back to its own (disk-loaded) default.
+        system_prompt = row.get("topic_tagger_prompt")
         row["topic_tags"] = await run_with_optional_timeout(
-            lambda: topic_tagger.tag(chunks, filename=filename, max_tags=max_tags, lang=language),
+            lambda: topic_tagger.tag(
+                chunks, filename=filename, max_tags=max_tags, lang=language, system_prompt=system_prompt
+            ),
             timeout,
         )
         row["stage"] = "topic_tagged"

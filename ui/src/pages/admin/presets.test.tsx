@@ -26,7 +26,7 @@ vi.mock("@/lib/api/presets", async () => {
 });
 
 vi.mock("@/lib/api/prompts", () => ({
-  listPrompts: vi.fn().mockResolvedValue({ prompts: [] }),
+  listPrompts: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("@/lib/api/models", () => ({

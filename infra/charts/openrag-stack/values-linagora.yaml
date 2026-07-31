@@ -1,0 +1,165 @@
+persistence:
+  storageClass: longhorn
+  accessMode: ReadWriteMany
+  annotations:
+    "helm.sh/resource-policy": keep
+
+# values.yaml wires the postgresql/milvus sub-charts' storageClass through a
+# YAML alias to persistence.storageClass above — aliases resolve when
+# values.yaml is parsed, before Helm merges this overlay, so the top-level
+# override alone never reaches them. Set it explicitly per sub-chart here too.
+postgresql:
+  primary:
+    persistence:
+      storageClass: longhorn
+
+milvus:
+  minio:
+    persistence:
+      storageClass: longhorn
+  etcd:
+    persistence:
+      storageClass: longhorn
+
+openrag:
+  ingress:
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/rewrite-target: /$1
+      nginx.ingress.kubernetes.io/use-regex: "true"
+      nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+
+ray:
+  # This overlay runs the separate RayCluster (GPU node-selectors/resources
+  # below) rather than the embedded ray.init() fallback — both this flag and
+  # env.config.ENABLE_RAY_SERVE must be enabled together (see values.yaml).
+  enabled: true
+  nodeSelector:
+    gpu-role: serving
+  resources:
+    head:
+      limits:
+        nvidia.com/gpu: 1
+    worker:
+      limits:
+        nvidia.com/gpu: 1
+
+env:
+  config:
+    ENABLE_RAY_SERVE: "true"
+
+reranker:
+  nodeSelector:
+    gpu-role: serving
+  runtimeClassName: nvidia
+
+vllm:
+  # Single edit point for the HF_TOKEN secret name — anchor reused in the 4
+  # hf_token.secretName entries below. Must stay in sync with fullnameOverride
+  # ("openrag") in values.yaml; keep the full modelSpec array intact when
+  # changing this (Helm replaces lists wholesale, it doesn't merge by index —
+  # see templates/NOTES.txt).
+  hfTokenSecretName: &hfTokenSecret "openrag-env-secrets"
+  servingEngineSpec:
+    modelSpec:
+      - name: "embedder"
+        repository: "vllm/vllm-openai"
+        tag: "latest"
+        modelURL: "Qwen/Qwen3-Embedding-0.6B"
+        replicaCount: 1
+        requestCPU: 4
+        requestMemory: "16Gi"
+        requestGPU: 1
+        limitCPU: 4
+        limitMemory: "16Gi"
+        hf_token:
+          secretName: *hfTokenSecret
+          secretKey: HF_TOKEN
+        vllmConfig:
+          gpuMemoryUtilization: 0.3
+          extraArgs: ["--trust-remote-code", "--task", "embed"]
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: gpu-role
+                operator: In
+                values: ["serving"]
+
+      - name: "whisper"
+        repository: "ghcr.io/linagora/vllm-whisper"
+        tag: "latest"
+        modelURL: "openai/whisper-large-v3-turbo"
+        replicaCount: 1
+        requestCPU: 4
+        requestMemory: "16Gi"
+        requestGPU: 1
+        limitCPU: 4
+        limitMemory: "16Gi"
+        hf_token:
+          secretName: *hfTokenSecret
+          secretKey: HF_TOKEN
+        vllmConfig:
+          gpuMemoryUtilization: 0.5
+          extraArgs: ["--trust-remote-code", "--async-scheduling"]
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: gpu-role
+                operator: In
+                values: ["serving"]
+
+      - name: "llm"
+        repository: "vllm/vllm-openai"
+        tag: "latest"
+        modelURL: "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
+        replicaCount: 0
+        requestCPU: 8
+        requestMemory: "32Gi"
+        requestGPU: 2
+        limitCPU: 8
+        limitMemory: "32Gi"
+        hf_token:
+          secretName: *hfTokenSecret
+          secretKey: HF_TOKEN
+        vllmConfig:
+          v1: 1
+          tensorParallelSize: 2
+          pipelineParallelSize: 1
+          maxModelLen: 32768
+          extraArgs: ["--trust-remote-code"]
+        shmSize: "20Gi"
+        raySpec:
+          headNode:
+            requestCPU: 8
+            requestMemory: "32Gi"
+            requestGPU: 2
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: gpu-role
+                operator: In
+                values: ["llm"]
+        pvcStorage: "50Gi"
+
+      - name: "vlm"
+        repository: "vllm/vllm-openai"
+        tag: "v0.11.2"
+        modelURL: "Qwen/Qwen2.5-VL-7B-Instruct"
+        replicaCount: 1
+        requestCPU: 8
+        requestMemory: "32Gi"
+        requestGPU: 1
+        limitCPU: 8
+        limitMemory: "32Gi"
+        hf_token:
+          secretName: *hfTokenSecret
+          secretKey: HF_TOKEN
+        vllmConfig:
+          v1: 1
+          tensorParallelSize: 1
+          pipelineParallelSize: 1
+          maxModelLen: 8192
+          extraArgs: ["--trust-remote-code"]
+        shmSize: "20Gi"
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: gpu-role
+                operator: In
+                values: ["vlm"]
