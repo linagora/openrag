@@ -69,6 +69,9 @@ class VectorStoreSearcher(RetrievalSearcher):
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
     ) -> list[Chunk]:
+        # Collection is created lazily on first insert (#508); absent means no chunks.
+        if not await self._store.collection_exists(self._collection):
+            return []
         (embedding,) = await self._embedder.embed([query])
         filters: dict[str, Any] = {"partition": partition}
         if filter:
@@ -100,6 +103,8 @@ class VectorStoreSearcher(RetrievalSearcher):
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
     ) -> list[Chunk]:
+        if not await self._store.collection_exists(self._collection):  # see search()
+            return []
         embeddings = await self._embedder.embed(queries)
         filters: dict[str, Any] = {"partition": partition}
         if filter:
