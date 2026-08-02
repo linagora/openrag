@@ -263,7 +263,7 @@ async def stream_with_source_filtering(
         final_clean, citations = pending, None
 
     filtered = filter_sources_by_citations(sources, citations)
-    extra_payload = {"sources": filtered, "retrieved_sources": sources}
+    extra_payload = {"sources": filtered, "all_retrieved_sources": sources}
     if not saw_done:
         extra_payload["truncated"] = True
         logger.warning(

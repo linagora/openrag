@@ -136,7 +136,7 @@ The RAG pipeline filters out false-positive sources by having the LLM self-repor
 4. `filter_sources_by_citations()` (`openrag/core/utils/source_filtering.py`) filters the source metadata to only include cited sources; if no `[Sources: ...]` tag is found at all, every retrieved source is kept instead (a missing tag means the model didn't report citations, not that it used none)
 5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
 
-The `extra` field in API responses is a JSON string: `{"sources": [filtered_source_list], "retrieved_sources": [all_retrieved_sources]}`. `retrieved_sources` always carries every source retrieval produced, unfiltered by citation — useful for clients that want to show what was searched regardless of what the model cited.
+The `extra` field in API responses is a JSON string: `{"sources": [filtered_source_list], "all_retrieved_sources": [all_retrieved_sources]}`. `all_retrieved_sources` always carries every source retrieval produced, unfiltered by citation — useful for debugging and RAG evaluation, regardless of what the model cited.
 
 ### API Routers (`openrag/api/routers/`)
 
