@@ -79,15 +79,15 @@ def extract_and_strip_sources_block(
     return cleaned, set()
 
 
-def filter_sources_by_citations(
-    sources: list,
-    citations: set[int] | None,
-    *,
-    allow_uncited: bool = False,
-) -> list:
-    """Keep only sources whose 1-based index was cited."""
+def filter_sources_by_citations(sources: list, citations: set[int] | None) -> list:
+    """Keep only sources whose 1-based index was cited.
+
+    No tag at all (``citations is None``) means the model didn't report which
+    sources it used, not that it used none — the answer may still be grounded
+    in them, so keep everything rather than silently dropping real sources.
+    """
     if citations is None:
-        return sources if allow_uncited else []
+        return sources
     if not citations:
         return []
     return [source for i, source in enumerate(sources, start=1) if i in citations]
@@ -112,7 +112,6 @@ async def stream_with_source_filtering(
     model_name: str,
     buffer_size: int | None = None,
     *,
-    allow_uncited_sources: bool = False,
     citation_protocol_active: bool = True,
 ):
     """Process an LLM SSE stream and, when active, strip source tags.
@@ -263,7 +262,7 @@ async def stream_with_source_filtering(
     else:
         final_clean, citations = pending, None
 
-    filtered = filter_sources_by_citations(sources, citations, allow_uncited=allow_uncited_sources)
+    filtered = filter_sources_by_citations(sources, citations)
     extra_payload = {"sources": filtered}
     if not saw_done:
         extra_payload["truncated"] = True

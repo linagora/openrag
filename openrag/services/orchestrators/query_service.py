@@ -655,7 +655,7 @@ class QueryService:
         else:
             payload, docs, web_results, citation_protocol_active = await self._prepare_chat(partitions, payload, llm)
         sources = prepare_sources(docs, web_results)
-        structured_output = _allows_uncited_sources(payload)
+        structured_output = _is_structured_output(payload)
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
         chunk = await llm.chat(payload["messages"], **_sampling(payload))
@@ -669,15 +669,7 @@ class QueryService:
         else:
             clean, citations = content, None
         chunk["choices"][0]["message"]["content"] = clean
-        chunk["extra"] = json.dumps(
-            {
-                "sources": filter_sources_by_citations(
-                    sources,
-                    citations,
-                    allow_uncited=structured_output,
-                )
-            }
-        )
+        chunk["extra"] = json.dumps({"sources": filter_sources_by_citations(sources, citations)})
         return chunk
 
     async def chat_stream(
@@ -697,7 +689,7 @@ class QueryService:
         else:
             payload, docs, web_results, citation_protocol_active = await self._prepare_chat(partitions, payload, llm)
         sources = prepare_sources(docs, web_results)
-        structured_output = _allows_uncited_sources(payload)
+        structured_output = _is_structured_output(payload)
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
         llm_stream = llm.stream_chat(payload["messages"], **_sampling(payload))
@@ -705,7 +697,6 @@ class QueryService:
             llm_stream,
             sources,
             model_name,
-            allow_uncited_sources=structured_output,
             citation_protocol_active=citation_protocol_active and not structured_output,
         ):
             yield sse_line
@@ -725,7 +716,7 @@ class QueryService:
         else:
             payload, docs = await self._prepare_completions(partitions, payload, llm)
         sources = prepare_sources(docs, [])
-        structured_output = _allows_uncited_sources(payload)
+        structured_output = _is_structured_output(payload)
 
         resp = await llm.generate(payload["prompt"], **_sampling(payload, key="prompt"))
         text = resp.get("choices", [{}])[0].get("text", "") or ""
@@ -737,15 +728,7 @@ class QueryService:
         else:
             clean, citations = text, None
         resp["choices"][0]["text"] = clean
-        resp["extra"] = json.dumps(
-            {
-                "sources": filter_sources_by_citations(
-                    sources,
-                    citations,
-                    allow_uncited=structured_output,
-                )
-            }
-        )
+        resp["extra"] = json.dumps({"sources": filter_sources_by_citations(sources, citations)})
         return resp
 
 
@@ -789,7 +772,7 @@ def _sampling(payload: dict, key: str = "messages") -> dict:
     return {k: v for k, v in payload.items() if k not in drop}
 
 
-def _allows_uncited_sources(payload: dict) -> bool:
+def _is_structured_output(payload: dict) -> bool:
     """Structured output cannot carry the plain-text citation marker."""
     response_format = payload.get("response_format")
     return isinstance(response_format, dict) and response_format.get("type") in {"json_object", "json_schema"}

@@ -407,7 +407,7 @@ async def test_chat_direct_mode_skips_retrieval():
     out = await svc.chat(
         partitions=None,
         payload={"messages": [{"role": "user", "content": "hi"}], "metadata": {}},
-        prepare_sources=lambda d, w: [{"source_type": "document"}],
+        prepare_sources=lambda d, w: [{"source_type": "document"}] if d or w else [],
         model_name="m1",
     )
     assert called["n"] == 0  # no retrieval in direct mode
@@ -487,7 +487,7 @@ async def test_chat_conversational_request_skips_partition_retrieval():
     out = await svc.chat(
         partitions=["p"],
         payload={"messages": [{"role": "user", "content": "How can you help me?"}], "metadata": {}},
-        prepare_sources=lambda d, w: [{"source_type": "document"}],
+        prepare_sources=lambda d, w: [{"source_type": "document"}] if d or w else [],
         model_name="m",
     )
 
@@ -569,7 +569,8 @@ async def test_chat_inconsistent_classifier_result_prefers_supplied_query():
 
 
 @pytest.mark.asyncio
-async def test_chat_without_citation_does_not_attribute_retrieved_sources():
+async def test_chat_without_citation_keeps_retrieved_sources():
+    """No tag at all means the model didn't report citations, not that the answer is unsourced."""
     svc = _svc(llm=FakeLLM(chat_responses=["A general answer with no citation marker."]))
     sources = [{"source_type": "document", "filename": "unrelated.pdf"}]
 
@@ -580,7 +581,7 @@ async def test_chat_without_citation_does_not_attribute_retrieved_sources():
         model_name="m",
     )
 
-    assert json.loads(out["extra"])["sources"] == []
+    assert json.loads(out["extra"])["sources"] == sources
 
 
 @pytest.mark.asyncio
@@ -966,7 +967,7 @@ async def test_complete_direct_mode_preserves_literal_source_marker():
     out = await svc.complete(
         partitions=None,
         payload={"prompt": "do x"},
-        prepare_sources=lambda d, w: [{"x": 1}],
+        prepare_sources=lambda d, w: [{"x": 1}] if d or w else [],
     )
     assert out["choices"][0]["text"] == answer
     assert json.loads(out["extra"])["sources"] == []
