@@ -295,6 +295,18 @@ class TestStreamWithSourceFiltering:
         assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
 
     @pytest.mark.asyncio
+    async def test_retrieved_sources_includes_uncited_ones(self):
+        """`retrieved_sources` always carries every candidate, unfiltered by citation."""
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_chunk("\n[Sources: 1, 3]"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert _parse_finish_extra(result)["retrieved_sources"] == self.SOURCES
+
+    @pytest.mark.asyncio
     async def test_content_and_finish_reason_in_same_chunk_keeps_last_token(self):
         """A provider that packs the final token and finish_reason into one chunk
         must not lose that token (regression: `Hello ` + final `world` → `Hello`)."""

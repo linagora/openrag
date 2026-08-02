@@ -458,8 +458,9 @@ async def test_chat_with_partition_retrieves_and_filters_sources():
         prepare_sources=lambda d, w: sources,
         model_name="m",
     )
-    filtered = json.loads(out["extra"])["sources"]
-    assert filtered == [{"source_type": "document", "n": 1}]  # only cited source 1
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == [{"source_type": "document", "n": 1}]  # only cited source 1
+    assert extra["retrieved_sources"] == sources  # unfiltered, everything retrieved
 
 
 @pytest.mark.asyncio

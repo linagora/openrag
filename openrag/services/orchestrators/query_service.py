@@ -669,7 +669,9 @@ class QueryService:
         else:
             clean, citations = content, None
         chunk["choices"][0]["message"]["content"] = clean
-        chunk["extra"] = json.dumps({"sources": filter_sources_by_citations(sources, citations)})
+        chunk["extra"] = json.dumps(
+            {"sources": filter_sources_by_citations(sources, citations), "retrieved_sources": sources}
+        )
         return chunk
 
     async def chat_stream(
@@ -728,7 +730,9 @@ class QueryService:
         else:
             clean, citations = text, None
         resp["choices"][0]["text"] = clean
-        resp["extra"] = json.dumps({"sources": filter_sources_by_citations(sources, citations)})
+        resp["extra"] = json.dumps(
+            {"sources": filter_sources_by_citations(sources, citations), "retrieved_sources": sources}
+        )
         return resp
 
 
