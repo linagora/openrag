@@ -446,7 +446,12 @@ Accepts OpenAI-compatible chat completion requests with:
 
 **Response:**
 Returns OpenAI-compatible response with additional `extra` field containing:
-- `sources`: Array of source documents with metadata and URLs
+- `sources`: Array of source documents actually cited by the model (or every
+  retrieved source if it didn't report citations — see `citations_reported`)
+- `all_retrieved_sources`: Array of every source retrieval returned, unfiltered
+  by citation — for debugging and evaluation
+- `citations_reported`: `true` only if the model emitted a citations tag
+  (even an empty one); `false` means `sources` fell back to keeping everything
 
 **Streaming:**
 Set `stream: true` for Server-Sent Events (SSE) streaming responses.
@@ -552,7 +557,12 @@ Accepts OpenAI-compatible completion requests with:
 
 **Response:**
 Returns OpenAI-compatible response with additional `extra` field containing:
-- `sources`: Array of source documents with metadata and URLs
+- `sources`: Array of source documents actually cited by the model (or every
+  retrieved source if it didn't report citations — see `citations_reported`)
+- `all_retrieved_sources`: Array of every source retrieval returned, unfiltered
+  by citation — for debugging and evaluation
+- `citations_reported`: `true` only if the model emitted a citations tag
+  (even an empty one); `false` means `sources` fell back to keeping everything
 
 **Note:** Streaming is not supported for this endpoint.
 """,
