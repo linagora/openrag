@@ -37,6 +37,9 @@ spec:
                 # Keep venv writes group-writable (GID 0) so a later sync under a
                 # different APP_UID can still remove/replace owner-only entries
                 # left by a previous sync. See infra/scripts/entrypoint.sh.
+                # NOTE: only fixes files written from here on — a PVC provisioned
+                # before this fix still has owner-only entries and needs to be
+                # recreated once after upgrading.
                 umask 002
                 if [ -f /app/.venv/.ready ]; then
                   echo "Existing env detected, skipping install."
