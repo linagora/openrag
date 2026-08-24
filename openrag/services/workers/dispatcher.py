@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import traceback
 import uuid
 from datetime import UTC, datetime
@@ -15,13 +16,14 @@ from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.exceptions import ConflictError
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
-from services.workers.ray_utils import call_ray_actor_with_timeout
+from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 
 logger = get_logger()
 
 DEFAULT_TIMEOUT = 60.0
+_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS = 30.0
 _REQUIRE_EXISTING_PARTITION_KWARG = "require_existing_partition"
 
 
@@ -75,6 +77,16 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=task_description,
         )
 
+    async def _call_method(self, submit: Any, task_description: str) -> Any:
+        """Submit an actor call inside the availability boundary."""
+        from services.workers.ray_utils import call_ray_actor_method_with_timeout
+
+        return await call_ray_actor_method_with_timeout(
+            submit=submit,
+            timeout=self._timeout,
+            task_description=task_description,
+        )
+
     async def _set_queued_details(
         self,
         task_id: str,
@@ -86,24 +98,25 @@ class WorkerDispatcher(IndexingDispatcher):
     ) -> bool:
         remote = _remote_actor_method(self._tsm, "set_queued_details")
         if remote is not None:
-            accepted = await self._call(
-                remote(
+            accepted = await retry_idempotent_ray_actor_method(
+                submit=lambda: remote(
                     task_id,
                     file_id=file_id,
                     partition=partition,
                     metadata=metadata,
                     user_id=user_id,
                 ),
+                recovery_timeout=self._timeout,
                 task_description=f"set_queued_details({task_id})",
             )
             return accepted is not False
 
-        await self._call(
-            self._tsm.set_state.remote(task_id, "QUEUED"),
+        await self._call_method(
+            lambda: self._tsm.set_state.remote(task_id, "QUEUED"),
             task_description=f"set_state({task_id})",
         )
-        await self._call(
-            self._tsm.set_details.remote(
+        await self._call_method(
+            lambda: self._tsm.set_details.remote(
                 task_id,
                 file_id=file_id,
                 partition=partition,
@@ -114,23 +127,55 @@ class WorkerDispatcher(IndexingDispatcher):
         )
         return True
 
-    async def _begin_file_delete_fence(self, *, file_id: str, partition: str) -> None:
+    async def _begin_file_delete_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
         remote = _remote_actor_method(self._tsm, "begin_file_delete")
         if remote is None:
             raise RuntimeError("TaskStateManager does not expose file delete fencing for delete cleanup")
-        await self._call(
-            remote(partition=partition, file_id=file_id),
+        await retry_idempotent_ray_actor_method(
+            lambda: remote(partition=partition, file_id=file_id, fence_id=fence_id),
+            recovery_timeout=self._timeout,
             task_description=f"begin_file_delete({partition}, {file_id})",
         )
 
-    async def _end_file_delete_fence(self, *, file_id: str, partition: str) -> None:
+    async def _end_file_delete_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
         remote = _remote_actor_method(self._tsm, "end_file_delete")
         if remote is None:
             raise RuntimeError("TaskStateManager does not expose file delete fencing for delete cleanup")
-        await self._call(
-            remote(partition=partition, file_id=file_id),
+        await retry_idempotent_ray_actor_method(
+            lambda: remote(partition=partition, file_id=file_id, fence_id=fence_id),
+            recovery_timeout=self._timeout,
             task_description=f"end_file_delete({partition}, {file_id})",
         )
+
+    async def _renew_file_delete_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
+        remote = _remote_actor_method(self._tsm, "renew_file_delete")
+        if remote is None:
+            raise RuntimeError("TaskStateManager does not expose renewable file delete fencing")
+        while True:
+            await asyncio.sleep(_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS)
+            renewed = await retry_idempotent_ray_actor_method(
+                lambda: remote(partition=partition, file_id=file_id, fence_id=fence_id),
+                recovery_timeout=self._timeout,
+                task_description=f"renew_file_delete({partition}, {file_id})",
+            )
+            if renewed is not True:
+                raise RuntimeError("File delete fence lease was lost during cleanup")
+
+    async def _delete_with_renewable_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
+        delete_task = asyncio.create_task(self._delete_file_with_fence(file_id=file_id, partition=partition))
+        renewal_task = asyncio.create_task(
+            self._renew_file_delete_fence(file_id=file_id, partition=partition, fence_id=fence_id)
+        )
+        try:
+            done, _ = await asyncio.wait({delete_task, renewal_task}, return_when=asyncio.FIRST_COMPLETED)
+            if renewal_task in done:
+                await renewal_task
+            await delete_task
+        finally:
+            for task in (delete_task, renewal_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(delete_task, renewal_task, return_exceptions=True)
 
     async def dispatch_indexing(
         self,
@@ -226,8 +271,8 @@ class WorkerDispatcher(IndexingDispatcher):
                 allow_legacy_retry=allow_legacy_require_existing_partition_retry,
             )
 
-            registered = await self._call(
-                self._tsm.set_object_ref.remote(task_id, {"ref": task}),
+            registered = await self._call_method(
+                lambda: self._tsm.set_object_ref.remote(task_id, {"ref": task}),
                 task_description=f"set_object_ref({task_id})",
             )
             if registered is False:
@@ -261,8 +306,8 @@ class WorkerDispatcher(IndexingDispatcher):
         metadata = dict(task_details["metadata"])
         metadata[TASK_FINISHED_AT_METADATA_KEY] = _utc_now_iso()
         try:
-            await self._call(
-                self._tsm.set_details.remote(task_id, **{**task_details, "metadata": metadata}),
+            await self._call_method(
+                lambda: self._tsm.set_details.remote(task_id, **{**task_details, "metadata": metadata}),
                 task_description=f"set_finished_at({task_id})",
             )
         except Exception as exc:
@@ -324,13 +369,13 @@ class WorkerDispatcher(IndexingDispatcher):
     async def _mark_submit_failed(self, task_id: str, tb: str) -> None:
         set_failed = getattr(self._tsm, "set_failed_if_not_cancelled", None)
         if set_failed is not None:
-            await self._call(
-                set_failed.remote(task_id, tb),
+            await self._call_method(
+                lambda: set_failed.remote(task_id, tb),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )
             return
-        await self._call(
-            self._tsm.set_state.remote(task_id, "FAILED"),
+        await self._call_method(
+            lambda: self._tsm.set_state.remote(task_id, "FAILED"),
             task_description=f"set_state({task_id}, FAILED)",
         )
 
@@ -376,16 +421,17 @@ class WorkerDispatcher(IndexingDispatcher):
         return False
 
     async def delete_file(self, file_id: str, partition: str) -> None:
-        await self._begin_file_delete_fence(file_id=file_id, partition=partition)
+        fence_id = uuid.uuid4().hex
+        await self._begin_file_delete_fence(file_id=file_id, partition=partition, fence_id=fence_id)
         delete_failed = False
         try:
-            await self._delete_file_with_fence(file_id=file_id, partition=partition)
+            await self._delete_with_renewable_fence(file_id=file_id, partition=partition, fence_id=fence_id)
         except Exception:
             delete_failed = True
             raise
         finally:
             try:
-                await self._end_file_delete_fence(file_id=file_id, partition=partition)
+                await self._end_file_delete_fence(file_id=file_id, partition=partition, fence_id=fence_id)
             except Exception as exc:
                 logger.warning(
                     "Failed to release file delete fence",
@@ -539,22 +585,22 @@ class WorkerDispatcher(IndexingDispatcher):
         }
 
     async def get_task_state(self, task_id: str) -> str | None:
-        return await self._call(
-            self._tsm.get_state.remote(task_id),
+        return await self._call_method(
+            lambda: self._tsm.get_state.remote(task_id),
             task_description=f"get_state({task_id})",
         )
 
     async def get_task_error(self, task_id: str) -> str | None:
-        return await self._call(
-            self._tsm.get_error.remote(task_id),
+        return await self._call_method(
+            lambda: self._tsm.get_error.remote(task_id),
             task_description=f"get_error({task_id})",
         )
 
     async def cancel_task(self, task_id: str) -> bool:
         import ray
 
-        obj_ref = await self._call(
-            self._tsm.get_object_ref.remote(task_id),
+        obj_ref = await self._call_method(
+            lambda: self._tsm.get_object_ref.remote(task_id),
             task_description=f"get_object_ref({task_id})",
         )
         if obj_ref is None:
@@ -565,14 +611,23 @@ class WorkerDispatcher(IndexingDispatcher):
         # back and the task would be stuck active forever (a zombie).
         # TaskStateManager keeps CANCELLED sticky, so a worker that starts in
         # this small window cannot report active/success after the cancel claim.
-        cancelled = await self._call(
-            self._tsm.set_cancelled_if_active.remote(task_id),
+        cancelled = await self._call_method(
+            lambda: self._tsm.set_cancelled_if_active.remote(task_id),
             task_description=f"set_cancelled_if_active({task_id})",
         )
         if not cancelled:
-            return False
+            state = await self.get_task_state(task_id)
+            if state != "CANCELLED":
+                return False
 
         ray.cancel(obj_ref["ref"], recursive=True)
+        finish_cancellation = _remote_actor_method(self._tsm, "finish_cancellation")
+        if finish_cancellation is not None:
+            await retry_idempotent_ray_actor_method(
+                submit=lambda: finish_cancellation(task_id),
+                recovery_timeout=self._timeout,
+                task_description=f"finish_cancellation({task_id})",
+            )
         return True
 
 
