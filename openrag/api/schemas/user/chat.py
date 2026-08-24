@@ -43,8 +43,10 @@ class OpenAIChatCompletionRequest(BaseModel):
             "spoken_style_answer": False,
             "websearch": False,
             "llm_override": None,
+            "include_all_retrieved_sources": False,
         },
-        description="Extra custom parameters. Supports 'llm_override' object with an optional 'model' to override the downstream model name. The LLM endpoint and credentials are fixed by server configuration and cannot be overridden by the client.",
+        description="Extra custom parameters. Supports 'llm_override' object with an optional 'model' to override the downstream model name. The LLM endpoint and credentials are fixed by server configuration and cannot be overridden by the client. "
+        "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval set to the response's extra.all_retrieved_sources — off by default since it can be large; opt in only for debugging/evaluation.",
     )
 
     @model_validator(mode="after")
@@ -84,3 +86,12 @@ class OpenAICompletionRequest(BaseModel):
     stream: bool | None = Field(False)
     temperature: float | None = Field(0.3)
     top_p: float | None = Field(1.0)
+    metadata: dict[str, Any] | None = Field(
+        {
+            "spoken_style_answer": False,
+            "llm_override": None,
+            "include_all_retrieved_sources": False,
+        },
+        description="Extra custom parameters. Supports 'llm_override' object with an optional 'model' to override the downstream model name. The LLM endpoint and credentials are fixed by server configuration and cannot be overridden by the client. "
+        "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval set to the response's extra.all_retrieved_sources — off by default since it can be large; opt in only for debugging/evaluation.",
+    )
