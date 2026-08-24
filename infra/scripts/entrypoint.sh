@@ -30,6 +30,15 @@ if [ "$(id -u)" = "0" ]; then
   exec setpriv --reuid "$APP_UID" --regid 0 --clear-groups /app/entrypoint.sh "$@"
 fi
 
+# The persisted openrag_venv volume can be re-synced by different APP_UIDs
+# across the container's lifetime (e.g. a locally-built image bakes in the
+# host UID while a pulled/CI-built image bakes in the Dockerfile default) —
+# both share GID 0. Default umask (022) makes `uv sync` create new venv
+# entries owner-writable only, so a later sync under a different UID can't
+# remove/replace them ("Permission denied" on __editable__*.pth). Force
+# group-writable new files/dirs so any GID-0 UID can always resync.
+umask 002
+
 ENV_ARGS=()
 if [[ -n "${SHARED_ENV}" ]]; then
   ENV_ARGS+=("--env-file=${SHARED_ENV}")
