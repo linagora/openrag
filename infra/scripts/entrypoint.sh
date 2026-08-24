@@ -37,6 +37,9 @@ fi
 # entries owner-writable only, so a later sync under a different UID can't
 # remove/replace them ("Permission denied" on __editable__*.pth). Force
 # group-writable new files/dirs so any GID-0 UID can always resync.
+# NOTE: this only fixes files written from here on — an openrag_venv volume
+# that already existed before this fix still has owner-only entries and needs
+# to be recreated once after upgrading (delete the volume / let it resync).
 umask 002
 
 ENV_ARGS=()
