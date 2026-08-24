@@ -476,8 +476,11 @@ class QueryService:
             partition = [scope.partition]
             filter_params = {"file_id": scope.file_ids}
         elif attachment_ids and partition:
-            # No security check on the ids: file_id is ANDed with the
-            # server-fixed partition, so a foreign id can never match.
+            # The ids need no ownership check of their own: file_id is ANDed with
+            # the server-fixed partition, so a foreign id can never match. The one
+            # exception is the "all" wildcard, whose lookup is deliberately
+            # unscoped — safe only because "all" reaches this layer solely for a
+            # SUPER_ADMIN_MODE admin (see _existing_file_ids).
             indexed_attachment_ids = await self._existing_file_ids(attachment_ids, partition)
             filter_params = {"file_id": indexed_attachment_ids}
 
@@ -581,7 +584,10 @@ class QueryService:
         return _PrepareChatResult(payload, docs, web_results, retrieved_docs, retrieved_web_results, True, indexed_attachment_ids)
 
     async def _existing_file_ids(self, file_ids: list[str], partitions: list[str]) -> list[str]:
-        """Order-preserving subset of ``file_ids`` indexed in ``partitions``.
+        """Order-preserving, deduplicated subset of ``file_ids`` indexed in ``partitions``.
+
+        ``file_ids`` is client-supplied, so repeats are dropped rather than
+        echoed back into the filter and into ``extra.attachments``.
 
         ``"all"`` (``SUPER_ADMIN_MODE`` wildcard) takes an unscoped lookup instead
         of a per-partition one.
@@ -743,7 +749,7 @@ class QueryService:
         chunk["choices"][0]["message"]["content"] = clean
         extra = _build_extra_payload(sources, citations, all_sources, include_all_retrieved=include_all_retrieved)
         if metadata.get("attachments"):
-            # Indicate which attachments were actually leveraged to generate the answer.
+            # Indicate which attachments were actually searched to generate the answer.
             extra["attachments"] = attachments
         chunk["extra"] = json.dumps(extra)
         return chunk
