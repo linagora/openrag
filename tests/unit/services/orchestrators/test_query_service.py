@@ -1146,6 +1146,28 @@ async def test_complete_partition_request_keeps_context_and_filters_citations():
 
 
 @pytest.mark.asyncio
+async def test_complete_without_citation_keeps_retrieved_sources():
+    """complete()'s equivalent of test_chat_without_citation_keeps_retrieved_sources
+    (#847 review: test coverage asymmetry between chat and complete)."""
+    llm = FakeLLM(gen_text="A general answer with no citation marker.")
+    svc = _svc(llm=llm)
+    sources = [{"source_type": "document", "filename": "unrelated.pdf"}]
+
+    out = await svc.complete(
+        partitions=["p"],
+        payload={"prompt": "What does the report say?"},
+        prepare_sources=lambda d, w: sources,
+    )
+
+    extra = json.loads(out["extra"])
+    assert out["choices"][0]["text"] == "A general answer with no citation marker."
+    assert extra["sources"] == sources
+    assert extra["citations_reported"] is False
+    assert extra["presented_sources"] == sources
+    assert extra["cited_sources"] == []
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_yields_sse_and_done():
     svc = _svc(llm=FakeLLM())
     lines = []
