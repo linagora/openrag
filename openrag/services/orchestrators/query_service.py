@@ -86,6 +86,7 @@ class _PrepareChatResult(NamedTuple):
     citation_protocol_active: bool
     indexed_attachment_ids: list[str]
 
+
 _MAP_SYSTEM_PROMPT = """You are an AI assistant specialized in extracting and synthesizing relevant information from text.
 
 Your task:
@@ -581,7 +582,9 @@ class QueryService:
             },
         )
         payload["messages"] = new_messages
-        return _PrepareChatResult(payload, docs, web_results, retrieved_docs, retrieved_web_results, True, indexed_attachment_ids)
+        return _PrepareChatResult(
+            payload, docs, web_results, retrieved_docs, retrieved_web_results, True, indexed_attachment_ids
+        )
 
     async def _existing_file_ids(self, file_ids: list[str], partitions: list[str]) -> list[str]:
         """Order-preserving, deduplicated subset of ``file_ids`` indexed in ``partitions``.
