@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,6 +26,7 @@ _FENCE_KV_KEY = b"file-delete-fences-v1"
 _TASK_STATE_KV_NAMESPACE = "openrag-task-state-manager"
 _LEGACY_FENCE_ID = "__legacy__"
 _RECOVERABLE_TASK_KV_PREFIX = b"recoverable-task-v1:"
+_CANCELLATION_TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
 
 
 def _task_state_storage_available() -> bool:
@@ -67,7 +69,7 @@ def _recoverable_task_key(task_id: str) -> bytes:
 
 def _load_recoverable_tasks() -> dict[str, TaskInfo]:
     import ray.cloudpickle as cloudpickle
-    from ray.experimental.internal_kv import _internal_kv_get, _internal_kv_list
+    from ray.experimental.internal_kv import _internal_kv_del, _internal_kv_get, _internal_kv_list
 
     if not _task_state_storage_available():
         return {}
@@ -77,9 +79,19 @@ def _load_recoverable_tasks() -> dict[str, TaskInfo]:
         payload = _internal_kv_get(key, namespace=namespace)
         if payload is None:
             continue
-        task_id, info = cloudpickle.loads(payload)
+        task_id, info, expires_at = cloudpickle.loads(payload)
+        if expires_at is not None and expires_at <= time.time():
+            _internal_kv_del(key, namespace=namespace)
+            continue
         tasks[task_id] = info
     return tasks
+
+
+def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[TaskInfo, float | None]:
+    if info.state != "CANCELLED":
+        return info, None
+    timestamp = time.time() if now is None else now
+    return TaskInfo(state="CANCELLED"), timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
 
 
 def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
@@ -90,9 +102,10 @@ def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
         return
     key = _recoverable_task_key(task_id)
     if info.state in RECOVERABLE_TASK_STATES:
+        snapshot, expires_at = _recovery_snapshot(info)
         _internal_kv_put(
             key,
-            cloudpickle.dumps((task_id, info)),
+            cloudpickle.dumps((task_id, snapshot, expires_at)),
             overwrite=True,
             namespace=_task_state_kv_namespace(),
         )

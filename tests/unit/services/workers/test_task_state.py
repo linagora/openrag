@@ -335,3 +335,17 @@ async def test_cancellation_tombstone_survives_actor_reconstruction(monkeypatch)
 
     assert await reconstructed.get_state("task-1") == "CANCELLED"
     assert stored["task-1"].state == "CANCELLED"
+
+
+def test_cancellation_recovery_snapshot_is_sanitized_and_expires() -> None:
+    info = TaskInfo(
+        state="CANCELLED",
+        error="private traceback",
+        details={"user_id": 42, "metadata": {"secret": "value"}},
+        object_ref={"ref": object()},
+    )
+
+    snapshot, expires_at = task_state_module._recovery_snapshot(info, now=100.0)
+
+    assert snapshot == TaskInfo(state="CANCELLED")
+    assert expires_at == 100.0 + task_state_module._CANCELLATION_TOMBSTONE_TTL_SECONDS
