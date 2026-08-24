@@ -59,7 +59,7 @@ async def restart_ray_actor(actor_name: str) -> str:
 
     import ray
     from core.utils.exceptions import ServiceUnavailableError
-    from ray.exceptions import ActorUnavailableError, RayActorError
+    from services.workers.ray_utils import call_ray_actor_method_with_timeout
 
     actor_creation_map = get_actor_creation_map()
     if actor_name not in actor_creation_map:
@@ -84,11 +84,14 @@ async def restart_ray_actor(actor_name: str) -> str:
         deadline = loop.time() + 30
         while loop.time() < deadline:
             try:
-                ready_ref = actor.get_pool_info.remote()
                 remaining = max(0.01, min(1.0, deadline - loop.time()))
-                await asyncio.wait_for(asyncio.gather(ready_ref), timeout=remaining)
+                await call_ray_actor_method_with_timeout(
+                    submit=lambda: actor.get_pool_info.remote(),
+                    timeout=remaining,
+                    task_description="TaskStateManager restart readiness",
+                )
                 return actor_id
-            except (RayActorError, ActorUnavailableError, TimeoutError):
+            except (ServiceUnavailableError, TimeoutError):
                 await asyncio.sleep(0.1)
         raise ServiceUnavailableError(
             "Task state manager did not recover after restart",

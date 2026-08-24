@@ -60,6 +60,7 @@ async def _wait_for_new_incarnation(actor, previous: str, timeout: float = 10) -
     raise TimeoutError("Actor incarnation did not change")
 
 
+@pytest.mark.integration
 @pytest.mark.slow
 async def test_cached_job_service_recovers_after_actor_process_restart():
     namespace = f"task-state-recovery-{uuid.uuid4().hex}"

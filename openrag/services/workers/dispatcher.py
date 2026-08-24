@@ -76,7 +76,7 @@ class WorkerDispatcher(IndexingDispatcher):
         )
 
     async def _call_method(self, submit: Any, task_description: str) -> Any:
-        """Submit a job-facing actor call inside the availability boundary."""
+        """Submit an actor call inside the availability boundary."""
         from services.workers.ray_utils import call_ray_actor_method_with_timeout
 
         return await call_ray_actor_method_with_timeout(
@@ -96,8 +96,8 @@ class WorkerDispatcher(IndexingDispatcher):
     ) -> bool:
         remote = _remote_actor_method(self._tsm, "set_queued_details")
         if remote is not None:
-            accepted = await self._call(
-                remote(
+            accepted = await self._call_method(
+                lambda: remote(
                     task_id,
                     file_id=file_id,
                     partition=partition,
@@ -108,12 +108,12 @@ class WorkerDispatcher(IndexingDispatcher):
             )
             return accepted is not False
 
-        await self._call(
-            self._tsm.set_state.remote(task_id, "QUEUED"),
+        await self._call_method(
+            lambda: self._tsm.set_state.remote(task_id, "QUEUED"),
             task_description=f"set_state({task_id})",
         )
-        await self._call(
-            self._tsm.set_details.remote(
+        await self._call_method(
+            lambda: self._tsm.set_details.remote(
                 task_id,
                 file_id=file_id,
                 partition=partition,
@@ -128,8 +128,8 @@ class WorkerDispatcher(IndexingDispatcher):
         remote = _remote_actor_method(self._tsm, "begin_file_delete")
         if remote is None:
             raise RuntimeError("TaskStateManager does not expose file delete fencing for delete cleanup")
-        await self._call(
-            remote(partition=partition, file_id=file_id),
+        await self._call_method(
+            lambda: remote(partition=partition, file_id=file_id),
             task_description=f"begin_file_delete({partition}, {file_id})",
         )
 
@@ -137,8 +137,8 @@ class WorkerDispatcher(IndexingDispatcher):
         remote = _remote_actor_method(self._tsm, "end_file_delete")
         if remote is None:
             raise RuntimeError("TaskStateManager does not expose file delete fencing for delete cleanup")
-        await self._call(
-            remote(partition=partition, file_id=file_id),
+        await self._call_method(
+            lambda: remote(partition=partition, file_id=file_id),
             task_description=f"end_file_delete({partition}, {file_id})",
         )
 
@@ -236,8 +236,8 @@ class WorkerDispatcher(IndexingDispatcher):
                 allow_legacy_retry=allow_legacy_require_existing_partition_retry,
             )
 
-            registered = await self._call(
-                self._tsm.set_object_ref.remote(task_id, {"ref": task}),
+            registered = await self._call_method(
+                lambda: self._tsm.set_object_ref.remote(task_id, {"ref": task}),
                 task_description=f"set_object_ref({task_id})",
             )
             if registered is False:
@@ -271,8 +271,8 @@ class WorkerDispatcher(IndexingDispatcher):
         metadata = dict(task_details["metadata"])
         metadata[TASK_FINISHED_AT_METADATA_KEY] = _utc_now_iso()
         try:
-            await self._call(
-                self._tsm.set_details.remote(task_id, **{**task_details, "metadata": metadata}),
+            await self._call_method(
+                lambda: self._tsm.set_details.remote(task_id, **{**task_details, "metadata": metadata}),
                 task_description=f"set_finished_at({task_id})",
             )
         except Exception as exc:
@@ -334,13 +334,13 @@ class WorkerDispatcher(IndexingDispatcher):
     async def _mark_submit_failed(self, task_id: str, tb: str) -> None:
         set_failed = getattr(self._tsm, "set_failed_if_not_cancelled", None)
         if set_failed is not None:
-            await self._call(
-                set_failed.remote(task_id, tb),
+            await self._call_method(
+                lambda: set_failed.remote(task_id, tb),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )
             return
-        await self._call(
-            self._tsm.set_state.remote(task_id, "FAILED"),
+        await self._call_method(
+            lambda: self._tsm.set_state.remote(task_id, "FAILED"),
             task_description=f"set_state({task_id}, FAILED)",
         )
 

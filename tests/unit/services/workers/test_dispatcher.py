@@ -158,6 +158,40 @@ async def test_job_lookup_maps_actor_submission_failure_to_unavailability() -> N
 
 
 @pytest.mark.asyncio
+async def test_dispatch_maps_queued_details_submission_failure_to_unavailability() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = _pool_with_ref(object())
+    tsm = _task_state_manager()
+    tsm.set_queued_details.remote = MagicMock(
+        side_effect=ActorUnavailableError("actor is restarting", actor_id=None),
+    )
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ServiceUnavailableError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert caught.value.status_code == 503
+    assert caught.value.code == "RAY_ACTOR_UNAVAILABLE"
+    pool.submit.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_indexing_queues_worker_pool_task_and_records_ref() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
@@ -1286,13 +1320,13 @@ async def test_delete_file_final_ref_recheck_stays_within_delete_timeout() -> No
     )
     timeouts: list[tuple[str, float]] = []
 
-    async def bounded_call(*, future: Any, timeout: float, task_description: str) -> Any:
+    async def bounded_call(*, submit: Any, timeout: float, task_description: str) -> Any:
         timeouts.append((task_description, timeout))
-        return await future
+        return await submit()
 
     with (
         patch("services.workers.task_cancellation._REF_WAIT_INTERVAL", 999),
-        patch("services.workers.task_cancellation.call_ray_actor_with_timeout", side_effect=bounded_call),
+        patch("services.workers.task_cancellation.call_ray_actor_method_with_timeout", side_effect=bounded_call),
     ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
