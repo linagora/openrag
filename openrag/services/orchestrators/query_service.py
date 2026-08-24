@@ -143,6 +143,12 @@ class QueryService:
             config.rag.chat_history_depth if config.rag.chat_history_depth >= 1 else self._CHAT_HISTORY_DEPTH_DEFAULT
         )
         self._max_contextualized_query_len = config.rag.max_contextualized_query_len
+        # Sized on the assumption that retrieval returns ~reranker.top_k chunks,
+        # but reranker_top_k is never actually applied as a cutoff in
+        # RetrieverPipeline.retrieve_docs() on the no-map-reduce path — retrieval
+        # can return up to retriever.top_k candidates, so this budget (not
+        # reranker.top_k) is what actually determines how many reach the prompt.
+        # Tracked separately: https://github.com/linagora/openrag/issues/851
         self._max_context_tokens = config.reranker.top_k * config.chunker.chunk_size
 
         mr = config.map_reduce

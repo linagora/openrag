@@ -130,6 +130,13 @@ class RetrieverPipeline:
                 if self.reranker_enabled:
                     chunks = await _rerank_chunks(self.reranker, query.query, chunks)
 
+        # `reranker_top_k` is NOT applied here as a final cutoff — only
+        # `top_k` (an explicit caller-supplied value, e.g. map-reduce's
+        # max_total_documents) truncates. On the common no-`top_k` chat path
+        # this returns everything reranked (up to the retriever's own
+        # top_k), which callers sizing a token budget off reranker_top_k
+        # should not assume is bounded by it. Tracked separately:
+        # https://github.com/linagora/openrag/issues/851
         if top_k is not None:
             chunks = chunks[:top_k]
         return chunks
