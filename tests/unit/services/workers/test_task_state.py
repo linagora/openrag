@@ -18,6 +18,18 @@ def test_lock_is_safe_across_ray_concurrency_group_event_loops() -> None:
     assert isinstance(manager.lock, type(threading.Lock()))
 
 
+def test_legacy_recoverable_task_record_has_no_expiry() -> None:
+    import ray.cloudpickle as cloudpickle
+
+    info = TaskInfo(state="QUEUED")
+
+    assert task_state_module._decode_recoverable_task(cloudpickle.dumps(("task-1", info))) == (
+        "task-1",
+        info,
+        None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_reports_support_for_in_place_restart() -> None:
     manager = _task_state_manager()
@@ -408,5 +420,18 @@ def test_cancellation_recovery_snapshot_is_sanitized_and_expires() -> None:
 
     snapshot, expires_at = task_state_module._recovery_snapshot(info, now=100.0)
 
-    assert snapshot == TaskInfo(state="CANCELLED")
+    assert snapshot == TaskInfo(state="CANCELLED", object_ref=info.object_ref)
     assert expires_at == 100.0 + task_state_module._CANCELLATION_TOMBSTONE_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_finished_cancellation_drops_recoverable_worker_reference(monkeypatch) -> None:
+    saved: list[TaskInfo] = []
+    monkeypatch.setattr(task_state_module, "_save_recoverable_task", lambda _task_id, info: saved.append(info))
+    manager = _task_state_manager()
+    manager.tasks["task-1"] = TaskInfo(state="CANCELLED", object_ref={"ref": object()})
+
+    await manager.finish_cancellation("task-1")
+
+    assert manager.tasks["task-1"].object_ref is None
+    assert saved[-1].object_ref is None

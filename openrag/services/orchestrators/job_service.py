@@ -43,11 +43,11 @@ class JobService:
         canonical helper lives in ``services.workers.ray_utils``
         (``components.ray_utils`` is a backward-compat re-export).
         """
-        from services.workers.ray_utils import call_ray_actor_method_with_timeout
+        from services.workers.ray_utils import retry_idempotent_ray_actor_method
 
-        return await call_ray_actor_method_with_timeout(
+        return await retry_idempotent_ray_actor_method(
             submit=submit,
-            timeout=self._timeout,
+            recovery_timeout=self._timeout,
             task_description=task_description,
         )
 

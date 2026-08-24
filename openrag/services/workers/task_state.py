@@ -101,8 +101,18 @@ def _recoverable_task_key(task_id: str) -> bytes:
     return _RECOVERABLE_TASK_KV_PREFIX + base64.urlsafe_b64encode(task_id.encode())
 
 
-def _load_recoverable_tasks() -> dict[str, TaskInfo]:
+def _decode_recoverable_task(payload: bytes) -> tuple[str, TaskInfo, float | None]:
     import ray.cloudpickle as cloudpickle
+
+    record = cloudpickle.loads(payload)
+    if len(record) == 2:
+        task_id, info = record
+        return task_id, info, None
+    task_id, info, expires_at = record
+    return task_id, info, expires_at
+
+
+def _load_recoverable_tasks() -> dict[str, TaskInfo]:
     from ray.experimental.internal_kv import _internal_kv_del, _internal_kv_get, _internal_kv_list
 
     if not _task_state_storage_available():
@@ -113,7 +123,7 @@ def _load_recoverable_tasks() -> dict[str, TaskInfo]:
         payload = _internal_kv_get(key, namespace=namespace)
         if payload is None:
             continue
-        task_id, info, expires_at = cloudpickle.loads(payload)
+        task_id, info, expires_at = _decode_recoverable_task(payload)
         if expires_at is not None and expires_at <= time.time():
             _internal_kv_del(key, namespace=namespace)
             continue
@@ -125,7 +135,13 @@ def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[Tas
     if info.state != "CANCELLED":
         return info, None
     timestamp = time.time() if now is None else now
-    return TaskInfo(state="CANCELLED"), timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
+    # Keep the worker reference until cancellation is confirmed. If the actor
+    # restarts between the durable claim and ray.cancel(), a retry still needs
+    # this reference to stop the live worker.
+    return (
+        TaskInfo(state="CANCELLED", object_ref=info.object_ref),
+        timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS,
+    )
 
 
 def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
@@ -305,6 +321,15 @@ class TaskStateManager:
             info.state = "CANCELLED"
             _save_recoverable_task(task_id, info)
             return True
+
+    @ray.method(concurrency_group="set")
+    async def finish_cancellation(self, task_id: str) -> None:
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None or info.state != "CANCELLED":
+                return
+            info.object_ref = None
+            _save_recoverable_task(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_details(

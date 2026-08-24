@@ -83,6 +83,7 @@ def _task_state_manager() -> MagicMock:
     tsm.set_state = _remote_mock()
     tsm.set_failed_if_not_cancelled = _remote_mock()
     tsm.set_cancelled_if_active = _remote_mock(True)
+    tsm.finish_cancellation = _remote_mock()
     tsm.set_details = _remote_mock()
     tsm.set_object_ref = _remote_mock()
     tsm.get_state = _remote_mock("SERIALIZING")
@@ -149,6 +150,7 @@ async def test_job_lookup_maps_actor_submission_failure_to_unavailability() -> N
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
+        timeout=0.01,
     )
 
     with pytest.raises(ServiceUnavailableError) as caught:
@@ -175,6 +177,7 @@ async def test_dispatch_maps_queued_details_submission_failure_to_unavailability
         document_repo=_document_repo(),
         workspace_repo=_workspace_repo(),
         collection="default",
+        timeout=0.01,
     )
 
     with pytest.raises(ServiceUnavailableError) as caught:
@@ -190,6 +193,35 @@ async def test_dispatch_maps_queued_details_submission_failure_to_unavailability
     assert caught.value.status_code == 503
     assert caught.value.code == "RAY_ACTOR_UNAVAILABLE"
     pool.submit.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_queue_registration_retries_actor_reconstruction() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.set_queued_details.remote = AsyncMock(
+        side_effect=[ActorUnavailableError("actor is restarting", actor_id=None), True]
+    )
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=1,
+    )
+
+    assert await dispatcher._set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    assert tsm.set_queued_details.remote.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -973,6 +1005,7 @@ async def test_cancel_task_uses_stored_pool_object_ref() -> None:
 
     assert result is True
     tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
+    tsm.finish_cancellation.remote.assert_called_once_with("task-1")
     cancel.assert_called_once_with(ref, recursive=True)
 
 
@@ -1023,6 +1056,32 @@ async def test_cancel_task_does_not_cancel_terminal_task() -> None:
     assert result is False
     tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
     cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_finishes_recovered_cancellation_claim() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = object()
+    tsm = _task_state_manager()
+    tsm.get_object_ref.remote = AsyncMock(return_value={"ref": ref})
+    tsm.set_cancelled_if_active.remote = AsyncMock(return_value=False)
+    tsm.get_state.remote = AsyncMock(return_value="CANCELLED")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("ray.cancel") as cancel:
+        assert await dispatcher.cancel_task("task-1") is True
+
+    cancel.assert_called_once_with(ref, recursive=True)
+    tsm.finish_cancellation.remote.assert_called_once_with("task-1")
 
 
 @pytest.mark.asyncio

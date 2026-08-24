@@ -22,7 +22,7 @@ _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
 # partially compatible actor fleet left by the previous release.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v2"
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v3"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 

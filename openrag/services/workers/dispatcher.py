@@ -98,14 +98,15 @@ class WorkerDispatcher(IndexingDispatcher):
     ) -> bool:
         remote = _remote_actor_method(self._tsm, "set_queued_details")
         if remote is not None:
-            accepted = await self._call_method(
-                lambda: remote(
+            accepted = await retry_idempotent_ray_actor_method(
+                submit=lambda: remote(
                     task_id,
                     file_id=file_id,
                     partition=partition,
                     metadata=metadata,
                     user_id=user_id,
                 ),
+                recovery_timeout=self._timeout,
                 task_description=f"set_queued_details({task_id})",
             )
             return accepted is not False
@@ -615,9 +616,18 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=f"set_cancelled_if_active({task_id})",
         )
         if not cancelled:
-            return False
+            state = await self.get_task_state(task_id)
+            if state != "CANCELLED":
+                return False
 
         ray.cancel(obj_ref["ref"], recursive=True)
+        finish_cancellation = _remote_actor_method(self._tsm, "finish_cancellation")
+        if finish_cancellation is not None:
+            await retry_idempotent_ray_actor_method(
+                submit=lambda: finish_cancellation(task_id),
+                recovery_timeout=self._timeout,
+                task_description=f"finish_cancellation({task_id})",
+            )
         return True
 
 
