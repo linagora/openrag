@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 import services.workers.task_state as task_state_module
-from services.workers.task_state import PENDING_TASK_DETAILS, TaskStateManager
+from services.workers.task_state import PENDING_TASK_DETAILS, TaskInfo, TaskStateManager
 
 
 def _task_state_manager() -> Any:
@@ -260,3 +260,43 @@ async def test_file_delete_fence_token_makes_retries_idempotent() -> None:
         metadata={},
         user_id=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_active_task_registry_survives_actor_reconstruction(monkeypatch) -> None:
+    stored: dict[str, TaskInfo] = {}
+    monkeypatch.setattr(task_state_module, "_load_active_tasks", lambda: dict(stored))
+
+    def save(task_id: str, info: TaskInfo) -> None:
+        if info.state in task_state_module.CANCELLABLE_INDEXING_STATES:
+            stored[task_id] = TaskInfo(
+                state=info.state,
+                error=info.error,
+                details=dict(info.details),
+                object_ref=info.object_ref,
+            )
+        else:
+            stored.pop(task_id, None)
+
+    monkeypatch.setattr(task_state_module, "_save_active_task", save)
+
+    first_incarnation = _task_state_manager()
+    task_ref = {"ref": object()}
+    await first_incarnation.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    await first_incarnation.set_object_ref("task-1", task_ref)
+
+    reconstructed = _task_state_manager()
+
+    assert await reconstructed.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == {
+        "task-1": task_ref
+    }
+    assert "task-1" in await reconstructed.get_all_user_info(42)
+
+    await reconstructed.set_state("task-1", "COMPLETED")
+    assert stored == {}
