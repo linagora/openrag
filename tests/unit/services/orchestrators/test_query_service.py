@@ -407,7 +407,7 @@ async def test_chat_direct_mode_skips_retrieval():
     out = await svc.chat(
         partitions=None,
         payload={"messages": [{"role": "user", "content": "hi"}], "metadata": {}},
-        prepare_sources=lambda d, w: [{"source_type": "document"}],
+        prepare_sources=lambda d, w: [{"source_type": "document"}] if d or w else [],
         model_name="m1",
     )
     assert called["n"] == 0  # no retrieval in direct mode
@@ -454,12 +454,123 @@ async def test_chat_with_partition_retrieves_and_filters_sources():
     sources = [{"source_type": "document", "n": 1}, {"source_type": "document", "n": 2}]
     out = await svc.chat(
         partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"include_all_retrieved_sources": True},
+        },
+        prepare_sources=lambda d, w: sources,
+        model_name="m",
+    )
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == [{"source_type": "document", "n": 1}]  # only cited source 1
+    assert extra["presented_sources"] == sources  # everything shown to the model
+    assert extra["cited_sources"] == [{"source_type": "document", "n": 1}]  # strictly what was cited
+    assert extra["all_retrieved_sources"] == sources  # opted in: unfiltered, everything retrieved
+
+
+@pytest.mark.asyncio
+async def test_chat_all_retrieved_sources_omitted_by_default():
+    """#847 follow-up: all_retrieved_sources is debug/eval telemetry, gated
+    behind metadata.include_all_retrieved_sources — absent unless requested."""
+    svc = _svc(llm=FakeLLM(chat_responses=["answer [Sources: 1]"]))
+    sources = [{"source_type": "document", "n": 1}]
+
+    out = await svc.chat(
+        partitions=["p"],
         payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
         prepare_sources=lambda d, w: sources,
         model_name="m",
     )
-    filtered = json.loads(out["extra"])["sources"]
-    assert filtered == [{"source_type": "document", "n": 1}]  # only cited source 1
+
+    extra = json.loads(out["extra"])
+    assert "all_retrieved_sources" not in extra
+    assert extra["sources"] == sources
+    assert extra["presented_sources"] == sources
+    assert extra["cited_sources"] == sources
+
+
+@pytest.mark.asyncio
+async def test_chat_all_retrieved_sources_survives_context_budget_truncation():
+    """#847 review: all_retrieved_sources must reflect the complete retrieval
+    set, not just the docs that fit the prompt's context-token budget — a
+    doc dropped only for lack of room must still show up there."""
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="this one does not fit the token budget", metadata={"_id": "c2"}),
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=["answer [Sources: 1]"]))
+    svc._max_context_tokens = qs.get_num_tokens()("[Source 1]\nshort")
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"include_all_retrieved_sources": True},
+        },
+        prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
+        model_name="m",
+    )
+
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == [{"id": "c1"}]  # only the doc that fit the prompt and was cited
+    assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]  # both, unfiltered
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_all_retrieved_sources_survives_context_budget_truncation():
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="this one does not fit the token budget", metadata={"_id": "c2"}),
+    ]
+    stream_lines = [
+        'data: {"choices":[{"delta":{"content":"answer [Sources: 1]"},"finish_reason":null}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+        "data: [DONE]\n\n",
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(stream_lines=stream_lines))
+    svc._max_context_tokens = qs.get_num_tokens()("[Source 1]\nshort")
+
+    lines = [
+        line
+        async for line in svc.chat_stream(
+            partitions=["p"],
+            payload={
+                "messages": [{"role": "user", "content": "q"}],
+                "metadata": {"include_all_retrieved_sources": True},
+            },
+            prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
+            model_name="m",
+        )
+    ]
+    chunks_out = [
+        json.loads(line[len("data: ") :])
+        for line in lines
+        if line.startswith("data: ") and line.strip() != "data: [DONE]"
+    ]
+    extra = next(json.loads(c["extra"]) for c in reversed(chunks_out) if c.get("extra") not in (None, "{}"))
+
+    assert extra["sources"] == [{"id": "c1"}]
+    assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
+
+
+@pytest.mark.asyncio
+async def test_complete_all_retrieved_sources_survives_context_budget_truncation():
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="this one does not fit the token budget", metadata={"_id": "c2"}),
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(gen_text="answer\n[Sources: 1]"))
+    svc._max_context_tokens = qs.get_num_tokens()("[Source 1]\nshort")
+
+    out = await svc.complete(
+        partitions=["p"],
+        payload={"prompt": "q", "metadata": {"include_all_retrieved_sources": True}},
+        prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
+    )
+
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == [{"id": "c1"}]
+    assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
 
 
 @pytest.mark.asyncio
@@ -487,7 +598,7 @@ async def test_chat_conversational_request_skips_partition_retrieval():
     out = await svc.chat(
         partitions=["p"],
         payload={"messages": [{"role": "user", "content": "How can you help me?"}], "metadata": {}},
-        prepare_sources=lambda d, w: [{"source_type": "document"}],
+        prepare_sources=lambda d, w: [{"source_type": "document"}] if d or w else [],
         model_name="m",
     )
 
@@ -569,7 +680,8 @@ async def test_chat_inconsistent_classifier_result_prefers_supplied_query():
 
 
 @pytest.mark.asyncio
-async def test_chat_without_citation_does_not_attribute_retrieved_sources():
+async def test_chat_without_citation_keeps_retrieved_sources():
+    """No tag at all means the model didn't report citations, not that the answer is unsourced."""
     svc = _svc(llm=FakeLLM(chat_responses=["A general answer with no citation marker."]))
     sources = [{"source_type": "document", "filename": "unrelated.pdf"}]
 
@@ -580,7 +692,16 @@ async def test_chat_without_citation_does_not_attribute_retrieved_sources():
         model_name="m",
     )
 
-    assert json.loads(out["extra"])["sources"] == []
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == sources
+    # No tag at all → not reported, even though `sources` ends up covering
+    # everything, same as if the model had explicitly cited all of them (#847 review).
+    assert extra["citations_reported"] is False
+    # presented_sources always shows what the model saw; cited_sources — unlike
+    # legacy `sources` — never falls back and stays empty when nothing was
+    # actually reported cited.
+    assert extra["presented_sources"] == sources
+    assert extra["cited_sources"] == []
 
 
 @pytest.mark.asyncio
@@ -595,7 +716,9 @@ async def test_chat_invalid_citation_does_not_fallback_to_unrelated_sources():
         model_name="m",
     )
 
-    assert json.loads(out["extra"])["sources"] == []
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == []
+    assert extra["citations_reported"] is True  # a tag was present, just out of range
 
 
 @pytest.mark.asyncio
@@ -694,14 +817,21 @@ async def test_structured_websearch_returns_only_sources_included_in_context():
         partitions=None,
         payload={
             "messages": [{"role": "user", "content": "Question"}],
-            "metadata": {"websearch": True},
+            "metadata": {"websearch": True, "include_all_retrieved_sources": True},
             "response_format": {"type": "json_object"},
         },
         prepare_sources=lambda _docs, results: [{"url": result.url} for result in results],
         model_name="m",
     )
 
-    assert json.loads(out["extra"])["sources"] == [{"url": "https://example.test/included"}]
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == [{"url": "https://example.test/included"}]
+    # #847 review: excluded (didn't fit the web token budget) still shows up
+    # in all_retrieved_sources.
+    assert extra["all_retrieved_sources"] == [
+        {"url": "https://example.test/included"},
+        {"url": "https://example.test/excluded"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -733,7 +863,7 @@ async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
     retrieval = FakeRetrieval()
     web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
     svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
-    _payload, _docs, web, _citation_protocol_active = await svc._prepare_chat(
+    _payload, _docs, web, _retrieved_docs, _retrieved_web, _citation_protocol_active = await svc._prepare_chat(
         ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"websearch": True}}
     )
     assert len(retrieval.retrieve_multi_calls) == 1  # doc branch fused via the rrf_k-aware retrieve_multi
@@ -759,7 +889,7 @@ async def test_answer_system_prompt_comes_from_prompt_service():
     marker = MarkerPromptService()
     svc._prompt_service = marker
 
-    payload, _docs, _web, _citation_protocol_active = await svc._prepare_chat(
+    payload, _docs, _web, _retrieved_docs, _retrieved_web, _citation_protocol_active = await svc._prepare_chat(
         ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}}
     )
 
@@ -966,7 +1096,7 @@ async def test_complete_direct_mode_preserves_literal_source_marker():
     out = await svc.complete(
         partitions=None,
         payload={"prompt": "do x"},
-        prepare_sources=lambda d, w: [{"x": 1}],
+        prepare_sources=lambda d, w: [{"x": 1}] if d or w else [],
     )
     assert out["choices"][0]["text"] == answer
     assert json.loads(out["extra"])["sources"] == []
@@ -1006,11 +1136,35 @@ async def test_complete_partition_request_keeps_context_and_filters_citations():
         prepare_sources=lambda d, w: sources,
     )
 
+    extra = json.loads(out["extra"])
     assert out["choices"][0]["text"] == "The answer is grounded."
-    assert json.loads(out["extra"])["sources"] == sources
+    assert extra["sources"] == sources
+    assert extra["citations_reported"] is True
     answer_prompt = llm.generate_calls[0][0]
     assert "ctx" in answer_prompt
     assert "What does the report say?" in answer_prompt
+
+
+@pytest.mark.asyncio
+async def test_complete_without_citation_keeps_retrieved_sources():
+    """complete()'s equivalent of test_chat_without_citation_keeps_retrieved_sources
+    (#847 review: test coverage asymmetry between chat and complete)."""
+    llm = FakeLLM(gen_text="A general answer with no citation marker.")
+    svc = _svc(llm=llm)
+    sources = [{"source_type": "document", "filename": "unrelated.pdf"}]
+
+    out = await svc.complete(
+        partitions=["p"],
+        payload={"prompt": "What does the report say?"},
+        prepare_sources=lambda d, w: sources,
+    )
+
+    extra = json.loads(out["extra"])
+    assert out["choices"][0]["text"] == "A general answer with no citation marker."
+    assert extra["sources"] == sources
+    assert extra["citations_reported"] is False
+    assert extra["presented_sources"] == sources
+    assert extra["cited_sources"] == []
 
 
 @pytest.mark.asyncio
@@ -1044,6 +1198,43 @@ async def test_map_reduce_keeps_relevant_drops_irrelevant():
     out = await svc._map_reduce("q", docs)
     assert len(out) == 1
     assert out[0].page_content == "kept"
+
+
+@pytest.mark.asyncio
+async def test_chat_all_retrieved_sources_survives_map_reduce_replacement():
+    """#847 follow-up review: map-reduce replaces `docs` with LLM-generated
+    summaries before the prompt is built. all_retrieved_sources must still
+    reflect what retrieval actually returned, not those summaries."""
+    chunks = [
+        Chunk(id="c1", text="original text one", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="original text two", metadata={"_id": "c2"}),
+    ]
+    rel1 = json.dumps({"relevancy": True, "summary": "summary one"})
+    rel2 = json.dumps({"relevancy": True, "summary": "summary two"})
+    answer = "Grounded answer. [Sources: 1, 2]"
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=[rel1, rel2, answer]))
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"use_map_reduce": True, "include_all_retrieved_sources": True},
+        },
+        prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id"), "text": doc.page_content} for doc in d],
+        model_name="m",
+    )
+
+    extra = json.loads(out["extra"])
+    # What the LLM actually saw and cited: the map-reduce summaries.
+    assert extra["sources"] == [
+        {"id": "c1", "text": "summary one"},
+        {"id": "c2", "text": "summary two"},
+    ]
+    # The real retrieval, unreplaced by summarization.
+    assert extra["all_retrieved_sources"] == [
+        {"id": "c1", "text": "original text one"},
+        {"id": "c2", "text": "original text two"},
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -1226,7 +1417,7 @@ async def test_conversational_reply_resolves_its_prompt_from_the_library():
         "p": SimpleNamespace(generation_prompt_names={"sys_prompt": "chatty"}, chat_history_depth=4)
     }
 
-    out, docs, web, _ = await svc._prepare_chat(
+    out, docs, web, _retrieved_docs, _retrieved_web, _ = await svc._prepare_chat(
         ["p"], {"messages": [{"role": "user", "content": "hello!"}], "metadata": {}}
     )
 

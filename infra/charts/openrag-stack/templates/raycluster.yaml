@@ -34,6 +34,10 @@ spec:
               - sh
               - -c
               - |
+                # Keep venv writes group-writable (GID 0) so a later sync under a
+                # different APP_UID can still remove/replace owner-only entries
+                # left by a previous sync. See infra/scripts/entrypoint.sh.
+                umask 002
                 if [ -f /app/.venv/.ready ]; then
                   echo "Existing env detected, skipping install."
                 else
