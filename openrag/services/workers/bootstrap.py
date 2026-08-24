@@ -85,7 +85,7 @@ def get_task_state_manager():
         )
 
     actor = create_or_get()
-    if getattr(actor, "supports_in_place_restart", None) is not None:
+    if _supports_task_state_recovery(actor):
         return actor
 
     # ``get_if_exists`` keeps a detached actor created by an older deployment,
@@ -99,10 +99,17 @@ def get_task_state_manager():
             current = ray.get_actor("TaskStateManager", namespace="openrag")
         except ValueError:
             return create_or_get()
-        if getattr(current, "supports_in_place_restart", None) is not None:
+        if _supports_task_state_recovery(current):
             return current
         sleep(0.05)
     raise RuntimeError("Timed out replacing legacy TaskStateManager")
+
+
+def _supports_task_state_recovery(actor) -> bool:
+    return (
+        getattr(actor, "supports_in_place_restart", None) is not None
+        and getattr(actor, "renew_file_delete", None) is not None
+    )
 
 
 def get_task_completion_tracker(namespace: str = "openrag"):

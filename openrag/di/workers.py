@@ -71,7 +71,8 @@ async def restart_ray_actor(actor_name: str) -> str:
         actor = None
 
     restart_capability = getattr(actor, "supports_in_place_restart", None) if actor is not None else None
-    if actor_name == "TaskStateManager" and restart_capability is not None:
+    renewable_fences = getattr(actor, "renew_file_delete", None) if actor is not None else None
+    if actor_name == "TaskStateManager" and restart_capability is not None and renewable_fences is not None:
         # This actor is shared through handles cached by API services and
         # indexer workers. Let Ray reconstruct the same actor incarnation;
         # replacing it with a new actor would leave every cached handle bound

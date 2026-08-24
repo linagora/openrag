@@ -62,7 +62,10 @@ def test_initialize_worker_bootstrap_registers_parser_pool_factories(monkeypatch
 
 def test_task_state_manager_restarts_without_retrying_mutations(monkeypatch):
     calls = []
-    actor = SimpleNamespace(supports_in_place_restart=SimpleNamespace())
+    actor = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+    )
 
     def fake_get_or_create_actor(name, cls, **options):
         calls.append((name, cls, options))
@@ -84,7 +87,10 @@ def test_task_state_manager_restarts_without_retrying_mutations(monkeypatch):
 
 def test_legacy_task_state_manager_is_replaced_before_handle_is_returned(monkeypatch):
     legacy = SimpleNamespace()
-    replacement = SimpleNamespace(supports_in_place_restart=SimpleNamespace())
+    replacement = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+    )
     get_or_create = Mock(side_effect=[legacy, replacement])
     kill = Mock()
     monkeypatch.setattr(bootstrap, "actor_creation_map", {})
@@ -96,6 +102,24 @@ def test_legacy_task_state_manager_is_replaced_before_handle_is_returned(monkeyp
 
     kill.assert_called_once_with(legacy, no_restart=True)
     assert get_or_create.call_count == 2
+
+
+def test_task_state_manager_without_renewable_fences_is_replaced(monkeypatch):
+    legacy = SimpleNamespace(supports_in_place_restart=SimpleNamespace())
+    replacement = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+    )
+    get_or_create = Mock(side_effect=[legacy, replacement])
+    kill = Mock()
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    assert bootstrap.get_task_state_manager() is replacement
+
+    kill.assert_called_once_with(legacy, no_restart=True)
 
 
 def test_task_completion_tracker_is_detached_and_starts_recovery(monkeypatch):

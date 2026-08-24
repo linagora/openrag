@@ -94,6 +94,7 @@ def _task_state_manager() -> MagicMock:
     tsm.get_all_info = None
     tsm.set_queued_details = _remote_mock(True)
     tsm.begin_file_delete = _remote_mock()
+    tsm.renew_file_delete = _remote_mock(True)
     tsm.end_file_delete = _remote_mock()
     return tsm
 
@@ -1097,6 +1098,72 @@ async def test_delete_file_holds_file_delete_fence_around_cleanup() -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_file_renews_fence_during_slow_cleanup(monkeypatch) -> None:
+    from services.workers import dispatcher as dispatcher_module
+    from services.workers.dispatcher import WorkerDispatcher
+
+    renewed = asyncio.Event()
+    tsm = _task_state_manager()
+    tsm.renew_file_delete.remote = AsyncMock(side_effect=lambda **kwargs: renewed.set() or True)
+    vector_store = _vector_store()
+
+    async def wait_for_renewal(_collection: str) -> bool:
+        await renewed.wait()
+        return False
+
+    vector_store.collection_exists = AsyncMock(side_effect=wait_for_renewal)
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+    monkeypatch.setattr(dispatcher_module, "_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS", 0)
+
+    await dispatcher.delete_file("file-1", "tenant-a")
+
+    tsm.renew_file_delete.remote.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_file_stops_cleanup_if_fence_renewal_is_lost(monkeypatch) -> None:
+    from services.workers import dispatcher as dispatcher_module
+    from services.workers.dispatcher import WorkerDispatcher
+
+    cleanup_cancelled = asyncio.Event()
+    tsm = _task_state_manager()
+    tsm.renew_file_delete.remote = AsyncMock(return_value=False)
+    vector_store = _vector_store()
+
+    async def block_cleanup(_collection: str) -> bool:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_cancelled.set()
+
+    vector_store.collection_exists = AsyncMock(side_effect=block_cleanup)
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+    monkeypatch.setattr(dispatcher_module, "_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS", 0)
+
+    with pytest.raises(RuntimeError, match="lease was lost"):
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    assert cleanup_cancelled.is_set()
+    tsm.end_file_delete.remote.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_delete_file_releases_file_delete_fence_when_cleanup_fails() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
@@ -1453,6 +1520,7 @@ async def test_delete_file_ignores_unsafe_legacy_matching_api_when_v2_missing() 
     tsm._ray_actor_method_names = {
         "begin_file_delete",
         "end_file_delete",
+        "renew_file_delete",
         "get_matching_active_task_refs",
         "get_all_info",
         "get_object_ref",

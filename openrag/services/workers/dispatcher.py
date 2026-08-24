@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import traceback
 import uuid
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from services.workers.task_cancellation import cancel_active_indexing_tasks
 logger = get_logger()
 
 DEFAULT_TIMEOUT = 60.0
+_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS = 30.0
 _REQUIRE_EXISTING_PARTITION_KWARG = "require_existing_partition"
 
 
@@ -143,6 +145,36 @@ class WorkerDispatcher(IndexingDispatcher):
             recovery_timeout=self._timeout,
             task_description=f"end_file_delete({partition}, {file_id})",
         )
+
+    async def _renew_file_delete_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
+        remote = _remote_actor_method(self._tsm, "renew_file_delete")
+        if remote is None:
+            raise RuntimeError("TaskStateManager does not expose renewable file delete fencing")
+        while True:
+            await asyncio.sleep(_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS)
+            renewed = await retry_idempotent_ray_actor_method(
+                lambda: remote(partition=partition, file_id=file_id, fence_id=fence_id),
+                recovery_timeout=self._timeout,
+                task_description=f"renew_file_delete({partition}, {file_id})",
+            )
+            if renewed is not True:
+                raise RuntimeError("File delete fence lease was lost during cleanup")
+
+    async def _delete_with_renewable_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
+        delete_task = asyncio.create_task(self._delete_file_with_fence(file_id=file_id, partition=partition))
+        renewal_task = asyncio.create_task(
+            self._renew_file_delete_fence(file_id=file_id, partition=partition, fence_id=fence_id)
+        )
+        try:
+            done, _ = await asyncio.wait({delete_task, renewal_task}, return_when=asyncio.FIRST_COMPLETED)
+            if renewal_task in done:
+                await renewal_task
+            await delete_task
+        finally:
+            for task in (delete_task, renewal_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(delete_task, renewal_task, return_exceptions=True)
 
     async def dispatch_indexing(
         self,
@@ -392,7 +424,7 @@ class WorkerDispatcher(IndexingDispatcher):
         await self._begin_file_delete_fence(file_id=file_id, partition=partition, fence_id=fence_id)
         delete_failed = False
         try:
-            await self._delete_file_with_fence(file_id=file_id, partition=partition)
+            await self._delete_with_renewable_fence(file_id=file_id, partition=partition, fence_id=fence_id)
         except Exception:
             delete_failed = True
             raise

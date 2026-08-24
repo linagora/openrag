@@ -263,6 +263,60 @@ async def test_file_delete_fence_token_makes_retries_idempotent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_file_delete_fence_lease_expires_and_unblocks_indexing(monkeypatch) -> None:
+    now = 100.0
+    monkeypatch.setattr(task_state_module.time, "time", lambda: now)
+    manager = _task_state_manager()
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1", fence_id="abandoned-delete")
+
+    now += task_state_module._FILE_DELETE_FENCE_TTL_SECONDS + 1
+
+    assert await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_delete_fence_renewal_extends_lease(monkeypatch) -> None:
+    now = 100.0
+    monkeypatch.setattr(task_state_module.time, "time", lambda: now)
+    manager = _task_state_manager()
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+
+    now += task_state_module._FILE_DELETE_FENCE_TTL_SECONDS - 1
+    assert await manager.renew_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+    now += 2
+
+    assert (
+        await manager.set_queued_details(
+            "task-1",
+            file_id="file-1",
+            partition="tenant-a",
+            metadata={},
+            user_id=None,
+        )
+        is False
+    )
+
+
+def test_pre_lease_file_delete_fence_gets_migration_grace_period() -> None:
+    fences = {("tenant-a", "file-1"): {"old-delete": 1}}
+
+    normalized, changed = task_state_module._normalize_file_delete_fences(fences, now=100.0)
+
+    assert changed is True
+    assert normalized == {
+        ("tenant-a", "file-1"): {
+            "old-delete": 100.0 + task_state_module._FILE_DELETE_FENCE_TTL_SECONDS,
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_active_task_registry_survives_actor_reconstruction(monkeypatch) -> None:
     stored: dict[str, TaskInfo] = {}
     monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: dict(stored))

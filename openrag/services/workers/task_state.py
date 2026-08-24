@@ -27,6 +27,7 @@ _TASK_STATE_KV_NAMESPACE = "openrag-task-state-manager"
 _LEGACY_FENCE_ID = "__legacy__"
 _RECOVERABLE_TASK_KV_PREFIX = b"recoverable-task-v1:"
 _CANCELLATION_TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
+_FILE_DELETE_FENCE_TTL_SECONDS = 2 * 60
 
 
 def _task_state_storage_available() -> bool:
@@ -40,7 +41,36 @@ def _task_state_kv_namespace() -> bytes:
     return _TASK_STATE_KV_NAMESPACE.encode() + b"-" + ray_namespace
 
 
-def _load_file_delete_fences() -> dict[tuple[str, str], dict[str, int]]:
+def _normalize_file_delete_fences(
+    fences: dict[tuple[str, str], dict[str, int | float]],
+    *,
+    now: float | None = None,
+) -> tuple[dict[tuple[str, str], dict[str, int | float]], bool]:
+    timestamp = time.time() if now is None else now
+    normalized: dict[tuple[str, str], dict[str, int | float]] = {}
+    changed = False
+    for key, holders in fences.items():
+        active: dict[str, int | float] = {}
+        for holder, value in holders.items():
+            if holder == _LEGACY_FENCE_ID:
+                active[holder] = int(value)
+            elif isinstance(value, int) and not isinstance(value, bool):
+                # Upgrade the pre-lease format without dropping a deletion that
+                # may still be running during a rolling deployment.
+                active[holder] = timestamp + _FILE_DELETE_FENCE_TTL_SECONDS
+                changed = True
+            elif isinstance(value, float) and value > timestamp:
+                active[holder] = value
+            else:
+                changed = True
+        if active:
+            normalized[key] = active
+        elif holders:
+            changed = True
+    return normalized, changed
+
+
+def _load_file_delete_fences() -> dict[tuple[str, str], dict[str, int | float]]:
     from ray.experimental.internal_kv import _internal_kv_get
 
     if not _task_state_storage_available():
@@ -48,10 +78,14 @@ def _load_file_delete_fences() -> dict[tuple[str, str], dict[str, int]]:
     payload = _internal_kv_get(_FENCE_KV_KEY, namespace=_task_state_kv_namespace())
     if payload is None:
         return {}
-    return {(partition, file_id): holders for partition, file_id, holders in json.loads(payload)}
+    fences = {(partition, file_id): holders for partition, file_id, holders in json.loads(payload)}
+    normalized, changed = _normalize_file_delete_fences(fences)
+    if changed:
+        _save_file_delete_fences(normalized)
+    return normalized
 
 
-def _save_file_delete_fences(fences: dict[tuple[str, str], dict[str, int]]) -> None:
+def _save_file_delete_fences(fences: dict[tuple[str, str], dict[str, int | float]]) -> None:
     from ray.experimental.internal_kv import _internal_kv_put
 
     if not _task_state_storage_available():
@@ -170,26 +204,52 @@ class TaskStateManager:
         }
         self.user_index.setdefault(user_id, set()).add(task_id)
 
+    def _prune_expired_file_delete_fences(self) -> None:
+        updated, changed = _normalize_file_delete_fences(self.file_delete_fences)
+        if changed:
+            _save_file_delete_fences(updated)
+            self.file_delete_fences = updated
+
     def _file_delete_fenced(self, *, partition: str | None, file_id: str | None) -> bool:
         if partition is None or file_id is None:
             return False
+        self._prune_expired_file_delete_fences()
         return bool(self.file_delete_fences.get((partition, file_id)))
 
     @ray.method(concurrency_group="set")
     async def begin_file_delete(self, *, partition: str, file_id: str, fence_id: str | None = None) -> None:
         async with self.lock:
+            self._prune_expired_file_delete_fences()
             key = (partition, file_id)
             updated = dict(self.file_delete_fences)
             holders = dict(updated.get(key, {}))
             holder = fence_id or _LEGACY_FENCE_ID
-            holders[holder] = 1 if fence_id else holders.get(holder, 0) + 1
+            holders[holder] = (
+                time.time() + _FILE_DELETE_FENCE_TTL_SECONDS if fence_id else int(holders.get(holder, 0)) + 1
+            )
             updated[key] = holders
             _save_file_delete_fences(updated)
             self.file_delete_fences = updated
 
     @ray.method(concurrency_group="set")
+    async def renew_file_delete(self, *, partition: str, file_id: str, fence_id: str) -> bool:
+        async with self.lock:
+            self._prune_expired_file_delete_fences()
+            key = (partition, file_id)
+            holders = dict(self.file_delete_fences.get(key, {}))
+            if fence_id not in holders:
+                return False
+            holders[fence_id] = time.time() + _FILE_DELETE_FENCE_TTL_SECONDS
+            updated = dict(self.file_delete_fences)
+            updated[key] = holders
+            _save_file_delete_fences(updated)
+            self.file_delete_fences = updated
+            return True
+
+    @ray.method(concurrency_group="set")
     async def end_file_delete(self, *, partition: str, file_id: str, fence_id: str | None = None) -> None:
         async with self.lock:
+            self._prune_expired_file_delete_fences()
             key = (partition, file_id)
             updated = dict(self.file_delete_fences)
             holders = dict(updated.get(key, {}))

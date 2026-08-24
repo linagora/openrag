@@ -94,6 +94,7 @@ async def test_task_state_manager_restart_preserves_cached_handles(monkeypatch) 
         _actor_id=SimpleNamespace(hex=Mock(return_value="same-actor-id")),
         get_pool_info=ready_method,
         supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
     )
     factory = Mock()
     monkeypatch.setattr("di.workers.get_actor_creation_map", lambda: {"TaskStateManager": factory})
