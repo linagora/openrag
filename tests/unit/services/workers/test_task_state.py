@@ -265,10 +265,10 @@ async def test_file_delete_fence_token_makes_retries_idempotent() -> None:
 @pytest.mark.asyncio
 async def test_active_task_registry_survives_actor_reconstruction(monkeypatch) -> None:
     stored: dict[str, TaskInfo] = {}
-    monkeypatch.setattr(task_state_module, "_load_active_tasks", lambda: dict(stored))
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: dict(stored))
 
     def save(task_id: str, info: TaskInfo) -> None:
-        if info.state in task_state_module.CANCELLABLE_INDEXING_STATES:
+        if info.state in task_state_module.RECOVERABLE_TASK_STATES:
             stored[task_id] = TaskInfo(
                 state=info.state,
                 error=info.error,
@@ -278,7 +278,7 @@ async def test_active_task_registry_survives_actor_reconstruction(monkeypatch) -
         else:
             stored.pop(task_id, None)
 
-    monkeypatch.setattr(task_state_module, "_save_active_task", save)
+    monkeypatch.setattr(task_state_module, "_save_recoverable_task", save)
 
     first_incarnation = _task_state_manager()
     task_ref = {"ref": object()}
@@ -300,3 +300,38 @@ async def test_active_task_registry_survives_actor_reconstruction(monkeypatch) -
 
     await reconstructed.set_state("task-1", "COMPLETED")
     assert stored == {}
+
+
+@pytest.mark.asyncio
+async def test_cancellation_tombstone_survives_actor_reconstruction(monkeypatch) -> None:
+    stored: dict[str, TaskInfo] = {}
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: dict(stored))
+
+    def save(task_id: str, info: TaskInfo) -> None:
+        if info.state in task_state_module.RECOVERABLE_TASK_STATES:
+            stored[task_id] = TaskInfo(
+                state=info.state,
+                error=info.error,
+                details=dict(info.details),
+                object_ref=info.object_ref,
+            )
+        else:
+            stored.pop(task_id, None)
+
+    monkeypatch.setattr(task_state_module, "_save_recoverable_task", save)
+
+    first_incarnation = _task_state_manager()
+    await first_incarnation.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    assert await first_incarnation.set_cancelled_if_active("task-1") is True
+
+    reconstructed = _task_state_manager()
+    await reconstructed.set_state("task-1", "COMPLETED")
+
+    assert await reconstructed.get_state("task-1") == "CANCELLED"
+    assert stored["task-1"].state == "CANCELLED"

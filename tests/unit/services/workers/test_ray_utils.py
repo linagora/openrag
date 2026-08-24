@@ -71,3 +71,20 @@ async def test_idempotent_actor_method_retries_temporary_unavailability(monkeypa
 
     assert result is None
     assert call.await_count == 2
+
+
+async def test_idempotent_actor_method_does_not_retry_operation_timeout(monkeypatch):
+    call = AsyncMock(side_effect=TimeoutError)
+    sleep = AsyncMock()
+    monkeypatch.setattr(ray_utils, "call_ray_actor_method_with_timeout", call)
+    monkeypatch.setattr(ray_utils.asyncio, "sleep", sleep)
+
+    with pytest.raises(TimeoutError):
+        await retry_idempotent_ray_actor_method(
+            lambda: object(),
+            recovery_timeout=1,
+            task_description="set_state(task-1)",
+        )
+
+    call.assert_awaited_once()
+    sleep.assert_not_awaited()

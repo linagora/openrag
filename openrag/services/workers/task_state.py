@@ -18,12 +18,13 @@ ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 # the public active counts and the DocumentStatus enum on purpose — fencing only.
 LEGACY_ACTIVE_INDEXING_STATES = frozenset({"CHUNKING", "INSERTING"})
 CANCELLABLE_INDEXING_STATES = ACTIVE_INDEXING_STATES | LEGACY_ACTIVE_INDEXING_STATES
+RECOVERABLE_TASK_STATES = CANCELLABLE_INDEXING_STATES | {"CANCELLED"}
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
 PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
 _FENCE_KV_KEY = b"file-delete-fences-v1"
 _TASK_STATE_KV_NAMESPACE = "openrag-task-state-manager"
 _LEGACY_FENCE_ID = "__legacy__"
-_ACTIVE_TASK_KV_PREFIX = b"active-task-v1:"
+_RECOVERABLE_TASK_KV_PREFIX = b"recoverable-task-v1:"
 
 
 def _task_state_storage_available() -> bool:
@@ -33,7 +34,8 @@ def _task_state_storage_available() -> bool:
 
 
 def _task_state_kv_namespace() -> bytes:
-    return f"{_TASK_STATE_KV_NAMESPACE}:{ray.get_runtime_context().namespace}".encode()
+    ray_namespace = base64.urlsafe_b64encode(ray.get_runtime_context().namespace.encode()).rstrip(b"=")
+    return _TASK_STATE_KV_NAMESPACE.encode() + b"-" + ray_namespace
 
 
 def _load_file_delete_fences() -> dict[tuple[str, str], dict[str, int]]:
@@ -59,11 +61,11 @@ def _save_file_delete_fences(fences: dict[tuple[str, str], dict[str, int]]) -> N
     _internal_kv_put(_FENCE_KV_KEY, payload, overwrite=True, namespace=_task_state_kv_namespace())
 
 
-def _active_task_key(task_id: str) -> bytes:
-    return _ACTIVE_TASK_KV_PREFIX + base64.urlsafe_b64encode(task_id.encode())
+def _recoverable_task_key(task_id: str) -> bytes:
+    return _RECOVERABLE_TASK_KV_PREFIX + base64.urlsafe_b64encode(task_id.encode())
 
 
-def _load_active_tasks() -> dict[str, TaskInfo]:
+def _load_recoverable_tasks() -> dict[str, TaskInfo]:
     import ray.cloudpickle as cloudpickle
     from ray.experimental.internal_kv import _internal_kv_get, _internal_kv_list
 
@@ -71,7 +73,7 @@ def _load_active_tasks() -> dict[str, TaskInfo]:
         return {}
     tasks: dict[str, TaskInfo] = {}
     namespace = _task_state_kv_namespace()
-    for key in _internal_kv_list(_ACTIVE_TASK_KV_PREFIX, namespace=namespace):
+    for key in _internal_kv_list(_RECOVERABLE_TASK_KV_PREFIX, namespace=namespace):
         payload = _internal_kv_get(key, namespace=namespace)
         if payload is None:
             continue
@@ -80,14 +82,14 @@ def _load_active_tasks() -> dict[str, TaskInfo]:
     return tasks
 
 
-def _save_active_task(task_id: str, info: TaskInfo) -> None:
+def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
     import ray.cloudpickle as cloudpickle
     from ray.experimental.internal_kv import _internal_kv_del, _internal_kv_put
 
     if not _task_state_storage_available():
         return
-    key = _active_task_key(task_id)
-    if info.state in CANCELLABLE_INDEXING_STATES:
+    key = _recoverable_task_key(task_id)
+    if info.state in RECOVERABLE_TASK_STATES:
         _internal_kv_put(
             key,
             cloudpickle.dumps((task_id, info)),
@@ -125,7 +127,7 @@ class TaskInfo:
 @ray.remote(concurrency_groups={"set": 1000, "get": 1000, "queue_info": 1000})
 class TaskStateManager:
     def __init__(self) -> None:
-        self.tasks = _load_active_tasks()
+        self.tasks = _load_recoverable_tasks()
         self.user_index: dict[int | None, set[str]] = {}
         for task_id, info in self.tasks.items():
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
@@ -198,14 +200,14 @@ class TaskStateManager:
             if info.state == DocumentStatus.CANCELLED and state != DocumentStatus.CANCELLED:
                 return
             info.state = state
-            _save_active_task(task_id, info)
+            _save_recoverable_task(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_error(self, task_id: str, tb_str: str) -> None:
         async with self.lock:
             info = await self._ensure_task(task_id)
             info.error = tb_str
-            _save_active_task(task_id, info)
+            _save_recoverable_task(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_failed_if_not_cancelled(self, task_id: str, tb_str: str) -> bool:
@@ -216,7 +218,7 @@ class TaskStateManager:
                 return False
             info.state = "FAILED"
             info.error = tb_str
-            _save_active_task(task_id, info)
+            _save_recoverable_task(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -226,7 +228,7 @@ class TaskStateManager:
             if info is None or info.state in TERMINAL_TASK_STATES:
                 return False
             info.state = "CANCELLED"
-            _save_active_task(task_id, info)
+            _save_recoverable_task(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -249,7 +251,7 @@ class TaskStateManager:
                 metadata=metadata,
                 user_id=user_id,
             )
-            _save_active_task(task_id, info)
+            _save_recoverable_task(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_queued_details(
@@ -275,10 +277,10 @@ class TaskStateManager:
             )
             if self._file_delete_fenced(partition=partition, file_id=file_id):
                 info.state = "CANCELLED"
-                _save_active_task(task_id, info)
+                _save_recoverable_task(task_id, info)
                 return False
             info.state = "QUEUED"
-            _save_active_task(task_id, info)
+            _save_recoverable_task(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -289,10 +291,10 @@ class TaskStateManager:
             details = info.details or {}
             if self._file_delete_fenced(partition=details.get("partition"), file_id=details.get("file_id")):
                 info.state = "CANCELLED"
-                _save_active_task(task_id, info)
+                _save_recoverable_task(task_id, info)
                 return False
             accepted = info.state in ACTIVE_INDEXING_STATES or info.state in TERMINAL_INDEXING_STATES
-            _save_active_task(task_id, info)
+            _save_recoverable_task(task_id, info)
             return accepted
 
     @ray.method(concurrency_group="get")
