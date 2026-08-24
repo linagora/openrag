@@ -291,6 +291,20 @@ class TestVLLMClient:
         assert captured["top_logprobs"] == 5
 
     @pytest.mark.asyncio
+    async def test_truthy_logprobs_forwarded_on_generate(self):
+        """An explicit opt-in must keep flowing through unchanged on the completion path."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _completions_response()
+
+        await self._make_client(capture).generate("hi", logprobs=True, top_logprobs=5)
+
+        assert captured["logprobs"] is True
+        assert captured["top_logprobs"] == 5
+
+    @pytest.mark.asyncio
     async def test_trailing_slash_stripped(self):
         c = VLLMClient(endpoint="http://vllm:8000/v1/", model_name="m")
         assert c._endpoint == "http://vllm:8000/v1"
