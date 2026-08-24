@@ -152,11 +152,8 @@ def prepend_system_prompt(
     ``[Sources: ...]`` marker.
     """
     out = copy.deepcopy(messages)
-    # Same treatment as RAG/web context: a client-supplied custom_prompt is
-    # untrusted text and must not be able to forge a [Source N] block or a
-    # [Sources: ...] citation tag next to the real Context.
-    # A literal closing tag could also break out of the untrusted-content
-    # wrapper and have trailing attacker text read as if outside it.
+    # A literal closing tag could break out of the untrusted-content wrapper
+    # and have trailing attacker text read as if outside it.
     safe_custom_prompt = (
         _UNSAFE_PROMPT_CLOSE_TAG_RE.sub(
             "&lt;/unsafe_custom_prompt&gt;", neutralize_prompt_control_tokens(custom_prompt)
