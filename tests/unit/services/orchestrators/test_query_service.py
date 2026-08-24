@@ -1141,6 +1141,40 @@ async def test_map_reduce_keeps_relevant_drops_irrelevant():
     assert out[0].page_content == "kept"
 
 
+@pytest.mark.asyncio
+async def test_chat_all_retrieved_sources_survives_map_reduce_replacement():
+    """#847 follow-up review: map-reduce replaces `docs` with LLM-generated
+    summaries before the prompt is built. all_retrieved_sources must still
+    reflect what retrieval actually returned, not those summaries."""
+    chunks = [
+        Chunk(id="c1", text="original text one", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="original text two", metadata={"_id": "c2"}),
+    ]
+    rel1 = json.dumps({"relevancy": True, "summary": "summary one"})
+    rel2 = json.dumps({"relevancy": True, "summary": "summary two"})
+    answer = "Grounded answer. [Sources: 1, 2]"
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=[rel1, rel2, answer]))
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {"use_map_reduce": True}},
+        prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id"), "text": doc.page_content} for doc in d],
+        model_name="m",
+    )
+
+    extra = json.loads(out["extra"])
+    # What the LLM actually saw and cited: the map-reduce summaries.
+    assert extra["sources"] == [
+        {"id": "c1", "text": "summary one"},
+        {"id": "c2", "text": "summary two"},
+    ]
+    # The real retrieval, unreplaced by summarization.
+    assert extra["all_retrieved_sources"] == [
+        {"id": "c1", "text": "original text one"},
+        {"id": "c2", "text": "original text two"},
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #

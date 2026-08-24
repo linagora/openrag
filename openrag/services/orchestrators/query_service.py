@@ -490,15 +490,19 @@ class QueryService:
             return payload, [], [], [], [], False
 
         docs = [c.to_langchain() for c in chunks]
-        if use_map_reduce and docs:
-            docs = await self._map_reduce(" ".join(q.query for q in queries.query_list), docs)
 
-        # Full retrieval set, captured before the token-budget selection below
-        # drops anything that didn't fit in the prompt — kept separately for
-        # `all_retrieved_sources` (debugging/eval), while `docs`/`web_results`
-        # stay budget-truncated to match the citation indices the LLM sees (#847).
+        # Full retrieval set, captured right after retrieval — before map-reduce
+        # replaces `docs` with LLM-generated summaries, and before the
+        # token-budget selection below drops anything that didn't fit in the
+        # prompt. Kept separately for `all_retrieved_sources` (debugging/eval),
+        # while `docs`/`web_results` stay map-reduced and budget-truncated to
+        # match what the LLM actually saw and the citation indices it cites
+        # (#847 review — the map-reduce gap was called out in a follow-up pass).
         retrieved_docs = docs
         retrieved_web_results = web_results
+
+        if use_map_reduce and docs:
+            docs = await self._map_reduce(" ".join(q.query for q in queries.query_list), docs)
 
         web_formatted, web_source_numbers, web_tokens = "", [], 0
         web_start_index = 1
