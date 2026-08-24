@@ -295,8 +295,9 @@ class TestStreamWithSourceFiltering:
         assert _parse_finish_sources(result) == [{"file": "a.pdf"}, {"file": "c.pdf"}]
 
     @pytest.mark.asyncio
-    async def test_all_retrieved_sources_includes_uncited_ones(self):
-        """`all_retrieved_sources` always carries every candidate, unfiltered by citation."""
+    async def test_all_retrieved_sources_omitted_unless_opted_in(self):
+        """all_retrieved_sources is debug/eval telemetry — absent by default,
+        only included when the caller passes include_all_retrieved=True."""
         lines = [
             _make_chunk("Here is the answer."),
             _make_chunk("\n[Sources: 1, 3]"),
@@ -304,6 +305,20 @@ class TestStreamWithSourceFiltering:
             DONE_LINE,
         ]
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert "all_retrieved_sources" not in _parse_finish_extra(result)
+
+    @pytest.mark.asyncio
+    async def test_all_retrieved_sources_includes_uncited_ones_when_opted_in(self):
+        """`all_retrieved_sources` always carries every candidate, unfiltered by citation."""
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_chunk("\n[Sources: 1, 3]"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(
+            stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model", include_all_retrieved=True)
+        )
         assert _parse_finish_extra(result)["all_retrieved_sources"] == self.SOURCES
 
     @pytest.mark.asyncio

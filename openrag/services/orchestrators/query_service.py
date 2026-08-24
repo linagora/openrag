@@ -663,6 +663,7 @@ class QueryService:
     ) -> dict:
         """Non-streaming chat completion → finalized OpenAI dict."""
         metadata = payload.get("metadata") or {}
+        include_all_retrieved = bool(metadata.get("include_all_retrieved_sources", False))
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
@@ -677,7 +678,10 @@ class QueryService:
                 citation_protocol_active,
             ) = await self._prepare_chat(partitions, payload, llm)
         sources = prepare_sources(docs, web_results)
-        all_sources = prepare_sources(retrieved_docs, retrieved_web_results)
+        # `all_retrieved_sources` is debug/eval telemetry, not needed by most
+        # callers — skip building it (and calling prepare_sources on the full,
+        # uncapped retrieval set) unless the caller opted in (#847 review).
+        all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
@@ -693,11 +697,7 @@ class QueryService:
             clean, citations = content, None
         chunk["choices"][0]["message"]["content"] = clean
         chunk["extra"] = json.dumps(
-            {
-                "sources": filter_sources_by_citations(sources, citations),
-                "all_retrieved_sources": all_sources,
-                "citations_reported": citations is not None,
-            }
+            _build_extra_payload(sources, citations, all_sources, include_all_retrieved=include_all_retrieved)
         )
         return chunk
 
@@ -711,6 +711,7 @@ class QueryService:
     ) -> AsyncIterator[str]:
         """Streaming chat completion → SSE strings with filtered sources."""
         metadata = payload.get("metadata") or {}
+        include_all_retrieved = bool(metadata.get("include_all_retrieved_sources", False))
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
@@ -725,7 +726,7 @@ class QueryService:
                 citation_protocol_active,
             ) = await self._prepare_chat(partitions, payload, llm)
         sources = prepare_sources(docs, web_results)
-        all_sources = prepare_sources(retrieved_docs, retrieved_web_results)
+        all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
@@ -735,6 +736,7 @@ class QueryService:
             sources,
             model_name,
             all_sources=all_sources,
+            include_all_retrieved=include_all_retrieved,
             citation_protocol_active=citation_protocol_active and not structured_output,
         ):
             yield sse_line
@@ -747,6 +749,8 @@ class QueryService:
         prepare_sources: PrepareSources,
     ) -> dict:
         """Non-streaming text completion → finalized OpenAI dict."""
+        metadata = payload.get("metadata") or {}
+        include_all_retrieved = bool(metadata.get("include_all_retrieved_sources", False))
         llm = self._resolve_llm(partitions)
         citation_protocol_active = partitions is not None
         if partitions is None:
@@ -754,7 +758,7 @@ class QueryService:
         else:
             payload, docs, retrieved_docs = await self._prepare_completions(partitions, payload, llm)
         sources = prepare_sources(docs, [])
-        all_sources = prepare_sources(retrieved_docs, [])
+        all_sources = prepare_sources(retrieved_docs, []) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
 
         resp = await llm.generate(payload["prompt"], **_sampling(payload, key="prompt"))
@@ -768,11 +772,7 @@ class QueryService:
             clean, citations = text, None
         resp["choices"][0]["text"] = clean
         resp["extra"] = json.dumps(
-            {
-                "sources": filter_sources_by_citations(sources, citations),
-                "all_retrieved_sources": all_sources,
-                "citations_reported": citations is not None,
-            }
+            _build_extra_payload(sources, citations, all_sources, include_all_retrieved=include_all_retrieved)
         )
         return resp
 
@@ -821,6 +821,29 @@ def _is_structured_output(payload: dict) -> bool:
     """Structured output cannot carry the plain-text citation marker."""
     response_format = payload.get("response_format")
     return isinstance(response_format, dict) and response_format.get("type") in {"json_object", "json_schema"}
+
+
+def _build_extra_payload(
+    sources: list,
+    citations: set[int] | None,
+    all_sources: list | None,
+    *,
+    include_all_retrieved: bool,
+) -> dict:
+    """Shared ``extra`` shape for ``chat``/``complete`` (mirrors
+    ``stream_with_source_filtering``'s payload, minus the streaming-only
+    ``truncated`` flag) so the three response paths can't drift apart.
+    """
+    filtered = filter_sources_by_citations(sources, citations)
+    payload = {
+        "sources": filtered,
+        "presented_sources": sources,
+        "cited_sources": filtered if citations is not None else [],
+        "citations_reported": citations is not None,
+    }
+    if include_all_retrieved:
+        payload["all_retrieved_sources"] = all_sources
+    return payload
 
 
 __all__ = ["QueryService", "RAGMODE"]

@@ -114,18 +114,28 @@ async def stream_with_source_filtering(
     *,
     citation_protocol_active: bool = True,
     all_sources: list | None = None,
+    include_all_retrieved: bool = False,
 ):
     """Process an LLM SSE stream and, when active, strip source tags.
 
     ``sources`` is the prompt-visible (context-budget-truncated) list used to
-    resolve citation indices; ``all_sources`` — the complete pre-truncation
-    retrieval set — is reported separately as ``extra.all_retrieved_sources``
-    and defaults to ``sources`` when the caller has nothing more complete to
-    offer. ``extra.citations_reported`` distinguishes a genuine "the model
-    cited every source" from "no ``[Sources: ...]`` tag was found, so
-    everything was kept by default" — both leave ``sources`` covering the
-    full prompt-visible list, but only the former means ``citations_reported``
-    is ``true``.
+    resolve citation indices — reported as-is via ``extra.sources`` (legacy,
+    kept for existing clients: cited sources, or every presented source as a
+    fallback when no tag was found) and ``extra.presented_sources`` (always
+    the raw pre-filter list, so a client can render "sources consulted" when
+    nothing was cited). ``extra.cited_sources`` is the strict version: only
+    what the model actually cited, empty whenever no tag was found — never
+    falling back to "everything" the way ``sources`` does.
+    ``extra.citations_reported`` disambiguates those two empty/full states
+    on the wire: ``true`` only when a ``[Sources: ...]`` tag (even an empty
+    one) was actually found.
+
+    ``all_sources`` — the complete pre-truncation retrieval set — is reported
+    as ``extra.all_retrieved_sources`` only when ``include_all_retrieved`` is
+    true (it defaults to ``sources`` when the caller has nothing more
+    complete to offer). It's gated because a full retrieval dump on every
+    response is debug/eval telemetry, not something most callers need on the
+    hot path.
 
     The terminal flush (tail content + ``extra.sources``) runs exactly once
     after the loop on *every* termination path — a clean ``data: [DONE]``, the
@@ -276,12 +286,12 @@ async def stream_with_source_filtering(
     filtered = filter_sources_by_citations(sources, citations)
     extra_payload = {
         "sources": filtered,
-        "all_retrieved_sources": all_sources if all_sources is not None else sources,
-        # Disambiguates "the model cited exactly these" from "no [Sources: ...]
-        # tag was found, so everything was kept" — both cases can otherwise
-        # leave `sources` covering every retrieved source.
+        "presented_sources": sources,
+        "cited_sources": filtered if citations is not None else [],
         "citations_reported": citations is not None,
     }
+    if include_all_retrieved:
+        extra_payload["all_retrieved_sources"] = all_sources if all_sources is not None else sources
     if not saw_done:
         extra_payload["truncated"] = True
         logger.warning(

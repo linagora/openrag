@@ -454,13 +454,39 @@ async def test_chat_with_partition_retrieves_and_filters_sources():
     sources = [{"source_type": "document", "n": 1}, {"source_type": "document", "n": 2}]
     out = await svc.chat(
         partitions=["p"],
-        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"include_all_retrieved_sources": True},
+        },
         prepare_sources=lambda d, w: sources,
         model_name="m",
     )
     extra = json.loads(out["extra"])
     assert extra["sources"] == [{"source_type": "document", "n": 1}]  # only cited source 1
-    assert extra["all_retrieved_sources"] == sources  # unfiltered, everything retrieved
+    assert extra["presented_sources"] == sources  # everything shown to the model
+    assert extra["cited_sources"] == [{"source_type": "document", "n": 1}]  # strictly what was cited
+    assert extra["all_retrieved_sources"] == sources  # opted in: unfiltered, everything retrieved
+
+
+@pytest.mark.asyncio
+async def test_chat_all_retrieved_sources_omitted_by_default():
+    """#847 follow-up: all_retrieved_sources is debug/eval telemetry, gated
+    behind metadata.include_all_retrieved_sources — absent unless requested."""
+    svc = _svc(llm=FakeLLM(chat_responses=["answer [Sources: 1]"]))
+    sources = [{"source_type": "document", "n": 1}]
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        prepare_sources=lambda d, w: sources,
+        model_name="m",
+    )
+
+    extra = json.loads(out["extra"])
+    assert "all_retrieved_sources" not in extra
+    assert extra["sources"] == sources
+    assert extra["presented_sources"] == sources
+    assert extra["cited_sources"] == sources
 
 
 @pytest.mark.asyncio
@@ -477,7 +503,10 @@ async def test_chat_all_retrieved_sources_survives_context_budget_truncation():
 
     out = await svc.chat(
         partitions=["p"],
-        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"include_all_retrieved_sources": True},
+        },
         prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
         model_name="m",
     )
@@ -505,7 +534,10 @@ async def test_chat_stream_all_retrieved_sources_survives_context_budget_truncat
         line
         async for line in svc.chat_stream(
             partitions=["p"],
-            payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+            payload={
+                "messages": [{"role": "user", "content": "q"}],
+                "metadata": {"include_all_retrieved_sources": True},
+            },
             prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
             model_name="m",
         )
@@ -532,7 +564,7 @@ async def test_complete_all_retrieved_sources_survives_context_budget_truncation
 
     out = await svc.complete(
         partitions=["p"],
-        payload={"prompt": "q"},
+        payload={"prompt": "q", "metadata": {"include_all_retrieved_sources": True}},
         prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
     )
 
@@ -665,6 +697,11 @@ async def test_chat_without_citation_keeps_retrieved_sources():
     # No tag at all → not reported, even though `sources` ends up covering
     # everything, same as if the model had explicitly cited all of them (#847 review).
     assert extra["citations_reported"] is False
+    # presented_sources always shows what the model saw; cited_sources — unlike
+    # legacy `sources` — never falls back and stays empty when nothing was
+    # actually reported cited.
+    assert extra["presented_sources"] == sources
+    assert extra["cited_sources"] == []
 
 
 @pytest.mark.asyncio
@@ -780,7 +817,7 @@ async def test_structured_websearch_returns_only_sources_included_in_context():
         partitions=None,
         payload={
             "messages": [{"role": "user", "content": "Question"}],
-            "metadata": {"websearch": True},
+            "metadata": {"websearch": True, "include_all_retrieved_sources": True},
             "response_format": {"type": "json_object"},
         },
         prepare_sources=lambda _docs, results: [{"url": result.url} for result in results],
@@ -1157,7 +1194,10 @@ async def test_chat_all_retrieved_sources_survives_map_reduce_replacement():
 
     out = await svc.chat(
         partitions=["p"],
-        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {"use_map_reduce": True}},
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"use_map_reduce": True, "include_all_retrieved_sources": True},
+        },
         prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id"), "text": doc.page_content} for doc in d],
         model_name="m",
     )
