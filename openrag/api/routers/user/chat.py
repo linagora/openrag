@@ -14,7 +14,6 @@ handed to the service as a callable), and ``StreamingResponse`` /
 import asyncio
 import json
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 
 import consts
 from api.dependencies.auth import (
@@ -34,6 +33,7 @@ from core.models.preset import resolve_partition_chat_llm
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens, sanitize_text
+from core.utils.web_url import normalize_web_url
 from di.providers import get_config, get_partition_service, get_query_service
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -225,8 +225,8 @@ def __prepare_sources(request: Request, docs: list, web_results: list | None = N
         doc_metadata = dict(doc.metadata)
         links.append(build_document_source_link(doc_metadata, static_url, chunk_url))
     for result in web_results or []:
-        url = sanitize_text(result.url or "")
-        if not url or urlparse(url).scheme not in ("http", "https"):
+        url = normalize_web_url(result.url)
+        if url is None:
             continue
         links.append(
             {

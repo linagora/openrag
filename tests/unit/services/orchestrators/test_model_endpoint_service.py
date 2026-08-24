@@ -103,13 +103,15 @@ class _FakeEndpointRepo:
         return ("ok", promoted)
 
 
-def _make_service(repo=None, rows=None, settings=None):
+def _make_service(repo=None, rows=None, settings=None, partition_service=None, preset_service=None):
     from core.config.root import Settings
     from services.orchestrators.model_endpoint_service import ModelEndpointService
 
     return ModelEndpointService(
         model_endpoint_repo=repo or _FakeEndpointRepo(rows),
         config=settings or Settings(),
+        partition_service=partition_service,
+        preset_service=preset_service,
     )
 
 
@@ -911,6 +913,159 @@ async def test_update_model_endpoint_renames_and_evicts_cache():
     assert "old-name" not in cache
     assert ("old-name", "embedder") not in repo._store
     assert ("new-name", "embedder") in repo._store
+
+
+class _FakePresetServiceForReload:
+    def __init__(self):
+        self.load_all_calls = 0
+
+    async def load_all(self):
+        self.load_all_calls += 1
+
+
+class _FakePartitionServiceForReload:
+    def __init__(self):
+        self.load_partitions_calls = 0
+
+    async def load_partitions(self):
+        self.load_partitions_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_reloads_presets_then_partitions():
+    """A rename cascades DB-side references (#770) inside the repo's own rename
+    transaction (see PgModelEndpointRepository.rename), but those writes are
+    invisible until PresetService / PartitionService reload their in-memory
+    caches — pin that both get refreshed on a rename."""
+    existing = _make_row(name="old-name", model_type="llm")
+    repo = _FakeEndpointRepo(rows=[existing])
+    preset_service = _FakePresetServiceForReload()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.update_model_endpoint("old-name", "llm", new_name="new-name")
+
+    assert preset_service.load_all_calls == 1
+    assert partition_service.load_partitions_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_without_rename_skips_preset_and_partition_reload():
+    """A plain field update (no rename) touches no cross-referenced name, so
+    it must not pay for a presets/partitions reload it doesn't need."""
+    existing = _make_row(name="jina")
+    repo = _FakeEndpointRepo(rows=[existing])
+    preset_service = _FakePresetServiceForReload()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.update_model_endpoint("jina", "embedder", endpoint="http://new:8000/v1")
+
+    assert preset_service.load_all_calls == 0
+    assert partition_service.load_partitions_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_aliases_new_name_before_reload_awaits():
+    """A request racing the rename must resolve `new_name` even before the
+    presets/partitions reload below completes — the DB cascade (#770) has
+    already repointed partitions/presets at it by the time the rename
+    `await` returns, so the registry can't lag behind until `load_all()`."""
+    existing = _make_row(name="old-name", model_type="llm", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    seen_during_reload = {}
+
+    class _SnoopingPresetService:
+        async def load_all(self):
+            seen_during_reload["new-name"] = svc._config.models.llm.get("new-name")
+            seen_during_reload["old-name"] = svc._config.models.llm.get("old-name")
+
+    svc._preset_service = _SnoopingPresetService()
+
+    await svc.update_model_endpoint("old-name", "llm", new_name="new-name")
+
+    assert seen_during_reload["new-name"].endpoint == "http://old:8000/v1"
+    assert seen_during_reload["old-name"].endpoint == "http://old:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_keeps_both_names_resolvable_after_failed_reload():
+    """If PresetService.load_all() (or PartitionService.load_partitions())
+    raises mid-rename, the DB rename has already committed — the registry
+    must still resolve both the old and the new name afterward, instead of
+    being stuck answering only to the pre-rename one until process restart."""
+    existing = _make_row(name="old-name", model_type="llm", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    class _FailingPresetService:
+        async def load_all(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "llm", new_name="new-name")
+
+    assert svc._config.models.llm.get("old-name").endpoint == "http://old:8000/v1"
+    assert svc._config.models.llm.get("new-name").endpoint == "http://old:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_with_field_change_aliases_the_new_values():
+    """A rename combined with a field change (e.g. a new endpoint URL) must
+    alias `new_name`/`old_name` to the row this call just wrote, not to
+    whatever the in-memory bucket held before the update ran — otherwise a
+    reload failure right after would leave the registry silently serving the
+    stale pre-update config under the DB-authoritative new name forever."""
+    existing = _make_row(name="old-name", model_type="llm", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    class _FailingPresetService:
+        async def load_all(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "llm", new_name="new-name", endpoint="http://new:8000/v1")
+
+    assert svc._config.models.llm.get("new-name").endpoint == "http://new:8000/v1"
+    assert svc._config.models.llm.get("old-name").endpoint == "http://new:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_evicts_stale_client_cache_before_failed_reload():
+    """A cached *client instance* under old_name predates this call and can't
+    know about a field change baked into the same rename — the factory checks
+    its cache before the config registry, so it must be evicted eagerly (not
+    only in the post-reload cleanup a failing reload would skip), or a
+    request through old_name keeps getting the stale pre-update client."""
+    existing = _make_row(name="old-name", model_type="llm", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+    stale_client = object()
+    cache: dict = {"old-name": stale_client}
+    svc._client_caches["llm"] = cache
+
+    class _FailingPresetService:
+        async def load_all(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "llm", new_name="new-name", endpoint="http://new:8000/v1")
+
+    assert "old-name" not in cache
+    assert "new-name" not in cache
 
 
 @pytest.mark.asyncio

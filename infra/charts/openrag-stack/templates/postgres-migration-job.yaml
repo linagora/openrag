@@ -14,6 +14,14 @@ Disabled by default via `postgresProvisioning.migrationJob.enabled`. Enable it
 for managed Postgres and pair it with `runMigrationsInApp: false` so the app no
 longer migrates at startup. When disabled, the application runs migrations
 itself during startup instead.
+
+It runs the same image, UID and security context as the OpenRAG Deployment, so
+it also reuses `openrag.serviceAccountName`. That matters on OpenShift: the pod
+requests `runAsUser: 10001`, which only a SecurityContextConstraints bound to
+that ServiceAccount permits. Falling back to the namespace's `default` SA would
+put the Job under `restricted-v2` (MustRunAsRange) instead, and admission would
+reject a UID outside the namespace's assigned range — the Job would fail as a
+pre-upgrade hook and abort the whole release.
 */}}
 {{- if .Values.postgresProvisioning.migrationJob.enabled }}
 apiVersion: batch/v1
@@ -36,14 +44,17 @@ spec:
         app.kubernetes.io/component: postgres-migration
     spec:
       restartPolicy: Never
-      automountServiceAccountToken: {{ .Values.security.automountServiceAccountToken }}
+      {{- with .Values.openrag.serviceAccountName }}
+      serviceAccountName: {{ tpl . $ }}
+      {{- end }}
+      automountServiceAccountToken: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.openrag "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
       securityContext:
-        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+        {{- include "openrag-stack.mergeSecurityContext" (dict "component" .Values.openrag.podSecurityContext "default" .Values.security.podSecurityContext) | nindent 8 }}
       containers:
         - name: migrate
-          image: "{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
+          image: "{{ .Values.openrag.image.registry | default .Values.global.image.registry }}/{{ .Values.openrag.image.repository }}:{{ .Values.openrag.image.tag }}"
           securityContext:
-            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
+            {{- include "openrag-stack.mergeSecurityContext" (dict "component" (.Values.openrag.containerSecurityContext | default dict) "default" .Values.security.containerSecurityContext) | nindent 12 }}
           workingDir: /app/openrag
           command:
             - sh
@@ -53,9 +64,9 @@ spec:
                 uv run python -m services.persistence.migrations.run
           envFrom:
             - configMapRef:
-                name: rag-env
+                name: {{ include "openrag-stack.fullname" . }}-env
             - secretRef:
-                name: rag-env-secrets
+                name: {{ include "openrag-stack.secretName" . }}
           env:
             # The runner (services.persistence.migrations.run) always runs
             # migrations and never auto-creates the database, so it ignores

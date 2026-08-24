@@ -46,6 +46,7 @@ from api.routers.admin.model_endpoints import router as model_endpoints_router
 from api.routers.admin.monitoring import router as monitoring_router
 from api.routers.admin.partitions import router as partition_router
 from api.routers.admin.presets import router as presets_router
+from api.routers.admin.prompts import router as prompts_router
 from api.routers.admin.tools import router as tools_router
 from api.routers.admin.users import router as users_router
 from api.routers.admin.workspaces import router as workspaces_router
@@ -117,6 +118,7 @@ class Tags(Enum):
     PARTITION = "Partitions & files"
     MODEL_ENDPOINTS = "Model Endpoints"
     PRESETS = "Presets"
+    PROMPTS = "Prompts"
     QUEUE = "Queue management"
     ACTORS = "Ray Actors"
     USERS = "User management"
@@ -357,6 +359,7 @@ app.include_router(search_router, prefix="/search", tags=[Tags.SEARCH])
 app.include_router(partition_router, prefix="/partition", tags=[Tags.PARTITION])
 app.include_router(model_endpoints_router, prefix="/model-endpoints", tags=[Tags.MODEL_ENDPOINTS])
 app.include_router(presets_router, prefix="/presets", tags=[Tags.PRESETS])
+app.include_router(prompts_router, prefix="/prompts", tags=[Tags.PROMPTS])
 app.include_router(queue_router, prefix="/queue", tags=[Tags.QUEUE])
 app.include_router(actors_router, prefix="/actors", tags=[Tags.ACTORS])
 app.include_router(users_router, prefix="/users", tags=[Tags.USERS])
