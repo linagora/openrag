@@ -1089,8 +1089,11 @@ async def test_delete_file_holds_file_delete_fence_around_cleanup() -> None:
     await dispatcher.delete_file("file-1", "tenant-a")
 
     assert call_order == ["begin", "lookup", "exists", "delete", "workspace", "document", "delete", "end"]
-    tsm.begin_file_delete.remote.assert_awaited_once_with(partition="tenant-a", file_id="file-1")
-    tsm.end_file_delete.remote.assert_awaited_once_with(partition="tenant-a", file_id="file-1")
+    begin_kwargs = tsm.begin_file_delete.remote.await_args.kwargs
+    end_kwargs = tsm.end_file_delete.remote.await_args.kwargs
+    assert begin_kwargs["partition"] == "tenant-a"
+    assert begin_kwargs["file_id"] == "file-1"
+    assert end_kwargs == begin_kwargs
 
 
 @pytest.mark.asyncio
@@ -1115,7 +1118,9 @@ async def test_delete_file_releases_file_delete_fence_when_cleanup_fails() -> No
     with pytest.raises(Exception, match="Milvus connection failed"):
         await dispatcher.delete_file("file-1", "tenant-a")
 
-    tsm.end_file_delete.remote.assert_awaited_once_with(partition="tenant-a", file_id="file-1")
+    tsm.end_file_delete.remote.assert_awaited_once()
+    assert tsm.end_file_delete.remote.await_args.kwargs["partition"] == "tenant-a"
+    assert tsm.end_file_delete.remote.await_args.kwargs["file_id"] == "file-1"
     workspace_repo.remove_file_from_all_workspaces.assert_not_called()
     document_repo.remove_file_from_partition.assert_not_called()
 

@@ -37,6 +37,7 @@ logger = get_logger()
 __all__ = [
     "call_ray_actor_method_with_timeout",
     "call_ray_actor_with_timeout",
+    "retry_idempotent_ray_actor_method",
     "retry_with_backoff",
     "with_retry",
     "with_timeout",
@@ -139,6 +140,32 @@ async def call_ray_actor_method_with_timeout(
         future=future,
         timeout=timeout,
         task_description=task_description,
+    )
+
+
+async def retry_idempotent_ray_actor_method(
+    submit: Callable[[], ray.ObjectRef],
+    recovery_timeout: float = 30.0,
+    task_description: str = "Ray task",
+    attempt_timeout: float = 1.0,
+    retry_delay: float = 0.1,
+) -> Any:
+    """Retry an idempotent actor write while its process is reconstructing."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + recovery_timeout
+    while loop.time() < deadline:
+        try:
+            remaining = max(0.01, min(attempt_timeout, deadline - loop.time()))
+            return await call_ray_actor_method_with_timeout(
+                submit=submit,
+                timeout=remaining,
+                task_description=task_description,
+            )
+        except (ServiceUnavailableError, TimeoutError):
+            await asyncio.sleep(retry_delay)
+    raise ServiceUnavailableError(
+        "Worker service did not recover in time",
+        code="RAY_ACTOR_UNAVAILABLE",
     )
 
 

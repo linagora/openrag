@@ -15,7 +15,7 @@ from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.exceptions import ConflictError
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
-from services.workers.ray_utils import call_ray_actor_with_timeout
+from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 
@@ -124,21 +124,23 @@ class WorkerDispatcher(IndexingDispatcher):
         )
         return True
 
-    async def _begin_file_delete_fence(self, *, file_id: str, partition: str) -> None:
+    async def _begin_file_delete_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
         remote = _remote_actor_method(self._tsm, "begin_file_delete")
         if remote is None:
             raise RuntimeError("TaskStateManager does not expose file delete fencing for delete cleanup")
-        await self._call_method(
-            lambda: remote(partition=partition, file_id=file_id),
+        await retry_idempotent_ray_actor_method(
+            lambda: remote(partition=partition, file_id=file_id, fence_id=fence_id),
+            recovery_timeout=self._timeout,
             task_description=f"begin_file_delete({partition}, {file_id})",
         )
 
-    async def _end_file_delete_fence(self, *, file_id: str, partition: str) -> None:
+    async def _end_file_delete_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
         remote = _remote_actor_method(self._tsm, "end_file_delete")
         if remote is None:
             raise RuntimeError("TaskStateManager does not expose file delete fencing for delete cleanup")
-        await self._call_method(
-            lambda: remote(partition=partition, file_id=file_id),
+        await retry_idempotent_ray_actor_method(
+            lambda: remote(partition=partition, file_id=file_id, fence_id=fence_id),
+            recovery_timeout=self._timeout,
             task_description=f"end_file_delete({partition}, {file_id})",
         )
 
@@ -386,7 +388,8 @@ class WorkerDispatcher(IndexingDispatcher):
         return False
 
     async def delete_file(self, file_id: str, partition: str) -> None:
-        await self._begin_file_delete_fence(file_id=file_id, partition=partition)
+        fence_id = uuid.uuid4().hex
+        await self._begin_file_delete_fence(file_id=file_id, partition=partition, fence_id=fence_id)
         delete_failed = False
         try:
             await self._delete_file_with_fence(file_id=file_id, partition=partition)
@@ -395,7 +398,7 @@ class WorkerDispatcher(IndexingDispatcher):
             raise
         finally:
             try:
-                await self._end_file_delete_fence(file_id=file_id, partition=partition)
+                await self._end_file_delete_fence(file_id=file_id, partition=partition, fence_id=fence_id)
             except Exception as exc:
                 logger.warning(
                     "Failed to release file delete fence",

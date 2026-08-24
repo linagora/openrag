@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import services.workers.task_state as task_state_module
 from services.workers.task_state import PENDING_TASK_DETAILS, TaskStateManager
 
 
@@ -212,4 +213,50 @@ async def test_file_delete_fence_is_counted_for_overlapping_deletes() -> None:
             user_id=None,
         )
         is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_delete_fence_survives_actor_reconstruction(monkeypatch) -> None:
+    stored: dict[tuple[str, str], dict[str, int]] = {}
+
+    monkeypatch.setattr(task_state_module, "_load_file_delete_fences", lambda: dict(stored))
+
+    def save(fences: dict[tuple[str, str], dict[str, int]]) -> None:
+        stored.clear()
+        stored.update(fences)
+
+    monkeypatch.setattr(task_state_module, "_save_file_delete_fences", save)
+
+    first_incarnation = _task_state_manager()
+    await first_incarnation.begin_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+
+    reconstructed = _task_state_manager()
+    accepted = await reconstructed.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=None,
+    )
+
+    assert accepted is False
+    await reconstructed.end_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+    assert stored == {}
+
+
+@pytest.mark.asyncio
+async def test_file_delete_fence_token_makes_retries_idempotent() -> None:
+    manager = _task_state_manager()
+
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+    await manager.end_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+
+    assert await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=None,
     )

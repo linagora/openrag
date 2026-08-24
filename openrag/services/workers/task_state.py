@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +19,33 @@ LEGACY_ACTIVE_INDEXING_STATES = frozenset({"CHUNKING", "INSERTING"})
 CANCELLABLE_INDEXING_STATES = ACTIVE_INDEXING_STATES | LEGACY_ACTIVE_INDEXING_STATES
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
 PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
+_FENCE_KV_KEY = b"file-delete-fences-v1"
+_FENCE_KV_NAMESPACE = b"openrag-task-state-manager"
+_LEGACY_FENCE_ID = "__legacy__"
+
+
+def _load_file_delete_fences() -> dict[tuple[str, str], dict[str, int]]:
+    from ray.experimental.internal_kv import _internal_kv_get, _internal_kv_initialized
+
+    if not _internal_kv_initialized() or ray.get_runtime_context().get_actor_id() is None:
+        return {}
+    payload = _internal_kv_get(_FENCE_KV_KEY, namespace=_FENCE_KV_NAMESPACE)
+    if payload is None:
+        return {}
+    return {(partition, file_id): holders for partition, file_id, holders in json.loads(payload)}
+
+
+def _save_file_delete_fences(fences: dict[tuple[str, str], dict[str, int]]) -> None:
+    from ray.experimental.internal_kv import _internal_kv_initialized, _internal_kv_put
+
+    if not _internal_kv_initialized() or ray.get_runtime_context().get_actor_id() is None:
+        return
+    payload = json.dumps(
+        [[partition, file_id, holders] for (partition, file_id), holders in sorted(fences.items())],
+        separators=(",", ":"),
+    )
+    _internal_kv_put(_FENCE_KV_KEY, payload, overwrite=True, namespace=_FENCE_KV_NAMESPACE)
+
 
 try:
     from core.config import load_config as _load_config
@@ -48,7 +76,7 @@ class TaskStateManager:
     def __init__(self) -> None:
         self.tasks: dict[str, TaskInfo] = {}
         self.user_index: dict[int | None, set[str]] = {}
-        self.file_delete_fences: dict[tuple[str, str], int] = {}
+        self.file_delete_fences = _load_file_delete_fences()
         self.lock = asyncio.Lock()
 
     async def _ensure_task(self, task_id: str) -> TaskInfo:
@@ -77,23 +105,38 @@ class TaskStateManager:
     def _file_delete_fenced(self, *, partition: str | None, file_id: str | None) -> bool:
         if partition is None or file_id is None:
             return False
-        return self.file_delete_fences.get((partition, file_id), 0) > 0
+        return bool(self.file_delete_fences.get((partition, file_id)))
 
     @ray.method(concurrency_group="set")
-    async def begin_file_delete(self, *, partition: str, file_id: str) -> None:
+    async def begin_file_delete(self, *, partition: str, file_id: str, fence_id: str | None = None) -> None:
         async with self.lock:
             key = (partition, file_id)
-            self.file_delete_fences[key] = self.file_delete_fences.get(key, 0) + 1
+            updated = dict(self.file_delete_fences)
+            holders = dict(updated.get(key, {}))
+            holder = fence_id or _LEGACY_FENCE_ID
+            holders[holder] = 1 if fence_id else holders.get(holder, 0) + 1
+            updated[key] = holders
+            _save_file_delete_fences(updated)
+            self.file_delete_fences = updated
 
     @ray.method(concurrency_group="set")
-    async def end_file_delete(self, *, partition: str, file_id: str) -> None:
+    async def end_file_delete(self, *, partition: str, file_id: str, fence_id: str | None = None) -> None:
         async with self.lock:
             key = (partition, file_id)
-            remaining = self.file_delete_fences.get(key, 0) - 1
-            if remaining > 0:
-                self.file_delete_fences[key] = remaining
+            updated = dict(self.file_delete_fences)
+            holders = dict(updated.get(key, {}))
+            holder = fence_id or _LEGACY_FENCE_ID
+            remaining = holders.get(holder, 0) - 1
+            if fence_id or remaining <= 0:
+                holders.pop(holder, None)
             else:
-                self.file_delete_fences.pop(key, None)
+                holders[holder] = remaining
+            if holders:
+                updated[key] = holders
+            else:
+                updated.pop(key, None)
+            _save_file_delete_fences(updated)
+            self.file_delete_fences = updated
 
     @ray.method(concurrency_group="set")
     async def set_state(self, task_id: str, state: str) -> None:
