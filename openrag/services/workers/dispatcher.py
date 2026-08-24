@@ -75,6 +75,16 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=task_description,
         )
 
+    async def _call_method(self, submit: Any, task_description: str) -> Any:
+        """Submit a job-facing actor call inside the availability boundary."""
+        from services.workers.ray_utils import call_ray_actor_method_with_timeout
+
+        return await call_ray_actor_method_with_timeout(
+            submit=submit,
+            timeout=self._timeout,
+            task_description=task_description,
+        )
+
     async def _set_queued_details(
         self,
         task_id: str,
@@ -539,22 +549,22 @@ class WorkerDispatcher(IndexingDispatcher):
         }
 
     async def get_task_state(self, task_id: str) -> str | None:
-        return await self._call(
-            self._tsm.get_state.remote(task_id),
+        return await self._call_method(
+            lambda: self._tsm.get_state.remote(task_id),
             task_description=f"get_state({task_id})",
         )
 
     async def get_task_error(self, task_id: str) -> str | None:
-        return await self._call(
-            self._tsm.get_error.remote(task_id),
+        return await self._call_method(
+            lambda: self._tsm.get_error.remote(task_id),
             task_description=f"get_error({task_id})",
         )
 
     async def cancel_task(self, task_id: str) -> bool:
         import ray
 
-        obj_ref = await self._call(
-            self._tsm.get_object_ref.remote(task_id),
+        obj_ref = await self._call_method(
+            lambda: self._tsm.get_object_ref.remote(task_id),
             task_description=f"get_object_ref({task_id})",
         )
         if obj_ref is None:
@@ -565,8 +575,8 @@ class WorkerDispatcher(IndexingDispatcher):
         # back and the task would be stuck active forever (a zombie).
         # TaskStateManager keeps CANCELLED sticky, so a worker that starts in
         # this small window cannot report active/success after the cancel claim.
-        cancelled = await self._call(
-            self._tsm.set_cancelled_if_active.remote(task_id),
+        cancelled = await self._call_method(
+            lambda: self._tsm.set_cancelled_if_active.remote(task_id),
             task_description=f"set_cancelled_if_active({task_id})",
         )
         if not cancelled:

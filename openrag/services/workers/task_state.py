@@ -294,6 +294,11 @@ class TaskStateManager:
         }
 
     @ray.method(concurrency_group="queue_info")
+    async def supports_in_place_restart(self) -> bool:
+        """Identify actors created with the restart policy introduced by #841."""
+        return True
+
+    @ray.method(concurrency_group="queue_info")
     async def get_user_pending_task_count(self, user_id: int) -> int:
         async with self.lock:
             task_ids = self.user_index.get(user_id, set())

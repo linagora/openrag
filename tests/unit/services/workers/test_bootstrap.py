@@ -58,6 +58,20 @@ def test_initialize_worker_bootstrap_registers_parser_pool_factories(monkeypatch
     assert set(PARSER_POOL_ACTORS) <= set(bootstrap.actor_creation_map)
 
 
+def test_task_state_manager_restarts_without_retrying_mutations(monkeypatch):
+    calls = _capture_actor_creations(monkeypatch)
+
+    assert bootstrap.get_task_state_manager() == "actor-handle"
+
+    ((name, _cls, options),) = calls
+    assert name == "TaskStateManager"
+    assert options == {
+        "lifetime": "detached",
+        "max_restarts": -1,
+        "max_task_retries": 0,
+    }
+
+
 def test_task_completion_tracker_is_detached_and_starts_recovery(monkeypatch):
     calls = []
     tracker = Mock()

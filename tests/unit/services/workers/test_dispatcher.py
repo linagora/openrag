@@ -5,7 +5,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from ray.exceptions import TaskCancelledError
+from core.utils.exceptions import ServiceUnavailableError
+from ray.exceptions import ActorUnavailableError, TaskCancelledError
 from services.workers.task_state import PENDING_TASK_DETAILS
 
 
@@ -129,6 +130,31 @@ def test_from_ray_namespace_does_not_require_legacy_indexer_actor() -> None:
         )
 
     assert isinstance(dispatcher, WorkerDispatcher)
+
+
+@pytest.mark.asyncio
+async def test_job_lookup_maps_actor_submission_failure_to_unavailability() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.get_state.remote = MagicMock(
+        side_effect=ActorUnavailableError("actor is restarting", actor_id=None),
+    )
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ServiceUnavailableError) as caught:
+        await dispatcher.get_task_state("task-1")
+
+    assert caught.value.status_code == 503
+    assert caught.value.code == "RAY_ACTOR_UNAVAILABLE"
 
 
 @pytest.mark.asyncio

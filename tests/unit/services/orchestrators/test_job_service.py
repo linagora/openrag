@@ -12,11 +12,11 @@ from services.orchestrators.job_service import JobService
 
 @pytest.fixture(autouse=True)
 def _stub_ray_utils(monkeypatch):
-    async def _call_ray_actor_with_timeout(*, future, timeout, task_description):
-        return await future
+    async def _call_ray_actor_method_with_timeout(*, submit, timeout, task_description):
+        return await submit()
 
     ray_utils = types.ModuleType("services.workers.ray_utils")
-    ray_utils.call_ray_actor_with_timeout = _call_ray_actor_with_timeout
+    ray_utils.call_ray_actor_method_with_timeout = _call_ray_actor_method_with_timeout
     monkeypatch.setitem(sys.modules, "services.workers.ray_utils", ray_utils)
 
 

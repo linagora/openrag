@@ -67,7 +67,18 @@ def get_or_create_actor(name, cls, namespace="openrag", remote_args=(), **option
 def get_task_state_manager():
     from services.workers.task_state import TaskStateManager
 
-    return get_or_create_actor("TaskStateManager", TaskStateManager, lifetime="detached")
+    return get_or_create_actor(
+        "TaskStateManager",
+        TaskStateManager,
+        lifetime="detached",
+        # Keep the same actor identity across process crashes so the handles
+        # cached by API services and indexer workers become usable again once
+        # Ray reconstructs the actor. State remains ephemeral until #660.
+        max_restarts=-1,
+        # Several state mutations are not safe to execute twice (notably the
+        # delete-fence counters), so calls retain at-most-once semantics.
+        max_task_retries=0,
+    )
 
 
 def get_task_completion_tracker(namespace: str = "openrag"):

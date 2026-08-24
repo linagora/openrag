@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from importlib import import_module
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+import ray
 from core.config.root import Settings
-from di.workers import ensure_worker_bootstrap, list_ray_actors
+from di.workers import ensure_worker_bootstrap, list_ray_actors, restart_ray_actor
 
 
 def _fake_actor(name: str, namespace: str):
@@ -80,3 +83,57 @@ def test_worker_bootstrap_import_has_no_actor_side_effects() -> None:
     assert module.actor_creation_map == {}
     assert not hasattr(module, "task_state_manager")
     assert not hasattr(module, "serializer")
+
+
+@pytest.mark.asyncio
+async def test_task_state_manager_restart_preserves_cached_handles(monkeypatch) -> None:
+    ready_ref = asyncio.get_running_loop().create_future()
+    ready_ref.set_result(True)
+    ready_method = SimpleNamespace(remote=Mock(return_value=ready_ref))
+    actor = SimpleNamespace(
+        _actor_id=SimpleNamespace(hex=Mock(return_value="same-actor-id")),
+        get_pool_info=ready_method,
+        supports_in_place_restart=SimpleNamespace(),
+    )
+    factory = Mock()
+    monkeypatch.setattr("di.workers.get_actor_creation_map", lambda: {"TaskStateManager": factory})
+    monkeypatch.setattr(ray, "get_actor", Mock(return_value=actor))
+    kill = Mock()
+    monkeypatch.setattr(ray, "kill", kill)
+
+    assert await restart_ray_actor("TaskStateManager") == "same-actor-id"
+
+    kill.assert_called_once_with(actor, no_restart=False)
+    factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_other_actor_restart_still_recreates_the_actor(monkeypatch) -> None:
+    old_actor = SimpleNamespace()
+    new_actor = SimpleNamespace(_actor_id=SimpleNamespace(hex=Mock(return_value="new-actor-id")))
+    factory = Mock(return_value=new_actor)
+    monkeypatch.setattr("di.workers.get_actor_creation_map", lambda: {"MarkerPool": factory})
+    monkeypatch.setattr(ray, "get_actor", Mock(return_value=old_actor))
+    kill = Mock()
+    monkeypatch.setattr(ray, "kill", kill)
+
+    assert await restart_ray_actor("MarkerPool") == "new-actor-id"
+
+    kill.assert_called_once_with(old_actor, no_restart=True)
+    factory.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_legacy_task_state_manager_without_restart_policy_is_recreated(monkeypatch) -> None:
+    old_actor = SimpleNamespace()
+    new_actor = SimpleNamespace(_actor_id=SimpleNamespace(hex=Mock(return_value="new-task-state-id")))
+    factory = Mock(return_value=new_actor)
+    monkeypatch.setattr("di.workers.get_actor_creation_map", lambda: {"TaskStateManager": factory})
+    monkeypatch.setattr(ray, "get_actor", Mock(return_value=old_actor))
+    kill = Mock()
+    monkeypatch.setattr(ray, "kill", kill)
+
+    assert await restart_ray_actor("TaskStateManager") == "new-task-state-id"
+
+    kill.assert_called_once_with(old_actor, no_restart=True)
+    factory.assert_called_once_with()

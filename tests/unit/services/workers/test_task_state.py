@@ -11,6 +11,13 @@ def _task_state_manager() -> Any:
 
 
 @pytest.mark.asyncio
+async def test_reports_support_for_in_place_restart() -> None:
+    manager = _task_state_manager()
+
+    assert await manager.supports_in_place_restart() is True
+
+
+@pytest.mark.asyncio
 async def test_cancelled_state_is_not_overwritten_by_worker_transitions() -> None:
     manager = _task_state_manager()
 

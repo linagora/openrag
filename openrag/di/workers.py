@@ -53,9 +53,13 @@ def get_actor_creation_map() -> Mapping[str, Callable[[], Any]]:
     return actor_creation_map
 
 
-def restart_ray_actor(actor_name: str) -> str:
-    """Restart a named Ray actor and return the new actor id."""
+async def restart_ray_actor(actor_name: str) -> str:
+    """Restart a named Ray actor and return its actor id."""
+    import asyncio
+
     import ray
+    from core.utils.exceptions import ServiceUnavailableError
+    from ray.exceptions import ActorUnavailableError, RayActorError
 
     actor_creation_map = get_actor_creation_map()
     if actor_name not in actor_creation_map:
@@ -63,9 +67,36 @@ def restart_ray_actor(actor_name: str) -> str:
 
     try:
         actor = ray.get_actor(actor_name, namespace=OPENRAG_NAMESPACE)
-        ray.kill(actor, no_restart=True)
     except ValueError:
-        pass
+        actor = None
+
+    restart_capability = getattr(actor, "supports_in_place_restart", None) if actor is not None else None
+    if actor_name == "TaskStateManager" and restart_capability is not None:
+        # This actor is shared through handles cached by API services and
+        # indexer workers. Let Ray reconstruct the same actor incarnation;
+        # replacing it with a new actor would leave every cached handle bound
+        # to the dead one. Poll a normal actor method because Ray's built-in
+        # readiness future can complete just before ordinary calls stop seeing
+        # ActorUnavailableError.
+        actor_id = actor._actor_id.hex()
+        ray.kill(actor, no_restart=False)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 30
+        while loop.time() < deadline:
+            try:
+                ready_ref = actor.get_pool_info.remote()
+                remaining = max(0.01, min(1.0, deadline - loop.time()))
+                await asyncio.wait_for(asyncio.gather(ready_ref), timeout=remaining)
+                return actor_id
+            except (RayActorError, ActorUnavailableError, TimeoutError):
+                await asyncio.sleep(0.1)
+        raise ServiceUnavailableError(
+            "Task state manager did not recover after restart",
+            code="TASK_STATE_RECOVERY_TIMEOUT",
+        )
+
+    if actor is not None:
+        ray.kill(actor, no_restart=True)
 
     new_actor = actor_creation_map[actor_name]()
     return new_actor._actor_id.hex()
