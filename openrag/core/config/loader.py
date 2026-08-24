@@ -45,6 +45,8 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("EMBEDDER_TIMEOUT", "embedder.timeout", float),
     ("EMBEDDER_BATCH_SIZE", "embedder.batch_size", int),
     ("EMBEDDER_CONCURRENCY", "embedder.embed_concurrency", int),
+    # Model endpoint registry
+    ("MODEL_ENDPOINT_SYNC_ON_BOOT", "models.sync_on_boot", bool),
     # VectorDB
     ("VDB_HOST", "vectordb.host", str),
     ("VDB_iPORT", "vectordb.port", int),

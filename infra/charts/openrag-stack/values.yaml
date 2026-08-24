@@ -1,18 +1,40 @@
+# Pinned so every resource name is deterministic regardless of the Helm
+# release name — required for ArgoCD, which by default sets .Release.Name to
+# the Application's own name (or whatever releaseName it's given), not
+# something this chart controls. postgresql.fullnameOverride and
+# milvus.fullnameOverride below are kept in sync with this value by hand
+# (subchart values.yaml is static, it can't reference this one).
+# NOTE: the vllm-stack sub-chart has no such override hook — its Service names
+# (.../*-engine-service) are permanently derived from the real Release.Name
+# (see BASE_URL/EMBEDDER_BASE_URL/VLM_BASE_URL/TRANSCRIBER_BASE_URL below). If
+# deploying via ArgoCD, set spec.source.helm.releaseName to this same value
+# ("openrag") so those URLs resolve too.
+fullnameOverride: "openrag"
+
+global:
+  image:
+    registry: "docker.io"
+
+# Chart-level toggle for umbrella charts that include openrag-stack as a
+# dependency with `condition: openrag-stack.enabled` — has no effect standalone.
+enabled: true
+
 # === Network isolation ===
-# Default-deny ingress for all pods in the release namespace, allowing only
-# intra-namespace traffic plus the public HTTP ports below. This isolates the
-# unauthenticated Ray dashboard (8265), GCS (6379), Postgres, Milvus, etc. from
-# outside the namespace. Disable only if you manage isolation elsewhere.
+# Default-deny ingress; allow only same-namespace traffic and the public HTTP
+# ports below. Isolates the Ray dashboard, Postgres, Milvus, etc.
 networkPolicy:
   enabled: true
   # Ports reachable from outside the namespace (e.g. via the Ingress controller).
   externalPorts:
-    - 8080  # openrag API/UI
+    - 8080  # openrag API/UI & admin-ui
+    # - 8265  # ray dashboard - Security issue, the ray dashboard is not protected by any auth, so it should not be exposed to the public internet.
 
 # === Global shared persistence ===
 persistence:
   enabled: true
-  storageClass: &storageClass longhorn
+  storageClass: &storageClass ""  # empty = use cluster default StorageClass
+  annotations:
+    "helm.sh/resource-policy": keep
   accessMode: ReadWriteMany
   volumes:
     modelWeights: { size: 50Gi }
@@ -21,27 +43,105 @@ persistence:
     logs: { size: 1Gi }
     venv: { size: 10Gi }
 
+# === Shared security defaults ===
+# Pod Security Standards "restricted" baseline, merged into each workload's
+# own podSecurityContext below via the openrag-stack.mergeSecurityContext
+# helper — components only set the runAsUser/runAsGroup/fsGroup specific to
+# their own Dockerfile (see e.g. openrag's OpenShift arbitrary-UID comment)
+# and inherit runAsNonRoot/seccompProfile from here. automountServiceAccountToken
+# and containerSecurityContext are identical for every workload today, so
+# templates read them directly from here with no per-component override.
+security:
+  automountServiceAccountToken: false
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+    readOnlyRootFilesystem: false  # workloads write to runtime paths (openrag /tmp, ray .venv, reranker model cache, ...)
+
+# === Ray (KubeRay operator + RayCluster) ===
+kuberay:
+  enabled: false
+
 ray:
+  enabled: false
+  # 0.0.0.0 would expose the unauthenticated Ray dashboard on every pod
+  # interface (ShadowRay / CVE-2023-48022); loopback-only is safe because the
+  # dashboard is still reachable through ray.ingress / openrag.rayDashboard.ingress.
   dashboardHost: "127.0.0.1"
+  rayVersion: "2.47.1"
+  enableInTreeAutoscaling: false
+  annotations:
+    ray.io/overwrite-container-cmd: "true"
   workers:
     count: 1
     replicas: 1
     minReplicas: 1
     maxReplicas: 1
-  nodeSelector:
-    gpu-role: serving
+  serviceAccountName: ""
+  # infra/docker/ray.Dockerfile creates a plain uid/gid 10001 "app" user (no
+  # arbitrary-GID pattern like openrag's image) and chowns /app to it. Merged
+  # with the shared security.podSecurityContext defaults above.
+  podSecurityContext:
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+  # Uncomment to override the shared security.automountServiceAccountToken /
+  # security.containerSecurityContext defaults for this workload specifically.
+  # automountServiceAccountToken: false
+  # containerSecurityContext: {}
+  nodeSelector: {}
   image:
-    repository: ghcr.io/linagora/openrag-ray
+    registry: "ghcr.io"
+    repository: "linagora/openrag-ray"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "1.1.13"
+    tag: "v2.1.0"
+  resources:
+    head:
+      requests:
+        cpu: "4"
+        memory: "8Gi"
+        nvidia.com/gpu: 1
+      limits:
+        cpu: "4"
+        memory: "8Gi"
+        nvidia.com/gpu: 1
+    worker:
+      requests:
+        cpu: "4"
+        memory: "8Gi"
+        nvidia.com/gpu: 1
+      limits:
+        cpu: "4"
+        memory: "8Gi"
+        nvidia.com/gpu: 1
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+      # nginx.ingress.kubernetes.io/rewrite-target: /
+      # nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+    tls: []
+    path: /
+    pathType: Prefix
 
 # === PostgreSQL (bitnami) ===
 postgresql:
   enabled: true
+  # Kept in sync with the root fullnameOverride ("openrag") by hand — see the
+  # note above it. Without this, the postgresql sub-chart names its own
+  # Service from the real Release.Name instead, which won't match POSTGRES_HOST below.
+  fullnameOverride: "openrag-postgresql"
   auth:
     username: &pgUser root
-    # Must be supplied at install time; templates fail closed if it is empty.
-    password: &pgPass ""
+    # Must be supplied at install time, e.g. --set postgresql.auth.password=$(openssl rand -hex 16)
+    # — templates fail closed (secrets-env.yaml's requiredSecrets check) if left empty.
+    password: ""
   primary:
     persistence:
       enabled: true
@@ -50,6 +150,7 @@ postgresql:
   service:
     port: &pgPort 5432
 
+# === PostgreSQL provisioning & migrations ===
 postgresProvisioning:
   # Keep the bundled PostgreSQL chart self-contained by default. Managed
   # Postgres deployments should set this to false and point POSTGRES_* values
@@ -66,8 +167,12 @@ postgresProvisioning:
 # === Milvus ===
 milvus:
   enabled: true
+  # Kept in sync with the root fullnameOverride ("openrag") by hand — see the
+  # note on it above. Without this, the milvus sub-chart names its own proxy
+  # Service from the real Release.Name instead, which won't match VDB_HOST.
+  fullnameOverride: "openrag-milvus"
   image:
-    all: { tag: v2.6.0 }
+    all: { tag: "v2.6.0" }
   cluster: { enabled: true }
   pulsarv3: { enabled: false }
   woodpecker: { enabled: true }
@@ -91,12 +196,25 @@ milvus:
       type: ClusterIP
       port: 19530
 
-# === vLLM (embedder) ===
+# === vLLM (embedder + whisper + llm + vlm) ===
 vllm:
+  enabled: true
   embedderModelName: &embedderModel "Qwen/Qwen3-Embedding-0.6B"
   vlmModelName: &vlmModel "Qwen/Qwen2.5-VL-7B-Instruct"
   whisperModelName: &whisperModel "openai/whisper-large-v3-turbo"
   llmModelName: &llmModel "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
+
+  # Single source for the HF_TOKEN secret name passed to all four model specs.
+  # YAML anchor: editing this value propagates to all four hf_token.secretName entries below.
+  # Must match the chart env secret name ({{ include "openrag-stack.fullname" . }}-env-secrets by default).
+  # values.yaml is not templated, so if you override fullnameOverride ("openrag")
+  # this must be updated to match too — see templates/NOTES.txt for a warning if
+  # they ever drift, and NEVER use "--set vllm.servingEngineSpec.modelSpec[N]...":
+  # Helm replaces lists wholesale rather than merging them by index, so a
+  # partial override there silently wipes repository/tag/modelURL/resources
+  # for all four models (see NOTES.txt for the safe way to override this).
+  hfTokenSecretName: &vllmHfTokenSecretName "openrag-env-secrets"
+
   servingEngineSpec:
     enableEngine: true
     securityContext:
@@ -127,16 +245,12 @@ vllm:
         limitCPU: 4
         limitMemory: "16Gi"
         hf_token:
-          secretName: rag-env-secrets
+          secretName: *vllmHfTokenSecretName
           secretKey: HF_TOKEN
         vllmConfig:
           gpuMemoryUtilization: 0.3
           extraArgs: ["--trust-remote-code", "--task", "embed"]
-        nodeSelectorTerms:
-          - matchExpressions:
-              - key: gpu-role
-                operator: In
-                values: ["serving"]
+        nodeSelectorTerms: []
 
       - name: "whisper"
         repository: "ghcr.io/linagora/vllm-whisper"
@@ -149,16 +263,12 @@ vllm:
         limitCPU: 4
         limitMemory: "16Gi"
         hf_token:
-          secretName: rag-env-secrets
+          secretName: *vllmHfTokenSecretName
           secretKey: HF_TOKEN
         vllmConfig:
           gpuMemoryUtilization: 0.5
           extraArgs: ["--trust-remote-code", "--async-scheduling"]
-        nodeSelectorTerms:
-          - matchExpressions:
-              - key: gpu-role
-                operator: In
-                values: ["serving"]
+        nodeSelectorTerms: []
 
       - name: "llm"
         repository: "vllm/vllm-openai"
@@ -171,7 +281,7 @@ vllm:
         limitCPU: 8
         limitMemory: "32Gi"
         hf_token:
-          secretName: rag-env-secrets
+          secretName: *vllmHfTokenSecretName
           secretKey: HF_TOKEN
         vllmConfig:
           v1: 1
@@ -185,12 +295,9 @@ vllm:
             requestCPU: 8
             requestMemory: "32Gi"
             requestGPU: 2
-        nodeSelectorTerms:
-          - matchExpressions:
-              - key: gpu-role
-                operator: In
-                values: ["llm"]
+        nodeSelectorTerms: []
         pvcStorage: "50Gi"
+
       - name: "vlm"
         repository: "vllm/vllm-openai"
         tag: "v0.11.2"
@@ -202,7 +309,7 @@ vllm:
         limitCPU: 8
         limitMemory: "32Gi"
         hf_token:
-          secretName: rag-env-secrets
+          secretName: *vllmHfTokenSecretName
           secretKey: HF_TOKEN
         vllmConfig:
           v1: 1
@@ -211,25 +318,27 @@ vllm:
           maxModelLen: 8192
           extraArgs: ["--trust-remote-code"]
         shmSize: "20Gi"
-        nodeSelectorTerms:
-          - matchExpressions:
-              - key: gpu-role
-                operator: In
-                values: ["vlm"]
+        nodeSelectorTerms: []
   routerSpec:
     enableRouter: false
 
 # === Infinity reranker ===
 reranker:
+  # Set to false to skip deploying the local Infinity reranker. Also set
+  # externalUrl below to point RERANKER_BASE_URL at an external one instead —
+  # otherwise RERANKER_ENABLED renders "false" and no reranker is used at all.
+  enabled: true
+  # URL of an external reranker (vLLM or any OpenAI-compatible reranker).
+  # When set, this overrides RERANKER_BASE_URL (see env.config below) —
+  # remember to also set enabled: false so the local Deployment/Service
+  # aren't created alongside it.
+  externalUrl: ""
   rerankerModelName: &rerankerModel "Alibaba-NLP/gte-multilingual-reranker-base"
   servicePort: &rerankerPort 7997
   image:
-    repository: michaelf34/infinity
-    # Operator-supplied serving image: pin to a specific infinity release tag
-    # (or digest) before production use rather than tracking latest.
-    tag: latest
-  nodeSelector:
-    gpu-role: serving
+    repository: "michaelf34/infinity"
+    tag: "0.0.75"
+  nodeSelector: {}
   model:
     id: Alibaba-NLP/gte-multilingual-reranker-base
   command:
@@ -239,7 +348,7 @@ reranker:
     - --port
     - *rerankerPort
   replicas: 1
-  runtimeClassName: nvidia
+  runtimeClassName: ""
   service:
     type: ClusterIP
     port: *rerankerPort
@@ -250,103 +359,278 @@ reranker:
     limits:
       cpu: "4"
       memory: "16Gi"
+  serviceAccountName: ""
+  # Merged with the shared security.podSecurityContext defaults above.
+  podSecurityContext:
+    runAsUser: 1000
+    fsGroup: 1000
+  # Uncomment to override the shared security.automountServiceAccountToken /
+  # security.containerSecurityContext defaults for this workload specifically.
+  # automountServiceAccountToken: false
+  # containerSecurityContext: {}
 
-# === Admin UI (React SPA + nginx) ===
-# Static SPA served by the admin-ui container (nginx-unprivileged, :8080). It is
-# same-origin: the SPA makes relative /v1, /auth, … calls that the Ingress routes
-# to the API (see ingress.paths below), so there is no CORS. Runs under the same
-# hardened security context as the rest of the stack.
+# === Admin UI (replaces indexer-ui) ===
+# React SPA served by an nginx bundled inside the image. VITE_BASE_PATH=/app/
+# and VITE_API_BASE_URL="" are compiled into the JS bundle at image build time
+# (see infra/docker/ui.Dockerfile) — the SPA assumes it is served under /app/
+# and makes same-origin, root-relative API calls (/v1, /auth, /chainlit, ...).
+# Changing the path prefix requires rebuilding the image with different
+# build-args; this chart cannot do it via runtime env.
 adminUi:
   enabled: true
   image:
-    repository: linagoraai/openrag-admin-ui
+    registry: ""
+    repository: "linagoraai/openrag-admin-ui"
     # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
     # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
-    tag: "v2.0.0"
-  imagePullPolicy: IfNotPresent
+    tag: "v2.1.0"
+    pullPolicy: IfNotPresent
   replicaCount: 1
   service:
     type: ClusterIP
     port: 8080
     targetPort: 8080
+  # Routing note: admin-ui and openrag/ray-serve share a single optional
+  # Ingress resource (templates/openrag.yaml) — there is no separate Ingress
+  # for admin-ui. Off by default; this flag only adds the more specific
+  # "/app/" path onto openrag.ingress's Ingress ahead of its "/" catch-all,
+  # and has no effect unless openrag.ingress.enabled=true too.
+  # openrag.ingress.host/className/annotations/tls apply to both paths —
+  # there is no automatic "/" -> "/app/" redirect (unlike the compose
+  # front-door), so users must browse to /app/ directly.
+  ingress:
+    enabled: false
   resources: {}
+  serviceAccountName: ""
+  # Uncomment to override the shared security.automountServiceAccountToken /
+  # security.containerSecurityContext defaults for this workload specifically.
+  # automountServiceAccountToken: false
+  # containerSecurityContext: {}
+  # Base image is nginxinc/nginx-unprivileged:1.27-alpine, listening on 8080 so
+  # it never needs root/NET_BIND_SERVICE. infra/docker/ui.Dockerfile chowns
+  # /var/cache/nginx, /etc/nginx/conf.d and /var/run to 10001:0 and makes them
+  # group-writable, so runAsGroup must stay 0 (not 10001) — the same
+  # arbitrary-UID pattern as openrag.podSecurityContext below: on OpenShift the
+  # restricted-v2 SCC replaces runAsUser with a UID from the namespace range but
+  # always keeps GID 0, and group 0 is what keeps those paths writable then.
+  # fsGroup would not help here instead (it only affects mounted volumes, not
+  # paths baked into the image, and this container has no volumeMounts at all).
+  # Merged with the shared security.podSecurityContext defaults above.
+  podSecurityContext:
+    runAsUser: 10001
+    runAsGroup: 0
+  probes:
+    startup: {}
+    readiness:
+      httpGet:
+        path: /app/
+        port: admin-ui
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    liveness:
+      httpGet:
+        path: /app/
+        port: admin-ui
+      initialDelaySeconds: 10
+      periodSeconds: 20
 
 # === OpenRAG main app ===
 openrag:
   image:
-    repository: linagoraai/openrag
+    registry: ""
+    repository: "linagoraai/openrag"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "1.1.13"
+    tag: "v2.1.0"
+    pullPolicy: IfNotPresent
   service:
     type: ClusterIP
     port: 8080
+    targetPort: 8080
+  # Off by default: enabling requires an explicit openrag.ingress.host (see
+  # templates/openrag.yaml's `required` guard) so the chart never exposes an
+  # unauthenticated wildcard-host Ingress by accident.
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+      # For OpenShift HAProxy ingress — increase timeout for large file uploads
+      # (HAProxy default is 30s; uploads over slow links or large files need more):
+      # haproxy.router.openshift.io/timeout: 600s
+      #
+      # For nginx ingress — body size limit (default 1m, raise for large files):
+      # nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+      # nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    tls: []
+  # Ray dashboard ingress — only relevant when ray.enabled=false (embedded Ray via ray.init()).
+  # When ray.enabled=true the dashboard is on the RayCluster head and has its own ingress (ray.ingress).
+  rayDashboard:
+    ingress:
+      enabled: false
+      className: ""
+      host: ""
+      annotations: {}
+        # nginx.ingress.kubernetes.io/rewrite-target: /
+      tls: []
+      path: /
+      pathType: Prefix
   resources:
     requests:
       cpu: "4"
       memory: "16Gi"
+      nvidia.com/gpu: 1
     limits:
       cpu: "4"
       memory: "16Gi"
+      nvidia.com/gpu: 1
   replicas: 1
-
-ingress:
-  enabled: false
-  className: "nginx"
-  host: ""
-  tls:
-    enabled: false
-    secretName: ""
-
-  paths:
-    openrag:
-      enabled: true
-
-security:
-  automountServiceAccountToken: false
+  # Size of the /dev/shm emptyDir volume. Ray's plasma object store and Python
+  # multiprocessing both use /dev/shm for POSIX semaphores and shared memory.
+  # Kubernetes defaults /dev/shm to 64Mi which causes OOM/ENOSPC errors when
+  # running Marker workers. Set to ~30% of the container memory limit or more.
+  # Set to "" or null to disable (use the 64Mi kernel default).
+  shmSize: ""
+  extraVolumes: []
+  extraVolumeMounts: []
+  # Raw Kubernetes initContainer objects, e.g. to merge multiple mounted CA
+  # bundles into one file on a shared emptyDir before the main container
+  # starts (see values-openrag.yaml's kc-ca-bundle example).
+  extraInitContainers: []
+  serviceAccountName: ""
+  # Uncomment to override the shared security.automountServiceAccountToken /
+  # security.containerSecurityContext defaults for this workload specifically.
+  # automountServiceAccountToken: false
+  # containerSecurityContext: {}
+  # infra/docker/api.Dockerfile bakes an "openrag" user as uid 10001, primary
+  # gid 0 (`useradd --uid 10001 --gid 0`), and grants group-write on the paths
+  # it writes at runtime (venv, egg-info, HOME, data/db/logs, HF cache, uv
+  # cache) via `chgrp -R 0` + `chmod g=u` — the OpenShift arbitrary-UID
+  # pattern. runAsGroup must stay 0 (not 10001) to match, or e.g. the editable
+  # install's `openrag.egg-info` isn't writable and uv fails at startup
+  # ("Cannot update time stamp of directory 'openrag.egg-info'"). fsGroup can
+  # stay 10001: it's only applied (and added as a supplementary group) to the
+  # mounted PVCs (data/logs/model_weights/venv), not to the image's own paths.
+  # Merged with the shared security.podSecurityContext defaults above.
   podSecurityContext:
-    runAsNonRoot: true
     runAsUser: 10001
-    runAsGroup: 10001
+    runAsGroup: 0
     fsGroup: 10001
-    seccompProfile:
-      type: RuntimeDefault
-  containerSecurityContext:
-    allowPrivilegeEscalation: false
-    capabilities:
-      drop:
-        - ALL
+  # Probe configuration. Override with exec probes when ENABLE_RAY_SERVE=true,
+  # since the Ray Serve HTTP proxy runs on the Ray head (not on this pod).
+  probes:
+    startup:
+      httpGet:
+        path: /health_check
+        port: openrag
+      failureThreshold: 30
+      periodSeconds: 10
+    readiness:
+      httpGet:
+        path: /health_check
+        port: openrag
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      failureThreshold: 3
+    liveness:
+      httpGet:
+        path: /health_check
+        port: openrag
+      initialDelaySeconds: 60
+      periodSeconds: 30
+      failureThreshold: 3
+
+# === Outbound proxy ===
+# Set enabled: true when the cluster has no direct internet access.
+# Both uppercase and lowercase forms are injected (HTTP_PROXY / http_proxy) for broad tool compatibility.
+# no_proxy excludes cluster-internal traffic from being routed through the proxy.
+proxy:
+  enabled: false
+  url: "http://192.168.100.100:80"
+  # Add your OpenShift apps domain to bypass the proxy for internal routes (e.g. .apps.mycluster.example.com)
+  noProxy: "localhost,127.0.0.1,.cluster.local,.svc,10.0.0.0/8,172.16.0.0/12"
 
 # === Shared env (config + secrets) ===
 env:
+  # Name of an existing K8s Secret to use as-is.
+  # When set, the chart creates no Secret/ExternalSecret/VaultStaticSecret resource.
+  existingSecret: ""
+
+  # Secrets provider — ignored when existingSecret is set.
+  # type: values (default) | externalSecret | vaultStaticSecret
+  secretsProvider:
+    type: values
+
+    # Option A: External Secrets Operator
+    externalSecret:
+      refreshInterval: "1h"
+      secretStore:
+        name: "vault-backend"
+        kind: "ClusterSecretStore"
+      # Option 1: fetch all keys from a path (recommended)
+      dataFrom: []
+      # - extract:
+      #     key: "openrag/secrets"
+      # Option 2: map individual keys
+      data: []
+      # - secretKey: API_KEY
+      #   remoteRef:
+      #     key: "openrag/secrets"
+      #     property: "api_key"
+
+    # Option B: Vault Secrets Operator
+    vaultStaticSecret:
+      vaultAuthRef: "openrag-vault-auth"
+      mount: "kv"
+      type: "kv-v2"
+      path: "openrag/secrets"
+      refreshAfter: "30s"
+      hmacSecretData: true
+
   config:
     # LLM
-    BASE_URL: "http://{{ .Release.Name }}-llm-engine-service/v1/"
-    MODEL: *llmModel
+    # NOTE: postgresql/milvus are sub-charts pinned via their own
+    # fullnameOverride (see values above) so they honor "fullname" like the
+    # rest of this chart. vllm-stack has no such override in its own templates
+    # — its *-engine-service Services are permanently named from the real
+    # Release.Name, so BASE_URL/VLM_BASE_URL/EMBEDDER_BASE_URL/
+    # TRANSCRIBER_BASE_URL below must stay on .Release.Name. Under ArgoCD, set
+    # spec.source.helm.releaseName to match fullnameOverride ("openrag") so
+    # these resolve too.
+    BASE_URL: 'http://{{ .Release.Name }}-llm-engine-service/v1/'
+    MODEL: '{{ .Values.vllm.llmModelName }}'
     LLM_SEMAPHORE: "50"
 
     # VLM
-    VLM_BASE_URL: "http://{{ .Release.Name }}-vlm-engine-service/v1/"
-    VLM_MODEL: *vlmModel
+    VLM_BASE_URL: 'http://{{ .Release.Name }}-vlm-engine-service/v1/'
+    VLM_MODEL: '{{ .Values.vllm.vlmModelName }}'
     VLM_SEMAPHORE: "50"
 
     # App
     APP_PORT: "8080"
-    ENABLE_RAY_SERVE: "true"
+    # Requires ray.enabled=true (a separate RayCluster with its own "serve" port
+    # 80 exposed on {{ fullname }}-raycluster-head-svc — see templates/openrag.yaml
+    # Ingress). With the default ray.enabled=false, the app is expected to run
+    # plain uvicorn on APP_PORT instead, which is what container/service/probes
+    # in templates/openrag.yaml are wired for. Flip both together (see
+    # values-linagora.yaml for the ray.enabled=true pairing).
+    ENABLE_RAY_SERVE: "false"
     RAY_SERVE_NUM_REPLICAS: "4"
     RAY_SERVE_PORT: "80"
 
     WITH_CHAINLIT_UI: "false"
-    SAVE_UPLOADED_FILES: "false"
-    # HTTP scaling is handled by Ray Serve above (ENABLE_RAY_SERVE +
-    # RAY_SERVE_NUM_REPLICAS), not uvicorn workers — see entrypoint.sh.
+    SAVE_UPLOADED_FILES: "true"
 
     # Vector DB
-    VDB_HOST: "{{ .Release.Name }}-milvus"
+    # milvus.fullnameOverride above pins this sub-chart's proxy Service name to
+    # match "fullname" instead of the real Release.Name (see note near the top).
+    VDB_HOST: '{{ include "openrag-stack.fullname" . }}-milvus'
     VDB_PORT: "19530"
     VDB_CONNECTOR_NAME: "milvus"
 
     # PostgreSQL
-    POSTGRES_HOST: "{{ .Release.Name }}-postgresql"
+    # postgresql.fullnameOverride above pins this sub-chart's Service name to
+    # match "fullname" instead of the real Release.Name (see note near the top).
+    POSTGRES_HOST: '{{ include "openrag-stack.fullname" . }}-postgresql'
     POSTGRES_PORT: *pgPort
     POSTGRES_USER: *pgUser
     # POSTGRES_PASSWORD is a secret — defined under env.secrets, not here in the
@@ -355,15 +639,25 @@ env:
     POSTGRES_RUN_MIGRATIONS: "{{ .Values.postgresProvisioning.runMigrationsInApp }}"
 
     # Embedder
-    EMBEDDER_MODEL_NAME: *embedderModel
-    EMBEDDER_BASE_URL: "http://{{ .Release.Name }}-embedder-engine-service/v1"
+    EMBEDDER_MODEL_NAME: '{{ .Values.vllm.embedderModelName }}'
+    EMBEDDER_BASE_URL: 'http://{{ .Release.Name }}-embedder-engine-service/v1'
 
     # Reranker
-    RERANKER_MODEL: *rerankerModel
-    RERANKER_ENABLED: "true"
+    RERANKER_MODEL: '{{ .Values.reranker.rerankerModelName }}'
+    # True when either the local Infinity reranker is deployed or an external
+    # one is configured — false (and RERANKER_BASE_URL below moot) when
+    # neither applies, so this never points at a Service that doesn't exist.
+    RERANKER_ENABLED: '{{ or .Values.reranker.enabled (ne .Values.reranker.externalUrl "") }}'
     RERANKER_TOP_K: "4"
-    RERANKER_BASE_URL: "http://{{ .Release.Name }}-reranker:{{ .Values.reranker.servicePort }}"
-    RERANKER_MODEL_TYPE: "infinity"
+    RERANKER_BASE_URL: '{{ if .Values.reranker.externalUrl }}{{ .Values.reranker.externalUrl }}{{ else }}http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.servicePort }}{{ end }}'
+    RERANKER_PROVIDER: "infinity"
+
+    # Model Endpoint Registry: when true, re-syncs each type's env-seeded
+    # endpoint (URL/model/api_key/...) from the vars above on every boot, so a
+    # Helm values change + rollout takes effect after the first deploy. Keep
+    # false to let endpoints edited from the admin UI stay as the source of
+    # truth. See docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
+    MODEL_ENDPOINT_SYNC_ON_BOOT: "false"
 
     # Prompts: templates ship inside the package (openrag/prompts/templates);
     # set PROMPTS_DIR only to override with a custom template directory.
@@ -375,24 +669,43 @@ env:
     MARKER_MAX_PROCESSES: "15"
     MARKER_POOL_SIZE: "3"
     MARKER_NUM_GPUS: "0.6"
-    TRANSCRIBER_BASE_URL: "http://{{ .Release.Name }}-whisper-engine-service/v1"
+    TRANSCRIBER_BASE_URL: 'http://{{ .Release.Name }}-whisper-engine-service/v1'
 
     # Ray
+    # RAY_ADDRESS: 'ray://{{ include "openrag-stack.fullname" . }}-raycluster-head-svc:10001'
+    RAY_NUM_GPUS: "0.1"
     RAY_POOL_SIZE: "3"
     RAY_MAX_TASKS_PER_WORKER: "50"
     RAY_DASHBOARD_PORT: "8265"
-    RAY_ADDRESS: "ray://raycluster-head-svc:10001"
     RAY_task_retry_delay_ms: "3000"
     RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
 
     UV_LINK_MODE: "copy"
     UV_CACHE_DIR: "/tmp/uv-cache"
+    UV_PYTHON_PREFERENCE: "only-system"
+    UV_PYTHON: "python3"  # portable: finds python3 in PATH, bypasses .python-version patch-version mismatch
 
   secrets:
     API_KEY: "" # LLM API KEY
     VLM_API_KEY: "" # VLM API KEY
     EMBEDDER_API_KEY: ""
     TRANSCRIBER_API_KEY: ""
+    # Read live from postgresql.auth.password (not the *pgPass anchor, which
+    # only resolves within values.yaml and goes stale once overridden via
+    # --set/-f) so the secret always matches the actual DB credential.
     POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
     AUTH_TOKEN: "" # API KEY for OpenRAG
     HF_TOKEN: "" # HuggingFace token
+    RERANKER_API_KEY: "EMPTY"  # Set when using an external reranker that requires authentication
+
+# Arbitrary additional Kubernetes objects rendered at install time.
+# Each entry is a full resource manifest; Go templates are supported.
+# Example:
+# extraObjects:
+#   - apiVersion: v1
+#     kind: ConfigMap
+#     metadata:
+#       name: "{{ include "openrag-stack.fullname" . }}-extra"
+#     data:
+#       key: value
+extraObjects: []

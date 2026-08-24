@@ -204,6 +204,64 @@ def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.Monke
     assert tagger._llm.kwargs["temperature"] == 0.1
 
 
+def test_worker_factories_do_not_forward_the_env_managed_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`managed_by` is bookkeeping, not a constructor kwarg — and never a request field.
+
+    Every seeded endpoint now carries the marker in `extra`, and the worker
+    factories splat `extra` straight into the client. Forwarding it would push
+    `managed_by: "env"` into the provider payload, which a strict
+    OpenAI-compatible service rejects with a 400 — failing indexing rather than
+    anything visibly related to the marker.
+    """
+    from core.config.model_endpoints import (
+        ENV_MANAGED_KEY,
+        ENV_MANAGED_VALUE,
+        LLM_CONTEXT_SIZE_KEY,
+        LLM_OUTPUT_TOKENS_KEY,
+    )
+    from core.llm import llm_registry
+    from services.workers.indexer_pool import _build_topic_tagger_factory
+
+    class ProbeLLM:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    llm_registry.register("marker-probe")(ProbeLLM)
+    cfg = SimpleNamespace(
+        models=SimpleNamespace(
+            llm={
+                "topic-a": ModelEndpointConfig(
+                    endpoint="http://llm:8000/v1",
+                    model_name="topic-model",
+                    timeout=9.0,
+                    extra={
+                        "implementation": "marker-probe",
+                        "temperature": 0.1,
+                        ENV_MANAGED_KEY: ENV_MANAGED_VALUE,
+                        LLM_CONTEXT_SIZE_KEY: 8192,
+                        LLM_OUTPUT_TOKENS_KEY: 1024,
+                    },
+                )
+            }
+        ),
+        llm=SimpleNamespace(base_url="", model=""),
+        paths=SimpleNamespace(prompts_dir="/tmp/prompts"),
+        prompts=SimpleNamespace(topic_tagger="topic.txt"),
+    )
+    monkeypatch.setattr("core.prompts.load_template_by_key", lambda *_args: "extract topics")
+
+    tagger = _build_topic_tagger_factory(cfg)("topic-a")
+
+    assert ENV_MANAGED_KEY not in tagger._llm.kwargs
+    assert "implementation" not in tagger._llm.kwargs
+    # The LLM token budgets are the same class of control key. di/factories.py
+    # already stripped them, but these worker factories did not — so they leaked
+    # into every worker-issued request until both sides shared one set.
+    assert LLM_CONTEXT_SIZE_KEY not in tagger._llm.kwargs
+    assert LLM_OUTPUT_TOKENS_KEY not in tagger._llm.kwargs
+    assert tagger._llm.kwargs["temperature"] == 0.1  # real kwargs still forwarded
+
+
 def test_build_contextualizer_factory_returns_factory_for_later_hydration(tmp_path) -> None:
     # With no LLM configured at build time the factory is still returned (the
     # registry is hydrated from the DB later) — resolving an unknown name raises
@@ -1390,6 +1448,15 @@ class _RecordingWorker:
         return {"stored_count": 1, "stage": "stored"}
 
 
+def _AsyncReturn(value):
+    """A stub coroutine function returning *value* for any arguments."""
+
+    async def _call(*_a, **_k):
+        return value
+
+    return _call
+
+
 def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     """Bare IndexerWorkerActor with only the attributes process_file touches."""
     from services.workers.indexer_pool import IndexerWorkerActor
@@ -1409,6 +1476,12 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
+    # These build the actor with __new__, so __init__ never runs. Captioning is
+    # enabled by default, so ingest now resolves its prompt even for a config
+    # that omits the flag — stub the service these tests don't exercise.
+    actor._prompt_service = SimpleNamespace(
+        resolve_prompt=_AsyncReturn("prompt"),
+    )
     return actor
 
 

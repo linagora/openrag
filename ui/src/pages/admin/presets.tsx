@@ -10,7 +10,7 @@ import {
   getPresetOptions,
 } from "@/lib/api/presets";
 import type { PresetResponse, PresetType } from "@/lib/api/presets";
-import { listPrompts } from "@/lib/api/prompts";
+import { listAllPrompts } from "@/lib/api/prompts";
 import type { PromptResponse } from "@/lib/api/prompts";
 import { listModelEndpoints, pickDefaultEndpoint } from "@/lib/api/models";
 import { PageHeader } from "@/components/shared/page-header";
@@ -39,6 +39,12 @@ import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatDate, intOr, numOr } from "@/lib/utils";
+import {
+  PROMPT_DEFAULT_OPTION,
+  promptOptionToName,
+  promptOptionValue,
+  promptSelectValue,
+} from "@/lib/prompt-meta";
 import {
   type Config,
   configGet,
@@ -387,9 +393,9 @@ function IndexationPresetForm({
           onModelChange={(v) => set("vlm", v)}
           models={vlms}
           promptLabel="Caption prompt"
-          promptValue={configGet(config, "vlm_caption_prompt_name", "")}
-          onPromptChange={(v) => set("vlm_caption_prompt_name", v || null)}
-          prompts={promptsByType("vlm_caption")}
+          promptValue={configGet(config, "image_captioning_prompt_name", "")}
+          onPromptChange={(v) => set("image_captioning_prompt_name", v || null)}
+          prompts={promptsByType("image_captioning")}
         />
         <FeatureToggle
           label="Contextualization"
@@ -402,7 +408,7 @@ function IndexationPresetForm({
           promptLabel="Prompt"
           promptValue={configGet(config, "contextualization_prompt_name", "")}
           onPromptChange={(v) => set("contextualization_prompt_name", v || null)}
-          prompts={promptsByType("contextualization")}
+          prompts={promptsByType("chunk_contextualizer")}
         />
         <FeatureToggle
           label="Topic tagging"
@@ -416,6 +422,10 @@ function IndexationPresetForm({
           modelValue={configGet(config, "topic_tagging_llm", "")}
           onModelChange={(v) => set("topic_tagging_llm", v)}
           models={llms}
+          promptLabel="Prompt"
+          promptValue={configGet(config, "topic_tagging_prompt_name", "")}
+          onPromptChange={(v) => set("topic_tagging_prompt_name", v || null)}
+          prompts={promptsByType("topic_tagger")}
           numberLabel="Max tags"
           numberValue={configGet(config, "max_topic_tags", 7)}
           onNumberChange={(v) => set("max_topic_tags", v)}
@@ -512,23 +522,20 @@ function FeatureToggle({
 }) {
   const handleToggle = (on: boolean) => {
     onToggle(on);
-    if (on) {
-      // Auto-select when only one option available
-      if (models.length === 1 && !modelValue) onModelChange(models[0]);
-      if (prompts?.length === 1 && onPromptChange && !promptValue) onPromptChange(prompts[0].name);
-    }
+    // Auto-select the sole model, but never the sole prompt: an empty prompt
+    // value is a real choice ("use the type's global default"), and after
+    // seeding a type usually has exactly one prompt — the default itself.
+    // Auto-selecting it would pin that *name* into the preset just by opening
+    // and saving, so promoting a different global default later would silently
+    // stop affecting this preset. Models have no such fallback, so they keep it.
+    if (on && models.length === 1 && !modelValue) onModelChange(models[0]);
   };
 
-  // Auto-select if toggled on and model/prompt list resolves to single item later
+  // Same for a list that resolves to a single item after the query settles.
   useEffect(() => {
     if (!enabled) return;
     if (models.length === 1 && !modelValue) onModelChange(models[0]);
   }, [enabled, models, modelValue, onModelChange]);
-
-  useEffect(() => {
-    if (!enabled || !prompts || !onPromptChange) return;
-    if (prompts.length === 1 && !promptValue) onPromptChange(prompts[0].name);
-  }, [enabled, prompts, promptValue, onPromptChange]);
 
   return (
     <div className="space-y-2">
@@ -575,17 +582,17 @@ function FeatureToggle({
                 <PromptViewButton prompts={prompts} selectedName={promptValue || ""} />
               </div>
               <Select
-                value={promptValue || "__active__"}
-                onValueChange={(v) => onPromptChange(v === "__active__" ? "" : v)}
+                value={promptSelectValue(promptValue)}
+                onValueChange={(v) => onPromptChange(promptOptionToName(v))}
               >
                 <SelectTrigger size="sm">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__active__">Active prompt</SelectItem>
+                  <SelectItem value={PROMPT_DEFAULT_OPTION}>Use default</SelectItem>
                   {prompts.map((p) => (
-                    <SelectItem key={p.id} value={p.name}>
-                      {p.name}{p.is_default ? " (active)" : ""}
+                    <SelectItem key={p.id} value={promptOptionValue(p.name)}>
+                      {p.name}{p.is_default ? " (default)" : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -598,6 +605,45 @@ function FeatureToggle({
   );
 }
 
+/* ---------- Standalone prompt picker (retrieval hyde / multi_query) ---------- */
+
+function PromptSelect({
+  label,
+  prompts,
+  value,
+  onChange,
+}: {
+  label: string;
+  prompts: PromptResponse[];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-1">
+        <Label className="text-xs">{label}</Label>
+        {prompts.length > 0 && <PromptViewButton prompts={prompts} selectedName={value} />}
+      </div>
+      <Select
+        value={promptSelectValue(value)}
+        onValueChange={(v) => onChange(promptOptionToName(v))}
+      >
+        <SelectTrigger size="sm">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={PROMPT_DEFAULT_OPTION}>Use default</SelectItem>
+          {prompts.map((p) => (
+            <SelectItem key={p.id} value={promptOptionValue(p.name)}>
+              {p.name}{p.is_default ? " (default)" : ""}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
 /* ---------- Retrieval form ---------- */
 
 function RetrievalPresetForm({
@@ -606,16 +652,19 @@ function RetrievalPresetForm({
   retrievalPipelines,
   rerankers,
   llms,
+  prompts,
 }: {
   config: Config;
   onChange: (c: Config) => void;
   retrievalPipelines: string[];
   rerankers: string[];
   llms: string[];
+  prompts: PromptResponse[];
 }) {
   const set = (key: string, value: unknown) => onChange(configSet(config, key, value));
   const pipelineType: string = configGet(config, "type", "single");
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const promptsByType = (type: string) => prompts.filter((p) => p.prompt_type === type);
 
   return (
     <div className="space-y-5">
@@ -633,6 +682,12 @@ function RetrievalPresetForm({
             </SelectContent>
           </Select>
         </div>
+        <PromptSelect
+          label="Query contextualizer prompt"
+          prompts={promptsByType("query_contextualizer")}
+          value={configGet(config, "query_contextualizer_prompt_name", "")}
+          onChange={(v) => set("query_contextualizer_prompt_name", v || null)}
+        />
         {pipelineType !== "single" && (
           <div className="space-y-1.5">
             <Label className="text-xs">Expansion LLM</Label>
@@ -653,6 +708,22 @@ function RetrievalPresetForm({
               </SelectContent>
             </Select>
           </div>
+        )}
+        {pipelineType === "hyde" && (
+          <PromptSelect
+            label="HyDE prompt"
+            prompts={promptsByType("hyde")}
+            value={configGet(config, "hyde_prompt_name", "")}
+            onChange={(v) => set("hyde_prompt_name", v || null)}
+          />
+        )}
+        {pipelineType === "multiQuery" && (
+          <PromptSelect
+            label="Multi-query prompt"
+            prompts={promptsByType("multi_query")}
+            value={configGet(config, "multi_query_prompt_name", "")}
+            onChange={(v) => set("multi_query_prompt_name", v || null)}
+          />
         )}
         <div className="space-y-1.5">
           <Label className="text-xs">top_k (vector retrieval count)</Label>
@@ -854,10 +925,10 @@ function PresetDialog({
 
   const { data: promptData } = useQuery({
     queryKey: ["prompts-for-presets"],
-    queryFn: () => listPrompts({ limit: 200 }),
-    enabled: open && presetType === "indexation",
+    queryFn: () => listAllPrompts(),
+    enabled: open,
   });
-  const allPrompts = promptData?.prompts ?? [];
+  const allPrompts = promptData ?? [];
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -901,6 +972,7 @@ function PresetDialog({
               retrievalPipelines={options?.retrieval_types ?? []}
               rerankers={rerankers}
               llms={llms}
+              prompts={allPrompts}
             />
           )}
 

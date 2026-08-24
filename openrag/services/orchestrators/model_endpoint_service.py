@@ -13,7 +13,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from core.config.model_endpoints import ModelEndpointConfig, ModelEndpointRow
+from core.config.model_endpoints import (
+    ENV_MANAGED_KEY,
+    ENV_MANAGED_VALUE,
+    ModelEndpointConfig,
+    ModelEndpointRow,
+)
 from core.utils.exceptions import NotFoundError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.redaction import preserve_existing_secrets
@@ -26,6 +31,22 @@ logger = get_logger()
 
 _VALID_TYPES = frozenset({"embedder", "reranker", "llm", "vlm"})
 _SAMPLING_TYPES = frozenset({"llm", "vlm"})
+# `EMPTY` is the config's stand-in for "no key configured" (see endpoints.py), not
+# a credential. Treating it as one would let boot-time sync overwrite a real
+# hand-set key with a placeholder the moment sync_on_boot was switched on.
+_PLACEHOLDER_API_KEYS = frozenset({"", "EMPTY"})
+# Which env var, if any, owns a given tunable per model type. `_build_default_seeds`
+# always fills these from Settings, so their presence in the seed says nothing about
+# whether the *environment* set them — without this table sync would write the config
+# default over an admin's value (an llm row tuned to timeout=99 came back as 60).
+# Absent from this table (e.g. llm timeout, which has no env var at all) means env
+# does not own the field and sync must leave it alone.
+_ENV_OWNED_TUNABLES: dict[str, dict[str, str]] = {
+    "embedder": {"batch_size": "EMBEDDER_BATCH_SIZE", "timeout": "EMBEDDER_TIMEOUT"},
+    "vlm": {"timeout": "VLM_TIMEOUT"},
+    "reranker": {"timeout": "RERANKER_TIMEOUT"},
+    "llm": {},
+}
 
 
 def _slug(model_name: str) -> str:
@@ -69,6 +90,21 @@ def _with_sampling_params(extra: dict[str, Any], llm_cfg: Any) -> dict[str, Any]
     return {**extra, **_sampling_params(llm_cfg)}
 
 
+def _is_unmodified_seed(row: ModelEndpointRow, data: dict[str, Any]) -> bool:
+    """Is *row* still byte-identical to what the seeder would have written?
+
+    Rows created before the marker existed carry no provenance, so the slug is
+    the only handle on them — but a slug match alone cannot tell an old seed from
+    an endpoint an admin happened to name after the model. Adopting the latter
+    would overwrite their URL and model on the first synced restart.
+
+    Requiring the row to still match env exactly makes adoption safe by
+    construction: if it matches, taking ownership changes nothing; if an admin
+    has touched it, it is left alone and simply never adopted.
+    """
+    return row.endpoint == data["endpoint"] and (row.model_name or "") == (data["model_name"] or "")
+
+
 class ModelEndpointService:
     """CRUD and lifecycle management for named model endpoints."""
 
@@ -78,11 +114,13 @@ class ModelEndpointService:
         model_endpoint_repo: ModelEndpointRepository,
         config: Settings,
         partition_service: Any = None,
+        preset_service: Any = None,
         client_caches: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._repo = model_endpoint_repo
         self._config = config
         self._partition_service = partition_service
+        self._preset_service = preset_service
         self._client_caches: dict[str, dict[str, Any]] = client_caches or {}
 
     # ------------------------------------------------------------------
@@ -101,34 +139,109 @@ class ModelEndpointService:
         from their ``extra`` first (see ``_backfill_sampling_params``), since
         endpoints created before #720's fix never had them written and would
         otherwise keep silently running at the provider default forever.
+
+        When ``models.sync_on_boot`` is set (env ``MODEL_ENDPOINT_SYNC_ON_BOOT``),
+        the endpoint the seeder created is instead refreshed from Settings/env on
+        every boot, so operators can manage it via env vars + a pod rollout.
+
+        That row is found by its ``ENV_MANAGED_KEY`` marker rather than by name,
+        because the name is derived from the model slug: keying off the slug meant
+        that changing the model produced a name that matched nothing, so the sync
+        silently did nothing and the old model stayed live. Rows seeded before the
+        marker existed are adopted on first sync by matching the slug once.
+
+        For the marked row the sync also rotates ``api_key`` inside ``extra`` —
+        env is the source of truth for the credential it owns, and without this a
+        rotated key never reached the DB, so requests kept using the stale key and
+        failed once the provider revoked it. Every other ``extra`` key an admin set
+        is preserved. Endpoints created by hand (no marker) are never touched.
         """
         seeds = self._build_default_seeds()
         now = datetime.now(UTC)
+        sync_on_boot = self._config.models.sync_on_boot
         for model_type, data in seeds.items():
             existing = await self._repo.list_all(model_type=model_type)
-            if existing:
-                if model_type in _SAMPLING_TYPES:
-                    await self._backfill_sampling_params(existing, getattr(self._config, model_type))
-                continue
+            if existing and model_type in _SAMPLING_TYPES:
+                # #720: rows created before the fix never had the sampling params
+                # written, so backfill them before anything else — independent of
+                # whether the env still points anywhere or sync_on_boot is set.
+                await self._backfill_sampling_params(existing, getattr(self._config, model_type))
+
             endpoint: str = data["endpoint"]
             model_name: str = data["model_name"]
             if not endpoint:
                 logger.info(f"No {model_type} endpoint configured — skipping seed.")
                 continue
+
+            name = _slug(model_name or "")
+            # The marker survives a model change; the slug does not, so look for
+            # the marker first and fall back to the slug only to adopt a row
+            # seeded before the marker existed.
+            managed_row = next((r for r in existing if r.extra.get(ENV_MANAGED_KEY) == ENV_MANAGED_VALUE), None)
+            existing_row = managed_row or await self._repo.get(name, model_type)
+            if existing_row is not None:
+                if sync_on_boot and (managed_row is not None or _is_unmodified_seed(existing_row, data)):
+                    await self._sync_env_managed(existing_row, model_type, data)
+                continue
+
+            if existing:
+                # Some other endpoint of this type already exists (hand-created
+                # via the admin API) — don't create a competing default. Reuses
+                # the list fetched above (nothing added/removed a row since).
+                continue
+
             row = ModelEndpointRow(
-                name=_slug(model_name or ""),
+                name=name,
                 model_type=model_type,
                 endpoint=endpoint,
                 model_name=model_name or None,
                 batch_size=data.get("batch_size", 32),
                 timeout=data.get("timeout", 30.0),
-                extra=data.get("extra", {}),
+                extra={**data.get("extra", {}), ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
                 is_default=True,
                 created_at=now,
                 updated_at=now,
             )
             await self._repo.create(row)
             logger.info(f"Seeded default {model_type} endpoint '{row.name}'.")
+
+    async def _sync_env_managed(self, row: ModelEndpointRow, model_type: str, data: dict[str, Any]) -> None:
+        """Refresh the env-seeded row from Settings/env.
+
+        Only fields the environment actually owns are written. ``endpoint`` and
+        ``model_name`` always are — they are what "point this at the configured
+        model" means. ``batch_size``/``timeout`` are written only when their env
+        var is set (see ``_ENV_OWNED_TUNABLES``); the seed carries a value for
+        them regardless, so trusting the seed would overwrite an admin's tuning
+        with the config default.
+
+        ``extra`` is merged, never replaced: the marker and the API key come from
+        env, everything else an admin put there survives. The key is only
+        overwritten when env supplies a *real* one, so neither an unset
+        ``*_API_KEY`` nor its ``EMPTY`` placeholder can clear a working credential.
+
+        The row is deliberately **not renamed** when the model changes. The name
+        is a stable identifier that partitions (``chat_llm``) and presets store by
+        value, and nothing cascades a rename — so renaming would strand those
+        references and the next job could not resolve the endpoint.
+        """
+        seed_extra: dict = data.get("extra", {}) or {}
+        new_extra = {**row.extra, ENV_MANAGED_KEY: ENV_MANAGED_VALUE}
+        env_api_key = seed_extra.get("api_key")
+        if env_api_key and env_api_key not in _PLACEHOLDER_API_KEYS:
+            new_extra["api_key"] = env_api_key
+
+        fields: dict[str, Any] = {
+            "endpoint": data["endpoint"],
+            "model_name": data["model_name"] or None,
+            "extra": new_extra,
+        }
+        for field, env_var in _ENV_OWNED_TUNABLES.get(model_type, {}).items():
+            if os.getenv(env_var) is not None and field in data:
+                fields[field] = data[field]
+
+        await self._repo.update(row.name, model_type, **fields)
+        logger.info(f"Synced {model_type} endpoint '{row.name}' from env (MODEL_ENDPOINT_SYNC_ON_BOOT=true).")
 
     def _build_default_seeds(self) -> dict[str, dict[str, Any]]:
         """Build seed data from env overrides + existing Settings fallbacks.
@@ -285,6 +398,29 @@ class ModelEndpointService:
         Pass ``new_name=`` to rename. After any change the in-memory config is
         reloaded and the stale cached client instance is evicted so the next
         request builds a fresh client against the updated config.
+
+        A rename also cascades to every stored reference — ``partitions.embedder``
+        / ``partitions.chat_llm`` and endpoint-name fields embedded in
+        ``pipeline_presets.config`` — inside the repo's own rename transaction
+        (see ``PgModelEndpointRepository.rename``, #770). Those writes are
+        invisible until the referencing services reload their in-memory caches,
+        which is why a rename also refreshes presets then partitions here —
+        the same order ``PresetService.update_preset`` uses, since partition
+        resolution reads the presets dict.
+
+        Both reload calls ``await``, so a concurrent request can run between
+        them — and the DB rename has *already* committed by that point. Without
+        ``_alias_renamed_name``, a request landing in that window could resolve
+        a partition/preset that the cascade already repointed at ``new_name``
+        against a registry that (until the final ``load_all()`` below) still
+        only knows ``name`` — a bare ``KeyError``. The alias makes both ``name``
+        and ``new_name`` resolve immediately, built from the row this call just
+        wrote — not whatever the in-memory bucket held before it — so a rename
+        combined with a field change (e.g. a new ``endpoint``) aliases the
+        *updated* config, not a stale pre-update one. That also covers a reload
+        call above raising: the registry stays queryable under both names,
+        correctly, instead of the update's failure leaving it stuck on a stale
+        config until process restart.
         """
         existing = await self._repo.get(name, model_type)
         if existing is None:
@@ -312,6 +448,21 @@ class ModelEndpointService:
             await self._repo.rename(name, model_type, new_name)
             effective_name = new_name
             renamed_from = name
+            self._alias_renamed_name(model_type, name, new_name, updated or existing)
+            # A cached *client instance* under either name would otherwise survive
+            # this alias — the factory checks its cache before consulting the
+            # config registry, so a stale pre-rename/pre-update client would keep
+            # serving until the eviction at the end of this method, which a
+            # reload call below raising would skip entirely. The config alias
+            # above is already fresh, so evicting now is safe: anything rebuilt
+            # from either name resolves through the up-to-date config, not stale
+            # cached state.
+            self._invalidate_client_cache(model_type, name)
+            self._invalidate_client_cache(model_type, new_name)
+            if self._preset_service is not None:
+                await self._preset_service.load_all()
+            if self._partition_service is not None:
+                await self._partition_service.load_partitions()
 
         if promote_to_default:
             # Clears any prior default and sets this row in one transaction, then
@@ -428,6 +579,39 @@ class ModelEndpointService:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _alias_renamed_name(self, model_type: str, old_name: str, new_name: str, row: ModelEndpointRow) -> None:
+        """Make both ``old_name`` and ``new_name`` resolve to *row* before any reload runs.
+
+        Runs synchronously right after the rename ``await`` returns — no
+        further ``await`` happens before this executes, so no concurrent
+        request can observe the DB already renamed while the registry still
+        only answers to ``old_name``.
+
+        Built from ``row`` — the just-written DB state — rather than copying
+        whatever the in-memory bucket currently holds under ``old_name``: a
+        rename can land in the same call as a field update (e.g. a new
+        ``endpoint`` URL), applied to the DB *before* this runs, so the stale
+        in-memory entry would alias both names to the pre-update config. If a
+        reload below then raises, that staleness would never get corrected
+        by the final ``load_all()`` this call never reaches — the registry
+        would keep serving the old endpoint under the new (DB-authoritative)
+        name until process restart. The next full ``load_all()`` (below, or
+        from any later CRUD call) rebuilds the bucket straight from DB and
+        drops the ``old_name`` entry on its own.
+        """
+        bucket: dict[str, Any] | None = getattr(self._config.models, model_type, None)
+        if bucket is None:
+            return
+        cfg = ModelEndpointConfig(
+            endpoint=row.endpoint,
+            model_name=row.model_name,
+            batch_size=row.batch_size,
+            timeout=row.timeout,
+            extra=row.extra,
+        )
+        bucket[old_name] = cfg
+        bucket[new_name] = cfg
 
     def _invalidate_client_cache(self, model_type: str, name: str) -> None:
         """Evict ``name`` from the component-factory cache for ``model_type``."""

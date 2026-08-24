@@ -128,7 +128,7 @@ describe("JobListPage filters", () => {
     await userEvent.type(search, "completed");
     expect(search.value).toBe("completed");
 
-    await userEvent.click(screen.getByRole("tab", { name: "FAILED" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Failed" }));
 
     await waitFor(() => expect(search.value).toBe(""));
     expect(await screen.findByText("failed.pdf")).not.toBeNull();
@@ -245,7 +245,7 @@ describe("JobListPage filters", () => {
       [expect.objectContaining({ task_id: "all-named-task" })],
     );
 
-    await userEvent.click(screen.getByRole("tab", { name: "FAILED" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Failed" }));
     await waitFor(() => expect(screen.getByText("docs.pdf")).not.toBeNull());
   });
 

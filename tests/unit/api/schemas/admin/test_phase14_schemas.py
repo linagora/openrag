@@ -46,6 +46,45 @@ def test_create_model_endpoint_rejects_empty_normalized_endpoint(endpoint):
         CreateModelEndpointRequest(name="default", model_type="llm", endpoint=endpoint)
 
 
+_UNSAFE_NAMES = [
+    "owner/model",  # splits across the {model_type}/{name} route segment (#768)
+    ".",  # RFC 3986 dot-segment: normalizes to the collection route
+    "..",  # RFC 3986 dot-segment: normalizes away the model_type segment too
+    "-leading-dash",
+    "trailing-dash-",
+    ".leading-dot",
+    "trailing-dot.",
+    "_leading_underscore",
+    "trailing_underscore_",
+    "has space",
+    "has%percent",
+    "a" * 129,  # over _NAME_MAX_LENGTH
+]
+
+
+@pytest.mark.parametrize("bad_name", _UNSAFE_NAMES)
+def test_create_model_endpoint_rejects_unsafe_name(bad_name):
+    """Any name outside the URL-path-segment allowlist is rejected, not just '/'."""
+    with pytest.raises(ValidationError):
+        CreateModelEndpointRequest(name=bad_name, model_type="reranker", endpoint="http://host")
+
+
+@pytest.mark.parametrize("bad_name", _UNSAFE_NAMES)
+def test_update_model_endpoint_rejects_unsafe_name(bad_name):
+    """Same allowlist applies to renames via the update schema — kept in sync
+    with the create matrix above (a separate, optional-name validator) so a
+    regression in one can't go uncovered by the other."""
+    with pytest.raises(ValidationError):
+        UpdateModelEndpointRequest(name=bad_name)
+
+
+@pytest.mark.parametrize("good_name", ["default", "gpt-4.1", "jina_v3", "LocalReranker.prod", "a", "a" * 128])
+def test_create_model_endpoint_accepts_realistic_names(good_name):
+    """Interior '.', '_', '-' stay available for realistic names."""
+    request = CreateModelEndpointRequest(name=good_name, model_type="reranker", endpoint="http://host")
+    assert request.name == good_name
+
+
 def test_update_model_endpoint_requires_at_least_one_field():
     """Endpoint updates must contain at least one field."""
     with pytest.raises(ValidationError):

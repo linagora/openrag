@@ -351,7 +351,7 @@ export default function JobListPage() {
         <TabsList>
           {STATUS_TABS.map((tab) => (
             <TabsTrigger key={tab} value={tab}>
-              {tab}
+              {tab.charAt(0) + tab.slice(1).toLowerCase()}
             </TabsTrigger>
           ))}
         </TabsList>

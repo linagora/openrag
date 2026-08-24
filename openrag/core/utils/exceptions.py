@@ -86,10 +86,16 @@ class OpenRAGError(Exception):
 
 
 class ConfigError(OpenRAGError):
-    """Configuration-related errors."""
+    """Configuration-related errors.
 
-    def __init__(self, message: str, **kwargs):
-        super().__init__(message, code="CONFIG_ERROR", status_code=500, **kwargs)
+    Accepts a custom ``code`` (same shape as :class:`ValidationError`) so a
+    caller can name a specific failure. Hard-coding it made ``code=`` collide
+    with the forwarded ``**kwargs`` and raise ``TypeError`` from the ``raise``
+    statement itself, replacing the intended error with an unrelated one.
+    """
+
+    def __init__(self, message: str, *, code: str = "CONFIG_ERROR", **kwargs):
+        super().__init__(message, code=code, status_code=500, **kwargs)
 
 
 class RegistryError(OpenRAGError):

@@ -1,10 +1,13 @@
 import json
 import os
+import re
 import secrets
+import string
 import time
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import chainlit as cl
 import httpx
@@ -19,6 +22,7 @@ from core.auth.chainlit import (
     CHAINLIT_TOKEN_COOKIE_PATH,
 )
 from core.utils.logging import get_logger, mask_email
+from core.utils.web_url import normalize_web_url
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
@@ -42,10 +46,92 @@ OPENRAG_AUTH_HANDLE_METADATA_KEY = "openrag_auth_handle"
 OPENRAG_CHAT_PROFILES_METADATA_KEY = "openrag_chat_profiles"
 OPENRAG_SESSION_COOKIE_NAME = "openrag_session"
 _OPENRAG_TOKEN_STORE: dict[str, tuple[str, float]] = {}
+_MARKDOWN_ESCAPE_TABLE = str.maketrans({char: f"\\{char}" for char in string.punctuation})
+_MARKDOWN_URL_SAFE_CHARS = ":/?#[]@!$&'+,;=%"
+# Chainlit inserts source names into Markdown link labels. Strip only characters
+# that can break or restyle that label so ordinary filenames stay recognizable.
+_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS = str.maketrans(dict.fromkeys("[]*`\\<>", " "))
+_MARKDOWN_BLOCK_PREFIX_RE = re.compile(r"^(?:(?:#{1,6}|[-+]|\d{1,9}[.)])\s+)+")
+_MARKDOWN_THEMATIC_BREAK_RE = re.compile(r"^(?:(?:-\s*){3,}|(?:_\s*){3,}|(?:\*\s*){3,})$")
 
 
 class MissingOpenRAGCredentialError(RuntimeError):
     pass
+
+
+def _escape_markdown_text(value: str) -> str:
+    """Render untrusted source metadata as literal Markdown text."""
+    return value.translate(_MARKDOWN_ESCAPE_TABLE)
+
+
+def _neutralize_source_name_delimiters(value: str) -> str:
+    """Remove active Markdown delimiters while preserving safe filename punctuation."""
+    characters = list(value)
+    underscore_openers: list[tuple[int, int]] = []
+    index = 0
+
+    while index < len(value):
+        if value[index] != "_":
+            index += 1
+            continue
+
+        end = index + 1
+        while end < len(value) and value[end] == "_":
+            end += 1
+
+        previous = value[index - 1] if index else None
+        following = value[end] if end < len(value) else None
+        previous_whitespace = previous is None or previous.isspace()
+        following_whitespace = following is None or following.isspace()
+        previous_punctuation = previous is not None and unicodedata.category(previous)[0] in {"P", "S"}
+        following_punctuation = following is not None and unicodedata.category(following)[0] in {"P", "S"}
+        left_flanking = not following_whitespace and (
+            not following_punctuation or previous_whitespace or previous_punctuation
+        )
+        right_flanking = not previous_whitespace and (
+            not previous_punctuation or following_whitespace or following_punctuation
+        )
+        can_open = left_flanking and (not right_flanking or previous_punctuation)
+        can_close = right_flanking and (not left_flanking or following_punctuation)
+
+        if can_close and underscore_openers:
+            opener_start, opener_end = underscore_openers.pop()
+            characters[opener_start:opener_end] = " " * (opener_end - opener_start)
+            characters[index:end] = " " * (end - index)
+        elif can_open:
+            underscore_openers.append((index, end))
+        index = end
+
+    index = 0
+    while index < len(value):
+        if value[index] != "~":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(value) and value[end] == "~":
+            end += 1
+        if end - index >= 2:
+            characters[index:end] = " " * (end - index)
+        index = end
+
+    return "".join(characters)
+
+
+def _safe_source_name(value: str, existing: dict) -> str:
+    """Build a Markdown-inert name that Chainlit can match to its element."""
+    value = _neutralize_source_name_delimiters(value)
+    value = value.lstrip()
+    if _MARKDOWN_THEMATIC_BREAK_RE.fullmatch(value):
+        value = ""
+    else:
+        value = _MARKDOWN_BLOCK_PREFIX_RE.sub("", value)
+    base = " ".join(value.translate(_MARKDOWN_UNSAFE_SOURCE_NAME_CHARS).split()) or "source"
+    candidate = base
+    suffix = 2
+    while candidate in existing:
+        candidate = f"{base} {suffix}"
+        suffix += 1
+    return candidate
 
 
 def get_user_language() -> str:
@@ -465,26 +551,48 @@ async def __fetch_page_content(chunk_url, headers=None):
 
 
 async def _format_sources(metadata_sources, only_txt=False, api_key=None):
-    external_url = get_external_url()  # used to override the base URL when the front-end requests a file resource
-    if not metadata_sources:
-        return None, None
+    if not isinstance(metadata_sources, list) or not metadata_sources:
+        return [], []
 
     d = {}
     headers = get_headers(api_key)
+    external_url = get_external_url()  # used to override the base URL when the front-end requests a file resource
     for i, s in enumerate(metadata_sources):
+        if not isinstance(s, dict):
+            continue
+
         if s.get("source_type") == "web":
-            title = s.get("title") or s.get("url", f"Web source {i + 1}")
-            url = s.get("url", "")
+            title = s.get("title", "")
             snippet = s.get("snippet", "")
-            content = f"**[{title}]({url})**\n\n{snippet}"
-            source_name = title
-            if source_name in d:
-                source_name = f"{title} ({i})"
+            title = title.strip() if isinstance(title, str) else ""
+            snippet = snippet.strip() if isinstance(snippet, str) else ""
+            url = normalize_web_url(s.get("url"))
+            if url is None:
+                continue
+            markdown_url = quote(url, safe=_MARKDOWN_URL_SAFE_CHARS)
+
+            source_label = title or url
+            source_name = _safe_source_name(source_label, d)
+            content = f"**[{_escape_markdown_text(source_label)}]({markdown_url})**"
+            if snippet:
+                content += f"\n\n{_escape_markdown_text(snippet)}"
             d[source_name] = cl.Text(content=content, name=source_name, display="side")
             continue
 
-        filename = Path(s["filename"])
-        file_url = s["file_url"]
+        filename_value = s.get("filename")
+        file_url = s.get("file_url")
+        page = s.get("page")
+        if (
+            not isinstance(filename_value, str)
+            or not filename_value.strip()
+            or not isinstance(file_url, str)
+            or not file_url.strip()
+        ):
+            continue
+
+        filename = Path(filename_value.strip())
+        suffix = filename.suffix.lower()
+        file_url = file_url.strip()
         file_url = file_url.replace(INTERNAL_BASE_URL, external_url)  # put the correct base url
         # Avoid leaking the credential in the URL (browser history, proxy logs,
         # Referer headers). In OIDC mode the browser already sends the
@@ -495,36 +603,51 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
         # authenticate the fetch.
         if api_key and (AUTH_MODE != "oidc" or _current_openrag_auth_provider() == "credentials"):
             file_url = f"{file_url}?token={api_key}"
-        page = s["page"]
-        source_name = f"{filename}" + (
-            f" (page: {page})" if filename.suffix in [".pdf", ".pptx", ".docx", ".doc"] else ""
+        page_label = str(page).strip() if page is not None else ""
+        source_label = f"{filename}" + (
+            f" (page: {page_label})" if suffix in [".pdf", ".pptx", ".docx", ".doc"] and page_label else ""
         )
+        source_name = _safe_source_name(source_label, d)
 
-        if only_txt:
-            chunk_content = await __fetch_page_content(chunk_url=s["chunk_url"], headers=headers)
-            elem = cl.Text(content=chunk_content, name=source_name, display="side")
-        else:
-            match filename.suffix.lower():
-                case ".pdf":
-                    elem = cl.Pdf(
-                        name=source_name,
-                        url=file_url,
-                        page=int(s["page"]),
-                        display="side",
-                    )
-                case suffix if suffix in [".png", ".jpg", ".jpeg"]:
-                    elem = cl.Image(name=source_name, url=file_url, display="side")
-                case ".mp4":
-                    elem = cl.Video(name=source_name, url=file_url, display="side")
-                case ".mp3":
-                    elem = cl.Audio(name=source_name, url=file_url, display="side")
-                case _:
-                    chunk_content = await __fetch_page_content(chunk_url=s["chunk_url"], headers=headers)
-                    elem = cl.Text(content=chunk_content, name=source_name, display="side")
+        try:
+            if only_txt:
+                chunk_url = s.get("chunk_url")
+                if not isinstance(chunk_url, str) or not chunk_url.strip():
+                    continue
+                chunk_content = await __fetch_page_content(chunk_url=chunk_url, headers=headers)
+                if not isinstance(chunk_content, str) or not chunk_content.strip():
+                    continue
+                elem = cl.Text(content=chunk_content, name=source_name, display="side")
+            else:
+                match suffix:
+                    case ".pdf":
+                        elem = cl.Pdf(
+                            name=source_name,
+                            url=file_url,
+                            page=int(page) if page_label else None,
+                            display="side",
+                        )
+                    case suffix if suffix in [".png", ".jpg", ".jpeg"]:
+                        elem = cl.Image(name=source_name, url=file_url, display="side")
+                    case ".mp4":
+                        elem = cl.Video(name=source_name, url=file_url, display="side")
+                    case ".mp3":
+                        elem = cl.Audio(name=source_name, url=file_url, display="side")
+                    case _:
+                        chunk_url = s.get("chunk_url")
+                        if not isinstance(chunk_url, str) or not chunk_url.strip():
+                            continue
+                        chunk_content = await __fetch_page_content(chunk_url=chunk_url, headers=headers)
+                        if not isinstance(chunk_content, str) or not chunk_content.strip():
+                            continue
+                        elem = cl.Text(content=chunk_content, name=source_name, display="side")
+        except (httpx.HTTPError, httpx.InvalidURL, TypeError, ValueError, AttributeError):
+            logger.warning("Skipping an unavailable source", source_index=i)
+            continue
 
         d[source_name] = elem
 
-    source_names = list(d.keys())
+    source_names = list(d)
     elements = list(d.values())
 
     return elements, source_names
@@ -567,7 +690,12 @@ async def on_message(message: cl.Message):
             async for chunk in stream:
                 if chunk.extra:
                     extra = json.loads(chunk.extra)
-                    if "sources" in extra:
+                    if "cited_sources" in extra:
+                        # Strictly what the model cited; fall back to
+                        # everything it was shown when nothing was cited
+                        # (e.g. it didn't report citations at all).
+                        sources = extra["cited_sources"] or extra.get("presented_sources")
+                    elif "sources" in extra:
                         sources = extra["sources"]
 
                 if chunk.choices and chunk.choices[0].delta.content:
@@ -582,7 +710,7 @@ async def on_message(message: cl.Message):
             # Show sources
             elements, source_names = await _format_sources(sources, api_key=api_key, only_txt=False)
             msg.elements = elements if elements else []
-            if source_names:
+            if elements and source_names:
                 s = "\n\n" + "-" * 50 + f"\n\n{t('sources_label')}: \n" + "\n".join(source_names)
                 await msg.stream_token(s)
                 await msg.update()

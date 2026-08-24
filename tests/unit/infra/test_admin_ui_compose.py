@@ -39,3 +39,41 @@ def test_admin_ui_nginx_preserves_websocket_upgrades_for_chainlit():
     assert re.search(r"proxy_http_version\s+1\.1;", config)
     assert re.search(r"proxy_set_header\s+Upgrade\s+\$http_upgrade;", config)
     assert re.search(r"proxy_set_header\s+Connection\s+\$connection_upgrade;", config)
+
+
+def test_admin_ui_image_runs_as_uid_owning_its_writable_paths():
+    """The runtime paths nginx writes must be group 0, and the image must run as
+    a numeric UID that has access to them — the arbitrary-UID pattern
+    api.Dockerfile uses.
+
+    `USER nginx` is uid 101 with only gid 101, i.e. neither owner nor group on
+    paths chowned to 10001. Nothing writes under /var/cache/nginx today (the
+    base image points every *_temp_path at /tmp and openrag-admin.conf sets
+    `proxy_cache off`), so this stays invisible until something does — and it
+    then fails at request time, which no smoke test covers.
+    """
+    dockerfile = Path(__file__).resolve().parents[3] / "infra/docker/ui.Dockerfile"
+    content = dockerfile.read_text(encoding="utf-8")
+
+    assert re.search(r"^USER 10001:0$", content, re.MULTILINE)
+    assert not re.search(r"^USER nginx$", content, re.MULTILINE)
+    assert re.search(r"chown -R 10001:0 /var/cache/nginx /etc/nginx/conf\.d /var/run", content)
+    assert re.search(r"chmod -R g\+w /var/cache/nginx /etc/nginx/conf\.d /var/run", content)
+    # A private group would undo the chown above for any UID but 10001.
+    assert "10001:10001" not in content
+
+
+def test_admin_ui_chart_security_context_matches_image_ownership():
+    """adminUi.podSecurityContext must keep runAsGroup 0 to match the image's
+    chown -R 10001:0 — same reason openrag.podSecurityContext does.
+    """
+    values_path = Path(__file__).resolve().parents[3] / "infra/charts/openrag-stack/values.yaml"
+
+    with values_path.open(encoding="utf-8") as handle:
+        values = yaml.safe_load(handle)
+
+    admin_ui_ctx = values["adminUi"]["podSecurityContext"]
+
+    assert admin_ui_ctx["runAsUser"] == 10001
+    assert admin_ui_ctx["runAsGroup"] == 0
+    assert values["openrag"]["podSecurityContext"]["runAsGroup"] == 0

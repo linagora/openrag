@@ -27,6 +27,20 @@ if TYPE_CHECKING:
 # transaction; ModelEndpointService.update_model_endpoint routes is_default there.
 _ALLOWED_UPDATE_FIELDS = frozenset({"endpoint", "model_name", "batch_size", "timeout", "extra"})
 
+# Endpoint names are referenced by value elsewhere, and nothing updates those
+# references when an endpoint is renamed (#770) — so ``rename()`` cascades to
+# every known reference in the same transaction as the name change. Direct
+# endpoint-name columns on ``partitions``, keyed by the model_type they hold:
+_PARTITION_COLUMN_BY_TYPE = {"embedder": "embedder", "llm": "chat_llm"}
+# Endpoint-name keys embedded in ``pipeline_presets.config`` (JSONB), by the
+# preset_type that carries them — see core/config/retrieval_pipeline.py and
+# core/config/indexation_pipeline.py for the field definitions.
+_RETRIEVAL_PRESET_KEYS_BY_TYPE = {"llm": ("llm",), "reranker": ("reranker",)}
+_INDEXATION_PRESET_KEYS_BY_TYPE = {
+    "llm": ("contextualization_llm", "metadata_extraction_llm", "topic_tagging_llm"),
+    "vlm": ("vlm",),
+}
+
 
 class PgModelEndpointRepository(ModelEndpointRepository):
     """asyncpg-backed implementation of :class:`ModelEndpointRepository`."""
@@ -124,12 +138,80 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         return self._to_model(rec) if rec else None
 
     async def rename(self, name: str, model_type: str, new_name: str) -> None:
-        await self.pool.execute(
-            "UPDATE model_endpoints SET name = $3, updated_at = now() WHERE name = $1 AND model_type = $2",
-            name,
-            model_type,
-            new_name,
-        )
+        """Rename an endpoint and cascade the new name to every stored reference.
+
+        Left alone, a rename silently strands every partition or preset that
+        pointed at the old name — ``partitions.embedder`` / ``partitions.chat_llm``,
+        and the endpoint-name fields embedded in ``pipeline_presets.config``
+        (JSONB) — since nothing else in the schema updates those when the
+        referenced row's name changes (#770). All writes run in this one
+        transaction so a partial cascade can never leave the registry and its
+        referents disagreeing.
+
+        The caller (``ModelEndpointService.update_model_endpoint``) still owns
+        refreshing the in-memory partition/preset caches afterwards — this
+        method only makes the DB-side references consistent.
+
+        Raises :class:`NotFoundError` if ``name`` vanished between the
+        service's existence check and this transaction (a concurrent delete)
+        — mirroring ``PgPipelinePresetRepository.rename``. Without the
+        ``RETURNING`` check, a lost race would still run the cascade below,
+        repointing partitions/presets at a ``new_name`` that was never
+        actually created.
+
+        Also ``LOCK``s ``partitions`` ``IN SHARE MODE`` before touching
+        anything — the same lock :meth:`PgPresetRepository.delete` takes, and
+        the same table :meth:`PgPartitionRepository.update_partition` writes
+        to *before* its own DB-authoritative ``chat_llm`` re-check. Without
+        this, a partition PATCH could validate ``name`` against the in-memory
+        catalog, then block behind this transaction's cascade on the exact
+        row it's about to write, and resume writing the now-renamed-away
+        ``name`` straight back once this commits — permanently stranding that
+        partition the moment the service's temporary alias (see
+        ``ModelEndpointService._alias_renamed_name``) drops. Locking first, in
+        the same order both call sites use, makes the two block on each other
+        instead of interleaving: whichever transaction's ``partitions`` write
+        commits first is the one the other observes.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("LOCK TABLE partitions IN SHARE MODE")
+
+                renamed = await conn.fetchrow(
+                    "UPDATE model_endpoints SET name = $3, updated_at = now() "
+                    "WHERE name = $1 AND model_type = $2 RETURNING name",
+                    name,
+                    model_type,
+                    new_name,
+                )
+                if renamed is None:
+                    raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
+
+                partition_col = _PARTITION_COLUMN_BY_TYPE.get(model_type)
+                if partition_col:
+                    await conn.execute(
+                        f"UPDATE partitions SET {partition_col} = $2 WHERE {partition_col} = $1",
+                        name,
+                        new_name,
+                    )
+
+                for preset_type, keys in (
+                    ("retrieval", _RETRIEVAL_PRESET_KEYS_BY_TYPE.get(model_type, ())),
+                    ("indexation", _INDEXATION_PRESET_KEYS_BY_TYPE.get(model_type, ())),
+                ):
+                    for key in keys:
+                        await conn.execute(
+                            """
+                            UPDATE pipeline_presets
+                            SET config = jsonb_set(config, $1::text[], to_jsonb($2::text)), updated_at = now()
+                            WHERE preset_type = $3 AND config->>$4 = $5
+                            """,
+                            [key],
+                            new_name,
+                            preset_type,
+                            key,
+                            name,
+                        )
 
     async def delete(self, name: str, model_type: str) -> bool:
         result = await self.pool.execute(

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import ray
+from core.config.model_endpoints import CONTROL_EXTRA_KEYS
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
 
@@ -134,6 +135,7 @@ class IndexerWorkerActor:
         }
         self._has_default_fallback = self._has_default_fallbacks["llm"]
         self._model_endpoint_service: Any = None
+        self._prompt_service: Any = None
         self._registry_loaded_at: float | None = None
         self._last_miss_reload_at: float | None = None
         self._last_miss_reload_key: tuple[tuple[str, tuple[str, ...]], ...] | None = None
@@ -230,6 +232,55 @@ class IndexerWorkerActor:
             missing=missing,
         )
 
+    # Enrichment stage → (enable flag, prompt_type, preset name-field, row key).
+    # The name-field is the indexation-preset config key naming a library prompt
+    # for that stage. Only enabled stages are resolved, so a file that neither
+    # contextualizes nor tags nor captions pays no prompt-resolution cost.
+    _INGEST_PROMPTS = (
+        ("enable_contextualization", "chunk_contextualizer", "contextualization_prompt_name", "contextualizer_prompt"),
+        ("enable_topic_tagging", "topic_tagger", "topic_tagging_prompt_name", "topic_tagger_prompt"),
+        ("enable_image_captioning", "image_captioning", "image_captioning_prompt_name", "caption_prompt"),
+    )
+
+    async def _resolve_ingest_prompts(self, partition: str, indexation_config: dict[str, Any]) -> dict[str, str]:
+        """Resolve the enabled enrichment prompts for this file's indexation preset.
+
+        Returns ``{row_key: prompt_text}`` for each enabled stage. Each is
+        resolved by the preset's ``*_prompt_name`` (a named library prompt) →
+        global default → disk seed, so it always yields a string; any failure is
+        swallowed and the stage falls back to its own disk-loaded prompt rather
+        than failing the file.
+        """
+        # Fall back to the model's own default for an absent key, not to False:
+        # enable_image_captioning defaults to True, so a sparse config (one that
+        # simply omits the flag) still captions during ingest. A bare .get() read
+        # that as disabled, skipped resolution, and left captioning silently on
+        # the disk seed — ignoring both the preset's *_prompt_name and the type's
+        # library default, with nothing surfacing the divergence.
+        enabled = [
+            (pt, name_field, key)
+            for flag, pt, name_field, key in self._INGEST_PROMPTS
+            if indexation_config.get(flag, _ingest_flag_default(flag))
+        ]
+        if not enabled:
+            return {}
+        if self._prompt_service is None:
+            from services.orchestrators.prompt_service import PromptService
+
+            self._prompt_service = PromptService(
+                prompt_repo=self._catalog_store.prompt_repo,
+                config=self._cfg,
+            )
+        resolved: dict[str, str] = {}
+        for prompt_type, name_field, row_key in enabled:
+            try:
+                resolved[row_key] = await self._prompt_service.resolve_prompt(
+                    prompt_type, names=[indexation_config.get(name_field)]
+                )
+            except Exception as exc:  # noqa: BLE001 - resolution must never fail a file
+                self._logger.warning(f"Prompt resolution failed for '{prompt_type}' (partition={partition}): {exc}")
+        return resolved
+
     async def process_file(
         self,
         *,
@@ -249,6 +300,11 @@ class IndexerWorkerActor:
         try:
             await self._ensure_catalog()
             await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
+            # Resolve the enrichment-stage prompts once for this file (partition
+            # override → global default → disk seed). Done here, at the job
+            # boundary, so per-chunk work reuses one resolved string instead of
+            # hitting the DB per chunk.
+            resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
             result = await self._worker.process_file(
                 task_id=task_id,
                 path=path,
@@ -260,6 +316,7 @@ class IndexerWorkerActor:
                 indexation_config=indexation_config,
                 embedder_name=embedder_name,
                 require_existing_partition=require_existing_partition,
+                resolved_prompts=resolved_prompts,
             )
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:
@@ -661,7 +718,7 @@ def _build_embedder_factory(cfg: Settings) -> Any:
             entry = cache.get(name)
             if entry is not None and entry[0] == identity:
                 return entry[1]
-            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
+            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
             # Backfill max_model_len/embed_concurrency from static settings when the
             # endpoint's `extra` omits them — otherwise truncate_prompt_tokens is off
@@ -712,7 +769,7 @@ def _build_vlm_factory(cfg: Settings) -> Any:
             entry = cache.get(name)
             if entry is not None and entry[0] == identity:
                 return entry[1]
-            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
+            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
             instance = vlm_registry.create(
                 impl,
@@ -791,7 +848,7 @@ def _build_contextualizer_factory(cfg: Settings) -> Any:
                 )
                 shared["system_prompt"] = system_prompt
                 shared["llm_semaphore"] = llm_semaphore
-            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
+            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
             llm = llm_registry.create(
                 impl,
@@ -853,7 +910,7 @@ def _build_topic_tagger_factory(cfg: Settings) -> Any:
                 return entry[1]
             if "system_prompt" not in shared:
                 shared["system_prompt"] = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "topic_tagger")
-            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key != "implementation"}
+            impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
             llm = llm_registry.create(
                 impl,
@@ -965,3 +1022,15 @@ def _global_vlm_endpoint_config(cfg: Any) -> Any | None:
 
 
 __all__ = ["IndexerPool", "IndexerWorkerActor", "build_indexer_pool"]
+
+
+def _ingest_flag_default(flag: str) -> bool:
+    """The IndexationPipelineConfig default for an enrichment flag.
+
+    Read from the model so the two cannot drift: the defaults differ per stage
+    (captioning is on, contextualization and topic tagging are off).
+    """
+    from core.config.indexation_pipeline import IndexationPipelineConfig
+
+    field = IndexationPipelineConfig.model_fields.get(flag)
+    return bool(field.default) if field is not None else False

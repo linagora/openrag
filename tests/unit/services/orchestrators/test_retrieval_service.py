@@ -65,6 +65,7 @@ def _config(rtype: str = "single", reranker_enabled: bool = False) -> SimpleName
         ),
         reranker=SimpleNamespace(enabled=reranker_enabled, top_k=5),
         partitions={},
+        models=SimpleNamespace(reranker={}),
     )
 
 
@@ -247,6 +248,68 @@ async def test_retrieve_uses_partition_retrieval_config_and_named_reranker():
     assert call["partition"] == ["tenant-a"]
     assert call["top_k"] == 3
     assert call["similarity_threshold"] == 0.77
+
+
+@pytest.mark.asyncio
+async def test_retrieve_falls_back_to_default_reranker_when_preset_stale():
+    """A partition's ``reranker`` preset can go stale (renamed/deleted after
+    assignment — this field has no create/PATCH-time validation, unlike
+    ``chat_llm``). The stale name must fall back to the catalog default
+    instead of raising."""
+    s = FakeSearcher()
+    s.search_result = [_chunk("a")]
+    default_reranker = FakeReranker()
+    reranker_calls: list[str] = []
+
+    def factory(name: str):
+        reranker_calls.append(name)
+        if name == "default":
+            return default_reranker
+        raise KeyError(name)
+
+    cfg = _config()
+    cfg.partitions = {
+        "tenant-a": _partition(retrieval=RetrievalPipelineConfig(enable_reranker=True, reranker="stale-ranker"))
+    }
+
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        reranker_factory=factory,
+    )
+
+    out = await svc.retrieve(partitions=["tenant-a"], query=Query(query="hello"))
+
+    assert [c.id for c in out] == ["a"]
+    assert reranker_calls == ["stale-ranker", "default"]
+    assert default_reranker.calls[0]["query"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_falls_back_to_legacy_reranker_when_no_catalog_default():
+    """No ``is_default`` reranker endpoint registered yet — fall back to the
+    static reranker built at startup instead of raising."""
+    s = FakeSearcher()
+    s.search_result = [_chunk("a")]
+    legacy_reranker = FakeReranker()
+
+    cfg = _config()
+    cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(enable_reranker=True))}
+
+    svc = RetrievalService(
+        searcher=s,
+        reranker=legacy_reranker,
+        llm=None,
+        config=cfg,
+        reranker_factory=lambda name: (_ for _ in ()).throw(KeyError(name)),
+    )
+
+    out = await svc.retrieve(partitions=["tenant-a"], query=Query(query="hello"))
+
+    assert [c.id for c in out] == ["a"]
+    assert legacy_reranker.calls[0]["query"] == "hello"
 
 
 @pytest.mark.asyncio
@@ -447,10 +510,58 @@ async def test_retrieve_small_fanout_stays_fully_parallel():
     assert state["max"] == 3, "all 3 partitions should run concurrently under the cap"
 
 
-def test_pipeline_for_partition_threads_rrf_k():
+@pytest.mark.asyncio
+async def test_pipeline_for_partition_threads_rrf_k():
     """A partition's rrf_k must reach its RetrieverPipeline (#707)."""
     cfg = _config()
     cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(rrf_k=42))}
     svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg)
-    pipeline, _ = svc._pipeline_for_partition("tenant-a")
+    pipeline, _ = await svc._pipeline_for_partition("tenant-a")
     assert pipeline.rrf_k == 42
+
+
+class _RecordingPromptService:
+    def __init__(self, resolved: str):
+        self._resolved = resolved
+        self.calls: list[tuple[str, tuple]] = []
+
+    async def resolve_prompt(self, prompt_type, names=None):
+        self.calls.append((prompt_type, tuple(names or ())))
+        return self._resolved
+
+
+@pytest.mark.asyncio
+async def test_hyde_template_resolved_from_preset_via_prompt_service():
+    """A hyde preset's hyde_prompt_name is resolved through PromptService and
+    threaded into the HyDeRetriever (the #13 retrieval-prompt seam)."""
+    cfg = _config()
+    cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(type="hyde", hyde_prompt_name="myhyde"))}
+    rec = _RecordingPromptService("HYDE {question}")
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=object(), config=cfg, prompt_service=rec)
+    pipeline, _ = await svc._pipeline_for_partition("tenant-a")
+    assert pipeline.retriever.hyde_template == "HYDE {question}"
+    assert ("hyde", ("myhyde",)) in rec.calls
+
+
+@pytest.mark.asyncio
+async def test_multi_query_template_resolved_from_preset_via_prompt_service():
+    cfg = _config()
+    cfg.partitions = {
+        "tenant-a": _partition(retrieval=RetrievalPipelineConfig(type="multiQuery", multi_query_prompt_name="mymq"))
+    }
+    rec = _RecordingPromptService("MQ {query} {k_queries}")
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=object(), config=cfg, prompt_service=rec)
+    pipeline, _ = await svc._pipeline_for_partition("tenant-a")
+    assert pipeline.retriever.multi_query_template == "MQ {query} {k_queries}"
+    assert ("multi_query", ("mymq",)) in rec.calls
+
+
+@pytest.mark.asyncio
+async def test_single_strategy_resolves_no_prompt():
+    """type=single needs no expansion prompt — PromptService is never called."""
+    cfg = _config()
+    cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(type="single"))}
+    rec = _RecordingPromptService("unused")
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg, prompt_service=rec)
+    await svc._pipeline_for_partition("tenant-a")
+    assert rec.calls == []

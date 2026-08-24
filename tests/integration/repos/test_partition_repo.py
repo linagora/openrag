@@ -96,3 +96,16 @@ class TestDelete:
         assert await partition_repo.get_partition_file_count("cascade-me") == 0
         refreshed = await user_repo.get_user_dict_by_id(uploader_id)
         assert refreshed["file_count"] == 0
+
+
+class TestGenerationPromptNames:
+    async def test_round_trip_and_default_empty(self, postgres_store: PostgresStore):
+        repo = postgres_store.partition_repo
+        await repo.create_partition("genp")
+        # Defaults to an empty JSONB map.
+        row = await repo.get_partition_row("genp")
+        assert row["generation_prompt_names"] == {}
+        # Update persists and reads back as a dict (jsonb codec).
+        await repo.update_partition("genp", generation_prompt_names={"sys_prompt": "legal"})
+        row = await repo.get_partition_row("genp")
+        assert row["generation_prompt_names"] == {"sys_prompt": "legal"}
