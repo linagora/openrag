@@ -133,7 +133,7 @@ The RAG pipeline filters out false-positive sources by having the LLM self-repor
 1. `format_context()` (`openrag/core/prompts/chat_prompt_builder.py`) numbers each source (`[Source 1]`, `[Source 2]`, ...) in the context and returns `(formatted_text, included_indices)` — the indices track which docs fit within the token budget
 2. Prompt templates (`openrag/prompts/templates/*.txt`) instruct the LLM to append `[Sources: 1, 3, 5]` at the end of its response
 3. `extract_and_strip_sources_block()` (`openrag/core/utils/source_filtering.py`) strips this tag from the response before sending to the client
-4. `filter_sources_by_citations()` (`openrag/core/utils/source_filtering.py`) filters the source metadata to only include cited sources; if no `[Sources: ...]` tag is found at all, every retrieved source is kept instead (a missing tag means the model didn't report citations, not that it used none)
+4. `filter_sources_by_citations()` (`openrag/core/utils/source_filtering.py`) filters the source metadata to only include cited sources; if no `[Sources: ...]` tag is found at all, every presented source is kept instead (a missing tag means the model didn't report citations, not that it used none)
 5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
 
 The `extra` field in API responses is a JSON string with these keys:

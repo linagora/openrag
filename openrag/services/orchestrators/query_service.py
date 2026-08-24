@@ -669,7 +669,7 @@ class QueryService:
     ) -> dict:
         """Non-streaming chat completion → finalized OpenAI dict."""
         metadata = payload.get("metadata") or {}
-        include_all_retrieved = bool(metadata.get("include_all_retrieved_sources", False))
+        include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
@@ -717,7 +717,7 @@ class QueryService:
     ) -> AsyncIterator[str]:
         """Streaming chat completion → SSE strings with filtered sources."""
         metadata = payload.get("metadata") or {}
-        include_all_retrieved = bool(metadata.get("include_all_retrieved_sources", False))
+        include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
@@ -756,7 +756,7 @@ class QueryService:
     ) -> dict:
         """Non-streaming text completion → finalized OpenAI dict."""
         metadata = payload.get("metadata") or {}
-        include_all_retrieved = bool(metadata.get("include_all_retrieved_sources", False))
+        include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
         llm = self._resolve_llm(partitions)
         citation_protocol_active = partitions is not None
         if partitions is None:
