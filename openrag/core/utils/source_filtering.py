@@ -121,7 +121,11 @@ async def stream_with_source_filtering(
     resolve citation indices; ``all_sources`` — the complete pre-truncation
     retrieval set — is reported separately as ``extra.all_retrieved_sources``
     and defaults to ``sources`` when the caller has nothing more complete to
-    offer.
+    offer. ``extra.citations_reported`` distinguishes a genuine "the model
+    cited every source" from "no ``[Sources: ...]`` tag was found, so
+    everything was kept by default" — both leave ``sources`` covering the
+    full prompt-visible list, but only the former means ``citations_reported``
+    is ``true``.
 
     The terminal flush (tail content + ``extra.sources``) runs exactly once
     after the loop on *every* termination path — a clean ``data: [DONE]``, the
@@ -273,6 +277,10 @@ async def stream_with_source_filtering(
     extra_payload = {
         "sources": filtered,
         "all_retrieved_sources": all_sources if all_sources is not None else sources,
+        # Disambiguates "the model cited exactly these" from "no [Sources: ...]
+        # tag was found, so everything was kept" — both cases can otherwise
+        # leave `sources` covering every retrieved source.
+        "citations_reported": citations is not None,
     }
     if not saw_done:
         extra_payload["truncated"] = True

@@ -660,7 +660,11 @@ async def test_chat_without_citation_keeps_retrieved_sources():
         model_name="m",
     )
 
-    assert json.loads(out["extra"])["sources"] == sources
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == sources
+    # No tag at all → not reported, even though `sources` ends up covering
+    # everything, same as if the model had explicitly cited all of them (#847 review).
+    assert extra["citations_reported"] is False
 
 
 @pytest.mark.asyncio
@@ -675,7 +679,9 @@ async def test_chat_invalid_citation_does_not_fallback_to_unrelated_sources():
         model_name="m",
     )
 
-    assert json.loads(out["extra"])["sources"] == []
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == []
+    assert extra["citations_reported"] is True  # a tag was present, just out of range
 
 
 @pytest.mark.asyncio
@@ -1093,8 +1099,10 @@ async def test_complete_partition_request_keeps_context_and_filters_citations():
         prepare_sources=lambda d, w: sources,
     )
 
+    extra = json.loads(out["extra"])
     assert out["choices"][0]["text"] == "The answer is grounded."
-    assert json.loads(out["extra"])["sources"] == sources
+    assert extra["sources"] == sources
+    assert extra["citations_reported"] is True
     answer_prompt = llm.generate_calls[0][0]
     assert "ctx" in answer_prompt
     assert "What does the report say?" in answer_prompt

@@ -307,6 +307,22 @@ class TestStreamWithSourceFiltering:
         assert _parse_finish_extra(result)["all_retrieved_sources"] == self.SOURCES
 
     @pytest.mark.asyncio
+    async def test_citations_reported_true_when_model_cites_every_source(self):
+        """Citing every source and reporting no tag both leave `sources` equal
+        to the full list — `citations_reported` is the only way to tell them
+        apart (#847 review)."""
+        lines = [
+            _make_chunk("Here is the answer."),
+            _make_chunk("\n[Sources: 1, 2, 3]"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        extra = _parse_finish_extra(result)
+        assert extra["sources"] == self.SOURCES
+        assert extra["citations_reported"] is True
+
+    @pytest.mark.asyncio
     async def test_content_and_finish_reason_in_same_chunk_keeps_last_token(self):
         """A provider that packs the final token and finish_reason into one chunk
         must not lose that token (regression: `Hello ` + final `world` → `Hello`)."""
@@ -399,6 +415,9 @@ class TestStreamWithSourceFiltering:
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "I cannot find this in the documents."
         assert _parse_finish_sources(result) == []
+        # Explicit "[Sources: none]" is a reported (empty) citation set, not a
+        # missing tag — distinguishable from case 3 below via citations_reported.
+        assert _parse_finish_extra(result)["citations_reported"] is True
 
     @pytest.mark.asyncio
     async def test_case3_llm_no_tag_returns_all_sources(self):
@@ -411,6 +430,9 @@ class TestStreamWithSourceFiltering:
         result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
         assert _collect_content(result) == "Answer without any sources tag."
         assert _parse_finish_sources(result) == self.SOURCES
+        # No tag at all → citations_reported is False even though `sources`
+        # ends up covering everything, same as an explicit "cite all" case.
+        assert _parse_finish_extra(result)["citations_reported"] is False
 
     @pytest.mark.asyncio
     async def test_structured_output_preserves_source_like_json_values(self):
@@ -430,6 +452,8 @@ class TestStreamWithSourceFiltering:
         )
         assert _collect_content(result) == structured
         assert _parse_finish_sources(result) == self.SOURCES
+        # citation_protocol_active=False → citations always None → not reported.
+        assert _parse_finish_extra(result)["citations_reported"] is False
 
     @pytest.mark.asyncio
     async def test_direct_output_preserves_terminal_source_marker(self):
