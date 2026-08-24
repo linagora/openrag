@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -179,9 +179,11 @@ class TaskStateManager:
         for task_id, info in self.tasks.items():
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
         self.file_delete_fences = _load_file_delete_fences()
-        self.lock = asyncio.Lock()
+        # Ray runs each concurrency group on a separate event loop. A single
+        # asyncio lock cannot safely coordinate methods across those loops.
+        self.lock = threading.Lock()
 
-    async def _ensure_task(self, task_id: str) -> TaskInfo:
+    def _ensure_task(self, task_id: str) -> TaskInfo:
         if task_id not in self.tasks:
             self.tasks[task_id] = TaskInfo()
         return self.tasks[task_id]
@@ -218,7 +220,7 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="set")
     async def begin_file_delete(self, *, partition: str, file_id: str, fence_id: str | None = None) -> None:
-        async with self.lock:
+        with self.lock:
             self._prune_expired_file_delete_fences()
             key = (partition, file_id)
             updated = dict(self.file_delete_fences)
@@ -233,7 +235,7 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="set")
     async def renew_file_delete(self, *, partition: str, file_id: str, fence_id: str) -> bool:
-        async with self.lock:
+        with self.lock:
             self._prune_expired_file_delete_fences()
             key = (partition, file_id)
             holders = dict(self.file_delete_fences.get(key, {}))
@@ -248,7 +250,7 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="set")
     async def end_file_delete(self, *, partition: str, file_id: str, fence_id: str | None = None) -> None:
-        async with self.lock:
+        with self.lock:
             self._prune_expired_file_delete_fences()
             key = (partition, file_id)
             updated = dict(self.file_delete_fences)
@@ -268,8 +270,8 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="set")
     async def set_state(self, task_id: str, state: str) -> None:
-        async with self.lock:
-            info = await self._ensure_task(task_id)
+        with self.lock:
+            info = self._ensure_task(task_id)
             if info.state == DocumentStatus.CANCELLED and state != DocumentStatus.CANCELLED:
                 return
             info.state = state
@@ -277,15 +279,15 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="set")
     async def set_error(self, task_id: str, tb_str: str) -> None:
-        async with self.lock:
-            info = await self._ensure_task(task_id)
+        with self.lock:
+            info = self._ensure_task(task_id)
             info.error = tb_str
             _save_recoverable_task(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_failed_if_not_cancelled(self, task_id: str, tb_str: str) -> bool:
         """Atomically set state to FAILED and record the traceback, unless already CANCELLED."""
-        async with self.lock:
+        with self.lock:
             info = self.tasks.get(task_id)
             if info is None or info.state == "CANCELLED":
                 return False
@@ -296,7 +298,7 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="set")
     async def set_cancelled_if_active(self, task_id: str) -> bool:
-        async with self.lock:
+        with self.lock:
             info = self.tasks.get(task_id)
             if info is None or info.state in TERMINAL_TASK_STATES:
                 return False
@@ -314,8 +316,8 @@ class TaskStateManager:
         metadata: dict[str, Any],
         user_id: int | None,
     ) -> None:
-        async with self.lock:
-            info = await self._ensure_task(task_id)
+        with self.lock:
+            info = self._ensure_task(task_id)
             self._record_details(
                 task_id,
                 info,
@@ -336,8 +338,8 @@ class TaskStateManager:
         metadata: dict[str, Any],
         user_id: int | None,
     ) -> bool:
-        async with self.lock:
-            info = await self._ensure_task(task_id)
+        with self.lock:
+            info = self._ensure_task(task_id)
             if info.state == DocumentStatus.CANCELLED:
                 return False
             self._record_details(
@@ -358,8 +360,8 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
-        async with self.lock:
-            info = await self._ensure_task(task_id)
+        with self.lock:
+            info = self._ensure_task(task_id)
             info.object_ref = object_ref
             details = info.details or {}
             if self._file_delete_fenced(partition=details.get("partition"), file_id=details.get("file_id")):
@@ -372,25 +374,25 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="get")
     async def get_state(self, task_id: str) -> str | None:
-        async with self.lock:
+        with self.lock:
             info = self.tasks.get(task_id)
             return info.state if info else None
 
     @ray.method(concurrency_group="get")
     async def get_error(self, task_id: str) -> str | None:
-        async with self.lock:
+        with self.lock:
             info = self.tasks.get(task_id)
             return info.error if info else None
 
     @ray.method(concurrency_group="get")
     async def get_details(self, task_id: str) -> dict | None:
-        async with self.lock:
+        with self.lock:
             info = self.tasks.get(task_id)
             return info.details if info else None
 
     @ray.method(concurrency_group="get")
     async def get_object_ref(self, task_id: str) -> ray.ObjectRef | None:
-        async with self.lock:
+        with self.lock:
             info = self.tasks.get(task_id)
             return info.object_ref if info else None
 
@@ -401,7 +403,7 @@ class TaskStateManager:
         partition: str,
         file_id: str | None = None,
     ) -> dict[str, ray.ObjectRef | None | str]:
-        async with self.lock:
+        with self.lock:
             return self._matching_active_task_refs_locked(partition=partition, file_id=file_id)
 
     @ray.method(concurrency_group="get")
@@ -411,7 +413,7 @@ class TaskStateManager:
         partition: str,
         file_id: str | None = None,
     ) -> dict[str, ray.ObjectRef | None | str]:
-        async with self.lock:
+        with self.lock:
             return self._matching_active_task_refs_locked(partition=partition, file_id=file_id)
 
     def _matching_active_task_refs_locked(
@@ -437,12 +439,12 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_states(self) -> dict[str, str | None]:
-        async with self.lock:
+        with self.lock:
             return {tid: info.state for tid, info in self.tasks.items()}
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_info(self) -> dict[str, dict]:
-        async with self.lock:
+        with self.lock:
             return {
                 task_id: {
                     "state": info.state,
@@ -454,7 +456,7 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_user_info(self, user_id: int) -> dict[str, dict]:
-        async with self.lock:
+        with self.lock:
             task_ids = self.user_index.get(user_id, set())
             return {
                 tid: {
@@ -481,7 +483,7 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="queue_info")
     async def get_user_pending_task_count(self, user_id: int) -> int:
-        async with self.lock:
+        with self.lock:
             task_ids = self.user_index.get(user_id, set())
             return sum(1 for tid in task_ids if (info := self.tasks.get(tid)) and info.state in ACTIVE_INDEXING_STATES)
 

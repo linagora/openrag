@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import pytest
@@ -9,6 +10,12 @@ from services.workers.task_state import PENDING_TASK_DETAILS, TaskInfo, TaskStat
 
 def _task_state_manager() -> Any:
     return TaskStateManager.__ray_metadata__.modified_class()
+
+
+def test_lock_is_safe_across_ray_concurrency_group_event_loops() -> None:
+    manager = _task_state_manager()
+
+    assert isinstance(manager.lock, type(threading.Lock()))
 
 
 @pytest.mark.asyncio
