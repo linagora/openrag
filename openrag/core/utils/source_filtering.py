@@ -113,8 +113,15 @@ async def stream_with_source_filtering(
     buffer_size: int | None = None,
     *,
     citation_protocol_active: bool = True,
+    all_sources: list | None = None,
 ):
     """Process an LLM SSE stream and, when active, strip source tags.
+
+    ``sources`` is the prompt-visible (context-budget-truncated) list used to
+    resolve citation indices; ``all_sources`` — the complete pre-truncation
+    retrieval set — is reported separately as ``extra.all_retrieved_sources``
+    and defaults to ``sources`` when the caller has nothing more complete to
+    offer.
 
     The terminal flush (tail content + ``extra.sources``) runs exactly once
     after the loop on *every* termination path — a clean ``data: [DONE]``, the
@@ -263,7 +270,10 @@ async def stream_with_source_filtering(
         final_clean, citations = pending, None
 
     filtered = filter_sources_by_citations(sources, citations)
-    extra_payload = {"sources": filtered, "all_retrieved_sources": sources}
+    extra_payload = {
+        "sources": filtered,
+        "all_retrieved_sources": all_sources if all_sources is not None else sources,
+    }
     if not saw_done:
         extra_payload["truncated"] = True
         logger.warning(

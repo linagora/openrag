@@ -471,7 +471,7 @@ class QueryService:
                     context="",
                     current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
                 )
-                return payload, [], [], True
+                return payload, [], [], [], [], True
             queries = SearchQueries(query_list=[Query(query=messages[-1]["content"])])
 
         web_results: list = []
@@ -487,11 +487,18 @@ class QueryService:
             chunks = []
 
         if not chunks and not web_results and partition is None:
-            return payload, [], [], False
+            return payload, [], [], [], [], False
 
         docs = [c.to_langchain() for c in chunks]
         if use_map_reduce and docs:
             docs = await self._map_reduce(" ".join(q.query for q in queries.query_list), docs)
+
+        # Full retrieval set, captured before the token-budget selection below
+        # drops anything that didn't fit in the prompt — kept separately for
+        # `all_retrieved_sources` (debugging/eval), while `docs`/`web_results`
+        # stay budget-truncated to match the citation indices the LLM sees (#847).
+        retrieved_docs = docs
+        retrieved_web_results = web_results
 
         web_formatted, web_source_numbers, web_tokens = "", [], 0
         web_start_index = 1
@@ -538,7 +545,7 @@ class QueryService:
             },
         )
         payload["messages"] = new_messages
-        return payload, docs, web_results, True
+        return payload, docs, web_results, retrieved_docs, retrieved_web_results, True
 
     async def _gather_rag_and_web(self, queries, partition, top_k, filter_params):
         # Fuse the doc branch through retrieve_multi so a partition's rrf_k drives
@@ -558,6 +565,7 @@ class QueryService:
         # partition= is ours: the retrieval preset's query_contextualizer is
         # resolved per partition. The skip below is from #807.
         queries = await self.generate_query([{"role": "user", "content": prompt}], llm=llm, partition=partition)
+        retrieved_docs: list = []
         if not queries.query_list:
             if not queries.requires_retrieval:
                 docs, context = [], ""
@@ -566,6 +574,9 @@ class QueryService:
         if queries.query_list:
             chunks = await self._retrieval.retrieve_multi(partitions=partition, search_queries=queries)
             docs = [c.to_langchain() for c in chunks]
+            # Full retrieval set before the token-budget selection below, kept
+            # separately for `all_retrieved_sources` (#847).
+            retrieved_docs = docs
             context, included = format_context(
                 [doc.page_content for doc in docs],
                 max_context_tokens=self._max_context_tokens,
@@ -583,7 +594,7 @@ class QueryService:
             current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
         )
         payload["prompt"] = f"{instructions}\n\n# User request\n{prompt}"
-        return payload, docs
+        return payload, docs, retrieved_docs
 
     # ------------------------------------------------------------------
     # Message sanitization
@@ -651,10 +662,18 @@ class QueryService:
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
-            docs, web_results = [], []
+            docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
         else:
-            payload, docs, web_results, citation_protocol_active = await self._prepare_chat(partitions, payload, llm)
+            (
+                payload,
+                docs,
+                web_results,
+                retrieved_docs,
+                retrieved_web_results,
+                citation_protocol_active,
+            ) = await self._prepare_chat(partitions, payload, llm)
         sources = prepare_sources(docs, web_results)
+        all_sources = prepare_sources(retrieved_docs, retrieved_web_results)
         structured_output = _is_structured_output(payload)
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
@@ -670,7 +689,7 @@ class QueryService:
             clean, citations = content, None
         chunk["choices"][0]["message"]["content"] = clean
         chunk["extra"] = json.dumps(
-            {"sources": filter_sources_by_citations(sources, citations), "all_retrieved_sources": sources}
+            {"sources": filter_sources_by_citations(sources, citations), "all_retrieved_sources": all_sources}
         )
         return chunk
 
@@ -687,10 +706,18 @@ class QueryService:
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
-            docs, web_results = [], []
+            docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
         else:
-            payload, docs, web_results, citation_protocol_active = await self._prepare_chat(partitions, payload, llm)
+            (
+                payload,
+                docs,
+                web_results,
+                retrieved_docs,
+                retrieved_web_results,
+                citation_protocol_active,
+            ) = await self._prepare_chat(partitions, payload, llm)
         sources = prepare_sources(docs, web_results)
+        all_sources = prepare_sources(retrieved_docs, retrieved_web_results)
         structured_output = _is_structured_output(payload)
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
@@ -699,6 +726,7 @@ class QueryService:
             llm_stream,
             sources,
             model_name,
+            all_sources=all_sources,
             citation_protocol_active=citation_protocol_active and not structured_output,
         ):
             yield sse_line
@@ -714,10 +742,11 @@ class QueryService:
         llm = self._resolve_llm(partitions)
         citation_protocol_active = partitions is not None
         if partitions is None:
-            docs = []
+            docs, retrieved_docs = [], []
         else:
-            payload, docs = await self._prepare_completions(partitions, payload, llm)
+            payload, docs, retrieved_docs = await self._prepare_completions(partitions, payload, llm)
         sources = prepare_sources(docs, [])
+        all_sources = prepare_sources(retrieved_docs, [])
         structured_output = _is_structured_output(payload)
 
         resp = await llm.generate(payload["prompt"], **_sampling(payload, key="prompt"))
@@ -731,7 +760,7 @@ class QueryService:
             clean, citations = text, None
         resp["choices"][0]["text"] = clean
         resp["extra"] = json.dumps(
-            {"sources": filter_sources_by_citations(sources, citations), "all_retrieved_sources": sources}
+            {"sources": filter_sources_by_citations(sources, citations), "all_retrieved_sources": all_sources}
         )
         return resp
 

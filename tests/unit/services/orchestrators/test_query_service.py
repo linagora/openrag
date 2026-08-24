@@ -464,6 +464,84 @@ async def test_chat_with_partition_retrieves_and_filters_sources():
 
 
 @pytest.mark.asyncio
+async def test_chat_all_retrieved_sources_survives_context_budget_truncation():
+    """#847 review: all_retrieved_sources must reflect the complete retrieval
+    set, not just the docs that fit the prompt's context-token budget — a
+    doc dropped only for lack of room must still show up there."""
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="this one does not fit the token budget", metadata={"_id": "c2"}),
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=["answer [Sources: 1]"]))
+    svc._max_context_tokens = qs.get_num_tokens()("[Source 1]\nshort")
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
+        model_name="m",
+    )
+
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == [{"id": "c1"}]  # only the doc that fit the prompt and was cited
+    assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]  # both, unfiltered
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_all_retrieved_sources_survives_context_budget_truncation():
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="this one does not fit the token budget", metadata={"_id": "c2"}),
+    ]
+    stream_lines = [
+        'data: {"choices":[{"delta":{"content":"answer [Sources: 1]"},"finish_reason":null}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+        "data: [DONE]\n\n",
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(stream_lines=stream_lines))
+    svc._max_context_tokens = qs.get_num_tokens()("[Source 1]\nshort")
+
+    lines = [
+        line
+        async for line in svc.chat_stream(
+            partitions=["p"],
+            payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+            prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
+            model_name="m",
+        )
+    ]
+    chunks_out = [
+        json.loads(line[len("data: ") :])
+        for line in lines
+        if line.startswith("data: ") and line.strip() != "data: [DONE]"
+    ]
+    extra = next(json.loads(c["extra"]) for c in reversed(chunks_out) if c.get("extra") not in (None, "{}"))
+
+    assert extra["sources"] == [{"id": "c1"}]
+    assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
+
+
+@pytest.mark.asyncio
+async def test_complete_all_retrieved_sources_survives_context_budget_truncation():
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="this one does not fit the token budget", metadata={"_id": "c2"}),
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(gen_text="answer\n[Sources: 1]"))
+    svc._max_context_tokens = qs.get_num_tokens()("[Source 1]\nshort")
+
+    out = await svc.complete(
+        partitions=["p"],
+        payload={"prompt": "q"},
+        prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
+    )
+
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == [{"id": "c1"}]
+    assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
+
+
+@pytest.mark.asyncio
 async def test_chat_recovers_context_markers_as_citations():
     svc = _svc(llm=FakeLLM(chat_responses=["First claim [Source 2]. Second claim [Source 1][Source 2]."]))
     sources = [{"source_type": "document", "n": 1}, {"source_type": "document", "n": 2}]
@@ -703,7 +781,14 @@ async def test_structured_websearch_returns_only_sources_included_in_context():
         model_name="m",
     )
 
-    assert json.loads(out["extra"])["sources"] == [{"url": "https://example.test/included"}]
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == [{"url": "https://example.test/included"}]
+    # #847 review: excluded (didn't fit the web token budget) still shows up
+    # in all_retrieved_sources.
+    assert extra["all_retrieved_sources"] == [
+        {"url": "https://example.test/included"},
+        {"url": "https://example.test/excluded"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -735,7 +820,7 @@ async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
     retrieval = FakeRetrieval()
     web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
     svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
-    _payload, _docs, web, _citation_protocol_active = await svc._prepare_chat(
+    _payload, _docs, web, _retrieved_docs, _retrieved_web, _citation_protocol_active = await svc._prepare_chat(
         ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"websearch": True}}
     )
     assert len(retrieval.retrieve_multi_calls) == 1  # doc branch fused via the rrf_k-aware retrieve_multi
@@ -761,7 +846,7 @@ async def test_answer_system_prompt_comes_from_prompt_service():
     marker = MarkerPromptService()
     svc._prompt_service = marker
 
-    payload, _docs, _web, _citation_protocol_active = await svc._prepare_chat(
+    payload, _docs, _web, _retrieved_docs, _retrieved_web, _citation_protocol_active = await svc._prepare_chat(
         ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}}
     )
 
@@ -1228,7 +1313,7 @@ async def test_conversational_reply_resolves_its_prompt_from_the_library():
         "p": SimpleNamespace(generation_prompt_names={"sys_prompt": "chatty"}, chat_history_depth=4)
     }
 
-    out, docs, web, _ = await svc._prepare_chat(
+    out, docs, web, _retrieved_docs, _retrieved_web, _ = await svc._prepare_chat(
         ["p"], {"messages": [{"role": "user", "content": "hello!"}], "metadata": {}}
     )
 
