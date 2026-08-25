@@ -1114,6 +1114,27 @@ async def test_chat_leading_system_prompt_partially_truncated_not_duplicated():
 
 
 @pytest.mark.asyncio
+async def test_chat_system_only_messages_rejected():
+    from core.utils.exceptions import ValidationError
+
+    llm = FakeLLM(chat_responses=["answer [Sources: none]"])
+    svc = _svc(llm=llm)
+    with pytest.raises(ValidationError, match="at least one non-system message"):
+        await svc.chat(
+            partitions=["p1"],
+            payload={
+                "messages": [
+                    {"role": "system", "content": "SYS1"},
+                    {"role": "system", "content": "SYS2"},
+                ],
+                "metadata": {},
+            },
+            prepare_sources=lambda d, w: [],
+            model_name="m",
+        )
+
+
+@pytest.mark.asyncio
 async def test_complete_direct_mode_preserves_literal_source_marker():
     answer = "text body\n[Sources: none]"
     svc = _svc(llm=FakeLLM(gen_text=answer))

@@ -49,7 +49,7 @@ from core.prompts import (
     format_web_context,
     prepend_system_prompt,
 )
-from core.utils.exceptions import WorkspaceNotFoundError
+from core.utils.exceptions import ValidationError, WorkspaceNotFoundError
 from core.utils.logging import get_logger
 from core.utils.source_filtering import (
     extract_and_strip_sources_block,
@@ -432,6 +432,8 @@ class QueryService:
     async def _prepare_chat(self, partition: list[str] | None, payload: dict, llm: LLM | None = None):
         messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
         custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
+        if not messages:
+            raise ValidationError("Request must contain at least one non-system message")
         queries = await self.generate_query(messages, llm=llm, partition=partition)
 
         metadata = payload.get("metadata") or {}
