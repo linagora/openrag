@@ -446,7 +446,18 @@ Accepts OpenAI-compatible chat completion requests with:
 
 **Response:**
 Returns OpenAI-compatible response with additional `extra` field containing:
-- `sources`: Array of source documents with metadata and URLs
+- `sources`: Legacy field, kept for backward compatibility. Cited sources, or
+  every presented source as a fallback when the model didn't report citations
+- `presented_sources`: Array of every source actually shown to the model
+  (after context-budget truncation), regardless of what it cited
+- `cited_sources`: Array of only the sources the model explicitly cited; empty
+  whenever no citations tag was found (never falls back like `sources` does)
+- `citations_reported`: `true` only if the model emitted a citations tag
+  (even an empty one); `false` means `sources` fell back to keeping everything
+- `all_retrieved_sources`: Array of every source retrieval returned, unfiltered
+  by citation or context-budget truncation — only included when the request's
+  `metadata.include_all_retrieved_sources` is `true` (off by default; this is
+  debug/evaluation telemetry and can be large)
 
 **Streaming:**
 Set `stream: true` for Server-Sent Events (SSE) streaming responses.
@@ -552,7 +563,18 @@ Accepts OpenAI-compatible completion requests with:
 
 **Response:**
 Returns OpenAI-compatible response with additional `extra` field containing:
-- `sources`: Array of source documents with metadata and URLs
+- `sources`: Legacy field, kept for backward compatibility. Cited sources, or
+  every presented source as a fallback when the model didn't report citations
+- `presented_sources`: Array of every source actually shown to the model
+  (after context-budget truncation), regardless of what it cited
+- `cited_sources`: Array of only the sources the model explicitly cited; empty
+  whenever no citations tag was found (never falls back like `sources` does)
+- `citations_reported`: `true` only if the model emitted a citations tag
+  (even an empty one); `false` means `sources` fell back to keeping everything
+- `all_retrieved_sources`: Array of every source retrieval returned, unfiltered
+  by citation or context-budget truncation — only included when the request's
+  `metadata.include_all_retrieved_sources` is `true` (off by default; this is
+  debug/evaluation telemetry and can be large)
 
 **Note:** Streaming is not supported for this endpoint.
 """,
