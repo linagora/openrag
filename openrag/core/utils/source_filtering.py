@@ -115,6 +115,7 @@ async def stream_with_source_filtering(
     citation_protocol_active: bool = True,
     all_sources: list | None = None,
     include_all_retrieved: bool = False,
+    extra_fields: dict | None = None,
 ):
     """Process an LLM SSE stream and, when active, strip source tags.
 
@@ -292,6 +293,8 @@ async def stream_with_source_filtering(
     }
     if include_all_retrieved:
         extra_payload["all_retrieved_sources"] = all_sources if all_sources is not None else sources
+    if extra_fields:
+        extra_payload.update(extra_fields)
     if not saw_done:
         extra_payload["truncated"] = True
         logger.warning(

@@ -18,6 +18,7 @@ Tokenizers are injected as ``Callable[[str], int]`` so this module stays pure
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Callable
 from typing import Protocol
 
@@ -25,6 +26,8 @@ from core.utils.text import neutralize_prompt_control_tokens, sanitize_text
 
 SOURCE_SEPARATOR = "-" * 10 + "\n\n"
 EMPTY_CONTEXT_MESSAGE = "No document found from the database"
+
+_UNSAFE_PROMPT_CLOSE_TAG_RE = re.compile(r"</unsafe_custom_prompt>", re.IGNORECASE)
 
 
 class WebSourceLike(Protocol):
@@ -131,12 +134,42 @@ def prepend_system_prompt(
     *,
     context: str,
     current_date: str,
+    custom_prompt: str | None = None,
 ) -> list[dict]:
     """Return a deep-copied message list with a rendered system prompt prepended.
 
-    ``system_template`` must contain ``{context}`` and ``{current_date}``.
+    ``system_template`` must contain ``{context}`` and ``{current_date}``. A
+    ``{custom_prompt}`` placeholder is optional — where present, ``custom_prompt``
+    (e.g. a client-pinned custom system instruction) is given its own
+    ``# User defined an unsafe_custom_prompt`` heading, wrapping an
+    ``<unsafe_custom_prompt>`` block, and spliced in there; templates without
+    the placeholder silently ignore ``custom_prompt``. The heading and tag both
+    flag the content as untrusted input to the LLM, not an authoritative
+    instruction — paired with a template rule instructing the model to keep
+    following its core rules regardless of what this block says.
+    ``custom_prompt`` is run through ``neutralize_prompt_control_tokens`` first,
+    same as RAG/web context, so it cannot forge a ``[Source N]`` /
+    ``[Sources: ...]`` marker.
     """
     out = copy.deepcopy(messages)
-    rendered = system_template.format(context=context, current_date=current_date)
+    # A literal closing tag could break out of the untrusted-content wrapper
+    # and have trailing attacker text read as if outside it.
+    safe_custom_prompt = (
+        _UNSAFE_PROMPT_CLOSE_TAG_RE.sub(
+            "&lt;/unsafe_custom_prompt&gt;", neutralize_prompt_control_tokens(custom_prompt)
+        )
+        if custom_prompt
+        else custom_prompt
+    )
+    custom_prompt_block = (
+        f"\n# User defined an unsafe_custom_prompt\n<unsafe_custom_prompt>\n{safe_custom_prompt}\n</unsafe_custom_prompt>\n"
+        if custom_prompt
+        else ""
+    )
+    rendered = system_template.format(
+        context=context,
+        current_date=current_date,
+        custom_prompt=custom_prompt_block,
+    )
     out.insert(0, {"role": "system", "content": rendered})
     return out

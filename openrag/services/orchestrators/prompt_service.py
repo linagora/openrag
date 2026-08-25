@@ -44,11 +44,14 @@ _VALID_TYPES = frozenset(t.value for t in PromptType)
 # are sent to the LLM verbatim as a system message — never ``.format``-ed — so
 # they may contain any literal text, braces included, and need no validation.
 _PROMPT_FORMAT_FIELDS: dict[str, frozenset[str]] = {
-    PromptType.SYS_PROMPT.value: frozenset({"context", "current_date"}),
+    # ``custom_prompt`` must stay allow-listed here, or the bundled disk
+    # templates (which contain it) fail seed-time validation and the library
+    # default for these types is silently never created.
+    PromptType.SYS_PROMPT.value: frozenset({"context", "current_date", "custom_prompt"}),
     # Rendered by the same call site as sys_prompt (the answer prompt swapped in
     # when a request sets metadata.spoken_style_answer), so it takes the same
     # placeholders and must be validated identically.
-    PromptType.SPOKEN_STYLE_ANSWER.value: frozenset({"context", "current_date"}),
+    PromptType.SPOKEN_STYLE_ANSWER.value: frozenset({"context", "current_date", "custom_prompt"}),
     PromptType.QUERY_CONTEXTUALIZER.value: frozenset({"query_language", "current_date"}),
     PromptType.HYDE.value: frozenset({"question"}),
     PromptType.MULTI_QUERY.value: frozenset({"query", "k_queries"}),

@@ -716,6 +716,7 @@ OpenAI-compatible text completion endpoint.
 | `spoken_style_answer` | `bool` | `false` | Generates a succinct spoken-style conversational answer based on the retrieved documents. |
 | `use_map_reduce` | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
 | `llm_override` | `object` | `null` | Overrides only the downstream LLM model name while still using OpenRAG's configured LLM endpoint and credentials. Accepts: `model` (string). Endpoint URL and API key are server-side configuration and cannot be changed by a client request. |
+| `attachments` | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Unknown or unindexed IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
 
 Examples:
 
@@ -798,6 +799,30 @@ curl -X 'POST' 'http://localhost:8080/v1/chat/completions' \
     "llm_override": {
       "model": "gpt-4o"
     }
+  }
+}'
+```
+
+```bash title="Scoping retrieval to specific attachments"
+curl -X 'POST' 'http://localhost:8080/v1/chat/completions' \
+  -H 'accept: application/json' \
+  -H 'Authorization: Bearer YOUR_AUTH_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "openrag-{partition_name}",
+  "messages": [
+    {
+      "role": "user",
+      "content": "summarize these files"
+    }
+  ],
+  "stream": false,
+  "metadata": {
+    "attachments": [
+      {"id": "file-001"},
+      {"id": "file-002"},
+      {"id": "file-003"}
+    ]
   }
 }'
 ```

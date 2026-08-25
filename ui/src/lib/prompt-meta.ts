@@ -67,6 +67,12 @@ export const PROMPT_TYPE_VARIABLES: Record<string, TemplateVariable[]> = {
   sys_prompt: [
     { name: "context", description: "Retrieved document chunks injected by the pipeline", sample: "[Source 1] Employees are entitled to 20 days of paid vacation per year, accrued monthly." },
     { name: "current_date", description: "Today's date, injected at request time", sample: "2026-07-27" },
+    { name: "custom_prompt", description: "Client-supplied custom system instructions (wrapped in unsafe_custom_prompt tags)", sample: "Always respond in French" },
+  ],
+  spoken_style_answer: [
+    { name: "context", description: "Retrieved document chunks injected by the pipeline", sample: "[Source 1] Employees are entitled to 20 days of paid vacation per year, accrued monthly." },
+    { name: "current_date", description: "Today's date, injected at request time", sample: "2026-07-27" },
+    { name: "custom_prompt", description: "Client-supplied custom system instructions (wrapped in unsafe_custom_prompt tags)", sample: "Always respond in French" },
   ],
   query_contextualizer: [
     { name: "current_date", description: "Today's date, injected at request time", sample: "2026-07-27" },
@@ -189,6 +195,7 @@ export function extractPlaceholders(content: string): string[] {
  */
 const FORMATTED_PROMPT_TYPES = new Set([
   "sys_prompt",
+  "spoken_style_answer",
   "query_contextualizer",
   "hyde",
   "multi_query",
