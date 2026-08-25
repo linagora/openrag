@@ -31,12 +31,12 @@
 
 * **Text Files**: `txt`, `md`
 * **Document Files**: `pdf`, `docx`, `doc`, `pptx` - Advanced PDF parsing with OCR support and Office document processing
-* **E-mail**: `eml` - Message parsing, with thread relationships preserved
+* **E-mail**: `eml` - Message body and headers, with attachments parsed through their own format's pipeline
 * **Audio Files**: `wav`, `mp3`, `flac`, `ogg`, `aac`, `wma` - Audio transcription and content extraction
 * **Video Files**: `mp4`, `flv` - Speech transcription from the audio track
-* **Images**: `png`, `jpeg`, `jpg`, `svg` - Vision Language Model (VLM) powered image captioning and analysis
+* **Images**: `png`, `jpeg`, `jpg`, `svg` - Vision Language Model (VLM)-powered image captioning and analysis
 
-All files are converted to **Markdown format** for consistent processing across document types. When image captioning is enabled, embedded images are replaced by AI-generated descriptions.
+All files are converted to **Markdown format** for consistent processing across document types. When image captioning is enabled, images the parser can extract are replaced by AI-generated descriptions.
 
 ### 🎛️ Native Web-Based Admin UI
 Manage OpenRAG through the bundled web interface.
