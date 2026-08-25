@@ -7,9 +7,9 @@ dependencies:
   version: 18.7.3
 - name: milvus
   repository: https://zilliztech.github.io/milvus-helm/
-  version: 5.0.0
+  version: 5.0.25
 - name: vllm-stack
   repository: https://vllm-project.github.io/production-stack
   version: 0.1.11
-digest: sha256:1ea11f53796e3196848d5d46cdff5a6bdeeb012427c1951ea646a22b176adec6
-generated: "2026-06-10T14:51:21.005020805+02:00"
+digest: sha256:50f412b87a0f4b9fccb92b02a0ea0d21fa7d0343b86394077e4ac05cb7c16b61
+generated: "2026-08-25T13:53:27.648198879Z"

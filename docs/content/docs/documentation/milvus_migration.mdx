@@ -108,6 +108,23 @@ Once those checks pass, start the complete stack:
 docker compose up -d
 ```
 
+### Helm deployments
+
+The bundled Helm chart now installs the Milvus 3-compatible chart and image. Before upgrading an existing release, stop writes and back up the MinIO and etcd volumes, together with any standalone or log volume enabled through custom values.
+
+Milvus 3 runs with GID `999`. The chart sets `fsGroup: 999` with the `Always` policy so Kubernetes recursively makes supported mounted volumes writable before Milvus starts. The first startup can therefore take longer when a volume contains many files.
+
+Some storage drivers do not support `fsGroup` ownership changes. Check the driver's `fsGroupPolicy` before upgrading. If it is `None`, migrate the affected Milvus volume to group `999` using the storage provider's procedure before starting Milvus 3; otherwise the pods can fail with permission errors.
+
+After the upgrade, confirm that every Milvus workload is ready and uses the expected image:
+
+```bash
+kubectl get pods -n <namespace> -l app.kubernetes.io/name=milvus
+kubectl get pods -n <namespace> -l app.kubernetes.io/name=milvus \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\n"}{end}'
+# Expected Milvus image: milvusdb/milvus:v3.0.0
+```
+
 ### Legacy path: upgrade Milvus 2.5.x to 2.6.11
 
 This intermediate path is required for deployments upgrading from **OpenRAG &lt;= 1.1.7**. Do not jump directly from Milvus 2.5.x to 3.0.0.

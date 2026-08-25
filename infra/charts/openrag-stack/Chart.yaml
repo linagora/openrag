@@ -26,7 +26,7 @@ dependencies:
     repository: "https://charts.bitnami.com/bitnami"
     condition: postgresql.enabled
   - name: milvus
-    version: "5.0.0"
+    version: "5.0.25"
     repository: "https://zilliztech.github.io/milvus-helm/"
     condition: milvus.enabled
   - name: vllm-stack
