@@ -277,7 +277,7 @@ class TestVLLMClient:
         assert "top_logprobs" not in captured
 
     @pytest.mark.asyncio
-    async def test_truthy_logprobs_forwarded(self):
+    async def test_truthy_logprobs_forwarded_on_chat(self):
         """An explicit opt-in must keep flowing through unchanged."""
         captured: dict = {}
 
@@ -289,6 +289,22 @@ class TestVLLMClient:
 
         assert captured["logprobs"] is True
         assert captured["top_logprobs"] == 5
+
+    @pytest.mark.asyncio
+    async def test_truthy_logprobs_forwarded_on_generate(self):
+        """Same opt-in guarantee on the completions path. `/completions` takes
+        an integer `logprobs` (not the chat API's bool + `top_logprobs`), so a
+        truthy int must survive untouched — the strip is falsy-only, not a
+        blanket removal of the field."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _completions_response()
+
+        await self._make_client(capture).generate("hi", logprobs=5)
+
+        assert captured["logprobs"] == 5
 
     @pytest.mark.asyncio
     async def test_trailing_slash_stripped(self):
