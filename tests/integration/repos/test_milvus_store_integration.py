@@ -292,9 +292,7 @@ class TestHybridSearch:
     @pytest.mark.asyncio
     async def test_hybrid_search_empty_partition_returns_no_results(self, hybrid_store: MilvusVectorStore) -> None:
         await hybrid_store.initialize(_EMBEDDING_DIM)
-        await hybrid_store.upsert(
-            [_chunk("existing chunk", "__populated_partition__", 0.1)]
-        )
+        await hybrid_store.upsert([_chunk("existing chunk", "__populated_partition__", 0.1)])
 
         hits = await hybrid_store.search(
             _embedding(0.1),
