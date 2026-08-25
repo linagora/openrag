@@ -1,6 +1,6 @@
 """End-to-end integration tests for :class:`MilvusVectorStore`.
 
-These tests round-trip through a real Milvus 2.6 instance: they create a
+These tests round-trip through a real Milvus 3.0 instance: they create a
 fresh collection per test, exercise the public surface, and drop the
 collection on teardown. They are gated by the ``integration`` pytest marker
 and auto-skip when the configured Milvus host is not reachable.
@@ -333,7 +333,7 @@ class TestQueryByFilter:
         assert rows
         assert rows[0]["partition"] == "p1"
         assert rows[0]["text"] == "only"
-        # Milvus 2.6 returns the dense ``vector`` for the default ``["*"]``
+        # Milvus 3.0 returns the dense ``vector`` for the default ``["*"]``
         # projection (unlike the search path, which strips it via
         # ``_SEARCH_RESULT_DROPPED_KEYS``). ``_safe_batch_size`` relies on this
         # to shrink the query_iterator page for wildcard reads, so assert the

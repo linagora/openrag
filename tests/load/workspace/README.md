@@ -21,7 +21,7 @@ docker compose down -v       # Remove everything (next run re-inserts data)
 
 | Service    | Image                       | Port  |
 |------------|-----------------------------|-------|
-| Milvus     | milvusdb/milvus:v2.6.11     | 19530 |
+| Milvus     | milvusdb/milvus:v3.0.0      | 19530 |
 | PostgreSQL | postgres:16                 | 5433  |
 | etcd       | quay.io/coreos/etcd:v3.5.25 | -     |
 | MinIO      | minio/minio                 | -     |

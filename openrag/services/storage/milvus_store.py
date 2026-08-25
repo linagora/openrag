@@ -1,4 +1,4 @@
-"""Milvus 2.6 vector store adapter implementing :class:`VectorStore`.
+"""Milvus 3.0 vector store adapter implementing :class:`VectorStore`.
 
 Scope:
     Pure vector operations against a single Milvus collection (the one named
@@ -13,7 +13,7 @@ Collection model:
     collection name. ``ensure_collection`` / ``drop_collection`` operate at
     partition-row granularity.
 
-Client split (Milvus 2.6):
+Client split (Milvus 3.0):
     ``AsyncMilvusClient`` covers the data plane (``insert``, ``search``,
     ``hybrid_search``, ``query``, ``delete``, ``upsert``). The admin/lifecycle
     plane (``has_collection``, ``create_collection``, ``load_collection``,
@@ -22,7 +22,7 @@ Client split (Milvus 2.6):
     :class:`MilvusClient` is kept alongside.
 
 Hybrid BM25:
-    Milvus 2.6 native ``Function(FunctionType.BM25)`` computes the sparse
+    Milvus 3.0 native ``Function(FunctionType.BM25)`` computes the sparse
     vector server-side from the ``text`` field at both insert and query time.
     Hybrid is config-driven, not a separate entry point: :meth:`search`
     dispatches to :meth:`_hybrid_search` when ``config.hybrid_search`` is on
@@ -99,7 +99,7 @@ DEFAULT_BM25_SEARCH_PARAMS: dict[str, Any] = {
     "params": {"drop_ratio_build": 0.2},
 }
 
-#: Native Milvus 2.6 RRF fusion constant — k=100 matches the legacy MilvusDB
+#: Native Milvus 3.0 RRF fusion constant — k=100 matches the legacy MilvusDB
 #: tuning and the rank-fusion literature default.
 RRF_K = 100
 
@@ -137,7 +137,7 @@ analyzer_params: dict[str, Any] = {
 
 
 class MilvusVectorStore(VectorStore):
-    """Milvus 2.6 implementation of :class:`VectorStore`.
+    """Milvus 3.0 implementation of :class:`VectorStore`.
 
     The store is constructed cheaply (no I/O); the collection is materialised
     on the first :meth:`initialize` call. ``initialize`` is idempotent and
@@ -203,7 +203,7 @@ class MilvusVectorStore(VectorStore):
     def _ensure_loaded(self) -> None:
         """Create-if-absent + load the configured collection.
 
-        Synchronous because the Milvus 2.6 admin/lifecycle endpoints
+        Synchronous because the Milvus 3.0 admin/lifecycle endpoints
         (``has_collection``, ``create_collection``, ``load_collection``,
         ``alter_collection_properties``, ``describe_collection``) have no
         async equivalents.
@@ -445,7 +445,7 @@ class MilvusVectorStore(VectorStore):
     # must go through :meth:`drop_collection`.
     _TAUTOLOGICAL_EXPRS = frozenset({"true", "1==1"})
 
-    # Always-false predicate for an empty ``IN`` list. Milvus 2.6 rejects a
+    # Always-false predicate for an empty ``IN`` list. Milvus 3.0 rejects a
     # bare ``false`` literal ("predicate is not a boolean expression"), so the
     # match-nothing sentinel must be a comparison it can plan.
     _MATCH_NOTHING_EXPR = "1 == 0"
@@ -541,7 +541,7 @@ class MilvusVectorStore(VectorStore):
         return " and ".join(f"({part})" for part in parts)
 
     # ------------------------------------------------------------------
-    # Sync paginated query helper (Milvus 2.6 query_iterator is sync-only)
+    # Sync paginated query helper (Milvus 3.0 query_iterator is sync-only)
     # ------------------------------------------------------------------
 
     def _vector_dim(self) -> int:
@@ -588,7 +588,7 @@ class MilvusVectorStore(VectorStore):
 
         Only matters when the dense ``vector`` rides along (~dim*4 bytes/row);
         explicit scalar projections are small, so they keep the large default.
-        Milvus 2.6 returns the vector for the ``"*"`` wildcard too — the search
+        Milvus 3.0 returns the vector for the ``"*"`` wildcard too — the search
         path strips it post-hoc via ``_SEARCH_RESULT_DROPPED_KEYS`` and
         ``query_chunks_by_filter(["*"])`` leaks it — so ``"*"`` counts as
         vector-inclusive here. The dimension comes from :meth:`_vector_dim`, not
@@ -608,7 +608,7 @@ class MilvusVectorStore(VectorStore):
         output_fields: list[str],
         batch_size: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Drain a Milvus 2.6 ``query_iterator`` into a list.
+        """Drain a Milvus 3.0 ``query_iterator`` into a list.
 
         ``batch_size`` defaults to :meth:`_safe_batch_size`, which shrinks the
         page for vector-inclusive projections so one page stays under Milvus's
@@ -781,12 +781,12 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
-        # Milvus 2.6 returns {"insert_count": N, "ids": [...], "cost": ...}.
+        # Milvus 3.0 returns {"insert_count": N, "ids": [...], "cost": ...}.
         # Fall back to len(entities) if the server omits insert_count.
         return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
 
     def _parse_search_response(self, response: Any) -> list[dict[str, Any]]:
-        """Normalise a Milvus 2.6 search/hybrid_search response to raw dicts.
+        """Normalise a Milvus 3.0 search/hybrid_search response to raw dicts.
 
         Each record has ``id`` (stringified for :class:`Chunk` round-trip),
         ``score`` (distance for dense, fused RRF score for hybrid), and the
@@ -1168,7 +1168,7 @@ class MilvusVectorStore(VectorStore):
     ) -> list[str]:
         """Return ``Chunk.id`` strings for every row matching ``filters``.
 
-        Uses Milvus 2.6 ``query_iterator`` under the hood so result-set size
+        Uses Milvus 3.0 ``query_iterator`` under the hood so result-set size
         is bounded only by Milvus pagination, not by a server-side
         ``limit``. The returned IDs are the INT64 ``_id`` values stringified
         for round-trip with :class:`Chunk`.
@@ -1186,7 +1186,7 @@ class MilvusVectorStore(VectorStore):
     ) -> list[dict[str, Any]]:
         """Return full row data for every chunk matching ``filters``.
 
-        ``output_fields`` defaults to ``["*"]``, which in Milvus 2.6 includes
+        ``output_fields`` defaults to ``["*"]``, which in Milvus 3.0 includes
         the dense ``vector`` field (unlike :meth:`search`, which strips it via
         ``_SEARCH_RESULT_DROPPED_KEYS``). Callers that don't want the vector
         should pass an explicit scalar projection instead of ``["*"]``.
