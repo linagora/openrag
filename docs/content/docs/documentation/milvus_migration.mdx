@@ -5,7 +5,7 @@ title: Milvus Migrations
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 # Milvus Upgrade
-OpenRAG has been upgraded from Milvus **2.5.4** to **2.6.11** to leverage the enhancements introduced in the latest releases, particularly the new temporal querying capabilities added in version **2.6.6+**.
+OpenRAG now uses Milvus **3.0.0** with PyMilvus **3.0.1**. Existing Milvus 2.6 deployments can keep their data, but they must prepare the Milvus data directory before starting the new image because Milvus 3 runs as a non-root user.
 
 ## What's New in 2.6.x
 
@@ -46,12 +46,71 @@ results = client.query(
 ## Milvus Version Upgrade Steps
 
 :::danger[Who needs this migration?]
-This migration is only required if you are upgrading from **OpenRAG &lt;= 1.1.7**, which shipped with Milvus &lt;= 2.5.x. If your deployment already runs Milvus 2.6.x, skip this section.
+Do not skip this migration when upgrading an existing deployment:
+
+- If you already run Milvus **2.6.x**, follow the 2.6-to-3.0 procedure below.
+- If you run Milvus **2.5.x or earlier**, first complete the legacy intermediate upgrade to 2.6.11, then follow the 2.6-to-3.0 procedure.
 :::
 
 > For the full official reference, see the [Milvus upgrade guide](https://milvus.io/docs/upgrade_milvus_standalone-docker.md#Upgrade-process).
 
-### Step 1 — Upgrade Milvus to 2.5.16 (intermediate step)
+### Upgrade from Milvus 2.6.x to 3.0.0
+
+Milvus 2.6 containers ran as root, so existing bind-mounted files are commonly owned by `root:root`. Milvus 3 runs as UID/GID `999:999` and cannot start until it owns the directory mounted at `/var/lib/milvus`.
+
+:::danger[Back up before changing ownership]
+Stop writes and create a verified backup of the Milvus, etcd, and MinIO data before continuing. An image-only downgrade is not a safe rollback after Milvus 3 has written data.
+:::
+
+Run these commands from `infra/compose` while the Milvus 2.6 stack still exists. First resolve the exact host directory used by the current container:
+
+```bash
+MILVUS_CONTAINER="$(docker compose ps -q milvus)"
+MILVUS_DATA_PATH="$(
+  docker inspect "$MILVUS_CONTAINER" \
+    --format '{{range .Mounts}}{{if eq .Destination "/var/lib/milvus"}}{{.Source}}{{end}}{{end}}'
+)"
+
+test -n "$MILVUS_DATA_PATH"
+test -d "$MILVUS_DATA_PATH"
+printf 'Milvus data directory: %s\n' "$MILVUS_DATA_PATH"
+```
+
+Stop the stack, take the backup described above, and then transfer ownership to the Milvus 3 user:
+
+```bash
+docker compose down
+sudo chown -R 999:999 "$MILVUS_DATA_PATH"
+```
+
+Update OpenRAG, then pull and start the dependencies followed by Milvus:
+
+```bash
+docker compose pull milvus
+docker compose up -d etcd minio
+docker compose up -d milvus
+```
+
+Do not restart OpenRAG until Milvus is healthy and the logs contain no permission or migration errors:
+
+```bash
+docker compose ps milvus
+docker compose logs --tail 100 milvus
+docker inspect "$(docker compose ps -q milvus)" --format '{{.Config.Image}}'
+# Expected: milvusdb/milvus:v3.0.0
+```
+
+Once those checks pass, start the complete stack:
+
+```bash
+docker compose up -d
+```
+
+### Legacy path: upgrade Milvus 2.5.x to 2.6.11
+
+This intermediate path is required for deployments upgrading from **OpenRAG &lt;= 1.1.7**. Do not jump directly from Milvus 2.5.x to 3.0.0.
+
+#### Step 1 — Upgrade Milvus to 2.5.16
 
 :::caution[Do not update OpenRAG yet]
 During this step, keep your current version of OpenRAG (&lt; 1.1.7) running. Only the Milvus image is changed here. OpenRAG itself is updated in Step 2.
@@ -82,9 +141,9 @@ docker inspect milvus-standalone --format '{{ .Config.Image }}'
 # Expected: milvusdb/milvus:v2.5.16
 ```
 
-### Step 2 — Update OpenRAG
+#### Step 2 — Upgrade Milvus to 2.6.11
 
-Once Milvus 2.5.16 is healthy, stop all services and update OpenRAG to the new version. The updated `infra/compose/milvus/milvus.yaml` already includes Milvus 2.6.11 and the required MinIO and etcd upgrades.
+Once Milvus 2.5.16 is healthy, stop all services and move to an OpenRAG release that still packages Milvus 2.6.11, such as OpenRAG 2.1.0. This intermediate release also provides the required MinIO and etcd versions.
 
 ```bash
 docker compose down
@@ -108,6 +167,8 @@ Confirm the running Milvus version:
 docker inspect milvus-standalone --format '{{ .Config.Image }}'
 # Expected: milvusdb/milvus:v2.6.11
 ```
+
+After verifying that the collections are readable and searchable on 2.6.11, continue with the 2.6-to-3.0 procedure above.
 
 ## Schema Migrations
 
