@@ -307,6 +307,21 @@ class TestVLLMClient:
         assert captured["logprobs"] == 5
 
     @pytest.mark.asyncio
+    async def test_zero_logprobs_forwarded_on_generate(self):
+        """`/completions`' integer `logprobs` treats 0 as a deliberate request
+        (the sampled token's own logprob, no alternates) — distinct from
+        unset/False. A truthiness check would wrongly conflate 0 with off."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _completions_response()
+
+        await self._make_client(capture).generate("hi", logprobs=0)
+
+        assert captured["logprobs"] == 0
+
+    @pytest.mark.asyncio
     async def test_trailing_slash_stripped(self):
         c = VLLMClient(endpoint="http://vllm:8000/v1/", model_name="m")
         assert c._endpoint == "http://vllm:8000/v1"

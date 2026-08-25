@@ -117,7 +117,7 @@ def _log_safe_error_detail(exc: BaseException) -> dict:
 
 
 def _strip_falsy_logprobs(payload: dict) -> dict:
-    """Drop a falsy ``logprobs`` (and its dependent ``top_logprobs``) from *payload*.
+    """Drop an unset/off ``logprobs`` (and its dependent ``top_logprobs``) from *payload*.
 
     ``logprobs: false`` is already the OpenAI default, so sending it adds
     nothing — but strict providers whose schema lacks the field reject it by
@@ -125,8 +125,16 @@ def _strip_falsy_logprobs(payload: dict) -> dict:
     this, the config default (``LLMParamsConfig.logprobs = False``) lands in
     ``self._defaults`` and is sent on every request. A truthy value is a
     deliberate opt-in and is forwarded as-is.
+
+    Checked with ``is`` against ``None``/``False`` rather than plain
+    truthiness (or ``in (None, False)``, which suffers the same problem since
+    ``0 == False``): the legacy ``/completions`` endpoint's ``logprobs`` is an
+    *integer* (how many alternates to return), where ``0`` is a deliberate,
+    meaningful request — "give me the sampled token's own logprob, no
+    alternates" — not an off state, and must not be conflated with it.
     """
-    if not payload.get("logprobs"):
+    logprobs = payload.get("logprobs")
+    if logprobs is None or logprobs is False:
         payload.pop("logprobs", None)
         payload.pop("top_logprobs", None)
     return payload
