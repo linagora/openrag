@@ -35,7 +35,6 @@ verbatim (no langchain import in this module).
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime
@@ -50,7 +49,7 @@ from core.prompts import (
     format_web_context,
     prepend_system_prompt,
 )
-from core.utils.exceptions import WorkspaceNotFoundError
+from core.utils.exceptions import ValidationError, WorkspaceNotFoundError
 from core.utils.logging import get_logger
 from core.utils.source_filtering import (
     extract_and_strip_sources_block,
@@ -453,6 +452,9 @@ class QueryService:
 
     async def _prepare_chat(self, partition: list[str] | None, payload: dict, llm: LLM | None = None):
         messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
+        custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
+        if not messages:
+            raise ValidationError("Request must contain at least one non-system message")
         queries = await self.generate_query(messages, llm=llm, partition=partition)
 
         metadata = payload.get("metadata") or {}
@@ -564,19 +566,16 @@ class QueryService:
             context = f"{context}{SOURCE_SEPARATOR}{web_formatted}" if context else web_formatted
             web_results = [web_results[number - web_start_index] for number in web_source_numbers]
 
-        new_messages = copy.deepcopy(messages)
         prompt_type = "spoken_style_answer" if spoken_style else "sys_prompt"
         tmpl = await self._prompt_service.resolve_prompt(
             prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
         )
-        new_messages.insert(
-            0,
-            {
-                "role": "system",
-                "content": tmpl.format(
-                    context=context, current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
-                ),
-            },
+        new_messages = prepend_system_prompt(
+            messages,
+            tmpl,
+            context=context,
+            current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
+            custom_prompt=custom_prompt,
         )
         payload["messages"] = new_messages
         return _PrepareChatResult(
@@ -643,6 +642,7 @@ class QueryService:
         instructions = tmpl.format(
             context=context,
             current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
+            custom_prompt="",
         )
         payload["prompt"] = f"{instructions}\n\n# User request\n{prompt}"
         return payload, docs, retrieved_docs
@@ -846,6 +846,28 @@ def _json_slice(text: str) -> str:
 def _summary_doc(chunk, summary: str):
     """A summarised copy of a LangChain Document (page_content replaced)."""
     return chunk.__class__(page_content=summary, metadata=chunk.metadata)
+
+
+def _split_leading_system_prompt(raw_messages: list[dict], truncated: list[dict]) -> tuple[str | None, list[dict]]:
+    """Pull a client-pinned leading system prompt out of ``raw_messages``.
+
+    A leading run of ``role="system"`` messages in ``raw_messages`` (the
+    untruncated payload) is a pinned instruction, not a chat turn. ``truncated``
+    is a tail slice of ``raw_messages`` (``raw_messages[-depth:]``), so only the
+    portion of that leading run still inside the tail is stripped from it — a
+    system message elsewhere in history that merely lands first after
+    chat_history_depth truncation is never mistaken for the pin and dropped.
+    """
+    parts: list[str] = []
+    i = 0
+    while i < len(raw_messages) and raw_messages[i]["role"] == "system":
+        parts.append(raw_messages[i]["content"])
+        i += 1
+
+    offset = len(raw_messages) - len(truncated)
+    strip = max(0, i - offset)
+
+    return ("\n\n".join(parts) if parts else None), truncated[strip:]
 
 
 def _extract_attachment_ids(metadata: dict) -> list[str]:
