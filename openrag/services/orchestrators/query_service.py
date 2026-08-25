@@ -40,7 +40,7 @@ import json
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
@@ -71,6 +71,21 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 PrepareSources = Callable[[list, list], list]
+
+
+class _PrepareChatResult(NamedTuple):
+    """A named tuple stays positionally unpackable, so existing
+    ``a, b, c, ... = await self._prepare_chat(...)`` call sites still work.
+    """
+
+    payload: dict
+    docs: list
+    web_results: list
+    retrieved_docs: list
+    retrieved_web_results: list
+    citation_protocol_active: bool
+    indexed_attachment_ids: list[str]
+
 
 _MAP_SYSTEM_PROMPT = """You are an AI assistant specialized in extracting and synthesizing relevant information from text.
 
@@ -445,10 +460,12 @@ class QueryService:
         spoken_style = metadata.get("spoken_style_answer", False)
         use_websearch = metadata.get("websearch", False)
         workspace = metadata.get("workspace")
+        attachment_ids = _extract_attachment_ids(metadata)
 
         top_k = self._mr_max if use_map_reduce else None
 
         filter_params = None
+        indexed_attachment_ids: list[str] = []
         if workspace and partition:
             scope = await self._workspace.resolve_scope(workspace, partition)
             if scope is None:
@@ -459,8 +476,15 @@ class QueryService:
             # partition the caller also has access to (#706).
             partition = [scope.partition]
             filter_params = {"file_id": scope.file_ids}
+        elif attachment_ids and partition:
+            # No ownership check needed: file_id is ANDed with the server-fixed
+            # partition (or, for the "all" wildcard, SUPER_ADMIN_MODE-only).
+            indexed_attachment_ids = await self._existing_file_ids(attachment_ids, partition)
+            filter_params = {"file_id": indexed_attachment_ids}
 
-        force_retrieval = use_websearch or use_map_reduce
+        # An attachment must never be dropped just because the classifier
+        # judged the turn conversational.
+        force_retrieval = use_websearch or use_map_reduce or bool(indexed_attachment_ids)
         if not queries.query_list:
             if not queries.requires_retrieval and not force_retrieval:
                 # Resolved per request from the library (named -> default ->
@@ -477,7 +501,7 @@ class QueryService:
                     context="",
                     current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
                 )
-                return payload, [], [], [], [], True
+                return _PrepareChatResult(payload, [], [], [], [], True, indexed_attachment_ids)
             queries = SearchQueries(query_list=[Query(query=messages[-1]["content"])])
 
         web_results: list = []
@@ -493,7 +517,7 @@ class QueryService:
             chunks = []
 
         if not chunks and not web_results and partition is None:
-            return payload, [], [], [], [], False
+            return _PrepareChatResult(payload, [], [], [], [], False, indexed_attachment_ids)
 
         docs = [c.to_langchain() for c in chunks]
 
@@ -555,7 +579,24 @@ class QueryService:
             },
         )
         payload["messages"] = new_messages
-        return payload, docs, web_results, retrieved_docs, retrieved_web_results, True
+        return _PrepareChatResult(
+            payload, docs, web_results, retrieved_docs, retrieved_web_results, True, indexed_attachment_ids
+        )
+
+    async def _existing_file_ids(self, file_ids: list[str], partitions: list[str]) -> list[str]:
+        """Order-preserving, deduplicated subset of ``file_ids`` indexed in ``partitions``.
+
+        ``"all"`` (``SUPER_ADMIN_MODE`` wildcard) takes an unscoped lookup instead
+        of a per-partition one.
+        """
+        if "all" in partitions:
+            if len(partitions) > 1:
+                raise ValueError("`partitions` cannot mix the wildcard with explicit values.")
+            found = set(await self._workspace.get_existing_file_ids_any_partition(file_ids))
+        else:
+            results = await asyncio.gather(*(self._workspace.get_existing_file_ids(p, file_ids) for p in partitions))
+            found = {fid for r in results for fid in r}
+        return [fid for fid in dict.fromkeys(file_ids) if fid in found]
 
     async def _gather_rag_and_web(self, queries, partition, top_k, filter_params):
         # Fuse the doc branch through retrieve_multi so a partition's rrf_k drives
@@ -674,15 +715,16 @@ class QueryService:
         citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
+            attachments: list[str] = []
         else:
-            (
-                payload,
-                docs,
-                web_results,
-                retrieved_docs,
-                retrieved_web_results,
-                citation_protocol_active,
-            ) = await self._prepare_chat(partitions, payload, llm)
+            result = await self._prepare_chat(partitions, payload, llm)
+            payload = result.payload
+            docs = result.docs
+            web_results = result.web_results
+            retrieved_docs = result.retrieved_docs
+            retrieved_web_results = result.retrieved_web_results
+            citation_protocol_active = result.citation_protocol_active
+            attachments = result.indexed_attachment_ids
         sources = prepare_sources(docs, web_results)
         # `all_retrieved_sources` is debug/eval telemetry, not needed by most
         # callers — skip building it (and calling prepare_sources on the full,
@@ -702,9 +744,11 @@ class QueryService:
         else:
             clean, citations = content, None
         chunk["choices"][0]["message"]["content"] = clean
-        chunk["extra"] = json.dumps(
-            _build_extra_payload(sources, citations, all_sources, include_all_retrieved=include_all_retrieved)
-        )
+        extra = _build_extra_payload(sources, citations, all_sources, include_all_retrieved=include_all_retrieved)
+        if metadata.get("attachments"):
+            # Indicate which attachments were actually searched to generate the answer.
+            extra["attachments"] = attachments
+        chunk["extra"] = json.dumps(extra)
         return chunk
 
     async def chat_stream(
@@ -722,18 +766,21 @@ class QueryService:
         citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
+            attachments: list[str] = []
         else:
-            (
-                payload,
-                docs,
-                web_results,
-                retrieved_docs,
-                retrieved_web_results,
-                citation_protocol_active,
-            ) = await self._prepare_chat(partitions, payload, llm)
+            result = await self._prepare_chat(partitions, payload, llm)
+            payload = result.payload
+            docs = result.docs
+            web_results = result.web_results
+            retrieved_docs = result.retrieved_docs
+            retrieved_web_results = result.retrieved_web_results
+            citation_protocol_active = result.citation_protocol_active
+            attachments = result.indexed_attachment_ids
         sources = prepare_sources(docs, web_results)
         all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
+
+        extra_fields = {"attachments": attachments} if metadata.get("attachments") else None
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
         llm_stream = llm.stream_chat(payload["messages"], **_sampling(payload))
@@ -744,6 +791,7 @@ class QueryService:
             all_sources=all_sources,
             include_all_retrieved=include_all_retrieved,
             citation_protocol_active=citation_protocol_active and not structured_output,
+            extra_fields=extra_fields,
         ):
             yield sse_line
 
@@ -798,6 +846,14 @@ def _json_slice(text: str) -> str:
 def _summary_doc(chunk, summary: str):
     """A summarised copy of a LangChain Document (page_content replaced)."""
     return chunk.__class__(page_content=summary, metadata=chunk.metadata)
+
+
+def _extract_attachment_ids(metadata: dict) -> list[str]:
+    """file_ids from ``metadata.attachments = [{"id": ...}, ...]``; malformed payloads dropped."""
+    raw = metadata.get("attachments")
+    if not isinstance(raw, list):
+        return []
+    return [a["id"] for a in raw if isinstance(a, dict) and isinstance(a.get("id"), str) and a["id"]]
 
 
 def _dedupe_web(web_lists: list[list]) -> list:

@@ -99,6 +99,46 @@ class TestFileMembership:
         assert in_a == ["ws-a"]
 
 
+class TestExistingFileIds:
+    """The two catalog-existence lookups behind attachment scoping.
+
+    Exercised against real SQL rather than a fake, so the ``ANY($1::text[])``
+    predicate and the presence/absence of the partition clause are actually
+    executed — the scoping assertions below both fail if either clause is
+    changed.
+    """
+
+    async def test_partition_scoped_ignores_other_partitions(self, postgres_store: PostgresStore):
+        await _seed_partition_and_files(postgres_store, partition="a", file_ids=("f1", "f2"))
+        await _seed_partition_and_files(postgres_store, partition="b", file_ids=("f3",))
+        found = await postgres_store.workspace_repo.get_existing_file_ids("a", ["f1", "f3", "ghost"])
+        # f3 exists, but in partition "b" — a partition-scoped lookup must not see it.
+        assert found == {"f1"}
+
+    async def test_any_partition_spans_partitions(self, postgres_store: PostgresStore):
+        await _seed_partition_and_files(postgres_store, partition="a", file_ids=("f1",))
+        await _seed_partition_and_files(postgres_store, partition="b", file_ids=("f3",))
+        found = await postgres_store.workspace_repo.get_existing_file_ids_any_partition(
+            ["f1", "f3", "ghost"],
+        )
+        assert found == {"f1", "f3"}
+
+    async def test_any_partition_reports_a_shared_file_id_once(self, postgres_store: PostgresStore):
+        # The same file_id in two partitions is two ``files`` rows. Callers treat
+        # the result as a membership set, so it must come back as a single entry.
+        # (Both the query's DISTINCT and the set-building enforce this; the test
+        # pins the contract, not either mechanism.)
+        await _seed_partition_and_files(postgres_store, partition="a", file_ids=("shared",))
+        await _seed_partition_and_files(postgres_store, partition="b", file_ids=("shared",))
+        found = await postgres_store.workspace_repo.get_existing_file_ids_any_partition(["shared"])
+        assert found == {"shared"}
+
+    async def test_empty_input_short_circuits(self, postgres_store: PostgresStore):
+        repo = postgres_store.workspace_repo
+        assert await repo.get_existing_file_ids("a", []) == set()
+        assert await repo.get_existing_file_ids_any_partition([]) == set()
+
+
 class TestDeleteWorkspace:
     async def test_returns_orphan_file_ids(self, postgres_store: PostgresStore):
         await _seed_partition_and_files(postgres_store)
