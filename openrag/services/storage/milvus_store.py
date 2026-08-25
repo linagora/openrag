@@ -36,8 +36,6 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -810,28 +808,6 @@ class MilvusVectorStore(VectorStore):
             out.append(record)
         return out
 
-    @contextmanager
-    def _search_errors(self, kind: str) -> Iterator[None]:
-        """Map Milvus failures from a search call to the VDB error taxonomy.
-
-        Wraps the ``await`` site so :meth:`search` and :meth:`hybrid_search`
-        don't each repeat the same two-arm ``MilvusException`` /
-        ``Exception`` translation. ``kind`` names the operation for the
-        message (``"dense search"`` / ``"hybrid search"``).
-        """
-        try:
-            yield
-        except MilvusException as e:
-            raise VDBSearchError(
-                f"Milvus {kind} failed: {e!s}",
-                collection_name=self._collection_name,
-            ) from e
-        except Exception as e:
-            raise UnexpectedVDBError(
-                f"Unexpected error during Milvus {kind}: {e!s}",
-                collection_name=self._collection_name,
-            ) from e
-
     def _dense_search_params(self, similarity_threshold: float | None) -> dict[str, Any]:
         """Build the dense COSINE search params, optionally range-filtered.
 
@@ -848,6 +824,36 @@ class MilvusVectorStore(VectorStore):
             params["radius"] = similarity_threshold
             params["range_filter"] = COSINE_RANGE_FILTER_MAX
         return {"metric_type": DEFAULT_DENSE_SEARCH_PARAMS["metric_type"], "params": params}
+
+    async def _search_error_is_empty_result(self, error: MilvusException, expr: str) -> bool:
+        """Confirm Milvus 3 errors that represent an empty search scope.
+
+        Milvus 3 reports server errors instead of an empty result when the
+        backing collection does not exist yet or a hybrid-search filter has no
+        matching entities. Verification failures deliberately return
+        ``False`` so the original Milvus error remains visible.
+        """
+        message = str(error)
+        if error.code == 100 and "collection not found" in message:
+            try:
+                exists = await asyncio.to_thread(self._client.has_collection, self._collection_name)
+            except Exception:
+                return False
+            return not exists
+
+        if error.code == 5 and "unsupported ID type" in message:
+            try:
+                matching_rows = await self._async_client.query(
+                    collection_name=self._collection_name,
+                    filter=expr,
+                    output_fields=["_id"],
+                    limit=1,
+                )
+            except Exception:
+                return False
+            return matching_rows == []
+
+        return False
 
     async def search(
         self,
@@ -891,7 +897,7 @@ class MilvusVectorStore(VectorStore):
         self._resolve_collection(collection)
         expr = self._build_filter_expr(filters)
 
-        with self._search_errors("dense search"):
+        try:
             response = await self._async_client.search(
                 collection_name=self._collection_name,
                 data=[embedding],
@@ -901,6 +907,18 @@ class MilvusVectorStore(VectorStore):
                 filter=expr,
                 output_fields=["*"],
             )
+        except MilvusException as e:
+            if await self._search_error_is_empty_result(e, expr):
+                return []
+            raise VDBSearchError(
+                f"Milvus dense search failed: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+        except Exception as e:
+            raise UnexpectedVDBError(
+                f"Unexpected error during Milvus dense search: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
 
         return self._parse_search_response(response)
 
@@ -953,7 +971,7 @@ class MilvusVectorStore(VectorStore):
             expr=expr,
         )
 
-        with self._search_errors("hybrid search"):
+        try:
             response = await self._async_client.hybrid_search(
                 collection_name=self._collection_name,
                 reqs=[dense_req, sparse_req],
@@ -961,6 +979,18 @@ class MilvusVectorStore(VectorStore):
                 limit=top_k,
                 output_fields=["*"],
             )
+        except MilvusException as e:
+            if await self._search_error_is_empty_result(e, expr):
+                return []
+            raise VDBSearchError(
+                f"Milvus hybrid search failed: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+        except Exception as e:
+            raise UnexpectedVDBError(
+                f"Unexpected error during Milvus hybrid search: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
 
         return self._parse_search_response(response)
 

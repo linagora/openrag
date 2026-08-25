@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pymilvus import MilvusException
 
 from openrag.core.config.infrastructure import VectorDBConfig
 from openrag.core.models.chunk import Chunk, ChunkType
@@ -561,6 +562,88 @@ class TestHybridDispatch:
         """
         with pytest.raises(VDBSearchError, match="query_text"):
             await store.search([0.1, 0.2], collection="default")
+
+    @pytest.mark.asyncio
+    async def test_empty_filtered_hybrid_search_returns_no_results(self, store: MilvusVectorStore) -> None:
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(5, "service internal error: unsupported ID type")
+        )
+        store._async_client.query = AsyncMock(return_value=[])  # type: ignore[attr-defined]
+
+        result = await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={"partition": "empty"},
+        )
+
+        assert result == []
+        store._async_client.query.assert_awaited_once_with(  # type: ignore[attr-defined]
+            collection_name="test_collection",
+            filter='partition == "empty"',
+            output_fields=["_id"],
+            limit=1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_collection_search_returns_no_results(self, store: MilvusVectorStore) -> None:
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(100, "collection not found[database=default][collection=test_collection]")
+        )
+        store._client.has_collection.return_value = False  # type: ignore[attr-defined]
+
+        result = await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={"partition": "default"},
+        )
+
+        assert result == []
+        store._client.has_collection.assert_called_once_with("test_collection")  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_missing_collection_dense_search_returns_no_results(self, store: MilvusVectorStore) -> None:
+        store._hybrid = False
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(100, "collection not found[database=default][collection=test_collection]")
+        )
+        store._client.has_collection.return_value = False  # type: ignore[attr-defined]
+
+        result = await store.search(
+            [0.1, 0.2],
+            filters={"partition": "default"},
+        )
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_empty_result_verification_failure_preserves_search_error(self, store: MilvusVectorStore) -> None:
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(5, "service internal error: unsupported ID type")
+        )
+        store._async_client.query = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=RuntimeError("verification unavailable")
+        )
+
+        with pytest.raises(VDBSearchError, match="unsupported ID type"):
+            await store.search(
+                [0.1, 0.2],
+                query_text="query",
+                filters={"partition": "empty"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_hybrid_search_error_is_preserved_when_filter_has_rows(self, store: MilvusVectorStore) -> None:
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(5, "service internal error: unsupported ID type")
+        )
+        store._async_client.query = AsyncMock(return_value=[{"_id": 1}])  # type: ignore[attr-defined]
+
+        with pytest.raises(VDBSearchError, match="unsupported ID type"):
+            await store.search(
+                [0.1, 0.2],
+                query_text="query",
+                filters={"partition": "populated"},
+            )
 
 
 # ---------------------------------------------------------------------------

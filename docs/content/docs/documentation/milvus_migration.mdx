@@ -7,6 +7,8 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 # Milvus Upgrade
 OpenRAG now uses Milvus **3.0.0** with PyMilvus **3.0.1**. Existing Milvus 2.6 deployments can keep their data, but they must prepare the Milvus data directory before starting the new image because Milvus 3 runs as a non-root user.
 
+Fresh installations need no manual ownership step. The Compose stack initializes the empty Milvus bind mount before the server starts. The procedure below remains mandatory for existing data because all files created by Milvus 2.6 must be transferred to the Milvus 3 user.
+
 ## What's New in 2.6.x
 
 Milvus 2.6.6+ introduced the **`TIMESTAMPTZ`** field type, which enables:

@@ -289,6 +289,19 @@ class TestHybridSearch:
             assert "score" in hit
             assert "text" in hit
 
+    @pytest.mark.asyncio
+    async def test_hybrid_search_empty_partition_returns_no_results(self, hybrid_store: MilvusVectorStore) -> None:
+        await hybrid_store.initialize(_EMBEDDING_DIM)
+
+        hits = await hybrid_store.search(
+            _embedding(0.1),
+            query_text="no matching partition",
+            top_k=5,
+            filters={"partition": "__empty_partition__"},
+        )
+
+        assert hits == []
+
 
 class TestDeleteByFilter:
     @pytest.mark.asyncio

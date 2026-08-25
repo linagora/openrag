@@ -29,6 +29,19 @@ services:
       timeout: 20s
       retries: 3
 
+  milvus-init:
+    image: milvusdb/milvus:v3.0.0
+    user: "0:0"
+    entrypoint: ["chown", "milvus:milvus", "/var/lib/milvus"]
+    volumes:
+      - ${MILVUS_VOLUME_DIRECTORY:-./volumes}/milvus:/var/lib/milvus
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    restart: "no"
+
   milvus:
     image: milvusdb/milvus:v3.0.0
     command: ["milvus", "run", "standalone"]
@@ -54,5 +67,9 @@ services:
     # ports:
     #   - "${VDB_PORT:-19530}:${VDB_iPORT:-19530}"
     depends_on:
-      - "etcd"
-      - "minio"
+      etcd:
+        condition: service_started
+      minio:
+        condition: service_started
+      milvus-init:
+        condition: service_completed_successfully
