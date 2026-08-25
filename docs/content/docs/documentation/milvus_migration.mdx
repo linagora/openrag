@@ -79,25 +79,21 @@ Run the procedure for the storage profile selected in `infra/compose/.env`.
 
 #### Bind-mounted storage
 
-While the Milvus 2.6 stack still exists, resolve the exact host directory used by the current container:
+While the Milvus 2.6 stack still exists, confirm that `/var/lib/milvus` is a bind mount:
 
 ```bash
 MILVUS_CONTAINER="$(docker compose ps -q milvus)"
-MILVUS_DATA_PATH="$(
-  docker inspect "$MILVUS_CONTAINER" \
-    --format '{{range .Mounts}}{{if eq .Destination "/var/lib/milvus"}}{{.Source}}{{end}}{{end}}'
-)"
-
-test -n "$MILVUS_DATA_PATH"
-test -d "$MILVUS_DATA_PATH"
-printf 'Milvus data directory: %s\n' "$MILVUS_DATA_PATH"
+docker inspect "$MILVUS_CONTAINER" \
+  --format '{{range .Mounts}}{{if eq .Destination "/var/lib/milvus"}}type={{.Type}} source={{.Source}}{{end}}{{end}}'
+# Expected: type=bind
 ```
 
-Stop the stack, take the backup described above, and then transfer ownership to the Milvus 3 user. Do not add `--volumes` to the shutdown command.
+Stop the stack, take the backup described above, and then transfer ownership from a temporary service container. Running the change through Docker makes it apply to the daemon-side mount and preserves the correct ownership mapping with remote, rootless, and user-namespaced Docker. Do not add `--volumes` to the shutdown command.
 
 ```bash
 docker compose down
-sudo chown -R 999:999 "$MILVUS_DATA_PATH"
+docker compose run --rm --no-deps --user 0:0 \
+  --entrypoint chown milvus -R 999:999 /var/lib/milvus
 ```
 
 #### Docker named-volume storage
