@@ -234,6 +234,94 @@ class TestVLLMClient:
         assert "max_retries" not in captured
 
     @pytest.mark.asyncio
+    async def test_falsy_config_logprobs_not_forwarded_on_chat(self):
+        """The DI container forwards LLMParamsConfig.logprobs (default False)
+        into self._defaults. `logprobs: false` is the OpenAI default, so it adds
+        nothing — but strict providers whose schema lacks the field reject it by
+        name whatever the value, e.g. Gemini"""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture, logprobs=False).chat([{"role": "user", "content": "hi"}])
+
+        assert "logprobs" not in captured
+
+    @pytest.mark.asyncio
+    async def test_falsy_config_logprobs_not_forwarded_on_generate(self):
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _completions_response()
+
+        await self._make_client(capture, logprobs=False).generate("hi")
+
+        assert "logprobs" not in captured
+
+    @pytest.mark.asyncio
+    async def test_falsy_request_logprobs_dropped_with_top_logprobs(self):
+        """A client sending `logprobs: false` alongside `top_logprobs` must not
+        leak either: top_logprobs is only meaningful when logprobs is on."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture).chat([{"role": "user", "content": "hi"}], logprobs=False, top_logprobs=3)
+
+        assert "logprobs" not in captured
+        assert "top_logprobs" not in captured
+
+    @pytest.mark.asyncio
+    async def test_truthy_logprobs_forwarded_on_chat(self):
+        """An explicit opt-in must keep flowing through unchanged."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture).chat([{"role": "user", "content": "hi"}], logprobs=True, top_logprobs=5)
+
+        assert captured["logprobs"] is True
+        assert captured["top_logprobs"] == 5
+
+    @pytest.mark.asyncio
+    async def test_truthy_logprobs_forwarded_on_generate(self):
+        """Same opt-in guarantee on the completions path. `/completions` takes
+        an integer `logprobs` (not the chat API's bool + `top_logprobs`), so a
+        truthy int must survive untouched — the strip is falsy-only, not a
+        blanket removal of the field."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _completions_response()
+
+        await self._make_client(capture).generate("hi", logprobs=5)
+
+        assert captured["logprobs"] == 5
+
+    @pytest.mark.asyncio
+    async def test_zero_logprobs_forwarded_on_generate(self):
+        """`/completions`' integer `logprobs` treats 0 as a deliberate request
+        (the sampled token's own logprob, no alternates) — distinct from
+        unset/False. A truthiness check would wrongly conflate 0 with off."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _completions_response()
+
+        await self._make_client(capture).generate("hi", logprobs=0)
+
+        assert captured["logprobs"] == 0
+
+    @pytest.mark.asyncio
     async def test_trailing_slash_stripped(self):
         c = VLLMClient(endpoint="http://vllm:8000/v1/", model_name="m")
         assert c._endpoint == "http://vllm:8000/v1"

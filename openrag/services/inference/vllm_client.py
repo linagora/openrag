@@ -116,6 +116,30 @@ def _log_safe_error_detail(exc: BaseException) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _strip_falsy_logprobs(payload: dict) -> dict:
+    """Drop an unset/off ``logprobs`` (and its dependent ``top_logprobs``) from *payload*.
+
+    ``logprobs: false`` is already the OpenAI default, so sending it adds
+    nothing — but strict providers whose schema lacks the field reject it by
+    name whatever the value, e.g. Gemini. Without
+    this, the config default (``LLMParamsConfig.logprobs = False``) lands in
+    ``self._defaults`` and is sent on every request. A truthy value is a
+    deliberate opt-in and is forwarded as-is.
+
+    Checked with ``is`` against ``None``/``False`` rather than plain
+    truthiness (or ``in (None, False)``, which suffers the same problem since
+    ``0 == False``): the legacy ``/completions`` endpoint's ``logprobs`` is an
+    *integer* (how many alternates to return), where ``0`` is a deliberate,
+    meaningful request — "give me the sampled token's own logprob, no
+    alternates" — not an off state, and must not be conflated with it.
+    """
+    logprobs = payload.get("logprobs")
+    if logprobs is None or logprobs is False:
+        payload.pop("logprobs", None)
+        payload.pop("top_logprobs", None)
+    return payload
+
+
 @llm_registry.register("vllm")
 class VLLMClient(LLM):
     """OpenAI-compatible LLM client backed by vLLM.
@@ -193,6 +217,7 @@ class VLLMClient(LLM):
             chat_template_kwargs = dict(payload_kwargs.get("chat_template_kwargs") or {})
             chat_template_kwargs.setdefault("enable_thinking", enable_thinking)
             payload_kwargs["chat_template_kwargs"] = chat_template_kwargs
+        payload_kwargs = _strip_falsy_logprobs(payload_kwargs)
         return payload_kwargs
 
     @with_circuit_breaker("llm")
@@ -201,6 +226,7 @@ class VLLMClient(LLM):
         base_url, model, headers = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
         payload = {**self._defaults, **kwargs, "model": model, "prompt": prompt}
+        payload = _strip_falsy_logprobs(payload)
         log_llm_call(caller="VLLMClient.generate", model=model, endpoint=base_url, prompt=prompt)
         try:
             resp = await self._client.post(f"{base_url}/completions", json=payload, headers=headers)
