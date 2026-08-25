@@ -71,7 +71,11 @@ MILVUS_MQ_TYPE=rocksmq
 Stop writes and create a verified backup of the Milvus, etcd, and MinIO data before continuing. An image-only downgrade is not a safe rollback after Milvus 3 has written data.
 :::
 
-Run these commands from `infra/compose` while the Milvus 2.6 stack still exists. First resolve the exact host directory used by the current container:
+Run the procedure for the storage profile selected in `infra/compose/.env`.
+
+#### Bind-mounted storage
+
+While the Milvus 2.6 stack still exists, resolve the exact host directory used by the current container:
 
 ```bash
 MILVUS_CONTAINER="$(docker compose ps -q milvus)"
@@ -85,12 +89,24 @@ test -d "$MILVUS_DATA_PATH"
 printf 'Milvus data directory: %s\n' "$MILVUS_DATA_PATH"
 ```
 
-Stop the stack, take the backup described above, and then transfer ownership to the Milvus 3 user:
+Stop the stack, take the backup described above, and then transfer ownership to the Milvus 3 user. Do not add `--volumes` to the shutdown command.
 
 ```bash
 docker compose down
 sudo chown -R 999:999 "$MILVUS_DATA_PATH"
 ```
+
+#### Docker named-volume storage
+
+Docker Desktop and remote Docker contexts do not expose a named volume's daemon-side path to the local machine. Stop the stack without removing volumes, take the backup described above, and transfer ownership from a temporary service container instead:
+
+```bash
+docker compose down
+docker compose run --rm --no-deps --user 0:0 \
+  --entrypoint chown milvus -R 999:999 /var/lib/milvus
+```
+
+The command must run with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`, matching the existing deployment. Do not use `docker compose down --volumes` during this procedure.
 
 Update OpenRAG, then pull and start the dependencies followed by Milvus:
 
