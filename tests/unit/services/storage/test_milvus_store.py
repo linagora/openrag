@@ -616,6 +616,20 @@ class TestHybridDispatch:
         assert result == []
 
     @pytest.mark.asyncio
+    async def test_missing_collection_error_is_preserved_when_collection_exists(self, store: MilvusVectorStore) -> None:
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(100, "collection not found[database=default][collection=test_collection]")
+        )
+        store._client.has_collection.return_value = True  # type: ignore[attr-defined]
+
+        with pytest.raises(VDBSearchError, match="collection not found"):
+            await store.search(
+                [0.1, 0.2],
+                query_text="query",
+                filters={"partition": "default"},
+            )
+
+    @pytest.mark.asyncio
     async def test_empty_result_verification_failure_preserves_search_error(self, store: MilvusVectorStore) -> None:
         store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=MilvusException(5, "service internal error: unsupported ID type")

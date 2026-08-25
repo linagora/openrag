@@ -167,9 +167,9 @@ class MilvusVectorStore(VectorStore):
         self._schema_vector_dim: int | None = None
         self._loaded = False
         self._load_lock = asyncio.Lock()
-        # Connection healing: pymilvus 2.6 exposes no documented client-level
+        # Connection healing: PyMilvus 3.0 exposes no documented client-level
         # reconnect knob (no retry/keepalive params on MilvusClient or
-        # AsyncMilvusClient — see api-reference v2.6.x). Trust the gRPC
+        # AsyncMilvusClient). Trust the gRPC
         # channel's internal handling, same as the legacy MilvusDB. If
         # production drops surface a real issue, revisit with evidence
         # rather than racing pymilvus's internal channel state.

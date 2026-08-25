@@ -51,6 +51,7 @@ services:
     environment:
       ETCD_ENDPOINTS: etcd:2379
       ETCD_AUTH_ENABLED: "false"
+      MQ_TYPE: ${MILVUS_MQ_TYPE:-default}
       MINIO_ADDRESS: minio:9000
       # Milvus must authenticate to MinIO with the same credentials; otherwise
       # it falls back to the built-in minioadmin default and fails to connect.

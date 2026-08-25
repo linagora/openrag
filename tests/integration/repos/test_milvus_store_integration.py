@@ -204,6 +204,16 @@ class TestEndToEnd:
         assert hybrid_store._loaded is True
 
     @pytest.mark.asyncio
+    async def test_search_before_collection_creation_returns_no_results(self, hybrid_store: MilvusVectorStore) -> None:
+        hits = await hybrid_store.search(
+            _embedding(0.1),
+            query_text="collection not created yet",
+            filters={"partition": "default"},
+        )
+
+        assert hits == []
+
+    @pytest.mark.asyncio
     async def test_ensure_collection_rejects_dimension_change(
         self, hybrid_store: MilvusVectorStore, hybrid_config: VectorDBConfig
     ) -> None:
