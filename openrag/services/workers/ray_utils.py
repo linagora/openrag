@@ -14,6 +14,7 @@ call. Cancellation paths are translated into a predictable shape:
 - caller-side timeout → ``ray.cancel(future)`` then re-raise ``TimeoutError``
 - caller-side ``asyncio.CancelledError`` → ``ray.cancel(future)`` then re-raise
 - worker-side ``TaskCancelledError`` → re-raise as-is
+- actor restart/unavailability → ``ServiceUnavailableError`` (503)
 - worker-side ``RayTaskError`` → re-raise as ``RuntimeError`` (cause preserved)
 """
 
@@ -27,17 +28,31 @@ from collections.abc import Callable
 from typing import Any
 
 import ray
+from core.utils.exceptions import ServiceUnavailableError
 from core.utils.logging import get_logger
-from ray.exceptions import RayTaskError, TaskCancelledError
+from ray.exceptions import ActorUnavailableError, RayActorError, RayTaskError, TaskCancelledError
 
 logger = get_logger()
 
 __all__ = [
+    "call_ray_actor_method_with_timeout",
     "call_ray_actor_with_timeout",
+    "retry_idempotent_ray_actor_method",
     "retry_with_backoff",
     "with_retry",
     "with_timeout",
 ]
+
+
+def _actor_unavailable(task_description: str, exc: BaseException) -> ServiceUnavailableError:
+    logger.bind(
+        task_description=task_description,
+        ray_error=type(exc).__name__,
+    ).warning("Ray actor is temporarily unavailable")
+    return ServiceUnavailableError(
+        "Worker service is temporarily unavailable",
+        code="RAY_ACTOR_UNAVAILABLE",
+    )
 
 
 def _resolve_description(template: str, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
@@ -98,8 +113,59 @@ async def call_ray_actor_with_timeout(
         logger.warning(f"{task_description} Ray task was cancelled")
         raise
 
+    except (RayActorError, ActorUnavailableError) as exc:
+        raise _actor_unavailable(task_description, exc) from exc
+
     except RayTaskError as e:
         raise RuntimeError(f"{task_description} failed") from e
+
+
+async def call_ray_actor_method_with_timeout(
+    submit: Callable[[], ray.ObjectRef],
+    timeout: float,
+    task_description: str = "Ray task",
+) -> Any:
+    """Submit and await an actor method while covering both failure windows.
+
+    A dead or restarting actor can reject ``method.remote()`` synchronously,
+    before an ``ObjectRef`` exists. Keeping submission inside this helper
+    ensures that failure receives the same controlled 503 mapping as a failure
+    raised while awaiting the returned reference.
+    """
+    try:
+        future = submit()
+    except (RayActorError, ActorUnavailableError) as exc:
+        raise _actor_unavailable(task_description, exc) from exc
+    return await call_ray_actor_with_timeout(
+        future=future,
+        timeout=timeout,
+        task_description=task_description,
+    )
+
+
+async def retry_idempotent_ray_actor_method(
+    submit: Callable[[], ray.ObjectRef],
+    recovery_timeout: float = 30.0,
+    task_description: str = "Ray task",
+    retry_delay: float = 0.1,
+) -> Any:
+    """Retry an idempotent actor write while its process is reconstructing."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + recovery_timeout
+    while loop.time() < deadline:
+        try:
+            remaining = max(0.01, deadline - loop.time())
+            return await call_ray_actor_method_with_timeout(
+                submit=submit,
+                timeout=remaining,
+                task_description=task_description,
+            )
+        except ServiceUnavailableError:
+            await asyncio.sleep(retry_delay)
+    raise ServiceUnavailableError(
+        "Worker service did not recover in time",
+        code="RAY_ACTOR_UNAVAILABLE",
+    )
 
 
 def with_timeout(

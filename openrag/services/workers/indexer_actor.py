@@ -13,6 +13,7 @@ from services.workers.pipeline_builder import (
     REPLACE_OLD_CHUNK_IDS_ROW_KEY,
     IndexingPipeline,
 )
+from services.workers.ray_utils import retry_idempotent_ray_actor_method
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
@@ -74,7 +75,10 @@ class IndexerWorker:
         on success.  On failure, state is set to FAILED and the exception
         is re-raised so the Ray task is marked as errored.
         """
-        await self._tsm.set_state.remote(task_id, "SERIALIZING")
+        await retry_idempotent_ray_actor_method(
+            lambda: self._tsm.set_state.remote(task_id, "SERIALIZING"),
+            task_description=f"set_state({task_id}, SERIALIZING)",
+        )
         row: dict[str, Any] | None = None
         catalog_written = False
         try:
@@ -128,7 +132,10 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
-            await self._tsm.set_state.remote(task_id, "COMPLETED")
+            await retry_idempotent_ray_actor_method(
+                lambda: self._tsm.set_state.remote(task_id, "COMPLETED"),
+                task_description=f"set_state({task_id}, COMPLETED)",
+            )
             return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
         except Exception:
             should_cleanup_vectors = row is not None and (
@@ -143,7 +150,10 @@ class IndexerWorker:
                     task_id=task_id,
                 )
             tb = traceback.format_exc()
-            await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
+            await retry_idempotent_ray_actor_method(
+                lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
+                task_description=f"set_failed_if_not_cancelled({task_id})",
+            )
             raise
         # The raw upload is purged (when configured) by the enclosing actor, not
         # here: cleanup must also cover failures that happen *before* this method
