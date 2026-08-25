@@ -477,11 +477,8 @@ class QueryService:
             partition = [scope.partition]
             filter_params = {"file_id": scope.file_ids}
         elif attachment_ids and partition:
-            # The ids need no ownership check of their own: file_id is ANDed with
-            # the server-fixed partition, so a foreign id can never match. The one
-            # exception is the "all" wildcard, whose lookup is deliberately
-            # unscoped — safe only because "all" reaches this layer solely for a
-            # SUPER_ADMIN_MODE admin (see _existing_file_ids).
+            # No ownership check needed: file_id is ANDed with the server-fixed
+            # partition (or, for the "all" wildcard, SUPER_ADMIN_MODE-only).
             indexed_attachment_ids = await self._existing_file_ids(attachment_ids, partition)
             filter_params = {"file_id": indexed_attachment_ids}
 
@@ -588,9 +585,6 @@ class QueryService:
 
     async def _existing_file_ids(self, file_ids: list[str], partitions: list[str]) -> list[str]:
         """Order-preserving, deduplicated subset of ``file_ids`` indexed in ``partitions``.
-
-        ``file_ids`` is client-supplied, so repeats are dropped rather than
-        echoed back into the filter and into ``extra.attachments``.
 
         ``"all"`` (``SUPER_ADMIN_MODE`` wildcard) takes an unscoped lookup instead
         of a per-partition one.
