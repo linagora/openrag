@@ -15,6 +15,7 @@ pool/library for a backend it doesn't exercise.
 from __future__ import annotations
 
 import importlib
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from core.indexing.parsers.document_parser import DocumentParser
@@ -22,6 +23,8 @@ from core.models.document import Document, DocumentType, ProcessedDocument
 from core.utils.logging import get_logger
 
 logger = get_logger()
+
+TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
 
 # Translate the legacy ``file_loaders`` class-name values into new registry
 # backend names. Every pooled backend self-provisions its Ray pool on first
@@ -76,8 +79,11 @@ def _create(module_path: str, name: str, **kwargs: Any) -> DocumentParser:
 class ParserDispatcher(DocumentParser):
     """Route a document to the configured concrete parser by content type."""
 
-    def __init__(self, config: Any) -> None:
+    def __init__(
+        self, config: Any, *, transcription_prompt_resolver: TranscriptionPromptResolver | None = None
+    ) -> None:
         self._config = config
+        self._transcription_prompt_resolver = transcription_prompt_resolver
         self._by_name: dict[str, DocumentParser] = {}
 
     def supported_types(self) -> list[str]:
@@ -216,6 +222,7 @@ class ParserDispatcher(DocumentParser):
             timeout=tcfg.timeout,
             direct_upload_suffixes=tcfg.direct_upload_suffixes,
             language_detector=language_detector,
+            transcription_prompt_resolver=self._transcription_prompt_resolver,
             concurrency_limit=tcfg.max_concurrent_chunks,
         )
         return _create("core.indexing.parsers.audio.client_based", "audio_client", client=client)
@@ -277,9 +284,13 @@ def _build_vlm(base_url: str, model: str, api_key: str, timeout: float, enable_t
     )
 
 
-def build_parser_dispatcher(config: Any) -> ParserDispatcher:
+def build_parser_dispatcher(
+    config: Any,
+    *,
+    transcription_prompt_resolver: TranscriptionPromptResolver | None = None,
+) -> ParserDispatcher:
     """Build the content-type dispatcher over the new parser stack."""
-    return ParserDispatcher(config)
+    return ParserDispatcher(config, transcription_prompt_resolver=transcription_prompt_resolver)
 
 
 def build_caption_vlm(config: Any) -> Any | None:

@@ -649,8 +649,12 @@ class ServiceContainer:
             from services.workers.parsers.file_serializer import build_file_serializer
 
             settings = self._require_settings()
+
+            async def resolve_transcription_prompt() -> str | None:
+                return await self.prompt_service.resolve_prompt("asr_transcription")
+
             self._conversion_service = ConversionService(
-                serializer=build_file_serializer(),
+                serializer=build_file_serializer(transcription_prompt_resolver=resolve_transcription_prompt),
                 vector_store=self.vector_store,
                 collection=settings.vectordb.collection_name,
             )

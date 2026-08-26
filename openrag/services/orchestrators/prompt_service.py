@@ -132,7 +132,24 @@ _TYPE_TO_CONFIG_KEY: dict[str, str] = {
     PromptType.MULTI_QUERY.value: "multi_query",
     PromptType.SPOKEN_STYLE_ANSWER.value: "spoken_style_answer",
     PromptType.TOPIC_TAGGER.value: "topic_tagger",
+    PromptType.ASR_TRANSCRIPTION.value: "asr_transcription",
 }
+
+
+def _validate_content(prompt_type: str, content: str) -> None:
+    """Validate prompt content before it is stored.
+
+    An empty ASR transcription prompt deliberately means "send no prompt" and
+    lets the served speech model use its own native instruction. Every other
+    prompt participates in a text-generation stage and must remain non-empty.
+    """
+    if not content.strip() and prompt_type != PromptType.ASR_TRANSCRIPTION.value:
+        raise ValidationError(
+            "content must be non-empty",
+            status_code=422,
+            code="PROMPT_CONTENT_EMPTY",
+        )
+    _validate_template(prompt_type, content)
 
 
 class PromptService:
@@ -195,7 +212,16 @@ class PromptService:
     def _disk_seed(self, prompt_type: str) -> str:
         """Read a prompt type's bundled template from disk (honours PROMPTS_DIR)."""
         config_key = _TYPE_TO_CONFIG_KEY[prompt_type]
-        return load_template_by_key(self._config.paths.prompts_dir, self._config.prompts, config_key)
+        try:
+            return load_template_by_key(self._config.paths.prompts_dir, self._config.prompts, config_key)
+        except FileNotFoundError:
+            # ASR's intentional empty default means deployments that copied an
+            # older custom prompt directory continue to get an editable ASR
+            # prompt when upgrading. The audio client then omits ``prompt`` and
+            # the transcription endpoint uses its native instruction.
+            if prompt_type == PromptType.ASR_TRANSCRIPTION.value:
+                return ""
+            raise
 
     # ------------------------------------------------------------------
     # Resolution — the single seam
@@ -292,7 +318,7 @@ class PromptService:
 
     async def create_prompt(self, *, prompt_type: str, name: str, content: str, is_default: bool = False) -> Prompt:
         self._validate_type(prompt_type)
-        _validate_template(prompt_type, content)
+        _validate_content(prompt_type, content)
         if await self._repo.get_by_name(prompt_type, name) is not None:
             raise ValidationError(
                 f"A '{prompt_type}' prompt named '{name}' already exists.",
@@ -332,7 +358,7 @@ class PromptService:
 
         new_content = fields.get("content")
         if new_content is not None:
-            _validate_template(existing.prompt_type, str(new_content))
+            _validate_content(existing.prompt_type, str(new_content))
 
         new_name = fields.get("name")
         if new_name is not None and new_name != existing.name:

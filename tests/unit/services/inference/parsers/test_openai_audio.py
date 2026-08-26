@@ -109,6 +109,41 @@ class TestParse:
         kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
         assert kwargs["model"] == "whisper-mock"
         assert "language" not in kwargs
+        assert "prompt" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_transcription_prompt_is_forwarded(self, mock_openai_client):
+        mock_openai_client.audio.transcriptions.create.return_value = MagicMock(text="hello")
+        prompt = "Transcribe verbatim and preserve the product name: OpenRAG."
+        resolver = AsyncMock(return_value=f"  {prompt}  ")
+
+        await _client(mock_openai_client, transcription_prompt_resolver=resolver).parse(_audio_doc())
+
+        resolver.assert_awaited_once()
+        kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
+        assert kwargs["prompt"] == prompt
+
+    @pytest.mark.asyncio
+    async def test_blank_managed_transcription_prompt_uses_endpoint_default(self, mock_openai_client):
+        mock_openai_client.audio.transcriptions.create.return_value = MagicMock(text="hello")
+        resolver = AsyncMock(return_value="   ")
+
+        await _client(mock_openai_client, transcription_prompt_resolver=resolver).parse(_audio_doc())
+
+        resolver.assert_awaited_once()
+        kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
+        assert "prompt" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_transcription_prompt_lookup_failure_uses_endpoint_default(self, mock_openai_client):
+        mock_openai_client.audio.transcriptions.create.return_value = MagicMock(text="hello")
+        resolver = AsyncMock(side_effect=RuntimeError("prompt database unavailable"))
+
+        result = await _client(mock_openai_client, transcription_prompt_resolver=resolver).parse(_audio_doc())
+
+        kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
+        assert "prompt" not in kwargs
+        assert result.text_blocks[0].text == "hello"
 
     @pytest.mark.asyncio
     async def test_empty_transcript_yields_no_text_block(self, mock_openai_client):

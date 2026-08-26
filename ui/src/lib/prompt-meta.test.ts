@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  PROMPT_GROUPS,
   PROMPT_DEFAULT_OPTION,
   promptOptionToName,
   promptOptionValue,
@@ -59,6 +60,15 @@ describe("validatePlaceholders", () => {
     // chunk_contextualizer is sent to the model as-is and never `.format`-ed,
     // so braces in it are just characters.
     const v = validatePlaceholders('Return {"json": true} exactly', "chunk_contextualizer");
+    expect(v.unknown).toEqual([]);
+    expect(v.malformed).toBe(false);
+  });
+
+  it("exposes the global ASR prompt without template restrictions", () => {
+    const transcription = PROMPT_GROUPS.find((group) => group.name === "Transcription");
+    expect(transcription?.types).toEqual([{ value: "asr_transcription", label: "ASR transcription" }]);
+
+    const v = validatePlaceholders("Keep <speaker> labels and {literal braces}.", "asr_transcription");
     expect(v.unknown).toEqual([]);
     expect(v.malformed).toBe(false);
   });

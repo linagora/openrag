@@ -517,7 +517,7 @@ DELETE /presets/{preset_type}/{name}
 
 Every prompt the pipeline sends to a model is a stored, editable row rather than a bundled file. On first boot each type is seeded from its bundled template as that type's **default**; an admin can add named variants and select one per preset or per partition.
 
-All routes are prefixed with **`/prompts`** and require the **admin** role. `prompt_type` is one of `sys_prompt` | `spoken_style_answer` | `query_contextualizer` | `chunk_contextualizer` | `image_captioning` | `hyde` | `multi_query` | `topic_tagger`.
+All routes are prefixed with **`/prompts`** and require the **admin** role. `prompt_type` is one of `sys_prompt` | `spoken_style_answer` | `query_contextualizer` | `chunk_contextualizer` | `image_captioning` | `hyde` | `multi_query` | `topic_tagger` | `asr_transcription`.
 
 **Resolution order** for a given type: the name selected for the request → the type's global default → the bundled template. A selection naming a prompt that no longer exists falls back to the default rather than failing.
 
@@ -528,6 +528,7 @@ All routes are prefixed with **`/prompts`** and require the **admin** role. `pro
 | `sys_prompt`, `spoken_style_answer` | partition — `generation_prompt_names` |
 | `query_contextualizer`, `hyde`, `multi_query` | retrieval preset — `*_prompt_name` |
 | `chunk_contextualizer`, `image_captioning`, `topic_tagger` | indexation preset — `*_prompt_name` |
+| `asr_transcription` | global default — applied to every external audio transcription |
 
 #### Create a prompt
 ```http
@@ -535,7 +536,7 @@ POST /prompts/
 ```
 **Body:** `prompt_type`, `name`, `content`, `is_default` (default `false`). Returns `201 Created`, or `409` if that `(prompt_type, name)` already exists.
 
-Types rendered as templates (`sys_prompt`, `spoken_style_answer`, `query_contextualizer`, `hyde`, `multi_query`) accept only their own **plain** `{placeholders}` — no conversion (`!r`), format spec (`:>10`) or attribute access — and a violation returns `422` at write time rather than failing later at render. Escape a literal brace as `{{` / `}}`. The remaining types are sent to the model verbatim, so any text is valid.
+Types rendered as templates (`sys_prompt`, `spoken_style_answer`, `query_contextualizer`, `hyde`, `multi_query`) accept only their own **plain** `{placeholders}` — no conversion (`!r`), format spec (`:>10`) or attribute access — and a violation returns `422` at write time rather than failing later at render. Escape a literal brace as `{{` / `}}`. The remaining types are sent to the model verbatim. `asr_transcription` may be empty, which keeps the transcription model's native prompt.
 
 ```bash frame="none"
 curl -X POST http://localhost:8080/prompts/ \
