@@ -146,6 +146,17 @@ def _strip_falsy_logprobs(payload: dict) -> dict:
     return payload
 
 
+def _targets_client_endpoint(client: VLLMClient, *_args, **kwargs) -> bool:
+    """Breaker predicate: is this call routed to a client-supplied endpoint?
+
+    The ``"llm"`` breaker is one process-wide instance describing the *configured*
+    endpoint, and it counts connection errors and timeouts. Without this any
+    caller could aim the override at an unresolvable host, repeat until
+    ``fail_max``, and open the breaker for every tenant.
+    """
+    return client._has_endpoint_override(kwargs)
+
+
 @llm_registry.register("vllm")
 class VLLMClient(LLM):
     """OpenAI-compatible LLM client backed by vLLM.
@@ -334,7 +345,7 @@ class VLLMClient(LLM):
         payload_kwargs = _strip_falsy_logprobs(payload_kwargs)
         return payload_kwargs
 
-    @with_circuit_breaker("llm")
+    @with_circuit_breaker("llm", skip_if=_targets_client_endpoint)
     @with_retry(max_attempts=3)
     async def generate(self, prompt: str, **kwargs) -> dict:
         base_url, model, headers, overridden = self._resolve_overrides(kwargs)
@@ -356,7 +367,7 @@ class VLLMClient(LLM):
             ) from exc
         return _parse_response(resp)
 
-    @with_circuit_breaker("llm")
+    @with_circuit_breaker("llm", skip_if=_targets_client_endpoint)
     @with_retry(max_attempts=3)
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> dict:
         base_url, model, headers, overridden = self._resolve_overrides(kwargs)
