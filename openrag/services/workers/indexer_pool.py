@@ -22,7 +22,7 @@ _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
 # partially compatible actor fleet left by the previous release.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v3"
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v4"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 
@@ -63,8 +63,10 @@ class IndexerWorkerActor:
         from services.workers.pipeline_builder import build_indexing_pipeline
 
         cfg = load_config()
-
-        parser = build_parser_dispatcher(cfg)
+        parser = build_parser_dispatcher(
+            cfg,
+            transcription_prompt_resolver=self._resolve_transcription_prompt,
+        )
         parser_factory = _build_parser_factory(parser)
         vlm = build_caption_vlm(cfg)
         # Loaded unconditionally: a preset can caption through a *named* VLM
@@ -163,6 +165,29 @@ class IndexerWorkerActor:
                 return
             await self._catalog_store.initialize()
             self._catalog_initialized = True
+
+    def _get_prompt_service(self) -> Any:
+        if self._prompt_service is None:
+            from services.orchestrators.prompt_service import PromptService
+
+            self._prompt_service = PromptService(
+                prompt_repo=self._catalog_store.prompt_repo,
+                config=self._cfg,
+            )
+        return self._prompt_service
+
+    async def _resolve_transcription_prompt(self) -> str | None:
+        """Return the current global ASR prompt without caching it in the worker.
+
+        ``OpenAIAudioClient`` invokes this directly before each request. The
+        resulting database lookup makes an Admin UI save visible to the next
+        transcription even though the parser client itself is long-lived.
+        """
+        try:
+            return await self._get_prompt_service().resolve_prompt("asr_transcription")
+        except Exception as exc:  # noqa: BLE001 - a prompt lookup must not fail a file
+            self._logger.warning(f"ASR transcription prompt resolution failed: {exc}")
+            return None
 
     async def _ensure_registry_fresh(self, required_model_names: dict[str, list[str]] | list[str]) -> None:
         """Hydrate ``cfg.models`` from the DB so named endpoints resolve here.
@@ -264,17 +289,11 @@ class IndexerWorkerActor:
         ]
         if not enabled:
             return {}
-        if self._prompt_service is None:
-            from services.orchestrators.prompt_service import PromptService
-
-            self._prompt_service = PromptService(
-                prompt_repo=self._catalog_store.prompt_repo,
-                config=self._cfg,
-            )
+        prompt_service = self._get_prompt_service()
         resolved: dict[str, str] = {}
         for prompt_type, name_field, row_key in enabled:
             try:
-                resolved[row_key] = await self._prompt_service.resolve_prompt(
+                resolved[row_key] = await prompt_service.resolve_prompt(
                     prompt_type, names=[indexation_config.get(name_field)]
                 )
             except Exception as exc:  # noqa: BLE001 - resolution must never fail a file

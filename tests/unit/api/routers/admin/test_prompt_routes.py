@@ -89,9 +89,21 @@ class TestLibraryRoutes:
     async def test_create_rejects_empty_content(self, async_client_factory):
         svc = FakePromptService()
         async with async_client_factory(_build_app(svc)) as client:
-            resp = await client.post("/prompts/", json={"prompt_type": "sys_prompt", "content": "   "})
+            resp = await client.post("/prompts/", json={"prompt_type": "sys_prompt", "name": "blank", "content": "   "})
         assert resp.status_code == 422
         assert svc.calls == []
+
+    async def test_create_allows_blank_asr_content(self, async_client_factory):
+        svc = FakePromptService()
+        async with async_client_factory(_build_app(svc)) as client:
+            resp = await client.post(
+                "/prompts/",
+                json={"prompt_type": "asr_transcription", "name": "native", "content": "   "},
+            )
+        assert resp.status_code == 201
+        assert svc.calls == [
+            ("create", {"prompt_type": "asr_transcription", "name": "native", "content": "", "is_default": False})
+        ]
 
     async def test_create_rejects_unknown_type(self, async_client_factory):
         svc = FakePromptService()

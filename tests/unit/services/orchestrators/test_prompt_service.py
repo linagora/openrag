@@ -84,15 +84,18 @@ def _service(repo: FakePromptRepo | None = None) -> PromptService:
 
 
 class TestSeeding:
-    async def test_seeds_all_eight_types_from_disk(self):
+    async def test_seeds_all_prompt_types_from_disk(self):
         repo = FakePromptRepo()
         await _service(repo).seed_defaults()
         seeded_types = {p.prompt_type for p in repo.prompts.values()}
         assert seeded_types == set(PROMPT_TYPE_KEYS)
-        assert len(PROMPT_TYPE_KEYS) == 8
+        assert len(PROMPT_TYPE_KEYS) == 9
         for p in repo.prompts.values():
             assert p.is_default is True
-            assert p.content.strip()
+            if p.prompt_type == PromptType.ASR_TRANSCRIPTION.value:
+                assert not p.content.strip()
+            else:
+                assert p.content.strip()
 
     async def test_seeding_is_idempotent(self):
         repo = FakePromptRepo()
@@ -102,7 +105,7 @@ class TestSeeding:
         sysp.content = "OPERATOR EDIT"
         await svc.seed_defaults()
         assert (await repo.get_default("sys_prompt")).content == "OPERATOR EDIT"
-        assert len(repo.prompts) == 8
+        assert len(repo.prompts) == 9
 
     async def test_type_set_matches_enum(self):
         assert set(PROMPT_TYPE_KEYS) == {t.value for t in PromptType}
@@ -136,11 +139,35 @@ class TestResolution:
         # future per-user tier prepended ahead of the partition/preset name).
         assert await svc.resolve_prompt("hyde", names=["a", "b"]) == "B"
 
+    async def test_asr_falls_back_to_native_prompt_when_custom_dir_has_no_template(self, tmp_path):
+        config = SimpleNamespace(paths=PathsConfig(prompts_dir=tmp_path), prompts=PromptsConfig())
+        svc = PromptService(prompt_repo=FakePromptRepo(), config=config)
+
+        assert await svc.resolve_prompt(PromptType.ASR_TRANSCRIPTION.value) == ""
+
 
 class TestCrud:
     async def test_create_validates_type(self):
         with pytest.raises(ValidationError):
             await _service().create_prompt(prompt_type="not_a_type", name="x", content="y")
+
+    async def test_asr_allows_blank_content_to_select_the_model_prompt(self):
+        svc = _service()
+
+        created = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="native-model-prompt",
+            content="",
+            is_default=True,
+        )
+
+        assert created.content == ""
+        assert await svc.resolve_prompt(PromptType.ASR_TRANSCRIPTION.value) == ""
+
+    async def test_non_asr_rejects_blank_content(self):
+        with pytest.raises(ValidationError) as exc:
+            await _service().create_prompt(prompt_type="sys_prompt", name="blank", content="   ")
+        assert exc.value.status_code == 422
 
     async def test_get_missing_raises(self):
         with pytest.raises(NotFoundError):
@@ -375,9 +402,11 @@ class TestErrorPathsAreExercised:
         with pytest.raises(ValidationError):
             await svc.delete_prompt(p.id)
 
-    async def test_seeding_skips_a_type_whose_template_is_missing(self, tmp_path):
+    async def test_seeding_keeps_the_native_asr_default_when_custom_templates_are_missing(self, tmp_path):
         repo = FakePromptRepo()
         svc = _service(repo)
         svc._config = SimpleNamespace(paths=PathsConfig(prompts_dir=tmp_path), prompts=PromptsConfig())
         await svc.seed_defaults()  # warns per type, never raises
-        assert repo.prompts == {}
+        assert [(p.prompt_type, p.content, p.is_default) for p in repo.prompts.values()] == [
+            (PromptType.ASR_TRANSCRIPTION.value, "", True)
+        ]

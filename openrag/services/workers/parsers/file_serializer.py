@@ -15,6 +15,7 @@ and CPU parsers run in-process. Replaces the former ``DocSerializer`` Ray actor
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from core.indexing.serializer import FileSerializer
@@ -23,7 +24,7 @@ from core.indexing.serializer import FileSerializer
 class ParserFileSerializer(FileSerializer):
     """Implements ``FileSerializer`` by running the parser dispatcher in-process."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, transcription_prompt_resolver: Callable[[], Awaitable[str | None]] | None = None) -> None:
         from core.config import load_config
         from services.workers.parsers.parser_dispatcher import (
             build_caption_vlm,
@@ -32,7 +33,10 @@ class ParserFileSerializer(FileSerializer):
         )
 
         config = load_config()
-        self._dispatcher = build_parser_dispatcher(config)
+        self._dispatcher = build_parser_dispatcher(
+            config,
+            transcription_prompt_resolver=transcription_prompt_resolver,
+        )
         self._vlm = build_caption_vlm(config)
         self._caption_prompt = load_caption_prompt(config) if self._vlm is not None else None
         # Global gate for captioning images embedded in other documents.
@@ -67,9 +71,11 @@ class ParserFileSerializer(FileSerializer):
         return "\n\n".join(block.text for block in processed.text_blocks if block.text)
 
 
-def build_file_serializer() -> ParserFileSerializer:
+def build_file_serializer(
+    *, transcription_prompt_resolver: Callable[[], Awaitable[str | None]] | None = None
+) -> ParserFileSerializer:
     """Build the in-process file serializer. Convenience for the composition root."""
-    return ParserFileSerializer()
+    return ParserFileSerializer(transcription_prompt_resolver=transcription_prompt_resolver)
 
 
 __all__ = ["ParserFileSerializer", "build_file_serializer"]
