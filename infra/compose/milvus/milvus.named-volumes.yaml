@@ -50,6 +50,9 @@ services:
       - ALL
     cap_add:
       - CHOWN
+      # Let the ownership guard inspect restrictive restored directories
+      # without granting write bypass.
+      - DAC_READ_SEARCH
     restart: "no"
 
   milvus:

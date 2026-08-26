@@ -36,7 +36,7 @@ def _assert_milvus_initializer(services: dict) -> None:
     assert initializer["volumes"] == milvus["volumes"]
     assert initializer["read_only"] is True
     assert initializer["cap_drop"] == ["ALL"]
-    assert initializer["cap_add"] == ["CHOWN"]
+    assert initializer["cap_add"] == ["CHOWN", "DAC_READ_SEARCH"]
 
     command = initializer["command"][0]
     assert "! -uid 999" in command
