@@ -1,6 +1,6 @@
 # 🦫 OpenRag — The Open RAG Experimentation Playground
 
-![RAG Architecture](./RAG_architecture.png)
+![RAG Architecture](./RAG_architecture.gif)
 
 [OpenRag](https://open-rag.ai/) is a lightweight, modular and extensible Retrieval-Augmented Generation (RAG) framework designed to explore and test advanced RAG techniques — 100% open source and focused on experimentation, not lock-in.
 
@@ -31,10 +31,12 @@
 
 * **Text Files**: `txt`, `md`
 * **Document Files**: `pdf`, `docx`, `doc`, `pptx` - Advanced PDF parsing with OCR support and Office document processing
-* **Audio Files**: `wav`, `mp3`, `mp4`, `ogg`, `flv`, `wma`, `aac` - Audio transcription and content extraction
-* **Images**: `png`, `jpeg`, `jpg`, `svg` - Vision Language Model (VLM) powered image captioning and analysis
+* **E-mail**: `eml` - Message body and headers, with attachments parsed through their own format's pipeline
+* **Audio Files**: `wav`, `mp3`, `flac`, `ogg`, `aac`, `wma` - Audio transcription and content extraction
+* **Video Files**: `mp4`, `flv` - Speech transcription from the audio track
+* **Images**: `png`, `jpeg`, `jpg`, `svg` - Vision Language Model (VLM)-powered image captioning and analysis
 
-All files are intelligently converted to **Markdown format** with images replaced by AI-generated captions, ensuring consistent processing across all document types.
+All files are converted to **Markdown format** for consistent processing across document types. When image captioning is enabled, any image the parser can extract is replaced with an AI-generated description.
 
 ### 🎛️ Native Web-Based Admin UI
 Manage OpenRAG through the bundled web interface.
