@@ -403,6 +403,33 @@ async def test_generate_query_chatbotrag_falls_back_on_garbage():
     assert sq.query_list[0].query == "raw question"  # fallback to raw user query
 
 
+@pytest.mark.asyncio
+async def test_generate_query_renders_history_with_a_content_free_turn():
+    """The chat-history string is built over *every* message, so the assistant
+    turn that carries ``tool_calls`` — no ``content`` at all once the router
+    dumps with ``exclude_none=True`` — reaches it too. ChatBotRag is the default
+    ``rag.mode``, so the SimpleRag early return is no shield: reading the key
+    unguarded 500s on a plain tool-call replay.
+    """
+    llm = FakeLLM(chat_responses=['{"requires_retrieval": true, "query_list": [{"query": "q"}]}'])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    sq = await svc.generate_query(
+        [
+            {"role": "user", "content": "weather in Paris?"},
+            {"role": "assistant", "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "content": "18C", "tool_call_id": "c1"},
+            {"role": "user", "content": "and tomorrow?"},
+        ]
+    )
+
+    assert sq.query_list[0].query == "q"
+    # The turn is still rendered (role kept, empty body) rather than skipped, so
+    # the history handed to the contextualizer keeps its shape.
+    history = llm.chat_calls[0][0][1]["content"]
+    assert "assistant: \n" in history
+
+
 # --------------------------------------------------------------------------- #
 # chat / complete
 # --------------------------------------------------------------------------- #
@@ -1675,3 +1702,35 @@ async def test_conversational_reply_resolves_its_prompt_from_the_library():
     assert docs == [] and web == []
     assert out["messages"][0]["role"] == "system"
     assert "CONVERSATIONAL" in out["messages"][0]["content"]
+
+
+def test_split_leading_system_prompt_tolerates_content_free_system_turn():
+    """``OpenAIMessage`` allows a null content and the router dumps with
+    ``exclude_none=True``, so a leading system message can reach here with no
+    ``content`` key at all. Reading it unguarded raised KeyError — a 500 on a
+    request the schema had just accepted.
+    """
+    raw = [
+        {"role": "system"},
+        {"role": "system", "content": "be terse"},
+        {"role": "user", "content": "hi"},
+    ]
+
+    pinned, rest = qs._split_leading_system_prompt(raw, raw)
+
+    # The content-free turn is still consumed by the leading run (stripped from
+    # the history) — it just contributes nothing to the pinned prompt.
+    assert pinned == "be terse"
+    assert rest == [{"role": "user", "content": "hi"}]
+
+
+def test_split_leading_system_prompt_returns_none_when_every_system_turn_is_empty():
+    """A leading run made only of content-free system messages pins nothing,
+    rather than joining empty strings into a blank custom prompt.
+    """
+    raw = [{"role": "system"}, {"role": "system", "content": ""}, {"role": "user", "content": "hi"}]
+
+    pinned, rest = qs._split_leading_system_prompt(raw, raw)
+
+    assert pinned is None
+    assert rest == [{"role": "user", "content": "hi"}]

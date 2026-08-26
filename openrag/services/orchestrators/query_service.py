@@ -360,7 +360,7 @@ class QueryService:
         if RAGMODE(self._rag_mode) is RAGMODE.SIMPLERAG:
             return SearchQueries(query_list=[Query(query=last_user)])
 
-        chat_history = "".join(f"{m['role']}: {m['content']}\n" for m in messages)
+        chat_history = "".join(f"{m['role']}: {m.get('content') or ''}\n" for m in messages)
         contextualizer = await self._prompt_service.resolve_prompt(
             "query_contextualizer",
             names=[self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)],
@@ -857,11 +857,19 @@ def _split_leading_system_prompt(raw_messages: list[dict], truncated: list[dict]
     portion of that leading run still inside the tail is stripped from it — a
     system message elsewhere in history that merely lands first after
     chat_history_depth truncation is never mistaken for the pin and dropped.
+
+    ``content`` is read defensively: ``OpenAIMessage`` allows a null/absent
+    content (the assistant turn carrying ``tool_calls``), and the router dumps
+    with ``exclude_none=True``, so the key is genuinely optional. A content-free
+    system message still counts toward the leading run — it is stripped from the
+    history like its siblings — it just contributes nothing to the pin.
     """
     parts: list[str] = []
     i = 0
     while i < len(raw_messages) and raw_messages[i]["role"] == "system":
-        parts.append(raw_messages[i]["content"])
+        content = raw_messages[i].get("content")
+        if content:
+            parts.append(content)
         i += 1
 
     offset = len(raw_messages) - len(truncated)
