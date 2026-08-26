@@ -436,6 +436,44 @@ class TestCustomEndpointOverride:
     def _kwargs(self, **override):
         return {"metadata": {"llm_override": override}}
 
+    @staticmethod
+    def _refusing_transport() -> httpx.AsyncClient:
+        def refuse(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+
+        return httpx.AsyncClient(transport=_make_transport(refuse))
+
+    @pytest.mark.asyncio
+    async def test_client_endpoint_failure_does_not_touch_the_shared_breaker(self, monkeypatch):
+        """A failing client endpoint must not count against the shared "llm" breaker.
+
+        It is one global instance guarding the *server's* endpoint, so otherwise any
+        caller could aim the override at an unresolvable host and open it for every
+        tenant.
+        """
+        client = self._make_client(monkeypatch, enabled=True)
+        client._client = self._refusing_transport()
+
+        with pytest.raises(InferenceConnectionError):
+            await client.chat(
+                [{"role": "user", "content": "hi"}],
+                **self._kwargs(base_url="https://third-party.tld/v1", api_key="k"),
+            )
+
+        assert "llm" not in _breakers
+
+    @pytest.mark.asyncio
+    async def test_configured_endpoint_failure_still_counts_against_the_shared_breaker(self, monkeypatch):
+        """Skipping the breaker must be scoped to overridden endpoints, not a
+        blanket disable of the server's own."""
+        client = self._make_client(monkeypatch, enabled=True)
+        client._client = self._refusing_transport()
+
+        with pytest.raises(InferenceConnectionError):
+            await client.chat([{"role": "user", "content": "hi"}])
+
+        assert _breakers["llm"].fail_counter == 1
+
     def test_arbitrary_endpoint_is_honored_with_client_key(self, monkeypatch):
         client = self._make_client(monkeypatch, enabled=True)
         base_url, model, headers, overridden = client._resolve_overrides(

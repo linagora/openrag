@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import timedelta
 from functools import wraps
 
@@ -70,10 +71,26 @@ def get_breaker(name: str, fail_max: int = 50, timeout_duration: float = 60.0) -
     return _breakers[name]
 
 
-def with_circuit_breaker(name: str, fail_max: int = 50, timeout_duration: float = 60.0):
+def with_circuit_breaker(
+    name: str,
+    fail_max: int = 50,
+    timeout_duration: float = 60.0,
+    *,
+    skip_if: Callable[..., bool] | None = None,
+):
+    """Guard *fn* with the shared breaker registered under *name*.
+
+    *skip_if* receives the wrapped call's own arguments; returning True runs *fn*
+    outside the breaker entirely. For calls that don't reach the endpoint this
+    breaker describes — folding a second dependency into one health signal makes
+    it wrong in both directions.
+    """
+
     def decorator(fn):
         @wraps(fn)
         async def wrapper(*args, **kwargs):
+            if skip_if is not None and skip_if(*args, **kwargs):
+                return await fn(*args, **kwargs)
             breaker = get_breaker(name, fail_max, timeout_duration)
             try:
                 return await breaker.call_async(fn, *args, **kwargs)
