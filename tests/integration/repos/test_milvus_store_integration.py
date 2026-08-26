@@ -1,6 +1,6 @@
 """End-to-end integration tests for :class:`MilvusVectorStore`.
 
-These tests round-trip through a real Milvus 2.6 instance: they create a
+These tests round-trip through a real Milvus 3.0 instance: they create a
 fresh collection per test, exercise the public surface, and drop the
 collection on teardown. They are gated by the ``integration`` pytest marker
 and auto-skip when the configured Milvus host is not reachable.
@@ -204,6 +204,16 @@ class TestEndToEnd:
         assert hybrid_store._loaded is True
 
     @pytest.mark.asyncio
+    async def test_search_before_collection_creation_returns_no_results(self, hybrid_store: MilvusVectorStore) -> None:
+        hits = await hybrid_store.search(
+            _embedding(0.1),
+            query_text="collection not created yet",
+            filters={"partition": "default"},
+        )
+
+        assert hits == []
+
+    @pytest.mark.asyncio
     async def test_ensure_collection_rejects_dimension_change(
         self, hybrid_store: MilvusVectorStore, hybrid_config: VectorDBConfig
     ) -> None:
@@ -289,6 +299,37 @@ class TestHybridSearch:
             assert "score" in hit
             assert "text" in hit
 
+    @pytest.mark.asyncio
+    async def test_hybrid_search_empty_partition_returns_no_results(self, hybrid_store: MilvusVectorStore) -> None:
+        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.upsert([_chunk("existing chunk", "__populated_partition__", 0.1)])
+
+        hits = await hybrid_store.search(
+            _embedding(0.1),
+            query_text="no matching partition",
+            top_k=5,
+            filters={"partition": "__empty_partition__"},
+        )
+
+        assert hits == []
+
+    @pytest.mark.asyncio
+    async def test_hybrid_search_populated_partition_without_candidates_returns_no_results(
+        self, hybrid_store: MilvusVectorStore
+    ) -> None:
+        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.upsert([_chunk("alpha known vocabulary", "p1", 1.0)])
+
+        hits = await hybrid_store.search(
+            [-1.0, -1.1, -1.2, -1.3],
+            query_text="zzzzunseenlexeme",
+            top_k=5,
+            filters={"partition": "p1"},
+            similarity_threshold=0.99,
+        )
+
+        assert hits == []
+
 
 class TestDeleteByFilter:
     @pytest.mark.asyncio
@@ -333,7 +374,7 @@ class TestQueryByFilter:
         assert rows
         assert rows[0]["partition"] == "p1"
         assert rows[0]["text"] == "only"
-        # Milvus 2.6 returns the dense ``vector`` for the default ``["*"]``
+        # Milvus 3.0 returns the dense ``vector`` for the default ``["*"]``
         # projection (unlike the search path, which strips it via
         # ``_SEARCH_RESULT_DROPPED_KEYS``). ``_safe_batch_size`` relies on this
         # to shrink the query_iterator page for wildcard reads, so assert the
