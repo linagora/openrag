@@ -313,6 +313,23 @@ class TestHybridSearch:
 
         assert hits == []
 
+    @pytest.mark.asyncio
+    async def test_hybrid_search_populated_partition_without_candidates_returns_no_results(
+        self, hybrid_store: MilvusVectorStore
+    ) -> None:
+        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.upsert([_chunk("alpha known vocabulary", "p1", 1.0)])
+
+        hits = await hybrid_store.search(
+            [-1.0, -1.1, -1.2, -1.3],
+            query_text="zzzzunseenlexeme",
+            top_k=5,
+            filters={"partition": "p1"},
+            similarity_threshold=0.99,
+        )
+
+        assert hits == []
+
 
 class TestDeleteByFilter:
     @pytest.mark.asyncio

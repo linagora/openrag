@@ -572,7 +572,7 @@ class TestHybridDispatch:
         store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=MilvusException(5, "service internal error: unsupported ID type")
         )
-        store._async_client.query = AsyncMock(return_value=[])  # type: ignore[attr-defined]
+        store._async_client.search = AsyncMock(side_effect=[[[]], [[]]])  # type: ignore[attr-defined]
 
         result = await store.search(
             [0.1, 0.2],
@@ -581,16 +581,11 @@ class TestHybridDispatch:
         )
 
         assert result == []
-        store._async_client.query.assert_awaited_once_with(  # type: ignore[attr-defined]
-            collection_name="test_collection",
-            filter='partition == "empty"',
-            output_fields=["_id"],
-            limit=1,
-        )
+        assert store._async_client.search.await_count == 2  # type: ignore[attr-defined]
         logger.bind.assert_called_once_with(
             collection_name="test_collection",
             filter='partition == "empty"',
-            reason="empty_filter",
+            reason="empty_ann_result",
             error_code=5,
         )
         logger.bind.return_value.warning.assert_called_once_with("Milvus search error verified as an empty result")
@@ -656,7 +651,7 @@ class TestHybridDispatch:
         store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=MilvusException(5, "service internal error: unsupported ID type")
         )
-        store._async_client.query = AsyncMock(  # type: ignore[attr-defined]
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=RuntimeError("verification unavailable")
         )
 
@@ -668,11 +663,13 @@ class TestHybridDispatch:
             )
 
     @pytest.mark.asyncio
-    async def test_hybrid_search_error_is_preserved_when_filter_has_rows(self, store: MilvusVectorStore) -> None:
+    async def test_hybrid_search_error_is_preserved_when_an_ann_leg_has_results(self, store: MilvusVectorStore) -> None:
         store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=MilvusException(5, "service internal error: unsupported ID type")
         )
-        store._async_client.query = AsyncMock(return_value=[{"_id": 1}])  # type: ignore[attr-defined]
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=[[[{"_id": 1}]], [[]]]
+        )
 
         with pytest.raises(VDBSearchError, match="unsupported ID type"):
             await store.search(
@@ -680,6 +677,22 @@ class TestHybridDispatch:
                 query_text="query",
                 filters={"partition": "populated"},
             )
+
+    @pytest.mark.asyncio
+    async def test_populated_filter_with_no_ann_results_returns_no_results(self, store: MilvusVectorStore) -> None:
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(5, "service internal error: unsupported ID type")
+        )
+        store._async_client.search = AsyncMock(side_effect=[[[]], [[]]])  # type: ignore[attr-defined]
+
+        result = await store.search(
+            [0.1, 0.2],
+            query_text="query with no candidates",
+            filters={"partition": "populated"},
+            similarity_threshold=0.99,
+        )
+
+        assert result == []
 
 
 # ---------------------------------------------------------------------------

@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -828,7 +829,12 @@ class MilvusVectorStore(VectorStore):
             params["range_filter"] = COSINE_RANGE_FILTER_MAX
         return {"metric_type": DEFAULT_DENSE_SEARCH_PARAMS["metric_type"], "params": params}
 
-    async def _search_error_is_empty_result(self, error: MilvusException, expr: str) -> bool:
+    async def _search_error_is_empty_result(
+        self,
+        error: MilvusException,
+        expr: str,
+        verify_empty_result: Callable[[], Awaitable[bool]] | None = None,
+    ) -> bool:
         """Verify Milvus 3.0 server errors before treating them as no results.
 
         This is a compatibility workaround, not a stable Milvus API contract.
@@ -838,9 +844,10 @@ class MilvusVectorStore(VectorStore):
 
         The error code and message are therefore never sufficient on their
         own. A second server call must prove that the collection is absent or
-        that the filter has no rows. Verification failures return ``False`` so
-        the original error remains visible. Remove this workaround when the
-        supported Milvus release returns an empty search result directly.
+        that every ANN leg returned no IDs. Verification failures return
+        ``False`` so the original error remains visible. Remove this
+        workaround when the supported Milvus release returns an empty search
+        result directly.
         """
         message = str(error)
         if error.code == 100 and "collection not found" in message:
@@ -858,21 +865,16 @@ class MilvusVectorStore(VectorStore):
                 return True
             return False
 
-        if error.code == 5 and "unsupported ID type" in message:
+        if error.code == 5 and "unsupported ID type" in message and verify_empty_result is not None:
             try:
-                matching_rows = await self._async_client.query(
-                    collection_name=self._collection_name,
-                    filter=expr,
-                    output_fields=["_id"],
-                    limit=1,
-                )
+                is_empty = await verify_empty_result()
             except Exception:
                 return False
-            if matching_rows == []:
+            if is_empty:
                 logger.bind(
                     collection_name=self._collection_name,
                     filter=expr,
-                    reason="empty_filter",
+                    reason="empty_ann_result",
                     error_code=error.code,
                 ).warning("Milvus search error verified as an empty result")
                 return True
@@ -885,9 +887,10 @@ class MilvusVectorStore(VectorStore):
         error: MilvusException,
         kind: str,
         expr: str,
+        verify_empty_result: Callable[[], Awaitable[bool]] | None = None,
     ) -> list[dict[str, Any]]:
         """Return no results for a verified empty scope, otherwise map the error."""
-        if await self._search_error_is_empty_result(error, expr):
+        if await self._search_error_is_empty_result(error, expr, verify_empty_result):
             return []
         raise VDBSearchError(
             f"Milvus {kind} failed: {error!s}",
@@ -919,6 +922,37 @@ class MilvusVectorStore(VectorStore):
         if self._hybrid:
             return await self._hybrid_search(embedding, query_text, top_k, collection, filters, similarity_threshold)
         return await self._dense_search(embedding, top_k, collection, filters, similarity_threshold)
+
+    async def _hybrid_search_legs_are_empty(
+        self,
+        embedding: list[float],
+        query_text: str,
+        top_k: int,
+        expr: str,
+        similarity_threshold: float | None,
+    ) -> bool:
+        """Verify that dense and BM25 searches both produced no candidates."""
+        dense_response, sparse_response = await asyncio.gather(
+            self._async_client.search(
+                collection_name=self._collection_name,
+                data=[embedding],
+                anns_field="vector",
+                search_params=self._dense_search_params(similarity_threshold),
+                limit=top_k,
+                filter=expr,
+                output_fields=["_id"],
+            ),
+            self._async_client.search(
+                collection_name=self._collection_name,
+                data=[query_text],
+                anns_field="sparse",
+                search_params=DEFAULT_BM25_SEARCH_PARAMS,
+                limit=top_k,
+                filter=expr,
+                output_fields=["_id"],
+            ),
+        )
+        return all(not response or not response[0] for response in (dense_response, sparse_response))
 
     async def _dense_search(
         self,
@@ -1014,7 +1048,18 @@ class MilvusVectorStore(VectorStore):
                 output_fields=["*"],
             )
         except MilvusException as e:
-            return await self._search_error_or_empty(e, "hybrid search", expr)
+            return await self._search_error_or_empty(
+                e,
+                "hybrid search",
+                expr,
+                lambda: self._hybrid_search_legs_are_empty(
+                    embedding,
+                    query_text,
+                    top_k,
+                    expr,
+                    similarity_threshold,
+                ),
+            )
         except Exception as e:
             raise UnexpectedVDBError(
                 f"Unexpected error during Milvus hybrid search: {e!s}",
