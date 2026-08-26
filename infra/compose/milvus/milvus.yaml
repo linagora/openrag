@@ -32,7 +32,17 @@ services:
   milvus-init:
     image: milvusdb/milvus:v3.0.0
     user: "0:0"
-    entrypoint: ["chown", "milvus:milvus", "/var/lib/milvus"]
+    environment:
+      LD_PRELOAD: ""
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        incompatible_path="$$(find /var/lib/milvus -mindepth 1 \( ! -uid 999 -o ! -gid 999 \) -print -quit)"
+        if [ -n "$$incompatible_path" ]; then
+          echo "Existing Milvus data is not owned by UID/GID 999. Back up the deployment and follow the Milvus 2.6-to-3.0 migration guide before starting Milvus 3." >&2
+          exit 1
+        fi
+        chown 999:999 /var/lib/milvus
     volumes:
       - ${MILVUS_VOLUME_DIRECTORY:-./volumes}/milvus:/var/lib/milvus
     read_only: true

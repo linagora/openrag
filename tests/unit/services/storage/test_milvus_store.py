@@ -564,7 +564,11 @@ class TestHybridDispatch:
             await store.search([0.1, 0.2], collection="default")
 
     @pytest.mark.asyncio
-    async def test_empty_filtered_hybrid_search_returns_no_results(self, store: MilvusVectorStore) -> None:
+    async def test_empty_filtered_hybrid_search_returns_no_results(
+        self, store: MilvusVectorStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        logger = MagicMock()
+        monkeypatch.setattr("openrag.services.storage.milvus_store.logger", logger)
         store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=MilvusException(5, "service internal error: unsupported ID type")
         )
@@ -583,9 +587,20 @@ class TestHybridDispatch:
             output_fields=["_id"],
             limit=1,
         )
+        logger.bind.assert_called_once_with(
+            collection_name="test_collection",
+            filter='partition == "empty"',
+            reason="empty_filter",
+            error_code=5,
+        )
+        logger.bind.return_value.warning.assert_called_once_with("Milvus search error verified as an empty result")
 
     @pytest.mark.asyncio
-    async def test_missing_collection_search_returns_no_results(self, store: MilvusVectorStore) -> None:
+    async def test_missing_collection_search_returns_no_results(
+        self, store: MilvusVectorStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        logger = MagicMock()
+        monkeypatch.setattr("openrag.services.storage.milvus_store.logger", logger)
         store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=MilvusException(100, "collection not found[database=default][collection=test_collection]")
         )
@@ -599,6 +614,13 @@ class TestHybridDispatch:
 
         assert result == []
         store._client.has_collection.assert_called_once_with("test_collection")  # type: ignore[attr-defined]
+        logger.bind.assert_called_once_with(
+            collection_name="test_collection",
+            filter='partition == "default"',
+            reason="missing_collection",
+            error_code=100,
+        )
+        logger.bind.return_value.warning.assert_called_once_with("Milvus search error verified as an empty result")
 
     @pytest.mark.asyncio
     async def test_missing_collection_dense_search_returns_no_results(self, store: MilvusVectorStore) -> None:
