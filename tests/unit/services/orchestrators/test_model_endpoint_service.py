@@ -185,6 +185,13 @@ async def test_seed_defaults_preserves_endpoint_api_keys(monkeypatch):
         llm={"base_url": "http://llm:8000/v1", "model": "mistral", "api_key": "llm-key"},
         vlm={"base_url": "http://vlm:8000/v1", "model": "pixtral", "api_key": "vlm-key"},
         reranker={"provider": "infinity", "api_key": "rerank-key"},
+        loader={
+            "transcriber": {
+                "base_url": "http://stt:8000/v1",
+                "model_name": "moss-transcribe-diarize",
+                "api_key": "stt-key",
+            }
+        },
     )
     repo = _FakeEndpointRepo()
     svc = _make_service(repo, settings=settings)
@@ -197,6 +204,7 @@ async def test_seed_defaults_preserves_endpoint_api_keys(monkeypatch):
         "llm": "llm-key",
         "vlm": "vlm-key",
         "reranker": "rerank-key",
+        "stt": "stt-key",
     }
 
 
@@ -217,6 +225,14 @@ async def test_seed_defaults_preserves_endpoint_timeouts_and_batch_size(monkeypa
         llm={"base_url": "http://llm:8000/v1", "model": "mistral", "timeout": 45},
         vlm={"base_url": "http://vlm:8000/v1", "model": "pixtral", "timeout": 75},
         reranker={"provider": "infinity", "timeout": 25},
+        loader={
+            "transcriber": {
+                "base_url": "http://stt:8000/v1",
+                "model_name": "moss-transcribe-diarize",
+                "timeout": 900,
+                "max_concurrent_chunks": 3,
+            }
+        },
     )
     repo = _FakeEndpointRepo()
     svc = _make_service(repo, settings=settings)
@@ -229,6 +245,8 @@ async def test_seed_defaults_preserves_endpoint_timeouts_and_batch_size(monkeypa
     assert rows["llm"].timeout == 45
     assert rows["vlm"].timeout == 75
     assert rows["reranker"].timeout == 25
+    assert rows["stt"].timeout == 900
+    assert rows["stt"].batch_size == 3
 
 
 @pytest.mark.asyncio
@@ -795,6 +813,7 @@ async def test_load_all_populates_config_models():
     rows = [
         _make_row(name="jina", model_type="embedder", is_default=True),
         _make_row(name="mistral", model_type="llm", is_default=True),
+        _make_row(name="moss", model_type="stt", model_name="moss-transcribe-diarize", is_default=True),
     ]
     repo = _FakeEndpointRepo(rows=rows)
     settings = Settings()
@@ -806,6 +825,8 @@ async def test_load_all_populates_config_models():
     assert "default" in settings.models.embedder
     assert "mistral" in settings.models.llm
     assert "default" in settings.models.llm
+    assert "moss" in settings.models.stt
+    assert "default" in settings.models.stt
 
 
 @pytest.mark.asyncio

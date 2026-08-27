@@ -35,7 +35,9 @@ def test_models_config_dicts_are_mutable_in_place():
     ep = ModelEndpointConfig(endpoint="http://vllm:8000/v1")
 
     cfg.embedder["default"] = ep
+    cfg.stt["default"] = ep
     assert "default" in cfg.embedder
+    assert "default" in cfg.stt
 
     new_ep = ModelEndpointConfig(endpoint="http://new:8000/v1")
     cfg.embedder.clear()
@@ -54,6 +56,12 @@ def test_model_endpoint_row_invalid_model_type():
     """Persisted endpoint rows reject unknown model endpoint types."""
     with pytest.raises(ValidationError):
         ModelEndpointRow(**_row_payload(model_type="not-a-model"))
+
+
+def test_model_endpoint_row_accepts_stt_type():
+    """STT endpoints share the persisted registry with inference endpoints."""
+    row = ModelEndpointRow(**_row_payload(model_type="stt", model_name="moss-transcribe-diarize"))
+    assert row.model_type == "stt"
 
 
 @pytest.mark.parametrize("batch_size", [0, -1])

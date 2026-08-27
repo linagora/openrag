@@ -22,7 +22,7 @@ _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
 # partially compatible actor fleet left by the previous release.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v4"
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v5"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 
@@ -66,6 +66,7 @@ class IndexerWorkerActor:
         parser = build_parser_dispatcher(
             cfg,
             transcription_prompt_resolver=self._resolve_transcription_prompt,
+            transcription_endpoint_resolver=self._resolve_transcription_endpoint,
         )
         parser_factory = _build_parser_factory(parser)
         vlm = build_caption_vlm(cfg)
@@ -131,10 +132,12 @@ class IndexerWorkerActor:
         # Whether "default" resolves via global env/config fallbacks. This keeps
         # reload-on-miss from looping forever when no is_default row exists for a
         # type but the legacy config block can still serve the default endpoint.
+        transcriber_cfg = getattr(getattr(cfg, "loader", None), "transcriber", None)
         self._has_default_fallbacks = {
             "embedder": _global_embedder_endpoint_config(cfg) is not None,
             "llm": _global_llm_endpoint_config(cfg) is not None,
             "vlm": _global_vlm_endpoint_config(cfg) is not None,
+            "stt": bool(getattr(transcriber_cfg, "base_url", "") and getattr(transcriber_cfg, "model_name", "")),
         }
         self._has_default_fallback = self._has_default_fallbacks["llm"]
         self._model_endpoint_service: Any = None
@@ -189,6 +192,18 @@ class IndexerWorkerActor:
         except Exception as exc:  # noqa: BLE001 - a prompt lookup must not fail a file
             self._logger.warning(f"ASR transcription prompt resolution failed: {exc}")
             return None
+
+    def _resolve_transcription_endpoint(self) -> Any | None:
+        """Return the current default OpenAI-compatible STT endpoint.
+
+        The parser holds this resolver rather than a static client config. The
+        indexer refreshes ``cfg.models`` from the endpoint registry on its
+        existing bounded refresh cycle, so a saved Admin UI endpoint takes
+        effect without recreating the long-lived Ray actor.
+        """
+        models = getattr(self._cfg, "models", None)
+        stt = getattr(models, "stt", None)
+        return stt.get("default") if stt is not None else None
 
     async def _ensure_registry_fresh(self, required_model_names: dict[str, list[str]] | list[str]) -> None:
         """Hydrate ``cfg.models`` from the DB so named endpoints resolve here.
@@ -609,6 +624,10 @@ def _required_model_endpoint_names(
         "embedder": [],
         "llm": _required_llm_names(indexation_config),
         "vlm": [],
+        # Audio parsing resolves the global STT default at request time. Keep
+        # it in the refresh set so a worker with only file parsing (no LLM/VLM
+        # enrichment) still hydrates the newly editable endpoint registry.
+        "stt": ["default"],
     }
     if embedder_name:
         names["embedder"].append(embedder_name)

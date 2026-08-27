@@ -23,6 +23,29 @@ def test_create_model_endpoint_defaults_and_normalizes_endpoint():
     assert request.is_default is False
 
 
+def test_create_stt_endpoint_requires_a_model_and_accepts_language_hint():
+    request = CreateModelEndpointRequest(
+        name="moss",
+        model_type="stt",
+        endpoint="http://moss:8000/v1",
+        model_name="moss-transcribe-diarize",
+        extra={"language": "fr"},
+    )
+    assert request.extra == {"language": "fr"}
+
+    with pytest.raises(ValidationError, match="model_name is required"):
+        CreateModelEndpointRequest(name="moss", model_type="stt", endpoint="http://moss:8000/v1")
+
+    with pytest.raises(ValidationError, match="extra.language"):
+        CreateModelEndpointRequest(
+            name="moss",
+            model_type="stt",
+            endpoint="http://moss:8000/v1",
+            model_name="moss-transcribe-diarize",
+            extra={"language": "   "},
+        )
+
+
 @pytest.mark.parametrize("model_type", ["embedding", "chat", "vision", ""])
 def test_create_model_endpoint_rejects_unknown_type(model_type):
     """Only supported endpoint types are accepted."""

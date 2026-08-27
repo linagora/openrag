@@ -105,6 +105,8 @@ For local whisper loader, here are the options to use
 ##### OpenAI-compatible audio Loader ( `OpenAIAudioLoader` )
 The `OpenAIAudioLoader` option can use any OpenAI-compatible transcription service. Configure its URL, credentials, and model with **`TRANSCRIBER_BASE_URL`**, **`TRANSCRIBER_API_KEY`**, and **`TRANSCRIBER_MODEL`**.
 
+On first startup, these values seed the default **STT** endpoint in the Admin UI's **Model Endpoints** page. Once an STT endpoint is saved, it is the editable source for `OpenAIAudioLoader`: use it to change the OpenAI-compatible `/v1` URL, model, API key, timeout, concurrency, and optional language hint for MOSS, Whisper, or another compatible provider. No OpenRAG restart is required; indexer workers refresh the endpoint registry within one minute. The transcription endpoint must implement `/audio/transcriptions`.
+
 The audio is automatically segmented into chunks using silence detection, then transcribes these chunks in parallel for optimal speed and accuracy.
 
 :::tip[Whisper deployment as vLLM server]
@@ -138,7 +140,7 @@ Here are some other variables related to openai-compatible endpoint.
 
 :::tip[MOSS-Transcribe-Diarize with vLLM]
 
-`OpenMOSS-Team/MOSS-Transcribe-Diarize` uses this same endpoint and produces speaker-labelled text, so no new OpenRAG loader is needed. Set `AUDIOLOADER=OpenAIAudioLoader`, point `TRANSCRIBER_BASE_URL` at the vLLM server, set `TRANSCRIBER_MODEL=OpenMOSS-Team/MOSS-Transcribe-Diarize`, and set `USE_WHISPER_LANG_DETECTOR=false` so OpenRAG does not keep a local Whisper model solely for language detection.
+`OpenMOSS-Team/MOSS-Transcribe-Diarize` uses this same endpoint and produces timestamped, speaker-labelled text, so no new OpenRAG loader is needed. Set `AUDIOLOADER=OpenAIAudioLoader`, point the STT endpoint at the vLLM server, and use the model name advertised by `/v1/models`. For example, when vLLM is started with `--served-model-name moss-transcribe-diarize`, enter `moss-transcribe-diarize` rather than the Hugging Face repository ID. Set `USE_WHISPER_LANG_DETECTOR=false` when you do not need the local Whisper language detector.
 
 For a MOSS server bound to `127.0.0.1:8001`, use `http://127.0.0.1:8001/v1` only when OpenRAG runs on that host. A containerized OpenRAG needs a host-reachable address such as `http://host.docker.internal:8001/v1` (plus Docker's host-gateway mapping on Linux). Match `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` to the vLLM capacity; with `--max-num-seqs 1`, set it to `1`.
 

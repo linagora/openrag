@@ -18,6 +18,7 @@ from api.schemas.admin.model_endpoint_schemas import (
     ValidateEndpointRequest,
     ValidateEndpointResponse,
     validate_llm_token_extra,
+    validate_stt_fields,
 )
 from core.config.model_endpoints import ModelEndpointRow
 from core.utils.exceptions import ValidationError
@@ -100,6 +101,22 @@ def _reject_non_llm_token_budgets(model_type: str, extra: dict | None) -> None:
         raise ValidationError(str(exc)) from exc
 
 
+def _reject_invalid_stt_fields(model_type: str, fields: dict) -> None:
+    """Validate STT-only fields once the update route knows its endpoint type."""
+    if model_type != "stt":
+        return
+    if "model_name" not in fields and "extra" not in fields:
+        return
+    try:
+        # An omitted model name is valid on update: retain the stored model.
+        # A supplied empty value is not, because ``/audio/transcriptions``
+        # requires a model for every request.
+        model_name = fields.get("model_name", "existing")
+        validate_stt_fields(model_name, fields.get("extra"))
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+
 @router.post(
     "/",
     response_model=ModelEndpointResponse,
@@ -148,6 +165,7 @@ async def update_model_endpoint(
     """Update a registered inference endpoint."""
     fields = body.model_dump(exclude_unset=True)
     _reject_non_llm_token_budgets(model_type, fields.get("extra"))
+    _reject_invalid_stt_fields(model_type, fields)
     if "name" in fields:
         fields["new_name"] = fields.pop("name")
     result = await service.update_model_endpoint(

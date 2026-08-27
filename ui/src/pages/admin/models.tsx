@@ -23,6 +23,7 @@ import {
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointImplementation,
   mergeModelEndpointLlmContext,
+  mergeModelEndpointSttLanguage,
   prepareModelEndpointExtraForSubmit,
   revealModelEndpointApiKey,
   REDACTED_SECRET,
@@ -30,6 +31,7 @@ import {
   splitModelEndpointApiKeyExtra,
   splitModelEndpointImplementation,
   splitModelEndpointLlmContext,
+  splitModelEndpointSttLanguage,
   validateModelEndpoint,
   VENDOR_OPTIONS_BY_TYPE,
 } from "@/lib/api/models";
@@ -62,7 +64,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatDate, intOr, numOr } from "@/lib/utils";
 
-const MODEL_TYPES = ["embedder", "reranker", "llm", "vlm"] as const;
+const MODEL_TYPES = ["embedder", "reranker", "llm", "vlm", "stt"] as const;
 
 type RevealedApiKey = {
   modelType: ModelType;
@@ -178,7 +180,7 @@ export default function ModelsPage() {
     <div>
       <PageHeader
         title="Model Endpoints"
-        description="Manage embedder, reranker, LLM, and VLM endpoints"
+        description="Manage embedder, reranker, LLM, VLM, and speech-to-text endpoints"
         actions={
           <Button onClick={handleOpenCreate}>
             <Plus className="mr-2 h-4 w-4" /> Add Endpoint
@@ -234,7 +236,9 @@ export default function ModelsPage() {
                             <span className="truncate ml-2 max-w-[200px] text-right" title={ep.endpoint}>{ep.endpoint}</span>
                           </div>
                           <div className="flex justify-between">
-                            <span className="text-muted-foreground">Batch Size</span>
+                            <span className="text-muted-foreground">
+                              {ep.model_type === "stt" ? "Concurrency" : "Batch Size"}
+                            </span>
                             <span>{ep.batch_size}</span>
                           </div>
                           <div className="flex justify-between">
@@ -321,6 +325,7 @@ function EndpointDialog({
   const [apiKey, setApiKey] = useState("");
   const [maxContextSize, setMaxContextSize] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
+  const [languageHint, setLanguageHint] = useState("");
   const [vendor, setVendor] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
 
@@ -341,6 +346,7 @@ function EndpointDialog({
   const modelType = (editing ? editing.model_type : activeTab) as ModelType;
   // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
   const isLlm = modelType === "llm";
+  const isStt = modelType === "stt";
   const vendorOptions = VENDOR_OPTIONS_BY_TYPE[modelType];
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
@@ -364,7 +370,17 @@ function EndpointDialog({
       setRevealingApiKey(false);
       if (editing) {
         const { apiKey: displayApiKey, extra: apiExtra } = splitModelEndpointApiKeyExtra(editing.extra);
-        const { implementation, extra: implExtra } = splitModelEndpointImplementation(apiExtra);
+        // STT uses OpenAI's audio API directly, so unlike inference endpoints
+        // it has no implementation/vendor selector. Preserve any advanced
+        // `implementation` value in Extra rather than silently dropping it.
+        const { languageHint: storedLanguageHint, extra: sttExtra } =
+          editing.model_type === "stt"
+            ? splitModelEndpointSttLanguage(apiExtra)
+            : { languageHint: "", extra: apiExtra };
+        const { implementation, extra: implExtra } =
+          editing.model_type === "stt"
+            ? { implementation: "", extra: sttExtra }
+            : splitModelEndpointImplementation(sttExtra);
         // Only carve the LLM token-budget keys out of the editable extra for LLM
         // endpoints — the budget fields are LLM-only, and splitting for non-LLM
         // types would drop any same-named keys from their extra on save (they are
@@ -381,6 +397,7 @@ function EndpointDialog({
         setApiKey(displayApiKey);
         setMaxContextSize(llmContext.maxContextSize);
         setMaxOutputTokens(llmContext.maxOutputTokens);
+        setLanguageHint(storedLanguageHint);
         setVendor(implementation || DEFAULT_VENDOR_BY_TYPE[editing.model_type]);
         setExtraJson(JSON.stringify(displayExtra, null, 2));
         setValidated(true);
@@ -393,25 +410,35 @@ function EndpointDialog({
         setName("");
         setEndpoint("");
         setModelName("");
-        setBatchSize("32");
+        setBatchSize(activeTab === "stt" ? "1" : "32");
         setTimeout("30");
         setApiKey("");
         setMaxContextSize("");
         setMaxOutputTokens("");
+        setLanguageHint("");
         setVendor(DEFAULT_VENDOR_BY_TYPE[activeTab as ModelType]);
         setExtraJson("{}");
         setValidated(null);
         setValidationMsg(null);
       }
     }
-  }, [open, editing]);
+  }, [open, editing, activeTab]);
 
   // Reset validation when relevant fields change. The LLM token-budget fields
   // don't affect endpoint reachability, so they're deliberately excluded — the
   // raw extra is compared with them stripped out (as the textarea shows them).
   useEffect(() => {
     const editingExtra = editing ? splitModelEndpointApiKeyExtra(editing.extra) : null;
-    const editingImplExtra = editingExtra ? splitModelEndpointImplementation(editingExtra.extra).extra : null;
+    const editingSttExtra = editingExtra
+      ? editing?.model_type === "stt"
+        ? splitModelEndpointSttLanguage(editingExtra.extra).extra
+        : editingExtra.extra
+      : null;
+    const editingImplExtra = editingSttExtra
+      ? editing?.model_type === "stt"
+        ? editingSttExtra
+        : splitModelEndpointImplementation(editingSttExtra).extra
+      : null;
     // Match the display path above: only strip the budget keys for LLM endpoints,
     // otherwise the "unchanged" comparison would treat a non-LLM endpoint's
     // same-named extra keys as already removed.
@@ -610,13 +637,17 @@ function EndpointDialog({
     if (isLlm) {
       extra = mergeModelEndpointLlmContext(extra, { maxContextSize, maxOutputTokens });
     }
-    extra = mergeModelEndpointImplementation(extra, vendor);
+    if (isStt) {
+      extra = mergeModelEndpointSttLanguage(extra, languageHint);
+    } else {
+      extra = mergeModelEndpointImplementation(extra, vendor);
+    }
 
     if (editing) {
       const updateData: UpdateModelEndpointRequest = {
         endpoint,
         model_name: modelName || undefined,
-        batch_size: intOr(batchSize, 32),
+        batch_size: intOr(batchSize, isStt ? 1 : 32),
         timeout: numOr(timeout, 30),
         extra,
       };
@@ -630,7 +661,7 @@ function EndpointDialog({
         model_type: activeTab as ModelType,
         endpoint,
         model_name: modelName || undefined,
-        batch_size: intOr(batchSize, 32),
+        batch_size: intOr(batchSize, isStt ? 1 : 32),
         timeout: numOr(timeout, 30),
         extra,
       });
@@ -662,17 +693,31 @@ function EndpointDialog({
             {nameError && <p className="text-xs text-destructive">{nameError}</p>}
           </div>
           <div className="space-y-2">
-            <Label>Endpoint URL</Label>
+            {isStt ? (
+              <LabelWithInfo
+                label="Endpoint URL"
+                tooltip="OpenAI-compatible base URL including /v1. OpenRAG sends transcription requests to /audio/transcriptions under this URL."
+              />
+            ) : (
+              <Label>Endpoint URL</Label>
+            )}
             <Input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} required />
           </div>
           <div className="space-y-2">
-            <Label>Model Name</Label>
-            <Input value={modelName} onChange={(e) => setModelName(e.target.value)} />
+            {isStt ? (
+              <LabelWithInfo
+                label="Model Name"
+                tooltip="Required by OpenAI-compatible transcription APIs. It must match the model advertised by the endpoint, for example moss-transcribe-diarize."
+              />
+            ) : (
+              <Label>Model Name</Label>
+            )}
+            <Input value={modelName} onChange={(e) => setModelName(e.target.value)} required={isStt} />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label>Batch Size</Label>
-              <Input type="number" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} />
+              <Label>{isStt ? "Concurrent requests" : "Batch Size"}</Label>
+              <Input type="number" min="1" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} />
             </div>
             <div className="space-y-2">
               <Label>Timeout (s)</Label>
@@ -713,6 +758,20 @@ function EndpointDialog({
                 Token budgets for this endpoint. Leave blank to use the system default. Applied whenever this
                 endpoint answers a request — as the default LLM, or as a partition&apos;s chat LLM preset.
               </p>
+            </div>
+          )}
+          {isStt && (
+            <div className="space-y-2">
+              <LabelWithInfo
+                label="Language hint (optional)"
+                tooltip="A language code such as fr, en, or ar. When set, it is sent as the transcription language and takes precedence over the optional Whisper language detector. Leave blank for automatic detection."
+              />
+              <Input
+                value={languageHint}
+                onChange={(e) => setLanguageHint(e.target.value)}
+                placeholder="fr"
+                autoComplete="off"
+              />
             </div>
           )}
           <div className="space-y-2">
@@ -766,6 +825,7 @@ function EndpointDialog({
                 : "Stored in the endpoint extra payload when provided."}
             </p>
           </div>
+          {!isStt && (
           <div className="space-y-2">
             <Label>Vendor</Label>
             <Select value={vendor} onValueChange={setVendor}>
@@ -787,6 +847,7 @@ function EndpointDialog({
               Client implementation used to talk to this endpoint.
             </p>
           </div>
+          )}
           <div className="space-y-2">
             <Label>Extra (JSON)</Label>
             <Textarea
@@ -796,7 +857,9 @@ function EndpointDialog({
               rows={4}
             />
             <p className="text-xs text-muted-foreground">
-              Non-secret endpoint options only. The API key is handled separately above.
+              {isStt
+                ? "Advanced non-secret STT options only. The language hint and API key are handled separately above."
+                : "Non-secret endpoint options only. The API key is handled separately above."}
             </p>
           </div>
           {validationMsg && (
