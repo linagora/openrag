@@ -69,6 +69,9 @@ _HEADING_PREFIX_RE = re.compile(r"^\s*#{1,6}\s*")
 # expects a digit makes the marker miss the leaf test and get misfiled as a
 # heading — polluting the breadcrumb of every chunk beneath it.
 _EMPHASIS_RE = re.compile(r"[*_`\\]+")
+# Stricter than ``_HEADING_PREFIX_RE``: requires text after the hashes, so a
+# ``#hashtag`` line is not mistaken for a heading when re-homing split pieces.
+_CAPTION_HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S")
 # Inline HTML the parsers leave in heading lines — chiefly Marker's page anchors
 # (``<span id="page-46-0"></span>Encadré 3 …``), which would otherwise ride into
 # the breadcrumb verbatim.
@@ -183,6 +186,7 @@ class StructuredSectionChunker(BaseChunker):
         *,
         min_tokens: int | None = None,
         max_tokens: int | None = None,
+        hard_max_tokens: int | None = None,
         inline_threshold: int | None = None,
         heading_keywords: tuple[str, ...] | list[str] | None = None,
         leaf_patterns: tuple[str, ...] | list[str] | None = None,
@@ -203,6 +207,16 @@ class StructuredSectionChunker(BaseChunker):
         self.target_tokens = chunk_size
         self.max_tokens = max_tokens or int(chunk_size * 1.5)
         self.min_tokens = min_tokens if min_tokens is not None else max(1, chunk_size // 4)
+        # A *safety* bound, distinct from ``max_tokens``. ``max_tokens`` is the
+        # packing ceiling for prose; atomic units (a figure caption, a table)
+        # are exempt from it, because a fragment of one is not a smaller version
+        # of it — half a caption has lost the figure it describes, and half a
+        # table has lost its column headers. ``hard_max_tokens`` exists only to
+        # stop a pathological unit (a looping VLM caption) from silently
+        # overflowing the embedder's context window, so it is derived from that
+        # window by the caller, not from ``chunk_size``. ``None`` disables it:
+        # atomic units are then never force-split.
+        self.hard_max_tokens = hard_max_tokens
         # Tables / image captions at or below this many tokens are inlined with
         # surrounding prose instead of becoming standalone chunks (matches the
         # recursive chunker's inline threshold).
@@ -451,12 +465,14 @@ class StructuredSectionChunker(BaseChunker):
         return max(self.min_tokens, self.max_tokens - self._header_reserve(filename, heading_path, pages))
 
     def _emit_atomic(self, unit: _Unit, filename: str) -> list[_Unit]:
-        """A table over the (header-adjusted) max is split by ``chunk_table``."""
+        """A table over the (header-adjusted) max is split by ``chunk_table``;
+        whatever still exceeds the ceiling then goes through
+        ``_enforce_ceiling``."""
         emax = self._effective_max(filename, unit.heading_path, unit.pages)
         if unit.chunk_type is ChunkType.TABLE and unit.tokens > emax:
             element = MDElement(type="table", content=unit.text, page_number=unit.start_page)
             subs = chunk_table(element, chunk_size=emax, length_function=self.length_function)
-            return [
+            pieces = [
                 _Unit(
                     heading_path=list(unit.heading_path),
                     text=s.content.strip(),
@@ -467,16 +483,84 @@ class StructuredSectionChunker(BaseChunker):
                 )
                 for s in subs
             ]
-        return [unit]
+        else:
+            pieces = [unit]
+        return self._enforce_ceiling(pieces, filename)
 
-    def _split_oversize(self, unit: _Unit, filename: str) -> list[_Unit]:
+    def _enforce_ceiling(self, units: list[_Unit], filename: str) -> list[_Unit]:
+        """Safety net against a unit large enough to overflow the embedder.
+
+        This deliberately does **not** enforce ``max_tokens``. That is the
+        packing ceiling for prose; an atomic unit is exempt from it, because a
+        fragment of an atomic unit is not a smaller version of it. Piece 2 of
+        *"The chart illustrates the relationship between…"* has lost its
+        subject, its figure, and any hint of what it describes — a chunk that
+        embeds well and reads as a non-sequitur. Measured on the marker corpus,
+        enforcing ``max_tokens`` here split 55 captions into 78 fragments, and
+        bought nothing: the largest unsplit caption was 1,211 tokens, so no
+        caption came close to any real embedding limit.
+
+        ``hard_max_tokens`` is the bound that does matter — content past the
+        embedder's window is silently truncated, which is real data loss. It is
+        derived from that window by the caller (see ``create_chunker``), so a
+        partition pointing at a small-context embedder gets a tighter bound.
+        ``None`` disables the net entirely.
+
+        Tables are never force-split even above the bound: ``chunk_table``
+        already divides them losslessly on row boundaries, replaying the column
+        header. What reaches here is a single row too large to divide, and
+        cutting it mid-sentence yields a fragment that is neither a valid row
+        nor carries its headers. A physical-row fallback was measured and made
+        things worse — over-max chunks 113 → 80 but total excess tokens doubled
+        (16.6k → 33.3k), duplication 1.75% → 2.79%, orphan headings 5 → 22.
+        """
+        if self.hard_max_tokens is None:
+            return units
+        out: list[_Unit] = []
+        for unit in units:
+            if unit.tokens <= self.hard_max_tokens or unit.chunk_type is ChunkType.TABLE:
+                out.append(unit)
+                continue
+            # Cut as few times as possible: pack to the hard bound itself rather
+            # than back down to the prose target, so a caption that trips the
+            # net is halved, not shredded.
+            out.extend(
+                self._split_oversize(
+                    unit,
+                    filename,
+                    chunk_type=unit.chunk_type,
+                    target=self.hard_max_tokens,
+                    ceiling=self.hard_max_tokens,
+                )
+            )
+        return out
+
+    def _split_oversize(
+        self,
+        unit: _Unit,
+        filename: str,
+        *,
+        chunk_type: ChunkType = ChunkType.TEXT,
+        target: int | None = None,
+        ceiling: int | None = None,
+    ) -> list[_Unit]:
         """Split a single over-``max`` leaf at paragraph, then sentence boundaries,
-        to header-adjusted target/max so each piece + header stays within max."""
+        to header-adjusted target/max so each piece + header stays within max.
+
+        ``chunk_type`` (and the unit's ``atomic`` flag) carry through so an
+        oversize image caption stays typed as one — and stays unmergeable with
+        neighbouring prose — instead of being relabelled plain text.
+
+        ``target``/``ceiling`` override the prose budgets; the hard-bound safety
+        net passes the bound itself so a tripped unit is cut as few times as
+        possible instead of being packed back down to the prose target.
+        """
         path = unit.heading_path
+        reserve = self._header_reserve(filename, path, unit.pages)
         pieces = _greedy_split(
             unit.text,
-            self._packing_budget(filename, path, unit.pages),
-            self._effective_max(filename, path, unit.pages),
+            max(1, target - reserve) if target is not None else self._packing_budget(filename, path, unit.pages),
+            max(1, ceiling - reserve) if ceiling is not None else self._effective_max(filename, path, unit.pages),
             self.length_function,
         )
         return [
@@ -485,7 +569,8 @@ class StructuredSectionChunker(BaseChunker):
                 text=piece.strip(),
                 tokens=self.length_function(piece),
                 pages=set(unit.pages),
-                chunk_type=ChunkType.TEXT,
+                chunk_type=chunk_type,
+                atomic=unit.atomic,
             )
             for piece in pieces
         ]
@@ -521,17 +606,55 @@ class StructuredSectionChunker(BaseChunker):
             if out:
                 prev = out[-1]
                 merged_path = _common_prefix(prev.heading_path, unit.heading_path)
-                if (
-                    not prev.atomic
-                    and not unit.atomic
-                    and (prev.tokens < self.min_tokens or unit.tokens < self.min_tokens)
-                    and prev.tokens + unit.tokens <= self._effective_max(filename, merged_path, prev.pages | unit.pages)
-                    and _compatible(prev.heading_path, unit.heading_path)
-                ):
+                if self._may_merge(prev, unit, filename, merged_path):
                     _absorb(prev, unit, path=merged_path)
                     continue
             out.append(_copy_unit(unit))
         return out
+
+    def _may_merge(self, prev: _Unit, unit: _Unit, filename: str, merged_path: list[str]) -> bool:
+        """Whether two adjacent units may fold together.
+
+        Two gates always apply: at least one side is under ``min_tokens``, and
+        the result stays under the header-adjusted ceiling.
+
+        Beyond that there are two routes. **Same page** is the permissive one —
+        a slide is page-atomic, so its title, one-line label, figure caption and
+        table belong in one chunk, and requiring structural compatibility there
+        left every slide as three chunks (two of them noise). Restricting this
+        route to a shared page is what keeps it safe: it cannot chain content
+        across slides or across distant sections.
+
+        Otherwise the structural route applies, which is stricter: tables stay
+        out (a table glued to unrelated prose loses the column headers that make
+        it readable) and the heading paths must be compatible.
+        """
+        if prev.tokens >= self.min_tokens and unit.tokens >= self.min_tokens:
+            return False
+        if prev.tokens + unit.tokens > self._effective_max(filename, merged_path, prev.pages | unit.pages):
+            return False
+        if prev.pages & unit.pages:
+            return True
+        return self._may_absorb(prev) and self._may_absorb(unit) and _compatible(prev.heading_path, unit.heading_path)
+
+    def _may_absorb(self, unit: _Unit) -> bool:
+        """Whether a unit can take part in small-neighbour merging.
+
+        Atomic units are normally excluded, but image captions must be allowed
+        in at any size. A slide is heading + one-line label + figure + label,
+        and the labels are 9-70 tokens while the figure's caption is 200-500,
+        so the labels sit *between large atomic captions* and could never reach
+        a mergeable neighbour (``_merge_small`` only merges into the immediately
+        preceding unit). Every slide stayed three chunks, two of them noise:
+        29% of a Renault deck's chunks fell under the floor against 0% for
+        ``recursive_splitter`` — the one document class where the old chunker
+        won. On a slide the label belongs with the figure it labels, so letting
+        the caption absorb it is also the semantically right answer.
+
+        Tables stay excluded at any size: a table fragment glued to unrelated
+        prose loses the column headers that make it readable.
+        """
+        return not unit.atomic or unit.chunk_type is ChunkType.IMAGE_CAPTION
 
     # ------------------------------------------------------------------
     # Header
@@ -600,6 +723,13 @@ def _compatible(a: list[str], b: list[str]) -> bool:
     """
     if a == b:
         return True
+    # A heading-less unit (document preamble, cover page, stray block before the
+    # first heading) is NOT compatible with everything. The prefix test below
+    # would say it is — ``long[:0] == []`` always holds — turning any path-less
+    # unit into a magnet that chains unrelated sections into one chunk, under a
+    # ``_common_prefix`` of ``[]`` that discards the real section entirely.
+    if not a or not b:
+        return False
     short, long = (a, b) if len(a) <= len(b) else (b, a)
     if long[: len(short)] == short:
         return True
@@ -614,12 +744,34 @@ def _page_range(pages: set[int]) -> str:
 
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+# Fallback ladder for a paragraph with no sentence terminators — long legal
+# recitals and enumerations run for hundreds of tokens on semicolons or commas
+# alone. Tried in order of decreasing semantic strength before word-wrapping,
+# which is the only splitter that can land mid-sentence.
+_CLAUSE_RES = (
+    re.compile(r"(?<=;)\s+"),
+    re.compile(r"(?<=:)\s+"),
+    re.compile(r"\s+(?=[—–]\s)"),
+    re.compile(r"(?<=,)\s+"),
+)
+_SPLIT_LADDER = (_SENTENCE_RE, *_CLAUSE_RES)
 
 
 def _greedy_split(text: str, target: int, max_tokens: int, length_function: Callable[[str], int]) -> list[str]:
     """Pack paragraphs (then sentences for an over-``max`` paragraph) to ``target``."""
 
-    def pack(items: list[str], joiner: str) -> list[str]:
+    def descend(item: str, levels: tuple[re.Pattern[str], ...]) -> list[str]:
+        """Split one over-``max`` item on the strongest separator it actually
+        contains, then keep the weaker ones in reserve for its own oversize
+        pieces. Word-wrapping is the last resort because it is the only step
+        that can cut mid-sentence."""
+        for i, splitter in enumerate(levels):
+            parts = splitter.split(item)
+            if len(parts) > 1:
+                return pack(parts, " ", levels[i + 1 :])
+        return _hard_wrap(item, target, length_function)
+
+    def pack(items: list[str], joiner: str, levels: tuple[re.Pattern[str], ...]) -> list[str]:
         out: list[str] = []
         buf: list[str] = []
         size = 0
@@ -629,9 +781,7 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
                 out.append(joiner.join(buf))
                 buf, size = [], 0
             if it > max_tokens and not buf:
-                out.extend(
-                    pack(_SENTENCE_RE.split(item), " ") if joiner != " " else _hard_wrap(item, target, length_function)
-                )
+                out.extend(descend(item, levels))
                 continue
             buf.append(item)
             size += it
@@ -640,7 +790,35 @@ def _greedy_split(text: str, target: int, max_tokens: int, length_function: Call
         return out
 
     sanitized = sanitize_text(text, max_consecutive_newlines=2)
-    return pack(re.split(r"\n{2,}", sanitized), "\n\n")
+    return _rehome_trailing_headings(pack(re.split(r"\n{2,}", sanitized), "\n\n", _SPLIT_LADDER))
+
+
+def _rehome_trailing_headings(pieces: list[str]) -> list[str]:
+    """Move a heading stranded at a piece's end onto the following piece.
+
+    Splitting long *prose* rarely lands on a heading, but VLM image captions
+    carry their own ``###`` sub-headings, so packing paragraphs could end a
+    piece on one — stranding the heading away from the content it introduces
+    (worst case: a piece that is an ``<image_description>`` opener plus a bare
+    heading). Rule 4 of the strategy is that a heading always travels with its
+    body, so hand it forward rather than leaving it orphaned.
+    """
+    out = list(pieces)
+    # Walk backwards so a run of consecutive headings cascades forward in one
+    # pass, and so a piece that is *only* a heading (the worst case — packing
+    # can emit a bare ``### Key Trends`` as its own 3-token piece) empties out
+    # and is dropped below rather than being left as a heading-only chunk.
+    for i in range(len(out) - 2, -1, -1):
+        lines = out[i].rstrip().splitlines()
+        cut = len(lines)
+        while cut > 0 and _CAPTION_HEADING_RE.match(lines[cut - 1]):
+            cut -= 1
+        if cut == len(lines):
+            continue
+        moved = "\n\n".join(line.strip() for line in lines[cut:])
+        out[i] = "\n".join(lines[:cut]).rstrip()
+        out[i + 1] = f"{moved}\n\n{out[i + 1].lstrip()}"
+    return [piece for piece in out if piece.strip()]
 
 
 def _hard_wrap(text: str, target: int, length_function: Callable[[str], int]) -> list[str]:

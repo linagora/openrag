@@ -165,6 +165,138 @@ def test_oversize_article_is_split_not_dropped():
     assert len(paths) == 1
 
 
+def test_caption_over_max_tokens_is_left_whole():
+    # ``max_tokens`` is the *packing* ceiling for prose; an atomic caption is
+    # exempt. Splitting one strands the figure it describes — measured on the
+    # marker corpus it fragmented 55 captions for no embedding benefit.
+    caption = " ".join(f"sentence{i} describing the figure." for i in range(120))
+    doc = _doc(f"Article L1\nIntro prose.\n\n<image_description>{caption}</image_description>\n")
+    captions = [c for c in _chunker(chunk_size=30, max_tokens=45).chunk(doc) if c.chunk_type == ChunkType.IMAGE_CAPTION]
+    assert len(captions) == 1, "a caption must not be split by the packing ceiling"
+    assert _words(captions[0].text) > 45
+
+
+def test_caption_over_hard_max_tokens_is_split():
+    # The hard bound is the embedder's window, not the packing target: past it
+    # content would be silently truncated, so a pathological caption is cut.
+    caption = " ".join(f"sentence{i} describing the figure." for i in range(120))
+    doc = _doc(f"Article L1\nIntro prose.\n\n<image_description>{caption}</image_description>\n")
+    chunks = _chunker(chunk_size=30, max_tokens=45, hard_max_tokens=200).chunk(doc)
+    captions = [c for c in chunks if c.chunk_type == ChunkType.IMAGE_CAPTION]
+    assert len(captions) > 1, "a caption past the hard bound must be split"
+    assert all(_words(c.text) <= 200 for c in captions)
+
+
+def test_hard_max_tokens_cuts_as_few_times_as_possible():
+    # Splitting back down to ``chunk_size`` would shred a tripped caption; the
+    # net packs to the bound itself instead.
+    caption = " ".join(f"sentence{i} describing the figure." for i in range(120))
+    doc = _doc(f"Article L1\nIntro prose.\n\n<image_description>{caption}</image_description>\n")
+    captions = [
+        c
+        for c in _chunker(chunk_size=30, max_tokens=45, hard_max_tokens=300).chunk(doc)
+        if c.chunk_type == ChunkType.IMAGE_CAPTION
+    ]
+    assert len(captions) <= 3, f"expected a minimal number of cuts, got {len(captions)}"
+
+
+def test_split_caption_never_ends_on_its_own_heading():
+    # VLM captions carry their own ``###`` sub-headings, so packing paragraphs
+    # could strand one at a piece's end, away from the body it introduces.
+    body = " ".join(f"detail{i} about the chart." for i in range(60))
+    caption = f"{body}\n\n### Key Trends\n\n{body}\n\n### Conclusions\n\n{body}"
+    doc = _doc(f"Article L1\nIntro.\n\n<image_description>{caption}</image_description>\n")
+    chunks = _chunker(chunk_size=40, max_tokens=60, hard_max_tokens=120).chunk(doc)
+    captions = [c for c in chunks if c.chunk_type == ChunkType.IMAGE_CAPTION]
+    assert len(captions) > 1, "expected the caption to be split"
+    for chunk in captions:
+        last = [line for line in chunk.text.splitlines() if line.strip()][-1]
+        assert not last.lstrip().startswith("#"), f"heading stranded at chunk end: {last!r}"
+
+
+def test_breakless_paragraph_splits_on_clauses_not_mid_sentence():
+    # A long recital with no '.' — only semicolons/commas. Word-wrapping was the
+    # only fallback, so pieces landed mid-sentence; the clause ladder splits on
+    # the punctuation that is actually there.
+    clauses = "; ".join(f"considerant que le point {i} demeure applicable" for i in range(40))
+    doc = _doc(f"Article L1\n{clauses}")
+    chunks = _chunker(chunk_size=30, max_tokens=45).chunk(doc)
+    assert len(chunks) > 1, "the recital must be split"
+    for chunk in chunks:
+        body = (chunk.content or chunk.text).strip()
+        body = body.split("]", 1)[-1].strip() if body.startswith("[Source") else body
+        assert body.startswith(("considerant", "Article")), f"piece opens mid-clause: {body[:60]!r}"
+
+
+def test_small_caption_does_not_break_the_merge_chain():
+    # Slide shape: heading, one-line label, tiny caption, one-line label. The
+    # atomic caption used to sit between the two under-min labels and block
+    # merging, leaving three tiny chunks per slide.
+    md = "## Slide One\n\nSales by brand\n\n<image_description>RG</image_description>\n\nIn percent\n"
+    chunks = _chunker(chunk_size=60).chunk(_doc(md))
+    assert len(chunks) == 1, f"slide should collapse into one chunk, got {len(chunks)}"
+    assert "Sales by brand" in chunks[0].text
+    assert "In percent" in chunks[0].text
+
+
+def test_same_page_slide_collapses_across_atomic_types():
+    # A slide is page-atomic: label + table + label belong in one chunk. The
+    # structural route refuses tables, so only the same-page route can do this.
+    rows = "\n".join(f"| D{i} | {' '.join(['x'] * 12)} |" for i in range(8))
+    md = f"## Slide One\n\nSales by brand\n\n| Domain | Value |\n|---|---|\n{rows}\n\nIn percent\n"
+    chunks = _chunker(chunk_size=512).chunk(_doc(md, page=3))
+    assert len(chunks) == 1, f"one slide should be one chunk, got {len(chunks)}"
+    assert "Sales by brand" in chunks[0].text
+    assert "In percent" in chunks[0].text
+
+
+def test_headingless_unit_does_not_chain_unrelated_sections():
+    # ``_compatible([], X)`` used to be True, so a path-less cover block could
+    # absorb content from an unrelated deep section on another page.
+    body = " ".join(["alpha"] * 60)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text="COVER PAGE 2025", page_number=1),
+            TextBlock(text=f"# Book One\n\n## Chapter A\n\n{body}", page_number=9),
+        ],
+        metadata={"filename": "code.pdf"},
+    )
+    chunks = _chunker(chunk_size=512).chunk(doc)
+    cover = next(c for c in chunks if "COVER PAGE 2025" in c.text)
+    assert "alpha" not in cover.text, "cover block absorbed an unrelated section"
+
+
+def test_table_does_not_absorb_prose_from_another_page():
+    # Off-page, only the structural route applies and it excludes tables, so a
+    # stray label cannot be glued to a table it does not belong to. (On the same
+    # page it may — see test_same_page_slide_collapses_across_atomic_types.)
+    rows = "\n".join(f"| D{i} | {' '.join(['x'] * 12)} |" for i in range(8))
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text=f"## Slide One\n\n| Domain | Value |\n|---|---|\n{rows}\n", page_number=2),
+            TextBlock(text="## Slide One\n\nStray label", page_number=7),
+        ],
+        metadata={"filename": "code.pdf"},
+    )
+    tables = [c for c in _chunker(chunk_size=512).chunk(doc) if c.chunk_type == ChunkType.TABLE]
+    assert tables, "the table must stay its own chunk(s)"
+    for table in tables:
+        assert "Stray label" not in table.text, "table absorbed prose from another page"
+
+
+def test_oversize_table_row_is_never_sentence_split():
+    # Tables are exempt from ``_enforce_ceiling``: a row over the ceiling is
+    # indivisible, and slicing it mid-sentence yields a fragment that is neither
+    # a valid row nor carries its column headers. Measured on the marker corpus,
+    # a row-level fallback doubled total excess tokens — see _enforce_ceiling.
+    doc = _doc(f"Article L1\nIntro.\n\n| Ref | Text |\n|---|---|\n| R1 | {' '.join(['word'] * 200)} |\n")
+    tables = [c for c in _chunker(chunk_size=30, max_tokens=45).chunk(doc) if c.chunk_type == ChunkType.TABLE]
+    assert len(tables) == 1
+    assert _words(tables[0].text) > 45, "the row is kept whole rather than mangled"
+
+
 def test_markdown_headings_also_detected():
     # Bodies are kept above min_tokens so the two sibling chapters don't pack
     # together — this isolates heading *detection*, not sibling merging.
@@ -270,3 +402,19 @@ def test_span_anchor_stripped_from_heading():
 def test_empty_document_returns_no_chunks():
     assert _chunker().chunk(ProcessedDocument(document_id="d1", text_blocks=[])) == []
     assert _chunker().chunk(_doc("   \n  \n")) == []
+
+
+def test_hard_max_tokens_derived_from_embedder_window():
+    # The bound tracks the embedder the partition actually uses, not chunk_size:
+    # a partition on a small-context embedder must get a tighter bound.
+    from types import SimpleNamespace
+
+    from core.chunking.factory import resolve_hard_max_tokens
+
+    cfg = SimpleNamespace(hard_max_tokens=None)
+    assert resolve_hard_max_tokens(cfg, 2047) == 1023
+    assert resolve_hard_max_tokens(cfg, 8192) == 4096
+    # No known window => no invented bound (chunk_size says nothing about it).
+    assert resolve_hard_max_tokens(cfg, None) is None
+    # An explicit setting always wins.
+    assert resolve_hard_max_tokens(SimpleNamespace(hard_max_tokens=777), 8192) == 777
