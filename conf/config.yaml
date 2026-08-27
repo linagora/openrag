@@ -253,6 +253,8 @@ loader:
   # Env: TRANSCRIBER_BASE_URL, TRANSCRIBER_API_KEY, TRANSCRIBER_MODEL,
   #      TRANSCRIBER_TIMEOUT, TRANSCRIBER_MAX_CONCURRENT_CHUNKS, USE_WHISPER_LANG_DETECTOR,
   #      TRANSCRIBER_DIRECT_UPLOAD_SUFFIXES (pipe-separated, e.g. ".mp3|.mp4|.wav")
+  # These values seed the default Admin UI STT endpoint on first startup and
+  # remain the fallback when no saved STT endpoint is available.
   transcriber:
     base_url: http://transcriber:8000/v1
     api_key: EMPTY

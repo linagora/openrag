@@ -26,6 +26,7 @@ if "pydub" not in sys.modules:
         fake_pydub.AudioSegment = MagicMock()  # type: ignore[attr-defined]
         sys.modules["pydub"] = fake_pydub
 
+from core.config.model_endpoints import ModelEndpointConfig  # noqa: E402
 from core.models.document import Document, DocumentType  # noqa: E402
 from services.inference.parsers.openai_audio import OpenAIAudioClient  # noqa: E402
 
@@ -172,6 +173,71 @@ class TestParse:
         kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
         assert "language" not in kwargs
         assert result.text_blocks[0].text == "ok"
+
+    @pytest.mark.asyncio
+    async def test_stt_language_hint_overrides_whisper_language_detector(self, mock_openai_client):
+        mock_openai_client.audio.transcriptions.create.return_value = MagicMock(text="bonjour")
+        detector = AsyncMock(return_value="en")
+        endpoint = ModelEndpointConfig(
+            endpoint="http://x",
+            model_name="moss-transcribe-diarize",
+            batch_size=3,
+            timeout=120,
+            extra={"api_key": "k", "language": "fr"},
+        )
+
+        client = _client(
+            mock_openai_client,
+            language_detector=detector,
+            transcription_endpoint_resolver=lambda: endpoint,
+        )
+        await client.parse(_audio_doc())
+
+        detector.assert_not_awaited()
+        kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
+        assert kwargs["model"] == "moss-transcribe-diarize"
+        assert kwargs["language"] == "fr"
+        assert client._semaphore_for_endpoint(endpoint)._value == 3
+
+    @pytest.mark.asyncio
+    async def test_stt_endpoint_resolver_replaces_connection_and_model(self, monkeypatch):
+        from services.inference.parsers import openai_audio as module
+
+        created: list[tuple[dict[str, object], MagicMock]] = []
+
+        def make_openai_client(**kwargs):
+            client = MagicMock()
+            client.audio = MagicMock()
+            client.audio.transcriptions = MagicMock()
+            client.audio.transcriptions.create = AsyncMock(return_value=MagicMock(text="transcribed"))
+            created.append((kwargs, client))
+            return client
+
+        monkeypatch.setattr(module, "AsyncOpenAI", make_openai_client)
+        endpoint = ModelEndpointConfig(
+            endpoint="http://moss:8000/v1",
+            model_name="moss-transcribe-diarize",
+            batch_size=1,
+            timeout=900,
+            extra={"api_key": "endpoint-key"},
+        )
+        client = OpenAIAudioClient(
+            base_url="http://whisper:8000/v1",
+            api_key="legacy-key",
+            model="whisper-model",
+            transcription_endpoint_resolver=lambda: endpoint,
+        )
+
+        result = await client.parse(_audio_doc())
+
+        assert result.text_blocks[0].text == "transcribed"
+        assert created[1][0] == {
+            "base_url": "http://moss:8000/v1",
+            "api_key": "endpoint-key",
+            "timeout": 900,
+        }
+        request = created[1][1].audio.transcriptions.create.await_args.kwargs
+        assert request["model"] == "moss-transcribe-diarize"
 
     @pytest.mark.asyncio
     async def test_transcribe_exception_propagates(self, mock_openai_client):

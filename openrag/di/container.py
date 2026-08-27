@@ -653,8 +653,17 @@ class ServiceContainer:
             async def resolve_transcription_prompt() -> str | None:
                 return await self.prompt_service.resolve_prompt("asr_transcription")
 
+            def resolve_transcription_endpoint():
+                # ``ModelEndpointService`` updates this mutable registry in
+                # place after each Admin UI write, so extract requests pick up
+                # a new MOSS/Whisper/OpenAI-compatible STT endpoint immediately.
+                return settings.models.stt.get("default")
+
             self._conversion_service = ConversionService(
-                serializer=build_file_serializer(transcription_prompt_resolver=resolve_transcription_prompt),
+                serializer=build_file_serializer(
+                    transcription_prompt_resolver=resolve_transcription_prompt,
+                    transcription_endpoint_resolver=resolve_transcription_endpoint,
+                ),
                 vector_store=self.vector_store,
                 collection=settings.vectordb.collection_name,
             )
