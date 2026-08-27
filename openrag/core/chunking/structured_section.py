@@ -263,13 +263,25 @@ class StructuredSectionChunker(BaseChunker):
 
         chunks: list[Chunk] = []
         for idx, unit in enumerate(candidates):
-            # Only claim a header the chunk actually carries: ``header`` is
-            # persisted alongside ``text``, so populating it while
-            # ``prepend_heading_path`` is off would let a consumer rebuild
-            # ``header + content`` into a string that was never embedded.
-            header = self._build_header(filename, unit.heading_path, unit.pages) if self.prepend_heading_path else ""
+            # ``_build_units`` never emits a heading line as body — it updates
+            # the stack and continues, so a heading can't be stranded as an
+            # orphan chunk. That makes the header the *only* path by which
+            # heading text reaches the index. With ``prepend_heading_path``
+            # off, the breadcrumb is therefore kept inline at the top of the
+            # body instead of dropped: BM25 is declared over ``text`` alone, so
+            # a heading living only in ``metadata["hierarchy_path"]`` is
+            # unreachable by dense *and* sparse retrieval. The flag drops the
+            # verbose ``[Source | Page | Section]`` preamble, which is what an
+            # operator turning it off is asking for — not the document's
+            # structure.
+            header = self._build_header(filename, unit.heading_path, unit.pages)
             body = unit.text.strip()
-            text = f"{header}\n\n{body}" if header else body
+            if self.prepend_heading_path:
+                text = f"{header}\n\n{body}" if header else body
+            else:
+                breadcrumb = " > ".join(unit.heading_path)
+                text = f"{breadcrumb}\n\n{body}" if breadcrumb else body
+                header = ""
             chunks.append(
                 Chunk(
                     document_id=metadata.get("file_id", ""),
@@ -634,7 +646,13 @@ class StructuredSectionChunker(BaseChunker):
                 prev = out[-1]
                 merged_path = _common_prefix(prev.heading_path, unit.heading_path)
                 if self._may_merge(prev, unit, filename, merged_path):
-                    _absorb(prev, unit, path=merged_path)
+                    # Independent of which route allowed the merge: never let the
+                    # result end up with no breadcrumb when either input had one.
+                    # Keeping the surviving path is strictly better than dropping
+                    # the section from both the header and ``hierarchy_path``,
+                    # where it becomes unreachable by dense and sparse search
+                    # alike (BM25 is declared over ``text`` only).
+                    _absorb(prev, unit, path=merged_path or prev.heading_path or unit.heading_path)
                     continue
             out.append(_copy_unit(unit))
         return out
@@ -660,7 +678,7 @@ class StructuredSectionChunker(BaseChunker):
             return False
         if prev.tokens + unit.tokens > self._effective_max(filename, merged_path, prev.pages | unit.pages):
             return False
-        if prev.pages & unit.pages:
+        if prev.pages & unit.pages and _keeps_context(prev.heading_path, unit.heading_path):
             return True
         return self._may_absorb(prev) and self._may_absorb(unit) and _compatible(prev.heading_path, unit.heading_path)
 
@@ -735,6 +753,27 @@ def _absorb(cur: _Unit, unit: _Unit, *, path: list[str] | None = None) -> None:
         cur.chunk_type = unit.chunk_type
     if path is not None:
         cur.heading_path = list(path)
+
+
+def _keeps_context(a: list[str], b: list[str]) -> bool:
+    """Whether merging two units would preserve a section breadcrumb.
+
+    The same-page route is permissive because a slide *is* a section. That
+    reasoning does not carry to dense text, where several short units per page
+    under different headings is the norm — a legal code being the extreme case.
+    There, merging on page alone produced one chunk holding a tax article, a
+    public-health article, a labour article and a criminal article, under a
+    ``_common_prefix`` of ``[]``: every ``Titre``/``Chapitre`` erased from the
+    embedded header *and* from ``hierarchy_path``, which is the orphan-heading
+    defect this strategy exists to remove, reintroduced one pass later.
+
+    So: two units that both carry a path may only merge when they still share
+    an ancestor. A path-less unit (a slide label, a cover block) has no
+    breadcrumb to lose and is still free to join its neighbour.
+    """
+    if not a or not b:
+        return True
+    return bool(_common_prefix(a, b))
 
 
 def _common_prefix(a: list[str], b: list[str]) -> list[str]:

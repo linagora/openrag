@@ -27,6 +27,12 @@ from services.workers.stages.topic_tag import topic_tag_stage
 
 logger = get_logger()
 
+#: Tokens a later stage may prepend to a chunk before it is embedded — the
+#: ``[CONTEXT]`` block plus the ``[CHUNK_START]``/filename envelope, measured at
+#: ~56 tokens on the marker corpus. Generously over-estimated: it only decides
+#: how close to the limit a chunk must be to be worth re-tokenising.
+_ENVELOPE_HEADROOM_TOKENS = 512
+
 REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY = "_replace_old_chunk_collection"
 REPLACE_OLD_CHUNK_IDS_ROW_KEY = "_replace_old_chunk_ids"
 
@@ -343,11 +349,20 @@ class IndexingPipeline:
         into fragments that are no longer valid rows. This makes that trade
         visible instead of silent.
 
-        Measures ``chunk.text`` with the chunker's own token counter rather than
-        trusting ``chunk.token_count``: contextualization rewrites ``text`` with
-        the ``[CONTEXT]`` envelope via ``model_copy`` and does **not** refresh
-        ``token_count``, so the stored count is the pre-envelope one. Falls back
-        to ``token_count`` when no counter is available.
+        ``chunk.token_count`` is a *lower bound* on what actually gets embedded:
+        contextualization rewrites ``text`` with the ``[CONTEXT]`` envelope via
+        ``model_copy`` without refreshing the count, and the envelope only adds.
+        So the stored count settles almost every chunk on its own — over the
+        limit is already conclusive, and far enough under it cannot be pushed
+        over by an envelope. Only the band in between is re-tokenised.
+
+        That matters because this runs synchronously on the actor's event loop,
+        unconditionally, for every file — including partitions on
+        ``recursive_splitter`` that use nothing else here. Re-tokenising every
+        chunk cost ~360 ms per 3000-chunk document (more than double that with
+        the production ``ChatOpenAI`` counter), freezing every other in-flight
+        file's continuation. The adjacent chunk stage goes out of its way to
+        avoid exactly this, running the chunker under ``asyncio.to_thread``.
         """
         if not window or window <= 0:
             return
@@ -355,12 +370,16 @@ class IndexingPipeline:
         chunks = row.get("chunks") or []
 
         def tokens(chunk: Any) -> int:
-            if length_function is not None and getattr(chunk, "text", None):
-                return length_function(chunk.text)
-            return getattr(chunk, "token_count", 0) or 0
+            stored = getattr(chunk, "token_count", 0) or 0
+            if length_function is None or not getattr(chunk, "text", None):
+                return stored
+            # Conclusive on the stored count alone: already over, or too far
+            # under for any envelope to close the gap.
+            if stored > limit or stored <= limit - _ENVELOPE_HEADROOM_TOKENS:
+                return stored
+            return length_function(chunk.text)
 
-        sized = [(chunk, tokens(chunk)) for chunk in chunks]
-        offenders = [(chunk, count) for chunk, count in sized if count > limit]
+        offenders = [(chunk, count) for chunk in chunks if (count := tokens(chunk)) > limit]
         if not offenders:
             return
         worst, worst_tokens = max(offenders, key=lambda pair: pair[1])

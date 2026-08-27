@@ -501,3 +501,58 @@ def test_header_is_none_when_not_prepended():
     chunk = _chunker(chunk_size=512, prepend_heading_path=False).chunk(doc)[0]
     assert chunk.header is None
     assert not chunk.text.startswith("[Source")
+
+
+_MULTI_SECTION_PAGE = """Titre Ier : Dispositions fiscales
+
+Chapitre Ier : Taux
+
+Article L110-1
+Le taux normal de la taxe sur la valeur ajoutée est fixé à 20 %.
+
+Titre II : Dispositions sanitaires
+
+Chapitre Ier : Vaccination
+
+Article L210-1
+La vaccination antidiphtérique est obligatoire pour les mineurs.
+
+Titre III : Dispositions relatives au travail
+
+Article L310-1
+La durée légale du travail effectif est fixée à trente-cinq heures.
+"""
+
+
+def test_same_page_merge_does_not_span_unrelated_sections():
+    """A slide is a section, so merging on a shared page is safe there. Dense
+    text puts several short units per page under different headings — merging
+    on page alone produced one chunk holding a tax, health and labour article
+    with hierarchy_path=[], erasing every Titre from the header AND metadata.
+    """
+    chunks = _chunker(chunk_size=512).chunk(_doc(_MULTI_SECTION_PAGE))
+    assert len(chunks) > 1, "articles from different Titres must not merge"
+    for chunk in chunks:
+        assert chunk.metadata["hierarchy_path"], f"breadcrumb erased: {chunk.text[:60]!r}"
+    titres = {c.metadata["hierarchy_path"][0] for c in chunks}
+    assert len(titres) == 3, f"expected one chunk per Titre, got {titres}"
+
+
+def test_merge_never_leaves_a_chunk_without_a_breadcrumb():
+    """Independent of the route taken: if either side had a path, the merged
+    unit keeps one. Losing it entirely puts the heading beyond both dense and
+    sparse retrieval, since BM25 is declared over ``text`` alone."""
+    md = "## Chapter A\n\nShort intro.\n\nSome trailing note.\n"
+    for chunk in _chunker(chunk_size=512).chunk(_doc(md)):
+        assert chunk.metadata["hierarchy_path"], f"no breadcrumb on {chunk.text[:60]!r}"
+
+
+def test_headings_reach_the_index_even_without_the_header():
+    """_build_units never emits a heading as body, so the header is the only
+    path by which heading text reaches ``text``. Turning the flag off used to
+    delete the document's structure from the index outright."""
+    doc = _doc("# Livre Ier\n\n## Titre Ier\n\nArticle L110-1\nLe present code regit le sejour.")
+    joined = "\n".join(c.text for c in _chunker(chunk_size=512, prepend_heading_path=False).chunk(doc))
+    for heading in ("Livre Ier", "Titre Ier"):
+        assert heading in joined, f"{heading!r} absent from every chunk's text"
+    assert "[Source:" not in joined, "the verbose preamble should still be dropped"

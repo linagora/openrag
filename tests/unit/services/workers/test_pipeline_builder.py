@@ -983,8 +983,11 @@ def test_overflow_warning_measures_text_not_stale_token_count():
     from loguru import logger as _logger
     from services.workers.pipeline_builder import IndexingPipeline
 
-    # token_count says 10 (pre-envelope); the actual text is 3000 tokens.
-    chunk = SimpleNamespace(token_count=10, text="x " * 3000, chunk_index=0, chunk_type=None)
+    # Realistic stale case: the chunker sized this at 2000 (just under the
+    # 2046 limit) and contextualization then prepended the [CONTEXT] envelope
+    # without refreshing the count. A stored count far below the limit is not
+    # re-tokenised on purpose — no envelope can close that gap.
+    chunk = SimpleNamespace(token_count=2000, text="x " * 3000, chunk_index=0, chunk_type=None)
     messages, sink_id = _capture_warnings()
     try:
         IndexingPipeline._warn_on_embedder_overflow({"chunks": [chunk]}, 2047, lambda s: len(s.split()))
@@ -1055,3 +1058,29 @@ def test_legacy_single_argument_chunker_factory_still_works():
     pipeline = _pipeline_with_chunker_factory(lambda config: sentinel)
     assert pipeline._select_chunker(SimpleNamespace(chunking=object()), "default", 2047) is sentinel
     assert isinstance(pipeline, IndexingPipeline)
+
+
+def test_overflow_warning_skips_chunks_far_below_the_limit():
+    """The pass runs synchronously on the event loop for every file, including
+    partitions using nothing else from this feature. Re-tokenising every chunk
+    cost ~360 ms per 3000-chunk document; the stored count settles all but the
+    band near the limit."""
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    counted = []
+
+    def counter(text: str) -> int:
+        counted.append(text)
+        return len(text.split())
+
+    chunks = [SimpleNamespace(token_count=500, text="w " * 500, chunk_index=i, chunk_type=None) for i in range(100)]
+    messages, sink_id = _capture_warnings()
+    try:
+        IndexingPipeline._warn_on_embedder_overflow({"chunks": chunks}, 2047, counter)
+    finally:
+        _logger.remove(sink_id)
+    assert counted == [], "chunks far below the limit must not be re-tokenised"
+    assert not messages
