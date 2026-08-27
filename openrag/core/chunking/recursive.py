@@ -33,6 +33,31 @@ from core.utils.text import sanitize_text
 # they don't pollute the index.
 _IMAGE_PLACEHOLDER_MARKER = "[image placeholder]"
 
+# Strips the block's own wrapper so only the caption text is weighed.
+_IMAGE_BLOCK_TAG_RE = re.compile(r"</?image_description>", re.IGNORECASE)
+_IMAGE_PLACEHOLDER_RE = re.compile(re.escape(_IMAGE_PLACEHOLDER_MARKER), re.IGNORECASE)
+
+
+def is_placeholder_image(content: str) -> bool:
+    """True when an image block carries no caption beyond the placeholder.
+
+    The marker means the captioner found nothing useful in *one* image, but a
+    single block can describe several. Dropping the whole block on any
+    occurrence therefore deleted real caption text along with it: on the corpus
+    that cost a 132-token chart caption ("92 000 COLLABORATEURS…") and 225 words
+    of a tourism description, silently, from the index — and from *both*
+    chunkers, since they share this test.
+
+    So a block is only skipped when nothing but the wrapper and the marker(s)
+    remains. Anything with actual characters left is real caption text and is
+    kept.
+    """
+    if _IMAGE_PLACEHOLDER_MARKER not in content.lower():
+        return False
+    remainder = _IMAGE_PLACEHOLDER_RE.sub(" ", _IMAGE_BLOCK_TAG_RE.sub(" ", content))
+    return not any(char.isalnum() for char in remainder)
+
+
 # Tables/images smaller than this token count are inlined with surrounding
 # text rather than emitted as standalone chunks.
 _INLINE_ELEMENT_TOKEN_THRESHOLD = 100
@@ -228,7 +253,7 @@ class BaseChunker(ChunkingStrategy):
 
         for element in md_elements:
             if element.type in ("table", "image"):
-                if element.type == "image" and _IMAGE_PLACEHOLDER_MARKER in element.content.lower():
+                if element.type == "image" and is_placeholder_image(element.content):
                     continue
                 if self.length_function(element.content) <= _INLINE_ELEMENT_TOKEN_THRESHOLD:
                     texts.append(element)
