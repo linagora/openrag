@@ -26,18 +26,18 @@ ref-getter (now an injected callable).
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 
-from core.config.model_endpoints import STT_LANGUAGE_KEY, ModelEndpointConfig
+from core.config.model_endpoints import ENV_MANAGED_KEY, STT_LANGUAGE_KEY, ModelEndpointConfig
 from core.indexing.parsers.document_parser import BaseClientParser
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from core.utils.logging import get_logger
 from openai import AsyncOpenAI
 from pydub import AudioSegment
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 
 # Suffixes the transcription backend can ingest as-is, avoiding the ~10x
@@ -47,6 +47,24 @@ _DEFAULT_DIRECT_UPLOAD_SUFFIXES: tuple[str, ...] = (".mp3", ".m4a", ".ogg", ".we
 LanguageDetector = Callable[[Path], Awaitable[str | None]]
 TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
 TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None]
+
+# Endpoint ``extra`` holds both connection metadata and provider request options.
+# Only the latter belongs in the OpenAI-compatible transcription request body.
+_STT_REQUEST_CONTROL_EXTRA_KEYS = frozenset(
+    {
+        "api_key",
+        STT_LANGUAGE_KEY,
+        ENV_MANAGED_KEY,
+        "implementation",
+        # These are owned by OpenRAG's configured endpoint / prompt plumbing.
+        # Streaming is deliberately unsupported because this parser expects one
+        # complete transcription response.
+        "file",
+        "model",
+        "prompt",
+        "stream",
+    }
+)
 
 
 class OpenAIAudioClient(BaseClientParser):
@@ -104,7 +122,7 @@ class OpenAIAudioClient(BaseClientParser):
                             try:
                                 language = await self._language_detector(upload_path)
                             except Exception as exc:
-                                logger.warning("Language detection failed: %s", exc)
+                                logger.bind(error=str(exc)).warning("Language detection failed")
                         prompt = await self._resolve_prompt()
                         text = await self._transcribe(
                             upload_path,
@@ -116,10 +134,12 @@ class OpenAIAudioClient(BaseClientParser):
                         if cleanup:
                             await asyncio.to_thread(upload_path.unlink, True)
         except Exception:
-            logger.exception("OpenAI audio transcription failed (id=%s)", document.id)
+            logger.bind(document_id=document.id).exception("OpenAI audio transcription failed")
             raise
 
-        logger.info("OpenAI audio transcribed (id=%s) in %.2fs", document.id, time.time() - start)
+        logger.bind(document_id=document.id, elapsed_seconds=round(time.time() - start, 2)).info(
+            "OpenAI audio transcribed"
+        )
 
         text = text.strip()
         text_blocks = [TextBlock(text=text, page_number=1)] if text else []
@@ -141,7 +161,7 @@ class OpenAIAudioClient(BaseClientParser):
             return input_path, False
 
         sound = await asyncio.to_thread(AudioSegment.from_file, input_path)
-        logger.info("Converting audio to WAV (duration=%.1fs)", len(sound) / 1000)
+        logger.bind(duration_seconds=round(len(sound) / 1000, 1)).info("Converting audio to WAV")
         wav_path = input_path.with_suffix(".wav")
         await asyncio.to_thread(sound.export, wav_path, format="wav")
         return wav_path, True
@@ -159,7 +179,7 @@ class OpenAIAudioClient(BaseClientParser):
         try:
             prompt = await self._transcription_prompt_resolver()
         except Exception as exc:  # noqa: BLE001 - prompt storage must not block transcription
-            logger.warning("Transcription prompt resolution failed: %s", exc)
+            logger.bind(error=str(exc)).warning("Transcription prompt resolution failed")
             return None
         return prompt.strip() if prompt and prompt.strip() else None
 
@@ -176,12 +196,12 @@ class OpenAIAudioClient(BaseClientParser):
         try:
             endpoint = self._transcription_endpoint_resolver()
         except Exception as exc:  # noqa: BLE001 - endpoint lookup must not block indexing
-            logger.warning("STT endpoint resolution failed: %s", exc)
+            logger.bind(error=str(exc)).warning("STT endpoint resolution failed")
             return None
         if endpoint is None:
             return None
         if not endpoint.endpoint or not endpoint.model_name:
-            logger.warning("Ignoring incomplete configured STT endpoint; using TRANSCRIBER_* fallback.")
+            logger.warning("Ignoring incomplete configured STT endpoint; using TRANSCRIBER_* fallback")
             return None
         return endpoint
 
@@ -206,6 +226,21 @@ class OpenAIAudioClient(BaseClientParser):
         if isinstance(language, str) and language.strip():
             return language.strip()
         return None
+
+    @staticmethod
+    def _request_extra(endpoint: ModelEndpointConfig | None) -> dict[str, object]:
+        """Return provider-specific transcription request options from endpoint extra.
+
+        The Admin UI deliberately stores generic, non-secret options in
+        ``extra`` so MOSS, Whisper, and other OpenAI-compatible providers can
+        receive their own request fields without adding a provider-specific
+        OpenRAG configuration surface. Connection metadata is excluded here:
+        the API key configures the client and the language hint is sent through
+        the standard ``language`` parameter.
+        """
+        if endpoint is None:
+            return {}
+        return {key: value for key, value in endpoint.extra.items() if key not in _STT_REQUEST_CONTROL_EXTRA_KEYS}
 
     def _client_for_endpoint(self, endpoint: ModelEndpointConfig | None) -> tuple[AsyncOpenAI, str]:
         """Return an OpenAI client and model for one transcription request."""
@@ -246,5 +281,13 @@ class OpenAIAudioClient(BaseClientParser):
             kwargs["prompt"] = prompt
         if language:
             kwargs["language"] = language
+        request_extra = self._request_extra(endpoint_config)
+        if request_extra:
+            kwargs["extra_body"] = request_extra
+        logger.bind(
+            model=model,
+            language=language or "auto",
+            configured_stt_endpoint=endpoint_config is not None,
+        ).info("Sending audio transcription request")
         response = await client.audio.transcriptions.create(**kwargs)
         return response.text or ""

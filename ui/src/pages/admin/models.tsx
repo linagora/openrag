@@ -858,7 +858,7 @@ function EndpointDialog({
             />
             <p className="text-xs text-muted-foreground">
               {isStt
-                ? "Advanced non-secret STT options only. The language hint and API key are handled separately above."
+                ? "Advanced non-secret request-body options sent to the transcription provider. The language hint and API key are handled separately above."
                 : "Non-secret endpoint options only. The API key is handled separately above."}
             </p>
           </div>
