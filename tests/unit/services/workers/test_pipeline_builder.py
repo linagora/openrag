@@ -917,3 +917,58 @@ def test_ingest_flag_defaults_come_from_the_model_not_from_absence():
     assert _ingest_flag_default("enable_image_captioning") is True
     assert _ingest_flag_default("enable_contextualization") is False
     assert _ingest_flag_default("enable_topic_tagging") is False
+
+
+def _capture_warnings():
+    """Collect loguru records — loguru does not propagate to pytest's caplog."""
+    from loguru import logger as _logger
+
+    messages: list[str] = []
+    sink_id = _logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    return messages, sink_id
+
+
+def test_warns_when_a_chunk_exceeds_the_embedder_window():
+    """A chunk past truncate_prompt_tokens is silently cut by vLLM — surface it."""
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    row = {
+        "task_id": "t1",
+        "filename": "big.pdf",
+        "partition": "p",
+        "chunks": [
+            SimpleNamespace(token_count=100, chunk_index=0, chunk_type=None),
+            SimpleNamespace(token_count=2500, chunk_index=1, chunk_type=None),
+        ],
+    }
+    messages, sink_id = _capture_warnings()
+    try:
+        IndexingPipeline._warn_on_embedder_overflow(row, 2047)
+    finally:
+        _logger.remove(sink_id)
+    assert any("truncated before embedding" in m for m in messages)
+    assert any("2046-token limit" in m for m in messages)
+
+
+def test_no_warning_when_chunks_fit_or_window_unknown():
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    messages, sink_id = _capture_warnings()
+    try:
+        # Comfortably inside the window.
+        IndexingPipeline._warn_on_embedder_overflow(
+            {"chunks": [SimpleNamespace(token_count=500, chunk_index=0, chunk_type=None)]}, 2047
+        )
+        # Window unknown => nothing to compare against, so stay quiet.
+        IndexingPipeline._warn_on_embedder_overflow(
+            {"chunks": [SimpleNamespace(token_count=99999, chunk_index=0, chunk_type=None)]}, None
+        )
+    finally:
+        _logger.remove(sink_id)
+    assert not [m for m in messages if "truncated before embedding" in m]

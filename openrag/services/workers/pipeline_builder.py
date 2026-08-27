@@ -62,8 +62,12 @@ class IndexingPipeline:
     timeouts: PipelineTimeouts = PipelineTimeouts()
     indexation_config: IndexationPipelineConfig | None = None
     parser_factory: Callable[[str], DocumentParser] | None = None
-    chunker_factory: Callable[[Any], ChunkingStrategy] | None = None
+    chunker_factory: Callable[..., ChunkingStrategy] | None = None
     embedder_factory: Callable[[str], Embedder] | None = None
+    # Resolves an embedder endpoint name to its context window, so the chunker
+    # can derive a hard safety bound from the embedder this partition actually
+    # uses rather than from the deployment default.
+    embedder_window_resolver: Callable[[str], int | None] | None = None
     vlm_factory: Callable[[str], VLM] | None = None
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None
@@ -90,7 +94,9 @@ class IndexingPipeline:
         """
         config = self._effective_indexation_config(row)
         parser = self._select_parser(config)
-        chunker = self._select_chunker(config)
+        embedder_name = str(row.get("embedder_name") or "default")
+        embedder_window = self.embedder_window_resolver(embedder_name) if self.embedder_window_resolver else None
+        chunker = self._select_chunker(config, embedder_name, embedder_window)
         embedder = self._select_embedder(row)
         contextualizer, contextualization_llm = self._select_contextualizer(config)
         topic_tagger, topic_tagging_llm = self._select_topic_tagger(config)
@@ -141,6 +147,7 @@ class IndexingPipeline:
                     ),
                 )
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
+            self._warn_on_embedder_overflow(row, embedder_window)
             if contextualizer is not None:
                 await _timed(
                     "contextualize",
@@ -290,9 +297,65 @@ class IndexingPipeline:
             return self.parser_factory(config.parsing_strategy)
         return self.parser
 
-    def _select_chunker(self, config: IndexationPipelineConfig | None) -> ChunkingStrategy:
+    @staticmethod
+    def _warn_on_embedder_overflow(row: MutableMapping[str, Any], window: int | None) -> None:
+        """Warn when a chunk will be silently truncated by the embedder.
+
+        vLLM sends ``truncate_prompt_tokens = max_model_len - 1``, so anything
+        past that is dropped *before* it is embedded — no error, no log, just a
+        vector that describes part of the chunk while the store keeps all of it.
+        Retrieval then misses text the chunk visibly contains.
+
+        The chunker deliberately does not prevent every case: an indivisible
+        unit (a table row larger than the window) is kept whole rather than cut
+        into fragments that are no longer valid rows. This makes that trade
+        visible instead of silent. Counting uses the ``token_count`` the chunker
+        already computed, so nothing is re-tokenised here.
+
+        Note the count excludes what later stages prepend — contextualization's
+        ``[CONTEXT]`` block — so a chunk just under the limit can still overflow.
+        That headroom is why the chunker's hard bound defaults to half the
+        window rather than all of it.
+        """
+        if not window or window <= 0:
+            return
+        limit = window - 1  # truncate_prompt_tokens
+        chunks = row.get("chunks") or []
+        offenders = [c for c in chunks if (getattr(c, "token_count", 0) or 0) > limit]
+        if not offenders:
+            return
+        worst = max(offenders, key=lambda c: c.token_count)
+        logger.bind(
+            task_id=row.get("task_id"),
+            filename=row.get("filename", ""),
+            partition=row.get("partition"),
+            embedder_window=window,
+            truncate_at=limit,
+            offending_chunks=len(offenders),
+            total_chunks=len(chunks),
+            worst_tokens=worst.token_count,
+            worst_chunk_index=getattr(worst, "chunk_index", None),
+            worst_chunk_type=getattr(getattr(worst, "chunk_type", None), "value", None),
+        ).warning(
+            f"{len(offenders)} chunk(s) exceed the embedder's {limit}-token limit "
+            f"(largest {worst.token_count}) and will be truncated before embedding — "
+            f"their tail will not be retrievable"
+        )
+
+    def _select_chunker(
+        self,
+        config: IndexationPipelineConfig | None,
+        embedder_name: str = "default",
+        window: int | None = None,
+    ) -> ChunkingStrategy:
         if config is not None and self.chunker_factory is not None:
-            return self.chunker_factory(config.chunking)
+            try:
+                return self.chunker_factory(config.chunking, window)
+            except TypeError:
+                # A factory that predates the window argument (older callers and
+                # tests inject a single-argument lambda) still works; it just
+                # falls back to the chunker's own default bound.
+                return self.chunker_factory(config.chunking)
         return self.chunker
 
     def _select_embedder(self, row: MutableMapping[str, Any]) -> Embedder:
@@ -390,7 +453,8 @@ def build_indexing_pipeline(
     timeouts: PipelineTimeouts | None = None,
     indexation_config: IndexationPipelineConfig | None = None,
     parser_factory: Callable[[str], DocumentParser] | None = None,
-    chunker_factory: Callable[[Any], ChunkingStrategy] | None = None,
+    chunker_factory: Callable[..., ChunkingStrategy] | None = None,
+    embedder_window_resolver: Callable[[str], int | None] | None = None,
     embedder_factory: Callable[[str], Embedder] | None = None,
     vlm_factory: Callable[[str], VLM] | None = None,
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None,
@@ -412,6 +476,7 @@ def build_indexing_pipeline(
         indexation_config=indexation_config,
         parser_factory=parser_factory,
         chunker_factory=chunker_factory,
+        embedder_window_resolver=embedder_window_resolver,
         embedder_factory=embedder_factory,
         vlm_factory=vlm_factory,
         contextualizer_factory=contextualizer_factory,
