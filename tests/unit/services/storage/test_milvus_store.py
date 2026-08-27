@@ -1055,6 +1055,20 @@ class TestEnsureLoadedConcurrentCreation:
         assert properties == {SCHEMA_VERSION_PROPERTY_KEY: "1"}
         store._client.alter_collection_properties.assert_not_called()  # type: ignore[attr-defined]
 
+    def test_losing_the_create_race_validates_the_winners_collection(self, store: MilvusVectorStore) -> None:
+        """A worker that loses collection creation should continue indexing."""
+        store._embedding_dimension = 8
+        store._client.has_collection.side_effect = [False, True]
+        store._client.create_collection.side_effect = MilvusException(message="collection already exists")
+        store._client.describe_collection.return_value = {
+            "properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"},
+            "fields": [{"name": "vector"}, {"name": "sparse"}],
+        }
+
+        store._ensure_loaded()
+
+        store._client.load_collection.assert_called_once_with(store._collection_name)
+
     def test_duplicate_collection_with_different_parameters_preserves_error(self, store: MilvusVectorStore) -> None:
         store._embedding_dimension = 8
         store._client.has_collection.return_value = False
@@ -1069,34 +1083,34 @@ class TestEnsureLoadedConcurrentCreation:
 
     def test_real_creation_failure_still_raises(self, store: MilvusVectorStore) -> None:
         store._embedding_dimension = 8
-        store._client.has_collection.side_effect = [False, False]  # first call says "no", second call says "no" too
-        store._client.create_collection.side_effect = MilvusException(
-            message="some other failure, disk full or whatever"
-        )
-
-        with pytest.raises(VDBCreateOrLoadCollectionError):
-            store._ensure_loaded()
-
-    def test_partial_creation_failure_preserves_original_error(
-        self,
-        store: MilvusVectorStore,
-    ) -> None:
-        store._embedding_dimension = 8
-        store._timeout = 0
-
-        creation_error = MilvusException(message="index creation failed")
-        store._client.has_collection.side_effect = [False, True]
+        # A duplicate-create error whose collection is still absent: the
+        # recheck must not swallow the failure.
+        store._client.has_collection.side_effect = [False, False]
+        creation_error = MilvusException(message="collection already exists")
         store._client.create_collection.side_effect = creation_error
-        store._client.describe_collection.return_value = {
-            "properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"},
-            "fields": [{"name": "vector"}, {"name": "sparse"}],
-        }
 
         with pytest.raises(VDBCreateOrLoadCollectionError) as error:
             store._ensure_loaded()
 
-        assert "index creation failed" in str(error.value)
         assert error.value.__cause__ is creation_error
+        store._client.load_collection.assert_not_called()
+
+    def test_partial_creation_rechecks_existing_collection_schema(
+        self,
+        store: MilvusVectorStore,
+    ) -> None:
+        store._embedding_dimension = 8
+
+        creation_error = MilvusException(message="collection already exists: index creation failed")
+        store._client.has_collection.side_effect = [False, True]
+        store._client.create_collection.side_effect = creation_error
+        store._client.describe_collection.return_value = {
+            "properties": {},
+            "fields": [{"name": "vector"}, {"name": "sparse"}],
+        }
+
+        with pytest.raises(VDBSchemaMigrationRequiredError):
+            store._ensure_loaded()
 
     def test_existing_old_collection_still_requires_migration(
         self,
